@@ -18,14 +18,16 @@
   - `capture(argv: Sequence[str], *, cwd: Path, authority: BudgetAuthority) -> Capture`.
   - `summarize(capture: Capture, plan: str) -> dict` (`plan` repository-relative POSIX).
   - `plan_relative(plan: Path) -> str`: the plan's path relative to `git rev-parse --show-toplevel` run in the plan's directory, as POSIX.
-  - `gate(plan: Path, base: str, head: str, completed_through: int, *, argv: Sequence[str] | None = None) -> tuple[int, bytes]`: `(0 | 3, canonical summary bytes)`.
+  - `result_name(head: str, completed_through: int) -> str` = `f"projection-{head[:7]}-{completed_through}.json"`; `save_result(directory: Path, capture: Capture) -> Path` (D20; sdd-gate saves through it too).
+  - `gate(plan: Path, base: str, head: str, completed_through: int, *, argv: Sequence[str] | None = None, save_dir: Path | None = None) -> tuple[int, bytes]`: `(0 | 3, canonical summary bytes)`.
   - `confirm(plan: Path, base: str, raw: bytes, *, argv: Callable[[str, str, int], Sequence[str]] | None = None) -> tuple[int, bytes]`.
-  - CLI: `review-feasibility gate --plan P --base B --head H --completed-through N` and `review-feasibility confirm --plan P --base B --input FILE|-`.
+  - CLI: `review-feasibility gate --plan P --base B --head H --completed-through N [--save-dir DIR]` and `review-feasibility confirm --plan P --base B --input FILE|-`.
 
 **Invariants:**
 - A summary is derived only from bytes that passed `validate_result` with their producer's exit; exit 2 yields no summary (D3).
 - Summary bytes are `canonical_bytes(summary)`: sorted keys, compact, ASCII-escaped, LF-terminated.
-- `state == "complete"` iff exit 0 iff `violations == []` iff `recommended_boundary is None`.
+- `state == "complete"` iff exit 0 iff `violations == []`. `complete` requires `recommended_boundary is None`; an overflow's recommendation is the fitting boundary or null when none fits ("new design required", AC4, D18).
+- With `save_dir`, exit 0 or 3 writes the validated bytes to `save_dir / result_name(head, N)` before the summary prints (D3, D20).
 - Every refusal of `gate` or `confirm` exits 2 with empty stdout and exactly one stderr line `review-feasibility: <reason>`.
 - `capture` reads at most `report_wire_max_bytes + 1` stdout bytes; more is a refusal. Stderr is drained by a thread into a tail of at most 4096 bytes, so a chatty child never blocks.
 - `confirm` never trusts the input: it recomputes through `capture` and requires byte equality of `canonical_bytes(parsed input)` with the recomputed summary (D4).
@@ -55,27 +57,32 @@ class GateFixture(source_cases.SourceProjectionFixture):
     def plan_path(self):
         return str(self.repo / 'all.md')
 
-    def gate(self, completed=0):
+    def gate(self, completed=0, save=None):
         return self.invoke('gate', '--plan', self.plan_path(), '--base', self.base, '--head', self.head,
-                           '--completed-through', str(completed))
+                           '--completed-through', str(completed), *(('--save-dir', str(save)) if save else ()))
 
     def confirm(self, raw, base=None, plan=None):
         return self.invoke('confirm', '--plan', plan or self.plan_path(), '--base', base or self.base,
                            '--input', '-', input=raw)
 
-    def oversize(self):
-        """RecommendationTest's shape: the root overflows root_bytes, the leaf `end` fits."""
+    def oversize(self, leaf=True):
+        """RecommendationTest's shape: the root overflows root_bytes; the leaf `end`, when declared, fits."""
         root = self.delivery['boundaries'][0]
-        leaf = source_cases.BoundaryTreeTest().row('end', 'all', [1, 2])
-        leaf['process_commit_subject_bytes'] = [1]
-        self.delivery['boundaries'] = [root, leaf]
         root['process_commit_subject_bytes'] = [120] * 30
-        paths = [leaf['process_package']['spec'], leaf['process_package']['plan'], *leaf['process_package']['tasks']]
-        for index, path in enumerate(paths):
-            record = self.record(leaf['process_forecast_ids'][index], 0, path)
-            record['bounds'][0]['boundary'] = 'end'
-            self.delivery['process_records'].append(record)
+        if leaf:
+            leaf = source_cases.BoundaryTreeTest().row('end', 'all', [1, 2])
+            leaf['process_commit_subject_bytes'] = [1]
+            self.delivery['boundaries'] = [root, leaf]
+            paths = [leaf['process_package']['spec'], leaf['process_package']['plan'], *leaf['process_package']['tasks']]
+            for index, path in enumerate(paths):
+                record = self.record(leaf['process_forecast_ids'][index], 0, path)
+                record['bounds'][0]['boundary'] = 'end'
+                self.delivery['process_records'].append(record)
         self.emit(); self.commit('boundaries')
+
+    def bare_overflow(self):
+        """An overflow no declared boundary fits: a null recommendation (D18)."""
+        self.oversize(leaf=False)
 
     def assert_refused(self, result, needle):
         self.assertEqual((result.returncode, result.stdout), (2, b''), result.stderr)
@@ -103,11 +110,20 @@ class GateTest(GateFixture, unittest.TestCase):
     def test_overflow_summary_trims_the_recommendation(self):
         self.oversize()
         result = self.project(0, package=f'review-{self.base[:7]}..{self.head[:7]}.json')
-        gated = self.gate(0)
+        save = self.top / 'saved'; save.mkdir()
+        gated = self.gate(0, save)
         self.assertEqual((result.returncode, gated.returncode), (3, 3), gated.stderr)
+        self.assertEqual((save / f'projection-{self.head[:7]}-0.json').read_bytes(), result.stdout)  # D20
         full = json.loads(result.stdout)['recommended_boundary']
         self.assertEqual(json.loads(gated.stdout)['recommended_boundary'],
                          {key: full[key] for key in ('id', 'tasks', 'prerequisite_commit', 'metrics')})
+
+    def test_an_overflow_without_a_fitting_boundary_carries_null(self):
+        self.bare_overflow()
+        gated = self.gate(0)
+        summary = json.loads(gated.stdout)
+        self.assertEqual((gated.returncode, summary['state'], summary['recommended_boundary']),
+                         (3, 'decompose_required', None), gated.stderr)
 
     def test_invalid_input_is_one_reason_line(self):
         self.write('all.md', '# Plan without a forecast\n'); self.commit('break the plan')
@@ -132,7 +148,7 @@ class GateTest(GateFixture, unittest.TestCase):
 
 class ConfirmTest(GateFixture, unittest.TestCase):
     def test_confirm_reproduces_both_states(self):
-        for build in (lambda: None, self.oversize):
+        for build in (lambda: None, self.bare_overflow, self.oversize):
             build()
             gated = self.gate(0)
             confirmed = self.confirm(gated.stdout)
@@ -194,9 +210,9 @@ def capture(argv, *, cwd, authority):
 - Exit 2: the reason is the last non-empty stderr line, decoded with `replace`, minus a leading `review-feasibility: `, whitespace-collapsed and cut to 300 characters (`"projection failed"` when empty). Any exit outside {0, 2, 3}: `GateError(f"projection exit {code} is not 0, 2 or 3")`.
 - Exit 0 or 3: `validate_result(raw, exit, authority)`; its `ForecastError` becomes `GateError(f"invalid projection result: {reason}")`. Return `Capture(exit, raw, strict_json(raw))`.
 - `summarize` copies `state, base, head, completed_through, metrics, violations` and the four digests, sets `schema_version: 1`, `kind: "review-feasibility-summary"`, `plan`, and `recommended_boundary` to null or the four `RECOMMENDATION_KEYS` of the result's recommendation. It asserts the invariant chain above and raises `GateError("summary state disagrees with its exit")` otherwise.
-- `gate` runs `capture(argv or project_argv(...), cwd=plan.parent, authority=describe("review-package"))` and returns `(capture.exit, canonical_bytes(summarize(capture, plan_relative(plan))))`.
+- `gate` runs `capture(argv or project_argv(...), cwd=plan.parent, authority=describe("review-package"))`; with `save_dir` it calls `save_result(save_dir, capture)` (a temporary file beside the target, then `os.replace`; an `OSError` is `GateError("cannot save projection result")`); it returns `(capture.exit, canonical_bytes(summarize(capture, plan_relative(plan))))`.
 - `confirm`, in order: refuse `len(raw) > bound` (`"summary exceeds report wire bound"`); `strict_json` (its error is `GateError("invalid summary JSON")`); require a dict with exactly `SUMMARY_KEYS`, `type(completed_through) is int` and `>= 0`, `head` a full lowercase SHA, `state` in the two states (else `"confirm: <key> disagrees"`, naming the first offending key in sorted order); require `plan == plan_relative(plan)` and `base == base`, else `"confirm: plan disagrees"` / `"confirm: base disagrees"`; run `gate(plan, base, value["head"], value["completed_through"], argv=...)`; compare `canonical_bytes(value)` with the recomputed bytes and, on difference, name the first sorted top-level key whose values differ; require the recomputed exit to be `0` for `complete` and `3` otherwise. Return the recomputed `(exit, bytes)`.
-- `review_feasibility.main` gains the two subparsers. `gate` writes the summary and returns its exit. `confirm --input -` reads `sys.stdin.buffer.read(bound + 1)`; a file is read with `read_regular(path.parent, path.name, bound)` (no symlink following). The existing exception handler, `GateError` included, keeps the one-line refusal.
+- `review_feasibility.main` gains the two subparsers. `gate` (with optional `--save-dir DIR`) writes the summary and returns its exit. `confirm --input -` reads `sys.stdin.buffer.read(bound + 1)`; a file is read with `read_regular(path.parent, path.name, bound)` (no symlink following). The existing exception handler, `GateError` included, keeps the one-line refusal.
 - `python/README.md` § Review packaging and feasibility: one paragraph documenting `gate`, `confirm`, the summary fields and exits (the Invariants above), and one paragraph **Review feasibility forecast** carrying the v3 block field semantics that writing-plans' compact skeleton cites (D14): every field `load_plan` and `_records` check, with the conservative-bound rule (whole-record bytes at 10 lines of context, cumulative per path, a 64-byte subject per future commit).
 - `justfile`: add `tests/test_review_gate.py` to `agent-workflow-tests` beside `tests/test_review_feasibility.py`.
 - `tests/test_agent_tools_launchers.py::test_review_source_and_built_canonical_actual_parity`: after the `project` assertions in each label, run `gate` with the same plan, base, head and `--completed-through 1`, and `confirm` over its stdout; assert exit 0 in both labels, `confirm` stdout equal to `gate` stdout, and the source and built `gate` bytes equal.
@@ -214,7 +230,7 @@ git add python/agent_tools/review_gate.py python/agent_tools/review_feasibility.
 git commit -m "feat(review): add review-feasibility gate and confirm"
 ```
 
-Decisions: D3, D4, D10, D14.
+Decisions: D3, D4, D10, D14, D18, D20.
 
 ## Review feasibility task
 

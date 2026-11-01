@@ -23,17 +23,19 @@
 
 ## Execution gates
 
-Installed tools gate this delivery; in-flight source never gates itself (D11, D16).
+Installed tools gate this delivery; in-flight source never gates itself (D11, D16, D21). G0, one `bash` script with `N` set:
 
 ```sh
 PLAN=$(git rev-parse --show-toplevel)/.agents/artifacts/plans/2026-11-01-issue-227-projected-review-limits.md
-BASE=8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc; EV=$(sdd-workspace "$PLAN")
-timeout 900 review-feasibility project --plan "$PLAN" --base "$BASE" --head "$(git rev-parse HEAD)" \
-  --completed-through "$N" > "$EV/g0-$N.json"; echo "exit=$?"
-review-feasibility validate-result --input "$EV/g0-$N.json" --producer-exit 0 | cmp - "$EV/g0-$N.json"
+BASE=8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc; H=$(git rev-parse HEAD); EV=$(sdd-workspace "$PLAN")
+g0() { timeout 900 review-feasibility project --plan "$PLAN" --base "$BASE" --head "$H" --completed-through "$N" > "$1"; }
+g0 "$EV/g0-$N.json"; X=$?; g0 "$EV/g0-$N.again"; Y=$?
+[ "$X" = "$Y" ] && { [ "$X" = 0 ] || [ "$X" = 3 ]; } && cmp -s "$EV/g0-$N.json" "$EV/g0-$N.again" \
+  && review-feasibility validate-result --input "$EV/g0-$N.json" --producer-exit "$X" > /dev/null \
+  && echo "G0 exit=$X" || echo "G0 failed (exits $X/$Y)"
 ```
 
-G0 clears on a validated exit 0; exit 3 ends SDD `decompose_required`, exit 2 `failed`. G0 at 0 precedes `sdd-gate next --task 1`. After task N's clean review: a hand recording commit `plan: record task N evidence` (this root and `task-N.md`, D2's four changes), `sdd-gate next --completed N` (G1), G0 at N, `sdd-gate next --task N+1`. Task 5 ends at G1. Planning G0 at 0, head `abeead1`: exit 0 `complete/within_budget`, validated and reproduced; root 14,707 of 16,384 B, total 470,387 of 524,288 B, all eight members (largest 63,488 B), so a forecast revision has no spare member.
+G0 clears only on `G0 exit=0`; `G0 exit=3` ends SDD `decompose_required`; `G0 failed` (exit 2, a disagreeing rerun or an invalid result) ends it `failed`. G0 at 0 precedes `sdd-gate next --task 1`. After task N's clean review: a hand recording commit `plan: record task N evidence` (this root and `task-N.md`, D2's four changes), `sdd-gate next --completed N` (G1), G0 at N, `sdd-gate next --task N+1`. Task 5 ends at G1. Planning G0 at 0, head `abeead1`: exit 0 `complete/within_budget`, validated and reproduced; root 14,707 of 16,384 B, total 470,387 of 524,288 B, all eight members (largest 63,488 B), so a forecast revision has no spare member.
 
 ## Delivery estimate and boundaries
 
@@ -62,7 +64,20 @@ Task 5 — End-to-end replay — tests/test_review_limits_replay.py, justfile �
 
 ## Decisions
 
-Task 1: D3, D4, D10, D14. Task 2: D3, D5. Task 3: D2, D8, D9, D12, D15. Task 4: D2, D5–D9, D12–D14. Task 5: D6, D10. Gates and shape: D11, D16, D17.
+Task 1: D3, D4, D10, D14, D18, D20. Task 2: D3, D5, D18. Task 3: D2, D8, D9, D12, D15, D19, D20. Task 4: D2, D5–D9, D12–D14, D20, D22. Task 5: D6, D10, D23. Gates and shape: D11, D16, D17, D21.
+
+## Standards review provenance
+
+Reviewer `Codex` (gpt-6-astra, xhigh), isolated read-only, no fallback; base `8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc`, reviewed head `6ed6d3f7`. 8 accepted, 0 rejected, 0 deferred, each verified at its cited live lines.
+
+- B1 accepted: an overflow may carry a null recommendation (D18).
+- B2 accepted: `evidence` precedes `ledger-complete` and guards a fresh `--task` (D19).
+- B3 accepted: replay horizons follow the task count (D23).
+- B4 accepted: `gate --save-dir` keeps the planning result (D20).
+- B5 accepted: G0 keeps the real exit and reproduces by rerun (D21).
+- B6 accepted: skill-text pins are machine text only (D22).
+- S1 accepted: Task 3 tampers the task member and asserts the change.
+- S2 accepted: the replay snapshots saved-result bytes (D23).
 
 ## Review feasibility delivery
 

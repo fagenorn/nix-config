@@ -127,8 +127,9 @@ declared descendant holding Task 2.
 - **Gates declared in the plan.** The adopting skills and `sdd-gate` are not installed
   while this delivery runs, so the plan declares its gates explicitly, as the issue-235
   plan did (D11):
-  - G0 is the accepted projection with `validate-result`, reproduced byte for byte. It runs
-    before Task 1 and after each accepted task's recording, and exit 2 or 3 stops.
+  - G0 is the accepted projection run twice at identical inputs, both runs agreeing on
+    exit and bytes, then `validate-result` with that exit (D21). It runs before Task 1 and
+    after each accepted task's recording, and exit 2 or 3 stops.
   - G1 is the installed `sdd-gate` complete fixed-base actual gate, run after every task
     and at the final head.
 - **Reviews and verification.** Every implementation task gets a fresh independent
@@ -159,10 +160,13 @@ fields are:
 
 A summary is derived only from bytes that passed `validate_result` with their
 producer's exit. `complete` holds exactly when there are no violations, the exit is 0
-and the recommendation is null. Exit 2 yields no summary.
+and the recommendation is null. An overflow's recommendation is null when no declared
+boundary fits: new design required (D18). Exit 2 yields no summary.
 
-The full validated result is kept wherever a stop is recorded. It is a cache, not the
-provenance. The immutable provenance is the committed plan and history, and `confirm`
+The full validated result is kept wherever a stop is recorded, as
+`projection-<head7>-<N>.json` through one shared writer: `gate --save-dir` at planning
+(writing-plans passes the plan's `sdd-workspace`), sdd-gate's `projection` step in SDD
+(D20). It is a cache, not the provenance. The immutable provenance is the committed plan and history, and `confirm`
 reproduces the summary from them at any later time.
 
 ### `review-feasibility gate` and `confirm` (D4)
@@ -177,8 +181,8 @@ imports the same functions. The command table is unchanged.
   stderr to a bounded tail without blocking. The exit must be 0, 2 or 3. On 0 or 3 the
   bytes must pass `validate_result` with that exit under the same
   `describe("review-package")` authority. On 2 the result is the child's one-line reason.
-- **`gate --plan P --base B --head H --completed-through N`.** It prints the canonical
-  summary and exits 0 or 3. Any other outcome exits 2 with one stderr line,
+- **`gate --plan P --base B --head H --completed-through N [--save-dir DIR]`.** It prints
+  the canonical summary, after saving the validated result into DIR, and exits 0 or 3. Any other outcome exits 2 with one stderr line,
   `review-feasibility: <reason>`, and empty stdout.
 - **`confirm --plan P --base B --input FILE|-`.** It reads at most wire bound plus one
   byte, with no symlink following for a file, as `validate-result` does. It parses
@@ -230,9 +234,9 @@ projection, not `record`, is the authority on whether the evidence is valid.
 The steps run in this order:
 
 1. `ledger`
-2. `ledger-complete`
-3. `mark-progress`
-4. `evidence`
+2. `evidence`
+3. `ledger-complete`
+4. `mark-progress`
 5. `review-package`
 6. `validate-report`
 7. `budget-check`
@@ -248,10 +252,12 @@ The steps run in this order:
   to M−1.
 - **`ledger-complete`.** It writes `Task N: complete (commits <B7>..<H7>, …)` using the
   recorded `H`.
-- **`evidence`** (only with `--completed`). `HEAD` has exactly one parent, that parent is
-  `H`, `HEAD` changes only the plan root and task N's member, and both files equal the
+- **`evidence`** (task N with `--completed N`, else task M−1 for a fresh `--task M`,
+  M > 1). `HEAD` has exactly one parent, that parent is that task's recorded `H`, `HEAD`
+  changes only the plan root and that task's member, and both files equal the
   bytes `record` computes from `H`. A recording commit therefore cannot carry any other
-  forecast edit. Any refusal carries gate `failed`.
+  forecast edit, and a `complete` line never vouches for an unverified `HEAD` (D19). Any
+  refusal carries gate `failed`.
 - **`projection`** (only with `--task M`, when M has no dispatched line). It captures at
   `HEAD` with `--completed-through M−1`:
   - exit 0 saves the validated result to the workspace as
@@ -357,10 +363,10 @@ no projection result is mocked.
 
 | Contract | Seam and prior art | Evidence |
 |---|---|---|
-| Capture, summary, `confirm` | `python -m agent_tools.review_feasibility gate/confirm` in a repository built by the existing source-projection fixture. The capture function's argv parameter supplies producer output no real producer emits. | Summaries equal their result fields, both null and non-null recommendations. Capture refuses malformed, non-canonical, oversized, unknown-exit and exit-disagreeing output. `confirm` refuses each of: an extra or missing key; each of the four metrics plus one; each of the four identity digests altered; a stale head after a new commit; a base or plan mismatch; a state/exit swap. Each refusal names its field or the capture's reason. |
+| Capture, summary, `confirm` | `python -m agent_tools.review_feasibility gate/confirm` in a repository built by the existing source-projection fixture. The capture function's argv parameter supplies producer output no real producer emits. | Summaries equal their result fields, both null and non-null recommendations, an overflow with a null one included, at `gate`, `confirm` and both transports; `--save-dir` keeps the exact validated bytes. Capture refuses malformed, non-canonical, oversized, unknown-exit and exit-disagreeing output. `confirm` refuses each of: an extra or missing key; each of the four metrics plus one; each of the four identity digests altered; a stale head after a new commit; a base or plan mismatch; a state/exit swap. Each refusal names its field or the capture's reason. |
 | Transport validators | The existing `artifact_budget` boundary tests | Every producer and SDD shape above, accepted and refused, including a projection on another kind, in `failed`, with a nonzero ordinal, a foreign plan, a foreign policy, a state/violation disagreement, or an over-budget artifact beside a projection. Every summary `gate` emits validates at both boundaries. |
 | Ownership recording | `sdd-gate record` with the existing sdd-gate lifecycle harness | The recorded plan projects; prerequisites are filled; a repeat is a no-op; refusals for an undispatched task, a task with no commits, a changed reviewed head, an extra dirty path, and a task commit that edited a forecast block. A recording commit that carries any other forecast edit is refused at `evidence`. |
-| SDD ordering | `sdd-gate next` in the same harness | The initial projection runs before Task 1. Steps run in the order above. A projected overflow and an invalid projection each leave no dispatched line, brief or worker. An actual overflow despite a fitting projection refuses at `validate-report` and the projection never runs. A re-dispatch reuses the projection line. A missing or extra recording commit refuses at `ledger` or `evidence`. |
+| SDD ordering | `sdd-gate next` in the same harness | The initial projection runs before Task 1. Steps run in the order above. A projected overflow and an invalid projection each leave no dispatched line, brief or worker. An actual overflow despite a fitting projection refuses at `validate-report` and the projection never runs. A re-dispatch reuses the projection line. A missing or extra recording commit refuses at `ledger` or `evidence`, writing no `complete` line; a later `--task` over a lowered bound refuses at `evidence`. |
 | End-to-end replay | A new source test: a scratch repository shaped like the retained issue-121 delivery, with eight tasks and declared children for tasks 1–3, 4–6 and 7–8, and no historical fixture used as acceptance | Detailed after this table. |
 | Installed parity | The existing launcher-layout test | The built `gate` and `confirm` print the source bytes. |
 | Skill contracts | The existing skill-contract tests, machine-consumed text only | The exact producer and SDD report key sets in skill text. |
@@ -415,5 +421,11 @@ The end-to-end replay must show seven things:
 | D15 | `tests/test_sdd_gate.py` gains `ForecastCase(GateCase)`, which writes the v3 forecast at setUp over the fixture's plan commit as delivery base. The committed fixture files and golden briefs stay unchanged, and every dispatching `NextTest` case is re-based on it. | D9: every dispatch now projects. The loader binds `delivery_base` to a runtime commit, so committed fixture blocks cannot name it. Spec § Test seams' existing sdd-gate harness. | Committed fixture blocks with a fixed SHA cannot load. A separate harness would duplicate the lifecycle shims. |
 | D16 | This delivery's G0 runs between two installed `sdd-gate next` calls: `--completed N` (closing N and running G1), G0 at N, then `--task N+1`. Recordings are hand commits of D2's four changes, validated by G0. Each `Files:` list is exhaustive. The root's headroom covers the five recordings, so a Phase-5 root edit stays under 300 B or goes to this spec. | D11. The installed `sdd-gate next` has no projection step. The loader refuses a completed record with no owned effect. `load_plan` and `sdd-gate` check the root budget at every gate. | One `next --completed N --task N+1` call dispatches before a projection can run. Using the in-flight `record` before its review lets unreviewed code shape its own gate's input. |
 | D17 | The first planning G0 over a seven-task package (exit 3: `root_bytes` 19,187 of 16,384, total 486,131, recommendation `c1`) gets the installed writing-plans' one compaction round: seven tasks fold into five (recording with the `next` steps, planning with execution callers), cutting future commits from 40 to 30 at unchanged bounds of four subjects per task. | The packing policy reserves 6 JSON bytes per forecast subject byte, so the commit count drives the review root. writing-plans allows one compaction before `decompose_required`, and this plan predates D7's gate. Record and `next` share `sdd_gate.py` and its tests; both caller halves share from-issue `SKILL.md` and the contracts test. | Lowering per-task subject counts after a refusal is forecast gaming (D7, issue 226). Returning `decompose_required` at once would split a delivery whose fix lowers no bound. |
+| D18 | An overflow may carry a null recommendation, meaning new design required; only `complete` requires null. Task 1 tests it through `gate` and `confirm`, Task 2 at both transports. | Phase-5 review (Codex): Task 1 made null equivalent to success, failing AC4's "new design required" case. `_recommend` returns None when no declared boundary fits; `validate_result` accepts it. | Requiring a recommendation on every overflow would turn a valid stop into `failed`. |
+| D19 | `next` runs `evidence` before `ledger-complete`, and also for task M−1 before a fresh `--task M` without `--completed`. Amends D8's order. | Phase-5 review (Codex): a refused recording left a `complete` line, so a later `next --task N+1` could project over a tampered recording; the loader admits tail edits to process paths. D12. | Trusting the `complete` line lets an unverified forecast edit lower future bounds. A separate verified-marker line duplicates `evidence`. |
+| D20 | `gate --save-dir DIR` and sdd-gate's `projection` step keep the validated result through one `save_result` as `projection-<head7>-<N>.json`; writing-plans passes `sdd-workspace <root>`. | Phase-5 review (Codex): D3 keeps the full result wherever a stop is recorded, and planning had no writer. `sdd-workspace` ensures the per-plan directory D6 keeps. | Embedding the result in the report breaks the 8192-byte wire bound (D3). Relying on `confirm` alone drops the required cache. |
+| D21 | G0 keeps the producer's real exit, runs the projection twice at identical inputs, requires equal exits and bytes, then `validate-result` with that exit; any refusal fails closed. Amends D11 and D16; the provenance and G0 edits take the root past D16's 300 B, within the measured headroom of its 16,384 B forecast after five recordings. | Phase-5 review (Codex): `--producer-exit 0` rejected every valid exit 3, and `cmp` against `validate-result`'s echo of its input reproduced nothing. | Keeping the echo comparison proves only validity. Moving provenance to the spec breaks the provenance contract. |
+| D22 | New skill-text pins cover only machine-consumed text: helper argv, the forecast headings and kinds the loader reads, report JSON. English phrases are not pinned, and a phrase pin on cut text is deleted. Amends D14's "keep every pinned string". | Phase-5 review (Codex). agent-helpers rule 6. | Pinning `reconciliation record` or the stop heading freezes prose the standard leaves free. |
+| D23 | The replay derives process horizons from its task count and snapshots every workspace file's bytes. | Phase-5 review (Codex): the loader refuses a horizon above the task count, so the three-task child could not load, and a filename snapshot misses an overwritten result. | Reviewer's call accepted as-is. |
 
 The design and grill frontier is closed within the approved scope. The retained project bindings give no context-map or ADR write route, so this ledger is the issue's decision store.

@@ -11,7 +11,8 @@
 **Invariants (D6, D10):**
 - A scratch repository shaped like the retained issue-121 delivery: eight tasks, root `all`, children `first` [1–3], `middle` [4–6] depending on `first`, `last` [7–8] depending on `middle`, each child with its own future process package. No historical fixture, archive or review is read or reused as acceptance.
 - Nothing is mocked: every projection is the source `review-feasibility`, every gate the source `sdd-gate`.
-- A stop changes nothing: `HEAD`, the branch list, the ledger bytes and the saved result are identical before and after every post-stop read (confirm, child creation).
+- A stop changes nothing: `HEAD`, the ledger bytes and the saved result's bytes are identical before and after every post-stop read (confirm, child creation) (D23).
+- Process-record horizons are the scoped task count, so the three-task child loads (D23).
 
 - [ ] **Step 1: Write the failing test** `tests/test_review_limits_replay.py`
 
@@ -73,7 +74,7 @@ class ReplayTest(sdd_cases.GateCase):
             package = row["process_package"]
             for rid, path in zip(row["process_forecast_ids"], [package["spec"], package["plan"], *package["tasks"]]):
                 change = "modify" if (self.repo / path).exists() and path.startswith("plan") else "add"
-                process.append({"id": rid, "owner": 0, "path": path, "change": change, "last_task": 8,
+                process.append({"id": rid, "owner": 0, "path": path, "change": change, "last_task": count,
                                 "bounds": [self.bound(row["id"], 4096, rid)]})
         delivery = {"schema_version": 3, "kind": "review-feasibility-delivery", "delivery_base": self.base,
                     "proposed_boundary": "all", "boundaries": rows, "process_records": process,
@@ -107,8 +108,9 @@ class ReplayTest(sdd_cases.GateCase):
         return self.gate("next", self.plan, "--skill-dir", sdd_cases.SKILL, *args)
 
     def snapshot(self):
+        """HEAD, branches, ledger bytes and every workspace file's bytes, saved results included."""
         return (self.repo_git("rev-parse", "HEAD"), self.repo_git("branch", "--list"), self.ledger.read_bytes(),
-                sorted(p.name for p in self.workspace.iterdir()))
+                {p.name: p.read_bytes() for p in sorted(self.workspace.iterdir()) if p.is_file()})
 
     def grow_task_one(self):
         """Task 1 lands 200 KB over four files, each under the member limit; record and commit it."""
@@ -150,6 +152,7 @@ class ReplayTest(sdd_cases.GateCase):
         self.assertFalse((self.workspace / "task-2-implementer-dispatch.md").exists())
         self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["workers"], workers)
         before = self.snapshot()
+        self.assertIn(f"projection-{recording[:7]}-1.json", before[3])                 # the saved result
         confirmed = self.feasibility("confirm", "--plan", self.plan, "--base", self.base, "--input", "-",
                                      raw=canonical(summary).encode() + b"\n")
         self.assertEqual((confirmed.returncode, json.loads(confirmed.stdout)), (3, summary), confirmed.stderr)
@@ -218,7 +221,7 @@ git add tests/test_review_limits_replay.py justfile
 git commit -m "test(review): replay projected limits end to end"
 ```
 
-Decisions: D6, D10.
+Decisions: D6, D10, D23.
 
 ## Review feasibility task
 

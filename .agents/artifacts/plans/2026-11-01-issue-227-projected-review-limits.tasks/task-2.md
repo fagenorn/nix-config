@@ -63,6 +63,7 @@ In `home/common/agent-skills/tests/test_artifact_budget.py`, inside `ArtifactBud
         rows = [
             (self.plan_report("complete", self.summary()), True),
             (self.plan_report("decompose_required", over), True),
+            (self.plan_report("decompose_required", {**over, "recommended_boundary": None}), True),  # D18
             (self.plan_report("decompose_required", None, over=True), True),
             (self.plan_report("complete", None), False),
             (self.plan_report("complete", over), False),
@@ -96,6 +97,8 @@ In `home/common/agent-skills/tests/test_artifact_budget.py`, inside `ArtifactBud
         artifact = self.full("review-package", True)
         rows = [
             (self.sdd_stop({"kind": "projected_overflow", "projection": over}), True),
+            (self.sdd_stop({"kind": "projected_overflow", "projection": {**over, "recommended_boundary": None}}),
+             True),                                                                     # D18
             (self.sdd_stop({"kind": "actual_overage", "artifact": artifact}), True),
             (self.sdd_stop({"kind": "projected_overflow", "projection": self.summary()}), False),
             (self.sdd_stop({"kind": "projected_overflow", "projection": {**over, "head": "d" * 40}}), False),
@@ -121,7 +124,7 @@ In `tests/test_review_gate.py`, add to `GateTest` (the fixture's `PATH` already 
 
 ```python
     def test_every_gate_summary_validates_at_both_boundaries(self):
-        for build in (lambda: None, self.oversize):
+        for build in (lambda: None, self.bare_overflow, self.oversize):
             build()
             gated = self.gate(0)
             summary = json.loads(gated.stdout)
@@ -169,7 +172,7 @@ git add home/common/agent-skills/scripts/artifact_budget.py home/common/agent-sk
 git commit -m "feat(budget): validate review-feasibility summaries in reports"
 ```
 
-Decisions: D3, D5.
+Decisions: D3, D5, D18.
 
 ## Review feasibility task
 

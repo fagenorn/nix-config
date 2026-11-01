@@ -14,11 +14,11 @@
   - `sdd-gate record PLAN_FILE --task N` printing `{"command":"record","outcome":"ready","task":N,"head_sha":H,"paths":[<absolute root>,<absolute member>],"changed":bool}` (exit 0), or the existing refusal object with `gate: null` (exit 2). Steps, in order: `ledger`, `worktree`, `record`.
   - Ledger line `Task N: recorded (head <H40>)`, appended once.
   - In `tests/test_sdd_gate.py`: `class ForecastCase(GateCase)`, whose `setUp` makes the fixture plan carry a valid v3 forecast (D15) and exposes `self.forecast_base` (also assigned to `self.delivery_base`, so `NextTest.first()` passes it), `self.emit_forecast()`, `self.read_blocks()` and `self.record(task)`; the `next` tests below build on it.
-- Consumes: Task 1's `agent_tools.review_gate.{capture, project_argv, summarize, plan_relative, GateError}`; `review_record.recorded`, the `Task N: recorded (head H)` line and `ForecastCase` from the recording half.
+- Consumes: Task 1's `agent_tools.review_gate.{capture, project_argv, summarize, plan_relative, save_result, GateError}`; `review_record.recorded`, the `Task N: recorded (head H)` line and `ForecastCase` from the recording half.
 - Produces (callers in Tasks 4 and 5 rely on these exact names):
-  - `next` steps, in order: `ledger`, `ledger-complete`, `mark-progress`, `evidence`, `review-package`, `validate-report`, `budget-check`, `metrics-match`, `projection`, `task-brief`, `prepare-brief`, `register-worker`, `write-brief` (D8).
+  - `next` steps, in order: `ledger`, `evidence`, `ledger-complete`, `mark-progress`, `review-package`, `validate-report`, `budget-check`, `metrics-match`, `projection`, `task-brief`, `prepare-brief`, `register-worker`, `write-brief` (D8, D19).
   - Refusal at `projection`: exit 3 with `gate: "decompose_required"` and `report` = the canonical summary object; exit 2 with `gate: "failed"`, `report: null`, the capture reason as `detail`.
-  - Workspace file `projection-<head7>-<M−1>.json` holding the validated result bytes; ledger line `Projection gate: <base40>..<head40> through <M−1> root_bytes=<n> total_bytes=<n> file_count=<n> largest_member_bytes=<n>`.
+  - Workspace file `projection-<head7>-<M−1>.json` (`save_result`) holding the validated result bytes; ledger line `Projection gate: <base40>..<head40> through <M−1> root_bytes=<n> total_bytes=<n> file_count=<n> largest_member_bytes=<n>`.
   - Ready object key `projection`: `{"completed_through": M−1, "head_sha": <head40>, "metrics": {...}}`, or `null` without `--task`.
 
 
@@ -31,8 +31,9 @@
 
 **Invariants — `next` (D2, D8, D9, D12):**
 - `ledger`: with `--completed N` the ledger must hold `Task N: recorded (head H)`; with `--task M` the tasks with `complete` lines, counting this call's `--completed`, are exactly 1..M−1.
+- `evidence` checks task N with `--completed N`, else task M−1 when a fresh `--task M` has M > 1; otherwise it is skipped. `HEAD` has exactly one parent, that parent is the checked task's recorded `H`, `HEAD` changes only the plan root and that task's member, and both committed files equal `recorded(repo, plan, task, B, H)`. Any refusal carries gate `failed`.
+- `evidence` runs before `ledger-complete`, so a refused recording leaves no `complete` line, and a completion marker never authorizes a projection over an unverified `HEAD` (D19).
 - `ledger-complete` writes `Task N: complete (commits <B7>..<H7>, review clean | K parked)` with the recorded `H`, never the recording commit.
-- `evidence` (only with `--completed`): `HEAD` has exactly one parent, that parent is `H`, `HEAD` changes only the plan root and task N's member, and both committed files equal `recorded(repo, plan, N, B, H)`. Any refusal carries gate `failed`.
 - The actual gate always runs before `projection`; its refusal ends the call, so a projection never runs over or suppresses an actual failure.
 - `projection` runs only with `--task M` when M has no `dispatched` line. It captures `project_argv(plan, delivery_base, HEAD, M−1)`. A re-dispatch runs no projection and requires the `Projection gate:` line through M−1 whose head is M's recorded dispatch base (`ledger` refusal otherwise).
 - A plan without forecast blocks refuses at `projection` with gate `failed` (D9). `next --completed N` alone runs no projection.
@@ -162,8 +163,9 @@ class RecordTest(ForecastCase):
         self.write("stray.txt", "x\n"); self.repo_git("add", "stray.txt")
         refused()                                                     # extra dirty tracked path
         self.repo_git("rm", "-q", "--cached", "stray.txt"); (self.repo / "stray.txt").unlink()
-        self.write("plan.md", (self.repo / "plan.md").read_text(encoding="utf-8").replace(
-            '"record_bytes":2048', '"record_bytes":1024'))
+        member = self.repo / "plan.tasks/task-1.md"; text = member.read_text(encoding="utf-8")
+        self.write("plan.tasks/task-1.md", text.replace('"record_bytes":2048', '"record_bytes":1024'))
+        self.assertNotEqual(member.read_text(encoding="utf-8"), text)
         self.repo_commit("task 1 lowers its bound")
         step, steps = "record", ["ledger", "worktree"]
         refused()                                                     # a task commit edited the forecast
@@ -250,10 +252,12 @@ class NextProjectionTest(ForecastCase):
                                  gate=None, steps=[])                       # not recorded
         self.ready(self.record(1))
         self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
-                                 gate="failed", steps=["ledger", "ledger-complete"])  # not committed
+                                 gate="failed", steps=["ledger"])                   # not committed
         self.write("notes.txt", "smuggled\n"); recording = self.repo_commit("plan: record task 1 evidence")
         self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
-                                 gate="failed", steps=["ledger", "ledger-complete"])  # extra path
+                                 gate="failed", steps=["ledger"])                   # extra path
+        self.assertEqual(self.lines_matching("Task 1: complete"), [])           # D19: no unverified marker
+        self.assert_gate_refused(self.next("--task", 2), command="next", step="ledger", gate=None, steps=[])
         self.repo_git("reset", "-q", "--hard", task_head)
         self.ready(self.record(1)); recording = self.repo_commit("plan: record task 1 evidence")
         out = self.ready(self.next("--completed", 1, "--task", 2))
@@ -265,12 +269,25 @@ class NextProjectionTest(ForecastCase):
         self.assertEqual(len(self.lines_matching("Projection gate:")), 2)
         self.assertEqual(again["projection"]["head_sha"], recording)
 
+    def test_a_completion_marker_never_authorizes_an_unverified_head(self):
+        self.ready(self.first())
+        self.complete(1, "src/app.py", "value = 2\n")
+        self.ready(self.next("--completed", 1))
+        member = self.repo / "plan.tasks/task-2.md"; text = member.read_text(encoding="utf-8")
+        self.write("plan.tasks/task-2.md", text.replace('"record_bytes":2048', '"record_bytes":1024'))
+        self.assertNotEqual(member.read_text(encoding="utf-8"), text)
+        self.repo_commit("plan: lower task 2 bound")                            # a lowered future bound
+        self.assert_gate_refused(self.next("--task", 2), command="next", step="evidence", gate="failed",
+                                 steps=["ledger"])
+        self.assertEqual(len(self.lines_matching("Projection gate:")), 1)
+        self.assertEqual(self.lines_matching("Task 2: dispatched"), [])
+
     def test_an_actual_overflow_refuses_before_any_projection(self):
         self.ready(self.first())
         self.complete(1, "src/app.py", "".join(f"value_{n} = {n}\n" for n in range(8000)))
         out = self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next",
             step="validate-report", gate="decompose_required",
-            steps=["ledger", "ledger-complete", "evidence", "review-package"], code=3)
+            steps=["ledger", "evidence", "ledger-complete", "review-package"], code=3)
         self.assertEqual(out["report"]["state"], "decompose_required")
         self.assertEqual(len(self.lines_matching("Projection gate:")), 1)
         self.assertEqual(self.lines_matching("Task 2: dispatched"), [])
@@ -295,8 +312,8 @@ Expected: FAIL — `sdd-gate: invalid invocation` (no `record` subcommand) and `
 - `review_record.recorded` reads committed bytes with `git show <commit>:<path>` (both commits), parses blocks with the loader's `_block`, applies the four changes, and replaces the single JSON line under each heading. A `ForecastError` from parsing becomes `RecordError` with its reason.
 - `sdd_gate.record(args, done)` follows the steps and invariants above; `_parser` gains `record PLAN_FILE --task N`; `main` dispatches it. The module docstring and `python/README.md` § `sdd-gate` gain the `record` contract (its invocation, steps, ready object, ledger line and repeat rule).
 - A recorded head that `HEAD` neither equals nor is the single-parent recording commit over refuses at `ledger`.
-- `_ledger_reads` gains the recorded-head read and the 1..M−1 completeness rule; `next_task` inserts `evidence` after `mark-progress` and `projection` after the `Delivery gate:` line is written, and adds `projection` to the ready object.
-- `projection` uses `capture(project_argv(plan, delivery_base, head, M - 1), cwd=ledger.top, authority=package.authority)`; on exit 0 or 3 it writes the validated bytes with `write_atomic` before acting; on exit 3 the refusal report is `summarize(capture, plan_relative(plan))`; a `GateError` is the `failed` refusal. The ledger line is appended once (`_ledger_has`).
+- `_ledger_reads` gains the recorded-head read and the 1..M−1 completeness rule; `next_task` inserts `evidence` directly after `ledger` and `projection` after the `Delivery gate:` line is written, and adds `projection` to the ready object.
+- `projection` uses `capture(project_argv(plan, delivery_base, head, M - 1), cwd=ledger.top, authority=package.authority)`; on exit 0 or 3 it saves the validated bytes with `save_result(workspace, capture)` before acting; on exit 3 the refusal report is `summarize(capture, plan_relative(plan))`; a `GateError` is the `failed` refusal. The ledger line is appended once (`_ledger_has`).
 - Update the module docstring step list (thirteen steps) and `python/README.md` § `sdd-gate` with the `record`-then-`next` order, the two new steps, the ledger line, the saved result and the ready object's `projection`.
 - Update existing `NextTest` expectations whose ledgers or `completed_steps` gain the new steps; keep each test's intent.
 
@@ -312,7 +329,7 @@ git add python/agent_tools/review_record.py python/agent_tools/sdd_gate.py tests
 git commit -m "feat(sdd-gate): record ownership and project before dispatch"
 ```
 
-Decisions: D2, D8, D9, D12, D15.
+Decisions: D2, D8, D9, D12, D15, D19, D20.
 
 ## Review feasibility task
 
