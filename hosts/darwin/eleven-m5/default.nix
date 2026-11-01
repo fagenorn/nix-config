@@ -1,12 +1,13 @@
 {
   lib,
   pkgs,
+  unstablePkgs,
   username,
   ...
 }:
 let
-  # Teammates who reach this Studio over the owner's tailnet; SSH with the listed keys is the only
-  # remote way in. An entry nix-darwin creates is a standard account with no password; admin rights
+  # Teammates who reach this Studio over the elevenyellow.org.github tailnet; SSH with the listed
+  # keys is the only remote way in. An entry nix-darwin creates is a standard account with no password; admin rights
   # and a password (e.g. from `sysadminctl -addUser ... -admin`) are left alone, since the admin
   # group is not declared here. Reuse an existing account's uid, or pick an unused one above 500
   # (`dscl . -list /Users UniqueID`), e.g.
@@ -58,21 +59,17 @@ in
   power.restartAfterPowerFailure = true;
   power.restartAfterFreeze = true;
 
-  # Coming back unattended also needs FileVault off and automatic login as the owner (set by
-  # hand: it takes the password), because the Tailscale app only runs in a logged-in session.
-  # That boot-time session would sit open at the console, so put the display to sleep right
-  # after it. That only locks it once the owner has also run, by hand (it takes the password),
-  # `sysadminctl -screenLock immediate -password -`; Tailscale keeps running behind the lock.
-  # Only near boot, so a later login or a switch reloading this agent is left alone.
-  launchd.user.agents.lock-after-autologin = {
-    script = ''
-      boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed -E 's/^\{ sec = ([0-9]+).*/\1/')
-      [ $(( $(/bin/date +%s) - boot )) -lt 300 ] || exit 0
-      /bin/sleep 15
-      /usr/bin/pmset displaysleepnow
-    '';
-    serviceConfig.RunAtLoad = true;
-  };
+  # Tailscale as the tailscaled system daemon, not the menu-bar app (the tailscale-app cask is
+  # MBP-only): the app is controlled by one logged-in user's session, which on this multi-user
+  # Mac locks the others out, and it does not run without a login. The daemon starts at boot
+  # with no session; drive it as root (`sudo tailscale up`, `sudo tailscale switch`).
+  # Coming back unattended needs FileVault off (set by hand). Keep automatic login off: no
+  # session is needed, and one would sit unlocked at the console.
+  services.tailscale.enable = true;
+  # From nixpkgs-unstable: 25.11's tailscale lags upstream and misses its security fixes
+  # (https://tailscale.com/security-bulletins). It stays patched only while `just update` keeps
+  # advancing nixpkgs-unstable, so run it at least monthly.
+  services.tailscale.package = unstablePkgs.tailscale;
 
   system.defaults.dock.persistent-apps = [
     "/Applications/Helium.app"
