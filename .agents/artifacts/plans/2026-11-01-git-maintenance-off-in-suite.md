@@ -58,3 +58,9 @@ Task 2 — Both launch sites pass it; a traced commit under the runner starts no
 - Task 1 rests on D2 and D5. Task 2 rests on D1, D3, D4 and D5.
 - Planning appended D5 (the interface of `member_environment` and where it is computed, and how the new cases strip the inherited git configuration).
 - A planning trial ran at `0518859a` in a scratch worktree, then discarded, on git 2.51.2. Task 1's cases errored at base (6 errors), passed with the function, and each of four wrong compositions (overwrite, a bare space join, prepend, `GIT_CONFIG_COUNT` slots) was killed by its own case. Task 2's two commit cases failed before the wiring, each listing `['git', 'maintenance', 'run', '--auto', '--quiet', '--detach']`, while the control passed. After the wiring, removing `env=` from either launch site failed only that site's case, and removing the strip override failed the control when the module ran under the runner. With both tasks applied the module ran 25 tests `OK`, and the first 19 members of `just agent-workflow-tests`, among them `tests/test_review_history.py` and `tests/test_review_task7.py`, which set their own `GIT_CONFIG_COUNT`, passed before that run was stopped for host load; the whole suite runs in sdd's final gate.
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, `codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no fallback. Base SHA `8d0bbc25`; reviewed plan commit `fb1c6576`. No focus beyond the review contract.
+- Findings: 0 blocking, 1 should-fix, discussion notes only. Accepted 1, rejected 0, deferred 0.
+- PR-01 (should-fix, accepted): the test module's docstring would claim every case but one runs the runner end to end; Task 2 Step 1 item 4 now rewrites it, and Step 4's check asserts the new text.

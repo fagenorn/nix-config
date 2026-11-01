@@ -100,6 +100,26 @@ class GitMaintenanceTest(RunnerCase):
 
 `--jobs 2` with one member takes the parallel launch site, so each commit case fails only for its own site.
 
+4. The module docstring's second paragraph no longer holds once Task 1's direct cases and this task's control exist (Phase-5 review PR-01). Replace exactly:
+
+```text
+Every case but the report-ordering one runs `python -m agent_tools.suite_runner`
+in a temporary working directory over fixture members written there. Members
+that must overlap meet at a filesystem barrier instead of sleeping, so no
+assertion depends on how long anything took (D9).
+```
+
+with exactly:
+
+```text
+Most cases run `python -m agent_tools.suite_runner` in a temporary working
+directory over fixture members written there. The report-ordering case and the
+members' git environment cases (issue 496) call the module's functions
+directly, and one control runs a fixture member with `bash` outside the runner.
+Members that must overlap meet at a filesystem barrier instead of sleeping, so
+no assertion depends on how long anything took (D9).
+```
+
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (timeout 300 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_suite_runner.py -k GitMaintenanceTest 2>&1 | grep -E "^(FAIL|ERROR):|^Ran|^OK|^FAILED|maintenance"'`
@@ -149,6 +169,9 @@ assert "with the recipe's environment:" not in text, "old sentence still present
 assert text.count("with the recipe's environment plus two git configuration entries:") == 1
 assert text.count("(`member_environment`)") == 1
 assert text.count("never by a serial-exemption list, a retry or a lock.") == 1
+tests = Path("tests/test_suite_runner.py").read_text(encoding="utf-8")
+assert "Every case but the report-ordering one" not in tests, "stale docstring"
+assert tests.count("call the module's functions\ndirectly") == 1
 print("readme-ok")
 EOF
 ```
