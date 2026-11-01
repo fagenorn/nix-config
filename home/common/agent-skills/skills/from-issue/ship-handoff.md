@@ -136,14 +136,13 @@ A generic delegated owner never takes it. With lifecycle identity, first run the
 
 ## Inline fallback (no ship-issue skill)
 
-Deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff. The PR body carries `Closes #<num>` only when the sdd report's `acceptance_state` is `met` or `not_applicable`, and no closing keyword otherwise:
+Deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff. The PR body has `## Why`, `## What changes`, `## Evidence` and `## Merge danger`, then a collapsed `<details>` Delivery record; it carries `Closes #<num>` only when the sdd report's `acceptance_state` is `met` or `not_applicable`, and no closing keyword otherwise:
 
 <!-- agent-dispatch: id=from-issue-inline-ship-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh first-pass reviewer over the shipping diff.
 
 Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, then close
-the issue when the sdd report's `acceptance_state` is `met` or `not_applicable`;
-otherwise hold it with ship-issue Phase 8 step 1's hold sequence, in its order:
+the issue on that condition; otherwise hold it with ship-issue Phase 8 step 1's hold sequence, in its order:
 view the issue's state and reopen it only when `CLOSED`, create the
 `needs-verification` label only when it is missing and never with `--force`,
 label it `needs-verification`, comment the verdict table, then verify the issue
