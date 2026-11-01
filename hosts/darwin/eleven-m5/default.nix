@@ -58,14 +58,12 @@ in
   power.restartAfterPowerFailure = true;
   power.restartAfterFreeze = true;
 
-  # Tailscale as the open-source tailscaled system daemon, not the menu-bar app (the
-  # tailscale-app cask is MBP-only). The app is controlled by whichever logged-in user's copy
-  # connected first, so on this multi-user Mac it locked everyone else out, and it only ran in a
-  # logged-in session, which forced automatic login. The daemon starts at boot with no session
-  # and is driven only from the CLI as root: `sudo tailscale login` / `sudo tailscale switch`.
-  # Coming back unattended still needs FileVault off; automatic login is no longer needed.
-  # It keeps no state from the app, so the node joins its tailnet afresh on first
-  # `sudo tailscale up`.
+  # Tailscale as the tailscaled system daemon, not the menu-bar app (the tailscale-app cask is
+  # MBP-only): the app is controlled by one logged-in user's session, which on this multi-user
+  # Mac locks the others out, and it does not run without a login. The daemon starts at boot
+  # with no session; drive it as root (`sudo tailscale up`, `sudo tailscale switch`).
+  # Coming back unattended needs FileVault off (set by hand). Keep automatic login off: no
+  # session is needed, and one would sit unlocked at the console.
   services.tailscale.enable = true;
 
   system.defaults.dock.persistent-apps = [
