@@ -23,7 +23,7 @@ into the plan's workspace.
 forecast blocks, from the ledger and Git, and commits nothing (the controller
 commits the two files). It runs three steps: `ledger` (tasks 1..N-1 are
 complete, N is dispatched and not complete, and an earlier recorded head for N
-is HEAD or its single-parent recording commit), `worktree` (no tracked change
+is HEAD or the commit recording it), `worktree` (no tracked change
 but the plan root and task N's member, and the task's base is a proper ancestor
 of its head with the forecast's evidence head behind the base) and `record`
 (the task's commits left every forecast block alone; the two files take the
@@ -685,26 +685,31 @@ def _committed(path: PurePosixPath, commit: str) -> bytes | None:
     return done.stdout if done.returncode == 0 else None
 
 
-def _check_evidence(ledger: Ledger, plan: Path, target: tuple[int, str, str], head: str) -> None:
-    """Step `evidence`: `head` is the single commit that records the target task over its recorded
-    head, changes only the plan root and that task's member and commits the computed bytes."""
+def _verify_recording(ledger: Ledger, plan: Path, target: tuple[int, str, str], commit: str) -> None:
+    """Raise `RecordError` unless `commit` is the one commit that records the target task over its
+    recorded head: its single parent, changing only the plan root and the task's member and
+    committing exactly the bytes `recorded` computes."""
     task, base, recorded_head = target
-
-    def refuse(detail: str) -> Refusal:
-        return Refusal("evidence", detail, gate="failed")
-
     try:
-        if history_commit(ledger.top, head).parents != (recorded_head,):
-            raise refuse(f"HEAD is not the one commit recording task {task} over "
-                         f"{recorded_head[:7]}")
+        if history_commit(ledger.top, commit).parents != (recorded_head,):
+            raise RecordError(f"{commit[:7]} is not the one commit recording task {task} over "
+                              f"{recorded_head[:7]}")
         files = paths(ledger.top, plan, task)
-        if not set(_touched(recorded_head, head)) <= {str(path) for path in files}:
-            raise refuse(f"the commit recording task {task} changes more than its plan files")
+        if not set(_touched(recorded_head, commit)) <= {str(path) for path in files}:
+            raise RecordError(f"the commit recording task {task} changes more than its plan files")
         for path, data in zip(files, recorded(ledger.top, plan, task, base, recorded_head)):
-            if _committed(path, head) != data:
-                raise refuse(f"{path} at HEAD is not task {task}'s computed record")
-    except (BriefError, ForecastError, RecordError) as error:
-        raise refuse(str(error)) from None
+            if _committed(path, commit) != data:
+                raise RecordError(f"{path} at {commit[:7]} is not task {task}'s computed record")
+    except (BriefError, ForecastError) as error:
+        raise RecordError(str(error)) from None
+
+
+def _check_evidence(ledger: Ledger, plan: Path, target: tuple[int, str, str], head: str) -> None:
+    """Step `evidence`: `head` is the commit that records the target task."""
+    try:
+        _verify_recording(ledger, plan, target, head)
+    except RecordError as error:
+        raise Refusal("evidence", str(error), gate="failed") from None
 
 
 def _project(plan: Path, ledger: Ledger, delivery_base: str, head: str, through: int,
@@ -814,19 +819,17 @@ def _dirty_paths() -> set[str]:
     return {entry[3:] for entry in done.stdout.decode("utf-8", "replace").split("\0") if entry}
 
 
-def _record_head(ledger: Ledger, task: int, current: str) -> str:
+def _record_head(ledger: Ledger, plan: Path, task: int, base: str, current: str) -> str:
     """`H`: `HEAD`, or the head an earlier `recorded` line names when `HEAD` is that head or the
-    one commit over it."""
+    commit that records it (anything else refuses at `ledger`)."""
     earlier = _recorded_head(ledger, task)
     if earlier is None or earlier == current:
         return earlier or current
     try:
-        parents = history_commit(ledger.top, current).parents
-    except ForecastError as error:
-        raise Refusal("ledger", str(error)) from None
-    if parents != (earlier,):
-        raise Refusal("ledger", f"task {task} was recorded at {earlier[:7]}, which neither HEAD "
-                                "nor its parent is")
+        _verify_recording(ledger, plan, (task, base, earlier), current)
+    except RecordError as error:
+        raise Refusal("ledger", f"task {task} was recorded at {earlier[:7]}, which HEAD neither "
+                                f"is nor records: {error}") from None
     return earlier
 
 
@@ -847,7 +850,7 @@ def record(args: argparse.Namespace, done: list[str]) -> dict:
         raise Refusal("ledger", f"{ledger.path} must record tasks 1..{task - 1} complete and "
                                 f"task {task} not complete")
     base = task_base(ledger, task)
-    head = _record_head(ledger, task, pinned_head("ledger", None))
+    head = _record_head(ledger, plan, task, base, pinned_head("ledger", None))
     done.append("ledger")
 
     files = [ledger.top / path for path in paths(ledger.top, plan, task)]

@@ -481,6 +481,15 @@ class RecordTest(ForecastCase):
         self.assertEqual((again["head_sha"], again["changed"]), (head, False))
         self.assertEqual(self.ledger_lines().count(f"Task 1: recorded (head {head})"), 1)
 
+    def test_a_later_task_commit_is_not_taken_for_the_recording(self):
+        base, head = self.start_task(1, "src/app.py", "value = 2\n")
+        self.ready(self.record(1))
+        self.write("src/app.py", "value = 3\n")                      # a review fix over the recorded head
+        self.repo_git("add", "src/app.py"); self.repo_git("commit", "-q", "-m", "review fix")
+        out = self.assert_gate_refused(self.record(1), command="record", step="ledger", gate=None, steps=[])
+        self.assertIn("changes more than its plan files", out["detail"])
+        self.assertEqual(self.ledger_lines().count(f"Task 1: recorded (head {head})"), 1)
+
     def test_a_due_prerequisite_gets_the_recorded_identity(self):
         self.delivery["boundaries"][0]["process_commit_subject_bytes"] = [64] * 4
         child = {"id": "two", "parent": "all", "tasks": [2], "acceptance": "Second", "depends_on": ["one"],
