@@ -2793,6 +2793,30 @@ class ToIssuesCriterionLineContractsTest(unittest.TestCase):
             normalized(self.text))
 
 
+class ToIssuesStandaloneBodyContractsTest(unittest.TestCase):
+    """#495 AC1: the to-issues template puts Problem before What to build, and
+    the skill states the first-use and stranger-read rules (D3, D4, D6)."""
+
+    TEMPLATE_HEADINGS = ["Parent", "Problem", "What to build", "Decisions",
+                         "Acceptance criteria", "Blocked by"]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = ToIssuesCriterionLineContractsTest.TO_ISSUES.read_text(encoding="utf-8")
+
+    def test_the_template_sections_put_the_problem_before_what_to_build(self):
+        template = self.text[self.text.index("<issue-template>"):
+                             self.text.index("</issue-template>")]
+        headings = [line[3:] for line in template.splitlines() if line.startswith("## ")]
+        self.assertEqual(headings, self.TEMPLATE_HEADINGS)
+
+    def test_the_first_use_and_stranger_read_rules_are_stated(self):
+        text = normalized(self.text)
+        for token in ("at first use", "reread each body"):
+            with self.subTest(token=token):
+                self.assertIn(token, text)
+
+
 class AcceptanceMapContractsTest(unittest.TestCase):
     """#274 AC2: plans carry an Acceptance map and plan review blocks a gap (D2-D5)."""
 
