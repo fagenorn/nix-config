@@ -9,23 +9,23 @@ description: Splits a plan, spec or PRD into independently grabbable tracker iss
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker` and `bindings.paths`; required blocked capabilities stop, and authored unsupported takes its documented tracker-free route.
 
-`bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}` say where and how issues are filed. An authored unsupported tracker, or `kind: none`, means no publishing: emit the slices as a Markdown list, one template block each, for the user to file. A blocked tracker stops the forge operation.
+`bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}` say where and how issues are filed. An authored unsupported tracker, or `kind: none`, means no filing: publish the slices as a Markdown list, one template block each, for the user to file.
 
 ## Process
 
 ### 1. Gather context
 
-Work from the conversation. Given an issue reference, fetch and read its full body; load the comment thread only when the body points to a discussion, shows review activity, or leaves a question open.
+Work from the conversation. Given an issue reference, read its full body, and its comments only when the body points to a discussion, shows review activity or leaves a question open.
 
 ### 2. Explore the codebase
 
-Explore if you haven't. Titles and descriptions use the terms of the retained `bindings.paths.context` and the knowledge capability's passed records (an authored unsupported knowledge capability takes its no-knowledge route). Look for prefactoring that makes the change easy; it is its own leading slice.
+Explore if you haven't. Titles and descriptions use the terms of the retained `bindings.paths.context` and the knowledge capability's passed records (an authored unsupported knowledge capability takes its no-knowledge route). A title states the outcome in plain words, never plan shorthand. Look for prefactoring that makes the change easy.
 
 ### 3. Draft vertical slices
 
 First read the retained `bindings.paths.rejections` entries in authored order. Never propose a slice that re-litigates a rejected direction; cite the rejection path instead. Only the user revives one.
 
-Each issue is a **tracer bullet**: a thin vertical slice through every integration layer, never a horizontal slice of one layer. Mark each slice human-required (needs a person's decision, review, credential or approval) or autonomous, preferring autonomous.
+Each issue is a **tracer bullet**, never a horizontal slice of one layer. Mark each slice human-required (needs a person's decision, review, credential or approval) or autonomous, preferring autonomous.
 
 <vertical-slice-rules>
 - Each slice delivers a narrow but COMPLETE path through every layer (schema, API, UI, tests)
@@ -35,11 +35,11 @@ Each issue is a **tracer bullet**: a thin vertical slice through every integrati
 - Prefer many thin slices over few thick ones
 </vertical-slice-rules>
 
-A wide refactor (one mechanical change with codebase-wide blast radius) cannot land green as a tracer bullet: sequence it per [WIDE-REFACTORS.md](./WIDE-REFACTORS.md) when such a candidate appears.
+A wide refactor (one mechanical change with codebase-wide blast radius) cannot land green as a tracer bullet: sequence it per [WIDE-REFACTORS.md](./WIDE-REFACTORS.md).
 
 ### 4. Quiz the user
 
-Present the breakdown as a numbered list with each slice's **title**, **type** (human-required / autonomous), **blocked by**, and **user stories covered** when the source has them. Ask whether the granularity, dependencies, merges or splits, and human/autonomous marks are right. Iterate until the user approves.
+Present the breakdown as a numbered list with each slice's **title**, **type** (human-required / autonomous), **blocked by**, and **user stories covered** when the source has them. Iterate on granularity, dependencies, merges, splits and marks until the user approves.
 
 When the user rules a direction out (not merely defers it), write one short file per rejection to an authored `bindings.paths.rejections` location (the idea in a line, why, the date, any link) and commit it with the breakdown. An empty or unsupported list has no write route.
 
@@ -50,18 +50,22 @@ Publish each approved slice with the template below, blockers first so "Blocked 
 Record blocking edges natively where the tracker supports it:
 
 - **GitHub**: `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`. **`issue_id` is the blocker's numeric database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`), not its `#number` or `node_id`: a number silently links the wrong issue or fails. Read open blockers back from `issue_dependencies_summary.blocked_by`.
-- **GitLab**: `glab issue note <child> --message "/blocked_by #<blocker>"`; the free tier lacks native links, so the body section is the record.
+- **GitLab**: `glab issue note <child> --message "/blocked_by #<blocker>"`; the free tier lacks native links.
 
-Without a native relationship the template's "Blocked by" section is the record. A slice is unblocked when all its blockers are closed.
+Without native links, "Blocked by" is the record. A slice is unblocked when all its blockers are closed.
 
 <issue-template>
 ## Parent
 
 A reference to the parent issue (omit when the source was not an issue).
 
+## Problem
+
+What happens today, who it affects and why it matters now.
+
 ## What to build
 
-The slice's end-to-end behavior, not layer-by-layer steps. No file paths or code, except a prototype snippet that pins a decision better than prose (state machine, reducer, schema), trimmed to its decision and marked as from a prototype.
+The slice's end-to-end behavior, not layer-by-layer steps. No code, except a prototype snippet that pins a decision better than prose (state machine, reducer, schema), trimmed to its decision and marked as from a prototype.
 
 **Demo:** one line: what a reviewer can run, see, or click when this slice lands.
 
@@ -91,7 +95,7 @@ Write each criterion as `- [ ] [code|evidence|human] <observable outcome> — me
 
 Prefer `code`, then `evidence`. The `measured:` clause is the only place the body names a test, file or command.
 
-The body is the contract, read weeks later in a fresh context: behavior and outcomes, no file paths outside `measured:`, no line numbers, no "as discussed above"; what an implementer needs lives in the body or a linked artifact, never only in a comment.
+The body is the contract, read weeks later by a stranger holding only that page: behavior and outcomes, no line numbers, nothing an implementer needs left only to a comment. Explain each glossary term, decision ID or slice label in a few words, or link it, at first use. Before publishing, reread each body as that stranger and rewrite or link any sentence that needs the spec, the plan or the conversation.
 
 Every criterion must be falsifiable: name the `measured:` observation that would show it false, and confirm by hand that it fails at the commit the implementer starts from; a criterion already true there lets the issue be "completed" as a no-op. Also reject a criterion only another slice's work can satisfy, and one that restates the request instead of deriving from the artifact.
 
