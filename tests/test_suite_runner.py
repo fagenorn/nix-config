@@ -228,7 +228,7 @@ SERIAL_INTERRUPTED_REAP_INTERRUPT = textwrap.dedent('''\
 ''')
 
 
-PLAIN_MEMBER =textwrap.dedent('''\
+PLAIN_MEMBER = textwrap.dedent('''\
     import unittest
 
 
