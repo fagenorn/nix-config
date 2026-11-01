@@ -19,7 +19,7 @@ Spec: `.agents/artifacts/specs/2026-11-01-issue-494-readable-ship-pr-body-design
 - Write every dictated byte exactly, line breaks included. The text is binding (spec § Budget fit). Measured on the plan's scratch prototype: after Task 1, `SKILL.md` is at 500/500 reflowed lines (skill lint L2), ship-owner hot has 127 B headroom and implementation-owner hot has 12 B. After Task 2 the figures are 499 lines and 112 B. Any re-wrap or rewording is a plan deviation, and must pass the Budget command before it is committed. Never add the `instruction-budget-raise` label and never raise a ceiling (per D1).
 - `docs/standards/agent-helpers.md` rule 6: the new cases pin only template markup and the destination name, never a placeholder or guidance sentence (per D9).
 - Process custody: every test, build or gate command runs in the foreground from the worktree root as `launch-scope exec --repo-root <R> --run-id <I> --worker-id <W> -- <argv>`. Below, this is written `launch-scope exec … --`, with the stated timeout. `<R>`, `<I>` and `<W>` come from the dispatch's `Lifecycle worker:` line. Scratch goes under the path `launch-scope scratch --repo-root <R> --run-id <I> --worker-id <W>` prints. Commits go through `launch-commit --repo-root <R> --run-id <I> --worker-id <W> -- <git commit args>`. They are SSH-signed and end with the session's attribution trailer. Never push, never `just switch`.
-- **PR body cases** (timeout 600 s): `launch-scope exec … -- bash -c 'PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k pr_body_reads_first -k inline_fallback_names -k notes_go_to_the_delivery_record 2>&1 | grep -E "^(FAIL|ERROR|AssertionError|Ran|OK|FAILED)"'`
+- **PR body cases** (timeout 600 s): `launch-scope exec … -- bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k pr_body_reads_first -k inline_fallback_names -k notes_go_to_the_delivery_record 2>&1 | grep -E "^(FAIL|ERROR|AssertionError|Ran|OK|FAILED)"'`. Its exit status is the test run's: nonzero is expected at each intentional failing-test step and zero after the fix.
 - **Skill contract tests** (timeout 900 s): `launch-scope exec … -- bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_skill_lint.py home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -3'`. At the base this prints `Ran 293 tests` and `OK (skipped=3)`.
 - **Budget** (timeout 600 s): `launch-scope exec … -- bash -c 'set -o pipefail; just agent-instruction-budget 2>&1 | tail -3'`. The last line must be `check: pass`. The command runs skill lint too, so an L2 breach prints a `lint:` line.
 - **Installed tier** (timeout 3600 s): `launch-scope exec … -- bash -c 'set -o pipefail; just agent-installed-skill-tests 2>&1 | tail -4'`. It runs `just build` first, then checks the installed skill trees.
@@ -56,5 +56,11 @@ Task 2 — Notes go to the Delivery record — `home/common/agent-skills/skills/
 - Blob URLs and the hold comment's record link: per D4. The four-column acceptance table: per D5.
 - The note destinations: per D6. The inline fallback's wording: per D7. The single readability rule: per D8.
 - What the new cases pin: per D9. The two-task split, the one-commit stale Summary between the tasks, and Task 2's `git grep` gate: per D11 (appended by this plan).
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh). No fallback.
+- Base SHA `8d0bbc25`, isolated read-only mode, no extra focus.
+- Findings: 0 Blocking, 1 Should fix, 0 Discussion. 1 accepted, 0 rejected, 0 deferred. Accepted: the PR body cases command gained `set -o pipefail`, so a failing run no longer exits zero through `grep`.
 
 ---
