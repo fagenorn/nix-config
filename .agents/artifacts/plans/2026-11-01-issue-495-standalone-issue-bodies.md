@@ -59,4 +59,10 @@ Task 1 — Problem-first, self-explaining to-issues bodies — `home/common/agen
 
 A scratch worktree at `63fc7608` applied Task 1's dictated replacements and class, then was discarded. Before the skill edits, the To-issues classes gave `Ran 4 tests`, `FAILED (failures=3)`. After them, `to-issues/SKILL.md` measured 6483 B with the sha256 Task 1 states, and the To-issues classes gave `OK`. The Skill-text suites gave `Ran 334 tests`, `OK (skipped=3)`, and the Budget run gave `check: pass`. `just build` passed in about 25 s, and `just agent-workflow-tests` passed 107 of 107 members in about 963 s.
 
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), fresh isolated read-only thread, no fallback.
+- Base SHA: `8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc`; plan reviewed at `cda2ef1f`. No extra focus.
+- Result: Blocking none, Should fix none. Findings accepted 0, rejected 0, deferred 0.
+
 ---
