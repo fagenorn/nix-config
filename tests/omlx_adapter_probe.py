@@ -9,9 +9,12 @@ uses the actual pinned Qwen template.
 import argparse
 import ast
 import asyncio
+from dataclasses import dataclass
 import inspect
 import json
 import logging
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -40,6 +43,9 @@ class CapturedPreflight(Exception):
 
 class Lease:
     async def release(self):
+        pass
+
+    def limit_gpu_power(self, watts):
         pass
 
 
@@ -71,6 +77,8 @@ class AdapterRouteTest(unittest.TestCase):
             "_AUTO_MODE_CLASSIFIER_THINKING_BUDGET": 256,
             "_server_state": SimpleNamespace(oq_manager=None, mcp_manager=None),
             "_LLMEngineLease": Lease,
+            "_resolve_gpu_power_limit": lambda request, model: None,
+            "dataclass": dataclass,
             "_reject_lone_surrogates": lambda request: None,
             "get_engine_for_model": self.get_engine,
             "_serving_model_id": lambda lease, model: model,
@@ -94,16 +102,24 @@ class AdapterRouteTest(unittest.TestCase):
         # Execute the actual endpoint, not a copied approximation of its merge.
         tree = ast.parse(SERVER_SOURCE.read_text())
         names = {"_merge_anthropic_chat_template_kwargs", "_resolve_thinking_budget", "create_anthropic_message",
-                 "_cache_store_kwargs"}
+                 "_cache_store_kwargs", "_prepare_anthropic_prompt",
+                 "_count_anthropic_prompt", "_apply_preserve_thinking_default"}
         constants = {"_CACHE_STORE_HEADER"}
         nodes = [n for n in tree.body if isinstance(n, ast.Assign)
                  and any(isinstance(t, ast.Name) and t.id in constants for t in n.targets)]
         functions = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
+        nodes += [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "_AnthropicPrompt"]
         nodes += functions
         for node in functions:
             node.decorator_list = []
             node.args.defaults = []
         module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *nodes], type_ignores=[])
+        # dataclass resolves the endpoint's string annotations via sys.modules.
+        probe_module = types.ModuleType(self.namespace["__name__"])
+        probe_module.__dict__.update(self.namespace)
+        self.namespace = probe_module.__dict__
+        sys.modules[probe_module.__name__] = probe_module
+        self.addCleanup(sys.modules.pop, probe_module.__name__, None)
         exec(compile(ast.fix_missing_locations(module), str(SERVER_SOURCE), "exec"), self.namespace)
 
     async def get_engine(self, *args, **kwargs):
