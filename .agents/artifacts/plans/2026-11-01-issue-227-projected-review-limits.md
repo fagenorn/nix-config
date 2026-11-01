@@ -33,7 +33,7 @@ timeout 900 review-feasibility project --plan "$PLAN" --base "$BASE" --head "$(g
 review-feasibility validate-result --input "$EV/g0-$N.json" --producer-exit 0 | cmp - "$EV/g0-$N.json"
 ```
 
-G0 clears on a validated exit 0; exit 3 ends SDD `decompose_required`, exit 2 `failed`. G0 at 0 precedes `sdd-gate next --task 1`. After task N's clean review: a hand recording commit `plan: record task N evidence` (this root and `task-N.md`, D2's four changes), `sdd-gate next --completed N` (G1), G0 at N, `sdd-gate next --task N+1`. Task 5 ends at G1. Planning G0 at 0: PLANNING_G0_RESULT.
+G0 clears on a validated exit 0; exit 3 ends SDD `decompose_required`, exit 2 `failed`. G0 at 0 precedes `sdd-gate next --task 1`. After task N's clean review: a hand recording commit `plan: record task N evidence` (this root and `task-N.md`, D2's four changes), `sdd-gate next --completed N` (G1), G0 at N, `sdd-gate next --task N+1`. Task 5 ends at G1. Planning G0 at 0, head `abeead1`: exit 0 `complete/within_budget`, validated and reproduced; root 14,707 of 16,384 B, total 470,387 of 524,288 B, all eight members (largest 63,488 B), so a forecast revision has no spare member.
 
 ## Delivery estimate and boundaries
 
