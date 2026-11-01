@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
@@ -146,7 +147,8 @@ class _HeldSigint:
             signal.raise_signal(signal.SIGINT)
 
 
-def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
+def _run_serial(members: Sequence[str], environment: Mapping[str, str],
+                out: _Output) -> list[MemberResult]:
     results = []
     for index, member in enumerate(members):
         out.write(_line(f"{PREFIX} start {member}") + _line(f"{PREFIX} begin {member}"))
@@ -157,7 +159,7 @@ def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
         hold = _HeldSigint()
         try:
             try:
-                process = subprocess.Popen(member_command(member))
+                process = subprocess.Popen(member_command(member), env=environment)
             except OSError as error:
                 out.write(_line(str(error)))
             finally:
@@ -177,7 +179,7 @@ def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
     return results
 
 
-def _run_parallel(members: Sequence[str], jobs: int,
+def _run_parallel(members: Sequence[str], jobs: int, environment: Mapping[str, str],
                   out: _Output) -> list[MemberResult | None]:
     results: list[MemberResult | None] = [None] * len(members)
     stop = threading.Event()
@@ -200,7 +202,7 @@ def _run_parallel(members: Sequence[str], jobs: int,
                 started = time.monotonic()
                 try:
                     process = subprocess.Popen(
-                        member_command(member), stdin=subprocess.DEVNULL,
+                        member_command(member), env=environment, stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 except OSError as error:
                     process, output = None, _line(str(error))
@@ -259,13 +261,15 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO) -> int:
     A KeyboardInterrupt propagates after the running members have finished and
     written their blocks. Must be called from the main thread: the runner holds
     SIGINT while it launches a serial member or starts its parallel workers.
+    Every member runs with `member_environment(os.environ)`, computed once.
     """
     output = _Output(out)
+    environment = member_environment(os.environ)
     started = time.monotonic()
     if jobs == 1:
-        results = _run_serial(members, output)
+        results = _run_serial(members, environment, output)
     else:
-        results = _run_parallel(members, jobs, output)
+        results = _run_parallel(members, jobs, environment, output)
     missing = [member for member, result in zip(members, results) if result is None]
     if missing:
         raise RuntimeError(f"members left without a result: {', '.join(missing)}")
