@@ -49,10 +49,15 @@ and is dropped on a hold as today. Every step that today writes notes "in the PR
 or "the PR body's Summary" names the Delivery record instead. from-issue's inline
 fallback names the same four headings and the block.
 
+The **Delivery record** is that collapsed block of the PR body and nothing else. It is
+not the acceptance record file (`<plan stem>.acceptance.md`), and not review-package's
+durable `delivery-detail` package. Skill text always writes the name capitalized, so
+it reads as a handle.
+
 The template stays in `SKILL.md` Phase 4 (per D1). It uses blank lines only where
 GitHub-flavoured Markdown needs them (per D2). Compressing the neighbouring Phase 2, 4
-and 8 prose pays for it (per D10). No other ship-issue file changes, and neither does
-the guard.
+and 8 prose pays for it (per D10). Besides `SKILL.md`, only `REVIEW.md` changes in
+ship-issue (two destination phrases). The guard does not change.
 
 ### Target text — `SKILL.md` Phase 4
 
@@ -147,9 +152,10 @@ the table and any notes render normally. The `Closes` line renders outside the b
 
 ### What a later step reads back (per D3, D5)
 
-- `Acceptance state:`, `Acceptance record:`, the acceptance table and `Closes #<num>`
-  keep their exact text and each appears exactly once, inside the Delivery record
-  except `Closes`. The pinned strings in `SHIP_ISSUE_MACHINE_TEXT` do not change.
+- `Acceptance state:`, `Acceptance record:` and `Closes #<num>` keep their exact text.
+  Each of them, and the acceptance table, appears exactly once; everything but
+  `Closes` sits inside the Delivery record. The pinned strings in
+  `SHIP_ISSUE_MACHINE_TEXT` do not change. Only the table's columns change (per D5).
 - Remainder mode (`REMAINDER.md` § Close or hold from the PR body) is unchanged. It
   reads one `Acceptance state:` line, one `Acceptance record:` line and "its
   acceptance table", none of which depends on position or column count. No code parses
@@ -159,6 +165,12 @@ the table and any notes render normally. The `Closes` line renders outside the b
   as written, because the heading is kept.
 - The hold comment (`Held for verification: <PR URL>`, then the state, the table and
   the record link) now carries the four-column table.
+- The acceptance table is the one under `## Acceptance` with the `AC` header. A
+  readable section may hold another table, such as a before/after table in Evidence.
+  The close-or-hold choice reads only the `Acceptance state:` line, so the worst case
+  of a misread table is a hold comment that quotes the wrong table.
+- A PR opened before this change, still in the old layout, parses the same way: a
+  remainder owner finds the same three lines and copies its three-column table.
 
 ### When the Delivery record is written (per D6)
 
@@ -218,11 +230,11 @@ re-measured with the same two commands before it is committed.
 
 ## Test seams
 
-Both new cases go in `home/common/agent-skills/tests/test_workflow_skill_contracts.py`,
+The new cases go in `home/common/agent-skills/tests/test_workflow_skill_contracts.py`,
 next to `test_ship_issue_documents_carry_their_machine_text`. They pin template markup
 that is rendered verbatim into the `gh pr create` argument, and the destination name
 the other phases cite. They pin no guidance sentence (per D9). A throwaway version of
-both failed at base for the stated reasons and passed on the prototype.
+each failed at base for the stated reasons and passed on the prototype.
 
 1. **The template reads first, then records.** Locate the template as the fenced
    `gh pr create … --body "…"` block in `SKILL.md` and assert, in order: `## Why`,
@@ -270,11 +282,11 @@ unchanged. AC4 is `just agent-workflow-tests` and `just build`. The plan also ru
 
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
-| D1 | The template stays in ship-issue `SKILL.md` Phase 4. No new skill file is created and `instruction-load.json` is not touched; the growth is paid for by trims (D10). | `instruction_load.run_check` treats any model edit except lowering a ceiling or a note as a raise needing the user-only label. A new reference file must be named by `SKILL.md` (lint L4a) and listed in every profile that loads it (`_member_violations`), which is a model edit. | A conditional `ship-issue/PR-BODY.md`: needs the label. A doc under `~/.agents/share/`: outside the measured corpus, so it evades the gate it exists to enforce. Moving other `SKILL.md` text to a sibling: `REVIEW.md` is at L3's 100 lines, and the movable blocks are pinned in `SKILL.md`. |
+| D1 | The template stays in ship-issue `SKILL.md` Phase 4. No new skill file is created and `instruction-load.json` is not touched; the growth is paid for by trims (D10). | `instruction_load.run_check` treats any model edit except lowering a ceiling or a note as a raise needing the user-only label. A new reference file must be named by `SKILL.md` (lint L4a) and listed in every profile that loads it (`_member_violations`), which is a model edit. | A conditional `ship-issue/PR-BODY.md`: needs the label. A doc under `~/.agents/share/`: outside the measured corpus, so it evades the gate it exists to enforce. Moving other `SKILL.md` text to a sibling: `REVIEW.md` is at L3's 100 lines, and the movable blocks are pinned in `SKILL.md`. Putting the template in `DELIVERY-LOOP.md`, which has room: that file is read only under lifecycle identity, so a standalone run would never see the template. |
 | D2 | The template puts blank lines only where GFM needs them: after the `<summary>` line, around the table, after `</details>`, and in the unchanged acceptance block. The four sections follow each other directly, and What changes is one placeholder line covering sketch and bullets. | `SKILL.md`'s body sits at the L2 ceiling of 500 reflowed lines, and the same text with blank-separated sections measured 503. The GFM render spike shows the compact shape renders identically. | Blank lines between sections: over L2. Describing the four sections in prose rather than literal headings: weaker for the agent and the test, and no shorter. |
 | D3 | `<details><summary>Delivery record</summary>` is one line. The unchanged `## Acceptance` section moves inside the block, followed by the notes. `Closes #<num>` stays the last line, outside. | The issue orders the record as spec and plan, acceptance, review, verification. HUMAN-GATE Gate 1 and Phase 6 cite `## Acceptance`, and HUMAN-GATE has 2 B of conditional headroom. REMAINDER reads lines, not positions. Render and guard spikes. | Renaming or dropping the `## Acceptance` heading: forces HUMAN-GATE edits over its ceiling. `Closes` inside the block: hides the trailer a reviewer checks for. |
 | D4 | Spec and plan are blob URLs at the pushed head SHA. The Phase-4 URL rule says so once, and Phase 8's record link becomes "the record's blob URL at the merge SHA". | `bindings.vcs.merge.strategy` is `merge`, so the pushed head stays reachable after `delete_branch: true`. The merge SHA is unknown at Phase 4. DRY: one URL rule. | Branch-name URLs: break when the branch is deleted. Spelling the full URL template in each place: over the line ceiling. |
-| D5 | The acceptance table becomes `AC`, `Criterion`, `Kind`, `Verdict`. `Criterion` is the record row's claim before `— measured:`, and the other cells copy closed tokens. The hold comment says "acceptance table", not "three-column table". `REMAINDER.md` is unchanged. | The issue asks for "the acceptance table with each criterion's text". The column order follows the record's `HEADER`. REMAINDER reads "its acceptance table" with no column count. | Keeping three columns: ignores the issue. Copying the whole Criterion cell: its measured clause carries backticks, `"` and `\|`, which the guard refuses. |
+| D5 | The acceptance table becomes `AC`, `Criterion`, `Kind`, `Verdict`. `Criterion` is the record row's claim before `— measured:`, and the other cells copy closed tokens. The hold comment says "acceptance table", not "three-column table". `REMAINDER.md` is unchanged and finds the table under `## Acceptance` by its `AC` header. | The issue asks for "the acceptance table with each criterion's text". The column order follows the record's `HEADER`. REMAINDER reads "its acceptance table" with no column count, and close-or-hold reads only the `Acceptance state:` line. | Keeping three columns: ignores the issue. Copying the whole Criterion cell: its measured clause carries backticks, `"` and `\|`, which the guard refuses. |
 | D6 | Every note site names "the Delivery record": Phase 2's skipped, reused and baseline-diff notes, Phase 5's route record and routing error, and `REVIEW.md`'s range record and diff-review scope. The block carries only the review text the body carries today (route, verdicts, scope). Findings stay in PR comments and the durable detail package. | AC3. The issue: "everything that today fills the body". PR #490's Review section held the route and the axis verdicts. REVIEW.md's severity mapping gives findings their homes. | A single global "all notes go to the Delivery record" sentence: AC3 measures each site. A new findings list in the body: duplicates PR comments and the durable package. |
 | D7 | The inline fallback in `ship-handoff.md` names the four headings and the collapsed `<details>` Delivery record itself. The close clause reuses "on that condition" to pay for it (+67 B of 79). | The fallback runs when the ship-issue skill is absent, so it cannot point at Phase 4. Implementation-owner hot headroom is 79 B. | Pointing at ship-issue's Phase 4: absent on that path. Copying the full template: over the ceiling. |
 | D8 | The readability rule is stated once, in Phase 4's guard paragraph: above `<details>`, explain or link each domain term on first use and name no internal ID (decision, finding, slice or `ACn`). | The issue's What to build. The guard paragraph already governs what the body may contain. | A per-section rule in each placeholder: repeats one rule four times. |
