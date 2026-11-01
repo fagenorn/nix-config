@@ -15,12 +15,11 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path, PurePosixPath
 import re
-import subprocess
 from types import SimpleNamespace
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import (RECORD_POLICY, RECORD_POLICY_SHA256, GenerationError, _split_diff,
-                                       actual_inputs_from_trees)
+                                       actual_inputs_from_trees, record_git)
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, edge_facts, read_regular, strict_json,
                                          tree_entry)
 from agent_tools.review_git import HistoryError, original_commit, original_range
@@ -217,10 +216,9 @@ def _read(directory, relative, size, sha256=...) -> bytes:
 
 
 def _recipe(repo, pins, old_tree, new_tree, *paths) -> bytes:
-    argv = ["git", "-C", str(repo), *pins.recipe, old_tree, new_tree, *(("--", *paths) if paths else ())]
     try:
-        return subprocess.run(argv, check=True, capture_output=True).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
+        return record_git(repo, *pins.recipe, old_tree, new_tree, *(("--", *paths) if paths else ()))
+    except GenerationError as exc:
         raise Issue100Error("evidence_unavailable") from exc
 
 
