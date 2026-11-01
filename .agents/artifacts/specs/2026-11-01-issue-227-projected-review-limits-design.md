@@ -79,6 +79,15 @@ through its existing self-registration and `launch-commit` route.
 
 The first `next --task 1` projects with `--completed-through 0` (D2, D8).
 
+Two terms keep this precise:
+
+- The **reviewed head** is the commit a task's clean review accepted.
+- The **gate head** is the single recording commit over the reviewed head. The
+  issue's "exact accepted head" is the gate head: the actual gate, the projection and
+  the `Delivery gate:` ledger line all bind to it.
+
+After SDD entry, the forecast blocks change only through `record` (D12).
+
 **4. One closed stop summary in the existing transports.** `gate` derives a closed,
 bounded `review-feasibility-summary` from a validated result. Producer reports carry it
 as `projection`. SDD gains a `decompose_required` state whose `stop` tells a projected
@@ -111,6 +120,9 @@ declared descendant holding Task 2.
   the plan root, every indexed task, every product path, fix-round allowance and
   sequential shared-path contribution, every recording commit and Phase-5 edit, and
   each declared child boundary's process package.
+- **Declared descendants.** The plan declares child boundaries along its dependency
+  chain, so that an overflow has a recommendation: summary commands and transport
+  validators, then the SDD gate and recording, then callers and the replay.
 - **Gates declared in the plan.** The adopting skills and `sdd-gate` are not installed
   while this delivery runs, so the plan declares its gates explicitly, as the issue-235
   plan did (D11):
@@ -146,8 +158,11 @@ fields are:
 
 A summary is derived only from bytes that passed `validate_result` with their
 producer's exit. `complete` holds exactly when there are no violations, the exit is 0
-and the recommendation is null. Exit 2 yields no summary. The full validated result is
-kept wherever a stop is recorded.
+and the recommendation is null. Exit 2 yields no summary.
+
+The full validated result is kept wherever a stop is recorded. It is a cache, not the
+provenance. The immutable provenance is the committed plan and history, and `confirm`
+reproduces the summary from them at any later time.
 
 ### `review-feasibility gate` and `confirm` (D4)
 
@@ -174,8 +189,8 @@ imports the same functions. The command table is unchanged.
   recomputed exit must be the input state's exit. On agreement it prints the summary and
   exits 0 or 3. Otherwise it exits 2 with one stderr line naming the first disagreeing
   top-level field in sorted order, or the capture's reason.
-- **Completed ordinal at planning.** Receivers bind `completed_through` only at
-  planning, where the producer boundary requires 0. In SDD, a forged ordinal must still
+- **Ordinal binding.** Receivers bind `completed_through` only at planning, where the
+  producer boundary requires 0. In SDD, a forged ordinal must still
   reproduce against the plan's recorded ownership, or the recomputation refuses.
 
 ### Ownership recording (D2)
@@ -190,7 +205,8 @@ existing `Task N: recorded (head H)` line names. `B` is task N's
 - **`worktree`.** No tracked change lies outside the plan root and task N's member. `B`
   is a strict ancestor of `H`, and the previous evidence checkpoint `C` (the forecast's
   current `actual_evidence.head`) is an ancestor of `B`.
-- **`record`.** It reads the committed blocks at `H` and makes four changes:
+- **`record`.** The committed blocks at `H` must equal those at `B`: no task commit may
+  edit the forecast. It reads those blocks and makes four changes:
   - task N's `actual_ranges` gains `{base: B, head: H}`;
   - when `B ≠ C`, `actual_evidence.process_ranges` gains
     `{base: C, head: B, boundaries: [<proposed boundary>]}`;
@@ -232,8 +248,9 @@ The steps run in this order:
 - **`ledger-complete`.** It writes `Task N: complete (commits <B7>..<H7>, …)` using the
   recorded `H`.
 - **`evidence`** (only with `--completed`). `HEAD` has exactly one parent, that parent is
-  `H`, and `HEAD` changes only the plan root and task N's member. Any refusal carries
-  gate `failed`.
+  `H`, `HEAD` changes only the plan root and task N's member, and both files equal the
+  bytes `record` computes from `H`. A recording commit therefore cannot carry any other
+  forecast edit. Any refusal carries gate `failed`.
 - **`projection`** (only with `--task M`, when M has no dispatched line). It captures at
   `HEAD` with `--completed-through M−1`:
   - exit 0 saves the validated result to the workspace as
@@ -277,7 +294,10 @@ that both boundaries share. It checks:
     `projection` (an actual artifact overage), or a `within_budget` artifact plus a
     projection whose state is `decompose_required`, with the same ordinal and plan
     bindings.
-  - `failed` carries no projection. Every other artifact kind refuses `projection`.
+  - `failed` carries no projection. That includes an exit 2 whose reason begins
+    `projection_unavailable`: an unprovable recommendation is never relabelled as an
+    overflow, and the notes keep the tool's reason.
+  - Every other artifact kind refuses `projection`.
 - **SDD.** A new `decompose_required` state has the eleven existing keys plus `stop`:
   - `review_state` is `unknown`; both verdicts and `verification_state` are `not_run`;
   - `base_sha` and `head_sha` are the refused gate's range;
@@ -304,15 +324,22 @@ that both boundaries share. It checks:
 
   No later dispatch follows a stop. The workspace, ledger and worktree are kept. A plan
   without forecast blocks fails at the first projection (D9).
-- **from-issue.** Its artifact-report boundary confirms an implementation-plan report's
-  `projection` against the Phase-1 base, and the confirm exit must match the state. A
-  confirmed `decompose_required` ends the attempt. The Phase-5 caller gate requires that
-  confirmation. In Phase 6, an SDD `decompose_required` is verified by `confirm` or by the
-  independent artifact check, then ends through the terminal return procedure with a
-  `stopped` historical row. Its bounded notes name the class, the head, the ordinal, and
-  the recommendation's id and tasks or "new design required". A disagreement is
-  `failed`. The delegated owner takes this route in place of progress or delegate.
-  AUTO.md's exact plan reports gain `projection`.
+- **from-issue.** Every receiver computes the base it passes to `confirm` itself, by
+  sdd's merge-base rule; it never copies the base from the report it is checking (D13).
+  - Its artifact-report boundary confirms an implementation-plan report's `projection`,
+    and the confirm exit must match the state. A confirmed `decompose_required` ends the
+    attempt. The Phase-5 caller gate requires that confirmation.
+  - The Phase-5 plan review grades the forecast's completeness: a missing `Files:` path,
+    a missing process artifact or recording subject, or a bound below the task's stated
+    scope is Blocking.
+  - In Phase 6, an SDD `decompose_required` is verified by `confirm` or by the
+    independent artifact check, then ends through the terminal return procedure with a
+    `stopped` historical row. A disagreement is `failed`. The delegated owner takes this
+    route in place of progress or delegate.
+  - The stop's bounded notes lead with the class, the gate head, the ordinal, and the
+    recommendation's id and tasks or "new design required", because the lifecycle
+    ledger trims the tail of the notes to retain the worktree path.
+  - AUTO.md's exact plan reports gain `projection`.
 - **The decomposition-stop text in from-issue.** It is the one home of the
   reconciliation rule. A recommendation authorizes nothing. Each derived delivery needs
   a new issue, spec, plan, base, forecast, package and reviews. The stopped issue stays
@@ -329,9 +356,9 @@ no projection result is mocked.
 
 | Contract | Seam and prior art | Evidence |
 |---|---|---|
-| Capture, summary, `confirm` | `python -m agent_tools.review_feasibility gate/confirm` in a repository built by the existing source-projection fixture. The capture function's argv parameter supplies producer output no real producer emits. | Summaries equal their result fields, both null and non-null recommendations. Capture refuses malformed, non-canonical, oversized, unknown-exit and exit-disagreeing output. `confirm` refuses each of: an extra or missing key; each of the four metrics plus one; a stale head after a new commit; a stale package or forecast after a plan amendment; a base or plan mismatch; a state/exit swap. Each refusal names its field. |
+| Capture, summary, `confirm` | `python -m agent_tools.review_feasibility gate/confirm` in a repository built by the existing source-projection fixture. The capture function's argv parameter supplies producer output no real producer emits. | Summaries equal their result fields, both null and non-null recommendations. Capture refuses malformed, non-canonical, oversized, unknown-exit and exit-disagreeing output. `confirm` refuses each of: an extra or missing key; each of the four metrics plus one; each of the four identity digests altered; a stale head after a new commit; a base or plan mismatch; a state/exit swap. Each refusal names its field or the capture's reason. |
 | Transport validators | The existing `artifact_budget` boundary tests | Every producer and SDD shape above, accepted and refused, including a projection on another kind, in `failed`, with a nonzero ordinal, a foreign plan, a foreign policy, a state/violation disagreement, or an over-budget artifact beside a projection. Every summary `gate` emits validates at both boundaries. |
-| Ownership recording | `sdd-gate record` with the existing sdd-gate lifecycle harness | The recorded plan projects; prerequisites are filled; a repeat is a no-op; refusals for an undispatched task, a task with no commits, a changed reviewed head and an extra dirty path. |
+| Ownership recording | `sdd-gate record` with the existing sdd-gate lifecycle harness | The recorded plan projects; prerequisites are filled; a repeat is a no-op; refusals for an undispatched task, a task with no commits, a changed reviewed head, an extra dirty path, and a task commit that edited a forecast block. A recording commit that carries any other forecast edit is refused at `evidence`. |
 | SDD ordering | `sdd-gate next` in the same harness | The initial projection runs before Task 1. Steps run in the order above. A projected overflow and an invalid projection each leave no dispatched line, brief or worker. An actual overflow despite a fitting projection refuses at `validate-report` and the projection never runs. A re-dispatch reuses the projection line. A missing or extra recording commit refuses at `ledger` or `evidence`. |
 | End-to-end replay | A new source test: a scratch repository shaped like the retained issue-121 delivery, with eight tasks and declared children for tasks 1–3, 4–6 and 7–8, and no historical fixture used as acceptance | Detailed after this table. |
 | Installed parity | The existing launcher-layout test | The built `gate` and `confirm` print the source bytes. |
@@ -381,3 +408,7 @@ The end-to-end replay must show seven things:
 | D9 | A plan without a forecast, whether in flight or hand-written, is invalid input at SDD entry and fails. There is no grandfathering. | Issue 227: no guessed success. The loader refuses a missing section. | Skipping the gate when the blocks are absent would be guessed success. |
 | D10 | Tests run source commands in real temporary Git repositories, with an argv seam for producer outputs that cannot occur and a scratch replay shaped like the retained issue-121 delivery: eight tasks, children 1–3, 4–6 and 7–8. One installed-parity case. | agent-helpers rule 5. The bar's tests that can fail. The CORE test seams. The parent issue 152 demo. | A fake command on `PATH` cannot work, because siblings run by module. Mocked results prove no parity. Replaying the real retained evidence only shows `projection_unavailable`. |
 | D11 | This delivery runs its gates as plan-declared steps. G0 is the accepted projection: the installed command or a scratch checkout of the base, never the in-flight worktree source, with hand recordings that G0 validates. G1 is the installed sdd-gate actual gate. | AC7. The installed skills are not updated until merge and switch. The issue-235 plan precedent. | Using unreviewed in-flight source as its own gate. Waiting for installation, which would leave this delivery ungated. |
+| D12 | Forecast blocks change only through `record`. A task commit may not edit them, and a recording commit must be byte-equal to `record`'s output. The Phase-5 plan review grades the forecast's completeness as Blocking. | Issue 226/227: never lower an honest forecast. The loader's tail rule admits any edit to a process path, so a mid-run edit could otherwise lower future bounds unseen. The bar's defense in depth. | Trusting tail process edits allows silent forecast lowering mid-run. A mechanical completeness checker adds little: the projection already counts unforecast actual paths, and whether a bound is honest needs judgment. |
+| D13 | Each receiver derives the base it passes to `confirm` by sdd's merge-base rule, never from the report under check. The stop's notes lead with the class, the gate head, the ordinal and the recommendation. | The bar's defense in depth: the expectation is independent. The delegated owner's continuation carries no base. workflow-state trims the tail of the notes to retain the worktree path. | Copying the report's `base_sha` makes the binding circular. The Phase-1 note is unavailable to a delegated owner. |
+
+The design and grill frontier is closed within the approved scope. The retained project bindings give no context-map or ADR write route, so this ledger is the issue's decision store.
