@@ -183,8 +183,10 @@ def confirm(plan: Path, base: str, raw: bytes, *,
     head, ordinal = value["head"], value["completed_through"]
     code, recomputed = gate(plan, base, head, ordinal, argv=None if argv is None else argv(base, head, ordinal))
     if canonical_bytes(value) != recomputed:
+        # Compare encodings, not values: Python treats 1, 1.0 and True as equal, the wire does not.
         actual = strict_json(recomputed)
-        raise GateError(f"confirm: {next(key for key in SUMMARY_KEYS if value[key] != actual[key])} disagrees")
+        key = next(key for key in SUMMARY_KEYS if canonical_bytes(value[key]) != canonical_bytes(actual[key]))
+        raise GateError(f"confirm: {key} disagrees")
     if code != _STATES[value["state"]]:
         raise GateError("confirm: state disagrees")
     return code, recomputed

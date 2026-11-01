@@ -128,6 +128,8 @@ class ConfirmTest(GateFixture, unittest.TestCase):
                  ('state', lambda v: v.update(state='complete')),
                  ('completed_through', lambda v: v.update(completed_through=True)),
                  ('violations', lambda v: v.update(violations=[])),
+                 ('schema_version', lambda v: v.update(schema_version=True)),
+                 ('metrics', lambda v: v['metrics'].update(root_bytes=float(v['metrics']['root_bytes']))),
                  ('recommended_boundary', lambda v: v['recommended_boundary'].update(tasks=[1]))]
         cases += [('metrics', lambda v, m=m: v['metrics'].update({m: v['metrics'][m] + 1})) for m in METRICS]
         cases += [(d, lambda v, d=d: v.update({d: v[d][:-1] + ('0' if v[d][-1] != '0' else '1')}))
