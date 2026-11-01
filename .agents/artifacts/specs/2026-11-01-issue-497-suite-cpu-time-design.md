@@ -32,8 +32,11 @@ member's **child CPU time**. Every row of the closing table prints that figure
 next to the member's wall time, and the summary line ends with the suite total.
 A member whose CPU is close to its wall time was computing; one far below it
 was waiting, for I/O, a sleep or a CPU it could not get. The suite total set
-against `wall × the host's CPUs` says which of those it was: near it, the host
-was saturated; well below it, the members were waiting on something else.
+against `wall × the CPUs the run could use` (the smaller of `--jobs` and the
+host's CPUs) says which: near it, every slot was computing and the CPUs were
+saturated; well below it, the members were waiting on something else. A
+module whose CPU itself grows from a serial run to a parallel one ran on
+slower, shared CPUs.
 
 ## Decisions
 
@@ -61,9 +64,9 @@ was saturated; well below it, the members were waiting on something else.
 ### Reaping and interrupts (D2)
 
 - **Parallel mode.** A worker reads the member's merged output to its end,
-  then reaps it. That is what `communicate()` does for one output pipe and no
-  input, so capture is unchanged. Python runs signal handlers on the main
-  thread only, so a worker's reap is never interrupted.
+  closes the pipe, then reaps the member. That is what `communicate()` does for
+  one output pipe and no input, so capture is unchanged. Python runs signal
+  handlers on the main thread only, so a worker's reap is never interrupted.
 - **Serial mode** waits on the main thread, where a SIGINT raises
   `KeyboardInterrupt`. If that lands after `wait4` has reaped the member but
   before its result is bound, the status and the CPU are lost, and the
@@ -78,13 +81,16 @@ was saturated; well below it, the members were waiting on something else.
     existing `_HeldSigint`, which re-delivers a held interrupt only after the
     result is recorded, the pattern 436 D14 uses for launches. An interrupt
     path that finds the result already recorded writes the end line from it
-    and does not wait again.
+    and does not wait again, so every started member still gets its end line.
   - Probe on darwin: a SIGINT interrupts `waitid(WNOWAIT)` with
     `KeyboardInterrupt` and leaves the member unreaped, and a second `waitid`
     then `wait4` reap it with its rusage. `os.waitid` and `WNOWAIT` have existed
     on Linux since Python 3.3.
 - Launching, the start, begin, end and interrupted lines, the exit codes and the
   436 D14 launch hold do not change.
+- A runner started with SIGCHLD ignored has its members reaped by the kernel,
+  so no status exists to read. `wait4` then raises `ChildProcessError` and the
+  run fails loudly, where `Popen` today reports exit 0 for every member.
 
 ### Report contract (D3)
 
@@ -112,7 +118,8 @@ suite-runner: summary members=<n> passed=<p> failed=<f> jobs=<N> wall=<seconds>s
   CPU time, with D1's definition (user plus system, the member and the
   descendants it waited for, read when the runner reaps it, unreaped
   descendants not counted); the summary's `cpu=` total; and how to read them,
-  as in the Solution.
+  as in the Solution, including the comparison with the smaller of `--jobs`
+  and the host's CPUs.
 - The recipe comment and `CLAUDE.md` do not change: neither describes the
   report.
 
@@ -127,9 +134,11 @@ temporary directory.
   values and pins: the aligned two-figure rows, the launch-error member's
   `0.0`, and a `cpu=` total taken from unrounded values (three members at
   0.04 s each print rows of `0.0` and a total of `0.1`).
-- **End to end, CPU against wall (D4).** One new test runs a busy member and a
-  sleeping member, in that list order, once with `--jobs 2` and once with
-  `--jobs 1` (one subtest each), because D2 changes both reaping paths.
+- **End to end, CPU against wall (D4).** Two new tests run a busy member and a
+  sleeping member, in that list order, one with `--jobs 2` and one with
+  `--jobs 1`, because D2 changes both reaping paths. Each is its own test so
+  that each starts from a fresh barrier: a `done` marker left by the other run
+  would let the sleeping member skip its wait.
   - The busy member runs a grandchild, `sys.executable -c`, whose loop spins
     until its own `time.process_time()` reaches 1.0 s. Around the grandchild
     it measures its own **share**, the change in `os.times()` user, system and
@@ -148,7 +157,7 @@ temporary directory.
       because one process at a time can never run longer than the wall clock;
     - the busy member's CPU is at least half of the share times its wall time.
       This is "close to wall", scaled by the CPU the host actually gave the
-      member, so host load moves both sides together and cannot fail it. On an
+      member, so steady host load moves both sides together. On an
       idle darwin host the share was 0.85 to 0.95 and the runner's ratio 0.85
       to 0.91;
     - the sleeping member's CPU is at most a quarter of its wall time ("well
@@ -164,8 +173,13 @@ temporary directory.
   already exercise the serial interruptible wait (D2) and must stay green
   unchanged.
 - This test is the suite runner's only assertion on elapsed time (436 D9 kept
-  them out), because the criterion is a CPU-to-wall comparison. Each bound
-  above holds whatever the host's load.
+  them out), because the criterion is a CPU-to-wall comparison. No bound rests
+  on how loaded the host is: the CPU floors are reached by spinning on CPU
+  time, the sleeping member's ceiling only loosens as load stretches its wall,
+  and the busy member's ratio floor scales with the share it measured itself,
+  leaving a 2x margin for load that changes during its own start-up.
+- The PR's CI run is the Linux check of D1: if Linux's `wait4` left the
+  grandchild out, the busy member's 1.0 s floor fails there.
 
 ## Out of scope
 
@@ -185,5 +199,5 @@ temporary directory.
 |----|--------|-----------|----------------------|
 | D1 | A member's CPU is `ru_utime + ru_stime` from one `os.wait4` on its pid, made by the single reap function both modes use; it covers the member and every descendant reaped beneath it, a never-launched member reports `0.0`, and descendants never waited for are not counted. | The issue asks for user plus system with children included; the suite's modules run their work in subprocesses; darwin probe (grandchild's 1.0 s counted); standard-library-only package (agent-helpers). | `RUSAGE_CHILDREN` deltas around each member (charge concurrent members to each other in parallel mode); `psutil` (not standard library); `/proc` sampling (Linux-only, misses exited descendants). |
 | D2 | Parallel workers read output to its end, then reap. Serial mode waits with `os.waitid(WEXITED \| WNOWAIT)`, which reaps nothing, and reaps after with SIGINT held by `_HeldSigint`, so an interrupt can never lose a member's status or CPU. | 436 D12/D14 SIGINT discipline; signals reach the main thread only; darwin probe (`waitid` interrupted with the member unreaped, then reaped with its rusage); the-bar truthful terminal states. | `wait4` as the interruptible wait (an interrupt after the reap loses the status, and the re-wait raises `ChildProcessError`); running serial mode on worker threads (restructures the serial path and its interrupt tests for a reporting change); `RUSAGE_CHILDREN` deltas in serial mode only (two homes for one measurement). |
-| D3 | Rows become `<wall>s wall <cpu>s cpu <state> <member>`, both `{:7.1f}`, still sorted by wall; the summary appends `cpu=<total>s`, the sum of unrounded member CPU; header, failed and end lines unchanged. This amends the 436 D6 contract by one field per line. | The issue's "CPU column next to wall" and "suite total"; no program parses the summary, and prefix greps for `failed=0` keep matching; YAGNI. | Labels in the header only (a grepped row loses its meaning); CPU after the member path (not a column); CPU on end lines or a ratio column (not asked, derivable); a separate total line (a second closing line to cite). |
+| D3 | Rows become `<wall>s wall <cpu>s cpu <state> <member>`, both `{:7.1f}`, still sorted by wall; the summary appends `cpu=<total>s`, the sum of unrounded member CPU; header, failed and end lines unchanged. This amends the 436 D6 contract by one field on the row and one on the summary. | The issue's "CPU column next to wall" and "suite total"; no program parses the summary, and prefix greps for `failed=0` keep matching; YAGNI. | Labels in the header only (a grepped row loses its meaning); CPU after the member path (not a column); CPU on end lines or a ratio column (not asked, derivable); a separate total line (a second closing line to cite). |
 | D4 | The AC test runs a busy member (grandchild spinning to 1.0 s of its own CPU) and a sleeping member (waits for the busy one, then sleeps 1.0 s) in both modes and asserts: busy CPU at least 1.0 s, at most wall plus 0.1 s, and at least half of its self-measured share times wall; sleeper CPU at most a quarter of wall; `cpu=` within rounding of the rows. | AC ("sleeps … well below", "busy-loops … close to wall"); the-bar tests that can fail; host load is not scheduled (rejection record, recorded load 71 on 10 cores), so no bound may depend on it. | A fixed ratio threshold (fails on an oversubscribed host); a wall-clock spin (under load its CPU falls below any fixed target); mocking `os.wait4` (asserts calls, not behaviour); one mode only (both reaping paths change). |
