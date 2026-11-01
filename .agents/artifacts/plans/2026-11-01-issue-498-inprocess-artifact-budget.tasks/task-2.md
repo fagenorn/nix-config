@@ -163,11 +163,9 @@ class InProcessArtifactBudgetTest(LifecycleHarness, unittest.TestCase):
                                   stdin=json.dumps(result).encode("utf-8"))
                     for result in (refused, accepted)]
         self.assertEqual(verdicts, [2, 0])
-        before = self.state_path.read_bytes()
         self.assert_refused(
             self.finish_without_spawning(attempt, refused, ok=False),
             "workflow-state: artifact-budget validate-report rejected the ship-summary boundary\n")
-        self.assertEqual(self.state_path.read_bytes(), before)
         self.finish_without_spawning(attempt, accepted, ok=True)
         self.assertEqual(self.read_state()["issues"]["14"]["outcome"], accepted)
 
@@ -185,11 +183,9 @@ class InProcessArtifactBudgetTest(LifecycleHarness, unittest.TestCase):
                                   "--root", self.root.resolve() / path, "--format", "json")
                     for path in paths]
         self.assertEqual(verdicts, [2, 0])
-        before = self.state_path.read_bytes()
         self.assert_refused(
             self.finish_without_spawning(attempt, refused, ok=False),
             "workflow-state: durable detail is not a checker-valid review package\n")
-        self.assertEqual(self.state_path.read_bytes(), before)
         self.finish_without_spawning(attempt, accepted, ok=True)
         self.assertEqual(self.read_state()["issues"]["14"]["outcome"], accepted)
 
@@ -214,25 +210,45 @@ class InProcessArtifactBudgetTest(LifecycleHarness, unittest.TestCase):
                                           worktree.resolve() / relative))
         self.assertEqual(verdicts, [2, 0])
         retained.write_text(refused, encoding="utf-8")
-        before = self.state_path.read_bytes()
         self.assert_refused(
             self.finish_without_spawning(attempt, result, ok=False),
             "workflow-state: artifact-budget validate-detail-input rejected the detail input\n")
-        self.assertEqual(self.state_path.read_bytes(), before)
         retained.write_text(accepted, encoding="utf-8")
         self.finish_without_spawning(attempt, result, ok=True)
         outcome = self.read_state()["issues"]["14"]["outcome"]
         self.assertEqual((outcome["state"], outcome["detail_state"], outcome["report_path"]),
                          ("stopped", "unpublished", relative))
+
+    def test_an_exception_escaping_the_validator_is_refused_as_a_crashed_child_was(self):
+        # A CLI child that crashed exited 1 with empty stdout, which the base mapped to
+        # the boundary's refusal. No wire-bounded input crashes the validator on the
+        # supported interpreters, so the seam is the loaded module's `invoke`
+        # (issue 498 D4, D8).
+        workflow = load_source_module(SCRIPT, "workflow_state_issue_498_crash")
+        module = workflow._artifact_budget()
+        wire = json.dumps(self.merged_result()).encode("utf-8")
+        argv = ["validate-report", "--boundary", "ship-summary", "--input", "-"]
+        with recorded_spawns() as spawned, \
+                mock.patch.object(module, "invoke", side_effect=RecursionError("deep")):
+            outcome = workflow.artifact_budget_invoke(argv, wire)
+            with self.assertRaises(workflow.WorkflowError) as caught:
+                workflow.artifact_budget_validate(
+                    "validate-report", boundary="ship-summary", input_bytes=wire)
+        self.assertEqual(spawned, [])
+        self.assertEqual((outcome.exit_code, outcome.stdout), (1, b""))
+        self.assertIn("RecursionError: deep", outcome.stderr)
+        self.assertEqual(str(caught.exception),
+                         "artifact-budget validate-report rejected the ship-summary boundary")
 ```
 
-The legacy `finish` covers all three commands. A `present` detail is first validated at `ship-summary` and then checked. An `unpublished` `stopped` result runs `validate-detail-input` and then a second `ship-summary` validation. Before this change the validator was the only child that `finish` started. At plan time every assertion except the spawn check held against the base, so the spawn check is the test's only red.
+The fourth test pins D4's exception mapping, which the three `finish` cases never reach: removing the `except Exception` arm of `artifact_budget_invoke` turns it red. The legacy `finish` covers all three commands. A `present` detail is first validated at `ship-summary` and then checked. An `unpublished` `stopped` result runs `validate-detail-input` and then a second `ship-summary` validation. Before this change the validator was the only child that `finish` started. At plan time every assertion except the spawn check held against the base, so the spawn check is the test's only red.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run the focused form (Global Constraints) on `test_workflow_state.py` with `-k InProcessArtifactBudgetTest -k ArtifactBudgetPolicyResolutionTest`.
-Expected: `FAILED (failures=4)`, 4 tests.
-- Each of the three `InProcessArtifactBudgetTest` tests fails with `Lists differ: ['subprocess.Popen', …] != []` on its refused finish.
+Expected: `FAILED (failures=4, errors=1)`, 5 tests.
+- Each of the three `finish` tests of `InProcessArtifactBudgetTest` fails with `Lists differ: ['subprocess.Popen', …] != []` on its refused finish.
+- The exception-mapping test errors with `AttributeError`: the base has no `_artifact_budget`.
 - The installed test fails with `AssertionError: 1 != 0`. Its probe's traceback ends in `FileNotFoundError` for `<home>/.agents/bin/artifact-budget`, because the base still runs the wrapper.
 
 - [ ] **Step 3: Write the minimal implementation**
@@ -369,7 +385,7 @@ Change nothing else. `phase_notes_maximum`, the wrapper file and every other ent
 - [ ] **Step 4: Verify**
 
 Run the focused form with `-k InProcessArtifactBudgetTest -k ArtifactBudgetPolicyResolutionTest`.
-Expected: `OK`, 4 tests.
+Expected: `OK`, 5 tests.
 
 Confirm that the installed test pins D7. In a scratch copy of the tree only (never committed), drop `.resolve(strict=True)` from `_artifact_budget`'s `entry` line. Then run that copy's focused form with `-k ArtifactBudgetPolicyResolutionTest`.
 Expected: it fails on `Path(observed["module"])`, the link path against its store target.

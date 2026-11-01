@@ -48,7 +48,7 @@ Task 2 — workflow-state validates in-process and starts no child — `home/com
 
 | AC | Kind | Task | Check |
 |----|------|------|-------|
-| AC1 | code | Task 2 | `home/common/agent-skills/tests/test_workflow_state.py::InProcessArtifactBudgetTest` has three tests: the result file at `ship-summary`, a `present` detail through `check`, and an `unpublished` detail through `validate-detail-input`. Each runs accepted and refused, records no process-creation audit event, matches the CLI's verdict, and on refusal prints the exact `workflow-state:` line with exit 2. `::ArtifactBudgetPolicyResolutionTest::test_installed_symlinked_policy_validates_a_terminal_result` covers the installed layout: no wrapper, no spawn, and the module's store target loaded. Task 1's `test_artifact_budget.py::InvokeParityTest` proves the core matches the CLI. `just agent-workflow-tests` runs them all, locally and on the PR's Linux CI run. |
+| AC1 | code | Task 2 | `home/common/agent-skills/tests/test_workflow_state.py::InProcessArtifactBudgetTest` has four tests. Three cover the result file at `ship-summary`, a `present` detail through `check`, and an `unpublished` detail through `validate-detail-input`: each runs accepted and refused, records no process-creation audit event, matches the CLI's verdict, and on refusal prints the exact `workflow-state:` line with exit 2. The fourth pins the crash mapping: an exception escaping `invoke` yields exit 1, empty stdout and the boundary's refusal, with no process started (D4, D8). `::ArtifactBudgetPolicyResolutionTest::test_installed_symlinked_policy_validates_a_terminal_result` covers the installed layout: no wrapper, no spawn, and the module's store target loaded. Task 1's `test_artifact_budget.py::InvokeParityTest` proves the core matches the CLI. `just agent-workflow-tests` runs them all, locally and on the PR's Linux CI run. |
 | AC2 | evidence | Task 2 | Post-merge only, measured by ship (D6). Conditions: the merge commit's push run to `main`, job "Agent Workflow Tests (advisory)", hosted ubuntu-24.04, default cap 4. Run these two commands for that run and again for the last push run to `main` before the merge. First `gh run view <run-id> --repo fagenorn/nix-config --log > <log>`. Then `awk '/Agent Workflow Tests \(advisory\)/ && match($0, /suite-runner: +[0-9]+\.[0-9]s /) { split(substr($0, RSTART, RLENGTH), f, " "); s += f[2] } END { printf "%.1f\n", s }' <log>`. The awk sums the module seconds of the timing rows. It reads the rows with and without the `wall`/`cpu` columns, and skips `end` and `summary` lines. Threshold: the merge run's sum is at least 200 s below the earlier run's (2,033 s on run 41314186007 when the issue was filed). Acceptance-record row `AC2` stays `unverified` on the branch, with no branch gate, and ship fills it after the merge. The PR's CI run is the pre-merge reading cited in the PR. |
 
 ## Decisions
@@ -58,5 +58,14 @@ Task 2 — workflow-state validates in-process and starts no child — `home/com
 - The one invocation helper, its exception mapping and the load-failure text: D1, D4 (Task 2).
 - The parity table and the audit-hook proof: D5 (Tasks 1 and 2). D7's installed-layout pins are in Task 2.
 - AC2 as post-merge evidence, and the per-call costs left in place: D6.
+- The crash-mapping test seam: D8 (Task 2).
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus; no fallback.
+- Base SHA: `a731801d`; reviewed plan head `225770d2`.
+- Findings: 0 blocking, 2 should-fix, 0 discussion. Accepted 2, rejected 0, deferred 0.
+  - PR498-S1 (accepted, D8): Task 2 adds a fourth `InProcessArtifactBudgetTest` case for D4's exception mapping. The reviewer's suggested trigger, deeply nested JSON raising `RecursionError`, was checked and rejected as the trigger: on Python 3.13 the CLI refuses an 8,000-deep array as invalid JSON without recursing out, and the 8,192-byte wire bound caps the depth, so the test patches the loaded module's `invoke` instead.
+  - PR498-S2 (accepted): the three unchanged-ledger assertions after a refused `finish` were vacuous, since `LifecycleHarness.finish` restores the state bytes on refusal; they are removed, and the existing rollback regressions stay the guard.
 
 ---
