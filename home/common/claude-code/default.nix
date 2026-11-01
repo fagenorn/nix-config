@@ -3,9 +3,7 @@
   lib,
   pkgs,
   inputs,
-  libx,
   agentTools,
-  osConfig,
   ...
 }:
 let
@@ -369,9 +367,9 @@ in
     # NOTE: MCP servers are intentionally NOT set here. The 25.11 module injects them via a
     # `--mcp-config` flag on a wrapper binary, but in Claude Code 2.1.183 that flag is variadic
     # (`--mcp-config <configs...>`), so the wrapper swallows any following args and breaks every
-    # `claude` subcommand (`claude mcp list`, `claude doctor`, opening a dir, ...). Instead the
-    # palmier-pro server is merged into ~/.claude.json (user scope) by the activation script
-    # below, which shows up natively in `claude mcp list` and `/mcp` and leaves subcommands intact.
+    # `claude` subcommand (`claude mcp list`, `claude doctor`, opening a dir, ...). Instead a
+    # server is merged into ~/.claude.json (user scope) by an idempotent jq activation script,
+    # which shows up natively in `claude mcp list` and `/mcp` and leaves subcommands intact.
 
     # NOTE: `settings` is deliberately left unset. The module writes ~/.claude/settings.json
     # as a READ-ONLY store symlink, which breaks Claude Code's in-app /config flow and the
@@ -503,48 +501,16 @@ in
     run chmod u+w "$HOME/.claude/settings.json"
   '';
 
-  # Declaratively register the palmier-pro MCP server at user scope by merging it into
-  # ~/.claude.json (the file Claude Code reads natively). Idempotent: only rewrites when the
-  # entry is missing/changed, minimising any race with a running Claude Code. We do NOT own the
-  # whole file (it holds OAuth + runtime state) — just this one key. Only on hosts that install
-  # the palmier-pro app; elsewhere the server would never answer.
-  home.activation.palmierProMcp = lib.mkIf (libx.hasCask osConfig "fagenorn/palmier/palmier-pro") (
-    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-      cfg="$HOME/.claude.json"
-      jq=${pkgs.jq}/bin/jq
-      want='{"type":"http","url":"http://127.0.0.1:19789/mcp"}'
-      wantC=$(printf '%s' "$want" | "$jq" -cS .)
-      if [ -f "$cfg" ] && "$jq" -e . "$cfg" >/dev/null 2>&1; then
-        haveC=$("$jq" -cS '.mcpServers["palmier-pro"] // null' "$cfg")
-        src=$(cat "$cfg")
-      else
-        haveC=null
-        src='{}'
-      fi
-      # Only rewrite when the entry is actually missing/different (idempotent → avoids churn
-      # and minimises any race with a concurrently-running Claude Code rewriting the file).
-      if [ "$haveC" != "$wantC" ]; then
-        tmp="$cfg.hm-tmp.$$"
-        printf '%s' "$src" | "$jq" --argjson v "$want" '.mcpServers["palmier-pro"] = $v' > "$tmp"
-        chmod 600 "$tmp"
-        mv -f "$tmp" "$cfg"
-      fi
-    ''
-  );
-
-  # Hosts without the app drop an entry an earlier generation left behind.
-  home.activation.palmierProMcpRemove =
-    lib.mkIf (!libx.hasCask osConfig "fagenorn/palmier/palmier-pro")
-      (
-        lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-          cfg="$HOME/.claude.json"
-          jq=${pkgs.jq}/bin/jq
-          if [ -f "$cfg" ] && "$jq" -e '.mcpServers["palmier-pro"]' "$cfg" >/dev/null 2>&1; then
-            tmp="$cfg.hm-tmp.$$"
-            "$jq" 'del(.mcpServers["palmier-pro"])' "$cfg" > "$tmp"
-            chmod 600 "$tmp"
-            mv -f "$tmp" "$cfg"
-          fi
-        ''
-      );
+  # palmier-pro is no longer installed anywhere: drop the user-scope MCP entry an earlier
+  # generation merged into ~/.claude.json. Touches only that key; a no-op once it is gone.
+  home.activation.palmierProMcpRemove = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    cfg="$HOME/.claude.json"
+    jq=${pkgs.jq}/bin/jq
+    if [ -f "$cfg" ] && "$jq" -e '.mcpServers["palmier-pro"]' "$cfg" >/dev/null 2>&1; then
+      tmp="$cfg.hm-tmp.$$"
+      "$jq" 'del(.mcpServers["palmier-pro"])' "$cfg" > "$tmp"
+      chmod 600 "$tmp"
+      mv -f "$tmp" "$cfg"
+    fi
+  '';
 }
