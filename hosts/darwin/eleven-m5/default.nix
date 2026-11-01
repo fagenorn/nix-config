@@ -1,6 +1,7 @@
 {
   lib,
   pkgs,
+  unstablePkgs,
   username,
   ...
 }:
@@ -65,6 +66,9 @@ in
   # Coming back unattended needs FileVault off (set by hand). Keep automatic login off: no
   # session is needed, and one would sit unlocked at the console.
   services.tailscale.enable = true;
+  # From nixpkgs-unstable: the stable channel's tailscale lags far behind upstream and misses
+  # security fixes (TS-2026-013 to -017 need 1.104.2+/1.104.4+), which it does not backport.
+  services.tailscale.package = unstablePkgs.tailscale;
 
   system.defaults.dock.persistent-apps = [
     "/Applications/Helium.app"
