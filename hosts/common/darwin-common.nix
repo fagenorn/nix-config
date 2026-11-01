@@ -117,7 +117,6 @@ in
       "helium-browser" # imputnet privacy Chromium browser -> /Applications/Helium.app (bundle net.imput.helium); replaced microsoft-edge
       "ghostty" # Modern GPU terminal
       "orbstack" # Fast Docker Desktop alternative & Linux VMs
-      "tailscale-app" # Mesh VPN client
     ];
     masApps = {
       # === Productivity & Utilities ===
