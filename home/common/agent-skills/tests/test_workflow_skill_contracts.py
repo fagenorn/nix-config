@@ -299,6 +299,28 @@ SHIP_ISSUE_MACHINE_TEXT = {
     ),
 }
 
+# The ship-issue PR body template (#494 D2, D3, D9): the one fenced
+# `gh pr create` whose double-quoted body the agent renders verbatim. Its
+# markup is pinned in reading order; no placeholder sentence is.
+PR_BODY_TEMPLATE_RE = re.compile(r'```\ngh pr create [^\n]*--body "(.*?)"\n```', re.S)
+PR_BODY_MARKUP = (
+    "## Why", "## What changes", "## Evidence", "## Merge danger",
+    "<details><summary>Delivery record</summary>", "Spec: ", "plan: ", "## Acceptance",
+    "Acceptance state: <effective acceptance state>",
+    "Acceptance record: <record-path or none>", "<acceptance table>",
+    "<review and verification notes>", "</details>", "Closes #<num>",
+)
+PR_BODY_ONCE = (
+    "Acceptance state: <effective acceptance state>",
+    "Acceptance record: <record-path or none>", "<acceptance table>", "Closes #<num>",
+)
+# What the lifecycle guard refuses in a pr-create body.
+PR_BODY_UNSAFE = ('"', "$", "`", "\\")
+INLINE_FALLBACK_MARKUP = (
+    "`## Why`", "`## What changes`", "`## Evidence`", "`## Merge danger`", "`<details>`",
+    "Delivery record",
+)
+
 # "sibling <=2 words> candidate" — the in-working-tree prescription being
 # removed. The bounded gap keeps it off handoff's legitimate
 # "candidate ... sibling temporary" sentences, where the words appear in the
@@ -1584,6 +1606,24 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             for item in items:
                 with self.subTest(path=path.name, item=item):
                     self.assertIn(item, text)
+
+    def test_ship_issue_pr_body_reads_first_then_records(self):
+        bodies = PR_BODY_TEMPLATE_RE.findall(self.ship_issue)
+        self.assertEqual(len(bodies), 1)
+        body = bodies[0]
+        self.assert_ordered(body, *PR_BODY_MARKUP)
+        self.assertNotIn("## Summary", body)
+        for line in PR_BODY_ONCE:
+            with self.subTest(line=line):
+                self.assertEqual(body.count(line), 1)
+        for character in PR_BODY_UNSAFE:
+            with self.subTest(character=character):
+                self.assertNotIn(character, body)
+
+    def test_inline_fallback_names_the_readable_body(self):
+        fallback = self.section(self.ship_handoff, "## Inline fallback (no ship-issue skill)",
+                                "## Remainder owner prompt")
+        self.assert_ordered(normalized(fallback), *INLINE_FALLBACK_MARKUP)
 
     def test_sdd_documents_carry_their_machine_text(self):
         for path, items in SDD_MACHINE_TEXT.items():

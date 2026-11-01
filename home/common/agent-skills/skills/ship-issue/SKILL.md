@@ -128,15 +128,17 @@ git push -u origin <branch>
 Run `check-launch` again, then:
 
 ```
-gh pr create --repo <resolved-repository> --base <integration> --head <branch> --title "<title>" --body "## Summary
-<2-4 bullets of what shipped>
+gh pr create --repo <resolved-repository> --base <integration> --head <branch> --title "<title>" --body "## Why
+<1-3 sentences: what was wrong or missing and who notices, with the issue URL>
+## What changes
+<smallest sketch (diff, call tree or before/after) indented 4 spaces, then 2-4 plain bullets>
+## Evidence
+<before and after: the failing test that now passes, output or behaviour>
+## Merge danger
+<one- or two-way door; blast radius in a word; rollout and rollback>
+<details><summary>Delivery record</summary>
 
-## Spec
-<spec-path>
-
-## Plan
-<plan-path>
-
+Spec: <blob URL>, plan: <blob URL>
 ## Acceptance
 Acceptance state: <effective acceptance state>
 
@@ -144,18 +146,17 @@ Acceptance record: <record-path or none>
 
 <acceptance table>
 
+<review and verification notes>
+</details>
+
 Closes #<num>"
 ```
 
-This is the one form the lifecycle guard accepts: one command, those five flags in that order, `<resolved-repository>` the retained `bindings.tracker.repo_slug`, and the body a single double-quoted argument that may span lines but contains no `"`, `$`, backtick or backslash. A body from a file, a heredoc or a command substitution is refused: render it in place.
+This is the one form the lifecycle guard accepts: one command, those five flags in that order, `<resolved-repository>` the retained `bindings.tracker.repo_slug`, and the body a single double-quoted argument that may span lines but contains no `"`, `$`, backtick or backslash. A body from a file, a heredoc or a command substitution is refused: render it in place. Above `<details>`, explain or link each domain term on first use and name no internal ID (decision, finding, slice or `ACn`). Title: the issue title verbatim unless the implementation deviated meaningfully; under 70 chars.
 
-The `## Acceptance` section always appears. `Acceptance state:` carries the effective value, and `Acceptance record:` carries the record's repository-relative path or `none`. With a record, `<acceptance table>` is a Markdown table with the three columns `AC`, `Kind` and `Verdict`, one row per record row, copying its closed tokens; without one, drop that line. On a **hold** drop the `Closes #<num>` line too: a hold body carries no closing keyword (close, closes, closed, fix, fixes, fixed, resolve, resolves or resolved before an issue reference), so the merge cannot close the issue.
+The `## Acceptance` section always appears. `Acceptance state:` carries the effective value, and `Acceptance record:` carries the record's repository-relative path or `none`. With a record, `<acceptance table>` is a Markdown table with the columns `AC`, `Criterion`, `Kind` and `Verdict`, one row per record row, copying its closed tokens and its claim before `— measured:`; without one, drop that line. On a **hold** drop the `Closes #<num>` line too: a hold body carries no closing keyword (any form of close, fix or resolve before an issue reference), so the merge cannot close the issue. GitHub auto-closes only on a merge into the **default branch**; otherwise Phase 8's `gh issue close <num>` closes the issue, and the close branch keeps `Closes #<num>` for traceability.
 
-Title: the issue title verbatim unless the implementation deviated meaningfully. Under 70 chars; details go in the body.
-
-GitHub auto-close on merge fires only when the PR base equals the **default branch**; when retained integration and default branches differ, the real close mechanism is Phase 8's explicit `gh issue close <num>` — on the close branch keep the `Closes #<num>` trailer for traceability, don't rely on it.
-
-**Use full URLs, not bare `#N`**, in PR bodies, comments, and commit-message references (`https://github.com/<resolved-repository>/issues/<n>`) — a bare `#N` resolves against the source repo and can land on unrelated refs. The `Closes #<num>` trailer is the one exception.
+**Use full URLs, not bare `#N`**, in PR bodies, comments, and commit-message references (`https://github.com/<resolved-repository>/issues/<n>`; spec and plan as blob URLs at the pushed head) — a bare `#N` resolves against the source repo. The `Closes #<num>` trailer is the one exception.
 
 ## Phase 5 — Review the PR
 
@@ -239,7 +240,7 @@ Before cleanup, invoke review-package (`~/.agents/bin/review-package`) in `deliv
 
 1. Close or hold, per the effective acceptance state.
    - **Close** (`met` or `not_applicable`): `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (see Phase 4).
-   - **Hold** (`unmet` or `human_pending`), in this order: `gh issue view <num> --json state,comments`; if `CLOSED` (a commit's closing keyword can close it), `gh issue reopen <num>`. When `gh label list --repo <resolved-repository> --search needs-verification --json name` shows no name exactly `needs-verification`, run `gh label create needs-verification --repo <resolved-repository> --description "Merged, acceptance criteria await verification"` — never `--force`, which would overwrite a user's label. Then `gh issue edit <num> --add-label needs-verification`. The hold comment's first line is `Held for verification: <PR URL>`; the rest gives the effective acceptance state, the PR body's three-column table and the record's link at the merge SHA (`https://github.com/<resolved-repository>/blob/<merge-sha>/<record-path>`). When the earlier view already shows one or more comments with that first line, reuse the earliest one's URL; otherwise post it with `gh issue comment <num> --body "<hold comment>"`, whose stdout is the comment URL. Finally `gh issue view <num> --json state,labels` must show `OPEN` with `needs-verification`; anything else keeps ownership and retries, as for any failed post-merge action.
+   - **Hold** (`unmet` or `human_pending`), in this order: `gh issue view <num> --json state,comments`; if `CLOSED` (a commit's closing keyword can close it), `gh issue reopen <num>`. When `gh label list --repo <resolved-repository> --search needs-verification --json name` shows no name exactly `needs-verification`, run `gh label create needs-verification --repo <resolved-repository> --description "Merged, acceptance criteria await verification"` — never `--force`, which would overwrite a user's label. Then `gh issue edit <num> --add-label needs-verification`. The hold comment's first line is `Held for verification: <PR URL>`; the rest gives the effective acceptance state, the PR body's acceptance table and the record's blob URL at the merge SHA. When the earlier view already shows one or more comments with that first line, reuse the earliest one's URL; otherwise post it with `gh issue comment <num> --body "<hold comment>"`, whose stdout is the comment URL. Finally `gh issue view <num> --json state,labels` must show `OPEN` with `needs-verification`; anything else keeps ownership and retries, as for any failed post-merge action.
 2. Remove the worktree from the main repo root, never from inside the worktree (branch delete: `## gh hygiene`):
    ```
    MAIN_ROOT=$(git -C "$(git rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
