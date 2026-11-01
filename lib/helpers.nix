@@ -119,13 +119,13 @@ in
               "jundot/homebrew-omlx" = omlx-tap;
               # Referenced as `incoai/tap/splash`.
               "incoai/homebrew-tap" = splash-tap;
-              # Local tap carrying the self-authored palmier-pro (auto-updating) and darktable casks
+              # Local tap carrying the self-authored darktable cask
               # (listed in homebrew.casks in hosts/darwin/mbp/default.nix).
               # builtins.path copies the dir to its OWN top-level store path so it satisfies
               # nix-homebrew's `package`-typed taps option (a bare subpath would not).
               # NOTE: nix-homebrew uses the KEY verbatim as the Library/Taps/<...> dir name, so
               # it MUST include the `homebrew-` prefix Homebrew requires; the cask is still
-              # referenced by the short tap name `fagenorn/palmier/palmier-pro`.
+              # referenced by the short tap name `fagenorn/palmier/darktable`.
               "fagenorn/homebrew-palmier" = builtins.path {
                 path = ../homebrew/palmier-tap;
                 name = "homebrew-palmier";
@@ -142,7 +142,6 @@ in
             ];
             trust.casks = [
               "nikitabobko/tap/aerospace"
-              "fagenorn/palmier/palmier-pro"
               "fagenorn/palmier/darktable"
             ];
           };

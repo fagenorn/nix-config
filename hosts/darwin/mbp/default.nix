@@ -108,19 +108,5 @@
     "inkscape"
 
     "android-studio"
-
-    # palmier-pro (AI video editor, macOS 26 / Tahoe only). greedy => every `brew upgrade`
-    # (run on each `sudo just` activation) re-pulls the latest PalmierPro.dmg from the
-    # self-authored fagenorn/palmier tap. Its embedded MCP server is wired into Claude Code
-    # in home/common/claude-code/default.nix.
-    {
-      name = "fagenorn/palmier/palmier-pro";
-      greedy = true;
-      # No `no_quarantine` arg: Homebrew 6 removed `--no-quarantine` entirely
-      # (Homebrew/brew#23363), and bundle passes unknown args through verbatim, so the
-      # install dies with "invalid option". The app stays quarantined: Homebrew stamps
-      # com.apple.quarantine on cask apps regardless of the system-wide
-      # LSQuarantine = false preference, so Gatekeeper checks each fresh copy on launch.
-    }
   ];
 }
