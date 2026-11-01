@@ -310,11 +310,17 @@ PR_BODY_MARKUP = (
     "Acceptance record: <record-path or none>", "<acceptance table>",
     "<review and verification notes>", "</details>", "Closes #<num>",
 )
+# The blank lines the template keeps around its HTML: GitHub renders Markdown
+# inside `<details>` only after a blank line, and resumes it after `</details>`
+# only after another.
+PR_BODY_BLANK_LINE_BOUNDARIES = (
+    "<details><summary>Delivery record</summary>\n\n", "</details>\n\n",
+)
 PR_BODY_ONCE = (
     "Acceptance state: <effective acceptance state>",
     "Acceptance record: <record-path or none>", "<acceptance table>", "Closes #<num>",
 )
-# What the lifecycle guard refuses in a pr-create body.
+# The printable characters the lifecycle guard refuses in a pr-create body.
 PR_BODY_UNSAFE = ('"', "$", "`", "\\")
 INLINE_FALLBACK_MARKUP = (
     "`## Why`", "`## What changes`", "`## Evidence`", "`## Merge danger`", "`<details>`",
@@ -1625,6 +1631,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(len(bodies), 1)
         body = bodies[0]
         self.assert_ordered(body, *PR_BODY_MARKUP)
+        for boundary in PR_BODY_BLANK_LINE_BOUNDARIES:
+            with self.subTest(boundary=boundary):
+                self.assertIn(boundary, body)
         self.assertNotIn("## Summary", body)
         for line in PR_BODY_ONCE:
             with self.subTest(line=line):
