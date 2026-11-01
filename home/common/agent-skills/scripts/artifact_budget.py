@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 from dataclasses import dataclass
+from functools import partial
 import importlib.util
 import json
 import os
@@ -61,6 +62,14 @@ SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 PLAN_MEMBER_RE = re.compile(r"task-([1-9][0-9]*)\.md\Z")
 SHARD_RE = re.compile(r"shard-([0-9]{3})\.(diff|jsonl)\Z")
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+BOUNDARY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+# Restated from `agent_tools.review_gate`, which this flat script does not import.
+SUMMARY_KEYS = frozenset({
+    "artifact_policy_sha256", "base", "completed_through", "forecast_sha256", "head", "kind",
+    "metrics", "packing_policy_sha256", "plan", "plan_package_sha256", "recommended_boundary",
+    "schema_version", "state", "violations"})
+RECOMMENDATION_KEYS = frozenset({"id", "metrics", "prerequisite_commit", "tasks"})
 
 
 class ArtifactBudgetError(Exception):
@@ -794,6 +803,77 @@ def _valid_artifact(value: object, *, kind: str | None = None,
                            over=over is True, root_only=root_only) is None
 
 
+def _projected_violations(metrics: Mapping[str, int], limits: ArtifactLimits) -> list[str]:
+    return [code for code, limit_name, measure in _BOUNDS
+            if measure(metrics) > getattr(limits, limit_name)]
+
+
+def _posix_relative(value: object) -> bool:
+    if not _valid_path(value):
+        return False
+    path = PurePosixPath(value)
+    return (not path.is_absolute() and str(path) == value
+            and not any(part in {"", ".", ".."} for part in path.parts))
+
+
+def _recommendation_fault(value: object, completed_through: int, limits: ArtifactLimits) -> str | None:
+    fault = _members_fault(value, RECOMMENDATION_KEYS, "projection.recommended_boundary")
+    if fault is not None:
+        return fault
+    if not (isinstance(value["id"], str) and BOUNDARY_ID_RE.fullmatch(value["id"])):
+        return "projection.recommended_boundary.id is not a boundary id"
+    tasks = value["tasks"]
+    if not (isinstance(tasks, list) and all(_integer(task, minimum=1) for task in tasks)
+            and tasks == sorted(set(tasks)) and completed_through + 1 in tasks):
+        return "projection.recommended_boundary.tasks must be sorted, distinct and reach completed_through + 1"
+    if not _sha(value["prerequisite_commit"]):
+        return "projection.recommended_boundary.prerequisite_commit must be a 40-hex commit"
+    if not (_valid_metrics(value["metrics"]) and not _projected_violations(value["metrics"], limits)):
+        return "projection.recommended_boundary.metrics must be one measurement within the limits"
+    return None
+
+
+def summary_fault(value: object, *, limits: ArtifactLimits, policy_sha256: str) -> str | None:
+    """Why `value` is not a review-feasibility summary, or None; both report boundaries share it (issue 227 D5).
+
+    `limits` are the review-package limits; `packing_policy_sha256` is checked for shape only.
+    """
+    fault = _members_fault(value, SUMMARY_KEYS, "projection")
+    if fault is not None:
+        return fault
+    if (type(value["schema_version"]), value["schema_version"], value["kind"]) != (
+            int, 1, "review-feasibility-summary"):
+        return "projection.schema_version must be 1 and projection.kind review-feasibility-summary"
+    state = value["state"]
+    if not (isinstance(state, str) and state in {"complete", "decompose_required"}):
+        return "projection.state must be complete or decompose_required"
+    if not _posix_relative(value["plan"]):
+        return "projection.plan must be a relative POSIX path without empty, . or .. parts"
+    for name in ("base", "head"):
+        if not _sha(value[name]):
+            return f"projection.{name} must be a 40-hex commit"
+    if not _integer(value["completed_through"]):
+        return "projection.completed_through must be a non-negative integer"
+    for name in ("plan_package_sha256", "forecast_sha256", "packing_policy_sha256",
+                 "artifact_policy_sha256"):
+        if not (isinstance(value[name], str) and DIGEST_RE.fullmatch(value[name])):
+            return f"projection.{name} must be sha256:<64 hex>"
+    if value["artifact_policy_sha256"] != policy_sha256:
+        return "projection.artifact_policy_sha256 must equal the loaded policy identity"
+    if not _valid_metrics(value["metrics"]):
+        return "projection.metrics must be four non-negative integer counts of one measurement"
+    expected = _projected_violations(value["metrics"], limits)
+    if value["violations"] != expected:
+        return "projection.violations must be the limits the metrics exceed, in checker order"
+    if (state == "decompose_required") != bool(expected):
+        return f"projection.state {state} disagrees with projection.violations"
+    recommendation = value["recommended_boundary"]
+    if recommendation is not None and state == "complete":
+        return "projection.recommended_boundary must be null when the state is complete"
+    return None if recommendation is None else _recommendation_fault(
+        recommendation, value["completed_through"], limits)
+
+
 # Each producer state's allowed artifact kinds and budget side; `failed` takes a
 # root-only artifact or null (issue 472 D3).
 _PRODUCER_ARTIFACTS = {
@@ -803,20 +883,42 @@ _PRODUCER_ARTIFACTS = {
 }
 
 
-def validate_producer_report(value: Mapping[str, object], notes_max_characters: int) -> None:
-    _require_members(value, {"state", "artifact", "notes"}, "producer report")
+def _projection_binding_fault(projection: Mapping[str, object], state: object,
+                              artifact: Mapping[str, object]) -> str | None:
+    for name, expected in (("state", state), ("completed_through", 0), ("plan", artifact["path"])):
+        if projection[name] != expected:
+            return f"projection.{name} must be {json.dumps(expected)}"
+    return None
+
+
+def validate_producer_report(value: Mapping[str, object], notes_max_characters: int, *,
+                             review_limits: ArtifactLimits, policy_sha256: str) -> None:
+    projected = "projection" in value
+    _require_members(value, {"state", "artifact", "notes"} | ({"projection"} if projected else set()),
+                     "producer report")
     _require_notes(value["notes"], notes_max_characters)
     state, artifact = value["state"], value["artifact"]
+    if projected and state not in ("complete", "decompose_required"):
+        raise ArtifactBudgetError(f"projection is not allowed for state {state}")
     if state == "failed":
         fault = None if artifact is None else _artifact_fault(
             artifact, kinds=KINDS, over=False, root_only=True)
     elif isinstance(state, str) and state in _PRODUCER_ARTIFACTS:
         kinds, over = _PRODUCER_ARTIFACTS[state]
+        if projected:
+            kinds, over = ("implementation-plan",), False
         fault = _artifact_fault(artifact, kinds=kinds, over=over)
     else:
         raise ArtifactBudgetError("state must be complete, decompose_required, stopped or failed")
     if fault is not None:
         raise ArtifactBudgetError(f"{fault} for state {state}")
+    if projected:
+        fault = (summary_fault(value["projection"], limits=review_limits, policy_sha256=policy_sha256)
+                 or _projection_binding_fault(value["projection"], state, artifact))  # type: ignore[arg-type]
+        if fault is not None:
+            raise ArtifactBudgetError(fault)
+    elif state == "complete" and artifact["kind"] == "implementation-plan":  # type: ignore[index]
+        raise ArtifactBudgetError("projection is required for implementation-plan")
 
 
 def _relative_path(value: object, *, durable: bool) -> bool:
@@ -867,11 +969,59 @@ def acceptance_pairs_with_review(review_state: object, acceptance_state: object)
     return allowed is not None and acceptance_state in allowed
 
 
-def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int) -> None:
-    keys = {"state", "review_state", "conformance_verdict", "correctness_verdict",
-            "verification_state", "base_sha", "head_sha", "acceptance_state", "detail_state",
-            "report_path", "notes"}
-    _require_members(value, keys, "SDD report")
+_SDD_KEYS = {"state", "review_state", "conformance_verdict", "correctness_verdict",
+             "verification_state", "base_sha", "head_sha", "acceptance_state", "detail_state",
+             "report_path", "notes"}
+_SDD_STOP_CELLS = {"review_state": "unknown", "conformance_verdict": "not_run",
+                   "correctness_verdict": "not_run", "verification_state": "not_run",
+                   "acceptance_state": "not_applicable", "detail_state": "none", "report_path": None}
+
+
+def _sdd_stop_fault(stop: object, base: str, head: str, *, review_limits: ArtifactLimits,
+                    policy_sha256: str) -> str | None:
+    kind = stop.get("kind") if isinstance(stop, dict) else None
+    member = {"projected_overflow": "projection", "actual_overage": "artifact"}.get(kind)  # type: ignore[arg-type]
+    if member is None:
+        return "stop.kind must be projected_overflow or actual_overage"
+    fault = _members_fault(stop, {"kind", member}, "stop")
+    if fault is not None:
+        return fault
+    if member == "artifact":
+        fault = _artifact_fault(stop["artifact"], kinds=("review-package",), over=True)
+        return None if fault is None else f"stop.{fault}"
+    projection = stop["projection"]
+    fault = summary_fault(projection, limits=review_limits, policy_sha256=policy_sha256)
+    if fault is not None:
+        return f"stop.{fault}"
+    if projection["state"] != "decompose_required":
+        return "stop.projection.state must be decompose_required"
+    if (projection["base"], projection["head"]) != (base, head):
+        return "stop.projection.base and head must equal base_sha and head_sha"
+    return None
+
+
+def _validate_sdd_decompose_required(value: Mapping[str, object], notes_max_characters: int, *,
+                                     review_limits: ArtifactLimits, policy_sha256: str) -> None:
+    _require_members(value, _SDD_KEYS | {"stop"}, "SDD report")
+    _require_notes(value["notes"], notes_max_characters)
+    for name, expected in _SDD_STOP_CELLS.items():
+        if value[name] != expected:
+            raise ArtifactBudgetError(f"invalid SDD state: {name} must be {json.dumps(expected)}")
+    if not (_sha(value["base_sha"]) and _sha(value["head_sha"])):
+        raise ArtifactBudgetError("invalid SDD state: base_sha and head_sha must be 40-hex commits")
+    fault = _sdd_stop_fault(value["stop"], value["base_sha"], value["head_sha"],  # type: ignore[arg-type]
+                            review_limits=review_limits, policy_sha256=policy_sha256)
+    if fault is not None:
+        raise ArtifactBudgetError(f"invalid SDD state: {fault}")
+
+
+def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int, *,
+                        review_limits: ArtifactLimits, policy_sha256: str) -> None:
+    if value.get("state") == "decompose_required":
+        _validate_sdd_decompose_required(value, notes_max_characters, review_limits=review_limits,
+                                         policy_sha256=policy_sha256)
+        return
+    _require_members(value, _SDD_KEYS, "SDD report")
     _require_notes(value["notes"], notes_max_characters)
     if not _detail_fields(value, allow_unpublished=True):
         raise ArtifactBudgetError("invalid SDD report")
@@ -1172,8 +1322,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 elif args.boundary == "ship-summary" and value.get("interface_version") == 2:
                     validate_delivery_model_report(value, notes_max, "ship-summary")
                 else:
-                    validators = {"producer": validate_producer_report,
-                                  "sdd": validate_sdd_report,
+                    review = {"review_limits": limits["review-package"], "policy_sha256": identity}
+                    validators = {"producer": partial(validate_producer_report, **review),
+                                  "sdd": partial(validate_sdd_report, **review),
                                   "ship-handoff": validate_ship_handoff_report,
                                   "ship-summary": validate_ship_summary_report,
                                   "workflow-response": validate_workflow_response_report}

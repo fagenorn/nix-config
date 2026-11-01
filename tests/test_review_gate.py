@@ -107,6 +107,29 @@ class GateTest(GateFixture, unittest.TestCase):
         with self.assertRaisesRegex(GateError, '^boom$'):
             capture([sys.executable, '-c', script], cwd=self.repo, authority=authority)
 
+    def test_every_gate_summary_validates_at_both_boundaries(self):
+        for build in (lambda: None, self.bare_overflow, self.oversize):
+            build()
+            gated = self.gate(0)
+            summary = json.loads(gated.stdout)
+            checked = subprocess.run(['artifact-budget', 'check', '--kind', 'implementation-plan', '--root',
+                                      self.plan_path(), '--format', 'json'], env=self.env, capture_output=True)
+            artifact = {'kind': 'implementation-plan', 'path': 'all.md', 'budget_status': 'within_budget',
+                        'metrics': json.loads(checked.stdout)['metrics']}
+            state = summary['state']
+            producer = {'state': state, 'artifact': artifact, 'projection': summary, 'notes': 'n'}
+            reports = [('producer', producer)]
+            if state == 'decompose_required':
+                reports.append(('sdd', {'state': state, 'review_state': 'unknown', 'conformance_verdict': 'not_run',
+                    'correctness_verdict': 'not_run', 'verification_state': 'not_run', 'base_sha': summary['base'],
+                    'head_sha': summary['head'], 'acceptance_state': 'not_applicable', 'detail_state': 'none',
+                    'report_path': None, 'notes': 'n', 'stop': {'kind': 'projected_overflow', 'projection': summary}}))
+            for boundary, report in reports:
+                raw = json.dumps(report, sort_keys=True, separators=(',', ':')).encode() + b'\n'
+                done = subprocess.run(['artifact-budget', 'validate-report', '--boundary', boundary, '--input', '-'],
+                                      input=raw, env=self.env, capture_output=True)
+                self.assertEqual((done.returncode, done.stdout), (0, raw), done.stderr)
+
 
 class ConfirmTest(GateFixture, unittest.TestCase):
     def test_confirm_reproduces_both_states(self):
