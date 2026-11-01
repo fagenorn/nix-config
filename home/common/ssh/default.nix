@@ -29,7 +29,7 @@
         identityFile = "~/.ssh/id_ed25519";
       };
 
-      # The Studio lives in the elevenyellow.org.github tailnet and is shared into this one; a
+      # The Studio lives in the elevenyellow.org.github tailnet and is shared into mink-fort; a
       # shared node keeps its Tailscale IP everywhere, while its MagicDNS name differs per tailnet.
       "eleven-m5" = lib.hm.dag.entryBefore [ "*" ] {
         hostname = "100.114.0.34";
