@@ -4,14 +4,19 @@
 `checkout/`, and patches `os.environ` and the working directory until the test's cleanup: `PATH`
 is that `bin/` alone, `HOME` is `home/`, `HOST_WORLD` names `state/`, and git reads no global or
 system configuration. No test reaches this host's `launchctl`, `codesign` or `security`: the
-`bin/` holds a logging `git` wrapper over the real git, and fake `security` and `codesign`
-scripts. Each logs `{tool, argv}` to `state/calls.jsonl`, then answers from `state/` files; an
+`bin/` holds a logging `git` wrapper over the real git, and fake `security`, `codesign` and
+`launchctl` scripts. Each logs `{tool, argv}` to `state/calls.jsonl`, then answers from `state/` files; an
 unregistered argv exits 64.
 
 The fake `codesign` signs by writing `Contents/_CodeSignature/CodeResources`, a JSON seal over
 every other entry of the bundle and the signing identity, verifies by recomputing the seal, and
 prints the `-d --verbose=2` lines on stderr as the real tool does. `knobs.json` makes one
 `{tool: {verb: ...}}` call sleep, write stderr and exit with a chosen code instead.
+
+The fake `launchctl` keeps `state/launchd.json` (`{"jobs": {label: job}, "next_pid": n}`) and
+answers `print gui/<uid>/<label>` with the block the real tool prints (issue 547 D21),
+`bootout gui/<uid>/<label>` and `bootstrap gui/<uid> <plist>`; `load_job` seeds a job directly. A
+knob on `launchctl` may also write `stdout`, before its stderr.
 """
 import hashlib
 import json
@@ -154,6 +159,89 @@ lines.append("Sealed Resources version=2 rules=13 files=2")
 sys.stderr.write("\\n".join(lines) + "\\n")
 """
 
+LAUNCHCTL_SCRIPT = """#!{python}
+import json, os, plistlib, sys, time
+from pathlib import Path
+
+state = Path(os.environ["HOST_WORLD"])
+argv = sys.argv[1:]
+with open(state / "calls.jsonl", "a", encoding="utf-8") as log:
+    log.write(json.dumps({{"tool": "launchctl", "argv": argv}}) + "\\n")
+uid = os.getuid()
+domain = f"gui/{{uid}}"
+if len(argv) == 2 and argv[0] in ("print", "bootout") and argv[1].startswith(domain + "/"):
+    verb, label = argv[0], argv[1][len(domain) + 1:]
+elif len(argv) == 3 and argv[0] == "bootstrap" and argv[1] == domain:
+    verb, label = "bootstrap", None
+else:
+    sys.stderr.write("fake launchctl: unregistered call\\n")
+    sys.exit(64)
+knobs = state / "knobs.json"
+knob = json.loads(knobs.read_text("utf-8")).get("launchctl", {{}}).get(verb) if knobs.exists() else None
+if knob:
+    time.sleep(knob["sleep"])
+    sys.stdout.write(knob.get("stdout", ""))
+    sys.stdout.flush()
+    sys.stderr.write(knob["stderr"])
+    sys.exit(knob["exit"])
+store = state / "launchd.json"
+table = json.loads(store.read_text("utf-8"))
+jobs = table["jobs"]
+
+
+def save():
+    store.write_text(json.dumps(table), "utf-8")
+
+
+def block(label, job):
+    lines = [f"{{domain}}/{{label}} = {{{{", "\\tactive count = 1", f"\\tpath = {{job['path']}}",
+             "\\ttype = LaunchAgent", f"\\tstate = {{job['state']}}", "",
+             f"\\tprogram = {{job['program']}}", "\\targuments = {{",
+             *[f"\\t\\t{{argument}}" for argument in job["arguments"]], "\\t}}", ""]
+    if job["working_directory"]:
+        lines += [f"\\tworking directory = {{job['working_directory']}}", ""]
+    lines += ["\\tinherited environment = {{",
+              "\\t\\tSSH_AUTH_SOCK => /var/run/com.apple.launchd.fake/Listeners", "\\t}}", "",
+              "\\tdefault environment = {{", "\\t\\tPATH => /usr/bin:/bin:/usr/sbin:/sbin",
+              *[f"\\t\\t{{name}} => {{value}}" for name, value in job["default_environment"].items()],
+              "\\t}}", "", "\\tenvironment = {{",
+              *[f"\\t\\t{{name}} => {{value}}" for name, value in job["environment"].items()],
+              f"\\t\\tXPC_SERVICE_NAME => {{label}}", "\\t}}", "",
+              "\\tLWCR = {{", '\\t\\t"vers" => 1', "\\t}}", "",
+              f"\\tdomain = {{domain}} [100016]", f"\\truns = {{job['runs']}}"]
+    if job["pid"] is not None:
+        lines.append(f"\\tpid = {{job['pid']}}")
+    lines += ["\\timmediate reason = speculative", "}}"]
+    return "\\n".join(lines) + "\\n"
+
+
+if verb == "print":
+    if label not in jobs:
+        sys.stderr.write(f'Bad request.\\nCould not find service "{{label}}" in domain for user gui: {{uid}}\\n')
+        sys.exit(113)
+    sys.stdout.write(block(label, jobs[label]))
+elif verb == "bootout":
+    if label not in jobs:
+        sys.stderr.write("Boot-out failed: 3: No such process\\n")
+        sys.exit(3)
+    del jobs[label]
+    save()
+else:
+    with open(argv[2], "rb") as handle:
+        definition = plistlib.load(handle)
+    if definition["Label"] in jobs:
+        sys.stderr.write("Bootstrap failed: 5: Input/output error\\n")
+        sys.exit(5)
+    arguments = definition["ProgramArguments"]
+    jobs[definition["Label"]] = {{
+        "path": argv[2], "state": "running", "pid": table["next_pid"], "runs": 1,
+        "program": arguments[0], "arguments": arguments,
+        "working_directory": definition.get("WorkingDirectory"),
+        "environment": definition.get("EnvironmentVariables", {{}}), "default_environment": {{}}}}
+    table["next_pid"] += 1
+    save()
+"""
+
 
 class HostWorld:
     def __init__(self, test_case: unittest.TestCase) -> None:
@@ -168,6 +256,8 @@ class HostWorld:
         self._script("security", SECURITY_SCRIPT.format(python=sys.executable))
         self._script("codesign", CODESIGN_SCRIPT.format(
             python=sys.executable, seal_directory=SEAL_DIRECTORY, not_signed=NOT_SIGNED))
+        self._script("launchctl", LAUNCHCTL_SCRIPT.format(python=sys.executable))
+        (self.state / "launchd.json").write_text(json.dumps({"jobs": {}, "next_pid": 4000}), "utf-8")
         self.identities()
         self._git("init", "-q", "-b", "main")
         (self.checkout / "README").write_text("world\n", "utf-8")
@@ -259,12 +349,47 @@ class HostWorld:
             {"pairs": [list(pair) for pair in pairs], "exit": exit, "stderr": stderr,
              "sleep": sleep}), "utf-8")
 
-    def fail(self, tool: str, verb: str, *, exit: int, stderr: str = "", sleep: float = 0) -> None:
-        """Make one verb of `tool` sleep, write `stderr` and exit with `exit`, doing nothing else."""
+    def fail(self, tool: str, verb: str, *, exit: int, stdout: str = "", stderr: str = "",
+             sleep: float = 0) -> None:
+        """Make one verb of `tool` sleep, write `stdout` then `stderr` and exit with `exit`.
+
+        Only the fake `launchctl` writes a knob's `stdout`; `security` and `codesign` never print
+        on stdout from a knob, so a `stdout` for them is refused rather than silently dropped.
+        """
+        if stdout and tool != "launchctl":
+            raise ValueError(f"the fake {tool} has no knob stdout")
         knobs = self.state / "knobs.json"
         table = json.loads(knobs.read_text("utf-8")) if knobs.exists() else {}
-        table.setdefault(tool, {})[verb] = {"exit": exit, "stderr": stderr, "sleep": sleep}
+        table.setdefault(tool, {})[verb] = {"exit": exit, "stdout": stdout, "stderr": stderr,
+                                            "sleep": sleep}
         knobs.write_text(json.dumps(table), "utf-8")
+
+    def program(self, name: str) -> str:
+        """An executable no-op stub `name` in `bin/`, returning its absolute path."""
+        self._script(name, "#!/bin/sh\nexit 0\n")
+        return str(self.bin / name)
+
+    def plist_path(self, label: str) -> Path:
+        return self.home / "Library/LaunchAgents" / f"{label}.plist"
+
+    def load_job(self, label: str, *, path: str, environment: dict[str, str] | None = None,
+                 state: str = "running", runs: int = 1, working_directory: str | None = None,
+                 default_environment: dict[str, str] | None = None) -> None:
+        """Seed a loaded job; a job that is not `running` has no pid."""
+        store = self.state / "launchd.json"
+        table = json.loads(store.read_text("utf-8"))
+        program = str(self.bin / "notifierd")
+        pid = None
+        if state == "running":
+            pid, table["next_pid"] = table["next_pid"], table["next_pid"] + 1
+        table["jobs"][label] = {
+            "path": path, "state": state, "pid": pid, "runs": runs, "program": program,
+            "arguments": [program, "serve", "--quiet"], "working_directory": working_directory,
+            "environment": dict(environment or {}), "default_environment": dict(default_environment or {})}
+        store.write_text(json.dumps(table), "utf-8")
+
+    def job(self, label: str) -> dict | None:
+        return json.loads((self.state / "launchd.json").read_text("utf-8"))["jobs"].get(label)
 
     def calls(self, tool: str | None = None) -> list[dict]:
         log = self.state / "calls.jsonl"

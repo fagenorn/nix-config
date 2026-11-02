@@ -1,0 +1,293 @@
+"""The launchd-agent adapter (issue 547). Run: just agent-workflow-tests"""
+import ast
+import inspect as introspect
+import json
+import os
+import unittest
+from unittest import mock
+
+from agent_tools import launchd_agent_adapter as adapter, release_adapter
+from .host_world import HostWorld
+
+LABEL = "dev.example.notifier"
+CONFIG = {"program": "notifierd", "arguments": ["serve", "--quiet"], "keep_alive": True,
+          "background": True, "stdout_path": "logs/out.log", "stderr_path": "logs/err.log"}
+DESCRIPTOR = {"name": "launchd-agent", "adapter_contract_version": "1.0.0",
+              "operations": {"activate": {
+                  "mode": "local_apply", "support": "supported", "inspect": "supported",
+                  "reason": None, "mutability": "in_place", "config_schema_version": 1,
+                  "config_schema": {"members": {"arguments": "string_list", "background": "boolean",
+                                                "keep_alive": "boolean", "program": "string",
+                                                "stderr_path": "string", "stdout_path": "string"},
+                                    "required": ["keep_alive", "program"]},
+                  "effects": ["reversible_no_incremental_spend", "irreversible"],
+                  "recovery_capable": False, "candidate_members": []}},
+              "predicates": {"agent_running": {"support": "supported", "reason": None},
+                             "publication_visible": {"support": "unsupported",
+                                                     "reason": "no_publication_mode"},
+                             "running_subject_identity": {"support": "supported", "reason": None}},
+              "collector": {"max_collection_latency_ms": 30000, "max_concurrent_collections": 1},
+              "target_kinds": {"launchd_gui_agent": ["label"]},
+              "credential_classes": ["gui_session"], "executables": ["git", "launchctl"],
+              "host_capacity": "not_required"}
+FACT_KEYS = {"checkout", "domain", "label", "loaded", "path", "pid", "plist", "runs", "stamp",
+             "state", "working_directory"}
+
+
+class Case(unittest.TestCase):
+    def setUp(self):
+        self.world = HostWorld(self)
+        self.world.program("notifierd")
+        self.candidate = {"version": "v1.2.3", "commit": self.world.head()}
+
+    def parameters(self, candidate=True, **config):
+        parameters = {"action": "agent", "operation": "activate",
+                      "target": {"handle": "agent", "kind": "launchd_gui_agent", "label": LABEL},
+                      "config": {**CONFIG, **config}}
+        if candidate:
+            parameters["candidate"] = dict(self.candidate)
+        return parameters
+
+    def effect(self, parameters=None):
+        return adapter.inspect({"kind": "effect", "operation": "activate",
+                                "parameters": parameters or self.parameters()})
+
+    def predicate(self, name, parameters=None):
+        return adapter.inspect({"kind": "predicate", "predicate": name, "operation": "activate",
+                                "parameters": parameters or self.parameters(
+                                    candidate=name != "agent_running")})
+
+    def managed(self, stamp="candidate", **changes):
+        stamp = (self.candidate["version"], self.candidate["commit"]) if stamp == "candidate" else stamp
+        environment = {} if stamp is None else {adapter.STAMP_VERSION: stamp[0],
+                                                adapter.STAMP_COMMIT: stamp[1]}
+        self.world.load_job(LABEL, path=str(self.world.plist_path(LABEL)), environment=environment,
+                            working_directory=str(self.world.checkout), **changes)
+
+    def snapshot(self):
+        return (self.world.tree(), (self.world.state / "launchd.json").read_bytes(),
+                (self.world.checkout / ".git/index").read_bytes())
+
+
+class DescribeTest(Case):
+    def test_descriptor_is_exact_valid_fresh_and_unregistered(self):
+        self.assertEqual(adapter.describe(), DESCRIPTOR)
+        self.assertEqual(release_adapter.descriptor_problems(adapter.describe()), [])
+        adapter.describe()["operations"].clear()
+        self.assertEqual(adapter.describe(), DESCRIPTOR)
+        self.assertNotIn("launchd-agent", release_adapter.REGISTRY)
+        for node in ast.walk(ast.parse(introspect.getsource(adapter))):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("agent_tools"):
+                self.assertEqual(node.module, "agent_tools.canonical")
+            if isinstance(node, ast.Import):
+                self.assertFalse([a.name for a in node.names if a.name.startswith("agent_tools")])
+
+
+class ClassificationTest(Case):
+    def test_each_row_of_the_inspect_table(self):
+        plist = lambda: self.world.plist_path(LABEL)
+        rows = (
+            ("plist symlink", lambda: plist().parent.mkdir(parents=True) or
+             plist().symlink_to(self.world.checkout), ("diverged", "plist_unexpected"),
+             ("unsatisfied", "subject_mismatch")),
+            ("plist directory", lambda: plist().mkdir(parents=True), ("diverged", "plist_unexpected"),
+             ("unsatisfied", "subject_mismatch")),
+            ("not loaded", lambda: None, ("absent", "agent_not_loaded"), ("unsatisfied", "subject_absent")),
+            ("foreign path", lambda: self.world.load_job(LABEL, path="/Library/LaunchAgents/x.plist"),
+             ("diverged", "agent_path_foreign"), ("unsatisfied", "subject_mismatch")),
+            ("unmanaged", lambda: self.managed(stamp=None), ("absent", "agent_unmanaged"),
+             ("unsatisfied", "unrelated_subject_running")),
+            ("stamp only in default environment", lambda: self.managed(
+                stamp=None, default_environment={adapter.STAMP_VERSION: "v1.2.3",
+                                                 adapter.STAMP_COMMIT: self.candidate["commit"]}),
+             ("absent", "agent_unmanaged"), ("unsatisfied", "unrelated_subject_running")),
+            ("other release", lambda: self.managed(stamp=("v1.2.2", "f" * 40)),
+             ("absent", "agent_other_release"), ("unsatisfied", "subject_mismatch")),
+            ("head moved", lambda: self.managed() or self.world.commit(),
+             ("diverged", "checkout_moved"), ("unsatisfied", "subject_mismatch")),
+            ("tracked change", lambda: self.managed() or self.world.dirty(),
+             ("diverged", "checkout_moved"), ("unsatisfied", "subject_mismatch")),
+            ("not running", lambda: self.managed(state="not running"),
+             ("in_progress", "agent_not_running"), ("unsatisfied", "subject_absent")),
+            ("running", lambda: self.managed(), ("satisfied", "running"), ("satisfied", "running")),
+            ("print exit 5", lambda: self.world.fail("launchctl", "print", exit=5),
+             ("unknown", "lookup_failed"), ("unknown", "identity_unobservable")),
+            ("no runs line", lambda: self.world.fail("launchctl", "print", exit=0,
+                                                     stdout=f"gui/1/{LABEL} = {{\n\tpath = x\n}}\n"),
+             ("unknown", "payload_invalid"), ("unknown", "identity_unobservable")),
+            ("launchctl missing", lambda: (self.world.bin / "launchctl").unlink(),
+             ("unknown", "executable_missing"), ("unknown", "identity_unobservable")))
+        for name, arrange, effect, identity in rows:
+            with self.subTest(row=name):
+                self.setUp()
+                arrange()
+                observed = self.effect()
+                self.assertEqual((observed["outcome"], observed["reason"]), effect)
+                self.assertEqual(release_adapter.effect_observation_problems(observed), [])
+                self.assertEqual(set(observed["facts"]) - {"detail"}, FACT_KEYS)
+                predicate = self.predicate("running_subject_identity")
+                self.assertEqual((predicate["outcome"], predicate["reason"]), identity)
+                self.assertEqual(release_adapter.predicate_observation_problems(predicate), [])
+
+    def test_a_checkout_that_is_not_there_is_an_unreadable_checkout(self):
+        self.world.load_job(LABEL, path=str(self.world.plist_path(LABEL)), environment={
+            adapter.STAMP_VERSION: "v1.2.3", adapter.STAMP_COMMIT: self.candidate["commit"]},
+            working_directory=str(self.world.root / "gone"))
+        observed = self.effect()
+        self.assertEqual((observed["outcome"], observed["reason"]), ("unknown", "lookup_failed"))
+        self.assertTrue(observed["facts"]["detail"])
+
+    def test_a_stamped_job_with_no_working_directory_has_no_checkout(self):
+        self.world.load_job(LABEL, path=str(self.world.plist_path(LABEL)), environment={
+            adapter.STAMP_VERSION: "v1.2.3", adapter.STAMP_COMMIT: self.candidate["commit"]})
+        observed = self.effect()
+        self.assertEqual((observed["outcome"], observed["reason"]), ("diverged", "checkout_moved"))
+        self.assertIsNone(observed["facts"]["checkout"])
+        self.assertEqual(self.world.calls("git"), [])
+
+
+class LivenessTest(Case):
+    def test_each_row_of_the_liveness_table(self):
+        rows = (
+            ("not loaded", lambda: None, ("unsatisfied", "agent_not_loaded")),
+            ("foreign path", lambda: self.world.load_job(LABEL, path="/Library/LaunchAgents/x.plist"),
+             ("unsatisfied", "agent_path_foreign")),
+            ("not running", lambda: self.managed(state="not running"),
+             ("unsatisfied", "agent_not_running")),
+            ("restarted", lambda: self.managed(runs=2), ("unsatisfied", "agent_restarted")),
+            ("running", lambda: self.managed(stamp=None), ("satisfied", "running")),
+            ("print exit 5", lambda: self.world.fail("launchctl", "print", exit=5),
+             ("unknown", "lookup_failed")))
+        for name, arrange, expected in rows:
+            with self.subTest(row=name):
+                self.setUp()
+                arrange()
+                observed = self.predicate("agent_running")
+                self.assertEqual((observed["outcome"], observed["reason"]), expected)
+                self.assertEqual(release_adapter.predicate_observation_problems(observed), [])
+                self.assertEqual({c["tool"] for c in self.world.calls()}, {"launchctl"})
+
+
+class ObservationTest(Case):
+    def test_a_satisfied_observation_names_service_plist_and_pid(self):
+        self.managed()
+        head = self.world.head()
+        observed = self.effect()
+        self.assertEqual(observed["observed_subject"], {"version": "v1.2.3", "commit": head, "pid": 4000})
+        self.assertEqual(observed["references"], [f"gui/{os.getuid()}/{LABEL}",
+                                                  str(self.world.plist_path(LABEL))])
+        facts = observed["facts"]
+        self.assertEqual(set(facts), FACT_KEYS)
+        self.assertEqual(facts["checkout"], {"head": head, "clean": True})
+        self.assertIs(facts["loaded"], True)
+        self.assertEqual((facts["runs"], facts["pid"], facts["state"]), (1, 4000, "running"))
+        self.assertEqual(facts["stamp"], self.candidate)
+
+    def test_inspect_never_mutates(self):
+        for name, arrange in (("running", lambda: self.managed()),
+                              ("head moved", lambda: self.managed() or self.world.commit())):
+            with self.subTest(arrangement=name):
+                self.setUp()
+                arrange()
+                before = self.snapshot()
+                self.effect()
+                self.predicate("running_subject_identity")
+                self.predicate("agent_running")
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual({c["argv"][0] for c in self.world.calls("launchctl")}, {"print"})
+                git = self.world.calls("git")
+                self.assertTrue(git)
+                self.assertTrue(all(c["argv"][0] == "--no-optional-locks" for c in git))
+
+    def test_a_print_past_the_budget_is_lookup_timeout(self):
+        self.world.fail("launchctl", "print", exit=0, sleep=3)
+        with mock.patch.object(adapter, "INSPECT_BUDGET_SECONDS", 1):
+            observed = self.effect()
+        self.assertEqual((observed["outcome"], observed["reason"]), ("unknown", "lookup_timeout"))
+
+
+class ShapeTest(Case):
+    def test_requests_outside_the_closed_shape_start_no_child(self):
+        def config(**changes):
+            return lambda p: p["config"].update(changes)
+
+        def without(name):
+            return lambda p: p["config"].pop(name)
+        mutations = {
+            "label -x": lambda p: p["target"].update(label="-x"),
+            "label with space": lambda p: p["target"].update(label="a b"),
+            "label too long": lambda p: p["target"].update(label="a" * 129),
+            "label not a string": lambda p: p["target"].update(label=["a"]),
+            "target extra member": lambda p: p["target"].update(domain="system"),
+            "target kind": lambda p: p["target"].update(kind="installed_bundle"),
+            "program with slash": config(program="/usr/bin/x"),
+            "program empty": config(program=""),
+            "program dotdot": config(program=".."),
+            "arguments empty": config(arguments=[]),
+            "arguments duplicate": config(arguments=["a", "a"]),
+            "keep_alive string": config(keep_alive="true"),
+            "background int": config(background=1),
+            "stdout absolute": config(stdout_path="/tmp/x"),
+            "stderr parent": config(stderr_path="../x"),
+            "config extra": config(run_at_load=True),
+            "config missing program": without("program"),
+            "candidate version": lambda p: p["candidate"].update(version="1.2.3"),
+            "operation install": lambda p: p.update(operation="install"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(mutation=name):
+                parameters = self.parameters()
+                mutate(parameters)
+                observed = self.effect(parameters)
+                self.assertEqual((observed["outcome"], observed["reason"]),
+                                 ("unknown", "parameters_invalid"))
+                self.assertEqual(release_adapter.effect_observation_problems(observed), [])
+                self.assertEqual(set(observed["facts"]) - {"detail"}, FACT_KEYS)
+                self.assertTrue(observed["facts"]["detail"])
+                running = self.predicate("agent_running", parameters)
+                self.assertEqual((running["outcome"], running["reason"]),
+                                 ("unknown", "parameters_invalid"))
+                identity = self.predicate("running_subject_identity", parameters)
+                self.assertEqual((identity["outcome"], identity["reason"]),
+                                 ("unknown", "identity_unobservable"))
+                self.assertEqual(self.world.calls(), [])
+        with self.subTest(mutation="request operation"):
+            request = {"kind": "effect", "operation": "install", "parameters": self.parameters()}
+            self.assertEqual(adapter.inspect(request)["reason"], "parameters_invalid")
+            self.assertEqual(self.world.calls(), [])
+
+    def test_a_missing_candidate_fails_an_effect_and_identity_but_not_liveness(self):
+        parameters = self.parameters(candidate=False)
+        self.assertEqual(self.effect(parameters)["reason"], "parameters_invalid")
+        self.assertEqual(self.predicate("running_subject_identity", parameters)["reason"],
+                         "identity_unobservable")
+        self.assertEqual(self.world.calls(), [])
+        self.assertEqual(self.predicate("agent_running", parameters)["reason"], "agent_not_loaded")
+
+    def test_a_present_candidate_is_checked_for_liveness(self):
+        parameters = self.parameters()
+        parameters["candidate"]["commit"] = "A" * 40
+        self.assertEqual(self.predicate("agent_running", parameters)["reason"], "parameters_invalid")
+        self.assertEqual(self.world.calls(), [])
+
+    def test_undeclared_predicates_are_unsupported(self):
+        for name in ("publication_visible", "liveness"):
+            with self.subTest(predicate=name):
+                observed = self.predicate(name)
+                self.assertEqual((observed["outcome"], observed["reason"]),
+                                 ("unknown", "predicate_unsupported"))
+        self.assertEqual(self.world.calls(), [])
+
+    def test_a_request_that_is_not_closed_is_parameters_invalid(self):
+        for name, request in (("not a dict", []), ("no kind", {"operation": "activate"}),
+                              ("extra member", {"kind": "effect", "operation": "activate",
+                                                "parameters": self.parameters(), "x": 1})):
+            with self.subTest(request=name):
+                observed = adapter.inspect(request)
+                self.assertEqual((observed["outcome"], observed["reason"]),
+                                 ("unknown", "parameters_invalid"))
+        self.assertEqual(self.world.calls(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
