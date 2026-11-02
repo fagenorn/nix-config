@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -2004,6 +2005,15 @@ class ResumePackContractsTest(unittest.TestCase):
         self.assertIn(self.PACK, self.read(ROLLOVER))
 
 
+def skill_sections(document, *sections):
+    """Run the source tree's `skill-sections` on `document` (issue 505 D8): a child process with
+    `PYTHONPATH` set to `python/`, because the installed-mode run has no package on its path."""
+    return subprocess.run(
+        [sys.executable, "-m", "agent_tools.skill_sections", str(document), *sections],
+        capture_output=True, text=True, timeout=60, check=False,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")})
+
+
 class SlimBootContractsTest(unittest.TestCase):
     """Issue 448: the fresh-owner boot reads only what its phase needs."""
 
@@ -2029,6 +2039,7 @@ class SlimBootContractsTest(unittest.TestCase):
     CHECK_LAUNCH = ("workflow-state check-launch --repo-root <ledger_repo_root> "
                     "--run-id <run-id> --action-id <action_id>")
     ENTRY = "<from-issue-dir>/resume-pack.md"
+    INDEX_CALL = "skill-sections --opening <from-issue-dir>/SKILL.md 'Files beside this one'"
 
     def test_pack_carrying_prompts_name_the_resume_entry(self):
         resume = self.section(self.read(FROM_ISSUE), "### Resume pack", "## The flow")
@@ -2046,7 +2057,7 @@ class SlimBootContractsTest(unittest.TestCase):
                        "`reviewed_head_sha`",
                        "`git -C <worktree> rev-parse HEAD`", "`worktree.head`",
                        "`git -C <worktree> status --porcelain`", "`worktree.dirty_paths`",
-                       "`## Files beside this one`"):
+                       f"`{self.INDEX_CALL}`"):
             position = entry.find(anchor, position + 1)
             self.assertGreaterEqual(position, 0, anchor)
         self.assertIn("`action_id`", entry)
@@ -2058,23 +2069,43 @@ class SlimBootContractsTest(unittest.TestCase):
         end = index.find(" - **`", start + 1)
         return index[start:] if end < 0 else index[start:end]
 
-    @staticmethod
-    def headings(path):
-        return {line.lstrip("#").strip()
-                for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("#")}
-
     def test_every_section_and_file_the_verified_pack_reads_exists(self):
         for name, document in (("AUTO.md", AUTO), ("resume-pack.md", FROM_ISSUE),
                                ("delegated-owner.md", DELEGATED_OWNER),
                                ("ship-handoff.md", FROM_ISSUE)):
+            sections = []
             for span in re.findall(r"`([^`]+)`", self.bullet(name)):
-                with self.subTest(bullet=name, span=span):
-                    if span.endswith(".md"):
+                if span.endswith(".md"):
+                    with self.subTest(bullet=name, span=span):
                         self.assertTrue((FROM_ISSUE_DIR / span).is_file())
-                    elif not (span.startswith("-") or "<" in span or span in ("sdd", "ship-issue")):
-                        self.assertIn(span.removeprefix("## "), self.headings(document))
+                elif not (span.startswith("-") or "<" in span or span in ("sdd", "ship-issue")):
+                    sections.append(span.removeprefix("## "))
+            with self.subTest(bullet=name, sections=sections):
+                self.assertTrue(sections)
+                printed = skill_sections(document, *sections)
+                self.assertEqual(printed.returncode, 0, printed.stderr)
         for heading in ("`## Checks and Phases 6–7`", "`## Generic delegate`"):
             self.assertIn(heading, self.bullet("delegated-owner.md"))
+
+    def test_the_resume_read_list_names_producer_reports_and_every_phase_resolves(self):
+        index = self.bullet("resume-pack.md")
+        for span in ("`Producer reports`", "`Phase <n>`"):
+            self.assertIn(span, index)
+        printed = skill_sections(FROM_ISSUE, *(f"Phase {n}" for n in range(8)))
+        self.assertEqual(printed.returncode, 0, printed.stderr)
+
+    def test_producer_report_rules_left_the_always_read_dispatch_section(self):
+        text = self.read(FROM_ISSUE)
+        dispatch = self.section(text, "## Dispatch, phase-budget and attempt-budget rules",
+                                "## Terminal return procedure")
+        producer = self.section(text, "## Producer reports", "## Phase 2 — Brainstorm")
+        for argv in ("--boundary producer", "review-feasibility confirm"):
+            with self.subTest(argv=argv):
+                self.assertNotIn(argv, dispatch)
+        for argv in ("artifact-budget validate-report --boundary producer --input -",
+                     "review-feasibility confirm --plan <root> --base <base> --input -"):
+            with self.subTest(argv=argv):
+                self.assertIn(argv, producer)
 
     def test_phases_6_7_read_neither_the_stop_rules_nor_the_ship_handoff(self):
         auto = self.bullet("AUTO.md")
