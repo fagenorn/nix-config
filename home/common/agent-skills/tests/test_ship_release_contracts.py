@@ -1,16 +1,17 @@
-"""Contracts for the ship-release skill's release state machine.
+"""Contracts for the ship-release skill, a client of the release core.
 
-Checks on the machine-consumed text of the skill (its commands, state-file
-fields and cross-file anchors; #291 D6 deletes guidance-prose pins), plus two
-executable checks that run the skill's exact commands against throwaway local
-git repositories. Nothing here ever tags, releases, pushes, or deploys against
-a real remote: the executable tests build repos under a TemporaryDirectory and
+Checks on the machine-consumed text of the skill: the `release transaction` examples
+(each parses against the live parser), the dispatch marker and the cross-file anchors
+to CHANGELOG.md. Two executable checks run the skill's previous-tag command against
+throwaway local git repositories. Nothing here ever tags, releases, pushes, or deploys
+against a real remote: the executable tests build repos under a TemporaryDirectory and
 talk to no network.
 """
 
 import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -21,9 +22,6 @@ REPO_ROOT = Path(__file__).parents[4]
 SHIP_RELEASE = REPO_ROOT / "home/common/agent-skills/skills/ship-release/SKILL.md"
 CHANGELOG = REPO_ROOT / "home/common/agent-skills/skills/ship-release/CHANGELOG.md"
 EVALS = REPO_ROOT / "home/common/agent-skills/skills/ship-release/evals/evals.json"
-
-STATE_PATH = ".superpowers/workflows/ship-release/state.json"
-
 
 GIT_LOCATION_VARS = (
     "GIT_DIR",
@@ -91,76 +89,10 @@ class ShipReleaseContractsTest(unittest.TestCase):
         cls.changelog = CHANGELOG.read_text(encoding="utf-8")
         cls.evals = json.loads(EVALS.read_text(encoding="utf-8"))
 
-    def section(self, text, heading, next_heading):
-        start = text.index(heading)
-        end = text.index(next_heading, start + len(heading))
-        return text[start:end]
-
-    # -- R2: no-PR paths tag the local merge result, never the stale remote ---
-
-    def test_merge_sha_command_targets_local_default_not_remote(self):
-        self.assertIn("MERGE_SHA=$(git rev-parse <default>)", self.skill)
-        self.assertNotIn("git rev-parse origin/<default>)", self.skill)
-
-    def test_merge_sha_command_resolves_local_merge_in_a_real_repo(self):
-        """Execute the skill's exact no-PR MERGE_SHA command after a local
-        --no-ff merge with a deliberately stale origin/<default>."""
-        match = re.search(
-            r"^MERGE_SHA=\$\(git rev-parse <default>\)$", self.skill, re.M
-        )
-        self.assertIsNotNone(match, "no-PR MERGE_SHA command missing from SKILL.md")
-        command = match.group(0).replace("<default>", "main")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp) / "repo"
-            repo.mkdir()
-            sh("git init -q -b main .", repo)
-            sh("echo base > file && git add . && git commit -qm base", repo)
-            # Freeze the remote-tracking ref at the pre-merge tip.
-            sh("git update-ref refs/remotes/origin/main HEAD", repo)
-            sh("git checkout -qb integration", repo)
-            sh("echo feature > file && git commit -qam feature", repo)
-            sh("git checkout -q main", repo)
-            sh("git merge -q --no-ff integration -m 'merge: release'", repo)
-
-            resolved = sh(f'{command} && echo "$MERGE_SHA"', repo)
-            local_tip = sh("git rev-parse main", repo)
-            stale_remote = sh("git rev-parse origin/main", repo)
-
-            self.assertEqual(resolved, local_tip)
-            self.assertNotEqual(
-                resolved,
-                stale_remote,
-                "the skill's command must not resolve the stale remote tip",
-            )
-
-    # -- R4: the forge-less skip-check command ---------------------------------
-
-    def test_forge_less_skip_check_reads_the_tags_at_the_merge_sha(self):
-        self.assertIn('git tag --points-at "$MERGE_SHA"', self.skill)
-
-    def test_release_creation_uses_the_guarded_spelling(self):
-        """D21: 4.5f is the single guarded line, with the tag and slug literal."""
-        block = self.section(self.skill, "### 4.5f.", "### 4.5g.")
-        self.assertIn(
-            '${GH_PREFIX}gh release create <vX.Y.Z> --repo <repo-slug> --verify-tag '
-            '--title "<vX.Y.Z> — <one-line scope from PR title>" '
-            "--notes-file <release-notes-path>\n",
-            block,
-        )
-        for forbidden in ("--target", "$NEXT_VERSION", "\\\n"):
-            self.assertNotIn(forbidden, block)
-
-    # -- R3: Phase 0 resumes from durable state and merged PRs ----------------
-
-    def test_phase_zero_reads_the_state_file_and_merged_prs(self):
-        for argv in (STATE_PATH, "--state merged", "mergeCommit"):
-            self.assertIn(argv, self.skill)
-
     # -- R5: PREV_TAG must be reachable from the released commit --------------
 
     def test_prev_tag_selection_is_reachability_restricted(self):
-        self.assertIn('--merged "$MERGE_SHA"', self.skill)
+        self.assertIn('--merged "$COMMIT"', self.skill)
         self.assertIn(
             "git describe --tags --abbrev=0 origin/<default>",
             self.skill,
@@ -177,7 +109,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
         match = re.search(r"^git for-each-ref --count=1 .*$", self.skill, re.M)
         self.assertIsNotNone(match, "PREV_TAG command missing from SKILL.md")
         command = match.group(0)
-        self.assertIn('--merged "$MERGE_SHA"', command)
+        self.assertIn('--merged "$COMMIT"', command)
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -193,7 +125,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
             sh("echo b >> file && git commit -qam b", repo)
             merge_sha = sh("git rev-parse main", repo)
 
-            prev = sh(command, repo, extra_env={"MERGE_SHA": merge_sha})
+            prev = sh(command, repo, extra_env={"COMMIT": merge_sha})
             self.assertEqual(prev, "v0.1.0")
 
             # Sanity: without --merged the wrong tag would have won, so the
@@ -203,36 +135,45 @@ class ShipReleaseContractsTest(unittest.TestCase):
             )
             self.assertEqual(repo_wide, "v9.9.9")
 
-    # -- R6: the cross-file anchors between SKILL.md and CHANGELOG.md resolve --
+    # -- the cross-file anchors between SKILL.md and CHANGELOG.md resolve -------
 
     def test_cross_file_anchors_resolve(self):
         self.assertIn("CHANGELOG.md#version-bump-signals", self.skill)
         self.assertIn("## Version bump signals", self.changelog)
-        self.assertIn("#45d-decide-major--minor--patch", self.changelog)
-        self.assertIn("### 4.5d. Decide MAJOR / MINOR / PATCH", self.skill)
+        self.assertIn("](./SKILL.md#phase-2--version)", self.changelog)
+        self.assertIn("\n## Phase 2 — Version\n", self.skill)
+        for gone in ("§5d", "#45d-"):
+            self.assertNotIn(gone, self.changelog)
 
-    # -- R7: the durable state file's fields ----------------------------------
+    def test_skill_names_no_legacy_state(self):
+        for gone in (".superpowers/workflows", "state.json", "headSha", "mergeSha", "prUrl",
+                     "releaseUrl", "deployState", "gh pr create", "gh pr merge",
+                     "gh release create", "git tag -a", "--auto"):
+            self.assertNotIn(gone, self.skill)
 
-    def test_durable_state_names_every_field(self):
-        state_section = self.section(
-            self.skill, "## Durable release state", "## Phase 0 — Pre-flight"
-        )
-        for field in ("headSha", '"pr"', "prUrl", "mergeSha", "tag", "releaseUrl", "deployState"):
-            self.assertIn(field, state_section)
+    def test_release_examples_parse_and_cover_every_subcommand(self):
+        from agent_tools import release
+        lines = [line for line in self.skill.splitlines()
+                 if line.startswith("release transaction ")]
+        actions = set()
+        for line in lines:
+            with self.subTest(line=line):
+                args = release.build_parser().parse_args(shlex.split(line)[1:])
+                self.assertEqual(args.area, "transaction")
+                actions.add(args.action)
+        self.assertEqual(actions, {"status", "preview", "run", "abandon"})
+        self.assertEqual(len(lines), 6)
 
-    # -- R9: Phase 5 polls a registered deploy adapter through one command -------
+    def test_status_is_read_before_nothing_to_release(self):
+        phase0 = self.skill.split("## Phase 0", 1)[1].split("\n## ", 1)[0]
+        self.assertLess(phase0.index("release transaction status"),
+                        phase0.index("git describe --tags --abbrev=0"))
 
-    def test_phase_five_polls_the_registered_adapter_command(self):
-        """Issue 465 D11: the registered-adapter verdict is the command's observation; no
-        Phase 5 example reads runs or health by hand."""
-        block = self.section(self.skill, "### 5d. Adapter commands", "### 5e. Wakeup prompt")
-        self.assertIn("\nrelease deploy inspect --repo-root <checkout> --commit <MERGE_SHA>\n",
-                      block)
-        self.assertIn("\n${GH_PREFIX}gh run view <facts.run.id> --repo <repo-slug> --log-failed\n",
-                      block)
-        phase = self.section(self.skill, "## Phase 5 — Watch deploy", "## Phase 6 — Report")
-        for forbidden in ("gh run list", "curl", "${GH_PREFIX}release"):
-            self.assertNotIn(forbidden, phase)
+    def test_ownership_keeps_the_dispatch_marker_and_one_resolver_call(self):
+        marker = ("<!-- agent-dispatch: id=ship-release-owner role=ship-owner model=opus "
+                  "effort=high -->")
+        self.assertEqual(self.skill.count(marker), 1)
+        self.assertEqual(self.skill.count("resolve-project resolve --repo-root <checkout>"), 1)
 
     # -- R8: evals match the fixture repo and stay non-destructive -------------
 
