@@ -100,6 +100,8 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_review_package.py \
     tests/test_review_pack.py \
     tests/test_review_feasibility.py \
+    tests/test_review_gate.py \
+    tests/test_review_limits_replay.py \
     tests/test_review_projection_cases.py \
     tests/test_review_history.py \
     tests/test_review_task7.py \

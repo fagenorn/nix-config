@@ -9,6 +9,7 @@ from typing import Sequence
 from agent_tools.review_actual import GenerationError, InvocationError, _run_git
 from agent_tools.review_budget import BudgetError, describe
 from agent_tools.review_forecast import ForecastError, canonical_bytes, read_regular
+from agent_tools.review_gate import confirm, gate
 from agent_tools.review_pack import ReviewPackError
 from agent_tools.review_projection import project, validate_result
 
@@ -30,8 +31,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     validation = commands.add_parser("validate-result")
     validation.add_argument("--input", required=True)
     validation.add_argument("--producer-exit", required=True, type=int, choices=(0, 3))
+    summary = commands.add_parser("gate")
+    summary.add_argument("--plan", required=True, type=Path)
+    summary.add_argument("--base", required=True)
+    summary.add_argument("--head", required=True)
+    summary.add_argument("--completed-through", required=True, type=int)
+    summary.add_argument("--save-dir", type=Path)
+    confirmation = commands.add_parser("confirm")
+    confirmation.add_argument("--plan", required=True, type=Path)
+    confirmation.add_argument("--base", required=True)
+    confirmation.add_argument("--input", required=True)
     try:
         args = parser.parse_args(argv)
+        if args.command == "gate":
+            code, summary_bytes = gate(args.plan, args.base, args.head, args.completed_through,
+                                       save_dir=args.save_dir)
+            sys.stdout.buffer.write(summary_bytes)
+            return code
+        if args.command == "confirm":
+            authority = describe("review-package")
+            if args.input == "-":
+                raw = sys.stdin.buffer.read(authority.report_wire_max_bytes + 1)
+            else:
+                path = Path(args.input).absolute()
+                raw = read_regular(path.parent, path.name, authority.report_wire_max_bytes)
+            code, summary_bytes = confirm(args.plan, args.base, raw)
+            sys.stdout.buffer.write(summary_bytes)
+            return code
         if args.command == "project":
             plan = args.plan.absolute()
             repo = Path(_run_git(plan.parent, "rev-parse", "--show-toplevel").strip())

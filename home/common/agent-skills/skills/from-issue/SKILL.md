@@ -7,12 +7,12 @@ description: Drives one tracker issue through investigate → spec → plan → 
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery contract (and `lane-triage evaluate`, read-only, for `bindings.workflow.light_lane`); this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.paths.artifacts`, and `bindings.workflow`; required blocked capabilities stop and authored unsupported capabilities take only documented no-capability routes.
 
-Take one tracker issue from triage to merged code by chaining the canonical skills, carrying the caller's scoped authorization across phase boundaries.
+Take one tracker issue from triage to merged code by chaining the canonical skills under the caller's scoped authorization.
 
 ## Files beside this one
 - `<tracker-cli>` is `bindings.tracker.cli`; before invoking it, unset only the names `bindings.tracker.credential_env.unset_before_invocation` lists.
-- Phases 2–5 ground through `doc-grounded-questions` before their first question, option set or review pass; that skill owns the pass and its git-dir `GROUNDING.md` cache.
-- **`AUTO.md`** — autonomous-mode rules. Read it once, now, only with the literal token `--auto`; with a resume pack, after its checks pass. A failed pack reads it whole; a verified pack reads the opening and `The self-answer pattern`, then for Phases 0–5 `When *not* to auto-resolve`, for Phases 2–4 `Phases 2–4 run as subagents`, and for Phases 5–7: `Other Phase 5–7 routes` (the direct-autonomous controller at Phase 5 reads `rollover.md`, and the delegated owner `delegated-owner.md`, in its place) and `Interface_version 2 delivery relay`.
+- Phases 2–5 ground through `doc-grounded-questions` before their first question, option set or review pass; it owns the pass and its git-dir `GROUNDING.md` cache.
+- **`AUTO.md`** — autonomous-mode rules. Read it once, now, only with the literal token `--auto`; with a resume pack, after its checks pass. A failed pack reads it whole; a verified pack reads the opening and `The self-answer pattern`, then for Phases 0–5 `When *not* to auto-resolve`, for Phases 2–4 `Phases 2–4 run as subagents`, and for Phases 5–7 `Other Phase 5–7 routes` (the direct-autonomous controller at Phase 5 reads `rollover.md`, the delegated owner `delegated-owner.md`, instead) and `Interface_version 2 delivery relay`.
 - **`acquire-dispatcher.md`** — a complete dispatcher envelope, or a generic `delegate` owner.
 - **`acquire-direct.md`** — `--auto` with no dispatcher envelope.
 - **`acquire-durable.md`** — an interactive user's explicit request for durable orchestration.
@@ -21,7 +21,7 @@ Take one tracker issue from triage to merged code by chaining the canonical skil
 - **`investigate.md`** — Phase 0.
 - **`decision-ledger.md`** — before writing the first ledger row.
 - **`standards-review.md`** — Phase 5.
-- **`REVIEW-CONTRACT.md`** — Phase-5 reviewer contract: hand it over **by absolute path**, never read it in.
+- **`REVIEW-CONTRACT.md`** — Phase-5 reviewer contract: hand it over **by absolute path**, never read it.
 - **`rollover.md`** — the direct autonomous controller's Phase-5 transfer and its stop afterwards.
 - **`delegated-owner.md`** — every delegated owner, first: only `## Checks and Phases 6–7` or `## Generic delegate`, as its route selects.
 - **`ship-handoff.md`** — `## Phase 7 — Ship` on, or a generic delegate's handoff.
@@ -34,51 +34,42 @@ Select the acquisition route by the first condition that holds:
 3. otherwise an explicit request for durable orchestration → `acquire-durable.md`;
 4. otherwise → `acquire-interactive.md`.
 
-Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`, `issue`, `attempt`, `owner`, `action_id`, and normalized `worktree` as one identity and never guess a missing field. Every `workflow-state` command of this owner or its delegated remainder takes `--repo-root <ledger_repo_root>` exactly as supplied (never the current checkout or owner worktree), by the full `~/.agents/bin/workflow-state` path when the bare name does not resolve. Pass `action_id`, which changes on each relaunch, through verbatim.
+Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`, `issue`, `attempt`, `owner`, `action_id`, and normalized `worktree` as one identity; never guess a missing field. Every `workflow-state` command of this owner or its delegated remainder takes `--repo-root <ledger_repo_root>` exactly as supplied (never the current checkout or owner worktree), by the full `~/.agents/bin/workflow-state` path when the bare name does not resolve. Pass `action_id`, which changes on each relaunch, verbatim.
 
 With lifecycle identity, run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> -- <argv>`, still in the foreground; a forge verb never goes through it. Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` prints.
 
-Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -` or `--input -`, with the helper named bare or as `~/.agents/bin/workflow-state`, optionally piped into or out of `artifact-budget validate-report --input -`. Pipe each `workflow-state` reply's raw bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding it, but never `build-delivery` or `resume-pack` stdout: neither is a workflow response, and a resume pack stays untrusted until its checks pass.
+Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -` or `--input -`, with the helper named bare or as `~/.agents/bin/workflow-state`, optionally piped into or out of `artifact-budget validate-report --input -`. Pipe each `workflow-state` reply's bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding, but never `build-delivery` or `resume-pack` stdout: neither is a workflow response, and a resume pack stays untrusted until its checks pass.
 
-The ledger, not tracker or intent data, selects the next delivery stage: follow the returned `owner`, `delivery_remainder`, requirement, or terminal variant without manufacturing authority, a retry, or another permission ritual. Every delivery effect runs through ship-issue's `## Delivery loop`.
+The ledger, not tracker or intent data, selects the next delivery stage: follow the returned `owner`, `delivery_remainder`, requirement, or terminal variant without manufacturing authority, a retry, or a permission ritual. Every delivery effect runs through ship-issue's `## Delivery loop`.
 
 ### Resume pack
 A prompt composed with a pack names `<from-issue-dir>/resume-pack.md`, this directory's absolute path, as the owner's entry in place of the skill invocation, keeping its arguments.
 
 ## The flow
 
-```
-0. Investigate        → summary + open questions (no files yet)
-1. Worktree (skill)   → isolated workspace off origin/<integration-branch>
-2. Brainstorm (skill) → <specification-directory>/<date>-<topic>-design.md
-3. Grill (skill)      → spec refinements + context-doc / ADR updates
-4. Plan (skill)       → <plan-directory>/<date>-<feature>.md
-5. Standards review   → Codex plan review, native fallback, or self-grade
-6. Execute (skill)    → subagent-driven-development
-7. Ship (skill)       → ship-issue: PR, review, CI, merge, cleanup
-```
+0 Investigate (no files yet) · 1 Worktree · 2 Brainstorm · 3 Grill · 4 Plan · 5 Standards review · 6 Execute · 7 Ship.
 
-**Checkpoints.** At every phase boundary, state the artifact produced and the next action. Continue when the user's existing explicit authorization covers that action and its target; a phase transition or fresh session neither erases that authorization nor implies literal `--auto`. Ask only for a concrete missing decision when scope or authority changes. An actual permission denial stops the denied action and is never routed around. With literal `--auto`, also apply `AUTO.md`'s lifecycle and decision-ledger rules.
+**Checkpoints.** Every **CHECKPOINT** below follows this rule. At every phase boundary, state the artifact produced and the next action. Continue when the user's existing explicit authorization covers that action and its target; a phase transition or fresh session neither erases it nor implies literal `--auto`. Ask only for a concrete missing decision when scope or authority changes. An actual permission denial stops the denied action and is never routed around. With literal `--auto`, also apply `AUTO.md`'s lifecycle and decision-ledger rules.
 
 ## Decision ledger (artifact discipline)
-Non-obvious decisions this flow makes instead of the user live in **one issue-level ledger table** in the spec, under a section named exactly `## Decision ledger` — format and rules in `decision-ledger.md` beside this file. Mandatory under `--auto`; expected interactively too.
+Non-obvious decisions this flow makes instead of the user live in **one issue-level ledger table** in the spec, under a section named exactly `## Decision ledger` — format and rules in `decision-ledger.md`. Mandatory under `--auto`; expected interactively.
 
 ## Risk lanes
-Assigned per task at planning time (Phase 4), recorded in the plan's `## Task index`, and applied by `sdd` during execution:
+Assigned per task in Phase 4, recorded in the plan's `## Task index`, applied by `sdd`:
 
-- **mechanical** — deletion/renaming with **no** behavioral, configuration, interface, generated-output, or semantic-documentation effect; file and line counts never qualify a change on their own.
-- **low-risk** — small semantic changes: bounded, locally-verifiable behavior changes, **excluding** anything touching concurrency, lifecycle, destructive operations, security, release, migration, or public contracts.
+- **mechanical** — deletion/renaming with **no** behavioral, configuration, interface, generated-output or semantic-documentation effect; file and line counts never qualify a change.
+- **low-risk** — bounded, locally-verifiable behavior changes, **excluding** anything touching concurrency, lifecycle, destructive operations, security, release, migration or public contracts.
 - **full** — everything else.
 
-Mechanical and low-risk tasks get scoped (inline or reviewer-lite) verification; full-lane tasks get a full per-task review. The independent final two-axis review is mandatory for **every** lane.
+Mechanical and low-risk tasks get scoped verification, full-lane tasks a full per-task review; the final two-axis review is mandatory for **every** lane.
 
 ## Skill-tool invocations
-Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-plans`, `doc-grounded-questions`, `codex-collaboration`, `sdd`, `ship-issue` — go through the `Skill` tool, never paraphrased from memory. `codex-collaboration` is Claude-only, so native Codex sessions take the Phase-5 native-reviewer path.
+Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-plans`, `doc-grounded-questions`, `codex-collaboration`, `sdd`, `ship-issue` — go through the `Skill` tool, never from memory. `codex-collaboration` is Claude-only, so native Codex sessions take the Phase-5 native-reviewer path.
 
-**Never hard-fail on a missing sibling** — run the phase inline: brainstorm as intent + requirements + ≥2 options; grill against the map's areas and `adr/` dirs; plan as numbered tasks with a verification gate each; execute task-by-task with the verify commands; ship per the Phase-7 fallback.
+**Never hard-fail on a missing sibling**; run the phase inline: brainstorm as intent + requirements + ≥2 options; grill against the map's areas and `adr/` dirs; plan as numbered tasks with a verification gate each; execute task-by-task with the verify commands; ship per the Phase-7 fallback.
 
 ## Dispatch, phase-budget and attempt-budget rules
-**Structured report-backs.** Every `Agent` dispatch states the applicable fixed JSON return schema; details live in budgeted worktree files. Prefer the tiered agent types over `general-purpose`.
+**Structured report-backs.** Every `Agent` dispatch states its fixed JSON return schema; details live in budgeted worktree files. Prefer the tiered agent types.
 
 **Leaf-agent clauses.** Every prompt this skill or a file beside it composes for an `Agent` dispatch carries these four clauses verbatim, as a paragraph of their own; a prompt built from `ship-handoff.md` already carries them:
 
@@ -86,21 +77,25 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 **Writing workers.** With lifecycle identity, every agent this owner dispatches that may commit or write to the forge — a Phase 2–4 subagent that commits artifacts, sdd's writing agents (Phase 6) and the Phase-7 ship owner — is registered first:
 `workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`.
-Its prompt carries the printed id as the single line
+Its prompt carries the printed id as the line
 `Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`,
 followed by the sentences "Run each long command, every verification command included, as
 `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`,
 still in the foreground." and "Create every scratch directory or scratch worktree under the path that
 `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.", and it
-creates every commit through `launch-commit`. Release it with `--event returned` when it returns. Never register the fresh delegated owner or the ledger-only bookkeeper. Stop a background worker you cannot wait for through the host's task-stop and release it with `--event stopped`; with no stop capability, wait for it to return. An owner that can neither wait nor stop returns without a terminal write and leaves recovery to the dispatcher.
+creates every commit through `launch-commit`. Release it with `--event returned` when it returns. Never register the fresh delegated owner or the bookkeeper. Stop a background worker you cannot wait for through the host's task-stop and release it with `--event stopped`; with no stop capability, wait for it. An owner that can neither wait nor stop returns without a terminal write, leaving recovery to the dispatcher.
 
-**Self-reap.** With lifecycle identity, every exit that ends this owner's launch — the `handoff` action, the terminal return procedure and the suspension procedure — first releases every worker this owner registered, then runs `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` with this owner's own `action_id`, and only then makes the exit write; when the ledger-only bookkeeper makes that write, the reap runs before the bookkeeper is dispatched. A reap that exits non-zero does not block the exit write: name its exit code and, when it printed a report, its `skipped` launches in this owner's result. After a `delegate`, the owner whose exit ends the launch reaps it.
+**Self-reap.** With lifecycle identity, every exit that ends this owner's launch — the `handoff` action, the terminal return procedure and the suspension procedure — first releases every worker this owner registered, then runs `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` with this owner's own `action_id`, and only then makes the exit write; when the ledger-only bookkeeper makes that write, the reap runs before the bookkeeper is dispatched. A reap that exits non-zero does not block the exit write: name its exit code and any printed `skipped` launches in this owner's result. After a `delegate`, the owner whose exit ends the launch reaps it.
 
 **Interim child results.** A child's return that the host marks interim (its own background work still running, or a result that may be interim) is not a completion. Re-engage that same child by its recorded agent identity: tell it to wait for its job inside its turn and then return its final report, and wait for that report within your turn. Never answer an interim result with a text-only reply, never suspend for it (it is not an `external` wait), and never dispatch a replacement or stop the child. A registered lifecycle worker stays registered under its existing worker id and registers nothing new: an interim result is not its `returned` event. If the message cannot be delivered or its reply cannot be awaited in your turn, follow from-issue's **Writing workers** route (task-stop, then release `--event stopped`), then this skill's handling of a lost child, the one case that may lead to a fresh dispatch. Only the child's final hand-back counts as its result.
 
 **Artifact report boundary.** At every producer boundary, before the phase's `workflow-state progress` call, pipe the received stdout bytes unchanged through `artifact-budget validate-report --boundary producer --input -` before decoding JSON. For a non-null artifact, run `artifact-budget check --kind <reported-kind> --root <reported-path> --format json` yourself and compare the reported kind, path and all four metrics by integer value. Validator or checker exit 2, a missing or non-integer metric (booleans included), any mismatch, or `complete` with anything other than `within_budget` is a contract error and becomes `failed`; an accepted over-budget state follows only its producer's remediation and never advances. Retain only the root and compact metrics, never a member list or artifact contents.
 
-**Executable phase gate.** At every phase boundary from Phase 0 through Phase 7, with lifecycle identity, call (booleans truthful; `--turn-count <n>` only when observed, never fabricated):
+An `implementation-plan` report's `projection` is confirmed too: `review-feasibility confirm --plan <root> --base <base> --input -` over it, `<base>` from `git merge-base HEAD origin/<integration-branch>` (never the report), must exit 0 for `complete` and 3 for `decompose_required`; any other exit or a disagreement is `failed`. A confirmed `decompose_required` takes the Decomposition stop.
+
+**Decomposition stop.** The attempt ends `stopped` through the terminal return procedure; its notes lead with the class, gate head, ordinal and the recommendation's id and tasks, or "new design required". The worktree, branch, workspace, ledger and saved result are kept; nothing is acquired, filed, repinned or dispatched. Each derived delivery needs a new issue, spec, plan, base, forecast, package and reviews. Closing the stopped issue or its parent needs a reconciliation record mapping every original criterion and operational effect to an accepted child's immutable identities, actual package, review and operational evidence; a closed checkbox is not evidence.
+
+**Executable phase gate.** At every phase boundary from Phase 0 through Phase 7, with lifecycle identity, call (truthful booleans; `--turn-count <n>` only when observed):
 
 ```text
 workflow-state progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --phase <completed> --next-needs-context <bool> --artifacts-sufficient <bool> --remainder-self-contained <bool> | artifact-budget validate-report --boundary workflow-response --input -
@@ -109,23 +104,23 @@ workflow-state progress --repo-root <ledger_repo_root> --run-id <run-id> --actio
 and obey the `action` of the validated `phase_gate` reply exactly:
 1. **`continue`** — proceed in this conversation.
 2. **`fresh_start`** — start a fresh conversation from committed artifacts; do not carry conversational state.
-3. **`handoff`** — first release every worker this owner registered, then run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`. Beneath `ledger_repo_root`, create only the run's non-symlink `handoffs/` directory if missing, never the destination leaf. Invoke `handoff` with a destination beneath `.superpowers/workflows/<run-id>/handoffs/`, repeat `workflow-state progress` with `--handoff-path <exact-path>` to finalize `handed_off` on the same attempt, and persist the handoff. A direct `--auto` invocation not prompted `Relaunched owner` never stops: on this or a child's `Handed off (…)` line it dispatches one fresh `from-issue-phase-delegate` owner prompted only `/from-issue <num> --auto` and `Relaunched owner`, and relays its return. Any other owner returns only `Handed off (<exact-handoff-path>). Resume: /from-issue <num> --auto` and stops.
+3. **`handoff`** — first release every worker this owner registered, then run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`. Beneath `ledger_repo_root`, create only the run's non-symlink `handoffs/` directory if missing, never the destination leaf. Invoke `handoff` with a destination beneath `.superpowers/workflows/<run-id>/handoffs/`, then repeat `workflow-state progress` with `--handoff-path <exact-path>` to finalize `handed_off` on the same attempt. A direct `--auto` invocation not prompted `Relaunched owner` never stops: on this or a child's `Handed off (…)` line it dispatches one fresh `from-issue-phase-delegate` owner prompted only `/from-issue <num> --auto` and `Relaunched owner`, and relays its return. Any other owner returns only `Handed off (<exact-handoff-path>). Resume: /from-issue <num> --auto` and stops.
 4. **`delegate`** —
 <!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
 Agent(subagent_type="issue-owner", model="opus", effort="high") delegates the remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
-   Before dispatching it, run `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` with this owner's own `action_id` and, on exit 0, put its stdout in the prompt as a `Resume pack` paragraph.
-   Except at the rollover or a relaunch the prompt has the line `Delegated owner: return the ship handoff`. Its return, in order: (a) only the re-entry line, a `Suspended (…)` line or a `Handed off (…)` line (the delegated owner already reaped before its own exit), or bytes valid at `--boundary workflow-response` as `terminal` or `terminal_failed` (these alone mean it already ended the launch itself): relay it (a `Handed off (…)` per the `handoff` action), write nothing and stop, with no reap; (b) bytes valid at `--boundary ship-handoff`, `state: complete`, with this owner's identity: call `workflow-state progress` for Phase 6, then run Phase 7 with those bytes unchanged as the handoff; (c) anything else: a contract failure via the terminal return procedure.
+   Before dispatching, run `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` with this owner's own `action_id` and, on exit 0, put its stdout in the prompt as a `Resume pack` paragraph.
+   Except at the rollover or a relaunch the prompt has the line `Delegated owner: return the ship handoff`. Its return, in order: (a) only the re-entry line, a `Suspended (…)` line or a `Handed off (…)` line (it already reaped before its own exit), or bytes valid at `--boundary workflow-response` as `terminal` or `terminal_failed` (these alone mean it ended the launch itself): relay it (a `Handed off (…)` per the `handoff` action), write nothing and stop, with no reap; (b) bytes valid at `--boundary ship-handoff`, `state: complete`, with this owner's identity: call `workflow-state progress` for Phase 6, then run Phase 7 with those bytes unchanged as the handoff; (c) anything else: a contract failure via the terminal return procedure.
    Exception — **ledger-only remainder**: when every content artifact is final and only `workflow-state` transitions plus verbatim result relay remain, delegate to the cheap bookkeeper instead:
 <!-- agent-dispatch: id=from-issue-ledger-remainder role=bookkeeper model=haiku effort=low -->
 Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.
-   Give it the exact commands, identities, and paths inline; it decides nothing and edits nothing.
+   Give it the exact commands, identities and paths inline; it decides and edits nothing.
 
-On the direct-autonomous route, `rollover.md` replaces the generic Phase-5 delegation above and `delegated-owner.md` its Phase-6 and Phase-7 `delegate` gates. Every other Phase-6 `delegate` is the Phase-7 ship-owner dispatch. Without lifecycle identity, apply that order locally with the default ceilings of `workflow-state progress` and the default interactive handoff.
+On the direct-autonomous route, `rollover.md` replaces the generic Phase-5 delegation above and `delegated-owner.md` its Phase-6 and Phase-7 `delegate` gates. Every other Phase-6 `delegate` is the Phase-7 ship-owner dispatch. Without lifecycle identity, apply that order locally with `workflow-state progress`'s default ceilings and the interactive handoff.
 
-If `workflow-state progress` is rejected with `cannot record progress at or after attempt deadline` or `progress requires an active attempt`, do not retry it: release every worker this owner registered, run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, then print the canonical re-entry line `/from-issue <num> --auto` and stop, writing no `finish`.
+If `workflow-state progress` is rejected with `cannot record progress at or after attempt deadline` or `progress requires an active attempt`, do not retry: release and reap as **Self-reap** says, print the canonical re-entry line `/from-issue <num> --auto` and stop, writing no `finish`.
 
 ## Terminal return procedure
-Use this one procedure for Phase-0 content stops, attempt budget stops, execution failure, and Phase-7 success whenever lifecycle identity exists. The terminal result is one `ship-summary/v2` bound to the exact current custody and contract digest: after Phase 7, the ship report's summary; for a stop before Phase 7, assemble `state: terminal_failed`, the owner object's `custody`, its `contract_digest` as `delivery_contract_digest`, the validated legacy `stopped` or `failed` row only as `historical_owner_result`, and empty delivery, authority, and reevaluation arrays. Validate the raw candidate with `artifact-budget validate-report --boundary ship-summary --input -` before decoding, and use only its canonical stdout as the summary bytes. Release every worker this owner registered, run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, and, after the `check-launch` fence of this owner's own `action_id` (on `current: false` or any helper failure, write nothing, print the canonical re-entry line `/from-issue <num> --auto` on its own line and stop), feed those bytes on stdin to `workflow-state finish` in one command whose reply is validated before decoding:
+With lifecycle identity, use this one procedure for Phase-0 content stops, attempt budget stops, execution failure and Phase-7 success. The terminal result is one `ship-summary/v2` bound to the current custody and contract digest: after Phase 7, the ship report's summary; for a stop before Phase 7, assemble `state: terminal_failed`, the owner object's `custody`, its `contract_digest` as `delivery_contract_digest`, the validated legacy `stopped` or `failed` row only as `historical_owner_result`, and empty delivery, authority and reevaluation arrays. Validate the raw candidate with `artifact-budget validate-report --boundary ship-summary --input -` before decoding, and use only its canonical stdout as the summary bytes. Release every worker this owner registered, run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` and, after the `check-launch` fence of this owner's own `action_id` (on `current: false` or any helper failure, write nothing, print the re-entry line `/from-issue <num> --auto` on its own line and stop), feed those bytes on stdin to `workflow-state finish` in one command whose reply is validated before decoding:
 
 ```text
 workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
@@ -133,22 +128,22 @@ workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary
 EOF
 ```
 
-Only after that durable write succeeds, send those canonical bytes — the validated `finish` reply — unchanged to the caller. A `delivery_remainder` reply is relayed unchanged too; the next acquisition or control sweep launches it. A new run never uses the legacy `--issue/--attempt/--result-file` transport. The earlier direct-autonomous controller that delegated at the Phase-5 rollover does not run this procedure: its only terminal work is the validate-and-relay stop in `rollover.md`.
+Only after that durable write succeeds, send those canonical bytes — the validated `finish` reply — unchanged to the caller. A `delivery_remainder` reply is relayed unchanged too; the next acquisition or control sweep launches it. A new run never uses the legacy `--issue/--attempt/--result-file` transport. The direct-autonomous controller that delegated at the Phase-5 rollover does not run this procedure: its only terminal work is the validate-and-relay stop in `rollover.md`.
 
-When acquisition returns a terminal replay (`kind: terminal`) rather than an owner, print that envelope's `reentry` verbatim on its own line before relaying the compact response unchanged; a replay writes no `finish`.
+A terminal replay from acquisition (`kind: terminal`) prints that envelope's `reentry` verbatim on its own line, then relays the compact response unchanged; a replay writes no `finish`.
 
-Failure to persist is a failure to finish: surface it and never report the issue as merged or completed. Without lifecycle identity, send the same compact schema directly.
+Failure to persist is a failure to finish: surface it, never report the issue as merged or completed. Without lifecycle identity, send the same compact schema directly.
 
 ## Suspension procedure
-Suspend — do not finish — when an environmental interruption pauses the work: an imminent quota or session limit, a repeated transport failure, a permission prompt only a human can approve, an external wait (a blocker another session owns: end the turn, never poll), or a context that cannot launch the agents a phase needs. A suspension consumes no attempt and needs no authorization phrase.
+Suspend — do not finish — when an environmental interruption pauses the work: an imminent quota or session limit, a repeated transport failure, a permission prompt only a human can approve, an external wait (a blocker another session owns: end the turn, never poll), or a context that cannot launch a phase's agents. A suspension consumes no attempt and needs no authorization.
 
-Release every worker this owner registered (the helper refuses with `live workers: <ids>` while one is live), run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, and then call:
+Release every worker this owner registered (the helper refuses with `live workers: <ids>` while any is live) and run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, and then call:
 
 ```text
 workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
-with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or sdd's `deadline` (the reaper alone owns `unknown`). A validated `kind: terminal` reply means the anti-zombie bound ended the attempt instead: handle it as the terminal replay in the terminal return procedure — print its `reentry`, relay it, and write no `finish` — and stop. Otherwise the reply is `kind: suspended`; print the canonical line as the final output:
+with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or sdd's `deadline` (the reaper alone owns `unknown`). A validated `kind: terminal` reply means the anti-zombie bound ended the attempt instead: handle it as the terminal return procedure's replay — print its `reentry`, relay it, write no `finish` — and stop. Otherwise the reply is `kind: suspended`; print the canonical line as the final output:
 
 ```text
 Suspended (blocked_on=<value>). Resume: <reentry from the envelope>
@@ -157,64 +152,64 @@ Suspended (blocked_on=<value>). Resume: <reentry from the envelope>
 That line is the last thing you emit: make no `finish` call and emit no result JSON.
 
 ## Phase 0 — Investigate
-Read `investigate.md` and follow it, running the lane triage below before posting the note (when the retained tracker capability is unsupported, skip the issue fetch and the PR pre-flight). With lifecycle identity, every Phase-0 early stop uses the terminal return procedure: a `terminal_failed` summary carrying the `stopped` or `failed` row through `workflow-state finish` before notifying the caller. **Mechanical-only shortcut:** declare `mechanical-only` only when the **entire** change fits the mechanical lane (§Risk lanes); Phase 5 then self-grades against `REVIEW-CONTRACT.md` and Phase 6 dispatches one mechanic+reviewer pair for the whole change. Every phase still runs; skip manufactured TDD framing.
+Read `investigate.md` and follow it, running the lane triage below before posting the note (with the retained tracker capability unsupported, skip the issue fetch and the PR pre-flight). With lifecycle identity, every Phase-0 early stop uses the terminal return procedure: a `terminal_failed` summary carrying the `stopped` or `failed` row through `workflow-state finish` before notifying the caller. **Mechanical-only shortcut:** declare `mechanical-only` only when the **entire** change fits the mechanical lane (§Risk lanes); Phase 5 then self-grades against `REVIEW-CONTRACT.md` and Phase 6 dispatches one mechanic+reviewer pair. Every phase still runs; skip manufactured TDD framing.
 
-**Lane triage.** Before the checkpoint, judge each light-lane signal `no`, `hit` or `doubt`, with one line of evidence: `contract_change` (a contract, schema or public interface changes), `concurrency_or_persistence` (concurrency, locking or persisted state), `open_design_questions` (a design question is open) and `criteria_shape` (`hit`: over four acceptance criteria, or one no deterministic code check verifies). Feed `{"signals": {<name>: {"value": ..., "evidence": ...}}, "paths": [<predicted repo-relative paths>]}` through a quoted heredoc to `lane-triage evaluate --repo-root <project.root> --input -`. Exit 0: record the input, its `{hits, lane, mode}` verdict and `ran: full (shadow)` (`ran: full (active route not yet available)` for `mode: active`) under the note's **Lane triage**; every attempt runs full. `light_lane_unsupported`: record "light lane unsupported". `invalid_input` or `resolver_refused`: fix the record and rerun, or stop; any other exit stops; every stop uses the terminal return procedure.
+**Lane triage.** Before the checkpoint, judge each light-lane signal `no`, `hit` or `doubt`, with one line of evidence: `contract_change` (a contract, schema or public interface changes), `concurrency_or_persistence` (concurrency, locking or persisted state), `open_design_questions` (a design question is open) and `criteria_shape` (`hit`: over four acceptance criteria, or one no deterministic code check verifies). Feed `{"signals": {<name>: {"value": ..., "evidence": ...}}, "paths": [<predicted repo-relative paths>]}` through a quoted heredoc to `lane-triage evaluate --repo-root <project.root> --input -`. Exit 0: record the input, its `{hits, lane, mode}` verdict and `ran: full (shadow)` (`ran: full (active route not yet available)` for `mode: active`) under the note's **Lane triage**; every attempt runs full. `light_lane_unsupported`: record "light lane unsupported". `invalid_input` or `resolver_refused`: fix and rerun, or stop; any other exit stops, through the terminal return procedure.
 
-**CHECKPOINT** — Record the restatement and scope; every open question needs a disposition (an answer, "defer to brainstorm", or "agent-choose"). Apply the shared checkpoint rule; ask only for a disposition that existing authorization does not cover.
+**CHECKPOINT** — Record the restatement and scope; every open question needs a disposition (an answer, "defer to brainstorm", or "agent-choose"). Ask only for a disposition that existing authorization does not cover.
 
 ## Phase 1 — Worktree
-Create the workspace before any spec/plan/grill commit lands; those commits go *in the worktree*, never on the integration branch. With a lifecycle envelope (dispatcher-owned, direct-autonomous or explicit durable), use its exact absolute `worktree`, never another path, and decide by what is there: **absent** from the filesystem and `git worktree list` → create it from `origin/<integration-branch>` at that exact path (through `worktrees` only if it accepts the exact path; otherwise `git worktree add -b <branch> <exact-envelope-path> origin/<integration-branch>`); **already a git worktree checked out on this issue's branch** → `cd` in and adopt it, never re-creating, moving or resetting it (Phase 0's inspection governs its contents); **anything else** → fail the attempt through the terminal return procedure, naming the envelope path and what was found, and remove nothing. A ledger-free interactive invocation follows `acquire-interactive.md`.
+Create the workspace before any spec/plan/grill commit; those commits go *in the worktree*, never on the integration branch. With a lifecycle envelope (dispatcher-owned, direct-autonomous or explicit durable), use its exact absolute `worktree`, never another, and decide by what is there: **absent** from the filesystem and `git worktree list` → create it from `origin/<integration-branch>` at that exact path (through `worktrees` only if it accepts that path; otherwise `git worktree add -b <branch> <exact-envelope-path> origin/<integration-branch>`); **already a git worktree on this issue's branch** → `cd` in and adopt it, never re-creating, moving or resetting it (Phase 0's inspection governs its contents); **anything else** → fail the attempt through the terminal return procedure, naming the path and what was found, and remove nothing. A ledger-free interactive invocation follows `acquire-interactive.md`.
 
-**CHECKPOINT** — Record the worktree path and base; in `--auto` log the base SHA in the investigation note. Apply the shared checkpoint rule.
+**CHECKPOINT** — Record the worktree path and base (in `--auto`, log the base SHA in the note).
 
 ## Phase 2 — Brainstorm
-Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Resolve every Phase-0 carryover before opening a new question. A note's **Lane triage** record and verdict go verbatim into the spec's `## Triage` section.
+Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Resolve every Phase-0 carryover before any new question. The note's **Lane triage** record and verdict go verbatim into the spec's `## Triage` section.
 
-**CHECKPOINT** — Record the spec path and approval source. Apply the shared checkpoint rule; existing authorization for autonomous design decisions suffices within its scope.
+**CHECKPOINT** — Record the spec path and approval source. Existing authorization for autonomous design decisions suffices within its scope.
 
 ## Phase 3 — Grill
-Invoke `grill-with-docs` on the spec; any ADRs and context-doc edits it produces commit in the worktree and ship when the PR merges.
+Invoke `grill-with-docs` on the spec; its ADRs and context-doc edits commit in the worktree and ship with the PR.
 
-**CHECKPOINT** — Record all doc updates and the refined spec. Apply the shared checkpoint rule.
+**CHECKPOINT** — Record all doc updates and the refined spec.
 
 ## Phase 4 — Plan
-Invoke `writing-plans` for a plan under the retained plans directory, committed in the worktree. The plan header carries a `## Task index` — one line per task: ID, title, files touched, and risk lane assigned here per §Risk lanes. The plan cites ledger rows by ID and appends new non-obvious plan-level decisions to the specification's ledger.
+Invoke `writing-plans` for a plan under the retained plans directory, committed in the worktree. The plan header carries a `## Task index` — one line per task: ID, title, files touched, and risk lane per §Risk lanes. The plan cites ledger rows by ID and appends new non-obvious plan-level decisions to the specification's ledger.
 
-**Plan-prose ≠ code-prose.** Prose the plan dictates verbatim into the codebase (docstrings, comments, doc sentences, ADR clauses) must describe how the live code *will actually behave*; if you can't say precisely yet, write a TODO and let the execute phase rewrite it from the implemented code.
+**Plan-prose ≠ code-prose.** Prose the plan dictates verbatim into the codebase (docstrings, comments, doc sentences, ADR clauses) must describe how the live code *will actually behave*; if you can't say yet, write a TODO for the execute phase to rewrite from the implemented code.
 
-**CHECKPOINT** — Record the plan path and review state. Apply the shared checkpoint rule.
+**CHECKPOINT** — Record the plan path and review state.
 
 ## Phase 5 — Standards review
 Read `standards-review.md` and follow it, its caller input gate first on every route.
 
-**CHECKPOINT** — Record that standards review is clean. Apply the shared checkpoint rule.
+**CHECKPOINT** — Record that standards review is clean.
 
 ## Phase 6 — Execute
-Invoke `sdd` with the literal token `--reviewed`: it dispatches an implementer per task and reviews each output by risk lane. With lifecycle identity, pass this owner's `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so sdd's `### Lifecycle workers` registers each writing agent under this launch and records a progress marker after each completed task, and hand it the `deadline_at` this owner holds (a later `declare-lane` reply's value supersedes the acquired one).
+Invoke `sdd` with the literal token `--reviewed`: it dispatches an implementer per task and reviews each output by risk lane. With lifecycle identity, pass this owner's `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so sdd's `### Lifecycle workers` registers each writing agent under this launch and records progress after each completed task, and hand it the `deadline_at` this owner holds (a later `declare-lane` value supersedes it).
 
-If the plan is `mechanical-only`, use one mechanic plus one first-pass reviewer for the whole change. With lifecycle identity, register the mechanic the same way (`workflow-state register-worker` before dispatch, the `Lifecycle worker:` line in its prompt, release on return) and run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` once before dispatching the mechanic and once after its change is committed; a refusal changes nothing and is not a suspension cause.
+If the plan is `mechanical-only`, use one mechanic plus one first-pass reviewer for the whole change. With lifecycle identity, register the mechanic the same way (`workflow-state register-worker` before dispatch, the `Lifecycle worker:` line in its prompt, release on return) and run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` once before dispatching the mechanic and once after its change is committed; a refusal changes nothing and is no suspension cause.
 
 <!-- agent-dispatch: id=from-issue-mechanical-implementation role=mechanic model=sonnet effort=high -->
 Agent(subagent_type="mechanic", model="sonnet", effort="high") executes the fully specified mechanical change.
 <!-- agent-dispatch: id=from-issue-mechanical-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs its first-pass review.
 
-sdd returns only canonical JSON: pipe the received bytes through `artifact-budget validate-report --boundary sdd --input -` before decoding any field. Revalidate a `present` delivery-detail package with `artifact-budget check --kind review-package`; for `unpublished`, validate the named retained source with `artifact-budget validate-detail-input`, consume canonical stdout, keep the workspace and worktree, and fail without Phase 7. Only after these gates may sdd's `review_state` (`clean | residuals | unknown`), `head_sha`, `acceptance_state` and `report_path` construct the Phase-7 handoff; ship-issue's Phase-5 range selection takes `head_sha` as the final-review head only when `review_state` is `clean`.
+sdd returns only canonical JSON: pipe the received bytes through `artifact-budget validate-report --boundary sdd --input -` before decoding any field. A validated `decompose_required` is verified, then takes the Decomposition stop: `projected_overflow` by `review-feasibility confirm --plan <root> --base <base> --input -` over `stop.projection` (exit 3, `<base>` from `git merge-base HEAD origin/<integration-branch>`, never the report), `actual_overage` by an independent `artifact-budget check --kind review-package` on `stop.artifact.path` that agrees; a disagreement is `failed`. Revalidate a `present` delivery-detail package with `artifact-budget check --kind review-package`; for `unpublished`, validate the named retained source with `artifact-budget validate-detail-input`, consume canonical stdout, keep the workspace and worktree, and fail without Phase 7. Only after these gates may sdd's `review_state` (`clean | residuals | unknown`), `head_sha`, `acceptance_state` and `report_path` construct the Phase-7 handoff; ship-issue's Phase-5 range selection takes `head_sha` as the final-review head only when `review_state` is `clean`.
 
-**CHECKPOINT** — Record the implementation commit on the feature branch. Apply the shared checkpoint rule.
+**CHECKPOINT** — Record the implementation commit on the feature branch.
 
 ## Phase 7 — Ship
 
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
 Agent(subagent_type="issue-owner", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`.
 
-Read `ship-handoff.md` for the subagent prompt, the inline fallback when `ship-issue` is absent, and the `## Remainder owner prompt` this same site launches for a validated `delivery_remainder` object; the remainder owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
+Read `ship-handoff.md` for the subagent prompt, the inline fallback without `ship-issue`, and the `## Remainder owner prompt` this site launches for a validated `delivery_remainder` object; that owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
 
-From-issue owns the terminal durable write: handle the ship report, and any Phase-6 execution failure or Phase-7 stopped/failed report, as `ship-handoff.md` § Ship report handling says.
+From-issue owns the terminal durable write: handle the ship report, and any Phase-6 execution failure or Phase-7 stopped/failed report, per `ship-handoff.md` § Ship report handling.
 
 ## Notes
-- Standing local-commit authorization covers spec, plan, doc, and fix commits where project policy or an explicit scoped user grant covers the concrete action, target, and effect; the same rule covers push, PR, merge, and cleanup. When neither source grants the action, suspend with `blocked_on=human_gate` and print the re-entry line. An actual permission or launch-guard denial stops the action and is never routed around.
-- Append `Co-Authored-By` when retained `bindings.vcs.commit.co_authored_by` is true. **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
-- **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`**; use retained `bindings.tracker.repo_slug`.
-- If a phase reveals the previous one was wrong, back up to that phase and redo it.
+- Standing local-commit authorization covers spec, plan, doc and fix commits where project policy or an explicit scoped user grant covers the concrete action, target and effect; the same rule covers push, PR, merge and cleanup. When neither grants the action, suspend with `blocked_on=human_gate` and print the re-entry line. An actual permission or launch-guard denial stops the action and is never routed around.
+- Append `Co-Authored-By` when retained `bindings.vcs.commit.co_authored_by` is true. **Never disable GPG signing** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
+- **PR bodies, comments and subagent prompts use full URLs, not bare `#N`**; use `bindings.tracker.repo_slug`.
+- If a phase reveals the previous one was wrong, redo that phase.

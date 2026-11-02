@@ -471,7 +471,7 @@ class AgentToolsLauncherTest(unittest.TestCase):
             + wire(task).decode() + '```\n')
         head = commit('process package')
         before = git('status', '--porcelain'), git('rev-parse', 'HEAD^{tree}')
-        projected = {}
+        projected, summaries = {}, {}
         for label in ('source', 'built'):
             outdir = top / (label + '-out'); outdir.mkdir()
             root = outdir / 'review.json'
@@ -497,6 +497,13 @@ class AgentToolsLauncherTest(unittest.TestCase):
                              (1, 'core', 'review.json'))
             self.assertEqual((value['state'], value['budget_status'], value['violations'],
                               value['recommended_boundary']), ('complete', 'within_budget', [], None))
+            gated = command(label, 'review-feasibility', 'gate', '--plan', str(repo / 'plan.md'),
+                '--base', base, '--head', head, '--completed-through', '1')
+            confirmed = command(label, 'review-feasibility', 'confirm', '--plan', str(repo / 'plan.md'),
+                '--base', base, '--input', '-', payload=gated.stdout)
+            self.assertEqual((gated.returncode, confirmed.returncode), (0, 0), gated.stderr + confirmed.stderr)
+            self.assertEqual(confirmed.stdout, gated.stdout)
+            summaries[label] = gated.stdout
             validated = command(label, 'review-feasibility', 'validate-result', '--input', '-',
                                 '--producer-exit', '0', payload=result.stdout)
             self.assertEqual((validated.returncode, validated.stdout), (0, result.stdout), validated.stderr)
@@ -519,6 +526,7 @@ class AgentToolsLauncherTest(unittest.TestCase):
                 env=checkenv, capture_output=True)
             self.assertEqual(refused.returncode, 2, refused.stderr)
         self.assertEqual(projected['source'], projected['built'])
+        self.assertEqual(summaries['source'], summaries['built'])
         self.assertEqual((top / 'source-out/review.json').read_bytes(),
                          (top / 'built-out/review.json').read_bytes())
         for a in (top / 'source-out/review.shards').iterdir():
