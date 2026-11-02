@@ -3,13 +3,13 @@
 **Files:**
 - Modify: `python/agent_tools/attempt_custody.py` (the cause comment and `BLOCKED_ON_VALUES`; `OBSERVATION_GATED_BLOCKED_ON`; `HUMAN_GATED_BLOCKED_ON`; `resume_permitted` after `suspension_reason`)
 - Modify: `tests/test_attempt_custody.py` (`VocabularyTest`)
-- Modify: `home/common/agent-skills/scripts/workflow-state.py` (the `attempt_custody` import; `suspended_reply` after `reentry_command`; `_apply_one_issue_policy`; `command_direct_owner`; `command_suspend`; the `suspend` parser)
+- Modify: `home/common/agent-skills/scripts/workflow-state.py` (the `attempt_custody` import; `validate_attempt`'s cause check; `suspended_reply` after `reentry_command`; `_apply_one_issue_policy`; `command_direct_owner`; `command_suspend`; the `suspend` parser)
 - Modify: `home/common/agent-skills/scripts/delivery_model/_wire.py` (the `suspended` reply's cause set)
-- Modify: `home/common/agent-skills/tests/test_verification_suspension.py` (a harness and three classes after Task 2's classes)
+- Modify: `home/common/agent-skills/tests/test_verification_suspension.py` (imports; a harness and five classes after Task 2's classes)
 - Modify: `home/common/agent-skills/README.md` (§ Attempt custody and fencing's vocabulary list; a new `### Verification blockers` subsection before `### Resume pack`)
 
 **Interfaces:**
-- Consumes: Task 1's `verification_blocker.park`, `strict_load`, `blocker_id`, `BlockerRefused`; Task 2's schema-11 ledger (`verification_blockers`, the attempt's `verification_blocker`, the attempt rule in `validate_attempt`), and the module Task 2 created, with its `LedgerHarness` (`worktree`, `spawn_all`) and `T`; `LifecycleHarness`'s `run_cli`, `launch_arguments`, `suspend`, `control`, `control_validated`, `acquire_direct`, `direct_run_id`, `direct_request`, `direct_owner_at_root`, `validated_response`, `tree_snapshot`, `read_state`, `write_state`, `worktree_fact`, `tracker_fact`, `delivery_model` and `delivery_fixtures`.
+- Consumes: Task 1's `verification_blocker.park`, `strict_load`, `blocker_id`, `BlockerRefused`; Task 2's schema-11 ledger (`verification_blockers`, the attempt's `verification_blocker`, the attempt rule in `validate_attempt`), and the module Task 2 created, with its `LedgerHarness` (`worktree`, `spawn_all`, `migrate`, `assert_locked_refusal`) and `T`; `LifecycleHarness`'s `install_legacy`, `run_cli`, `launch_arguments`, `suspend`, `control`, `control_validated`, `acquire_direct`, `direct_run_id`, `direct_request`, `direct_owner_at_root`, `validated_response`, `tree_snapshot`, `read_state`, `write_state`, `worktree_fact`, `tracker_fact`, `delivery_model` and `delivery_fixtures`.
 - Produces (c3 builds on these exact names):
   - `attempt_custody.OBSERVATION_GATED_BLOCKED_ON = frozenset({"verification"})` and `resume_permitted(blocked_on: str, *, human_directed: bool) -> bool`.
   - `workflow-state`: `suspended_reply(runtime, *, run_id: str, issue: int, attempt: dict) -> dict`; `_apply_one_issue_policy(..., reply_parked: bool = False)` and its operation `"parked"`; `suspend --verification-input <absolute-path|->`.
@@ -20,6 +20,8 @@
 - `--verification-input` is required exactly with `--blocked-on verification`; the input is read, strict-loaded, validated and identified before `refuse_misbound` and before any lock, so every refusal exits 2 with `.superpowers` byte-identical (D8).
 - Inside the transaction `suspend_attempt` decides first: at the stall bound the reply is `terminal` and no record is created or touched; otherwise `park` and the pointer land in the one write `transact` validates at schema 11 and commits before the reply prints (D8). The reply envelope does not name the blocker.
 - Control's two `_apply_one_issue_policy` calls are unchanged: a parked attempt is not resumable there and gets the existing non-dispatching `terminal` verdict in any sweep, directed or not (D7, D14). `direct-owner` passes `reply_parked=True`: merged-forge reconciliation, then the tracker halt, then `observe` `forge_pr`, then `parked`, answered by `suspended_reply` with nothing written; `new_run` stays refused for a suspended latest attempt.
+- Below schema 11 a `verification` cause is refused (`invalid suspended attempt cause`), so a legacy ledger holding one is refused in its schema-7 validation, before any run is minted, by `migrate`, `migrate --apply` and every locked read, with `.superpowers` byte-identical (D18).
+- A schema-11 parked attempt without a pointer, or with a pointer to no record or to a record that does not list it, is refused by every locked read, writing nothing (D19).
 - `delivery_model` still imports no `agent_tools`; no interface version moves (D10).
 
 - [ ] **Step 1: Write the failing tests**
@@ -236,6 +238,60 @@ class ParkedTest(VerificationHarness, unittest.TestCase):
             vb.blocker_id(failure()): record([73])})
 
 
+class ParkedPointerTest(VerificationHarness, unittest.TestCase):
+    """A parked attempt's pointer must name a record that lists it (issue 544 D5, D19)."""
+
+    def test_a_parked_attempt_needs_a_pointer_its_record_lists(self):
+        self.spawn_all(61, 62)
+        self.park(61, failure(), now=T(5))
+        self.park(62, failure(), now=T(6))
+        identity = vb.blocker_id(failure())
+        good = self.read_state()
+        dangling = ("invalid verification blockers: verification_blockers: attempt 61:1 "
+                    f"points at {identity}, which does not list it")
+
+        def no_pointer(state):
+            state["issues"]["61"]["attempts"][0]["verification_blocker"] = None
+
+        def no_record(state):
+            state["verification_blockers"] = {}
+
+        def unlisted(state):
+            state["verification_blockers"][identity]["attempts"] = [{"issue": 62, "attempt": 1}]
+
+        for label, change, line in (
+                ("no pointer", no_pointer, "invalid attempt verification blocker"),
+                ("no record", no_record, dangling),
+                ("a record that does not list it", unlisted, dangling)):
+            with self.subTest(case=label):
+                state = copy.deepcopy(good)
+                change(state)
+                self.assert_locked_refusal(state, line)
+
+
+class LegacyCauseTest(LedgerHarness, unittest.TestCase):
+    """A ledger below schema 11 cannot hold a verification suspension (issue 544 D18)."""
+
+    def test_a_legacy_verification_suspension_is_refused_before_any_mint(self):
+        self.spawn_all(61)
+        self.suspend(issue=61, attempt=1, blocked_on="transport", now=T(5))
+        state = self.read_state()
+        state["issues"]["61"]["attempts"][0]["blocked_on"] = "verification"
+        self.install_legacy(state, "orchestrate-61")
+        before = self.tree_snapshot()
+        for flags in ((), ("--apply",)):
+            with self.subTest(migrate=flags):
+                (row,) = [row for row in self.migrate(*flags) if row["ledger"] == "orchestrate-61"]
+                self.assertEqual((row["verdict"], row["reason"]), ("refused", "invalid_state"))
+                self.assertEqual(self.tree_snapshot(), before)
+        done = self.run_cli("init-run", "--repo-root", self.root, "--run-id", "orchestrate-61",
+                            ok=False)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (
+            2, "", "workflow-state: workflow state refused: invalid_state: "
+                   "invalid suspended attempt cause\n"))
+        self.assertEqual(self.tree_snapshot(), before)
+
+
 class WireCauseTest(LifecycleHarness, unittest.TestCase):
     def test_the_suspended_reply_admits_exactly_the_owner_causes(self):
         model = self.delivery_model
@@ -258,7 +314,7 @@ class WireCauseTest(LifecycleHarness, unittest.TestCase):
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_attempt_custody.py home/common/agent-skills/tests/test_verification_suspension.py 2>&1 | tail -4'`
-Expected: `Ran 45 tests` and `FAILED (failures=12, errors=1)`: `test_three_cause_classes_partition_the_attempt_causes` errors (`no attribute 'OBSERVATION_GATED_BLOCKED_ON'`); `test_the_closed_sets_are_the_shipped_ones` fails; every `SuspensionTest` and `ParkedTest` case fails, the suspensions on argparse's `unrecognized arguments: --verification-input` and the six refusal subtests on their stderr line (argparse's usage text). `WireCauseTest` passes at this commit, because the vocabulary and the wire set still agree; from Step 3 on it fails if one moves without the other.
+Expected: `Ran 48 tests` and `FAILED (failures=13, errors=1)`: `test_three_cause_classes_partition_the_attempt_causes` errors (`no attribute 'OBSERVATION_GATED_BLOCKED_ON'`); `test_the_closed_sets_are_the_shipped_ones` fails; every `SuspensionTest`, `ParkedTest` and `ParkedPointerTest` case fails, the suspensions on argparse's `unrecognized arguments: --verification-input` and the six refusal subtests on their stderr line (argparse's usage text). Two pins pass at this commit: `WireCauseTest`, because the vocabulary and the wire set still agree, and `LegacyCauseTest`, because `verification` is not yet a cause at all; from Step 3 on each fails if the vocabulary moves without its companion edit (without the legacy rule, the dry run reports `migrate` and the locked read mints the run before refusing it).
 
 - [ ] **Step 3: Implement**
 
@@ -268,6 +324,7 @@ Expected: `Ran 45 tests` and `FAILED (failures=12, errors=1)`: `test_three_cause
 - After `suspension_reason` add `resume_permitted(blocked_on: str, *, human_directed: bool) -> bool`: a non-`str` or a value outside `BLOCKED_ON_VALUES` (`owner_unavailable` included) raises `ValueError(f"blocked_on {blocked_on!r} is not one of {sorted(BLOCKED_ON_VALUES)}")`; an auto-resumable cause gives `True`, a human-gated one `human_directed`, the rest (observation-gated) `False`. Its docstring states that table and that no attempt is suspended on `owner_unavailable`.
 
 `home/common/agent-skills/scripts/workflow-state.py`:
+- In `validate_attempt`'s suspended-cause check, after `or value["blocked_on"] not in BLOCKED_ON_VALUES`, add `or (schema_version != SCHEMA_VERSION and value["blocked_on"] in OBSERVATION_GATED_BLOCKED_ON)`, with the comment `# No ledger below schema 11 was written with an observation-gated cause, and its` / `# 10 -> 11 step gives no pointer, so it is refused before any run is minted` / `# (issue 544 D18).` The refusal stays `invalid suspended attempt cause`.
 - In the `agent_tools.attempt_custody` import, drop `AUTO_RESUMABLE_BLOCKED_ON` (nothing else reads it) and add `OBSERVATION_GATED_BLOCKED_ON` and `resume_permitted`, keeping the list sorted.
 - After `reentry_command` add `suspended_reply(runtime, *, run_id: str, issue: int, attempt: dict[str, Any]) -> dict[str, Any]`, returning `{"interface_version": 2, "kind": "suspended", "run_id": run_id, "issue": issue, "custody": runtime.custody_for_record(issue, "implementation", attempt), "blocked_on": attempt["blocked_on"], "reentry": reentry_command(issue)}`; docstring: the interface-2 `suspended` envelope of a suspended attempt, `suspend`'s reply and the direct owner's for an attempt parked on an observation-gated cause (issue 544 D7). `command_suspend`'s inline envelope is replaced by a call to it (same bytes).
 - Before `command_suspend` add `verification_failure(args) -> dict[str, Any] | None` (D8): without `--verification-input` it returns `None`, or raises `WorkflowError("--verification-input is required with --blocked-on verification")` when `args.blocked_on == "verification"`; with it and another cause it raises `WorkflowError("--verification-input is only valid with --blocked-on verification")`; otherwise `raw = read_input_bytes(args.verification_input, "verification input")`, `failure = verification_blocker.strict_load(raw)` and `verification_blocker.blocker_id(failure)` (validates and identifies), a `BlockerRefused` becoming `WorkflowError(f"invalid verification input: {error}")`, and it returns `failure`.
@@ -299,7 +356,7 @@ An owner whose declared verification command fails for a reason outside its chan
 - [ ] **Step 4: Verify**
 
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_attempt_custody.py tests/test_attempt_identity.py home/common/agent-skills/tests/test_verification_suspension.py home/common/agent-skills/tests/test_delivery_model.py 2>&1 | tail -3'`
-Expected: `Ran 130 tests` and `OK` (33, 22, 12 and 63 per module; the new module's 12 are Task 2's 5 and this task's 7).
+Expected: `Ran 133 tests` and `OK` (33, 22, 15 and 63 per module; the new module's 15 are Task 2's 6 and this task's 9).
 
 Run (timeout 1800 s; about 3 minutes): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_attempt_migration.py home/common/agent-skills/tests/test_attempt_custody.py home/common/agent-skills/tests/test_control_cutover.py 2>&1 | tail -3'`
 Expected: `Ran 377 tests` and `OK`. With the first command this runs all six modules AC3 names.
@@ -323,5 +380,5 @@ launch-commit … -- -m "feat(workflow-state): park on verification blockers (is
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":3,"records":[{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":5,"record_bytes":6144,"support":{"covers":["r3a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3a","last_task":3,"owner":3,"path":"python/agent_tools/attempt_custody.py"},{"bounds":[{"added_lines":25,"boundary":"all","deleted_lines":3,"record_bytes":4096,"support":{"covers":["r3b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3b","last_task":3,"owner":3,"path":"tests/test_attempt_custody.py"},{"bounds":[{"added_lines":135,"boundary":"all","deleted_lines":32,"record_bytes":40960,"support":{"covers":["r2d","r3c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3c","last_task":3,"owner":3,"path":"home/common/agent-skills/scripts/workflow-state.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":3072,"support":{"covers":["r3d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3d","last_task":3,"owner":3,"path":"home/common/agent-skills/scripts/delivery_model/_wire.py"},{"bounds":[{"added_lines":450,"boundary":"all","deleted_lines":0,"record_bytes":23552,"support":{"covers":["r2e","r3e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3e","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/test_verification_suspension.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":3,"record_bytes":34816,"support":{"covers":["r2n","r3f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3f","last_task":3,"owner":3,"path":"home/common/agent-skills/README.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":3,"records":[{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":5,"record_bytes":6144,"support":{"covers":["r3a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3a","last_task":3,"owner":3,"path":"python/agent_tools/attempt_custody.py"},{"bounds":[{"added_lines":25,"boundary":"all","deleted_lines":3,"record_bytes":4096,"support":{"covers":["r3b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3b","last_task":3,"owner":3,"path":"tests/test_attempt_custody.py"},{"bounds":[{"added_lines":140,"boundary":"all","deleted_lines":32,"record_bytes":41984,"support":{"covers":["r2d","r3c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3c","last_task":3,"owner":3,"path":"home/common/agent-skills/scripts/workflow-state.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":3072,"support":{"covers":["r3d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3d","last_task":3,"owner":3,"path":"home/common/agent-skills/scripts/delivery_model/_wire.py"},{"bounds":[{"added_lines":550,"boundary":"all","deleted_lines":0,"record_bytes":28672,"support":{"covers":["r2e","r3e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3e","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/test_verification_suspension.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":3,"record_bytes":34816,"support":{"covers":["r2n","r3f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3f","last_task":3,"owner":3,"path":"home/common/agent-skills/README.md"}]}}
 ```

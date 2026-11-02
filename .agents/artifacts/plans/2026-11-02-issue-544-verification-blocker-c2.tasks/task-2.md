@@ -4,11 +4,11 @@
 - Modify: `python/agent_tools/attempt_identity.py` (`_MAX_SCHEMA_VERSION`, the `schema_refusal` docstring)
 - Modify: `tests/test_attempt_identity.py` (`test_schema_refusal`)
 - Modify: `python/agent_tools/attempt_store.py` (module docstring; version constants; `LockedRead` docstring; `_schema_ten` replaced; `locked_read`; `check_unlocked`; `_row_verdict`; the `migration_row` comment)
-- Modify: `home/common/agent-skills/scripts/workflow-state.py` (the `agent_tools` import; `SCHEMA_VERSION`; `STATE_FIELDS`, `LEGACY_STATE_FIELDS`, `ATTEMPT_FIELDS`, `LEGACY_ATTEMPT_FIELDS`, `SUSPENSION_DEFAULTS`; `validate_attempt`; `validate_state`; `new_run_state`; `reconcile_merged_attempt`, `stop_attempt`, `resume_attempt`)
+- Modify: `home/common/agent-skills/scripts/workflow-state.py` (the `agent_tools` import; `SCHEMA_VERSION`; `STATE_FIELDS`, `LEGACY_STATE_FIELDS`, `ATTEMPT_FIELDS`, `LEGACY_ATTEMPT_FIELDS`, `SUSPENSION_DEFAULTS`; `validate_attempt`; `validate_state`; `new_run_state`; `reconcile_merged_attempt`, `stop_attempt`, `resume_attempt`; the `# Bind:` comment in `command_direct_owner`)
 - Create: `home/common/agent-skills/tests/test_verification_suspension.py`
 - Modify (fixtures, D13): `home/common/agent-skills/tests/test_workflow_state.py`, `home/common/agent-skills/tests/test_attempt_migration.py`, `home/common/agent-skills/tests/test_control_cutover.py`, `home/common/agent-skills/tests/test_attempt_custody.py`, `home/common/agent-skills/tests/test_delivery_workflow.py`, `home/common/agent-skills/tests/test_host_admission.py`, `home/common/agent-skills/tests/test_delivery_sealing.py`
 - Modify: `justfile` (one line, `    home/common/agent-skills/tests/test_verification_suspension.py \`, right after `    home/common/agent-skills/tests/test_attempt_custody.py \`)
-- Modify: `home/common/agent-skills/README.md` (two sentences of § Run identity and migrate)
+- Modify: `home/common/agent-skills/README.md` (three sentences of § Run identity and migrate)
 
 **Interfaces:**
 - Consumes: Task 1's `verification_blocker.validate_blockers(blockers, pointers)`, `upgrade_ten(document)` and `BlockerRefused`.
@@ -17,12 +17,12 @@
   - `validate_attempt(value, *, issue, expected_number, direct, schema_version: int)` enforces at 11 that the pointer is non-null exactly when the attempt is `suspended` with `blocked_on` `"verification"`; `validate_state` at 11 also runs `validate_blockers`, so a write that leaves the pair or a record inconsistent is refused before anything is written.
   - `reconcile_merged_attempt`, `stop_attempt` and `resume_attempt` set `verification_blocker` to `None` beside `blocked_on`.
   - `attempt_store.VERIFICATION_SCHEMA_VERSION = 11`, the store's current version.
-  - The new module's `LedgerHarness(LifecycleHarness)` with `worktree(issue)`, `spawn_all(*issues)` and `migrate(*flags)`, and the constants `BASE_COMMIT`, `REPO`, `HELPER` and `T`.
+  - The new module's `LedgerHarness(LifecycleHarness)` with `worktree(issue)`, `spawn_all(*issues)`, `migrate(*flags)` and `assert_locked_refusal(state, line)` (writes `state` as the ledger, expects `init-run --run-id` to exit 2 with exactly `workflow-state: <line>` and the `.superpowers` tree unchanged), and the constants `BASE_COMMIT`, `REPO`, `HELPER` and `T`.
 
 **Invariants:**
 - Schema 7 is still the shape of a legacy document before it is bound: `validate_state(..., schema_version=7)` checks `LEGACY_STATE_FIELDS` and `LEGACY_ATTEMPT_FIELDS`, neither holding a new member; only schemas 11 and 7 are validated (D5).
 - The store's one 10 → 11 step is `upgrade_ten`, and its `BlockerRefused` is `LedgerRefused("invalid_state", <its line>)` (D9, D15). Schemas 8, 9 and 10 are bound, copied as 10, stepped, validated at 11 and returned with `changed` set; 8 keeps its launch plan and 8 and 9 their remainder plan, and 10 has neither. A ≤ 7 ledger is upgraded, planned and stepped before `mint_run`, so a refused step mints nothing. `check_unlocked` returns a ≤ 7 ledger as its schema-7 candidate, as before. `migrate` reports 8, 9 and 10 as `migrate`, 11 as `current` or `migrated`.
-- Nothing writes a blocker record yet, and `verification` is not yet a cause, so every pointer stays `None` until Task 3; `validate_blockers` runs on `{}` for every existing ledger.
+- Nothing writes a blocker record yet, and `verification` is not yet a cause, so every pointer stays `None` until Task 3; `validate_blockers` runs on `{}` for every existing ledger, and a hand-written pointer on any attempt is refused by every locked read, writing nothing (D19).
 - The fixed base's helper refuses a schema-11 ledger as `unknown_schema` and writes nothing (#337 D10); there is no reverse step.
 
 - [ ] **Step 1: Write the failing tests**
@@ -69,6 +69,17 @@ class LedgerHarness(LifecycleHarness):
         completed = self.run_cli("migrate", "--repo-root", self.root, *flags)
         return json.loads(completed.stdout)["ledgers"]
 
+    def assert_locked_refusal(self, state, line):
+        """`state`, written as the ledger, is refused by a locked read with `line`; nothing
+        under `.superpowers` changes."""
+        self.write_state(state)
+        before = self.tree_snapshot()
+        done = self.run_cli("init-run", "--repo-root", self.root, "--run-id", self.run_id,
+                            ok=False)
+        self.assertEqual((done.returncode, done.stdout, done.stderr),
+                         (2, "", f"workflow-state: {line}\n"))
+        self.assertEqual(self.tree_snapshot(), before)
+
 
 class SchemaElevenTest(LedgerHarness, unittest.TestCase):
     def test_a_new_ledger_is_schema_eleven_with_no_blockers(self):
@@ -107,6 +118,21 @@ class SchemaElevenTest(LedgerHarness, unittest.TestCase):
                 self.assertEqual(done.returncode, 2, done.stdout)
                 self.assertIn("invalid_state", done.stderr)
                 self.assertEqual(self.tree_snapshot(), before)
+
+
+class PointerRuleTest(LedgerHarness, unittest.TestCase):
+    """A pointer outside a verification suspension is refused, unchanged (issue 544 D5, D19)."""
+
+    def test_a_pointer_outside_a_verification_suspension_is_refused(self):
+        self.spawn_all(61, 62)
+        self.suspend(issue=62, attempt=1, blocked_on="transport", now=T(5))
+        good = self.read_state()
+        for issue, label in ((61, "active"), (62, "suspended on transport")):
+            with self.subTest(attempt=label):
+                state = json.loads(json.dumps(good))
+                state["issues"][str(issue)]["attempts"][0]["verification_blocker"] = (
+                    "sha256:" + "0" * 64)
+                self.assert_locked_refusal(state, "invalid attempt verification blocker")
 
 
 class HelperGenerationTest(LedgerHarness, unittest.TestCase):
@@ -202,7 +228,7 @@ Move the existing suites to schema 11 (D13). Each edit below is a pin of the cur
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_attempt_identity.py home/common/agent-skills/tests/test_verification_suspension.py 2>&1 | tail -4'`
-Expected: `Ran 27 tests` and `FAILED (failures=11, errors=1)`: `test_schema_refusal` (11 is still refused); `test_a_new_ledger_is_schema_eleven_with_no_blockers` errors with `KeyError: 'verification_blockers'`; `test_a_schema_ten_ledger_migrates_strictly` (a schema-10 ledger is still `current`); both subtests of `test_a_schema_ten_ledger_holding_a_new_member_is_refused_unchanged` (`invalid workflow state schema`/`invalid attempt schema` rather than `invalid_state`); and the seven base-helper subtests (the ledger is still schema 10, which the base helper reads: a call succeeds or refuses for another reason, such as `direct-owner`'s orchestrated hold, and both `migrate` rows are `current`). `test_the_head_helper_refuses_schema_twelve` already passes, since no helper reads schema 12. The fixture edits are not red-tested alone: they fail only once the schema moves.
+Expected: `Ran 28 tests` and `FAILED (failures=13, errors=1)`: `test_schema_refusal` (11 is still refused); `test_a_new_ledger_is_schema_eleven_with_no_blockers` errors with `KeyError: 'verification_blockers'`; `test_a_schema_ten_ledger_migrates_strictly` (a schema-10 ledger is still `current`); both subtests of `test_a_schema_ten_ledger_holding_a_new_member_is_refused_unchanged` (`invalid workflow state schema`/`invalid attempt schema` rather than `invalid_state`); both subtests of `test_a_pointer_outside_a_verification_suspension_is_refused` (`invalid attempt schema` at schema 10 rather than the pointer rule's line); and the seven base-helper subtests (the ledger is still schema 10, which the base helper reads: a call succeeds or refuses for another reason, such as `direct-owner`'s orchestrated hold, and both `migrate` rows are `current`). `test_the_head_helper_refuses_schema_twelve` already passes, since no helper reads schema 12. The fixture edits are not red-tested alone: they fail only once the schema moves.
 
 - [ ] **Step 3: Implement**
 
@@ -221,6 +247,7 @@ Expected: `Ran 27 tests` and `FAILED (failures=11, errors=1)`: `test_schema_refu
 - `STATE_FIELDS` gains `"verification_blockers"`; `LEGACY_STATE_FIELDS = STATE_FIELDS - {"transaction_id", "verification_blockers"}` with its comment extended to "and stepped to schema 11 (issue 544)". `ATTEMPT_FIELDS` gains `"verification_blocker"`, and after it `LEGACY_ATTEMPT_FIELDS = ATTEMPT_FIELDS - {"verification_blocker"}`. `SUSPENSION_DEFAULTS` gains `"verification_blocker": None`.
 - `validate_attempt` gains the keyword `schema_version: int` and checks `ATTEMPT_FIELDS` at `SCHEMA_VERSION`, else `LEGACY_ATTEMPT_FIELDS`. At `SCHEMA_VERSION`, after the suspension-cause check, it refuses `invalid attempt verification blocker` unless the pointer is non-null exactly when `state == "suspended"` and `blocked_on == "verification"`, and a non-null pointer is a `str`; with a comment that the pointer names the blocker the attempt is parked on and that R5, run by `validate_state` below, refuses any pointer that is not a record's id (issue 544 D5, D17).
 - `validate_state` passes `schema_version=schema_version` to `validate_attempt`; at `SCHEMA_VERSION`, after the issues loop and before `validate_workers`, it builds `pointers = {(int(key), attempt["attempt"]): attempt["verification_blocker"]}` over every attempt and calls `verification_blocker.validate_blockers(value["verification_blockers"], pointers)`, mapping `BlockerRefused` to `WorkflowError(f"invalid verification blockers: {error}")`. Its docstring says "11, or 7 for a document not yet bound" and "at schema 11".
+- In `command_direct_owner`, the comment `# Bind: a legacy ledger is committed as schema 10 at once, under its held lock.` says schema 11.
 - `new_run_state` adds `"verification_blockers": {}`. `reconcile_merged_attempt`, `stop_attempt` and `resume_attempt` each set `attempt["verification_blocker"] = None` on the line after `attempt["blocked_on"] = None`.
 
 `justfile`: the new module right after `    home/common/agent-skills/tests/test_attempt_custody.py \`.
@@ -231,12 +258,13 @@ Expected: `Ran 27 tests` and `FAILED (failures=11, errors=1)`: `test_schema_refu
   ```text
   Schema 11 (issue 544) adds the run's `verification_blockers` map and each attempt's `verification_blocker` pointer: the 10 → 11 step composes after the earlier ones, starts both empty, refuses a schema-10 ledger that already holds either member as `invalid_state`, and is committed by the ledger's next locked write or by `migrate --apply`, like the others.
   ```
+- Replace `is written as schema 10 by the same two routes, in one write: a schema-8 ledger takes its attempt-custody bind (next subsection) and the schema-10 bind together and is never stored at schema 9.` with `is written as schema 11 by the same two routes, in one write: a schema-8 ledger takes its attempt-custody bind (next subsection), the schema-10 bind and the 10 → 11 step together and is never stored at schema 9 or 10.`
 - Replace `so the package-2 (schema-9) helper and every earlier one refuse a schema-10 ledger; there is no reverse migration or transform, so rollback means redeploying a helper that reads schema 10` with `so a schema-10 helper and every earlier one refuse a schema-11 ledger; there is no reverse migration or transform, so rollback means redeploying a helper that reads schema 11`.
 
 - [ ] **Step 4: Verify**
 
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_attempt_identity.py tests/test_verification_blocker.py home/common/agent-skills/tests/test_verification_suspension.py 2>&1 | tail -3'`
-Expected: `Ran 51 tests` and `OK` (22, 24 and 5 per module).
+Expected: `Ran 52 tests` and `OK` (22, 24 and 6 per module).
 
 Run (timeout 1800 s; about 5 minutes): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_attempt_migration.py home/common/agent-skills/tests/test_attempt_custody.py home/common/agent-skills/tests/test_control_cutover.py home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_host_admission.py home/common/agent-skills/tests/test_delivery_sealing.py 2>&1 | tail -3'`
 Expected: `Ran 500 tests` and `OK` (297, 27, 33, 20, 88, 28 and 7 per module).
@@ -261,5 +289,5 @@ launch-commit … -- -m "feat(workflow-state): ledger schema 11 (issue 544)" -m 
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":2,"records":[{"bounds":[{"added_lines":3,"boundary":"all","deleted_lines":3,"record_bytes":3072,"support":{"covers":["r2a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2a","last_task":2,"owner":2,"path":"python/agent_tools/attempt_identity.py"},{"bounds":[{"added_lines":3,"boundary":"all","deleted_lines":3,"record_bytes":2048,"support":{"covers":["r2b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2b","last_task":2,"owner":2,"path":"tests/test_attempt_identity.py"},{"bounds":[{"added_lines":62,"boundary":"all","deleted_lines":40,"record_bytes":18432,"support":{"covers":["r2c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2c","last_task":2,"owner":2,"path":"python/agent_tools/attempt_store.py"},{"bounds":[{"added_lines":48,"boundary":"all","deleted_lines":16,"record_bytes":20480,"support":{"covers":["r2d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2d","last_task":3,"owner":2,"path":"home/common/agent-skills/scripts/workflow-state.py"},{"bounds":[{"added_lines":200,"boundary":"all","deleted_lines":0,"record_bytes":10240,"support":{"covers":["r2e"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r2e","last_task":3,"owner":2,"path":"home/common/agent-skills/tests/test_verification_suspension.py"},{"bounds":[{"added_lines":28,"boundary":"all","deleted_lines":20,"record_bytes":21504,"support":{"covers":["r2f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2f","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_workflow_state.py"},{"bounds":[{"added_lines":7,"boundary":"all","deleted_lines":7,"record_bytes":9216,"support":{"covers":["r2g"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2g","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_attempt_migration.py"},{"bounds":[{"added_lines":3,"boundary":"all","deleted_lines":3,"record_bytes":3584,"support":{"covers":["r2h"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2h","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_control_cutover.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":8,"record_bytes":10240,"support":{"covers":["r2i"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2i","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_attempt_custody.py"},{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":15,"record_bytes":16384,"support":{"covers":["r2j"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2j","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_delivery_workflow.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2048,"support":{"covers":["r2k"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2k","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_host_admission.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2048,"support":{"covers":["r2l"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2l","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_delivery_sealing.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":0,"record_bytes":2048,"support":{"covers":["r2m"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2m","last_task":2,"owner":2,"path":"justfile"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":18432,"support":{"covers":["r2n"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2n","last_task":3,"owner":2,"path":"home/common/agent-skills/README.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":2,"records":[{"bounds":[{"added_lines":3,"boundary":"all","deleted_lines":3,"record_bytes":3072,"support":{"covers":["r2a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2a","last_task":2,"owner":2,"path":"python/agent_tools/attempt_identity.py"},{"bounds":[{"added_lines":3,"boundary":"all","deleted_lines":3,"record_bytes":2048,"support":{"covers":["r2b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2b","last_task":2,"owner":2,"path":"tests/test_attempt_identity.py"},{"bounds":[{"added_lines":62,"boundary":"all","deleted_lines":40,"record_bytes":18432,"support":{"covers":["r2c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2c","last_task":2,"owner":2,"path":"python/agent_tools/attempt_store.py"},{"bounds":[{"added_lines":48,"boundary":"all","deleted_lines":16,"record_bytes":21504,"support":{"covers":["r2d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2d","last_task":3,"owner":2,"path":"home/common/agent-skills/scripts/workflow-state.py"},{"bounds":[{"added_lines":230,"boundary":"all","deleted_lines":0,"record_bytes":11264,"support":{"covers":["r2e"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r2e","last_task":3,"owner":2,"path":"home/common/agent-skills/tests/test_verification_suspension.py"},{"bounds":[{"added_lines":28,"boundary":"all","deleted_lines":20,"record_bytes":21504,"support":{"covers":["r2f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2f","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_workflow_state.py"},{"bounds":[{"added_lines":7,"boundary":"all","deleted_lines":7,"record_bytes":9216,"support":{"covers":["r2g"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2g","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_attempt_migration.py"},{"bounds":[{"added_lines":3,"boundary":"all","deleted_lines":3,"record_bytes":3584,"support":{"covers":["r2h"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2h","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_control_cutover.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":8,"record_bytes":10240,"support":{"covers":["r2i"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2i","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_attempt_custody.py"},{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":15,"record_bytes":16384,"support":{"covers":["r2j"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2j","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_delivery_workflow.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2048,"support":{"covers":["r2k"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2k","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_host_admission.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2048,"support":{"covers":["r2l"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2l","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_delivery_sealing.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":0,"record_bytes":2048,"support":{"covers":["r2m"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2m","last_task":2,"owner":2,"path":"justfile"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":18432,"support":{"covers":["r2n"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2n","last_task":3,"owner":2,"path":"home/common/agent-skills/README.md"}]}}
 ```

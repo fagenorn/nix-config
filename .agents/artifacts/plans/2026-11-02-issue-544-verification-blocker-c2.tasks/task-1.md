@@ -3,7 +3,7 @@
 **Files:**
 - Modify: `python/agent_tools/verification_blocker.py` (module docstring list; new private constants; `park`, `validate_blockers`, `upgrade_ten` after `blocker_id`; `blocker_id` reads the shared identity-member tuple)
 - Modify: `tests/test_verification_blocker.py` (three new classes before `if __name__ == "__main__":`)
-- Modify: `python/README.md` (one sentence appended to the first paragraph of `## verification-observe`)
+- Modify: `python/README.md` (the first paragraph of `## verification-observe`: one clause reworded, one sentence added)
 
 **Interfaces:**
 - Consumes: the module's own `BlockerRefused`, `FAILURE_KIND`, `SCHEMA_VERSION`, `blocker_id`, `_closed`, `_refuse`, `_valued_facts` (c1, unchanged).
@@ -14,7 +14,7 @@
 
 **Invariants:**
 - Still pure: the module imports only `copy`, `json`, `re`, `unicodedata`, `collections.abc` and `agent_tools.canonical` and touches no file, clock, process or environment variable (issue 543 D15; D2).
-- Every refusal is one `BlockerRefused` line `<field>: <reason>`; the tests read the exact texts Step 3 lists.
+- Every refusal is one `BlockerRefused` line `<field>: <reason>`; a map key, pointer or issue key it names is JSON-escaped, so a value holding a newline still gives one line (D20). The tests read the exact texts Step 3 lists.
 - `park` changes only the mapping it is given, never rewrites a record's content, never deletes a record, and returns the id. `upgrade_ten` never mutates its input. `validate_blockers` returns `None` and mutates nothing.
 
 - [ ] **Step 1: Write the failing tests** in `tests/test_verification_blocker.py`
@@ -156,6 +156,10 @@ class RecordRulesTest(unittest.TestCase):
             "R5 pointer to a record without it": ({PINNED_ID: record(attempts=((62, 1),))},
                                                   self.POINTERS,
                                                   "verification_blockers: attempt 61:1"),
+            "a key with a newline": ({"a\nb": record()}, self.POINTERS,
+                                     "verification_blockers[a\\nb].id: must equal its key"),
+            "a pointer with a newline": ({}, {(61, 1): "x\ny"},
+                                         "verification_blockers: attempt 61:1 points at x\\ny"),
         }
         for label, (blockers, pointers, prefix) in cases.items():
             with self.subTest(case=label):
@@ -193,6 +197,8 @@ class UpgradeTenTest(unittest.TestCase):
             ("schema_version: must be 10", {**document, "schema_version": 11}),
             ("schema_version: must be 10", {**document, "schema_version": True}),
             ("issues: must be an object", {**document, "issues": []}),
+            ("issues[6\\n1]: must be an object with an attempts list",
+             {**document, "issues": {"6\n1": []}}),
         )
         for message, value in cases:
             before = copy.deepcopy(value)
@@ -207,7 +213,7 @@ class UpgradeTenTest(unittest.TestCase):
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (timeout 300 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_verification_blocker.py 2>&1 | tail -4'`
-Expected: `Ran 24 tests` and `FAILED (errors=34)` — every new test and subtest errors with `AttributeError: module 'agent_tools.verification_blocker' has no attribute 'park'` (or `validate_blockers`, `upgrade_ten`); the 16 c1 tests pass.
+Expected: `Ran 24 tests` and `FAILED (errors=35)` — the 35 errors, tests and subtests, are all `AttributeError: module 'agent_tools.verification_blocker' has no attribute 'park'` (or `validate_blockers`, `upgrade_ten`); the 16 c1 tests pass.
 
 - [ ] **Step 3: Write the rules** in `python/agent_tools/verification_blocker.py`
 
@@ -216,16 +222,26 @@ Imports: add `import copy` before `import json`, and `from collections.abc impor
 - `_IDENTITY_MEMBERS = ("command", "failure_class", "facts", "repository")`; `blocker_id` now digests `{member: failure[member] for member in _IDENTITY_MEMBERS}` (same bytes, so `PINNED_ID` is unchanged).
 - `_RECORD_MEMBERS = {"id", "attempts", "state", "resolution", *_IDENTITY_MEMBERS}` and `_REFERENCE_MEMBERS = {"issue", "attempt"}`.
 
+After `_refuse` add `_shown(value) -> str`, the form a value takes inside a refusal: `text = json.dumps(value, ensure_ascii=True, default=repr)`, returned without its quotes for a `str` (`text[1:-1]`) and as is otherwise, so a newline becomes the two characters `\n` and the refusal stays one line (D20). Every map key, pointer and issue key below is interpolated through it.
+
 Add after `blocker_id`, each with a docstring that states its contract as below:
 
 - `_positive(value, label) -> int`: `type(value) is int and value >= 1`, else `<label>: must be a positive integer` (so `bool` is refused).
 - `park(blockers, failure, issue, attempt) -> str` (D3, D4): `_positive(issue, "issue")`, `_positive(attempt, "attempt")`, then `identity = blocker_id(failure)` (which validates), all before any write. A new id gets `{"id": identity, <each identity member deep-copied from failure>, "attempts": [{"issue": issue, "attempt": attempt}], "state": "open", "resolution": None}`. A known id gets the reference only when it is not already listed, and its list is re-sorted by `(issue, attempt)`; then `state` becomes `open` and `resolution` `None` (a resolved record is reopened). Content members are never written for a known id. Returns `identity`.
 - `_references(value, label, attempts)` (R3): a non-empty list (`<label>: must be a non-empty list`); each entry `_closed(entry, f"{label}[{i}]", _REFERENCE_MEMBERS)`, then `_positive` on `.issue` and `.attempt`; the `(issue, attempt)` keys strictly increase (`<label>: must be strictly increasing by issue and attempt`); each key is in `attempts` (`<label>[<i>]: names no attempt of this run`).
 - `_resolution(record, label)` (R4): `open` requires `resolution is None` (`<label>.resolution: must be null while open`); a state other than `open`/`resolved` is `<label>.state: must be open or resolved`; `resolved` requires `_closed(resolution, f"{label}.resolution", {"facts"})`, `_valued_facts(resolution["facts"], f"{label}.resolution.facts")`, the same `[(name, source)]` list as the record's facts (`<label>.resolution.facts: must keep the record's names and sources`) and at least one `value` different from the record's fact at the same position (`<label>.resolution.facts: must change at least one value`).
-- `validate_blockers(blockers, pointers) -> None` (R1–R5, D3–D5): not a dict is `verification_blockers: must be an object`. For each `key, record` with `label = f"verification_blockers[{key}]"`: `_closed(record, label, _RECORD_MEMBERS)` (R2); `record["id"] != key` is `<label>.id: must equal its key`; rebuild `{"kind": FAILURE_KIND, "schema_version": SCHEMA_VERSION, <the four identity members>}` and take its `blocker_id`, mapping a `BlockerRefused` to `<label>: <that refusal>` (so c1's shape, secret-shape and 2,048-byte rules hold); an id that differs is `<label>.id: must be the identity of its content` (R1); then `_references(record["attempts"], f"{label}.attempts", pointers)` and `_resolution(record, label)`. Last (R5): every non-null pointer must name a record whose `attempts` lists `{"issue": issue, "attempt": attempt}`, else `verification_blockers: attempt <issue>:<attempt> points at <pointer>, which does not list it`.
-- `upgrade_ten(document) -> dict` (D9): a dict whose `schema_version` is the `int` 10, else `schema_version: must be 10`; a present `verification_blockers` is `verification_blockers: present before schema 11`; `issues` not a dict is `issues: must be an object`; an entry that is not a dict with a list `attempts` is `issues[<key>]: must be an object with an attempts list`; an attempt that is not a dict is `issues[<key>].attempts[<i>]: must be an object`; a present pointer is `issues[<key>].attempts[<i>].verification_blocker: present before schema 11`. Every check runs before the copy. Returns `copy.deepcopy(document)` with `schema_version` 11, `verification_blockers` `{}` and every attempt's `verification_blocker` `None`.
+- `validate_blockers(blockers, pointers) -> None` (R1–R5, D3–D5): not a dict is `verification_blockers: must be an object`. For each `key, record` with `label = f"verification_blockers[{_shown(key)}]"`: `_closed(record, label, _RECORD_MEMBERS)` (R2); `record["id"] != key` is `<label>.id: must equal its key`; rebuild `{"kind": FAILURE_KIND, "schema_version": SCHEMA_VERSION, <the four identity members>}` and take its `blocker_id`, mapping a `BlockerRefused` to `<label>: <that refusal>` (so c1's shape, secret-shape and 2,048-byte rules hold); an id that differs is `<label>.id: must be the identity of its content` (R1); then `_references(record["attempts"], f"{label}.attempts", pointers)` and `_resolution(record, label)`. Last (R5): every non-null pointer must name a record whose `attempts` lists `{"issue": issue, "attempt": attempt}`, else `verification_blockers: attempt <issue>:<attempt> points at <pointer>, which does not list it`, each of the three through `_shown`.
+- `upgrade_ten(document) -> dict` (D9): a dict whose `schema_version` is the `int` 10, else `schema_version: must be 10`; a present `verification_blockers` is `verification_blockers: present before schema 11`; `issues` not a dict is `issues: must be an object`; an entry that is not a dict with a list `attempts` is `issues[<key>]: must be an object with an attempts list` (`<key>` through `_shown` here and below); an attempt that is not a dict is `issues[<key>].attempts[<i>]: must be an object`; a present pointer is `issues[<key>].attempts[<i>].verification_blocker: present before schema 11`. Every check runs before the copy. Returns `copy.deepcopy(document)` with `schema_version` 11, `verification_blockers` `{}` and every attempt's `verification_blocker` `None`.
 
-Module docstring: end the "content identity" bullet with `;` and add this bullet after it:
+Module docstring: replace the paragraph that begins `A validator returns its argument itself` with the first block below, then end the "content identity" bullet with `;` and add the second block after it:
+
+```text
+A shape validator returns its argument itself, never a copy, and never mutates
+it; `validate_blockers` returns None and mutates nothing. Every refusal is one
+`BlockerRefused` whose message is one line, `<field>: <reason>`, with any map key
+or pointer it names JSON-escaped.
+```
+
 
 ```text
 - the ledger's schema-11 rules (issue 544 D2-D5, D9): `park`, which records an attempt
@@ -233,10 +249,14 @@ Module docstring: end the "content identity" bullet with `;` and add this bullet
   against the run's attempt pointers, and `upgrade_ten`, the strict 10 -> 11 step.
 ```
 
-`python/README.md`, `## verification-observe`, first paragraph: right after the sentence that ends with the words "one `BlockerRefused` line" and its `<field>: <reason>` example, insert this sentence (nothing else in the file changes; no caller exists until Task 2):
+`python/README.md`, `## verification-observe`, first paragraph (nothing else in the file changes; no caller exists until Task 2): in the sentence that begins `` `agent_tools.verification_blocker` is the pure module``, the words from `and its validators return their argument` to the sentence's end become the first block below, and the second block is inserted as the next sentence:
 
 ```text
-It also holds the schema-11 ledger rules (issue 544): `park` records an attempt parked on a failure in a run's `verification_blockers` map, `validate_blockers` checks that map against the run's attempt pointers, and `upgrade_ten` is the strict 10 → 11 ledger step.
+its three shape validators return their argument, and every refusal is one `BlockerRefused` line, `<field>: <reason>`.
+```
+
+```text
+It also holds the schema-11 ledger rules (issue 544): `park` records an attempt parked on a failure in a run's `verification_blockers` map, `validate_blockers` checks that map against the run's attempt pointers and returns nothing, and `upgrade_ten` is the strict 10 → 11 ledger step; a map key or pointer named in their refusals is JSON-escaped, so each refusal stays one line.
 ```
 
 - [ ] **Step 4: Verify**
@@ -257,5 +277,5 @@ launch-commit … -- -m "feat(verification): ledger rules for shared blockers (i
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":1,"records":[{"bounds":[{"added_lines":185,"boundary":"all","deleted_lines":10,"record_bytes":13312,"support":{"covers":["r1a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1a","last_task":1,"owner":1,"path":"python/agent_tools/verification_blocker.py"},{"bounds":[{"added_lines":230,"boundary":"all","deleted_lines":10,"record_bytes":14336,"support":{"covers":["r1b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1b","last_task":1,"owner":1,"path":"tests/test_verification_blocker.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":13312,"support":{"covers":["r1c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1c","last_task":1,"owner":1,"path":"python/README.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":1,"records":[{"bounds":[{"added_lines":200,"boundary":"all","deleted_lines":15,"record_bytes":14336,"support":{"covers":["r1a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1a","last_task":1,"owner":1,"path":"python/agent_tools/verification_blocker.py"},{"bounds":[{"added_lines":240,"boundary":"all","deleted_lines":10,"record_bytes":15360,"support":{"covers":["r1b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1b","last_task":1,"owner":1,"path":"tests/test_verification_blocker.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":13312,"support":{"covers":["r1c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1c","last_task":1,"owner":1,"path":"python/README.md"}]}}
 ```
