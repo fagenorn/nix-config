@@ -1848,7 +1848,8 @@ def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
         json.dump(document, sys.stdout, separators=(",", ":"))
         print()
     else:
-        agent_owner_report.print_document(document, top=args.top)
+        agent_owner_report.print_document(document, top=args.top,
+                                          eval_grouping=eval_rows is not None)
 
 
 def main(argv=None, *, executor_factory=ProcessPoolExecutor):

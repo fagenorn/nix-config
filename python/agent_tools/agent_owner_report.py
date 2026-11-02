@@ -46,7 +46,7 @@ from agent_tools.context_meter_commands import Invocation, invocations, lex
 from agent_tools.model_pricing import SOURCE_DATE, SOURCE_URL, cache_write_split, usage_cost
 from agent_tools.transcript_calls import TTL_SECONDS, is_death, read_transcript
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPORT_KIND = "agent-owner-report"
 LONG_WAIT_SECONDS = 300
 MEASURED_PREFIX = MEASURED_NOTE.partition("{tokens}")[0]
@@ -1078,28 +1078,99 @@ def _print_calibration(calibration, top):
         top, ["phase", "boots", "observed p50", "modelled p50"], ["l", "r", "r", "r"])
 
 
-def print_document(doc: dict, *, top: int) -> None:
-    """Print the six tables of the owner report for `doc` (build_document's result)."""
+def _rate(value):
+    return "-" if value is None else f"{value:.0%}"
+
+
+def _ratio_text(value):
+    return "-" if value is None else f"{value:.2f}"
+
+
+def _print_comparison(doc, top):
+    """The comparison table of the candidate against the baseline arm, and its $ / delivered line."""
+    comparison = doc["comparison"]
+    arms = {row["arm"]: row for row in doc["arms"]}
+    projects = {(row["arm"], row["project"]): row for row in doc["projects"]}
+
+    def side(row):
+        return (f"{row['n']:,}", _rate(row["delivery_rate"]), _money(row["owner_dollars_per_lineage"]),
+                row["delivery_rate"]) if row is not None else ("0", "-", "-", None)
+
+    def line(name, before, after, ratio):
+        (n0, rate0, owner0, raw0), (n1, rate1, owner1, raw1) = side(before), side(after)
+        change = "-" if raw0 is None or raw1 is None else f"{(raw1 - raw0) * 100:+.1f}"
+        return [name, n0, n1, rate0, rate1, change, owner0, owner1, _ratio_text(ratio)]
+
+    base, cand = arms[BASELINE_ARM], arms[CANDIDATE_ARM]
+    rows = [line("all", base, cand, comparison["owner_dollars_per_lineage_ratio"])]
+    rows += [line(entry["project"], projects.get((BASELINE_ARM, entry["project"])),
+                  projects.get((CANDIDATE_ARM, entry["project"])),
+                  entry["owner_dollars_per_lineage_ratio"]) for entry in comparison["projects"]]
+    print("\nComparison (candidate against the pooled baseline; rate change in percentage points):\n")
+    _print_capped(
+        rows, top,
+        ["project", "baseline n", "candidate n", "baseline rate", "candidate rate", "rate change",
+         "baseline owner $ / lineage", "candidate owner $ / lineage", "ratio"],
+        ["l"] + ["r"] * 8)
+    print(f"\n$ / delivered: baseline {_money(base['dollars_per_delivered'])}, candidate "
+          f"{_money(cand['dollars_per_delivered'])}, ratio "
+          f"{_ratio_text(comparison['dollars_per_delivered_ratio'])}")
+
+
+def _print_pings(pings):
+    if pings is None:
+        print("Pings: not read (pass --proxy-log PATH)")
+        return
+    found, lost = pings["attributed"], pings["unattributed"]
+    print(f"Pings: {pings['lines']:,} ping lines read from {pings['log']}; attributed "
+          f"{_money(found['dollars'])} (owner {_money(found['owner_dollars'])}); unattributed "
+          f"{lost['pings']:,} pings, {_money(lost['dollars'])}; {pings['unpriced']:,} unpriced; "
+          f"{pings['skipped_lines']:,} lines skipped")
+
+
+def print_document(doc: dict, *, top: int, eval_grouping: bool = False) -> None:
+    """Print the owner report's tables for `doc` (build_document's result), plus the comparison
+    table when there is one. An eval grouping prints no `Pings:` line (issue 503 D7)."""
     rows = sorted(doc["lineages"], key=lambda row: (-row["total_dollars"], row["key"]))
-    print(f"Owner report ({doc['window']}, {len(rows):,} lineages)\n")
+    grouping = doc["start_grouping"]
+    if grouping is None:
+        print(f"Owner report ({doc['window']}, {len(rows):,} lineages)\n")
+    else:
+        print(f"Owner report ({doc['window']}; settled {grouping['settle_days']}d before "
+              f"{grouping['report_end'] or '-'}, {len(rows):,} lineages)\n")
     print("Lineages (one per run and issue; one per trial in an eval; dollars are list-price "
           "estimates):\n")
     _print_capped(
-        [[row["key"], row["arm"], f"{row['launches']:,}", f"{row['handoffs']:,}",
+        [[row["key"], row["arm"], row["project"], (row["started"] or "-")[:16],
+          f"{row['launches']:,}", f"{row['handoffs']:,}",
           f"{row['boots']:,}", f"{row['deaths']:,}", f"{row['long_child_waits']:,}",
           human(row["peak_context"]), _money(row["owner_dollars"]), _money(row["total_dollars"]),
-          "yes" if row["delivered"] else "no"] for row in rows],
-        top, ["lineage", "arm", "launches", "hand-offs", "boots", "deaths", "child waits",
-              "peak", "owner $", "total $", "delivered"],
-        ["l", "l"] + ["r"] * 8 + ["l"])
+          _money(row["ping_dollars"]), "yes" if row["delivered"] else "no"] for row in rows],
+        top, ["lineage", "arm", "project", "started", "launches", "hand-offs", "boots", "deaths",
+              "child waits", "peak", "owner $", "total $", "ping $", "delivered"],
+        ["l", "l", "l", "l"] + ["r"] * 9 + ["l"])
     print("\nArms (dollars per delivered issue = all spend of the arm / delivered; sd is the "
           "sample standard deviation over delivered rows):\n")
     _print_capped(
-        [[arm["arm"], f"{arm['n']:,}", f"{arm['delivered']:,}", _money(arm["dollars_per_delivered"]),
-          _money(arm["sd"]), _money(arm["undelivered_dollars"]), human(arm["peak_p50"]),
-          human(arm["peak_p90"])] for arm in doc["arms"]],
-        top, ["arm", "n", "delivered", "$ / delivered", "sd", "undelivered $", "peak p50", "peak p90"],
-        ["l"] + ["r"] * 7)
+        [[arm["arm"], f"{arm['n']:,}", f"{arm['delivered']:,}", _rate(arm["delivery_rate"]),
+          _money(arm["dollars_per_delivered"]), _money(arm["owner_dollars_per_lineage"]),
+          _money(arm["sd"]), _money(arm["undelivered_dollars"]), _money(arm["ping_dollars"]),
+          human(arm["peak_p50"]), human(arm["peak_p90"])] for arm in doc["arms"]],
+        top, ["arm", "n", "delivered", "rate", "$ / delivered", "owner $ / lineage", "sd",
+              "undelivered $", "ping $", "peak p50", "peak p90"],
+        ["l"] + ["r"] * 10)
+    print("\nProjects (one row per arm and project; owner $ / lineage counts owner calls and "
+          "owner pings):\n")
+    _print_capped(
+        [[row["arm"], row["project"], f"{row['n']:,}", f"{row['delivered']:,}",
+          _rate(row["delivery_rate"]), _money(row["dollars_per_delivered"]),
+          _money(row["owner_dollars_per_lineage"]), _money(row["ping_dollars"])]
+         for row in doc["projects"]],
+        top, ["arm", "project", "n", "delivered", "rate", "$ / delivered", "owner $ / lineage",
+              "ping $"],
+        ["l", "l"] + ["r"] * 6)
+    if doc["comparison"] is not None:
+        _print_comparison(doc, top)
     print("\nFresh-owner boots by phase (B = context at the end of the boot, the registering call or the last call before the first child; slimmable = boot "
           "tokens a smaller resume would skip):\n")
     _print_capped(
@@ -1115,6 +1186,13 @@ def print_document(doc: dict, *, top: int) -> None:
           f"{pricing['approximate_calls']:,} calls priced approximately")
     print(f"Unattributed: {lost['transcripts']:,} transcripts, {_money(lost['dollars'])}; "
           f"{lost['unresolved_owners']:,} owners without an issue")
+    if not eval_grouping:
+        _print_pings(doc["pings"])
+    for window in (grouping["windows"] if grouping is not None else ()):
+        unsettled = window["unsettled"]
+        print(f"Unsettled: {unsettled['lineages']:,} {window['arm']} lineages, "
+              f"{_money(unsettled['dollars'])} (started within {grouping['settle_days']}d of the "
+              f"report end)")
     if doc["interrupted"]:
         print(f"Interrupted trials left out (evidence gaps): {len(doc['interrupted']):,}")
     if doc["unmatched"]:

@@ -30,6 +30,23 @@ def run(root, *argv):
         capture_output=True, text=True, check=False)
 
 
+TOP_KEYS = ["kind", "schema_version", "window", "start_grouping", "pricing", "lineages", "arms",
+            "projects", "boots", "simulated", "calibration", "pings", "comparison", "unattributed",
+            "interrupted", "unmatched"]
+LINEAGE_KEYS = ["key", "run_id", "issue", "arm", "trial", "verdict", "direct", "launches",
+                "handoffs", "boots", "deaths", "long_child_waits", "peak_context", "owner_dollars",
+                "total_dollars", "delivered", "phase_reached", "phase7_entered", "gate_calls",
+                "measured_gate_calls", "help_calls", "absolute_path_calls", "project", "started",
+                "owner_ping_dollars", "ping_dollars"]
+
+
+def text(root, *extra):
+    """The owner report's text output over `root` (all time), which must exit 0."""
+    return subprocess.run(
+        [sys.executable, "-m", "agent_tools.agent_costs", "--report", "owners", "--days", "0",
+         "--projects-dir", str(root), *extra], capture_output=True, text=True, check=True).stdout
+
+
 class OwnerReportTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -308,6 +325,44 @@ class OwnerReportTest(unittest.TestCase):
             ["--report", "owners", "--started", "2026-10-25..2026-10-25"],
             ["--report", "owners", "--started", "2026-10-25..2026-10-32"],
             ["--report", "owners", "--started", "2026-10-25T00:00:00..2026-10-28"])
+
+    def test_the_version_2_document_keys(self):
+        self.chain(Session(self.root)).write()
+        doc = report(self.root)
+        self.assertEqual((list(doc), doc["schema_version"]), (TOP_KEYS, 2))
+        self.assertEqual(list(doc["lineages"][0]), LINEAGE_KEYS)
+        self.assertEqual((doc["start_grouping"], doc["pings"], doc["comparison"]), (None, None, None))
+
+    def test_text_output_prints_projects_comparison_pings_and_unsettled(self):
+        self.two_windows()
+        log = self.root / "proxy.log"
+        log.write_text(ping_line(30 * HOUR + 300, "s9", "k9", read=15_000), encoding="utf-8")
+        out = text(self.root, "--baseline", "2026-10-25..2026-10-26", "--started",
+                   "2026-10-26..2026-10-28", "--settle-days", "0", "--proxy-log", str(log))
+        for line in ("Owner report (baseline ", "; settled 0d before ", "\nProjects (",
+                     "\nComparison (", "\n$ / delivered: baseline ",
+                     f"\nPings: 1 ping lines read from {log}; attributed ",
+                     "\nUnsettled: 0 baseline lineages", "\nUnsettled: 0 candidate lineages"):
+            self.assertIn(line, out)
+        plain = text(self.root)
+        self.assertIn("\nPings: not read (pass --proxy-log PATH)", plain)
+        self.assertIn("\nProjects (", plain)
+        for absent in ("\nComparison (", "\nUnsettled: "):
+            self.assertNotIn(absent, plain)
+
+    def test_eval_text_prints_no_pings_line(self):
+        session = Session(self.root, project="-private-tmp-eval-from-issue-8-T1-repo")
+        g = session.call(None, 0, context=20_000, write=20_000, ttl="1h", bash=progress(6))
+        session.result(None, 5, g, gate_reply("continue"))
+        session.write()
+        results = self.root / "results.jsonl"
+        results.write_text(json.dumps({
+            "skill": "from-issue", "id": 8, "trial": 1, "verdict": "PASS",
+            "workdir": "/private/tmp/eval-from-issue-8.T1", "tree_rev": "a" * 40, "policy": None,
+            "claude_exit": 0}) + "\n", encoding="utf-8")
+        out = text(self.root, "--eval-results", str(results), "--eval", "from-issue:8")
+        self.assertIn("\nProjects (", out)
+        self.assertNotIn("Pings:", out)
 
     def test_text_output_prints_the_six_tables(self):
         self.chain(Session(self.root)).write()
