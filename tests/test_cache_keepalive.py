@@ -317,6 +317,13 @@ class KeepaliveCase(unittest.TestCase):
         self.clock.advance(seconds)
         return self.keepalive.tick()
 
+    def pinged(self, seconds):
+        """Advance the clock, send every ping now due, and return their conversations."""
+        pings = self.due(seconds)
+        for ping in pings:
+            self.keepalive.send(ping)
+        return [ping.conversation for ping in pings]
+
     def events(self, event):
         return [record for record in map(json.loads, self.stream.lines)
                 if record["event"] == event]
@@ -370,7 +377,7 @@ class KeepaliveTest(KeepaliveCase):
 
     def test_pings_repeat_while_the_session_is_active_and_stop_at_the_ceiling(self):
         self.busy_main()
-        self.exchange(AGENT_P)
+        self.exchange(AGENT_P, stop_reason="tool_use")
         while pings := self.due(270):
             [ping] = pings
             self.keepalive.send(ping)
@@ -543,13 +550,6 @@ class SideRequestTest(KeepaliveCase):
         id and no cache mark on the last message."""
         return self.exchange(agent, document(tail_mark=False, note="side"), **kwargs)
 
-    def pinged(self, seconds):
-        """Advance the clock, send every ping now due, and return their conversations."""
-        pings = self.due(seconds)
-        for ping in pings:
-            self.keepalive.send(ping)
-        return [ping.conversation for ping in pings]
-
     def test_a_side_request_after_a_tool_use_keeps_the_tool_pending_until_its_result(self):
         self.exchange(AGENT_P, stop_reason="tool_use")
         self.clock.advance(9)
@@ -614,6 +614,80 @@ class SideRequestTest(KeepaliveCase):
         self.clock.advance(9)
         self.side(finish=False)
         self.assertEqual(self.pinged(261), [self.handle(AGENT_P)])
+
+
+class EndTurnCapTest(KeepaliveCase):
+    """A conversation whose last reply ended its turn (`end_turn`) ends `end_turn_cap` at the
+    first due time at which its idle period holds two pings; any other last reply, or none, keeps
+    the window (issue 502)."""
+
+    def test_an_end_turn_reply_gets_two_pings_then_ends_end_turn_cap(self):
+        self.busy_main()
+        self.exchange(AGENT_P)
+        self.assertEqual([self.pinged(270), self.pinged(270)], [[self.handle(AGENT_P)]] * 2)
+        self.assertEqual(self.due(270), [])
+        [end] = self.events("keepalive_end")
+        self.assertEqual((end["conversation"], end["reason"], end["pings"], end["idle_s"]),
+                         (self.handle(AGENT_P), "end_turn_cap", 2, 810.0))
+        self.assertEqual(self.due(270), [])
+        self.assertEqual((len(self.events("keepalive_end")), len(self.upstream.requests)), (1, 2))
+
+    def test_a_reply_with_another_stop_reason_is_not_capped(self):
+        self.busy_main()
+        self.exchange(AGENT_P, stop_reason="max_tokens")
+        self.assertEqual([self.pinged(270), self.pinged(270), self.pinged(270)],
+                         [[self.handle(AGENT_P)]] * 3)
+        self.assertEqual(self.ends(), [])
+
+    def test_each_idle_period_after_an_end_turn_reply_gets_its_own_two_pings(self):
+        self.busy_main()
+        self.exchange(AGENT_P)
+        self.assertEqual([self.pinged(270), self.pinged(270)], [[self.handle(AGENT_P)]] * 2)
+        self.clock.advance(60)
+        self.exchange(AGENT_P, document(note="next turn"))
+        self.assertEqual([self.pinged(270), self.pinged(270), self.pinged(270)],
+                         [[self.handle(AGENT_P)], [self.handle(AGENT_P)], []])
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "resumed", 2),
+                                       (self.handle(AGENT_P), "end_turn_cap", 2)])
+
+    def test_a_side_request_never_lifts_the_cap(self):
+        self.busy_main()
+        self.exchange(AGENT_P)
+        self.assertEqual(self.pinged(270), [self.handle(AGENT_P)])
+        self.clock.advance(9)
+        self.exchange(AGENT_P, document(tail_mark=False, note="side"), stop_reason="tool_use")
+        self.assertEqual([self.pinged(261), self.pinged(270)], [[self.handle(AGENT_P)], []])
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "end_turn_cap", 2)])
+
+    def test_pings_sent_while_the_reply_streams_count_toward_the_cap(self):
+        self.busy_main()
+        reply = self.exchange(AGENT_P, finish=False)
+        self.assertEqual([self.pinged(270), self.pinged(270), self.pinged(270)],
+                         [[self.handle(AGENT_P)]] * 3)
+        self.clock.advance(5)
+        for piece in pieces(sse("end_turn")):
+            reply.chunk(piece)
+        reply.done("complete")
+        self.assertEqual(self.pinged(265), [])
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "end_turn_cap", 3)])
+
+    def test_an_idle_session_ends_session_idle_before_the_cap(self):
+        self.busy_main()
+        self.exchange(AGENT_P)
+        self.assertEqual(self.pinged(270), [self.handle(AGENT_P)])
+        self.clock.advance(30)
+        self.exchange(None, document(ttl="1h", note="tool result"))
+        self.assertEqual([self.pinged(240), self.pinged(270)], [[self.handle(AGENT_P)], []])
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "session_idle", 2)])
+
+    def test_a_newer_thread_request_clears_the_last_reply_even_when_it_fails(self):
+        self.busy_main()
+        self.exchange(AGENT_P)
+        self.clock.advance(100)
+        self.exchange(AGENT_P, document(note="overloaded"), status=529)
+        self.assertEqual([self.pinged(170), self.pinged(270), self.pinged(270)],
+                         [[self.handle(AGENT_P)]] * 3)
+        self.assertEqual(self.ends(), [])
 
 
 class FailingPingTest(KeepaliveCase):
