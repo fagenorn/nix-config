@@ -275,7 +275,8 @@ let
     # are allowed whole, bare and by their ~/.agents/bin path: their only writes are validated
     # ledger transitions under .superpowers/workflows/ (orchestrate-control's through its
     # workflow-state children), and every lifecycle call is one heredoc-fed command, so each
-    # pipeline segment matches a rule.
+    # pipeline segment matches a rule. The verification-observe adapter is allowed the same way:
+    # its only write is fetching the integration branch into refs/remotes/origin/<branch>.
     permissions = {
       defaultMode = "auto";
       allow = [
@@ -304,6 +305,8 @@ let
         "Bash(~/.agents/bin/ship-delivery:*)"
         "Bash(orchestrate-control:*)"
         "Bash(~/.agents/bin/orchestrate-control:*)"
+        "Bash(verification-observe:*)"
+        "Bash(~/.agents/bin/verification-observe:*)"
         "Agent"
       ];
       ask = [ ];

@@ -30,7 +30,8 @@ EXPECTED_ALLOW = [
     "Bash(workflow-state:*)", "Bash(~/.agents/bin/workflow-state:*)",
     "Bash(artifact-budget:*)", "Bash(~/.agents/bin/artifact-budget:*)",
     "Bash(ship-delivery:*)", "Bash(~/.agents/bin/ship-delivery:*)",
-    "Bash(orchestrate-control:*)", "Bash(~/.agents/bin/orchestrate-control:*)", "Agent",
+    "Bash(orchestrate-control:*)", "Bash(~/.agents/bin/orchestrate-control:*)",
+    "Bash(verification-observe:*)", "Bash(~/.agents/bin/verification-observe:*)", "Agent",
 ]
 
 # Stand-in for `gh`. Answers the two lookups the guard makes for any slug and
@@ -362,6 +363,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "orchestrate-control step --repo-root /r --input - <<'JSON'\n"
             '{"session":{},"first_sweep":true,"owners":[],"contracts_due":[],'
             '"refused_contracts":[]}\nJSON',
+            "verification-observe observe --repo-root /r --input - <<'JSON'\n"
+            '{"kind":"verification","blocker_id":"sha256:' + "0" * 64 + '",'
+            '"sources":[{"name":"flake-lock","paths":["flake.lock"]}]}\nJSON',
         ):
             with self.subTest(command=command.split()[0]):
                 result = self.invoke_command(command)
