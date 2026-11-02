@@ -3,7 +3,7 @@
 These three functions are the adapter's whole public surface (#124 D7). `describe()` returns a
 fresh descriptor with one operation, `deploy`: `publication_triggered` mode, `unsupported` for
 `invoke` (`bridge_watch_only`) and supported for `inspect`, so no release profile can bind it yet
-and ship-release reaches it through `release deploy inspect` (D1, D5). Its closed config is
+and it is read through `release deploy inspect` (D1, D5). Its closed config is
 `workflow`, `branch`, `services` (a `string_list`), `health_url` and `health_commit_field`.
 
 This module imports only the standard library and `agent_tools.canonical`: the registry in
