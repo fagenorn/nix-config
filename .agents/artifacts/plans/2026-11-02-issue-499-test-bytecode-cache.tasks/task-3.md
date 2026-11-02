@@ -130,6 +130,10 @@ AC1, every check (Task 1's seams, Task 2's harness check, this task's seam):
 Run (timeout 3600 s): `just build`
 Expected: exit 0.
 
+The issue's demo, informational only (no expected value, no assertion; spec § Test seams): under one fresh, empty cache directory created beneath the `launch-scope scratch` root, time two consecutive starts.
+Run (timeout 120 s): `bash -c 'set -e; c="$1"; for i in 1 2; do /usr/bin/time -p env PYTHONPATH="$PWD/python" PYTHONPYCACHEPREFIX="$c" python3 home/common/agent-skills/scripts/workflow-state.py --help >/dev/null; done' demo <fresh-cache-dir>`
+Record both runs' `real`, `user` and `sys` figures in Step 5's `## Demo` section, cold first.
+
 - [ ] **Step 5: Write the acceptance record**
 
 Create `.agents/artifacts/plans/2026-11-02-issue-499-test-bytecode-cache.acceptance.md` with exactly this content. The sdd controller writes the `Verdict` column, so leave it `—`:
@@ -139,9 +143,15 @@ Create `.agents/artifacts/plans/2026-11-02-issue-499-test-bytecode-cache.accepta
 
 | AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
 |----|-----------|------|------------------|----------|--------|------------|---------|
-| AC1 | [code] Suite child processes write and reuse bytecode in a per-run cache, and `workflow-state` loads its delivery module through the import system, so a second invocation compiles nothing. Measured by: a test added to the agent workflow test suite that asserts no recompilation on the second invocation, using the cache directory's contents or `-X importtime`. | code | `home/common/agent-skills/tests/test_delivery_workflow.py::DeliveryAdmissionTest::test_a_second_init_run_compiles_nothing_into_its_bytecode_cache`, `tests/test_suite_runner.py::MemberEnvironmentTest` and `::BytecodeCacheTest`, and the plan's harness check, run by `just agent-workflow-tests` | in final verification | — | `just agent-workflow-tests` on the final head, `failed=0` | — |
+| AC1 | [code] Suite child processes write and reuse bytecode in a per-run cache, and `workflow-state` loads its delivery module through the import system, so a second invocation compiles nothing. Measured by: a test added to the agent workflow test suite that asserts no recompilation on the second invocation, using the cache directory's contents or `-X importtime`. | code | `home/common/agent-skills/tests/test_delivery_workflow.py::DeliveryAdmissionTest::test_a_second_init_run_compiles_nothing_into_its_bytecode_cache`, `tests/test_suite_runner.py::MemberEnvironmentTest` and `::BytecodeCacheTest`, run by `just agent-workflow-tests`; and, separately, the plan root's harness check command | in final verification | — | `just agent-workflow-tests` on the final head, `failed=0`; the harness check on the final head, exit 0, its output recorded on its own | — |
 | AC2 | [evidence] Suite CPU work drops. Measured by: the suite runner's timing table on the merge commit's push to main (Agent Workflow Tests (advisory), hosted ubuntu-24.04, default worker cap); threshold: summed module seconds at least 150 s below the last push to main before the merge. | evidence | `gh run view <run-id> --repo fagenorn/nix-config --log \| grep -F "suite-runner: summary"` for the merge commit's push-triggered `ci.yaml` run on `main` and the last push run before it; threshold: the earlier `cpu=` minus the merge run's `cpu=` is at least 150.0 s | not measured — post-merge (D7) | — | post-merge, per D7: the "Agent Workflow Tests (advisory)" job of both runs, each with `failed=0`, `jobs=4` and the same `members=`; a non-qualifying merge run is read from its re-run, a non-qualifying baseline gives way to the latest earlier qualifying push run with the reason recorded; ship holds the issue for verification | — |
+
+## Demo
+
+Informational, not an acceptance check: two consecutive `workflow-state --help` starts under one fresh cache (Step 4's demo command). Cold: real <s>, user <s>, sys <s>. Warm: real <s>, user <s>, sys <s>.
 ```
+
+Replace each `<s>` with the figure Step 4's demo printed.
 
 - [ ] **Step 6: Commit**
 
