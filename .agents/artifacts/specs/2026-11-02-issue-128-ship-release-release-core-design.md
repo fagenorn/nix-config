@@ -40,8 +40,8 @@ For the operator, this means three problems:
 ## Solution
 
 Three new modules sit behind one new area of the existing `release` command,
-`release transaction status|preview|run`. Together they own every release semantic the skill
-hand-rolled:
+`release transaction status|preview|run|abandon`. Together they own every release semantic the
+skill hand-rolled:
 
 - **The driver** finds the release on `{project, target}`, previews a compiled plan with one
   confirmation per irreversible action, and runs the plan through `TransactionStore` with
@@ -84,10 +84,13 @@ caller must name one with `--profile`; otherwise the command refuses `profile_am
 the ids. An unknown id refuses `profile_unknown`.
 
 **Gates.** Four gates run in order. Each refuses with exit 3 and a closed JSON error
-`{code, repair_id, detail}`:
+`{code, repair_id, detail}`. `preview` and `run` apply all four. `status` and `abandon` apply only
+gate 1, because neither publishes anything:
 
 1. **Main checkout.** `--repo-root` must be the main checkout: its git common dir is its own
-   `.git`. Otherwise the command refuses `not_main_checkout`.
+   `.git`. Otherwise the command refuses `not_main_checkout`. `run` and `abandon` also refuse
+   `cwd_mismatch` unless the working directory's top level is `--repo-root`. The forge adapter
+   takes its checkout, and the guard its cwd, from the working directory (#124 D23; per D15).
 2. **Legacy release** (section 6).
 3. **Merge shape.** When `integration_branch != default_branch`, the profile must declare a
    `materialize` publication action. Otherwise the command refuses `merge_not_declared`, with
@@ -118,9 +121,14 @@ driver never creates `n + 1` while `n` is nonterminal.
 - The custody executor is `release-driver`, and its subject path is the main checkout.
 
 **Reservation.** Creating key `n + 1` reserves the candidate's version. Before creating it, `run`
-loads transactions `1..n` and refuses `version_reserved` when any of them holds the same version,
-whatever its outcome. `preview` runs the same check and reports it as not runnable. A reserved
-version is never reused (#81).
+loads transactions `1..n` and refuses `version_reserved` when any of them holds the same version.
+The one exception is an `abandoned` transaction: the core enters `abandoned` only when no action
+had an effect, so its version was never published (per D14). `preview` runs the same check and
+reports it as not runnable. A version that reached any other outcome is never reused (#81).
+
+**Host locality.** The store is host-local. Two hosts releasing one target meet at the provider's
+create-if-absent atomicity (#124 §7), never at the store. A same-candidate race converges to
+`satisfied`; a different candidate at the same version parks `diverged` (per D16).
 
 **Two concurrent `run` calls.** The loser gets the core's `CreationConflict` or `LeaseUnavailable`.
 `run` reports that as `release_busy` (exit 3).
@@ -131,10 +139,11 @@ version is never reused (#81).
 and `GH_TOKEN` are removed from the child environment, as the forge adapter does (#124 D17):
 
 1. **The integration tip.** `repos/<slug>/git/ref/heads/<integration>` must equal `--commit`.
-   Otherwise the result is `candidate_stale`.
+   Otherwise the command refuses `candidate_stale` and seals no receipt.
 2. **The required contexts.** They are the `checks` of
-   `repos/<slug>/branches/<default>/protection`. A 403 or 404 response, or an empty list, is
-   `verification_unavailable`: the required-check floor cannot be established (#116 D6).
+   `repos/<slug>/branches/<default>/protection`. A 403 or 404 response, or an empty list, refuses
+   `verification_unavailable`: the required-check floor cannot be established (#116 D6). A failed
+   or timed-out read refuses `verification_unavailable` too.
 3. **The check runs.** `repos/<slug>/commits/<commit>/check-runs` is matched to the required
    contexts by name, and by `app_id` when one is given.
 
@@ -168,8 +177,8 @@ Local `just build` is not receipt content (per D5).
 
 ### 4. Preview and confirmations (per D6)
 
-`release transaction preview` is read-only. It creates no directory, takes no lock, calls no
-adapter, and its only provider calls are the verification reads.
+`release transaction preview` is read-only. It creates no directory, takes no lock and calls no
+adapter. Its only provider calls are the verification reads, and only in `new` mode.
 
 **Mode.** The preview has two modes:
 
@@ -211,7 +220,14 @@ re-acquisition after a crash, or any change to the plan's inputs yields a new to
 `irreversible` under #124 D6.
 
 **Collecting confirmations.** The skill presents the preview once and ends its turn. A reply that
-confirms all of them lets it pass every token. Any other reply, or none, passes nothing.
+confirms all of them lets it pass every token. Any other reply, or none, passes nothing. A reply
+that changes the version is a changed target, so it needs a new preview.
+
+**Stable tokens.** While a token's inputs are unchanged, a re-preview prints the same token. A
+delegated owner therefore returns the preview JSON to its controller and ends there. The controller
+relaunches one owner with the user's answer. That owner re-runs `preview` with the same arguments,
+reading the notes file from a path outside both working trees, and calls `run` only when the
+printed tokens equal the confirmed ones (per D17).
 
 ### 5. Run (per D6, D7)
 
@@ -236,10 +252,11 @@ Neither refusal creates or writes anything.
    - one per token: `grant_id` is the token, `actor_kind` is `human`, and the authority class is
      `release-irreversible`;
    - one `release-scope:<acquisition>` grant for the reversible predeclared set, since invoking
-     the skill authorizes that set;
+     the skill authorizes that set. It is issued only when the plan has a reversible action, so
+     nix-config's plan has none;
 5. seals the receipt (section 3);
-6. advances through `awaiting_verification` to `ready`, calls `verify_anchors`, and advances to
-   `publishing`.
+6. advances through `awaiting_verification` to `ready`, then to `publishing`. It calls
+   `verify_anchors` first only when the plan has a `restorable` unit, which nix-config's does not.
 
 **Setup (resume mode).** `run` acquires custody and issues the grants. From `attention_required`,
 it advances back to `parked_from`.
@@ -279,6 +296,14 @@ An `InvocationRefused` from the core also parks, and its reason is kept.
 
 The exit code is 0 for any recorded progress and 3 for a refusal that wrote nothing.
 
+**Abandon.** `release transaction abandon` acquires custody and advances the current nonterminal
+transaction to `abandoned` with external state `known`. The core refuses that while any action had
+an effect, and the refusal reaches the caller as exit 3. The skill runs it only on the user's
+explicit word. This is the only exit for a no-effect park, such as a guard denial or a failed
+precondition on the first action, which would otherwise block the target. It also frees the
+version for reuse (section 2). A park after an effect stays blocking until a resume succeeds
+(per D14).
+
 ### 6. Legacy cutover (per D8)
 
 `release_cutover` reads `<repo-root>/.superpowers/workflows/ship-release/state.json` and classifies
@@ -288,7 +313,7 @@ it. It never reads a field into the core:
 |---|---|---|
 | `absent` | no file | none |
 | `completed` | a JSON object with the seven legacy keys, `releaseUrl` non-null (or `tag` non-null with `pr` null), and `deployState` `done` or `none` | `run` deletes the file before `create` and reports `legacy: deleted` |
-| `in_flight` | any other object of that shape | every subcommand refuses `legacy_release_in_flight` (exit 3, repair `release.legacy.finish`) |
+| `in_flight` | any other object of that shape | `preview` and `run` refuse `legacy_release_in_flight` (exit 3, repair `release.legacy.finish`); `status` reports it |
 | `unreadable` | not that shape | refused the same way. Nothing proves it is not in flight |
 
 The repair says to finish the release with the retained previous generation's ship-release, or to
@@ -339,8 +364,9 @@ This is the skill's re-entry question ("ask the core first") and the operator's 
 - one bounded CI wait when the preview reports `verification_pending`;
 - the preview stop;
 - `run`, re-run on `next: wait` or after a confirmation;
-- a report rendered only from `status`. A parked release is reported with its reason and the
-  resume option, never as released.
+- a report rendered only from `status`. A parked release is reported with its reason, never as
+  released. Its menu offers resume, plus `abandon` when no action took effect;
+- in `## Ownership`, the delegated owner's return at the preview (section 4).
 
 **What it deletes:**
 
@@ -373,7 +399,7 @@ The sandbox pipeline case now proves the tracker-free refusal and asserts that n
 
 ### 9. Documentation
 
-- `python/README.md` gains a `## Release driver` section: the three subcommands, the gates, the
+- `python/README.md` gains a `## Release driver` section: the four subcommands, the gates, the
   store and key, the receipt, the tokens and the legacy classes. The sentence that no adapter
   `invoke` is reachable from any command becomes "reachable only through `release transaction
   run`, which drives the core".
@@ -398,10 +424,10 @@ The sandbox pipeline case now proves the tracker-free refusal and asserts that n
 
 | # | Criterion | Deterministic verification | Kind |
 |---|---|---|---|
-| 1 | No state spec or resume table in the skill; state core-owned and inspectable | Contract test: `SKILL.md` names no `.superpowers/workflows` path and no state field, and holds exactly the `release transaction status`, `preview` and `run` argv examples. A command test runs `status` on a store with a nonterminal release and shows its state, actions and grants | code |
+| 1 | No state spec or resume table in the skill; state core-owned and inspectable | Contract test: `SKILL.md` names no `.superpowers/workflows` path and no state field, and holds exactly the `release transaction` argv examples (`status`, `preview`, `run`, `abandon`). A command test runs `status` on a store with a nonterminal release and shows its state, actions and grants | code |
 | 2 | One preview, both confirmations, unanswered does not proceed | nix-config-profile command test: `preview` lists exactly `tag` and `github-release`. `run` without tokens, with one token, or with a stale token exits 3 and leaves the store root absent | code |
 | 3 | Merge done, tag interrupted, resume without re-merge or double tag | Library seam, fixture CAS forge: the merge is satisfied, then the tag effect raises after its provider mutation. Clock moves past the TTL, then a fresh preview and `run`. The world log shows one merge and one tag mutation, and the transaction ends `succeeded` | code (merge arm is fixture-only, per D2) |
-| 4 | Failing release CI leaves no reserved SemVer | Verification world with a failed, then a pending, required context: `run` exits 3, no creation key exists, and the next `run` with passing checks takes ordinal 1 | code |
+| 4 | Failing release CI leaves no reserved SemVer | Verification world with a failed, then a pending, required context: `run` exits 3, no creation key exists, and the next `run` with passing checks takes ordinal 1. Also, a first action refused by the guard parks with no effect; `abandon` ends it `abandoned`, and the same version previews as runnable again. `abandon` after a satisfied tag exits 3 | code |
 | 5a | Entry context −40% against a fresh base | `instruction_load report --base 0a25b80 --head <candidate> --format json`: hot bytes of `ship-release` and `release-owner` ≤ 17,698 (base 29,498 / 4,271 words, measured 2026-11-02). Instruction Budget green | evidence |
 | 5b | #70 bundle `approved` | Committed trials manifest plus the bundle `just agent-gate-bundle` prints for it. It reads `unmeasured`, and approval needs paired live trials in both strata, so this row stays `human_pending` and the issue is held, not closed, at delivery (D11) | human |
 | 6 | Cutover refuses while legacy state records an in-flight release | Command tests for the in-flight and unreadable files (exit 3, file untouched, no store root), the completed file (deleted by `run`, never in the store) and the absent file | code |
@@ -433,7 +459,8 @@ The sandbox pipeline case now proves the tracker-free refusal and asserts that n
   retry only with a fresh token. Cases run per arm: merge, tag, Release, deploy.
 - **The skill contract** (`test_ship_release_contracts.py`). It keeps the executable `--merged`
   previous-tag check and the evals-shape check. It replaces the deleted-phase pins with pins on the
-  three argv examples, the `resolve-project` argv and the dispatch marker (agent-helpers rule 6).
+  `release transaction` argv examples, the `resolve-project` argv and the dispatch marker
+  (agent-helpers rule 6).
   It adds no English-phrase pin.
 - **Measurement.** `instruction_load report`/`check` and `agent_gate_bundle` over the committed
   manifest.
@@ -449,8 +476,8 @@ No seam below these is introduced.
   handed to this migration. This includes spend grants and a `railway` adapter.
 - **Host activation (`just switch`)**, host scheduling and capability adaptation (#150), and a real
   live release.
-- **Disposition commands** (`abandon`, `dispose_failed`, recovery and roll-forward) for a parked
-  release.
+- **Disposition commands other than `abandon`**: `dispose_failed`, recovery and roll-forward. A
+  release parked after an effect stays the target's blocking release until a resume succeeds.
 - **`evals.json` conversion to `pipeline` mode** (#90 tier 1), paired dry-run plan equivalence,
   and any `agent-cost-record` campaign.
 - **Unrelated cleanups.** The `release deploy inspect` command stays, though ship-release no longer
@@ -476,3 +503,7 @@ No seam below these is introduced.
 | D11 | The #70 evidence is a structurally valid trials manifest (four core classes, empty strata, commits bound) plus exactly the `unmeasured` bundle `just agent-gate-bundle` prints. AC5's approval stays `human_pending`, and delivery holds the issue open | #127 D17/D31; #70 forbids hand-authored records; #130 needs a fresh approved cutover bundle anyway | Hand-authored records or an approved bundle (fabrication). Running paired claude and codex live trials of real releases inside the attempt |
 | D12 | Crashes are simulated in process: an effect wrapper raises after the provider mutation, and an injected clock passes the TTL. Verification reads extend `forge_world`'s fake `gh` but stay outside the adapter spelling fixture | Core contract: whatever an effect raises propagates and leaves the intent open; #124 D12 (the fixture pins adapter spellings only) | Killing a subprocess mid-call (timing-flaky). Adding non-adapter reads to the shared fixture |
 | D13 | Selection is the sole publication profile, else `--profile`. Several with no argument refuses `profile_ambiguous`. nix-config's profile is unchanged, so its preview confirms tag and Release (#124 D6, though #90 classed the Release reversible) | #90 profile selection; #85 a child release selects one profile; #124 D6 | Picking the first profile. Reclassifying the Release now (a contract change no criterion needs) |
+| D14 | Grill. Add `release transaction abandon`, which advances a nonterminal release to `abandoned` only where the core's no-effect gate allows, run on the user's explicit word. An `abandoned` transaction's version may be reserved again. Reverses D7 in part (one disposition command) and refines D4 | Without it, a guard denial or failed precondition on the first action parks a no-effect release that blocks the target and burns a version forever. The core's `abandoned` gate proves no effect; #81 burns only versions that were published | No exit, so the target is blocked until someone hand-edits the store. Auto-abandoning in `run` (a terminal decision no human made). Wrapping `dispose_failed` too (needs observability grounds; no criterion) |
+| D15 | Grill. `run` and `abandon` refuse `cwd_mismatch` unless the working directory's top level is `--repo-root` | #124 D23: forge invoke takes its checkout from `git rev-parse --show-toplevel` in the working directory, and the guard judges that cwd | Changing directory inside the library (a hidden side effect). Trusting the caller's cwd (the tag would be prepared in the wrong checkout) |
+| D16 | Grill. The store is host-local. A cross-host race on one target is arbitrated only by the provider's create-if-absent atomicity: the same candidate converges, and a different candidate parks `diverged` | #124 §7 provider-atomic `index` creation; the legacy path had the same scope | A shared or remote store (a new distributed-ledger problem, #82). Claiming cross-host exclusion the key lease cannot give |
+| D17 | Grill. Tokens are stable while their inputs are unchanged. A delegated owner ends at the preview, and the controller relaunches one owner that re-previews and runs only on matching tokens. The notes file lives outside both working trees | Divergence 3 (a delegated release stops once at the preview); `## Ownership`'s single owner per launch; D6 tokens | Splitting ownership so the controller calls `run` itself. Carrying tokens in the controller without a re-preview, which would let inputs drift unseen |
