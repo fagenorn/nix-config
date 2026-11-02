@@ -24,14 +24,6 @@ def descriptors() -> dict:
     return {"github-forge": forge_adapter.describe(), "fixture-store": copy.deepcopy(FIXTURE_STORE)}
 
 
-def merge_descriptors() -> dict:
-    """`descriptors()` with the forge's `pr_merge` entry as a supported merge that binds `merge`."""
-    result = descriptors()
-    result["github-forge"]["operations"]["pr_merge"].update(
-        support="supported", reason=None, candidate_members=["merge"])
-    return result
-
-
 def base_contract() -> dict:
     return {"bindings": {"tracker": {"kind": "github", "repo_slug": "fagenorn/nix-config"},
                          "vcs": {"default_branch": "main"}},

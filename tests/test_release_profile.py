@@ -274,7 +274,7 @@ class MergeBindingTest(unittest.TestCase):
                 "merge": {"pr": 336, "base_tip": "5" * 40}}
 
     def compiled(self, profile, profile_id="two-branch", extra=None):
-        descriptors = {**support.merge_descriptors(), **(extra or {})}
+        descriptors = {**support.descriptors(), **(extra or {})}
         return release_profile.compile_profile(profile_id, profile, support.base_contract(),
                                                descriptors)
 

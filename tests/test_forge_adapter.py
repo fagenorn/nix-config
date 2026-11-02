@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import forge_adapter, github_remote, release_adapter, release_profile
+from . import forge_world
 from . import release_test_support as support
 from .forge_world import ForgeWorld
 
@@ -16,6 +17,8 @@ C = FIXTURE["canonical"]
 ROWS = {row["id"]: row for row in FIXTURE["rows"]}
 TARGET = {"kind": "github_repository", "repository": C["slug"], "branch": C["branch"]}
 CANDIDATE = {"version": C["tag"], "commit": C["commit"]}
+MERGE = {"pr": C["pr"], "base_tip": C["base_tip"]}
+MERGE_CANDIDATE = {**CANDIDATE, "merge": MERGE}
 
 def effect(operation, **parameters):
     return {"kind": "effect", "operation": operation, "parameters": {"target": TARGET, **parameters}}
@@ -115,31 +118,30 @@ class TagInspectTest(ForgeCase):
                          "store_unreachable")
 
 class PrMergeInspectTest(ForgeCase):
-    def pr(self, state, parents=(C["base_tip"], C["head"]), protection=None, base="main"):
+    def pr(self, state, parents=(C["base_tip"], C["commit"]), protection=None, base="main"):
         def on_base(row):
             return [part.replace("/heads/main", f"/heads/{base}").replace("/branches/main/", f"/branches/{base}/")
                     for part in ROWS[row]["argv"][1:]]
         self.world.respond_json("gh", ROWS["pr_merge.view"]["argv"][1:], {
-            "state": state, "baseRefName": base, "headRefName": "topic", "headRefOid": C["head"],
+            "state": state, "baseRefName": base, "headRefName": "topic", "headRefOid": C["commit"],
             "mergeCommit": {"oid": C["merge_commit"]} if state == "MERGED" else None,
             "url": "https://github.com/fagenorn/nix-config/pull/336", "statusCheckRollup": []})
         self.world.respond_json("gh", on_base("pr_merge.base_ref"), {"object": {"sha": C["base_tip"]}})
         self.world.respond_json("gh", ROWS["pr_merge.merge_commit"]["argv"][1:],
                                 {"parents": [{"sha": sha} for sha in parents]})
         if protection is None:
-            self.world.respond_json("gh", on_base("pr_merge.protection"), {
-                "required_status_checks": {"contexts": ["Nix Eval"]}, "enforce_admins": {"enabled": True}})
+            self.world.respond_json("gh", on_base("pr_merge.protection"), forge_world.FLOOR_PROTECTION)
         else:
             protection("gh", on_base("pr_merge.protection"))
 
     def request(self):
-        return effect("pr_merge", pr=C["pr"], expected_base_tip=C["base_tip"], expected_head=C["head"])
+        return effect("pr_merge", candidate=MERGE_CANDIDATE)
 
     def test_states_and_protection_facts(self):
         for state, parents, protection, outcome, status in (
                 ("OPEN", (), None, "absent", "protected"),
-                ("MERGED", (C["base_tip"], C["head"]), None, "satisfied", "protected"),
-                ("MERGED", (C["head"], C["base_tip"]), None, "diverged", "protected"),
+                ("MERGED", (C["base_tip"], C["commit"]), None, "satisfied", "protected"),
+                ("MERGED", (C["commit"], C["base_tip"]), None, "diverged", "protected"),
                 ("CLOSED", (), self.world.not_found, "diverged", "unprotected"),
                 ("OPEN", (), self.world.forbidden, "absent", "inaccessible")):
             with self.subTest(state=state, outcome=outcome, status=status):
@@ -159,11 +161,19 @@ class PrMergeInspectTest(ForgeCase):
     def test_the_facts_are_the_demo_readback(self):
         self.pr("OPEN")
         facts = self.inspect(self.request())["facts"]
-        self.assertEqual(facts, {"state": "OPEN", "base": "main", "head": "topic", "head_oid": C["head"],
+        self.assertEqual(facts, {"state": "OPEN", "base": "main", "head": "topic", "head_oid": C["commit"],
                                  "base_tip": C["base_tip"],
-                                 "protection": {"status": "protected", "required_contexts": ["Nix Eval"],
+                                 "protection": {"status": "protected", "strict": True,
+                                                "required_contexts": ["Instruction Budget", "Nix Eval"],
                                                 "enforce_admins": True}})
         self.assertNotIn(ROWS["pr_merge.merge_commit"]["argv"][1:], self.world.argvs("gh"))
+
+    def test_a_merge_onto_a_moved_base_is_diverged(self):
+        """Issue 554 row 9: GitHub merged onto a base the head already contained."""
+        self.pr("MERGED", parents=("6" * 40, C["commit"]))
+        observation = self.inspect(self.request())
+        self.assertEqual((observation["outcome"], observation["reason"]),
+                         ("diverged", "merge_parents_mismatch"))
 
 class InspectFailureTest(ForgeCase):
     def with_budget(self, seconds, request):
@@ -211,8 +221,10 @@ class InspectFailureTest(ForgeCase):
             {"kind": "effect", "operation": "tag", "parameters": {"target": TARGET}},
             effect("tag", candidate={"version": "1.2.3", "commit": C["commit"]}),
             effect("tag", candidate=CANDIDATE, surprise=1),
-            effect("pr_merge", pr=0, expected_base_tip=C["base_tip"], expected_head=C["head"]),
-            effect("pr_merge", pr=True, expected_base_tip=C["base_tip"], expected_head=C["head"]),
+            effect("pr_merge", candidate=CANDIDATE),
+            effect("pr_merge", candidate={**CANDIDATE, "merge": {**MERGE, "pr": True}}),
+            effect("pr_merge", candidate={**CANDIDATE, "merge": {**MERGE, "base_tip": "5" * 39}}),
+            effect("pr_merge", pr=C["pr"], expected_base_tip=C["base_tip"], expected_head=C["commit"]),
             {"kind": "effect", "operation": "tag",
              "parameters": {"target": {**TARGET, "kind": "other"}, "candidate": CANDIDATE}},
             {"kind": "effect", "operation": "tag",
@@ -412,12 +424,6 @@ class InvokeResultSetTest(InvokeCase):
                          ROWS["release.create"]["raw"].replace(C["notes_path"], notes))
 
 class InvokeFailureTest(InvokeCase):
-    def test_pr_merge_is_refused_before_any_call(self):
-        result = forge_adapter.invoke({"kind": "effect", "operation": "pr_merge", "parameters": {
-            "target": TARGET, "pr": C["pr"], "expected_base_tip": C["base_tip"], "expected_head": C["head"]}})
-        self.assertEqual((result["result"], result["error_class"]), ("rejected", "unsupported_operation"))
-        self.assertEqual(self.world.calls(), [])
-
     def test_invalid_input_and_unknown_operations_make_no_call(self):
         self.world.invoke_ready()
         bad_titles = ('a "quoted" title', "cost $5", "back`tick", "back\\slash", "nul\x00", "line\nbreak", "cr\rhere")
@@ -521,6 +527,153 @@ class InvokeFailureTest(InvokeCase):
                 finally:
                     forge_adapter.CHILD_TIMEOUT_SECONDS = saved
                 self.assertEqual(len(self.mutations()), 1)
+
+class PrMergeInvokeTest(InvokeCase):
+    """Issue 554 spec §3: every refusal comes before the guard and the merge."""
+
+    def setUp(self):
+        super().setUp()
+        self.world.invoke_ready()
+
+    def merge(self, candidate=MERGE_CANDIDATE):
+        result = forge_adapter.invoke({"kind": "effect", "operation": "pr_merge",
+                                       "parameters": {"target": TARGET, "candidate": candidate}})
+        self.assertEqual(release_adapter.invoke_result_problems(result), [])
+        return result
+
+    def guards(self):
+        return [c for c in self.world.calls() if c["tool"] == "claude-bash-lifecycle-guard"]
+
+    def merges(self):
+        return [c for c in self.world.calls() if c["tool"] == "gh" and c["argv"][:2] == ["pr", "merge"]]
+
+    def refused(self, reference, **ready):
+        self.world.merge_ready(**ready)
+        self.assertEqual(self.merge(), {"result": "rejected", "error_class": "precondition_failed",
+                                        "reference": reference})
+        self.assertEqual((self.guards(), self.merges()), ([], []))
+
+    def test_the_happy_path_renders_the_fixture_row_and_passes_the_guard(self):
+        self.world.merge_ready()
+        self.assertEqual(self.merge(), {"result": "accepted", "error_class": None,
+                                        "reference": f"https://github.com/{C['slug']}/pull/{C['pr']}"})
+        [merge] = self.merges()
+        self.assertEqual(["gh", *merge["argv"]], ROWS["pr_merge.merge"]["argv"])
+        [guard] = self.guards()
+        self.assertEqual(json.loads(guard["stdin"])["tool_input"]["command"], ROWS["pr_merge.merge"]["raw"])
+        reads = [c["argv"] for c in self.world.calls() if c["tool"] == "gh" and c["argv"][:2] != ["pr", "merge"]]
+        self.assertEqual(reads, [ROWS[i]["argv"][1:] for i in (
+            "invoke.repository", "pr_merge.protection", "pr_merge.head_auto_delete",
+            "pr_merge.view", "pr_merge.base_ref")])
+        self.assertFalse(any(c["token_visible"] for c in self.world.calls()))
+
+    def test_a_protection_floor_gap_refuses_before_the_guard(self):
+        """Issue 554 row 1."""
+        floor = forge_world.FLOOR_PROTECTION
+        checks = floor["required_status_checks"]
+        for member, protection in (
+                ("strict", {**floor, "required_status_checks": {**checks, "strict": False}}),
+                ("strict", {**floor, "required_status_checks": None}),
+                ("required_contexts", {**floor, "required_status_checks": {**checks, "contexts": []}}),
+                ("enforce_admins", {**floor, "enforce_admins": {"enabled": False}}),
+                ("unprotected", 404), ("inaccessible", 403)):
+            with self.subTest(member=member, protection=protection):
+                self.world.reset()
+                self.world.invoke_ready()
+                self.refused(f"protection_floor_unmet: {member}", protection=protection)
+
+    def test_a_failed_protection_read_refuses_with_no_mutation(self):
+        """Issue 554 row 2."""
+        for protection, error_class in (("fail", "provider_unavailable"), ("timeout", "transient_transport")):
+            with self.subTest(protection=protection):
+                self.world.reset()
+                self.world.invoke_ready()
+                self.world.merge_ready(protection=protection)
+                saved = forge_adapter.CHILD_TIMEOUT_SECONDS
+                forge_adapter.CHILD_TIMEOUT_SECONDS = 2
+                try:
+                    result = self.merge()
+                finally:
+                    forge_adapter.CHILD_TIMEOUT_SECONDS = saved
+                self.assertEqual((result["result"], result["error_class"]), ("rejected", error_class))
+                self.assertEqual((self.guards(), self.merges()), ([], []))
+
+    def test_head_auto_delete_refuses_before_the_guard(self):
+        """Issue 554 row 15."""
+        for answer in ("true", "null", ""):
+            with self.subTest(answer=answer):
+                self.world.reset()
+                self.world.invoke_ready()
+                self.refused("head_auto_delete_on", auto_delete=answer)
+
+    def test_a_pr_not_open_on_another_base_or_head_refuses(self):
+        """Issue 554 row 3."""
+        for ready, reference in ((dict(pr_state="MERGED"), "pr_not_open: MERGED"),
+                                 (dict(pr_state="CLOSED"), "pr_not_open: CLOSED"),
+                                 (dict(pr_base="release"), "pr_base_mismatch: release"),
+                                 (dict(pr_head="9" * 40), "pr_head_mismatch: " + "9" * 40)):
+            with self.subTest(reference=reference):
+                self.world.reset()
+                self.world.invoke_ready()
+                self.refused(reference, **ready)
+
+    def test_a_moved_base_refuses_base_moved(self):
+        """Issue 554 row 4."""
+        self.refused("base_moved: " + "6" * 40, base_tip="6" * 40)
+
+    def test_a_guard_denial_is_authorization_denied(self):
+        """Issue 554 row 5."""
+        self.world.invoke_ready(guard_exit=2)
+        self.world.merge_ready()
+        result = self.merge()
+        self.assertEqual((result["result"], result["error_class"]), ("rejected", "authorization_denied"))
+        self.assertEqual((len(self.guards()), self.merges()), (1, []))
+
+    def test_any_failed_merge_is_unknown_without_parsing_stderr(self):
+        """Issue 554 D6."""
+        for stderr in ("GraphQL: Head branch is out of date (mergePullRequest)", "HTTP 422: x", ""):
+            with self.subTest(stderr=stderr):
+                self.world.reset()
+                self.world.invoke_ready()
+                self.world.merge_ready(merge_exit=1, merge_stderr=stderr)
+                result = self.merge()
+                self.assertEqual((result["result"], result["error_class"]), ("unknown", "transient_transport"))
+                self.assertEqual(len(self.merges()), 1)
+        self.world.reset()
+        self.world.invoke_ready()
+        self.world.merge_ready(merge_sleep=6)
+        saved = forge_adapter.CHILD_TIMEOUT_SECONDS
+        forge_adapter.CHILD_TIMEOUT_SECONDS = 2
+        try:
+            result = self.merge()
+        finally:
+            forge_adapter.CHILD_TIMEOUT_SECONDS = saved
+        self.assertEqual((result["result"], result["error_class"]), ("unknown", "transient_transport"))
+
+    def test_an_unspawnable_merge_is_rejected(self):
+        self.world.merge_ready()
+        real = subprocess.run
+
+        def run(argv, *args, **kwargs):
+            if argv[:3] == ["gh", "pr", "merge"]:
+                raise PermissionError(13, "Permission denied", argv[0])
+            return real(argv, *args, **kwargs)
+        with mock.patch.object(forge_adapter.subprocess, "run", side_effect=run):
+            result = self.merge()
+        self.assertEqual((result["result"], result["error_class"]), ("rejected", "provider_unavailable"))
+
+    def test_a_malformed_merge_or_another_repository_refuses_early(self):
+        for candidate in (CANDIDATE, {**CANDIDATE, "merge": {**MERGE, "pr": 0}}):
+            with self.subTest(candidate=candidate):
+                self.world.reset()
+                result = self.merge(candidate)
+                self.assertEqual((result["result"], result["error_class"]), ("rejected", "invalid_input"))
+                self.assertEqual(self.world.calls(), [])
+        self.world.reset()
+        self.world.invoke_ready(slug="someone-else/nix-config")
+        self.world.merge_ready()
+        self.assertEqual(self.merge()["error_class"], "precondition_failed")
+        self.assertNotIn(ROWS["pr_merge.protection"]["argv"][1:], self.world.argvs("gh"))
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,10 +20,12 @@ class DescriptorTest(unittest.TestCase):
         self.assertEqual(sorted(release_adapter.REGISTRY), names)
         self.assertEqual(sorted(release_adapter.DESCRIPTORS), names)
 
-    def test_forge_descriptor_pins_pr_merge_unsupported(self):
+    def test_forge_descriptor_pins_pr_merge_supported(self):
         op = forge_adapter.describe()["operations"]["pr_merge"]
-        self.assertEqual((op["mode"], op["support"], op["inspect"], op["reason"], op["mutability"]),
-                         ("materialize", "unsupported", "supported", "target_cas_unproven", "pointer_cas"))
+        self.assertEqual((op["mode"], op["support"], op["inspect"], op["reason"], op["mutability"],
+                          op["effects"], op["recovery_capable"], op["candidate_members"]),
+                         ("materialize", "supported", "supported", None, "pointer_cas",
+                          ["irreversible"], False, ["merge"]))
         self.assertEqual(forge_adapter.describe()["host_capacity"], "not_required")
 
     def test_descriptor_problems_catch_each_rule(self):
@@ -96,7 +98,6 @@ class GrammarRefusesTest(unittest.TestCase):
             (act(target="nowhere"), "reference_unknown"),
             (act(deps=["github-release"]), "reference_unknown"),
             (act(effect="reversible_bounded_spend"), "effect_unsupported"),
-            (act(operation="pr_merge", mode="materialize"), "adapter_unsupported"),
             (act(mode="promote"), "adapter_unsupported"),
             (act(config_schema_version=2), "config_invalid"),
             (act(config={"x": 1}), "config_invalid"),
@@ -292,6 +293,16 @@ class HostLocalProfileTest(unittest.TestCase):
                                           "config": {}}
         self.assertIn("contract.release.deploy_conflict",
                       [v["repair_id"] for v in self.grammar(support.argus_shaped_profile(), contract)])
+
+class MergeProfileTest(unittest.TestCase):
+    def test_the_jarbird_shaped_profile_compiles(self):
+        """Issue 554 AC1: pr_merge -> tag -> github-release on one GitHub target."""
+        self.assertEqual(violations(support.release_of("two-branch", support.merge_profile())), [])
+        compiled = release_profile.compile_profile("two-branch", support.merge_profile(),
+                                                   support.base_contract(), support.descriptors())
+        self.assertEqual([n["id"] for n in compiled["publication"]], ["merge", "tag", "github-release"])
+        self.assertTrue(release_profile.binds_merge(compiled))
+
 
 if __name__ == "__main__":
     unittest.main()

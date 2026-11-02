@@ -6,7 +6,6 @@
     "commit": "1111111111111111111111111111111111111111",
     "tag_object": "2222222222222222222222222222222222222222",
     "pr": 336,
-    "head": "4444444444444444444444444444444444444444",
     "base_tip": "5555555555555555555555555555555555555555",
     "merge_commit": "3333333333333333333333333333333333333333",
     "title": "v1.2.3 — release",
@@ -96,6 +95,19 @@
       ]
     },
     {
+      "id": "pr_merge.head_auto_delete",
+      "operation": "pr_merge",
+      "kind": "read",
+      "raw": "gh api repos/fagenorn/nix-config --jq .delete_branch_on_merge",
+      "argv": [
+        "gh",
+        "api",
+        "repos/fagenorn/nix-config",
+        "--jq",
+        ".delete_branch_on_merge"
+      ]
+    },
+    {
       "id": "invoke.repository",
       "operation": "shared",
       "kind": "read",
@@ -150,6 +162,23 @@
         "v1.2.3 — release",
         "--notes-file",
         "/tmp/forge-notes-fixture.md"
+      ]
+    },
+    {
+      "id": "pr_merge.merge",
+      "operation": "pr_merge",
+      "kind": "mutation",
+      "raw": "gh pr merge 336 --repo fagenorn/nix-config --merge --match-head-commit 1111111111111111111111111111111111111111",
+      "argv": [
+        "gh",
+        "pr",
+        "merge",
+        "336",
+        "--repo",
+        "fagenorn/nix-config",
+        "--merge",
+        "--match-head-commit",
+        "1111111111111111111111111111111111111111"
       ]
     }
   ]

@@ -14,6 +14,11 @@ literals, so the world and the guard suite cannot disagree about a provider spel
 directory the fake `git rev-parse --show-toplevel` names. A call whose argv carries
 `--notes-file <path>` is keyed with that path replaced by `<NOTES>`; the real path is logged.
 
+`merge_ready(...)` registers the `pr_merge` invoke path (issue 554 D6, D13): the protection
+read, the head-branch auto-delete read, the pull request view, the base ref and the one
+`gh pr merge`, each adjustable by a keyword. `FLOOR_PROTECTION` is the protection payload that
+meets the release floor, and `verification_ready` registers it for its default checks.
+
 `verification_ready(...)` registers the three `gh api` reads of `release_verification` (#128
 D12). They stay outside the spelling fixture: the fixture pins the guard's rows, and these
 reads are read-only paths the guard never adjudicates.
@@ -33,6 +38,12 @@ CANONICAL = FIXTURE["canonical"]
 ROWS = {row["id"]: row for row in FIXTURE["rows"]}
 TOOLS = ("gh", "git", "claude-bash-lifecycle-guard")
 CLASS_BRANCHES = {"elevenyellow/nodocom": "dev"}
+FLOOR_PROTECTION = {
+    "required_status_checks": {
+        "strict": True, "contexts": ["Nix Eval", "Instruction Budget"],
+        "checks": [{"context": "Nix Eval", "app_id": None},
+                   {"context": "Instruction Budget", "app_id": None}]},
+    "enforce_admins": {"enabled": True}}
 
 SCRIPT = """#!{python}
 import json, os, sys, time
@@ -119,7 +130,7 @@ class ForgeWorld:
     def canonical(self, slug: str = CANONICAL["slug"], **overrides: object) -> None:
         """Register the happy-path responses for the fixture's canonical values, with `slug`
         (and, for a repository class that has one, its branch) substituted. `overrides` name
-        canonical values to replace: branch, tag, commit, tag_object, pr, head, base_tip,
+        canonical values to replace: branch, tag, commit, tag_object, pr, base_tip,
         merge_commit."""
         values = {**CANONICAL, "slug": slug,
                   "branch": CLASS_BRANCHES.get(slug, CANONICAL["branch"]), **overrides}
@@ -146,13 +157,48 @@ class ForgeWorld:
             "tag_name": values["tag"], "draft": False, "html_url": f"{url}/releases/tag/{values['tag']}"})
         self.respond_json("gh", argv("pr_merge.view"), {
             "state": "MERGED", "baseRefName": values["branch"], "headRefName": "topic",
-            "headRefOid": values["head"], "mergeCommit": {"oid": values["merge_commit"]},
+            "headRefOid": values["commit"], "mergeCommit": {"oid": values["merge_commit"]},
             "url": f"{url}/pull/{values['pr']}", "statusCheckRollup": []})
         self.respond_json("gh", argv("pr_merge.base_ref"), {"object": {"sha": values["base_tip"]}})
         self.respond_json("gh", argv("pr_merge.merge_commit"),
-                          {"parents": [{"sha": values["base_tip"]}, {"sha": values["head"]}]})
-        self.respond_json("gh", argv("pr_merge.protection"), {
-            "required_status_checks": {"contexts": ["Nix Eval"]}, "enforce_admins": {"enabled": True}})
+                          {"parents": [{"sha": values["base_tip"]}, {"sha": values["commit"]}]})
+        self.respond_json("gh", argv("pr_merge.protection"), FLOOR_PROTECTION)
+
+    def merge_ready(self, *, protection=FLOOR_PROTECTION, auto_delete="false", pr_state="OPEN",
+                    pr_base=CANONICAL["branch"], pr_head=CANONICAL["commit"],
+                    base_tip=CANONICAL["base_tip"], merge_exit=0, merge_stderr="",
+                    merge_sleep=0.0) -> None:
+        """Register the `pr_merge` invoke path on the fixture rows' argv (issue 554 D6, D13).
+
+        `protection` is a payload dict, `404` or `403` for those statuses, `"fail"` for an
+        HTTP 500, or `"timeout"` for the floor payload after a 6 s sleep. The merge answers
+        with `merge_exit`, `merge_stderr` and `merge_sleep`.
+        """
+
+        def row(row_id: str) -> list[str]:
+            return ROWS[row_id]["argv"][1:]
+
+        if isinstance(protection, dict):
+            self.respond_json("gh", row("pr_merge.protection"), protection)
+        elif protection == 404:
+            self.not_found("gh", row("pr_merge.protection"))
+        elif protection == 403:
+            self.forbidden("gh", row("pr_merge.protection"))
+        elif protection == "fail":
+            self.respond("gh", row("pr_merge.protection"), exit=1,
+                         stderr="gh: Internal Server Error (HTTP 500)")
+        elif protection == "timeout":
+            self.respond_json("gh", row("pr_merge.protection"), FLOOR_PROTECTION, sleep=6)
+        else:
+            raise ValueError(f"unknown protection answer {protection!r}")
+        self.respond("gh", row("pr_merge.head_auto_delete"), stdout=auto_delete + "\n")
+        self.respond_json("gh", row("pr_merge.view"), {
+            "state": pr_state, "baseRefName": pr_base, "headRefName": "dev", "headRefOid": pr_head,
+            "mergeCommit": None, "url": f"https://github.com/{CANONICAL['slug']}/pull/{CANONICAL['pr']}",
+            "statusCheckRollup": []})
+        self.respond_json("gh", row("pr_merge.base_ref"), {"object": {"sha": base_tip}})
+        self.respond("gh", row("pr_merge.merge"), exit=merge_exit, stderr=merge_stderr,
+                     sleep=merge_sleep)
 
     def invoke_ready(self, slug: str = CANONICAL["slug"], *, origin: str | None = None,
                      full_name: str | None = None, push_urls: list[str] | None = None, tag_local: str | None = None,
@@ -211,8 +257,10 @@ class ForgeWorld:
         if protection_exit:
             self.respond("gh", protection, exit=protection_exit, stderr="gh: Not Found (HTTP 404)")
         else:
-            self.respond_json("gh", protection, {"required_status_checks": {
-                "strict": True, "contexts": [c["context"] for c in checks], "checks": checks}})
+            self.respond_json("gh", protection, {
+                "required_status_checks": {"strict": True, "contexts": [c["context"] for c in checks],
+                                           "checks": checks},
+                "enforce_admins": {"enabled": True}})
         self.respond_json("gh", ["api", f"repos/{slug}/commits/{commit}/check-runs?per_page=100"],
                           {"total_count": len(runs) if total_count is None else total_count,
                            "check_runs": runs})
