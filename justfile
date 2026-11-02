@@ -92,6 +92,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
+    home/common/agent-skills/tests/test_inprocess_cli.py \
     home/common/agent-skills/tests/test_ship_delivery.py \
     home/common/agent-skills/tests/test_delivered_control.py \
     home/common/agent-skills/tests/test_workflow_delivery.py \

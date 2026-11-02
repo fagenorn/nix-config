@@ -24,6 +24,7 @@ from ._delivery_model_fixtures import (
     contract_and_delivery_for_stage, observation, pr_subject, seal, selection,
     stage_scope,
 )
+from ._inprocess_cli import run_script
 from .test_resolve_project import git, make_home, make_project_root, run as run_resolver, source_contract
 
 
@@ -80,8 +81,9 @@ def load(path, name, *, package=False):
     return module
 
 
-LifecycleHarness = load(Path(__file__).with_name("test_workflow_state.py"),
-                        "delivery_workflow_lifecycle_harness").LifecycleHarness
+_LIFECYCLE = load(Path(__file__).with_name("test_workflow_state.py"),
+                  "delivery_workflow_lifecycle_harness")
+LifecycleHarness, recorded_spawns = _LIFECYCLE.LifecycleHarness, _LIFECYCLE.recorded_spawns
 
 
 class DeliveryAdmissionTest(unittest.TestCase):
@@ -1664,9 +1666,8 @@ class BuilderHarness:
         return self.root
 
     def cli(self, *args, stdin=None, ok=True, cwd=None):
-        completed = subprocess.run(
-            [sys.executable, str(WORKFLOW), *map(str, args)], input=stdin,
-            capture_output=True, check=False, cwd=cwd,
+        completed = run_script(
+            WORKFLOW, args, input=stdin, cwd=cwd, text=False,
             env={**os.environ, "HOME": str(self.home)})
         if ok:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
@@ -1778,6 +1779,32 @@ class BuilderHarness:
             "authority_observations": keyed([]), "reevaluation_evidence": keyed([]),
             "delivery_observations": keyed([]), "requested_scopes": keyed(None),
             "recoveries": keyed(None)}
+
+
+class BuilderTransportTest(BuilderHarness, unittest.TestCase):
+    """Issue 500 D1, D6: the builder helper runs workflow-state in this process, in the
+    working directory and with the stdin bytes it is given."""
+
+    def test_the_helper_starts_no_process_and_honours_cwd_and_stdin(self):
+        self.project()
+        directory = os.getcwd()
+        malformed = b'{"issue": 171,'
+        try:
+            json.loads(malformed.decode("utf-8"))
+        except json.JSONDecodeError as error:
+            decoder = str(error)
+        with recorded_spawns() as spawns:
+            minted = self.cli("init-run", "--repo-root", self.root.name, "--creation-key",
+                              "issue-500-transport", "--now", NOW, cwd=self.root.parent)
+            refused = self.cli("build-delivery", "--repo-root", self.root, "--kind",
+                               "contract", "--input", "-", stdin=malformed, ok=False)
+        self.assertEqual(spawns, [])
+        run_id = json.loads(minted.stdout)["run_id"]
+        self.assertTrue((self.root / ".superpowers/workflows" / run_id / "state.json").is_file())
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, b"", f"workflow-state: invalid builder input JSON: {decoder}\n".encode()))
+        self.assertEqual(os.getcwd(), directory)
 
 
 class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
