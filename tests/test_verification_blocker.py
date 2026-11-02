@@ -310,5 +310,193 @@ class LoadTest(unittest.TestCase):
                          b'{"a":"\\u00e9","b":[1]}')
 
 
+def record(value=None, attempts=((61, 1),), state="open", resolution=None):
+    """The schema-11 record `park` writes for `value` (issue 544 D3)."""
+    value = failure() if value is None else value
+    return {"id": vb.blocker_id(value), "repository": copy.deepcopy(value["repository"]),
+            "command": copy.deepcopy(value["command"]),
+            "failure_class": value["failure_class"], "facts": copy.deepcopy(value["facts"]),
+            "attempts": [{"issue": issue, "attempt": number} for issue, number in attempts],
+            "state": state, "resolution": resolution}
+
+
+def changed_facts(value=None, objects=(B,)):
+    """The record's facts with the one path's object replaced: a resolution's facts."""
+    value = failure() if value is None else value
+    facts = copy.deepcopy(value["facts"])
+    for entry, object_id in zip(facts[0]["value"]["objects"], objects):
+        entry["object"] = object_id
+    return facts
+
+
+class ParkTest(unittest.TestCase):
+    def test_park_creates_then_joins_keeping_history_once(self):
+        blockers = {}
+        identity = vb.park(blockers, failure(), 62, 1)
+        self.assertEqual(identity, PINNED_ID)
+        self.assertEqual(blockers, {PINNED_ID: record(attempts=((62, 1),))})
+        self.assertEqual(vb.park(blockers, failure(), 61, 2), PINNED_ID)
+        self.assertEqual(vb.park(blockers, failure(), 62, 1), PINNED_ID)
+        self.assertEqual(blockers, {PINNED_ID: record(attempts=((61, 2), (62, 1)))})
+        other = failure(failure_class="environment")
+        self.assertEqual(vb.park(blockers, other, 61, 2), vb.blocker_id(other))
+        self.assertEqual(sorted(blockers), sorted([PINNED_ID, vb.blocker_id(other)]))
+
+    def test_park_reopens_a_resolved_record_and_never_rewrites_content(self):
+        blockers = {PINNED_ID: record(state="resolved",
+                                      resolution={"facts": changed_facts()})}
+        self.assertEqual(vb.park(blockers, failure(), 61, 1), PINNED_ID)
+        self.assertEqual(blockers, {PINNED_ID: record()})
+
+    def test_park_copies_the_failure_and_touches_only_the_map(self):
+        value, blockers = failure(), {}
+        before = copy.deepcopy(value)
+        vb.park(blockers, value, 61, 1)
+        self.assertEqual(value, before)
+        blockers[PINNED_ID]["facts"][0]["name"] = "changed"
+        self.assertEqual(value, before)
+
+    def test_park_refuses_a_bad_reference_or_failure_and_writes_nothing(self):
+        for issue, number, field in ((0, 1, "issue"), (True, 1, "issue"), ("61", 1, "issue"),
+                                     (61, 0, "attempt"), (61, False, "attempt")):
+            blockers = {}
+            with self.subTest(issue=issue, attempt=number), \
+                    self.assertRaises(vb.BlockerRefused) as caught:
+                vb.park(blockers, failure(), issue, number)
+            self.assertEqual(str(caught.exception), f"{field}: must be a positive integer")
+            self.assertEqual(blockers, {})
+        blockers = {}
+        with self.assertRaises(vb.BlockerRefused):
+            vb.park(blockers, failure(failure_class="product"), 61, 1)
+        self.assertEqual(blockers, {})
+
+
+class RecordRulesTest(unittest.TestCase):
+    POINTERS = {(61, 1): PINNED_ID, (62, 1): None, (62, 2): None}
+
+    def assert_refused(self, blockers, pointers, prefix):
+        with self.assertRaises(vb.BlockerRefused) as caught:
+            vb.validate_blockers(blockers, pointers)
+        self.assertTrue(str(caught.exception).startswith(prefix), str(caught.exception))
+        self.assertNotIn("\n", str(caught.exception))
+
+    def test_valid_maps_pass(self):
+        resolved = record(attempts=((61, 1), (62, 2)), state="resolved",
+                          resolution={"facts": changed_facts()})
+        for blockers in ({PINNED_ID: record()}, {PINNED_ID: resolved}):
+            with self.subTest(blockers=str(blockers)[:40]):
+                self.assertIsNone(vb.validate_blockers(blockers, self.POINTERS))
+        self.assertIsNone(vb.validate_blockers({}, {(61, 1): None}))
+        # A record outlives its attempts' parking: R3 keeps the history (issue 544 D3).
+        self.assertIsNone(vb.validate_blockers({PINNED_ID: record()}, {(61, 1): None}))
+
+    def test_each_rule_refuses(self):
+        key = f"verification_blockers[{PINNED_ID}]"
+        secret = failure(facts=[fact(paths=(".env",))])
+        secret_record = {**record(), "facts": secret["facts"]}
+        moved = changed_facts()
+        moved[0]["source"]["paths"] = ["other.lock"]
+        moved[0]["value"]["objects"][0]["path"] = "other.lock"
+        cases = {
+            "R1 not an object": ([], self.POINTERS, "verification_blockers: must be an object"),
+            "R1 key is not the id": ({ZERO_ID: record()}, {(61, 1): ZERO_ID},
+                                     f"verification_blockers[{ZERO_ID}].id"),
+            "R1 id is not the content": ({PINNED_ID: {**record(), "failure_class": "environment"}},
+                                         self.POINTERS, f"{key}.id"),
+            "R1 secret-shaped content": ({PINNED_ID: secret_record}, self.POINTERS,
+                                         f"{key}: facts[0].source.paths[0]: secret-shaped"),
+            "R1 oversized content": ({PINNED_ID: {**record(), "facts": sized("flake-lockx")["facts"]}},
+                                     self.POINTERS, f"{key}: failure: longer than 2048"),
+            "R2 unknown member": ({PINNED_ID: {**record(), "note": "x"}}, self.POINTERS,
+                                  f"{key}: missing [], unknown ['note']"),
+            "R2 missing member": ({PINNED_ID: edited(record(), ("resolution",), KeyError)},
+                                  self.POINTERS, f"{key}: missing ['resolution']"),
+            "R3 empty attempts": ({PINNED_ID: record(attempts=())}, {}, f"{key}.attempts"),
+            "R3 boolean attempt": ({PINNED_ID: edited(record(), ("attempts", 0, "attempt"), True)},
+                                   self.POINTERS, f"{key}.attempts[0].attempt"),
+            "R3 open reference": ({PINNED_ID: edited(record(), ("attempts", 0, "note"), 1)},
+                                  self.POINTERS, f"{key}.attempts[0]"),
+            "R3 unsorted": ({PINNED_ID: record(attempts=((62, 1), (61, 1)))}, self.POINTERS,
+                            f"{key}.attempts"),
+            "R3 repeated": ({PINNED_ID: record(attempts=((61, 1), (61, 1)))}, self.POINTERS,
+                            f"{key}.attempts"),
+            "R3 not of this run": ({PINNED_ID: record(attempts=((61, 1), (63, 1)))},
+                                   self.POINTERS, f"{key}.attempts[1]"),
+            "R4 unknown state": ({PINNED_ID: record(state="closed")}, self.POINTERS,
+                                 f"{key}.state"),
+            "R4 open with a resolution": ({PINNED_ID: record(resolution={"facts": changed_facts()})},
+                                          self.POINTERS, f"{key}.resolution"),
+            "R4 resolved without one": ({PINNED_ID: record(state="resolved")}, self.POINTERS,
+                                        f"{key}.resolution"),
+            "R4 open resolution object": ({PINNED_ID: record(
+                state="resolved", resolution={"facts": changed_facts(), "note": 1})},
+                self.POINTERS, f"{key}.resolution"),
+            "R4 invalid resolved facts": ({PINNED_ID: record(
+                state="resolved", resolution={"facts": changed_facts(objects=("x",))})},
+                self.POINTERS, f"{key}.resolution.facts"),
+            "R4 substituted source": ({PINNED_ID: record(
+                state="resolved", resolution={"facts": moved})}, self.POINTERS,
+                f"{key}.resolution.facts"),
+            "R4 nothing changed": ({PINNED_ID: record(
+                state="resolved", resolution={"facts": copy.deepcopy(failure()["facts"])})},
+                self.POINTERS, f"{key}.resolution.facts"),
+            "R5 pointer to no record": ({}, self.POINTERS, "verification_blockers: attempt 61:1"),
+            "R5 pointer to a record without it": ({PINNED_ID: record(attempts=((62, 1),))},
+                                                  self.POINTERS,
+                                                  "verification_blockers: attempt 61:1"),
+            "a key with a newline": ({"a\nb": record()}, self.POINTERS,
+                                     "verification_blockers[a\\nb].id: must equal its key"),
+            "a pointer with a newline": ({}, {(61, 1): "x\ny"},
+                                         "verification_blockers: attempt 61:1 points at x\\ny"),
+        }
+        for label, (blockers, pointers, prefix) in cases.items():
+            with self.subTest(case=label):
+                self.assert_refused(blockers, pointers, prefix)
+
+
+class UpgradeTenTest(unittest.TestCase):
+    def ten(self):
+        attempt = {"issue": 61, "attempt": 1, "state": "active", "blocked_on": None}
+        return {"schema_version": 10, "run_id": "r", "transaction_id": "t",
+                "issues": {"61": {"issue": 61, "attempts": [attempt, dict(attempt, attempt=2)]},
+                           "62": {"issue": 62, "attempts": []}}}
+
+    def test_the_step_adds_both_members_and_mutates_nothing(self):
+        document = self.ten()
+        before = copy.deepcopy(document)
+        upgraded = vb.upgrade_ten(document)
+        self.assertEqual(document, before)
+        expected = copy.deepcopy(before)
+        expected.update(schema_version=11, verification_blockers={})
+        for attempt in expected["issues"]["61"]["attempts"]:
+            attempt["verification_blocker"] = None
+        self.assertEqual(upgraded, expected)
+        upgraded["issues"]["61"]["attempts"][0]["state"] = "changed"
+        self.assertEqual(document, before)
+
+    def test_a_present_member_or_another_schema_is_refused(self):
+        document = self.ten()
+        pointed = copy.deepcopy(document)
+        pointed["issues"]["61"]["attempts"][1]["verification_blocker"] = None
+        cases = (
+            ("verification_blockers: present before schema 11",
+             {**document, "verification_blockers": {}}),
+            ("issues[61].attempts[1].verification_blocker: present before schema 11", pointed),
+            ("schema_version: must be 10", {**document, "schema_version": 11}),
+            ("schema_version: must be 10", {**document, "schema_version": True}),
+            ("issues: must be an object", {**document, "issues": []}),
+            ("issues[6\\n1]: must be an object with an attempts list",
+             {**document, "issues": {"6\n1": []}}),
+        )
+        for message, value in cases:
+            before = copy.deepcopy(value)
+            with self.subTest(message=message), self.assertRaises(vb.BlockerRefused) as caught:
+                vb.upgrade_ten(value)
+            self.assertEqual(str(caught.exception), message)
+            self.assertEqual(value, before)
+        with self.assertRaises(vb.BlockerRefused):
+            vb.upgrade_ten([])
+
+
 if __name__ == "__main__":
     unittest.main()
