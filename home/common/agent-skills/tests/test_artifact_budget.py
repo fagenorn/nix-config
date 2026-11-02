@@ -181,10 +181,11 @@ class ArtifactBudgetCliTest(unittest.TestCase):
     def test_workflow_response_boundary_red_accepts_valid_v2_bootstrap_shape(self):
         """Task 2 must add this closed raw boundary, not repair this fixture."""
         bootstrap = {
-            "interface_version": 2,
+            "interface_version": 3,
             "kind": "workflow_bootstrap",
             "run_id": "task-151-synthetic",
             "requirements": [],
+            "verification": [],
         }
         result = self.run_validate("workflow-response", bootstrap, use_stdin=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8"))
@@ -200,13 +201,14 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         self.assertGreater(response_bound, report_bound)
 
         def bootstrap(count):
-            return {"interface_version": 2, "kind": "workflow_bootstrap", "run_id": "bound",
+            return {"interface_version": 3, "kind": "workflow_bootstrap", "run_id": "bound",
                     "requirements": [{"issue": issue, "owner": f"{issue}:1",
                         "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
                                     "action_id": f"{issue}:1:1"},
                         "recorded_worktree": f"/worktrees/issue-{issue}",
                         "contract_digest": None}
-                        for issue in range(1, count + 1)]}
+                        for issue in range(1, count + 1)],
+                    "verification": []}
 
         def canonical(value):
             return json.dumps(value, sort_keys=True,
@@ -243,8 +245,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                        "recorded_worktree": "/worktree"}
         for digest, code in ((None, 0), ("sha256:" + "a" * 64, 0), ("absent", 2)):
             value = dict(requirement) if digest == "absent" else {**requirement, "contract_digest": digest}
-            bootstrap = {"interface_version": 2, "kind": "workflow_bootstrap",
-                         "run_id": "r", "requirements": [value]}
+            bootstrap = {"interface_version": 3, "kind": "workflow_bootstrap",
+                         "run_id": "r", "requirements": [value], "verification": []}
             with self.subTest(digest=digest):
                 self.assertEqual(self.run_validate("workflow-response", bootstrap,
                                                    use_stdin=True).returncode, code)
@@ -361,10 +363,10 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             refused = self.run_validate(boundary, mismatched, use_stdin=True)
             self.assertNotEqual(refused.returncode, 0)
             self.assertEqual(refused.stdout, b"")
-        for raw in (b'{"interface_version":2,"kind":"workflow_bootstrap",'
-                    b'"run_id":"x","requirements":[],"requirements":[]}',
-                    b'{"interface_version":2,"kind":"workflow_bootstrap",'
-                    b'"run_id":"x","requirements":[]}\xff'):
+        for raw in (b'{"interface_version":3,"kind":"workflow_bootstrap",'
+                    b'"run_id":"x","requirements":[],"requirements":[],"verification":[]}',
+                    b'{"interface_version":3,"kind":"workflow_bootstrap",'
+                    b'"run_id":"x","requirements":[],"verification":[]}\xff'):
             refused = subprocess.run(
                 [sys.executable, str(SCRIPT), "validate-report", "--boundary",
                  "workflow-response", "--input", "-", "--policy", str(POLICY)],
@@ -475,8 +477,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
 
     def test_workflow_response_uses_source_and_lexical_installed_package(self):
-        payload = {"interface_version": 2, "kind": "workflow_bootstrap",
-                   "run_id": "synthetic-loader", "requirements": []}
+        payload = {"interface_version": 3, "kind": "workflow_bootstrap",
+                   "run_id": "synthetic-loader", "requirements": [], "verification": []}
         source = self.run_validate("workflow-response", payload, use_stdin=True)
         self.assertEqual(source.returncode, 0, source.stderr)
         with tempfile.TemporaryDirectory() as raw:
@@ -496,7 +498,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual(installed.stdout, source.stdout)
 
     def test_workflow_response_lexical_loader_refuses_closed_failures(self):
-        payload = b'{"interface_version":2,"kind":"workflow_bootstrap","requirements":[],"run_id":"x"}'
+        payload = (b'{"interface_version":3,"kind":"workflow_bootstrap","requirements":[],'
+                   b'"run_id":"x","verification":[]}')
         for variant in ("missing_entry", "missing_private", "directory_entry", "wrong_interface"):
             with self.subTest(variant=variant), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw); store = root / "store"; home = root / "home"; store.mkdir()

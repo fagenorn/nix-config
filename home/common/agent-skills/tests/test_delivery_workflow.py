@@ -433,8 +433,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     "--repo-root", str(repo), "--creation-key", "admission", "--now", NOW],
                     capture_output=True, text=True, env=env, check=False)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertEqual(json.loads(completed.stdout), {"interface_version": 2,
-                    "kind": "workflow_bootstrap", "requirements": [],
+                self.assertEqual(json.loads(completed.stdout), {"interface_version": 3,
+                    "kind": "workflow_bootstrap", "requirements": [], "verification": [],
                     "run_id": TransactionStore(repo / ".superpowers/attempt-transactions")
                     .lookup(attempt_identity.run_key("admission"))})
                 malformed = base / "bad.json"; malformed.write_text("{malformed")

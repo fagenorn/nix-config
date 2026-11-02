@@ -197,11 +197,21 @@ class DeliveryProjection:
                 "requested_scope": copy.deepcopy(reduction["requested_scope"])}
 
     def bootstrap(self, state: dict[str, Any]) -> dict[str, Any]:
+        """The interface-3 `workflow_bootstrap`: each unfinished issue's custody requirement,
+        and the requirement of every `open` verification blocker that an unfinished issue's
+        latest attempt is parked on, once per blocker in id order (issue 545 D6)."""
         requirements = []
+        awaited = {}
         for issue_key in sorted(state["issues"], key=int):
             issue_state = state["issues"][issue_key]
             if self.delivery_complete(issue_state):
                 continue
+            latest = issue_state["attempts"][-1] if issue_state["attempts"] else None
+            if (latest is not None and latest["state"] == "suspended"
+                    and latest["blocked_on"] == "verification"):
+                record = state["verification_blockers"][latest["verification_blocker"]]
+                if record["state"] == "open":
+                    awaited[record["id"]] = verification_blocker.requirement(record)
             records = ([("implementation", item) for item in issue_state["attempts"]]
                        + [("remainder", item) for item in issue_state["delivery_remainders"]])
             if not records:
@@ -216,8 +226,9 @@ class DeliveryProjection:
                 "custody": self.custody_for_record(int(issue_key), kind, record),
                 "recorded_worktree": record["worktree"],
                 "contract_digest": issue_state["delivery"]["contract_digest"]})
-        return {"interface_version": 2, "kind": "workflow_bootstrap",
-                "run_id": state["run_id"], "requirements": requirements}
+        return {"interface_version": 3, "kind": "workflow_bootstrap",
+                "run_id": state["run_id"], "requirements": requirements,
+                "verification": [awaited[key] for key in sorted(awaited)]}
 
     def remainder_response(self, *, ledger_repo_root: str, run_id: str,
                            issue_state: dict[str, Any], remainder: dict[str, Any],

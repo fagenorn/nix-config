@@ -4601,8 +4601,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             )
             zero_id = json.loads(initialized.stdout)["run_id"]
             self.assertEqual(json.loads(initialized.stdout), {
-                "interface_version": 2, "kind": "workflow_bootstrap",
-                "run_id": zero_id, "requirements": [],
+                "interface_version": 3, "kind": "workflow_bootstrap",
+                "run_id": zero_id, "requirements": [], "verification": [],
             })
             zero_request = root / "control-zero.json"
             zero_request.write_text(json.dumps(self.control_request(

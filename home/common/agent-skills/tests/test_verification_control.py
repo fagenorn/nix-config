@@ -344,5 +344,69 @@ class WireTest(ControlHarness, unittest.TestCase):
             self.validate(parked(True))
 
 
+class BootstrapTest(ControlHarness, unittest.TestCase):
+    """Issue 545 D6, D9: `init-run` lists each awaited open blocker once, by id."""
+
+    def bootstrap(self):
+        done = self.run_cli("init-run", "--repo-root", self.root, "--run-id", self.run_id)
+        return self.validated_response(done.stdout)
+
+    def test_the_bootstrap_lists_the_open_blockers_awaited_until_they_resolve(self):
+        self.parked((61, X), (62, Y), (63, X))
+        boot = self.bootstrap()
+        self.assertEqual(boot["interface_version"], 3)
+        self.assertEqual(boot["verification"],
+                         sorted([asked(X), asked(Y)], key=lambda item: item["blocker_id"]))
+        self.assertEqual([item["issue"] for item in boot["requirements"]], [61, 62, 63])
+        resolved = self.sweep(9, observed(X, NEXT), issues=(61, 62, 63), max_parallel=1)
+        self.assertEqual(self.dispatched(resolved), [("resume", "61:1:2")])
+        self.assertEqual(self.bootstrap()["verification"], [asked(Y)])
+        self.sweep(10, observed(Y, NEXT), issues=(61, 62, 63), max_parallel=1)
+        self.assertEqual({record["state"] for record in self.blockers().values()},
+                         {"resolved"})
+        self.assertEqual(self.bootstrap()["verification"], [])
+
+    def test_the_validator_admits_only_interface_three(self):
+        self.parked((61, X), (62, Y))
+        boot = self.bootstrap()
+        model = self.delivery_model
+
+        def mutated(change):
+            value = json.loads(json.dumps(boot))
+            change(value)
+            return value
+
+        def interface_two(value):
+            value["interface_version"] = 2
+
+        def without_member(value):
+            del value["verification"]
+
+        def unsorted(value):
+            value["verification"].reverse()
+
+        def repeated(value):
+            value["verification"].append(value["verification"][0])
+
+        def opened(value):
+            value["verification"][0]["note"] = "x"
+
+        def other_kind(value):
+            value["verification"][0]["kind"] = "worktree_fact"
+
+        def null_kind(value):
+            value["verification"][0]["kind"] = None
+
+        self.assertEqual(model.validate_delivery_object(
+            boot, expected_kind="workflow-response", notes_max_characters=4096), boot)
+        for change in (interface_two, without_member, unsorted, repeated, opened, other_kind,
+                       null_kind):
+            with self.subTest(case=change.__name__), \
+                    self.assertRaises(model.DeliveryModelError):
+                model.validate_delivery_object(
+                    mutated(change), expected_kind="workflow-response",
+                    notes_max_characters=4096)
+
+
 if __name__ == "__main__":
     unittest.main()

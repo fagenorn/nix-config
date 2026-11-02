@@ -404,11 +404,17 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if set(value) == {"worker_id", "release_event", "released"}: return _released_worker(value)
     if set(value) == {"action_id", "outcome", "marker"}: return _progress_mark(value)
     if value.get("kind") == "workflow_bootstrap":
-        _object(value, _members("interface_version kind run_id requirements")); _v2(value); _string(value["run_id"], "run id")
+        _object(value, _members("interface_version kind run_id requirements verification"))
+        if type(value["interface_version"]) is not int or value["interface_version"] != 3: _reject()
+        _string(value["run_id"], "run id")
         _sorted_unique(value["requirements"], "bootstrap requirements", key=lambda item: (item.get("issue", 0), item.get("custody", {}).get("action_id", "")))
         for item in value["requirements"]:
             item = _object(item, _members("issue owner custody recorded_worktree contract_digest")); issue = _integer(item["issue"], "requirement issue", minimum=1); _string(item["owner"], "requirement owner"); validate_custody_ref(item["custody"], issue=issue); _string(item["recorded_worktree"], "recorded worktree")
             if item["contract_digest"] is not None: _digest(item["contract_digest"], "requirement contract")
+        # Issue 545 D9: the awaited open blockers, each the closed requirement, by id.
+        if not isinstance(value["verification"], list): _reject()
+        for item in value["verification"]: _verification(item)
+        _sorted_unique(value["verification"], "bootstrap verification", key=lambda item: item["blocker_id"])
         return value
     if value.get("kind") == "observe":
         _object(value, _members("interface_version kind issue run_id requirements")); _v2(value); _integer(value["issue"], "observe issue", minimum=1)
