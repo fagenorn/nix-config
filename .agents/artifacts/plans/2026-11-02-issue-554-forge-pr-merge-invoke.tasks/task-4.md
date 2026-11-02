@@ -200,7 +200,7 @@ Expected: FAIL. `observe_merge` does not exist, and `_new_plan`'s base `bind_can
 
 - [ ] **Step 3: Write the minimal implementation**
 
-Implement `observe_merge` and the `_new_plan` order per the Invariants. `_document` renders `candidate.get("merge")`. Rewrite the `release_driver` module docstring's sentence on `preview`'s reads: `preview` makes `release_verification`'s three reads, plus, for a profile that consumes `merge`, the three `observe_merge` reads before them (issue 554 D3). Add a paragraph to `release_verification`'s docstring that lists `observe_merge`'s reads and codes.
+Implement `observe_merge` and the `_new_plan` order per the Invariants. `_document` renders `candidate.get("merge")`. Rewrite the `release_driver` module docstring's sentence on `preview`'s reads: `preview` makes `release_verification`'s three reads, plus, for a profile that consumes `merge`, the three `observe_merge` reads before them (issue 554 D3). Add a paragraph to `release_verification`'s docstring that lists `observe_merge`'s reads and codes. Update the `VerificationRefused` docstring, which says the code "is `candidate_stale` or `verification_unavailable`", to name every code it now carries: `candidate_stale`, `verification_unavailable`, `release_pr_missing`, `release_pr_stale` and `release_pr_behind` (PR554-06).
 
 In `python/README.md` § Release driver, change only these:
 - The opening paragraph's "The candidate is `{version, commit, title, notes}`." gains "; for a profile that consumes `merge`, the driver adds `merge: {pr, base_tip}`, which it observes itself (issue 554 D3)".

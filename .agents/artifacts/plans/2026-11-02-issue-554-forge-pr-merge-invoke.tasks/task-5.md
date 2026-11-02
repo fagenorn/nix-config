@@ -18,7 +18,7 @@ Per D7, D12 and D15; spec §4 and the race rows 6, 7, 8, 10 and 16. Read the pla
 - Produces:
   - `_Drive.stopped(name: str, status: str, after: str = "") -> str`. It parks with reason `f"{name}: {status}{after}"`.
   - After an `invoke_action` that leaves the action unsatisfied, `after` is `f" after {result} {error_class}: {reference}"`, read from that action's latest `invocation_returned` event, when its `result` is not `accepted`. Otherwise `after` is empty.
-  - `StatefulForge(world)` also calls `world.merge_ready()`. `invoke` calls `self.land(request)` after an accepted invoke. `land(request: dict) -> None`:
+  - `StatefulForge(world)` keeps its base `__init__` and does not call `merge_ready()`. That call would re-register `repos/<slug>/git/ref/heads/main`, which single-branch tests answer through `verification_ready()` as the integration tip (PR554-01). Two-branch tests call `self.world.merge_ready(...)` themselves. `invoke` calls `self.land(request)` after an accepted invoke. `land(request: dict) -> None`:
     - `pr_merge` re-registers `pr_merge.view` as `MERGED` with `mergeCommit.oid == CANONICAL["merge_commit"]` and `headRefOid == CANONICAL["commit"]`, and `pr_merge.merge_commit` with parents `[merge.base_tip, candidate.commit]`.
     - `tag` peels the tag to `CANONICAL["merge_commit"]` when `"merge" in candidate`, else to `CANONICAL["commit"]`.
     - `release` is as at base.
@@ -27,7 +27,7 @@ Per D7, D12 and D15; spec §4 and the race rows 6, 7, 8, 10 and 16. Read the pla
 **Invariants:**
 - A park after a pre-invoke inspection (`absent` never invoked, or `diverged`) keeps its base reason `<name>: <status>`; `in_progress` and `unknown` still return `wait` with no park. The `InvocationRefused` park is unchanged.
 - The reason string is what `status()["release"]["reason"]` returns (128 D25), for every operation, not only `pr_merge`.
-- A two-branch release drives `merge`, `tag`, `github-release`, then `deploy`. A crash after the merge resumes by inspecting `merge` as `satisfied` and never runs a second `gh pr merge`. The tag lands at the merge commit.
+- A two-branch release drives `merge`, `tag`, `github-release`, then `deploy`. A crash after the merge leaves its intent open with no recorded inspection (the core records the inspection only after `invoke` returns), so the resume preview lists `merge` again with a fresh token (PR554-02). The resumed run's first inspection reads it `satisfied`, so it never runs a second `gh pr merge`. The tag lands at the merge commit.
 - The existing fixture-merge matrix (`MatrixCase`, `CrashMatrixTest`, `FixtureShapeTest`) is unchanged and still passes.
 
 - [ ] **Step 1: Write the failing tests**
@@ -47,6 +47,7 @@ class TwoBranchMatrixTest(unittest.TestCase):
         self.world.merge_observation_ready()
         self.clock = rs.Clock()
         self.forge, self.deploy = rs.StatefulForge(self.world), rs.FixtureDeploy()
+        self.world.merge_ready()
 
     def driver(self, forge=None, crash=None):
         forge = forge or self.forge
@@ -80,12 +81,15 @@ class TwoBranchMatrixTest(unittest.TestCase):
         self.clock.advance(release_driver.CUSTODY_TTL_MS + 1)
         resumed = driver.preview(None)
         self.assertEqual((resumed["mode"], resumed["candidate"]["merge"]), ("resume", support.MERGE))
-        self.assertNotIn("merge", [c["action"] for c in resumed["confirmations"]])
+        # The crash left merge's intent open with no recorded inspection, so it is not stored
+        # satisfied and is confirmed again; the resumed run inspects it and never re-invokes.
+        self.assertEqual([c["action"] for c in resumed["confirmations"]], TWO_BRANCH[:3])
         result = driver.run(None, [c["token"] for c in resumed["confirmations"]])
         self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
         self.assertEqual(len(self.merges()), 1)
         self.assertEqual([argv[3] for argv in self.tags()], [CANONICAL["merge_commit"]])
         actions = {a["name"]: (a["status"], a["attempts"]) for a in driver.status()["release"]["actions"]}
+        # One attempt: the intent the crashed invoke opened. The resume adds an inspection, not an attempt.
         self.assertEqual(actions["merge"], ("satisfied", 1))
 
     def test_a_provider_refused_merge_parks_with_no_effect(self):
@@ -105,7 +109,7 @@ class TwoBranchMatrixTest(unittest.TestCase):
 
     def test_a_landed_merge_that_exits_non_zero_is_satisfied(self):
         """Issue 554 row 8: the same-call inspection reads MERGED, and the tag follows."""
-        forge = rs.LandedDespiteExit(self.world)  # its __init__ registers merge_ready() defaults
+        forge = rs.LandedDespiteExit(self.world)
         self.world.merge_ready(merge_exit=1, merge_stderr="gh: connection reset")
         driver = self.driver(forge=forge)
         _, result = rs.release(driver, rs.candidate())
@@ -127,7 +131,7 @@ class TwoBranchMatrixTest(unittest.TestCase):
         self.assertEqual(driver.abandon()["state"], "abandoned")
 ```
 
-Order matters, because `verification_ready`, `merge_ready` and `StatefulForge.__init__` register the same protection, base-ref and merge argv, and the last write wins. A test's own `merge_ready(...)` therefore comes after `setUp` and after any forge construction, and nothing re-registers protection after it. The floor-breaking payload keeps `FLOOR_PROTECTION`'s `checks`, so the receipt still passes: it does not judge `enforce_admins` (D14). If the core refuses `abandon` in rows 6 and 7, stop and report it, because the spec's row 6 relies on the no-effect gate.
+Order matters, because `verification_ready` and `merge_ready` register the same protection argv, and `merge_ready` and `merge_observation_ready` register the same `heads/main` argv. The last write wins. In these tests the integration branch is `dev`, so `heads/main` is the base tip in every registration, and a test's own `merge_ready(...)` comes after `setUp` with nothing re-registering protection after it. The floor-breaking payload keeps `FLOOR_PROTECTION`'s `checks`, so the receipt still passes: it does not judge `enforce_admins` (D14). If the core refuses `abandon` in rows 6 and 7, stop and report it, because the spec's row 6 relies on the no-effect gate.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
@@ -152,7 +156,7 @@ Expected: exit 0.
 
 ```bash
 git add python/agent_tools/release_driver.py tests/release_driver_support.py tests/test_release_crash_matrix.py python/README.md
-launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "feat(issue-554/T5): run a two-branch release and name its park reason" -m "<trailer>"
+launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "feat(issue-554/T5): run two-branch releases, name park reasons" -m "<trailer>"
 ```
 
 ## Review feasibility task

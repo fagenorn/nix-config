@@ -1,10 +1,11 @@
 # Task 7: Native certification against the sandbox
 
-Per D10, D11 and D19; spec §8 and §9. Read the plan root's Global Constraints first. This is the only task with real GitHub effects.
+Per D10, D11, D19 and D20; spec §8 and §9. Read the plan root's Global Constraints first. This is the only task with real GitHub effects.
 
 **Stop rule (human gate).** Launch the harness openly, through the Bash tool and `launch-scope exec`, in the foreground. Stop and report `blocked_on: human_gate`, naming the refused step and its message, when any of these happens:
 - a permission guard, hook, prompt or sandbox policy refuses that launch;
-- one of these is refused or denied: the sandbox repository's creation, its protection or `delete_branch_on_merge` setup, a push, a status, a PR, a merge or a close on it.
+- one of these is refused or denied: the sandbox repository's creation, its protection or `delete_branch_on_merge` setup, a push, a status, a PR, a merge or a close on it;
+- the harness exits 3 (`result: blocked`), because GitHub answered an authentication or permission refusal (D20). That is a human gate, never a pass or a fail.
 
 Never route around a refusal: no other command spelling, no direct `gh` or `git` call in place of the harness, no changed permission setting, no disabled signing, no other repository. Then commit only Step 1's harness and recipe (Step 6a), and leave the evidence test, the evidence file and the README sentence out. Never mutate `fagenorn/nix-config` or `elevenyellow/jarbird`, and never touch any repository's protection except the sandbox's.
 
@@ -28,7 +29,7 @@ Never route around a refusal: no other command spelling, no direct `gh` or `git`
     - `CONTEXT = "release-merge-certification"`;
     - `SCHEMA = "release-merge-certification/v1"`.
 
-    Its entry point is `main(argv: list[str] | None = None) -> int`, with the required options `--scratch DIR` (an existing absolute directory) and `--output FILE`. It exits 0 when `result` is `passed`, 1 when the evidence was written but failed, and 2 on a refusal before any mutation (a bad argument, a sandbox without the marker).
+    Its entry point is `main(argv: list[str] | None = None) -> int`, with the required options `--scratch DIR` (an existing absolute directory) and `--output FILE`. It exits 0 when `result` is `passed`, 1 when the evidence was written with `result` `failed` or `inconclusive`, 2 on a refusal before any mutation (a bad argument, a sandbox without the marker), and 3 when it stopped at an authentication or permission refusal, with the evidence written as `result: blocked`.
   - The `justfile` recipe, placed beside `agent-gate-bundle`, with the summary comment directly above it:
 
     ```
@@ -36,9 +37,11 @@ Never route around a refusal: no other command spelling, no direct `gh` or `git`
     release-merge-certification *args:
       PYTHONPATH="{{agent_tools_path}}" python3 -m tests.release_merge_certification {{args}}
     ```
-  - The evidence object, written with `json.dumps(…, indent=2, sort_keys=True) + "\n"`: `{schema, issue: 554, repository: SANDBOX, actor, implementation: {commit, pr_merge_descriptor_digest}, protection: {strict, required_contexts, enforce_admins}, spelling, guard: "recording-shim", rows: [{id, pr, bound: {head, base_tip}, attempts: [{via, outcome, detail}], after: {state, base_tip, merge_commit, parents}, passed}], result, started_at, finished_at}`.
+  - The evidence object, written with `json.dumps(…, indent=2, sort_keys=True) + "\n"`: `{schema, issue: 554, repository: SANDBOX, actor, implementation: {commit, pr_merge_descriptor_digest}, protection: {strict, required_contexts, enforce_admins}, spelling, guard: "recording-shim", rows: [{id, pr, bound: {head, base_tip}, attempts: [{via, outcome, class, detail}], after: {state, base_tip, merge_commit, parents}, verdict, passed}], result, started_at, finished_at}`.
     - `via` is `adapter`, `argv` or `graphql`, and `outcome` is `accepted` or `refused`.
-    - `detail` is the first line of stderr, at most 240 characters, or the GraphQL error's `type: message`.
+    - `class` is `null` for an accepted attempt. A refused attempt's `class` is the classifier's: `merge_condition`, `auth`, `permission`, `transport`, `request` or `unclassified`.
+    - A row's `verdict` is `passed`, `failed`, `inconclusive` or `blocked`, and `passed` is `verdict == "passed"`. `result` is `passed`, `failed`, `inconclusive` or `blocked`.
+    - `detail` is a bounded excerpt: the first line of stderr, or the first GraphQL error's `type: message`, at most 240 characters, with anything token-like (`gho_`, `ghp_`, `github_pat_`, `Bearer `) replaced by `<redacted>`.
     - `implementation.commit` is `git rev-parse HEAD` of the checkout that runs the harness.
     - `pr_merge_descriptor_digest` is `telemetry_digest(forge_adapter.describe()["operations"]["pr_merge"])` (D19).
     - `after.merge_commit` and `after.parents` are null while the PR is not merged.
@@ -65,8 +68,18 @@ Never route around a refusal: no other command spelling, no direct `gh` or `git`
   - (b1) the rendered argv `gh pr merge <pr> --repo SANDBOX --merge --match-head-commit H`;
   - (b2) `gh api graphql -f query='mutation($id:ID!,$head:GitObjectID!){mergePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head,mergeMethod:MERGE}){pullRequest{state}}}' -f id=<PR node id> -f head=H`.
 
-  It passes when both are refused (non-zero exit, or GraphQL `errors`), the PR is still `OPEN` and `main` is still B1.
-- Row c (head mismatch) binds H, then pushes a second commit H′ to the head branch and posts a success status on it. After the wait, it attempts the rendered argv with `--match-head-commit H`. It passes when that is refused, the PR is still `OPEN` and `main` is unchanged.
+  It passes only when both attempts are refused with class `merge_condition`, the PR is still `OPEN` and `main` is still B1.
+- Row c (head mismatch) binds H, then pushes a second commit H′ to the head branch and posts a success status on it. After the wait, it attempts the rendered argv with `--match-head-commit H`. It passes only when that is refused with class `merge_condition`, the PR is still `OPEN` and `main` is unchanged.
+- The refusal classifier is one function, `classify(timed_out: bool, text: str) -> str`, over the attempt's exit and stderr or GraphQL errors (D20). Its patterns are case-insensitive module constants, checked in this order, and the first that matches decides:
+  1. `transport`: a timeout, `HTTP 5`, `connection`, `timed out`, `could not resolve host`, `TLS`.
+  2. `auth`: `HTTP 401`, `bad credentials`, `authentication`, `gh auth login`.
+  3. `permission`: `HTTP 403`, `must have admin rights`, `resource not accessible`, `permission`.
+  4. `merge_condition`, the intended rejection: `not up to date`, `out of date`, `head branch was modified`, `base branch was modified`, `base branch policy prohibits the merge`, `expected head`.
+  5. `request`: `HTTP 400`, `HTTP 404`, `HTTP 422`, `argument`, `parse error`, `could not resolve to`.
+  6. `unclassified`: anything else.
+
+  An `auth` or `permission` class on any mutation stops the run at once: no further mutation, evidence `result: blocked`, exit 3. In rows b and c, any other non-`merge_condition` class makes the row `inconclusive`, and so does an after-state the harness cannot read. A wrong after-state, such as row b merged, makes it `failed`. In row a, a first invoke that is not `accepted` is `inconclusive` when its reference classifies `transport` and `failed` otherwise, and the floor gate failing is `failed`. `result` is `blocked` if any row's verdict is `blocked`, else `failed` if any row failed, else `inconclusive` if any row is, else `passed`.
+- Confirming the classifier against the first live response: the `merge_condition` phrases are a starting set from gh's and GitHub's merge refusals, and the exact native text is unverified. After the first live run, read every row b and row c attempt's `class` and `detail`. When an attempt is `unclassified` and its detail plainly states the base-is-behind or head-moved condition, add that exact phrase to the `merge_condition` constant with a comment that quotes the observed excerpt, then re-run (within Step 3's two re-runs). Never add a phrase that names authentication, permission, transport, a missing node or an argument error. A detail that is not plainly the merge condition stays `inconclusive`: commit nothing from Step 3, and report it as a finding with the evidence path.
 - Cleanup closes row b's and row c's PRs (`gh pr close <n> --repo SANDBOX`), deletes no branch and never deletes the repository. `result` is `passed` only when all three rows pass. The evidence never holds a token, a header or a raw transcript.
 
 - [ ] **Step 1: Write the harness and the recipe**
@@ -103,7 +116,7 @@ class MergeCertificationEvidenceTest(unittest.TestCase):
                           evidence["guard"], evidence["result"]),
                          ("release-merge-certification/v1", 554, harness.SANDBOX, "recording-shim", "passed"))
         self.assertEqual(sorted(self.rows), ["a", "b", "c"])
-        self.assertTrue(all(row["passed"] for row in evidence["rows"]))
+        self.assertTrue(all(row["passed"] and row["verdict"] == "passed" for row in evidence["rows"]))
         self.assertEqual(evidence["protection"], {"strict": True, "required_contexts": [harness.CONTEXT],
                                                   "enforce_admins": True})
         for marker in ("gho_", "ghp_", "github_pat_", "Authorization", "Bearer "):
@@ -122,6 +135,7 @@ class MergeCertificationEvidenceTest(unittest.TestCase):
         self.assertEqual(c["after"]["base_tip"], c["bound"]["base_tip"])
         for row in (b, c):
             self.assertEqual((row["after"]["state"], row["after"]["merge_commit"]), ("OPEN", None))
+            self.assertEqual({t["class"] for t in row["attempts"]}, {"merge_condition"})  # D20
 
     def test_the_spelling_and_descriptor_are_the_current_ones(self):
         """D11: a spelling or descriptor change demands a new certification."""
@@ -146,7 +160,7 @@ Expected: FAIL, with `FileNotFoundError` for the evidence file.
 - [ ] **Step 3: Run the certification (real GitHub effects; stop rule applies)**
 
 Run (timeout 1800 s), from the worktree root: `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- just release-merge-certification --scratch <launch-scope scratch dir> --output .agents/artifacts/evidence/release-554-native-certification.json`
-Expected: exit 0 and `"result": "passed"`. On exit 1, read the failing row's `detail`. Fix only the harness's own defect and re-run, at most twice. A failure that shows the adapter or the spec's premise wrong (for example, GitHub merges row b) is a finding: commit nothing from this step and report it with the evidence path. Any permission refusal falls under the stop rule.
+Expected: exit 0 and `"result": "passed"`. On exit 3, apply the stop rule. On exit 1, read each failing or inconclusive row's `class` and `detail`. Fix only the harness's own defect, or extend the classifier as the classifier-confirmation Invariant allows, and re-run, at most twice. A failure that shows the adapter or the spec's premise wrong (for example, GitHub merges row b) is a finding: commit nothing from this step and report it with the evidence path. Any permission refusal falls under the stop rule.
 
 - [ ] **Step 4: Document the admission**
 
@@ -179,5 +193,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":7,"records":[{"bounds":[{"added_lines":420,"boundary":"all","deleted_lines":0,"record_bytes":30720,"support":{"covers":["r7a"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r7a","last_task":7,"owner":7,"path":"tests/release_merge_certification.py"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":0,"record_bytes":2048,"support":{"covers":["r7b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7b","last_task":7,"owner":7,"path":"justfile"},{"bounds":[{"added_lines":130,"boundary":"all","deleted_lines":0,"record_bytes":6144,"support":{"covers":["r7c"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r7c","last_task":7,"owner":7,"path":".agents/artifacts/evidence/release-554-native-certification.json"},{"bounds":[{"added_lines":70,"boundary":"all","deleted_lines":0,"record_bytes":6144,"support":{"covers":["r7d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7d","last_task":7,"owner":7,"path":"tests/test_release_evidence.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":7168,"support":{"covers":["r7e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7e","last_task":7,"owner":7,"path":"home/common/claude-code/README.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":7,"records":[{"bounds":[{"added_lines":480,"boundary":"all","deleted_lines":0,"record_bytes":34816,"support":{"covers":["r7a"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r7a","last_task":7,"owner":7,"path":"tests/release_merge_certification.py"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":0,"record_bytes":2048,"support":{"covers":["r7b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7b","last_task":7,"owner":7,"path":"justfile"},{"bounds":[{"added_lines":150,"boundary":"all","deleted_lines":0,"record_bytes":7168,"support":{"covers":["r7c"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r7c","last_task":7,"owner":7,"path":".agents/artifacts/evidence/release-554-native-certification.json"},{"bounds":[{"added_lines":70,"boundary":"all","deleted_lines":0,"record_bytes":6144,"support":{"covers":["r7d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7d","last_task":7,"owner":7,"path":"tests/test_release_evidence.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":7168,"support":{"covers":["r7e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7e","last_task":7,"owner":7,"path":"home/common/claude-code/README.md"}]}}
 ```

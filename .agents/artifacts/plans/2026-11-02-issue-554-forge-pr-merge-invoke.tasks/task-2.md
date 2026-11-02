@@ -285,7 +285,7 @@ Re-measure (D16), with `PYTHONPATH="$PWD/python" python3 -c 'from agent_tools im
 - `accepted` with the PR URL, and `unknown` for any other exit;
 - inspect's `protection.strict` and its exact-parents `satisfied`.
 
-Cite issue 554 D4, D6, D7, D13 and D17.
+Cite issue 554 D4, D6, D7, D13 and D17. In the forge paragraph, the sentence "There are two mutation spellings: …" becomes three: it adds `gh pr merge <pr> --repo <slug> --merge --match-head-commit <commit>`. The following clause, "`already exists` (git) or `HTTP 422` (gh) is `precondition_failed`", is scoped to `tag` and `release`, because a failed `pr_merge` is `unknown` (PR554-06).
 
 - [ ] **Step 4: Verify**
 
@@ -295,8 +295,11 @@ Expected: PASS, `OK`.
 Run: `bash -c 'set -o pipefail; python3 -m unittest tests/test_claude_permission_guard.py 2>&1 | tail -4'`
 Expected: PASS, `OK`.
 
-Run: `if git grep -nE 'target_cas_unproven|"head": "4444|expected_head' -- python/agent_tools/forge_adapter.py tests/fixtures/forge-adapter-spellings.json tests/forge_world.py tests/test_forge_adapter.py tests/test_release_command.py; then exit 1; fi`
-Expected: exit 0.
+Run: `if git grep -nE 'target_cas_unproven|expected_head|expected_base_tip' -- python/agent_tools/forge_adapter.py tests/forge_world.py tests/test_release_command.py; then exit 1; fi`
+Expected: exit 0. The scope is production code and the world. `tests/test_forge_adapter.py` keeps the old-shape rejection case on purpose.
+
+Run: `if git grep -n '"head"' -- tests/fixtures/forge-adapter-spellings.json; then exit 1; fi`
+Expected: exit 0 (`canonical.head` is gone).
 
 Run (timeout 3600 s): `just build`
 Expected: exit 0.
@@ -305,7 +308,7 @@ Expected: exit 0.
 
 ```bash
 git add python/agent_tools/forge_adapter.py tests/fixtures/forge-adapter-spellings.json tests/forge_world.py tests/test_forge_adapter.py tests/release_test_support.py tests/test_release_profile.py tests/test_release_grammar.py tests/test_release_adapter_core.py tests/test_release_command.py tests/test_claude_permission_guard.py python/README.md
-launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "feat(issue-554/T2): support the forge pr_merge invoke behind its floor" -m "<trailer>"
+launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "feat(issue-554/T2): support forge pr_merge behind its floor" -m "<trailer>"
 ```
 
 ## Review feasibility task
