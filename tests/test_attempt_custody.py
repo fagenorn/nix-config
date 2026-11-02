@@ -43,7 +43,7 @@ class VocabularyTest(unittest.TestCase):
     def test_the_closed_sets_are_the_shipped_ones(self):
         self.assertEqual(ac.BLOCKED_ON_VALUES, {
             "usage_limit", "transport", "human_gate", "external", "unknown",
-            "host_capacity", "agent_dispatch", "deadline"})
+            "host_capacity", "agent_dispatch", "deadline", "verification"})
         self.assertEqual(ac.OWNER_BLOCKED_ON_VALUES,
                          ac.BLOCKED_ON_VALUES - {"unknown", "host_capacity"})
         self.assertEqual(ac.AUTO_RESUMABLE_BLOCKED_ON, {
@@ -53,6 +53,24 @@ class VocabularyTest(unittest.TestCase):
         self.assertEqual(ac.FENCING_REASONS, (
             "custody_misbound", "superseded_launch", "launch_identity_required",
             "custody_unavailable"))
+
+    def test_three_cause_classes_partition_the_attempt_causes(self):
+        self.assertEqual(ac.OBSERVATION_GATED_BLOCKED_ON, {"verification"})
+        classes = (ac.AUTO_RESUMABLE_BLOCKED_ON, ac.HUMAN_GATED_BLOCKED_ON,
+                   ac.OBSERVATION_GATED_BLOCKED_ON)
+        self.assertEqual(frozenset().union(*classes), ac.BLOCKED_ON_VALUES)
+        self.assertEqual(sum(map(len, classes)), len(ac.BLOCKED_ON_VALUES))
+        for cause in sorted(ac.BLOCKED_ON_VALUES):
+            for directed in (False, True):
+                expected = (cause in ac.AUTO_RESUMABLE_BLOCKED_ON
+                            or (cause in ac.HUMAN_GATED_BLOCKED_ON and directed))
+                with self.subTest(cause=cause, human_directed=directed):
+                    self.assertIs(ac.resume_permitted(cause, human_directed=directed), expected)
+        for value in ("owner_unavailable", "nonsense", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ac.resume_permitted(value, human_directed=True)
+        self.assertEqual(ac.suspension_reason("verification"), "suspended:verification")
+        self.assertEqual(ac.blocked_on_of("suspended:verification"), "verification")
 
     def test_the_cutover_vocabulary(self):
         self.assertEqual(ac.SUSPENSION_CAUSES - ac.BLOCKED_ON_VALUES, {"owner_unavailable"})
