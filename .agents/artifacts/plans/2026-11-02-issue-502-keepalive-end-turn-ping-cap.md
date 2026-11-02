@@ -49,21 +49,22 @@ Task 1 — Cap pings after an end_turn reply — `python/agent_tools/cache_keepa
 
 ## AC2 measurement
 
-Read-only, post-merge, on mbp (D7). Choose `START` and `END` as the AC2 row says, as ISO-8601 UTC timestamps in the log's own `ts` format (for example `2026-11-03T09:00:00.000Z`), and replace the two `<ts>` placeholders with them: the inline assignments put both in the script's environment, which is where it reads them, and its only argument is the log path. It refuses, exiting non-zero with a message on stderr and printing nothing on stdout, when `START` or `END` is missing or empty or when `START` is not before `END`. The script reads each JSON line whose `ts` lies in `[START, END)`. A conversation's last reply is the `stop_reason` of its newest `request` line whose `keepalive` is neither `untracked` nor `no_tail_mark`. An idle period is closed by a `keepalive_end` line, whose `pings` field is that period's count; a `listening` line (a restart forgets every conversation) or the end of the window closes each still-open period with the number of its `ping` lines since its last `keepalive_end`. It prints `end_turn_periods` (periods whose last reply was `end_turn`), `over_cap` (those with more than 2 pings) and `max_pings` among them. On the pre-change log of 2026-10-26..11-01 it prints `{"end_turn_periods": 2003, "over_cap": 1295, "max_pings": 13}`, so it detects the behaviour this issue removes.
+Read-only, post-merge, on mbp (D7). Choose `START` and `END` as the AC2 row says, as ISO-8601 UTC timestamps in the log's own `ts` format (for example `2026-11-03T09:00:00.000Z`), and replace the two `<ts>` placeholders with them: the inline assignments put both in the script's environment, which is where it reads them, and its only argument is the log path. It refuses, exiting non-zero with a message on stderr and printing nothing on stdout, when `START` or `END` is missing or empty or when `START` is not before `END`. The script reads each JSON line whose `ts` lies in `[START, END)`. A conversation's last reply is set, like the runtime's, by its newest thread request: of its `request` lines whose `keepalive` is neither `untracked` nor `no_tail_mark`, the one whose start (`ts` minus `duration_ms`, since a `request` line is written when its response ends) is latest so far, its `stop_reason` when its `status` is 2xx and its `outcome` is `complete`, else none. An older request whose response ends after a newer one started never changes it. An idle period is closed by a `keepalive_end` line, whose `pings` field is that period's count; a `listening` line (a restart forgets every conversation) or the end of the window closes each still-open period with the number of its `ping` lines since its last `keepalive_end`. It prints `end_turn_periods` (periods whose last reply was `end_turn`), `over_cap` (those with more than 2 pings) and `max_pings` (the most pings in any of those `end_turn` periods). On the pre-change log of 2026-10-26..11-01 (`START=2026-10-26T00:00:00.000Z`, `END=2026-11-02T00:00:00.000Z`) it prints `{"end_turn_periods": 2017, "over_cap": 1305, "max_pings": 13}`, so it detects the behaviour this issue removes.
 
 ```bash
 START=<ts> END=<ts> python3 -I -c '
 import json, os, sys
+from datetime import datetime, timedelta
 start, end, path = os.environ.get("START", ""), os.environ.get("END", ""), sys.argv[1]
 if not start or not end or start >= end:
     sys.exit("refusing: set START and END inline, non-empty, with START before END")
-last, open_pings, periods, over = {}, {}, 0, []
+last, newest, open_pings, periods, over, top = {}, {}, {}, 0, 0, 0
 def close(conversation, pings):
-    global periods
+    global periods, over, top
     if last.get(conversation) == "end_turn":
         periods += 1
-        if pings > 2:
-            over.append(pings)
+        over += pings > 2
+        top = max(top, pings)
 for raw in open(path, encoding="utf-8", errors="replace"):
     try:
         e = json.loads(raw)
@@ -75,9 +76,16 @@ for raw in open(path, encoding="utf-8", errors="replace"):
     if event == "listening":
         for k, n in open_pings.items():
             close(k, n)
-        last.clear(); open_pings.clear()
+        last.clear(); newest.clear(); open_pings.clear()
     elif event == "request" and c and e.get("keepalive") not in (None, "untracked", "no_tail_mark"):
-        last[c] = e.get("stop_reason")
+        try:
+            began = datetime.fromisoformat(e["ts"]) - timedelta(milliseconds=float(e.get("duration_ms") or 0))
+        except (TypeError, ValueError):
+            continue
+        if began >= newest.get(c, began):
+            newest[c] = began
+            done = isinstance(e.get("status"), int) and 200 <= e["status"] < 300 and e.get("outcome") == "complete"
+            last[c] = e.get("stop_reason") if done else None
     elif event == "ping" and c:
         open_pings[c] = open_pings.get(c, 0) + 1
     elif event == "keepalive_end" and c:
@@ -85,7 +93,7 @@ for raw in open(path, encoding="utf-8", errors="replace"):
         close(c, e.get("pings", 0))
 for k, n in open_pings.items():
     close(k, n)
-print(json.dumps({"end_turn_periods": periods, "over_cap": len(over), "max_pings": max(over, default=0)}))
+print(json.dumps({"end_turn_periods": periods, "over_cap": over, "max_pings": top}))
 ' ~/Library/Logs/claude-cache-proxy.log
 ```
 
