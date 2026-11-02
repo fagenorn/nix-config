@@ -62,8 +62,8 @@ seam is a plan bug.>
 
 ## Delivery estimate and boundaries
 
-<Expected changed files, aggregate-growth risks, and independently deliverable
-slices when the change may exceed a review-package boundary; numbers are estimates.>
+<Only the rationale for each boundary, one line each; the numbers live in the
+committed forecast blocks.>
 
 ## Task index
 
