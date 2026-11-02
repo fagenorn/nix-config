@@ -24,6 +24,8 @@ BASE_COMMIT = "eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7"
 REPO = Path(__file__).resolve().parents[4]
 CORE = re.compile(
     r"^rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+# The issue-207 ledger text per concrete test class (issue 500 D4, D9).
+_DELIVERED_207: dict[type, str] = {}
 
 
 class MigrationFixtures(LifecycleHarness):
@@ -38,15 +40,29 @@ class MigrationFixtures(LifecycleHarness):
         return TransactionStore(self.store_root)
 
     def delivered_207(self):
-        class Driver(DeliveredControlHarness, unittest.TestCase):
-            def runTest(self):
-                pass
+        """The issue-207 ledger's parsed state, a fresh parse on every call (issue 500 D4).
 
-        Driver.setUpClass()
-        driver = Driver()
-        self.addCleanup(driver.doCleanups)
-        driver.deliver_through_remainder()
-        return json.loads(driver.ledger.read_text(encoding="utf-8"))
+        The first call in a concrete test class runs the #220 driver and keeps the
+        ledger's text for that class; the driver's root and HOME are removed before
+        this method returns, and a failed run keeps nothing.
+        """
+        owner = type(self)
+        text = _DELIVERED_207.get(owner)
+        if text is None:
+            class Driver(DeliveredControlHarness, unittest.TestCase):
+                def runTest(self):
+                    pass
+
+            Driver.setUpClass()
+            driver = Driver()
+            try:
+                driver.deliver_through_remainder()
+                text = driver.ledger.read_text(encoding="utf-8")
+            finally:
+                driver.doCleanups()
+            _DELIVERED_207[owner] = text
+            owner.addClassCleanup(_DELIVERED_207.pop, owner, None)
+        return json.loads(text)
 
     def install_orchestrated(self, handle):
         source = self.delivered_207()
@@ -188,6 +204,18 @@ class MigrateOnWriteTest(MigrationFixtures, unittest.TestCase):
                     self.assertEqual(refused.returncode, 2)
                     self.assertIn(reason, refused.stderr)
                 self.assertEqual(self.tree_snapshot(), before)
+
+    def test_each_delivered_207_call_is_the_callers_own_copy(self):
+        """Issue 500 D4, D6: a mutation of one call's state never reaches the next call's."""
+        first = self.delivered_207()
+        self.assertTrue(first["issues"]["207"]["attempts"])
+        expected = json.dumps(first, sort_keys=True)
+        second = self.delivered_207()
+        second["mutated"] = True
+        second["issues"]["207"]["attempts"][0]["mutated"] = True
+        second["issues"]["207"]["attempts"].append({"mutated": True})
+        second["issues"]["207"]["delivery_remainders"].clear()
+        self.assertEqual(json.dumps(self.delivered_207(), sort_keys=True), expected)
 
     def test_a_schema_8_ledger_whose_binding_breaks_is_refused(self):
         self.init_run()

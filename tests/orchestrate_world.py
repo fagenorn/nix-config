@@ -17,6 +17,7 @@ fails loudly. Nothing contacts a network remote.
 """
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -37,6 +38,8 @@ ROUTE = "claude-code"
 # The third name is one no implementation would know, so only honouring the contract's bound
 # `unset_before_invocation` list keeps it out of a tracker child (D30).
 TOKENS = ("GITHUB_TOKEN", "GH_TOKEN", "ORCH_TEST_SENTINEL")
+# The committed unmutated fixture project per concrete test class (issue 500 D5, D9).
+_TEMPLATES: dict[type, Path] = {}
 
 PRELUDE = '''#!{python}
 import json, os, re, subprocess, sys
@@ -167,36 +170,57 @@ class OrchestrateWorld:
                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
                     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
-        self._commit_project(mutate)
+        if mutate is None:
+            shutil.copytree(self._template(), self.root, symlinks=True, dirs_exist_ok=True)
+        else:
+            self._commit_project(self.root, mutate)
 
-    def _commit_project(self, mutate) -> None:
+    def _template(self) -> Path:
+        """The test class's unmutated committed project, built by its first world (issue 500 D5).
+
+        The class cleanup that removes the directory and the cache entry is registered
+        before the build, so a failed build leaves nothing behind and caches nothing.
+        """
+        owner = type(self.case)
+        template = _TEMPLATES.get(owner)
+        if template is None:
+            tmp = tempfile.TemporaryDirectory()
+            owner.addClassCleanup(tmp.cleanup)
+            owner.addClassCleanup(_TEMPLATES.pop, owner, None)
+            template = Path(tmp.name).resolve() / "project"
+            template.mkdir()
+            self._commit_project(template, None)
+            _TEMPLATES[owner] = template
+        return template
+
+    def _commit_project(self, root: Path, mutate) -> None:
         contract = json.loads((ROOT / ".agents/project.json").read_text("utf-8"))
         contract["bindings"]["tracker"]["credential_env"]["unset_before_invocation"] = list(TOKENS)
         if mutate is not None:
             mutate(contract)
-        self.git("init", "--quiet", "-b", "main")
-        self.git("config", "commit.gpgsign", "false")
-        (self.root / ".agents/instructions").mkdir(parents=True)
-        (self.root / ".agents/project.json").write_text(json.dumps(contract, indent=2) + "\n",
-                                                        "utf-8")
-        (self.root / ".agents/instructions/bootstrap.md").write_text("# invariants\n", "utf-8")
+        self._git_in(root, "init", "--quiet", "-b", "main")
+        self._git_in(root, "config", "commit.gpgsign", "false")
+        (root / ".agents/instructions").mkdir(parents=True)
+        (root / ".agents/project.json").write_text(json.dumps(contract, indent=2) + "\n",
+                                                   "utf-8")
+        (root / ".agents/instructions/bootstrap.md").write_text("# invariants\n", "utf-8")
         paths = contract["bindings"]["paths"]
         for name in ("standards", "rejections"):
             for relative in paths[name]:
-                (self.root / relative).mkdir(parents=True, exist_ok=True)
-                (self.root / relative / "keep.md").write_text("# keep\n", "utf-8")
+                (root / relative).mkdir(parents=True, exist_ok=True)
+                (root / relative / "keep.md").write_text("# keep\n", "utf-8")
         for relative in paths["architecture"]:
-            if not (self.root / relative).exists():
-                (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
-                (self.root / relative).write_text("# architecture\n", "utf-8")
+            if not (root / relative).exists():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_text("# architecture\n", "utf-8")
         done = subprocess.run(
             [sys.executable, "-m", "agent_tools.resolve_project", "write-projections",
-             "--repo-root", str(self.root)],
+             "--repo-root", str(root)],
             capture_output=True, text=True, timeout=120, env=self.env)
         if done.returncode != 0:
             raise AssertionError(f"fixture projections could not be rendered: {done.stdout}")
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "fixture")
+        self._git_in(root, "add", "-A")
+        self._git_in(root, "commit", "--quiet", "-m", "fixture")
 
     def _write_gh(self, world: dict) -> None:
         (self.state / "gh.json").write_text(json.dumps(world), "utf-8")
@@ -245,7 +269,10 @@ class OrchestrateWorld:
             env=self.env, timeout=120)
 
     def git(self, *args) -> str:
-        return subprocess.run(["git", "-C", str(self.root), *args], capture_output=True,
+        return self._git_in(self.root, *args)
+
+    def _git_in(self, root: Path, *args) -> str:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
                               text=True, check=True, env=self.env).stdout
 
     def _gh_world(self, change) -> None:
