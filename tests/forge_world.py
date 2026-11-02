@@ -13,6 +13,10 @@ literals, so the world and the guard suite cannot disagree about a provider spel
 `invoke_ready(...)` registers the invoke happy path (D12, D23): `checkout` is a real temporary
 directory the fake `git rev-parse --show-toplevel` names. A call whose argv carries
 `--notes-file <path>` is keyed with that path replaced by `<NOTES>`; the real path is logged.
+
+`verification_ready(...)` registers the three `gh api` reads of `release_verification` (#128
+D12). They stay outside the spelling fixture: the fixture pins the guard's rows, and these
+reads are read-only paths the guard never adjudicates.
 """
 import json
 import os
@@ -188,3 +192,27 @@ class ForgeWorld:
         create = [("<NOTES>" if part == CANONICAL["notes_path"] else part)
                   for part in ROWS["release.create"]["argv"][1:]]
         self.respond("gh", create, exit=create_exit, stdout=create_stdout, stderr=create_stderr)
+
+    def verification_ready(self, *, tip=CANONICAL["commit"], commit=CANONICAL["commit"],
+                           checks=None, runs=None, total_count=None, protection_exit=0,
+                           slug=CANONICAL["slug"], integration=CANONICAL["branch"],
+                           default=CANONICAL["branch"], sleep=0.0):
+        """Register release_verification's three reads (spec §3). Defaults: required
+        `Nix Eval` and `Instruction Budget` (app_id null), one completed success run each."""
+        checks = [{"context": "Nix Eval", "app_id": None},
+                  {"context": "Instruction Budget", "app_id": None}] if checks is None else checks
+        if runs is None:
+            runs = [{"id": index + 1, "name": entry["context"], "status": "completed",
+                     "conclusion": "success", "app": {"id": 15368}}
+                    for index, entry in enumerate(checks)]
+        self.respond_json("gh", ["api", f"repos/{slug}/git/ref/heads/{integration}"],
+                          {"object": {"sha": tip, "type": "commit"}}, sleep=sleep)
+        protection = ["api", f"repos/{slug}/branches/{default}/protection"]
+        if protection_exit:
+            self.respond("gh", protection, exit=protection_exit, stderr="gh: Not Found (HTTP 404)")
+        else:
+            self.respond_json("gh", protection, {"required_status_checks": {
+                "strict": True, "contexts": [c["context"] for c in checks], "checks": checks}})
+        self.respond_json("gh", ["api", f"repos/{slug}/commits/{commit}/check-runs?per_page=100"],
+                          {"total_count": len(runs) if total_count is None else total_count,
+                           "check_runs": runs})
