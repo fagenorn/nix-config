@@ -50,6 +50,9 @@ _HEREDOC = re.compile(r"""(?<!<)<<-?(?!<)\s*(['"]?)([A-Za-z_]\w*)\1""")
 _ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 _VARIABLE = re.compile(r"\$(?:(\w+)|\{(\w+)\})")
 _FILE_LIKE = re.compile(r"\.[A-Za-z0-9]+$")
+_WHOLE = "whole"
+_STDOUT_TO_FILE = frozenset({">", ">>", ">|", "&>", "&>>", "1>", "1>>", "1>|"})
+_CUTS = ("|", "|&", "(", ")", "`")
 _MARKERS = ('"type":"api-request', '"isMeta":true')
 
 
@@ -102,19 +105,34 @@ def _command_text(command):
 
 
 def _simple_commands(tokens):
-    """The word lists of the simple commands of `tokens`, redirections and their targets dropped."""
-    commands, words, skip = [], [], False
+    """The simple commands of `tokens` as `(words, shown)`: the words with redirections and
+    their targets dropped, and whether the command's standard output reaches the tool result,
+    that is, it is outside every `(`...`)` and backtick pair, is not cut short by a `(`, `)` or
+    backtick, is not followed by `|` or `|&`, and has no `>`, `>>`, `>|`, `&>` or `&>>`
+    redirection, with or without a leading `1` (issue 504 D5, D12).
+    """
+    commands, words, skip, to_file = [], [], False, False
+    depth, in_backtick = 0, False
     for token in tokens:
         if token.kind == "op" and token.value in SEPARATORS:
-            commands.append(words)
-            words, skip = [], False
+            shown = (depth == 0 and not in_backtick and not to_file
+                     and token.value not in _CUTS)
+            commands.append((words, shown))
+            words, skip, to_file = [], False, False
+            if token.value == "(":
+                depth += 1
+            elif token.value == ")":
+                depth = max(depth - 1, 0)
+            elif token.value == "`":
+                in_backtick = not in_backtick
         elif token.kind == "op":
             skip = True
+            to_file = to_file or token.value in _STDOUT_TO_FILE
         elif skip:
             skip = False
         else:
             words.append(token.value)
-    commands.append(words)
+    commands.append((words, depth == 0 and not in_backtick and not to_file))
     return commands
 
 
@@ -148,7 +166,7 @@ def _bash_keys(command):
     if tokens is None:
         return []
     keys, env, cwd = [], {}, ""
-    for words in _simple_commands(tokens):
+    for words, shown in _simple_commands(tokens):
         while words and _ASSIGNMENT.match(words[0]):
             name, _, value = words[0].partition("=")
             env[name] = _expand(value, env)
@@ -158,14 +176,17 @@ def _bash_keys(command):
         if words[0] == "cd" and len(words) > 1:
             cwd = _join(cwd, _expand(words[1], env))
         elif posixpath.basename(words[0]) in READERS:
-            keys.extend((path, tuple(words)) for path in _reader_operands(words, env, cwd))
+            extent = _WHOLE if shown and posixpath.basename(words[0]) == "cat" else tuple(words)
+            keys.extend((path, extent) for path in _reader_operands(words, env, cwd))
     return keys
 
 
 def read_keys(name, tool_input):
-    """The (path, ...) keys a tool call reads; empty for every tool but Read and Bash."""
+    """The `(path, extent)` keys a tool call reads (issue 504 D5); empty for every tool but Read
+    and Bash."""
     if name == "Read" and isinstance(tool_input.get("file_path"), str):
-        return [(tool_input["file_path"], tool_input.get("offset"), tool_input.get("limit"))]
+        extent = tuple(tool_input.get(field) for field in ("offset", "limit", "pages"))
+        return [(tool_input["file_path"], _WHOLE if extent == (None, None, None) else extent)]
     if name == "Bash" and isinstance(tool_input.get("command"), str):
         return _bash_keys(tool_input["command"])
     return []
@@ -197,12 +218,17 @@ def _skill_name(tool_input):
     return name if isinstance(name, str) and name else "(unnamed)"
 
 
+def _covered(key, seen):
+    """Whether an earlier read covers `key`: the same extent, or the same path read whole."""
+    return key in seen or (key[0], _WHOLE) in seen
+
+
 def _classify(name, tool_input, text, keys, seen, saved):
     """The (bucket, sub key) of a tool result by the first rule that holds (D2, D17)."""
     paths = [key[0] for key in keys]
     if name == "Read" and tool_input.get("file_path") in saved:
         verdict = saved[tool_input["file_path"]]
-    elif keys and all(key in seen for key in keys):
+    elif keys and all(_covered(key, seen) for key in keys):
         verdict = ("rereads", None)
     elif _RESUME_PACK.search(text) or (_OWNER_KIND.search(text) and _OWNER_VERSION.search(text)):
         verdict = ("resume_reads", None)

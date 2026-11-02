@@ -58,6 +58,32 @@ def two_call_boot(session, agent, seconds, *, issue, launch, phase, start, end, 
     session.result(agent, seconds + 21, gate, gate_reply("continue", issue=issue, launch=launch))
 
 
+def bash(command):
+    return ("Bash", {"command": command})
+
+
+def read(path, **extent):
+    return ("Read", {"file_path": path, **extent})
+
+
+def stepped_boot(session, agent, seconds, steps, *, issue=7):
+    """A fresh owner (launch 2, phase 6) booting from 20,000 in one call per `(tool, size)` step.
+    The step's result holds `size` characters, so the next call grows by `size` plus the 40
+    output tokens of the step's call. The last call registers."""
+    session.child(agent, tool_use_id=dispatch(session, seconds))
+    opening(session, agent)
+    context, previous = 20_000, 0
+    for index, (tool, size) in enumerate(steps):
+        tool_id = session.call(agent, seconds + 10 * index + 10, context=context,
+                               write=context - previous, tool=tool)
+        session.result(agent, seconds + 10 * index + 11, tool_id, "x" * size)
+        previous, context = context, context + size + 40
+    gate = session.call(agent, seconds + 10 * len(steps) + 10, context=context,
+                        write=context - previous, bash=progress(6, action_id=f"{issue}:1:2"))
+    session.result(agent, seconds + 10 * len(steps) + 11, gate,
+                   gate_reply("continue", issue=issue, launch=2))
+
+
 class BootReportTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -232,6 +258,33 @@ class BootReportTest(unittest.TestCase):
         self.assertEqual(row["buckets"], buckets(
             tool_schemas=29_800, harness=100, prompt=100, rereads=1_000, assistant=40,
             unexplained=-1_000))
+
+    def test_a_whole_read_covers_every_later_read_of_its_file(self):
+        src = "/r/src/a.py"
+        cases = (  # (first read, second read, whether the second is a reread)
+            (bash(f"cat {src}"), read(src), True),
+            (read(src), bash(f"cat {src}"), True),
+            (read(src), read(src, offset=10, limit=20), True),
+            (bash("cd /r/src && cat a.py 2>/dev/null"), read(src), True),
+            (read(src, offset=1, limit=50), read(src), False),
+            (read(src, offset=1, limit=50), read(src, offset=51, limit=50), False),
+            (read("/r/docs/a.pdf", pages="1-2"), read("/r/docs/a.pdf", pages="3-4"), False),
+            (bash(f"cat {src} | head -n 5"), read(src), False),
+            (bash(f'V=$(cat {src}); echo "$V"'), read(src), False),
+            (bash(f"echo `cat {src}`"), read(src), False),
+            (bash(f"cat {src} > /tmp/a.txt"), read(src), False),
+            (bash(f"cat {src} 1>>/tmp/a.txt"), read(src), False),
+            (bash(f"cat {src} $(true) | head -n 5"), read(src), False),
+        )
+        for index, (first, second, reread) in enumerate(cases):
+            with self.subTest(first=first, second=second):
+                root = self.root / f"case-{index}"
+                session = Session(root)
+                stepped_boot(session, "o1", 0, [(first, 1_000), (second, 2_000)])
+                session.write()
+                [row] = report(root)["boots"]
+                self.assertEqual((row["buckets"]["other_reads"], row["buckets"]["rereads"]),
+                                 (1_000, 2_000) if reread else (3_000, 0))
 
     def test_cohorts_follow_lineage_position_and_launch_ordinal_and_groups_pool_them(self):
         session = Session(self.root)
