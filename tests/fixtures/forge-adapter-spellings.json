@@ -134,6 +134,19 @@
       ]
     },
     {
+      "id": "tag.merged_compare",
+      "operation": "tag",
+      "kind": "read",
+      "raw": "gh api repos/fagenorn/nix-config/compare/3333333333333333333333333333333333333333...main --jq .status",
+      "argv": [
+        "gh",
+        "api",
+        "repos/fagenorn/nix-config/compare/3333333333333333333333333333333333333333...main",
+        "--jq",
+        ".status"
+      ]
+    },
+    {
       "id": "tag.push",
       "operation": "tag",
       "kind": "mutation",

@@ -33,6 +33,9 @@ before the guard and the merge (issue 554 D4, D6, D13): the protection floor, th
 branch's auto-delete setting, the pull request (open, on the target branch, at the candidate
 commit) and the base tip bound by `merge`. Any non-zero exit of its one `gh pr merge` is
 `unknown`, because the core inspects the pull request afterwards.
+
+With a merge binding, `tag` and `release` judge and tag the release PR's merge commit rather
+than `candidate.commit` (issue 554 D8).
 """
 
 import json
@@ -42,7 +45,7 @@ import shlex
 import subprocess
 import tempfile
 import time
-from typing import Any
+from typing import Any, Callable
 
 from agent_tools.github_remote import github_slug
 
@@ -180,12 +183,14 @@ def _sha(value: str, where: str) -> str:
     return value
 
 
-def _tag_state(slug: str, tag: str, commit: str, deadline: float
+def _tag_state(slug: str, tag: str, released: Callable[[], str | None], deadline: float
                ) -> tuple[str, str, str | None, list[str]]:
     """`(outcome, reason, peeled commit, references)` of the tag, read from its own objects.
 
     A tag object whose target is another tag object is peeled in turn, as local
-    `refs/tags/<tag>^{commit}` peels it, up to `TAG_CHAIN_LIMIT` objects.
+    `refs/tags/<tag>^{commit}` peels it, up to `TAG_CHAIN_LIMIT` objects. `released` names the
+    commit the tag must peel to and is called only once an annotated tag has peeled, so a
+    missing or lightweight tag costs no pull request read; `None` matches no tag.
     """
     ref_path = f"repos/{slug}/git/ref/tags/{tag}"
     references = [ref_path]
@@ -208,9 +213,39 @@ def _tag_state(slug: str, tag: str, commit: str, deadline: float
     else:
         raise _Unknown("payload_invalid", f"tag chain deeper than {TAG_CHAIN_LIMIT} objects")
     peeled = sha
-    if peeled == commit:
+    if peeled == released():
         return "satisfied", "observed", peeled, references
     return "diverged", "tag_target_mismatch", peeled, references
+
+
+def _released(parameters: dict[str, Any], read: Callable[[list[str]], Any]) -> str | None:
+    """The commit `tag` and `release` publish, or None when the release PR has not landed as bound.
+
+    Without `candidate.merge` it is `candidate.commit` and nothing is read. With it, it is the
+    pull request's merge commit, and only when `_merge_outcome` is `satisfied`, so the judgment
+    here and `pr_merge`'s inspect cannot disagree (issue 554 D8). `read` takes a `gh` argv
+    without `gh` and returns the parsed JSON.
+    """
+    candidate = parameters["candidate"]
+    if "merge" not in candidate:
+        return candidate["commit"]
+    slug = parameters["target"]["repository"]
+    view = read(["pr", "view", str(candidate["merge"]["pr"]), "--repo", slug, "--json", PR_FIELDS])
+    state, base = _field(view, "state"), _field(view, "baseRefName")
+    oid, parents = None, None
+    if state == "MERGED":
+        oid = _sha(_field(view, "mergeCommit", "oid"), "mergeCommit.oid")
+        parents = _parents(read(["api", f"repos/{slug}/git/commits/{oid}"]))
+    try:
+        outcome, _ = _merge_outcome(state, base, parents, parameters)
+    except ValueError as error:
+        raise _Unknown("payload_invalid", str(error))
+    return oid if outcome == "satisfied" else None
+
+
+def _inspect_released(parameters: dict[str, Any], deadline: float
+                      ) -> Callable[[], str | None]:
+    return lambda: _released(parameters, lambda argv: _read(argv, deadline)[1])
 
 
 def _inspect_tag(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
@@ -218,7 +253,7 @@ def _inspect_tag(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
     subject = {"tag": tag, "commit": None}
     try:
         outcome, reason, peeled, references = _tag_state(
-            slug, tag, parameters["candidate"]["commit"], deadline)
+            slug, tag, _inspect_released(parameters, deadline), deadline)
     except _Unknown as error:
         return _unknown(error.reason, error.detail, subject)
     return _observation(outcome, reason, {"tag": tag, "commit": peeled}, references)
@@ -240,7 +275,7 @@ def _inspect_release(parameters: dict[str, Any], deadline: float) -> dict[str, A
         if name != tag:
             return _observation("diverged", "release_tag_mismatch", subject, references)
         outcome, reason, peeled, tag_references = _tag_state(
-            slug, tag, parameters["candidate"]["commit"], deadline)
+            slug, tag, _inspect_released(parameters, deadline), deadline)
     except _Unknown as error:
         return _unknown(error.reason, error.detail, subject)
     return _observation(outcome, reason, {"tag": tag, "commit": peeled},
@@ -309,6 +344,14 @@ def _merge_outcome(state: str, base: str, parents: list[str] | None,
     return "diverged", "merge_parents_mismatch"
 
 
+def _parents(commit: Any) -> list[str]:
+    """The parent commit ids of one `git/commits` answer."""
+    listed = commit.get("parents") if isinstance(commit, dict) else None
+    if not isinstance(listed, list):
+        raise _Unknown("payload_invalid", "parents is not a list")
+    return [_sha(_field(parent, "sha"), "parent") for parent in listed]
+
+
 def _inspect_pr_merge(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
     slug, number = parameters["target"]["repository"], parameters["candidate"]["merge"]["pr"]
     subject = {"pr": number, "merge_commit": None}
@@ -334,10 +377,7 @@ def _inspect_pr_merge(parameters: dict[str, Any], deadline: float) -> dict[str, 
             commit_path = f"repos/{slug}/git/commits/{oid}"
             references.append(commit_path)
             _, commit = _read(["api", commit_path], deadline)
-            listed = commit.get("parents") if isinstance(commit, dict) else None
-            if not isinstance(listed, list):
-                raise _Unknown("payload_invalid", "parents is not a list")
-            parents = [_sha(_field(parent, "sha"), "parent") for parent in listed]
+            parents = _parents(commit)
         protection = _protection(slug, base, deadline)
     except _Unknown as error:
         return _unknown(error.reason, error.detail, subject)
@@ -546,9 +586,8 @@ def _same_repository(slug: str, checkout: str) -> None:
                            f"{what} is {found}, not {slug}")
 
 
-def _contained(parameters: dict[str, Any], checkout: str) -> None:
+def _contained(parameters: dict[str, Any], commit: str, checkout: str) -> None:
     slug, branch = parameters["target"]["repository"], parameters["target"]["branch"]
-    commit = parameters["candidate"]["commit"]
     status = _precondition_read(
         ["gh", "api", f"repos/{slug}/compare/{commit}...{branch}", "--jq", ".status"],
         checkout).strip()
@@ -683,9 +722,38 @@ def _invoke_pr_merge(parameters: dict[str, Any], checkout: str) -> dict[str, Any
     return _mutate(argv, raw, checkout, "pr_merge", f"https://github.com/{slug}/pull/{number}")
 
 
+def _released_for_invoke(parameters: dict[str, Any], checkout: str) -> str:
+    """The commit `tag` publishes, or a refusal when the release PR has not landed as bound."""
+
+    def read(argv: list[str]) -> Any:
+        try:
+            return json.loads(_precondition_read(["gh", *argv], checkout))
+        except ValueError:
+            raise _Refusal("rejected", "provider_unavailable", f"gh {argv[0]}: output is not JSON")
+
+    try:
+        released = _released(parameters, read)
+    except _Unknown as error:
+        raise _Refusal("rejected", "provider_unavailable", f"{error.reason}: {error.detail}")
+    if released is None:
+        raise _Refusal("rejected", "precondition_failed", "release PR not merged as bound")
+    return released
+
+
+def _invoke_tag(parameters: dict[str, Any], checkout: str) -> dict[str, Any]:
+    """Tag and push the released commit; a merge binding also fetches the branch holding it (D8)."""
+    tag, branch = parameters["candidate"]["version"], parameters["target"]["branch"]
+    released = _released_for_invoke(parameters, checkout)
+    _contained(parameters, released, checkout)
+    if "merge" in parameters["candidate"]:
+        _precondition_read(["git", "fetch", "--no-tags", "origin", f"refs/heads/{branch}"], checkout)
+    _local_tag(tag, released, checkout)
+    argv, raw = ["git", "push", "origin", f"refs/tags/{tag}"], f"git push origin refs/tags/{tag}"
+    return _mutate(argv, raw, checkout, "tag", f"refs/tags/{tag}")
+
+
 def _invoke(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
     slug, tag = parameters["target"]["repository"], parameters["candidate"]["version"]
-    commit = parameters["candidate"]["commit"]
     toplevel = _precondition_read(["git", "rev-parse", "--show-toplevel"], None).strip()
     if not os.path.isabs(toplevel):
         raise _Refusal("rejected", "provider_unavailable", "rev-parse did not return a directory")
@@ -693,10 +761,7 @@ def _invoke(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
     if operation == "pr_merge":
         return _invoke_pr_merge(parameters, toplevel)
     if operation == "tag":
-        _contained(parameters, toplevel)
-        _local_tag(tag, commit, toplevel)
-        argv, raw = ["git", "push", "origin", f"refs/tags/{tag}"], f"git push origin refs/tags/{tag}"
-        return _mutate(argv, raw, toplevel, operation, f"refs/tags/{tag}")
+        return _invoke_tag(parameters, toplevel)
     descriptor, path = tempfile.mkstemp(prefix="forge-release-notes-", suffix=".md")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:

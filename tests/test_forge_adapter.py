@@ -409,6 +409,8 @@ class InvokeResultSetTest(InvokeCase):
         self.assertEqual(payload, {"tool_name": "Bash", "tool_input": {"command": ROWS["tag.push"]["raw"]},
                                    "cwd": str(self.world.checkout)})
         self.assertFalse(any(c["token_visible"] for c in self.world.calls()))
+        self.assertFalse(any(c["argv"][:1] == ["fetch"] for c in self.world.calls() if c["tool"] == "git"))
+        self.assertFalse(any(argv[:2] == ["pr", "view"] for argv in self.world.argvs("gh")))
 
     def test_release_create_matches_the_fixture_and_removes_the_notes_file(self):
         self.world.invoke_ready()
@@ -674,6 +676,107 @@ class PrMergeInvokeTest(InvokeCase):
         self.world.merge_ready()
         self.assertEqual(self.merge()["error_class"], "precondition_failed")
         self.assertNotIn(ROWS["pr_merge.protection"]["argv"][1:], self.world.argvs("gh"))
+
+class MergedTagTest(InvokeCase):
+    """Issue 554 D8: with a merge binding, tag and release target the release PR's merge commit."""
+
+    def landed(self, state="MERGED", parents=(C["base_tip"], C["commit"])):
+        self.world.respond_json("gh", ROWS["pr_merge.view"]["argv"][1:], {
+            "state": state, "baseRefName": C["branch"], "headRefName": "dev", "headRefOid": C["commit"],
+            "mergeCommit": {"oid": C["merge_commit"]} if state == "MERGED" else None,
+            "url": f"https://github.com/{C['slug']}/pull/{C['pr']}", "statusCheckRollup": []})
+        self.world.respond_json("gh", ROWS["pr_merge.merge_commit"]["argv"][1:],
+                                {"parents": [{"sha": sha} for sha in parents]})
+
+    def tag_at(self, peeled):
+        self.tag_ref()
+        self.tag_object(peeled=peeled)
+
+    def test_tag_inspect_compares_the_tag_with_the_merge_commit(self):
+        self.landed()
+        self.tag_at(C["merge_commit"])
+        observation = self.inspect(effect("tag", candidate=MERGE_CANDIDATE))
+        self.assertEqual((observation["outcome"], observation["observed_subject"]["commit"]),
+                         ("satisfied", C["merge_commit"]))
+        self.assertEqual(self.world.argvs("gh"), [ROWS[i]["argv"][1:] for i in (
+            "tag.ref", "tag.object", "pr_merge.view", "pr_merge.merge_commit")])
+
+    def test_a_tag_at_the_integration_tip_is_diverged(self):
+        """Issue 554 row 14."""
+        self.landed()
+        self.tag_at(C["commit"])
+        observation = self.inspect(effect("tag", candidate=MERGE_CANDIDATE))
+        self.assertEqual((observation["outcome"], observation["reason"]), ("diverged", "tag_target_mismatch"))
+
+    def test_an_unresolvable_released_commit_never_satisfies(self):
+        for state, parents in (("OPEN", ()), ("MERGED", ("6" * 40, C["commit"]))):
+            with self.subTest(state=state, parents=parents):
+                self.world.reset()
+                self.landed(state, parents)
+                self.tag_at(C["merge_commit"])
+                observation = self.inspect(effect("tag", candidate=MERGE_CANDIDATE))
+                self.assertEqual((observation["outcome"], observation["reason"]),
+                                 ("diverged", "tag_target_mismatch"))
+        self.world.reset()
+        self.world.not_found("gh", ROWS["tag.ref"]["argv"][1:])
+        self.assertEqual(self.inspect(effect("tag", candidate=MERGE_CANDIDATE))["reason"], "tag_absent")
+        self.assertEqual(self.world.argvs("gh"), [ROWS["tag.ref"]["argv"][1:]])
+
+    def test_release_inspect_and_its_predicate_follow_the_merge_commit(self):
+        self.landed()
+        self.tag_at(C["merge_commit"])
+        self.world.respond_json("gh", ROWS["release.view"]["argv"][1:], {
+            "tag_name": C["tag"], "draft": False, "html_url": "u"})
+        parameters = {"target": TARGET, "candidate": MERGE_CANDIDATE, "title": C["title"], "notes": "n"}
+        self.assertEqual(self.inspect({"kind": "effect", "operation": "release",
+                                       "parameters": parameters})["outcome"], "satisfied")
+        predicate = forge_adapter.inspect({"kind": "predicate", "predicate": "publication_visible",
+                                           "operation": "release", "parameters": parameters})
+        self.assertEqual((predicate["outcome"], predicate["reason"]), ("satisfied", "observed"))
+
+    def test_tag_invoke_tags_and_pushes_the_merge_commit(self):
+        self.world.invoke_ready()
+        self.landed()
+        self.assertEqual(self.invoke("tag", candidate=MERGE_CANDIDATE)["result"], "accepted")
+        git = [c["argv"] for c in self.world.calls() if c["tool"] == "git"]
+        fetch = ["fetch", "--no-tags", "origin", "refs/heads/main"]
+        tag = ["tag", "-a", C["tag"], C["merge_commit"], "-m", f"release: {C['tag']}"]
+        self.assertLess(git.index(fetch), git.index(tag))
+        self.assertIn(ROWS["tag.merged_compare"]["argv"][1:], self.world.argvs("gh"))
+        self.assertNotIn(ROWS["tag.compare"]["argv"][1:], self.world.argvs("gh"))
+        self.assertEqual(["git", *self.mutations()[0]["argv"]], ROWS["tag.push"]["argv"])
+
+    def test_tag_invoke_refuses_before_the_pr_merged(self):
+        """Issue 554 row 13."""
+        self.world.invoke_ready()
+        self.landed("OPEN")
+        self.assertEqual(self.invoke("tag", candidate=MERGE_CANDIDATE),
+                         {"result": "rejected", "error_class": "precondition_failed",
+                          "reference": "release PR not merged as bound"})
+        self.assertEqual(self.mutations(), [])
+        self.assertFalse(any(c["tool"] == "claude-bash-lifecycle-guard" for c in self.world.calls()))
+
+    def test_a_failed_fetch_or_uncontained_merge_refuses_with_no_push(self):
+        for ready, error_class in ((dict(fetch_exit=1), "provider_unavailable"),
+                                   (dict(merged_compare="diverged"), "precondition_failed")):
+            with self.subTest(ready=ready):
+                self.world.reset()
+                self.world.invoke_ready(**ready)
+                self.landed()
+                result = self.invoke("tag", candidate=MERGE_CANDIDATE)
+                self.assertEqual((result["result"], result["error_class"]), ("rejected", error_class))
+                self.assertEqual(self.mutations(), [])
+
+    def test_an_unreadable_pull_request_is_unknown_to_inspect_and_unavailable_to_invoke(self):
+        self.tag_at(C["merge_commit"])
+        self.landed("REOPENED")
+        observation = self.inspect(effect("tag", candidate=MERGE_CANDIDATE))
+        self.assertEqual((observation["outcome"], observation["reason"]), ("unknown", "payload_invalid"))
+        self.world.reset()
+        self.world.invoke_ready()
+        result = self.invoke("tag", candidate=MERGE_CANDIDATE)
+        self.assertEqual((result["result"], result["error_class"]), ("rejected", "provider_unavailable"))
+        self.assertEqual(self.mutations(), [])
 
 if __name__ == "__main__":
     unittest.main()

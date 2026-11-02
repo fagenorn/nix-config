@@ -203,6 +203,7 @@ class ForgeWorld:
     def invoke_ready(self, slug: str = CANONICAL["slug"], *, origin: str | None = None,
                      full_name: str | None = None, push_urls: list[str] | None = None, tag_local: str | None = None,
                      tag_lookup_exit: int = 0, tag_create_exit: int = 0, compare: str = "ahead",
+                     merged_compare: str = "identical", fetch_exit: int = 0,
                      guard_exit: int = 0, push_exit: int = 0, push_stderr: str = "",
                      push_sleep: float = 0, create_exit: int = 0,
                      create_stdout: str = f"https://github.com/{CANONICAL['slug']}/releases/tag/"
@@ -214,6 +215,9 @@ class ForgeWorld:
         which `invoke.repository` and `tag.compare` are keyed on. `origin` replaces the whole
         origin URL (and so the default push URL), host included. `tag_local` names the commit
         an existing annotated local tag peels to; by default no local tag exists.
+        `merged_compare` answers the containment read of the release PR's merge commit and
+        `fetch_exit` the `git fetch` that precedes tagging it (issue 554 D8); both are inert
+        for a candidate without `merge`.
         """
         tag, commit = CANONICAL["tag"], CANONICAL["commit"]
         origin = origin or f"git@github.com:{slug}.git"
@@ -230,7 +234,12 @@ class ForgeWorld:
         else:
             self.respond("git", listing, stdout="tag\n", exit=tag_lookup_exit)
             self.respond("git", ["rev-parse", f"refs/tags/{tag}^{{commit}}"], stdout=tag_local + "\n")
+        self.respond("gh", ROWS["tag.merged_compare"]["argv"][1:], stdout=merged_compare + "\n")
+        self.respond("git", ["fetch", "--no-tags", "origin", f"refs/heads/{CANONICAL['branch']}"],
+                     exit=fetch_exit)
         self.respond("git", ["tag", "-a", tag, commit, "-m", f"release: {tag}"], exit=tag_create_exit)
+        self.respond("git", ["tag", "-a", tag, CANONICAL["merge_commit"], "-m", f"release: {tag}"],
+                     exit=tag_create_exit)
         self.respond("claude-bash-lifecycle-guard", [], exit=guard_exit,
                      stderr="lifecycle guard: refused" if guard_exit else "")
         self.respond("git", ROWS["tag.push"]["argv"][1:], exit=push_exit, stderr=push_stderr,
