@@ -10,16 +10,22 @@ It is the one home of:
 - order normalization of a declared selection (issue 543 D5);
 - the secret-shape rule (issue 543 D4);
 - strict loading and canonical bytes;
-- the content identity of a failure (issue 543 D3).
+- the content identity of a failure (issue 543 D3);
+- the ledger's schema-11 rules (issue 544 D2-D5, D9): `park`, which records an attempt
+  parked on a failure in the run's blocker map, `validate_blockers`, which checks that map
+  against the run's attempt pointers, and `upgrade_ten`, the strict 10 -> 11 step.
 
-A validator returns its argument itself, never a copy, and never mutates it.
-Every refusal is one `BlockerRefused` whose message is one line,
-`<field>: <reason>`.
+A shape validator returns its argument itself, never a copy, and never mutates
+it; `validate_blockers` returns None and mutates nothing. Every refusal is one
+`BlockerRefused` whose message is one line, `<field>: <reason>`, with any map key
+or pointer it names JSON-escaped.
 """
 
+import copy
 import json
 import re
 import unicodedata
+from collections.abc import Mapping
 
 from agent_tools.canonical import (
     reject_duplicate_keys,
@@ -45,6 +51,12 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _BLOCKER_ID = re.compile(r"sha256:[0-9a-f]{64}")
 
+# The identity digests these members of a failure and a ledger record keeps the same
+# ones, so a record can be re-identified from its own content (issue 543 D3).
+_IDENTITY_MEMBERS = ("command", "failure_class", "facts", "repository")
+_RECORD_MEMBERS = {"id", "attempts", "state", "resolution", *_IDENTITY_MEMBERS}
+_REFERENCE_MEMBERS = {"issue", "attempt"}
+
 _SECRET_PREFIXES = (".env", "id_rsa", "id_ecdsa", "id_ed25519")
 _SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 _SECRET_PARTS = ("secret", "token", "password", "passwd", "credential",
@@ -57,6 +69,12 @@ class BlockerRefused(ValueError):
 
 def _refuse(label: str, reason: str) -> BlockerRefused:
     return BlockerRefused(f"{label}: {reason}")
+
+
+def _shown(value: object) -> str:
+    """A value as a refusal names it: escaped, so a newline cannot split the line (issue 544 D20)."""
+    text = json.dumps(value, ensure_ascii=True, default=repr)
+    return text[1:-1] if isinstance(value, str) else text
 
 
 def strict_load(raw: bytes) -> object:
@@ -314,5 +332,138 @@ def normalize_declaration(value: object) -> dict:
 def blocker_id(failure: object) -> str:
     """The content identity of a valid failure (issue 543 D3); an invalid one gets none."""
     validate_failure(failure)
-    return telemetry_digest({member: failure[member] for member in
-                             ("command", "failure_class", "facts", "repository")})
+    return telemetry_digest({member: failure[member] for member in _IDENTITY_MEMBERS})
+
+
+def _positive(value: object, label: str) -> int:
+    """A positive `int`; a `bool` is not one."""
+    if type(value) is not int or value < 1:
+        raise _refuse(label, "must be a positive integer")
+    return value
+
+
+def park(blockers: dict, failure: object, issue: int, attempt: int) -> str:
+    """Record that `issue`:`attempt` is parked on `failure`; returns the blocker id.
+
+    A new id gets a record holding deep copies of the failure's identity members; a known
+    id only gains the reference (kept sorted, listed once) and is reopened, its content
+    never rewritten (issue 544 D3, D4). Everything is checked before `blockers` changes.
+    """
+    _positive(issue, "issue")
+    _positive(attempt, "attempt")
+    identity = blocker_id(failure)
+    reference = {"issue": issue, "attempt": attempt}
+    record = blockers.get(identity)
+    if record is None:
+        blockers[identity] = {"id": identity,
+                              **{member: copy.deepcopy(failure[member])
+                                 for member in _IDENTITY_MEMBERS},
+                              "attempts": [reference], "state": "open", "resolution": None}
+        return identity
+    if reference not in record["attempts"]:
+        record["attempts"].append(reference)
+        record["attempts"].sort(key=lambda each: (each["issue"], each["attempt"]))
+    record["state"] = "open"
+    record["resolution"] = None
+    return identity
+
+
+def _references(value: object, label: str, attempts: Mapping) -> None:
+    """R3: a non-empty, strictly increasing list of attempts that belong to this run."""
+    if not isinstance(value, list) or not value:
+        raise _refuse(label, "must be a non-empty list")
+    keys = []
+    for index, entry in enumerate(value):
+        at = f"{label}[{index}]"
+        _closed(entry, at, _REFERENCE_MEMBERS)
+        key = (_positive(entry["issue"], f"{at}.issue"),
+               _positive(entry["attempt"], f"{at}.attempt"))
+        if keys and keys[-1] >= key:
+            raise _refuse(label, "must be strictly increasing by issue and attempt")
+        if key not in attempts:
+            raise _refuse(at, "names no attempt of this run")
+        keys.append(key)
+
+
+def _resolution(record: dict, label: str) -> None:
+    """R4: an open record has no resolution; a resolved one carries changed facts."""
+    state, resolution = record["state"], record["resolution"]
+    if state == "open":
+        if resolution is not None:
+            raise _refuse(f"{label}.resolution", "must be null while open")
+        return
+    if state != "resolved":
+        raise _refuse(f"{label}.state", "must be open or resolved")
+    at = f"{label}.resolution"
+    _closed(resolution, at, {"facts"})
+    _valued_facts(resolution["facts"], f"{at}.facts")
+    held, now = record["facts"], resolution["facts"]
+    if ([(each["name"], each["source"]) for each in held]
+            != [(each["name"], each["source"]) for each in now]):
+        raise _refuse(f"{at}.facts", "must keep the record's names and sources")
+    if all(old["value"] == new["value"] for old, new in zip(held, now)):
+        raise _refuse(f"{at}.facts", "must change at least one value")
+
+
+def validate_blockers(blockers: object, pointers: Mapping[tuple[int, int], str | None]) -> None:
+    """Check a run's blocker map against its attempts' pointers (issue 544 D3-D5).
+
+    `pointers` maps every `(issue, attempt)` of the run to its blocker id or None.
+    Returns None and mutates nothing; the first broken rule is the refusal.
+    """
+    if not isinstance(blockers, dict):
+        raise _refuse("verification_blockers", "must be an object")
+    for key, record in blockers.items():
+        label = f"verification_blockers[{_shown(key)}]"
+        _closed(record, label, _RECORD_MEMBERS)
+        if record["id"] != key:
+            raise _refuse(f"{label}.id", "must equal its key")
+        try:
+            identity = blocker_id({"kind": FAILURE_KIND, "schema_version": SCHEMA_VERSION,
+                                   **{member: record[member] for member in _IDENTITY_MEMBERS}})
+        except BlockerRefused as error:
+            raise _refuse(label, str(error)) from error
+        if identity != key:
+            raise _refuse(f"{label}.id", "must be the identity of its content")
+        _references(record["attempts"], f"{label}.attempts", pointers)
+        _resolution(record, label)
+    for (issue, attempt), pointer in pointers.items():
+        if pointer is None:
+            continue
+        listed = (blockers[pointer]["attempts"]
+                  if isinstance(pointer, str) and pointer in blockers else [])
+        if {"issue": issue, "attempt": attempt} not in listed:
+            raise _refuse("verification_blockers",
+                          f"attempt {_shown(issue)}:{_shown(attempt)} points at "
+                          f"{_shown(pointer)}, which does not list it")
+
+
+def upgrade_ten(document: object) -> dict:
+    """The strict schema 10 -> 11 step (issue 544 D9): adds the empty blocker map and a null
+    pointer to every attempt, refusing a document that already holds either. The input is
+    checked in full, then copied; it is never mutated."""
+    if (not isinstance(document, dict) or type(document.get("schema_version")) is not int
+            or document["schema_version"] != 10):
+        raise _refuse("schema_version", "must be 10")
+    if "verification_blockers" in document:
+        raise _refuse("verification_blockers", "present before schema 11")
+    issues = document.get("issues")
+    if not isinstance(issues, dict):
+        raise _refuse("issues", "must be an object")
+    for key, entry in issues.items():
+        label = f"issues[{_shown(key)}]"
+        if not isinstance(entry, dict) or not isinstance(entry.get("attempts"), list):
+            raise _refuse(label, "must be an object with an attempts list")
+        for index, attempt in enumerate(entry["attempts"]):
+            at = f"{label}.attempts[{index}]"
+            if not isinstance(attempt, dict):
+                raise _refuse(at, "must be an object")
+            if "verification_blocker" in attempt:
+                raise _refuse(f"{at}.verification_blocker", "present before schema 11")
+    upgraded = copy.deepcopy(document)
+    upgraded["schema_version"] = 11
+    upgraded["verification_blockers"] = {}
+    for entry in upgraded["issues"].values():
+        for attempt in entry["attempts"]:
+            attempt["verification_blocker"] = None
+    return upgraded

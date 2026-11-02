@@ -9,7 +9,9 @@ lock: `settle_custody` before a ledger write, `seal_custody` after it, and `pend
 find a seal a crash left undone. From schema 10 the plan covers every delivery remainder as
 well as every attempt, records a held owner claim on its launch's span, and wakes a
 `host_capacity` suspension; `launch_views` reads, without a lock, what the store says of each
-current launch for a control sweep's occupancy and capacity gate.
+current launch for a control sweep's occupancy and capacity gate. From schema 11 every older
+ledger also takes `agent_tools.verification_blocker.upgrade_ten`, the strict step that adds
+the run's verification blockers (issue 544 D9).
 `workflow-state` keeps the ledger lock, the ledger read and commit, the delivery chain and
 `validate_state`; it passes the last two to this module as callbacks.
 """
@@ -28,6 +30,7 @@ from typing import Any, NamedTuple
 
 from agent_tools import attempt_custody as custody_rules
 from agent_tools import attempt_delivery as delivery_rules
+from agent_tools import verification_blocker as verification_rules
 from agent_tools.attempt_identity import (
     LEGACY_DIALECTS, REFUSAL_REASONS, REPORT_ROW_FIELDS, MigrationRefused, RunIdentity,
     RunPlan, classify, creation_arguments, direct_key, hold_key, hold_plan, hold_violation,
@@ -42,6 +45,7 @@ from agent_tools.transaction_storage import (
 BOUND_SCHEMA_VERSION = 8  # bound to its run; custody not yet in the core
 CUSTODY_SCHEMA_VERSION = 9  # attempt custody is held in the core
 CORE_STATE_SCHEMA_VERSION = 10  # claims and remainder custody are held in the core too
+VERIFICATION_SCHEMA_VERSION = 11  # the current version: the run's verification blockers
 
 
 class StoreRefused(Exception):
@@ -81,9 +85,9 @@ class OwnerReport(NamedTuple):
 
 
 class LockedRead(NamedTuple):
-    """A ledger as a locked read yields it: bound to its run transaction at schema 10.
+    """A ledger as a locked read yields it: bound to its run transaction at schema 11.
 
-    `changed` is true when the stored file is still a schema-9 or older document, so the
+    `changed` is true when the stored file is still a schema-10 or older document, so the
     caller's commit is also the migration write. `bound_launches` is then, for a document
     stored below schema 9, the 8 -> 9 plan, `(issue, attempt) -> launch count` for each
     attempt that was live; otherwise `{}`. `bound_remainders` is, for a document stored below
@@ -344,45 +348,57 @@ def _upgraded(document: Any, *, run_id: str, upgrade: Callable[..., dict]) -> tu
     return candidate, plan_legacy_run(candidate)
 
 
-def _schema_ten(document: dict[str, Any], identity: RunIdentity, *, run_id: str,
-                validate: Callable[..., dict]) -> tuple[dict[str, Any], dict, dict]:
-    """A schema-8 or schema-9 `document` as the validated schema-10 candidate with its bind
-    plans: the 8 -> 9 launch plan (empty for schema 9) and the remainder plan."""
+def _schema_eleven(candidate: dict[str, Any]) -> dict[str, Any]:
+    """`candidate`, a schema-10 document, as schema 11: the strict step (issue 544 D9, D15)."""
+    try:
+        return verification_rules.upgrade_ten(candidate)
+    except verification_rules.BlockerRefused as error:
+        raise LedgerRefused("invalid_state", str(error)) from error
+
+
+def _bound_candidate(document: dict[str, Any], identity: RunIdentity, *, run_id: str,
+                     validate: Callable[..., dict]) -> tuple[dict[str, Any], dict, dict]:
+    """A schema 8, 9 or 10 `document` as the validated schema-11 candidate with its bind
+    plans: the 8 -> 9 launch plan (empty unless the stored schema is 8) and the remainder
+    plan (empty for schema 10)."""
     candidate = copy.deepcopy(document)
     candidate["schema_version"] = CORE_STATE_SCHEMA_VERSION
-    validated = validate(candidate, run_id=run_id, identity=identity)
-    launches = plan_custody(validated) if document["schema_version"] == BOUND_SCHEMA_VERSION \
-        else {}
-    return validated, launches, delivery_rules.plan_remainder_migration(validated)
+    validated = validate(_schema_eleven(candidate), run_id=run_id, identity=identity)
+    stored = document["schema_version"]
+    launches = plan_custody(validated) if stored == BOUND_SCHEMA_VERSION else {}
+    remainders = delivery_rules.plan_remainder_migration(validated) \
+        if stored in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION) else {}
+    return validated, launches, remainders
 
 
 def locked_read(state_path: Path, document: Any, *, run_id: str, upgrade: Callable[..., dict],
                 validate: Callable[..., dict]) -> LockedRead:
     """A ledger read under its `state.lock`, bound to a run transaction.
 
-    A schema-10 `document` is bound to the transaction it names. A schema-8 or schema-9 one
-    is bound the same way, copied as schema 10 and planned (`bound_launches`,
-    `bound_remainders`), with `changed` set. An older one is upgraded, planned, its
-    transaction minted (the caller holds the ledger lock, the store lock nests inside it,
-    #337 D9) and the candidate returned as schema 10 with `changed` set. A refused ledger
-    mints nothing.
+    A schema-11 `document` is bound to the transaction it names. A schema 8, 9 or 10 one is
+    bound the same way, copied as schema 10, stepped to schema 11 and planned
+    (`bound_launches`, `bound_remainders`), with `changed` set. An older one is upgraded,
+    planned, stepped to schema 11, its transaction minted (the caller holds the ledger lock,
+    the store lock nests inside it, #337 D9) and the candidate returned as schema 11 with
+    `changed` set. A refused ledger mints nothing.
     """
     store = ledger_store(state_path)
     require_known_schema(document)
     version = document["schema_version"]
-    if version == CORE_STATE_SCHEMA_VERSION:
+    if version == VERIFICATION_SCHEMA_VERSION:
         identity = bound_identity(store, document, run_id)
         return LockedRead(validate(document, run_id=run_id, identity=identity), identity,
                           False, {}, {})
-    if version in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION):
+    if version in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION, CORE_STATE_SCHEMA_VERSION):
         identity = bound_identity(store, document, run_id)
-        validated, launches, remainders = _schema_ten(
+        validated, launches, remainders = _bound_candidate(
             document, identity, run_id=run_id, validate=validate)
         return LockedRead(validated, identity, True, launches, remainders)
     candidate, plan = _upgraded(document, run_id=run_id, upgrade=upgrade)
     launches = plan_custody(candidate)
-    candidate["transaction_id"] = mint_run(store, plan)
     candidate["schema_version"] = CORE_STATE_SCHEMA_VERSION
+    candidate = _schema_eleven(candidate)
+    candidate["transaction_id"] = mint_run(store, plan)
     identity = identity_of(plan.subject)
     validated = validate(candidate, run_id=run_id, identity=identity)
     return LockedRead(validated, identity, True, launches,
@@ -391,18 +407,18 @@ def locked_read(state_path: Path, document: Any, *, run_id: str, upgrade: Callab
 
 def check_unlocked(state_path: Path, document: Any, *, run_id: str, upgrade: Callable[..., dict],
                    validate: Callable[..., dict]) -> dict[str, Any]:
-    """Check a ledger without a lock or a write and return it as checked: schema 10 against
-    its run transaction, schema 8 or 9 the same way and as the schema-10 candidate its next
-    write binds, an older one through `upgrade`, `plan_migration` and `plan_custody` as its
-    schema-7 candidate. No store or directory is created."""
+    """Check a ledger without a lock or a write and return it as checked: schema 11 against
+    its run transaction, schema 8, 9 or 10 the same way and as the schema-11 candidate its
+    next write binds, an older one through `upgrade`, `plan_migration` and `plan_custody` as
+    its schema-7 candidate. No store or directory is created."""
     require_known_schema(document)
     version = document["schema_version"]
-    if version == CORE_STATE_SCHEMA_VERSION:
+    if version == VERIFICATION_SCHEMA_VERSION:
         identity = bound_identity(ledger_store(state_path), document, run_id)
         return validate(document, run_id=run_id, identity=identity)
-    if version in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION):
+    if version in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION, CORE_STATE_SCHEMA_VERSION):
         identity = bound_identity(ledger_store(state_path), document, run_id)
-        return _schema_ten(document, identity, run_id=run_id, validate=validate)[0]
+        return _bound_candidate(document, identity, run_id=run_id, validate=validate)[0]
     candidate, _ = _upgraded(document, run_id=run_id, upgrade=upgrade)
     plan_custody(candidate)
     return candidate
@@ -1221,19 +1237,20 @@ def _row_verdict(row: dict, document: Any, store: Path, *, upgrade: Callable[...
         return "refused", "invalid_state"
     if run_id != row["ledger"]:
         return "refused", "location_mismatch"
-    if version in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION, CORE_STATE_SCHEMA_VERSION):
+    if version in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION, CORE_STATE_SCHEMA_VERSION,
+                   VERIFICATION_SCHEMA_VERSION):
         try:
             identity = bound_identity(store, document, run_id)
-            if version == CORE_STATE_SCHEMA_VERSION:
+            if version == VERIFICATION_SCHEMA_VERSION:
                 validate(document, run_id=run_id, identity=identity)
             else:
-                _schema_ten(document, identity, run_id=run_id, validate=validate)
+                _bound_candidate(document, identity, run_id=run_id, validate=validate)
         except StoreFault:
             raise
         except (StoreRefused, *refusals):
             return "refused", "invalid_state"
         row["transaction_id"] = document["transaction_id"]
-        if version != CORE_STATE_SCHEMA_VERSION:
+        if version != VERIFICATION_SCHEMA_VERSION:
             return "migrate", None
         return ("migrated" if migrated else "current"), None
     try:
@@ -1271,7 +1288,7 @@ def migration_row(superpowers: Path, ledger: str, *, upgrade: Callable[..., dict
                dialect=classify(_typed(document, "run_id", str)))
     if row["dialect"] in LEGACY_DIALECTS:
         row["alias"] = legacy_alias(row["run_id"])
-    # A core run id (schema 8, 9 or 10) is a minted run, whose subject has no alias: alias
+    # A core run id (schema 8 to 11) is a minted run, whose subject has no alias: alias
     # stays null.
     row["verdict"], row["reason"] = _row_verdict(
         row, document, store, upgrade=upgrade, validate=validate, refusals=refusals,

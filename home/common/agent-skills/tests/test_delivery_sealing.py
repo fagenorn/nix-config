@@ -91,7 +91,7 @@ class SealingTest(Cutover, unittest.TestCase):
     def test_a_schema_9_ledger_that_is_already_delivered_seals_at_its_bind(self):
         self.cut("awaiting_verification", "ready")
         self.cli("migrate", "--repo-root", self.root, "--apply")
-        self.assertEqual(self.ledger_document()["schema_version"], 10)
+        self.assertEqual(self.ledger_document()["schema_version"], 11)
         self.assert_sealed()
         self.assertEqual(self.remainder(DELIVERED).subject["bound_launch"], 1)
         bound = self.tree()

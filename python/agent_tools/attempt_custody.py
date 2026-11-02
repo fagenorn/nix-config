@@ -40,9 +40,13 @@ FENCING_REASONS = ("custody_misbound", "superseded_launch", "launch_identity_req
 # ``suspend`` when too little time is left before the attempt's
 # ``deadline_at`` for its next task. It is auto-resumable, like ``transport``,
 # because a resume's fresh window is the remedy (per #281 D2).
+# ``verification`` is an owner value: ``suspend --verification-input`` writes it when a
+# declared verification command fails for a reason outside the change, and parks the attempt
+# on the run's shared verification blocker. It is observation-gated: no sweep and no human
+# re-entry resumes it, and nothing records the observation that would (issue 544 D6).
 BLOCKED_ON_VALUES = frozenset({
     "usage_limit", "transport", "human_gate", "external", "unknown", "host_capacity",
-    "agent_dispatch", "deadline",
+    "agent_dispatch", "deadline", "verification",
 })
 OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown", "host_capacity"}
 # ``owner_unavailable`` is the one cause only a delivery remainder takes: control writes it when
@@ -52,9 +56,12 @@ REMAINDER_BLOCKED_ON_VALUES = frozenset({"owner_unavailable"})
 SUSPENSION_CAUSES = BLOCKED_ON_VALUES | REMAINDER_BLOCKED_ON_VALUES
 AUTO_RESUMABLE_BLOCKED_ON = frozenset(
     {"usage_limit", "transport", "unknown", "host_capacity", "deadline"})
+# A suspension cause only an observation of the blocker it names clears (issue 544 D6).
+OBSERVATION_GATED_BLOCKED_ON = frozenset({"verification"})
 # A suspension cause only a person clears: an attempt or a delivery remainder parked on one
 # resumes only on a human-directed re-entry (issue 458 D3).
-HUMAN_GATED_BLOCKED_ON = BLOCKED_ON_VALUES - AUTO_RESUMABLE_BLOCKED_ON
+HUMAN_GATED_BLOCKED_ON = (BLOCKED_ON_VALUES - AUTO_RESUMABLE_BLOCKED_ON
+                          - OBSERVATION_GATED_BLOCKED_ON)
 STALL_LIMIT = 3
 LIVE_STATES = ("active", "handed_off", "suspended")
 # The unparking reason of a `host_capacity` suspension a later release woke, and the reason of
@@ -103,6 +110,18 @@ def suspension_reason(blocked_on: str) -> str:
     if type(blocked_on) is not str or blocked_on not in SUSPENSION_CAUSES:
         raise ValueError(f"blocked_on {blocked_on!r} is not one of {sorted(SUSPENSION_CAUSES)}")
     return _SUSPENDED + blocked_on
+
+
+def resume_permitted(blocked_on: str, *, human_directed: bool) -> bool:
+    """Whether a sweep may resume an attempt suspended on `blocked_on`: always for an
+    auto-resumable cause, only on a human-directed re-entry for a human-gated one, never for an
+    observation-gated one. ValueError outside `BLOCKED_ON_VALUES`: no attempt is suspended on
+    `owner_unavailable`, a cause only a delivery remainder takes."""
+    if type(blocked_on) is not str or blocked_on not in BLOCKED_ON_VALUES:
+        raise ValueError(f"blocked_on {blocked_on!r} is not one of {sorted(BLOCKED_ON_VALUES)}")
+    if blocked_on in AUTO_RESUMABLE_BLOCKED_ON:
+        return True
+    return human_directed if blocked_on in HUMAN_GATED_BLOCKED_ON else False
 
 
 def blocked_on_of(reason: str) -> str | None:

@@ -103,9 +103,9 @@ class PlanTest(unittest.TestCase):
                 self.assertIn(caught.exception.reason, ai.REFUSAL_REASONS)
 
     def test_schema_refusal(self):
-        for version in (1, 7, 8, 9, 10):
+        for version in (1, 7, 8, 9, 10, 11):
             self.assertIsNone(ai.schema_refusal({"schema_version": version}))
-        for document in ({"schema_version": 11}, {"schema_version": 0},
+        for document in ({"schema_version": 12}, {"schema_version": 0},
                          {"schema_version": True}, {"schema_version": "7"}, {}, [], None):
             with self.subTest(document=document):
                 self.assertEqual(ai.schema_refusal(document), "unknown_schema")

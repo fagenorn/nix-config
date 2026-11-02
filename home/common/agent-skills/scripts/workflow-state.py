@@ -21,17 +21,18 @@ import tempfile
 import traceback
 from typing import Any, Callable, Iterator, NamedTuple
 
-from agent_tools import attempt_observations, attempt_store, phase_budget
+from agent_tools import attempt_observations, attempt_store, phase_budget, verification_blocker
 from agent_tools.attempt_custody import (
-    AUTO_RESUMABLE_BLOCKED_ON,
     BLOCKED_ON_VALUES,
     LIVE_STATES,
+    OBSERVATION_GATED_BLOCKED_ON,
     OWNER_BLOCKED_ON_VALUES,
     STALL_LIMIT,
     at_ms,
     holds_issue,
     launch_id,
     reaped,
+    resume_permitted,
     stall_count,
     stalled,
 )
@@ -45,7 +46,7 @@ from agent_tools.attempt_identity import (
 from agent_tools.transaction_storage import is_id
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
@@ -94,10 +95,11 @@ PHASE_INPUT_FIELDS = (
 )
 STATE_FIELDS = frozenset(
     {"schema_version", "run_id", "transaction_id", "created_at", "updated_at", "prior_run",
-     "issues", "admission", "workers"}
+     "issues", "admission", "workers", "verification_blockers"}
 )
-# A schema-7 ledger, as it is read before it is bound to a run transaction (#337).
-LEGACY_STATE_FIELDS = STATE_FIELDS - {"transaction_id"}
+# A schema-7 ledger, as it is read before it is bound to a run transaction (#337) and
+# stepped to schema 11 (issue 544).
+LEGACY_STATE_FIELDS = STATE_FIELDS - {"transaction_id", "verification_blockers"}
 # The run's worker registry (#222 D2): every writing agent a launch dispatched,
 # in registration order. A worker is live while it is unreleased and its launch
 # is still current, so a superseded launch fences its workers with no write.
@@ -151,8 +153,10 @@ ATTEMPT_FIELDS = frozenset(
         "lane",
         "lane_budget_minutes",
         "lane_history",
+        "verification_blocker",
     }
 )
+LEGACY_ATTEMPT_FIELDS = ATTEMPT_FIELDS - {"verification_blocker"}
 # #280 D2, D3: an attempt's lane is declared once by triage and may escalate
 # from light to full, never back. The table is closed: a pair it does not name
 # is not a legal transition.
@@ -171,6 +175,7 @@ SUSPENSION_DEFAULTS = {
     "blocked_on": None,
     "suspend_phase": None,
     "stalled_resumes": 0,
+    "verification_blocker": None,
 }
 LAUNCH_FIELDS = frozenset({"kind", "owner", "worktree", "at"})
 
@@ -741,9 +746,10 @@ def validate_attempt_lane(value: dict[str, Any], *, started_at: datetime) -> Non
 
 
 def validate_attempt(
-    value: Any, *, issue: int, expected_number: int, direct: bool
+    value: Any, *, issue: int, expected_number: int, direct: bool, schema_version: int
 ) -> None:
-    if not isinstance(value, dict) or set(value) != ATTEMPT_FIELDS:
+    fields = ATTEMPT_FIELDS if schema_version == SCHEMA_VERSION else LEGACY_ATTEMPT_FIELDS
+    if not isinstance(value, dict) or set(value) != fields:
         raise WorkflowError("invalid attempt schema")
     if value["issue"] != issue or value["attempt"] != expected_number:
         raise WorkflowError("invalid attempt identity")
@@ -791,10 +797,22 @@ def validate_attempt(
         if (
             not isinstance(value["blocked_on"], str)
             or value["blocked_on"] not in BLOCKED_ON_VALUES
+            # No ledger below schema 11 was written with an observation-gated cause, and its
+            # 10 -> 11 step gives no pointer, so it is refused before any run is minted
+            # (issue 544 D18).
+            or (schema_version != SCHEMA_VERSION
+                and value["blocked_on"] in OBSERVATION_GATED_BLOCKED_ON)
         ):
             raise WorkflowError("invalid suspended attempt cause")
     elif value["blocked_on"] is not None:
         raise WorkflowError("only a suspended attempt carries a suspension cause")
+    if schema_version == SCHEMA_VERSION:
+        # The pointer names the blocker the attempt is parked on; R5, run by `validate_state`,
+        # refuses any pointer that is not a record's id (issue 544 D5, D17).
+        pointer = value["verification_blocker"]
+        parked = value["state"] == "suspended" and value["blocked_on"] == "verification"
+        if (pointer is not None) != parked or not (pointer is None or isinstance(pointer, str)):
+            raise WorkflowError("invalid attempt verification blocker")
     if value["suspend_phase"] is not None:
         require_plain_int(value["suspend_phase"], "attempt suspend phase")
     require_plain_int(value["stalled_resumes"], "attempt stalled resumes")
@@ -849,9 +867,9 @@ def validate_attempt(
 
 def validate_state(value: Any, *, run_id: str, identity: RunIdentity,
                    schema_version: int = SCHEMA_VERSION) -> dict[str, Any]:
-    """Validate one ledger at `schema_version` (10, or 7 for a document not yet bound).
+    """Validate one ledger at `schema_version` (11, or 7 for a document not yet bound).
 
-    `identity` is the run's identity: from its transaction's subject at schema 10, from its
+    `identity` is the run's identity: from its transaction's subject at schema 11, from its
     legacy name before it is bound.
     """
     fields = STATE_FIELDS if schema_version == SCHEMA_VERSION else LEGACY_STATE_FIELDS
@@ -906,7 +924,8 @@ def validate_state(value: Any, *, run_id: str, identity: RunIdentity,
             validate_result(result, expected_issue=issue)
         for number, attempt in enumerate(attempts, start=1):
             validate_attempt(
-                attempt, issue=issue, expected_number=number, direct=identity.direct
+                attempt, issue=issue, expected_number=number, direct=identity.direct,
+                schema_version=schema_version,
             )
             started_at = parse_utc(attempt["started_at"], "attempt start time")
             if started_at < created_at:
@@ -918,6 +937,16 @@ def validate_state(value: Any, *, run_id: str, identity: RunIdentity,
             validate_result(issue_value["outcome"], expected_issue=issue)
             if not attempts or attempts[-1]["result"] != issue_value["outcome"]:
                 raise WorkflowError("issue outcome does not match its latest attempt")
+    if schema_version == SCHEMA_VERSION:
+        pointers = {
+            (int(key), attempt["attempt"]): attempt["verification_blocker"]
+            for key, issue_value in value["issues"].items()
+            for attempt in issue_value["attempts"]
+        }
+        try:
+            verification_blocker.validate_blockers(value["verification_blockers"], pointers)
+        except verification_blocker.BlockerRefused as error:
+            raise WorkflowError(f"invalid verification blockers: {error}") from error
     validate_workers(value)
     validate_admission(value, library=_host_admission())
     return value
@@ -1863,6 +1892,7 @@ def new_run_state(
         "issues": issues,
         "admission": None,
         "workers": [],
+        "verification_blockers": {},
     }
 
 
@@ -1959,6 +1989,7 @@ def reconcile_merged_attempt(
     )
     attempt["state"] = "merged"
     attempt["blocked_on"] = None
+    attempt["verification_blocker"] = None
     attempt["result"] = result
     attempt["finished_at"] = finish_time(attempt, now)
     attempt["result_source"] = "superseded"
@@ -2016,12 +2047,26 @@ def stop_attempt(
     attempt["finished_at"] = finish_time(attempt, now)
     attempt["result_source"] = source
     attempt["blocked_on"] = None
+    attempt["verification_blocker"] = None
     return result
 
 
 def reentry_command(issue: int) -> str:
     """The single line that resumes one issue's run (per D14)."""
     return f"/from-issue {issue} --auto"
+
+
+def suspended_reply(
+    runtime, *, run_id: str, issue: int, attempt: dict[str, Any]
+) -> dict[str, Any]:
+    """The interface-2 ``suspended`` envelope of a suspended attempt: ``suspend``'s reply, and
+    the direct owner's for an attempt parked on an observation-gated cause (issue 544 D7)."""
+    return {
+        "interface_version": 2, "kind": "suspended", "run_id": run_id, "issue": issue,
+        "custody": runtime.custody_for_record(issue, "implementation", attempt),
+        "blocked_on": attempt["blocked_on"],
+        "reentry": reentry_command(issue),
+    }
 
 
 def suspend_attempt(attempt: dict[str, Any], *, blocked_on: str, now: str) -> bool:
@@ -2141,6 +2186,7 @@ def resume_attempt(
         attempt["last_progress_at"] = now
     attempt["state"] = "active"
     attempt["blocked_on"] = None
+    attempt["verification_blocker"] = None
     attempt["launch_kind"] = "resume"
     attempt["launches"].append({
         "kind": "resume",
@@ -2656,6 +2702,7 @@ def _apply_one_issue_policy(
     delivery_request=None,
     delivery_source_kind=None,
     contract: dict[str, Any] | None,
+    reply_parked: bool = False,
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
 
@@ -2693,7 +2740,11 @@ def _apply_one_issue_policy(
     owner always carries it, and an orchestrated sweep carries it exactly when
     the caller listed the issue numbers itself, on the session's first sweep
     only (issue 458 D4). A `--label`/`--milestone` sweep never does, so it
-    leaves those parked and reports them.
+    leaves those parked and reports them. Nothing resumes an attempt suspended on
+    an observation-gated cause (`verification`, issue 544 D6, D7): without
+    ``reply_parked`` its verdict is ``terminal``, as control gets it; with it, as
+    the direct owner asks, it passes the tracker halt and the forge requirement
+    and then returns ``parked``, which changes nothing.
 
     An expired attempt is reaped before any lane predicate is derived: the
     single ``demote_expired_attempt`` call turns it into a ``suspended``
@@ -2827,7 +2878,13 @@ def _apply_one_issue_policy(
     suspended = bool(
         latest is not None
         and latest["state"] == "suspended"
-        and (human_directed or latest["blocked_on"] in AUTO_RESUMABLE_BLOCKED_ON)
+        and resume_permitted(latest["blocked_on"], human_directed=human_directed)
+    )
+    parked = bool(
+        reply_parked
+        and latest is not None
+        and latest["state"] == "suspended"
+        and latest["blocked_on"] in OBSERVATION_GATED_BLOCKED_ON
     )
     retryable = bool(
         latest is not None
@@ -2838,14 +2895,14 @@ def _apply_one_issue_policy(
     )
 
     if latest is not None and not (
-        active_unexpired or handed_off or suspended or retryable
+        active_unexpired or handed_off or suspended or retryable or parked
     ):
         return decision("terminal", changed=expired, expired=expired)
 
     if active_unexpired and not current_owner_unavailable:
         return decision("idle", expired=False)
 
-    if suspended and tracker is not None:
+    if (suspended or parked) and tracker is not None:
         # A suspension is a parked interruption, not a claim on the issue: once
         # the tracker says the work is closed or blocked there is nothing for a
         # re-entry to resume, so it is reported exactly the way the retry lane
@@ -2858,6 +2915,12 @@ def _apply_one_issue_policy(
                 "terminal", changed=expired, expired=expired,
                 tracker_reason=halted, blockers=control_blockers(tracker),
             )
+
+    if parked:
+        unobserved_forge = forge_requirement()
+        if unobserved_forge is not None:
+            return decision("observe", requirements=unobserved_forge, expired=False)
+        return decision("parked", expired=False)
 
     if active_unexpired or handed_off or suspended:
         assert latest is not None
@@ -3874,7 +3937,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
             candidates = [retain(sequence, run_id, run_dir) for sequence, run_id, run_dir
                           in attempt_store.direct_runs(attempts, workflows_dir, issue)]
 
-            # Bind: a legacy ledger is committed as schema 10 at once, under its held lock.
+            # Bind: a legacy ledger is committed as schema 11 at once, under its held lock.
             retained: list[tuple[int, str, Path, Path, dict[str, Any], RunIdentity]] = []
             for sequence, run_id, run_dir, state_path in candidates:
                 read = read_locked_state(
@@ -4030,6 +4093,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     require_forge=True,
                     delivery_request=request, delivery_source_kind="direct",
                     contract=contract,
+                    reply_parked=True,
                 )
                 operation = policy["operation"]
                 if operation == "idle":
@@ -4104,6 +4168,10 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         reason=policy["attempt"]["result"]["state"],
                         blockers=[], result=policy["issue_state"]["outcome"],
                     )
+                elif operation == "parked":
+                    # No re-entry resumes a parked attempt; the reply writes nothing.
+                    response = suspended_reply(
+                        runtime, run_id=run_id, issue=issue, attempt=policy["attempt"])
                 elif operation == "reconcile":
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]
@@ -4296,15 +4364,39 @@ def command_progress(args: argparse.Namespace) -> int:
     return 0
 
 
+def verification_failure(args: argparse.Namespace) -> dict[str, Any] | None:
+    """The ``verification-failure`` a ``verification`` suspension carries, read, strictly
+    loaded, validated and identified; ``None`` for every other cause (issue 544 D8)."""
+    if args.verification_input is None:
+        if args.blocked_on == "verification":
+            raise WorkflowError("--verification-input is required with --blocked-on verification")
+        return None
+    if args.blocked_on != "verification":
+        raise WorkflowError("--verification-input is only valid with --blocked-on verification")
+    raw = read_input_bytes(args.verification_input, "verification input")
+    try:
+        failure = verification_blocker.strict_load(raw)
+        verification_blocker.blocker_id(failure)
+    except verification_blocker.BlockerRefused as error:
+        raise WorkflowError(f"invalid verification input: {error}") from error
+    return failure
+
+
 def command_suspend(args: argparse.Namespace) -> int:
     """Record an owner's graceful exit at an environmental interruption.
 
     The owner names the cause it can see (``unknown`` stays reserved for the
     reaper, which cannot); the envelope carries back the re-entry line that
     resumes the run, so callers never compose it themselves (per D2, D14).
+
+    ``--verification-input`` is required exactly with ``--blocked-on verification``;
+    its failure is read and checked before the ledger is locked, so a refused input
+    writes nothing; a granted suspension then parks the attempt on the run's shared
+    blocker in the same write (issue 544 D8).
     """
     resolve_owner_identity(args, "suspend")
     supplied = supplied_time(args.now, "--now")
+    failure = verification_failure(args)
     refuse_misbound(args.repo_root, args.run_id, issue=args.issue, remainder=False,
                     ordinal=args.attempt)
     runtime = _delivery()
@@ -4335,13 +4427,11 @@ def command_suspend(args: argparse.Namespace) -> int:
                 reason=attempt["result"]["state"], blockers=[],
                 result=issue_state["outcome"],
             ), True
-        return {
-            "interface_version": 2, "kind": "suspended", "run_id": args.run_id,
-            "issue": args.issue,
-            "custody": runtime.custody_for_record(args.issue, "implementation", attempt),
-            "blocked_on": attempt["blocked_on"],
-            "reentry": reentry_command(args.issue),
-        }, True
+        if failure is not None:
+            attempt["verification_blocker"] = verification_blocker.park(
+                state["verification_blockers"], failure, args.issue, args.attempt)
+        return suspended_reply(
+            runtime, run_id=args.run_id, issue=args.issue, attempt=attempt), True
 
     print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, suspend),
                         owner_call=OwnerCall(
@@ -5817,6 +5907,11 @@ def build_parser() -> argparse.ArgumentParser:
     suspend.add_argument(
         "--blocked-on", required=True, choices=sorted(OWNER_BLOCKED_ON_VALUES)
     )
+    suspend.add_argument(
+        "--verification-input",
+        help=("absolute path, or - for stdin, of the verification-failure that "
+              "verification-observe failure printed; required exactly with "
+              "--blocked-on verification"))
     suspend.add_argument("--action-id")
     suspend.set_defaults(handler=command_suspend)
 
