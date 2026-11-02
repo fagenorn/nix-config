@@ -305,6 +305,8 @@ GREEN_STATUS_CONTEXT_STATE = "SUCCESS"
 
 5. `validate_release_merge`: the jq argv's program becomes `RELEASE_ROLLUP_PREDICATE`. Its docstring and refusal text are unchanged.
 
+6. `validate_merge`: the comment above the integration-base exemption ends `The default branch keeps the full demand — even if it is ever also declared as the integration base.`, which stops being true once the floor can stand in for forge protection. Replace that last sentence with `The default branch keeps the protection demand — even if it is ever also declared as the integration base — and only a plan-gated protection answer, for a confirmed row that declares required checks, is judged by the merge floor instead (issue 552 D2).` Keep the first part of the comment, about the integration-base exemption, unchanged (Phase-5 PR-552-03).
+
 In `home/common/claude-code/README.md`:
 
 1. `## Adjudicated verbs`, first paragraph: replace `admin enforcement on the feature arm, while` with `admin enforcement on the feature arm (or, where the forge answers that the repository's plan cannot protect the branch, the plan-gated floor below), while`.

@@ -76,6 +76,15 @@ The issue's criteria are untagged, and both are classified `code`.
 - Planning appended D12 (how `<observed>` shows a fact that is not a string), D13 (the one-off gate for the release predicate's byte identity) and D14 (where the AC1 test is named, under the review-record limit).
 - A planning simulation applied the dictated README text and test code to scratch copies and measured the cumulative `-U10` diffs: the guard README at 22.2, 54.5 and 54.7 KB after Tasks 2, 3 and 4, the guard suite at 17.0, 33.4 and 37.9 KB, and `python/README.md` at 8.4 and 13.8 KB after Tasks 1 and 2.
 
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, `codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus.
+- Base SHA e692c9685c3e4b08f55c327c5f2b8c699fc95bc4; reviewed plan head 7ddb0b162d8d82e850757bd4b6a2d823a29b5d36. No fallback.
+- Findings: 1 blocking, 2 should-fix, 0 discussion items; 3 accepted, 0 rejected, 0 deferred.
+  - PR-552-01 (blocking, accepted): Task 1 Step 4 read `.agents/project.json` directly; it now checks the file is untouched with `git diff --exit-code` against the base.
+  - PR-552-02 (should-fix, accepted, D15): Task 2's loader invariant now separates the missing-member reason (the existing closed-key check) from the malformed-value reason.
+  - PR-552-03 (should-fix, accepted): Task 3 Step 3 item 6 corrects the integration-exemption comment that said the default branch keeps the full protection demand.
+
 ---
 
 ## Review feasibility delivery

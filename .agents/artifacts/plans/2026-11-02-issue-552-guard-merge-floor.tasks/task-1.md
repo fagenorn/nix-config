@@ -128,8 +128,8 @@ Expected: PASS, `OK`. The whole resolver suite stays green, because the committe
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_guard_policy.py 2>&1 | tail -4'`
 Expected: PASS, `OK`. The derivation still ignores the member.
 
-Run: `if grep -q '"required_checks"' .agents/project.json; then exit 1; fi`
-Expected: exit 0. Out of scope: nix-config's own contract declares no checks.
+Run: `git diff --exit-code e692c9685c3e4b08f55c327c5f2b8c699fc95bc4 HEAD -- .agents/project.json`
+Expected: exit 0, no output. Out of scope: nix-config's own contract is unchanged and declares no checks. The project contract is never read directly (`.agents/instructions/bootstrap.md`); Git inspection alone shows it is untouched (Phase-5 PR-552-01).
 
 After `git add` of the three files, run the Build (root § Global Constraints, timeout 3600 s). Expected: it ends without an error line, which shows that `resolve_project` still imports in the built `agent_tools` environment.
 
