@@ -3,9 +3,9 @@ import copy
 import tempfile
 from pathlib import Path
 
-from agent_tools import release_driver, release_profile
+from agent_tools import forge_adapter, release_driver, release_profile
 from . import release_test_support as support
-from .forge_world import CANONICAL
+from .forge_world import CANONICAL, ROWS
 
 PROJECT_ID = "fagenorn/nix-config"
 KEY = "release/fagenorn/nix-config"
@@ -63,3 +63,55 @@ def seed(driver, ordinal=1, **overrides) -> str:
         inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
         proof=inputs["proof"], recovery=inputs["recovery"],
         authority_class=release_driver.AUTHORITY_CLASS).transaction_id
+
+
+URL = f"https://github.com/{CANONICAL['slug']}/releases/tag/{CANONICAL['tag']}"
+
+
+class StatefulForge:
+    """`github-forge` for registry injection (D20): delegates to the real adapter and,
+    after an accepted invoke, makes the provider show what that invoke created."""
+
+    def __init__(self, world) -> None:
+        self.world = world
+        world.invoke_ready()
+        world.not_found("gh", ROWS["tag.ref"]["argv"][1:])
+        world.not_found("gh", ROWS["release.view"]["argv"][1:])
+
+    def describe(self):
+        return forge_adapter.describe()
+
+    def inspect(self, request):
+        return forge_adapter.inspect(request)
+
+    def invoke(self, request):
+        result = forge_adapter.invoke(request)
+        if result["result"] == "accepted":
+            self.land(request["operation"])
+        return result
+
+    def land(self, operation: str) -> None:
+        if operation == "tag":
+            self.world.respond_json("gh", ROWS["tag.ref"]["argv"][1:],
+                                    {"object": {"type": "tag", "sha": CANONICAL["tag_object"]}})
+            self.world.respond_json("gh", ROWS["tag.object"]["argv"][1:],
+                                    {"object": {"type": "commit", "sha": CANONICAL["commit"]}})
+        elif operation == "release":
+            self.world.respond_json("gh", ROWS["release.view"]["argv"][1:],
+                                    {"tag_name": CANONICAL["tag"], "draft": False, "html_url": URL})
+
+
+class NeverVisible(StatefulForge):
+    """Publication succeeds, but `publication_visible` never reads satisfied."""
+
+    def inspect(self, request):
+        observation = forge_adapter.inspect(request)
+        if request.get("kind") == "predicate":
+            observation = {**observation, "outcome": "unknown", "reason": "store_unreachable"}
+        return observation
+
+
+def release(driver, candidate_doc=None):
+    """Preview, then run with every token the preview lists; returns (preview, run)."""
+    shown = driver.preview(candidate_doc)
+    return shown, driver.run(candidate_doc, [c["token"] for c in shown["confirmations"]])

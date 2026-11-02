@@ -1,12 +1,13 @@
 """The release driver library against the real TransactionStore (#128 spec §1, §2, §4, §7)."""
+import json
 import re
 import unittest
 
-from agent_tools import forge_adapter, release_driver
+from agent_tools import forge_adapter, release_driver, release_profile
 from agent_tools.canonical import telemetry_digest
 from . import release_driver_support as rs
 from . import release_test_support as support
-from .forge_world import ForgeWorld
+from .forge_world import CANONICAL, ROWS, ForgeWorld
 
 TOKEN = re.compile(r"^(tag|github-release):[0-9a-f]{12}$")
 
@@ -164,6 +165,143 @@ class StatusTest(DriverCase):
         self.assertEqual([(a["name"], a["status"], a["attempts"]) for a in release["actions"]],
                          [("tag", None, 0), ("github-release", None, 0)])
         self.assertEqual(sorted(release["hazard_markers"]), [rs.KEY])
+
+
+def pushes(world):
+    return [c for c in world.calls() if c["argv"] == ROWS["tag.push"]["argv"][1:]]
+
+
+def creates(world):
+    return [c for c in world.calls() if c["argv"][:2] == ["release", "create"]]
+
+
+class RunTest(DriverCase):
+    def forge(self, cls=rs.StatefulForge):
+        self.world.verification_ready()
+        return self.driver(registry={"github-forge": cls(self.world)})
+
+    def test_a_confirmed_release_publishes_once_and_seals(self):
+        driver = self.forge()
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertTrue(result["receipt_digest"].startswith("sha256:"))
+        self.assertEqual((len(pushes(self.world)), len(creates(self.world))), (1, 1))
+        events = driver.store().load(result["transaction_id"]).events
+        def seq(predicate):
+            return next(e["seq"] for e in events if predicate(e))
+        verification = next(e for e in events if e["type"] == "evidence_recorded"
+                            and e["evidence_id"].startswith("verification:"))
+        self.assertEqual(json.loads(verification["reference"])["result"], "passed")
+        self.assertLess(verification["seq"], seq(lambda e: e.get("to") == "ready"))
+        self.assertLess(seq(lambda e: e.get("evidence_id") == "activation-not-applicable"),
+                        seq(lambda e: e.get("to") == "proving"))
+        self.assertIsNone(driver.store().load(result["transaction_id"]).custody)
+
+    def test_actions_run_in_bind_candidate_order_with_its_parameters(self):
+        driver = self.forge()
+        _, result = rs.release(driver, rs.candidate())
+        declared = [(e["name"], dict(e["parameters"]))
+                    for e in driver.store().load(result["transaction_id"]).events
+                    if e["type"] == "action_declared"]
+        units = release_profile.bind_candidate(driver.compiled, rs.candidate())["proof"]["units"]
+        self.assertEqual(declared, [(u["name"], u["parameters"]) for u in units])
+
+    def test_a_diverged_tag_parks_and_is_never_reported_released(self):
+        driver = self.forge()
+        self.world.respond_json("gh", ROWS["tag.ref"]["argv"][1:],
+                                {"object": {"type": "tag", "sha": CANONICAL["tag_object"]}})
+        self.world.respond_json("gh", ROWS["tag.object"]["argv"][1:],
+                                {"object": {"type": "commit", "sha": "9" * 40}})
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        status = driver.status()["release"]
+        self.assertEqual((status["reason"], status["terminal"]), ("tag: diverged", None))
+        self.assertEqual(pushes(self.world), [])
+
+    def test_proof_that_never_converges_parks(self):
+        driver = self.forge(rs.NeverVisible)
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("proving", "wait"))
+        self.clock.advance(1_800_000)
+        result = driver.run(None, [])
+        self.assertEqual(result["next"], "attention")
+        status = driver.status()["release"]
+        self.assertEqual((status["state"], status["parked_from"], status["reason"],
+                          status["terminal"]),
+                         ("attention_required", "proving", "proof_did_not_converge", None))
+
+
+class RunRefusalTest(DriverCase):
+    def setUp(self):
+        super().setUp()
+        self.registry = {"github-forge": rs.StatefulForge(self.world)}
+
+    def test_missing_partial_or_stale_tokens_write_nothing(self):
+        self.world.verification_ready()
+        driver = self.driver(registry=self.registry)
+        tokens = [c["token"] for c in driver.preview(rs.candidate())["confirmations"]]
+        for code, supplied in (("confirmation_required", []),
+                               ("confirmation_required", tokens[:1]),
+                               ("confirmation_stale", ["tag:000000000000", tokens[1]])):
+            with self.subTest(supplied=supplied):
+                self.assertRefusal(code, driver.run, rs.candidate(), supplied)
+        self.assertFalse((driver.project.common_dir / "agent-release").exists())
+
+    def test_red_or_pending_ci_reserves_no_version(self):
+        driver = self.driver(registry=self.registry)
+        for code, runs in (("verification_failed",
+                            [{"id": 1, "name": "Nix Eval", "status": "completed",
+                              "conclusion": "failure", "app": {"id": 15368}}]),
+                           ("verification_pending", [])):
+            with self.subTest(code=code):
+                self.world.verification_ready(runs=runs)
+                self.assertRefusal(code, driver.run, rs.candidate(), [])
+                self.assertFalse((driver.project.common_dir / "agent-release").exists())
+        self.world.verification_ready()
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((driver.current()[0], result["next"]), (1, "done"))
+
+    def test_a_published_version_is_never_reused(self):
+        self.world.verification_ready()
+        driver = self.driver(registry=self.registry)
+        rs.release(driver, rs.candidate())
+        self.assertEqual(driver.preview(rs.candidate())["refusal"]["code"], "version_reserved")
+        self.assertRefusal("version_reserved", driver.run, rs.candidate(), [])
+
+    def test_live_custody_is_release_busy(self):
+        driver = self.driver(registry=self.registry)
+        tid = rs.seed(driver)
+        driver.store().acquire(tid, executor_id="other", subject_path=str(driver.project.root),
+                               ttl_ms=10_000_000)
+        tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
+        self.assertRefusal("release_busy", driver.run, None, tokens)
+
+
+class AbandonTest(DriverCase):
+    def test_guard_denied_first_action_abandons_and_frees_the_version(self):
+        self.world.verification_ready()
+        forge = rs.StatefulForge(self.world)
+        self.world.invoke_ready(guard_exit=1)
+        driver = self.driver(registry={"github-forge": forge})
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        self.assertEqual(driver.abandon()["state"], "abandoned")
+        self.assertEqual(pushes(self.world), [])
+        self.world.invoke_ready()
+        again = driver.preview(rs.candidate())
+        self.assertEqual((again["mode"], again["runnable"]), ("new", True))
+
+    def test_abandon_refuses_after_an_effect_or_with_nothing_to_abandon(self):
+        self.assertRefusal("no_release", self.driver().abandon)
+        self.world.verification_ready()
+        forge = rs.StatefulForge(self.world)
+        self.world.invoke_ready(create_exit=1, create_stderr="gh: HTTP 422")
+        driver = self.driver(registry={"github-forge": forge})
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "attention")
+        self.assertEqual(len(pushes(self.world)), 1)
+        self.assertRefusal("abandon_refused", driver.abandon)
+        self.assertEqual(driver.status()["release"]["state"], "attention_required")
 
 
 if __name__ == "__main__":

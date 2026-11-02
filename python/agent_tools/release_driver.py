@@ -11,18 +11,26 @@ document, which still names the confirmations the operator would give (D18).
 The store root is `<common dir>/agent-release/store`; only `store(create=True)` makes it.
 A transaction's creation key is `release/v1:<project id>:<profile id>:<n>` with `n` from 1,
 so `transactions()` finds them by probing `n = 1, 2, ...` until the first absent key.
+
+`run` and `abandon` are the write side (§5; D6, D7, D14, D20, D21, D25). `run` refuses
+before it writes anything, then takes custody of the release, issues one grant per supplied
+confirmation token and drives the transaction as far as it can go without waiting on the
+world. It returns `done`, `confirm`, `wait` or `attention` and gives custody up on every
+normal return; a raised effect leaves custody to lapse (D21).
 """
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from agent_tools import release_adapter, release_profile, release_verification
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_core import TransactionStore
-from agent_tools.transaction_history import TERMINALS, Transaction
+from agent_tools.transaction_core import (
+    CreationConflict, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
+    TransactionBusy, TransactionError, TransactionStore)
+from agent_tools.transaction_history import TERMINALS, Custody, Transaction
 
 SCHEMA_VERSION = 1
 KEY_SCHEMA = "release/v1"
@@ -31,6 +39,12 @@ AUTHORITY_CLASS = "release"
 CUSTODY_TTL_MS = 900_000
 STORE_MODE = 0o700
 OPENINGS = ("lease_acquired", "lease_reacquired")
+GRANT_AUTHORITY = "release-irreversible"
+SCOPE_AUTHORITY = "release-scope"
+OPERATOR = "operator"
+ACTIVATION_NOT_APPLICABLE = "activation-not-applicable"
+ABANDON_REASON = "abandoned by operator"
+REFUSAL_DETAIL_LIMIT = 240
 
 
 class Refusal(Exception):
@@ -117,16 +131,33 @@ def _candidate(transaction: Transaction) -> dict[str, Any]:
             "title": _title(transaction)}
 
 
+def _openings(transaction: Transaction) -> int:
+    return sum(event["type"] in OPENINGS for event in transaction.events)
+
+
 def _next_acquisition(transaction: Transaction | None) -> int:
-    if transaction is None:
-        return 1
-    return 1 + sum(event["type"] in OPENINGS for event in transaction.events)
+    return 1 if transaction is None else 1 + _openings(transaction)
 
 
 def _view(transaction: Transaction | None, name: str) -> Mapping[str, Any] | None:
     if transaction is None:
         return None
     return next((view for view in transaction.actions if view["name"] == name), None)
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """The derivation `preview` documents and `run` acts on. `ordinal` is the creation-key
+    ordinal of the release: the one a new release will take, or the one in flight. The
+    verification `receipt` is held only by a new release's plan; a resumed one re-observes."""
+    mode: str
+    document: dict[str, Any]
+    refusal: Refusal | None
+    plan_digest: str
+    candidate: Mapping[str, Any]
+    ordinal: int
+    transaction: Transaction | None
+    receipt: dict[str, Any] | None
 
 
 class Driver:
@@ -243,16 +274,20 @@ class Driver:
                       "no proof unit targets a GitHub repository to verify the candidate against")
 
     def preview(self, candidate: Mapping[str, str] | None) -> dict[str, Any]:
+        return self._plan(candidate).document
+
+    def _plan(self, candidate: Mapping[str, str] | None) -> "_Plan":
+        """What `preview` shows and `run` re-derives before it writes anything (§5)."""
         shape = self.shape_refusal()
         if shape is not None:
             raise shape
         current = self.current()
         if current is not None and current[1].state not in TERMINALS:
-            return self._resume_preview(candidate, current[1])
-        return self._new_preview(candidate)
+            return self._resume_plan(candidate, *current)
+        return self._new_plan(candidate)
 
-    def _resume_preview(self, candidate: Mapping[str, str] | None,
-                        transaction: Transaction) -> dict[str, Any]:
+    def _resume_plan(self, candidate: Mapping[str, str] | None, ordinal: int,
+                     transaction: Transaction) -> "_Plan":
         stored = _candidate(transaction)
         if candidate is not None:
             raise Refusal("release_in_flight", f"{stored['version']} is in flight as "
@@ -260,25 +295,28 @@ class Driver:
         plan_digest = telemetry_digest({
             "transaction_id": transaction.transaction_id,
             "proof_plan_digest": transaction.events[0]["proof_plan_digest"]})
-        return self._document("resume", plan_digest, stored, None, transaction, None)
+        document = self._document("resume", plan_digest, stored, None, transaction, None)
+        return _Plan("resume", document, None, plan_digest, stored, ordinal, transaction, None)
 
-    def _new_preview(self, candidate: Mapping[str, str] | None) -> dict[str, Any]:
+    def _observe(self, candidate: Mapping[str, Any]) -> dict[str, Any]:
+        return release_verification.observe(
+            project_id=self.project.project_id, profile_id=self.profile_id,
+            profile_digest=self.compiled["digest"], repository=self._repository(),
+            integration_branch=self.project.integration_branch,
+            default_branch=self.project.default_branch, commit=candidate["commit"],
+            version=candidate["version"], clock=self.clock)
+
+    def _new_plan(self, candidate: Mapping[str, str] | None) -> "_Plan":
         if candidate is None:
             raise Refusal("candidate_required", "a new release needs a candidate")
         try:
             release_profile.bind_candidate(self.compiled, dict(candidate))
         except ValueError as error:
             raise Refusal("candidate_invalid", str(error)) from error
-        repository = self._repository()
         refusal: Refusal | None = None
         receipt = None
         try:
-            receipt = release_verification.observe(
-                project_id=self.project.project_id, profile_id=self.profile_id,
-                profile_digest=self.compiled["digest"], repository=repository,
-                integration_branch=self.project.integration_branch,
-                default_branch=self.project.default_branch, commit=candidate["commit"],
-                version=candidate["version"], clock=self.clock)
+            receipt = self._observe(candidate)
         except release_verification.VerificationRefused as error:
             refusal = Refusal(error.code, error.detail)
         verification = None
@@ -309,7 +347,69 @@ class Driver:
             "actions": [{key: action[key] for key in
                          ("name", "operation", "mode", "effect", "target")}
                         for action in self._actions(None)]})
-        return self._document("new", plan_digest, candidate, verification, None, refusal)
+        document = self._document("new", plan_digest, candidate, verification, None, refusal)
+        return _Plan("new", document, refusal, plan_digest, candidate, len(existing) + 1, None,
+                     receipt)
+
+    def run(self, candidate: Mapping[str, str] | None,
+            confirmations: Sequence[str]) -> dict[str, Any]:
+        plan = self._plan(candidate)
+        if plan.refusal is not None:
+            raise plan.refusal
+        supplied = list(dict.fromkeys(confirmations))
+        listed = {entry["token"]: entry["action"] for entry in plan.document["confirmations"]}
+        stale = [given for given in supplied if given not in listed]
+        if stale:
+            raise Refusal("confirmation_stale", "not confirmations of this release: "
+                          + ", ".join(stale))
+        missing = [action for given, action in listed.items() if given not in supplied]
+        if missing:
+            raise Refusal("confirmation_required", "confirm: " + ", ".join(missing))
+        router = _Router(self.compiled, self.registry)
+        if plan.transaction is None:
+            store = self.store(create=True)
+            transaction = self._create(store, plan)
+        else:
+            store, transaction = self.store(), plan.transaction
+        custody, transaction = self._acquire(store, transaction)
+        acquisition = _openings(transaction)
+        drive = _Drive(self, plan, store, router, custody, acquisition, transaction)
+        return drive.run(supplied)
+
+    def _create(self, store: TransactionStore, plan: _Plan) -> Transaction:
+        inputs = release_profile.bind_candidate(self.compiled, dict(plan.candidate))
+        try:
+            return store.create(
+                creation_key(self.project.project_id, self.profile_id, plan.ordinal),
+                inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
+                proof=inputs["proof"], recovery=inputs["recovery"],
+                authority_class=AUTHORITY_CLASS)
+        except (CreationConflict, LeaseUnavailable, TransactionBusy) as error:
+            raise Refusal("release_busy", str(error)) from error
+
+    def _acquire(self, store: TransactionStore, transaction: Transaction
+                 ) -> tuple[Custody, Transaction]:
+        try:
+            held = store.acquire(transaction.transaction_id, executor_id=EXECUTOR_ID,
+                                 subject_path=str(self.project.root), ttl_ms=CUSTODY_TTL_MS)
+        except (CreationConflict, LeaseUnavailable, TransactionBusy) as error:
+            raise Refusal("release_busy", str(error)) from error
+        return held.custody, held
+
+    def abandon(self) -> dict[str, Any]:
+        current = self.current()
+        if current is None or current[1].state in TERMINALS:
+            raise Refusal("no_release", "no release is in flight")
+        store = self.store()
+        custody, held = self._acquire(store, current[1])
+        try:
+            abandoned = store.advance(held.transaction_id, "abandoned", reason=ABANDON_REASON,
+                                      external_state="known", custody=custody)
+        except TransactionError as error:
+            store.release(custody)
+            raise Refusal("abandon_refused", str(error)[:REFUSAL_DETAIL_LIMIT]) from error
+        return {"schema_version": SCHEMA_VERSION, "transaction_id": abandoned.transaction_id,
+                "state": abandoned.state}
 
     def status(self) -> dict[str, Any]:
         shape = self.shape_refusal()
@@ -356,3 +456,227 @@ class Driver:
         return {"name": action["name"], "operation": action["operation"],
                 "effect": action["effect"], "status": action["status"],
                 "attempts": 0 if view is None else view["attempts"], "reference": reference}
+
+
+
+class _Router:
+    """One core-facing effect and observer over every adapter of a compiled profile (D20).
+
+    It holds one `core_binding` per adapter alias and picks by what a request names: the
+    action's node for `inspect` and `invoke`, the collector (an alias) for `observe`. It adds
+    no seam: fixture adapters enter only through the driver's `registry` argument.
+    """
+
+    def __init__(self, compiled: Mapping[str, Any], registry: Mapping[str, Any]) -> None:
+        self._bindings = {
+            alias: release_adapter.core_binding(registry[identity["adapter"]], compiled, alias)
+            for alias, identity in compiled["adapters"].items()}
+        self._alias = {node["id"]: node["adapter"]
+                       for node in (*compiled["publication"], *compiled["activation"])}
+
+    def _action(self, request: Mapping[str, Any]) -> release_adapter.CoreBinding:
+        name = request["parameters"]["action"]
+        if name not in self._alias:
+            raise ValueError(f"action {name!r} is no node of the compiled profile")
+        return self._bindings[self._alias[name]]
+
+    def inspect(self, request: Mapping[str, Any]) -> dict[str, str]:
+        return self._action(request).inspect(request)
+
+    def invoke(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        return self._action(request).invoke(request)
+
+    def observe(self, request: Mapping[str, Any]) -> dict[str, str]:
+        return self._bindings[request["collector"]].observe(request)
+
+
+class _Drive:
+    """One `run`'s pass over the transaction, under the one custody it acquired (§5).
+
+    `transaction` is always the latest snapshot the store returned. A phase returns None to
+    go on or the `next` word that ends the run. Custody is given up when `run` returns
+    normally, never in a `finally`: a raised effect leaves it to lapse (D21).
+    """
+
+    def __init__(self, driver: Driver, plan: _Plan, store: TransactionStore, router: _Router,
+                 custody: Custody, acquisition: int, transaction: Transaction) -> None:
+        self.driver = driver
+        self.plan = plan
+        self.store = store
+        self.router = router
+        self.custody = custody
+        self.acquisition = acquisition
+        self.transaction = transaction
+        self.nodes = {node["id"]: node for node in driver._nodes()}
+
+    def run(self, tokens: Sequence[str]) -> dict[str, Any]:
+        for given in tokens:
+            self.transaction = self.store.issue_grant(
+                self.custody, grant_id=given, actor=OPERATOR, actor_kind="human",
+                authority_class=GRANT_AUTHORITY)
+        if any(node["effect"] != "irreversible" for node in self.nodes.values()):
+            self.transaction = self.store.issue_grant(
+                self.custody, grant_id=f"{SCOPE_AUTHORITY}:{self.acquisition}", actor=OPERATOR,
+                actor_kind="human", authority_class=SCOPE_AUTHORITY)
+        if self.transaction.state == "attention_required":
+            self.advance(self.transaction.parked_from, "resume")
+        for phase in (self.begin, self.verify, self.publish, self.activate):
+            ending = phase()
+            if ending is not None:
+                return self.finish(ending)
+        return self.finish(self.prove())
+
+    def advance(self, target: str, reason: str) -> None:
+        self.transaction = self.store.advance(
+            self.transaction.transaction_id, target, reason=reason, custody=self.custody)
+
+    def park(self, reason: str) -> str:
+        self.advance("attention_required", reason)
+        return "attention"
+
+    def finish(self, ending: str) -> dict[str, Any]:
+        if self.transaction.state not in TERMINALS:
+            self.transaction = self.store.release(self.custody)
+        terminal = self.transaction.terminal
+        actions = [{"name": action["name"], "status": action["status"],
+                    "attempts": 0 if (view := _view(self.transaction, action["name"])) is None
+                    else view["attempts"]}
+                   for action in self.driver._actions(self.transaction)]
+        return {"schema_version": SCHEMA_VERSION,
+                "transaction_id": self.transaction.transaction_id,
+                "state": self.transaction.state, "next": ending, "actions": actions,
+                "receipt_digest": None if terminal is None else terminal["receipt_digest"]}
+
+    def begin(self) -> str | None:
+        if self.transaction.state == "created":
+            self.advance("awaiting_verification", "release started")
+        return None
+
+    def verify(self) -> str | None:
+        if self.transaction.state == "awaiting_verification":
+            if not any(entry["evidence_id"].startswith("verification:")
+                       for entry in self.transaction.evidence):
+                receipt, failure = self.receipt()
+                if receipt is None:
+                    return self.park(f"verification: {failure}")
+                self.store.record_evidence(
+                    self.custody, evidence_id=release_verification.evidence_id(receipt),
+                    form="event", reference=release_verification.canonical_text(receipt))
+            self.advance("ready", "verification passed")
+        return None
+
+    def receipt(self) -> tuple[dict[str, Any] | None, str | None]:
+        """The `passed` receipt to record, or None and what stopped it: the plan's own for a
+        new release, a fresh observation of the stored candidate for a resumed one."""
+        receipt = self.plan.receipt
+        if receipt is None:
+            try:
+                receipt = self.driver._observe(_candidate(self.transaction))
+            except release_verification.VerificationRefused as error:
+                return None, error.code
+        return (receipt, None) if receipt["result"] == "passed" else (None, receipt["result"])
+
+    def publish(self) -> str | None:
+        if self.transaction.state == "ready":
+            self.advance("publishing", "verified")
+        if self.transaction.state == "publishing":
+            ending = self.actions("publication")
+            if ending is not None:
+                return ending
+            self.advance("published", "publication satisfied")
+        return None
+
+    def activate(self) -> str | None:
+        if self.transaction.state == "published":
+            if self.driver.compiled["activation"]:
+                self.advance("activating", "publication satisfied")
+            else:
+                self.record_activation_not_applicable()
+                self.advance("proving", "no activation declared")
+        if self.transaction.state == "activating":
+            ending = self.actions("activation")
+            if ending is not None:
+                return ending
+            self.advance("proving", "activation satisfied")
+        return None
+
+    def record_activation_not_applicable(self) -> None:
+        if any(entry["evidence_id"] == ACTIVATION_NOT_APPLICABLE
+               for entry in self.transaction.evidence):
+            return
+        self.store.record_evidence(
+            self.custody, evidence_id=ACTIVATION_NOT_APPLICABLE, form="event",
+            reference=release_verification.canonical_text(
+                {"activation": "none", "profile_digest": self.driver.compiled["digest"]}))
+
+    def actions(self, phase: str) -> str | None:
+        for unit in self.transaction.proof_plan["units"]:
+            if unit["phase"] == phase:
+                ending = self.action(unit)
+                if ending is not None:
+                    return ending
+        return None
+
+    def status(self, name: str) -> str:
+        return _view(self.transaction, name)["status"]
+
+    def action(self, unit: Mapping[str, Any]) -> str | None:
+        name = unit["name"]
+        parameters = release_profile.thaw(unit["parameters"])
+        self.transaction = self.store.inspect_action(
+            self.custody, name=name, parameters=parameters, effect=self.router)
+        status = self.status(name)
+        if status == "satisfied":
+            return None
+        if status != "absent":
+            return self.stopped(name, status)
+        if self.nodes[name]["effect"] == "irreversible":
+            attempt = _view(self.transaction, name)["attempts"] + 1
+            try:
+                self.store.check_grant(self.custody, token(
+                    self.plan.plan_digest, name, attempt, self.acquisition))
+            except GrantInvalid:
+                return "confirm"
+        try:
+            self.transaction = self.store.invoke_action(
+                self.custody, name=name, parameters=parameters, effect=self.router)
+        except InvocationRefused as refused:
+            return self.park(f"{name}: refused {refused.reason}")
+        status = self.status(name)
+        return None if status == "satisfied" else self.stopped(name, status)
+
+    def stopped(self, name: str, status: str) -> str:
+        """The ending for an action that is not satisfied and is not to be invoked now."""
+        if status in ("in_progress", "unknown"):
+            return "wait"
+        if status in ("absent", "diverged"):
+            return self.park(f"{name}: {status}")
+        raise ValueError(f"action {name!r} has status {status!r}, which the driver cannot read")
+
+    def prove(self) -> str:
+        plan = self.transaction.proof_plan
+        for entry in plan["obligations"]:
+            self.collect(entry["obligation_id"])
+        try:
+            self.transaction = self.store.start_cohort(self.custody)
+        except ProofRefused as refused:
+            if refused.reason not in ("proof_incomplete", "convergence_exhausted"):
+                raise
+        else:
+            for member in plan["cohort"]["members"]:
+                self.collect(member)
+        try:
+            self.transaction = self.store.settle_proof(self.custody)
+        except ProofRefused as refused:
+            if refused.reason != "no_open_cohort":
+                raise
+        return {"succeeded": "done", "attention_required": "attention"}.get(
+            self.transaction.state, "wait")
+
+    def collect(self, obligation_id: str) -> None:
+        """Observe one obligation; the core refuses one it cannot take yet, which waits."""
+        try:
+            self.transaction = self.store.collect_obligation(
+                self.custody, obligation_id=obligation_id, observer=self.router)
+        except ProofRefused:
+            pass
