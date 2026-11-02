@@ -1,4 +1,4 @@
-"""The codesigned-artifact adapter (issue 547 D1, D4, D6-D8, D17, D19, D21): `describe`, `inspect`.
+"""The codesigned-artifact adapter (issue 547 D1, D4, D6-D9, D12, D15, D17, D19-D23): `describe`, `inspect`, `invoke`.
 
 `describe()` returns a fresh descriptor with one operation, `install`: `materialize` mode,
 `in_place` mutability, `supported` for `inspect`. `publication_visible` is supported and
@@ -17,18 +17,56 @@ Otherwise it classifies the install path with `lstat`, the bundle's `Contents/In
 --strict` and `-d --verbose=2` (stderr), by the table in the issue 547 spec. Every child runs by
 name on `PATH` with the caller's environment unchanged, under one `INSPECT_BUDGET_SECONDS`
 deadline per call. `publication_visible` maps the effect row by the table's last column.
+
+`invoke(request)` never raises and returns the closed `InvokeResult`. Every refusal reference is
+`<step>: <detail>`, cut to 240 characters, and one `INVOKE_BUDGET_SECONDS` deadline covers all its
+children, which run by name on `PATH` with the caller's environment unchanged: `git`, `security`
+and `codesign`, never the lifecycle guard (D12) and never a build (D9). It stops at the first
+refusal, in this order:
+
+1. Shape: not exactly an effect request is `invalid_input`, an operation `describe` does not
+   declare is `unsupported_operation`, parameters that fail the shape check `inspect` applies are
+   `invalid_input`. No child starts.
+2. Authority: uid 0 is `authorization_denied`.
+3. Checkout: the working directory's `git rev-parse --show-toplevel` must be absolute, HEAD must
+   be the candidate commit and no tracked file may be modified, else `precondition_failed`. A
+   read that times out is `transient_transport`, one that cannot start or exits non-zero is
+   `provider_unavailable`; the same answers apply to the `security` read in step 5.
+4. Source: `<root>/<source>` is a directory that is not a symlink, `Contents` is not a symlink and
+   `Contents/Info.plist` is a regular file that loads as a dictionary, else `precondition_failed`
+   (issue 547 D23).
+5. Identity: the `identity_env` value when set and non-empty (a listed name, or a listed hash in
+   any case), else the first listed name starting with `identity_prefix`, else `-` when
+   `adhoc_fallback` is true. No match is `precondition_failed` with `no_signing_identity`, and an
+   env value that matches nothing never falls back.
+6. Install path: an existing one that is a symlink or not a directory is `precondition_failed`.
+7. Staging (D20): the parent is made, stale `.<name>.release-staging` and `.<name>.release-previous`
+   siblings are removed, the source is copied with its symlinks into the staging directory, the
+   two stamp keys are written by replacing `Contents/Info.plist` with a temporary file in the
+   same directory (D23), and `codesign --force --sign` then `--verify --deep --strict` must pass.
+   Any failure removes staging and is `rejected`: `provider_unavailable` for an operating-system
+   error or a missing `codesign`, `transient_transport` for a timeout, `precondition_failed` for
+   a non-zero exit.
+8. Swap (D15, D20): an existing bundle is renamed to the previous sibling, then the staged bundle
+   to the install path. A failed rename did not happen: before any rename succeeded it is
+   `rejected`/`provider_unavailable` with staging removed, after one it is
+   `unknown`/`transient_transport` with the files left as they are. Then the previous sibling and
+   the staging directory are removed and the result is `accepted` with the install path.
 """
 
 import os
 import plistlib
 import re
+import shutil
 import stat
 import subprocess
+import tempfile
 import time
 import xml.parsers.expat
 from typing import Any
 
 INSPECT_BUDGET_SECONDS = 30
+INVOKE_BUDGET_SECONDS = 120
 DETAIL_LIMIT = 240
 STAMP_VERSION = "AgentReleaseVersion"
 STAMP_COMMIT = "AgentReleaseCommit"
@@ -37,6 +75,7 @@ CONFIG_MEMBERS = {"source": "string", "identity_prefix": "string", "identity_env
 REQUIRED_CONFIG = ("adhoc_fallback", "identity_prefix", "source")
 VERSION = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
+IDENTITY_LINE = re.compile(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"(.+)"\s*$')
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 EFFECT_SHAPE = frozenset(("kind", "operation", "parameters"))
@@ -152,26 +191,37 @@ def _observation(outcome: str, reason: str, *, path: str | None = None,
             "references": [] if path is None else [path], "observed_at": _now_ms(), "facts": facts}
 
 
-def _run(argv: list[str], deadline: float) -> tuple[str, int, str, str]:
-    """Run `argv` by name within what is left of `deadline`: `(status, code, stderr, detail)`.
+def _spawn(argv: list[str], deadline: float) -> tuple[str, subprocess.CompletedProcess | None, str]:
+    """Run `argv` by name within what is left of `deadline`: `(status, process, detail)`.
 
-    `status` is `"ok"` or one of `lookup_timeout`, `executable_missing` and `lookup_failed`,
-    and then `code` is -1. `detail` is the bounded stderr, empty on `lookup_timeout`, the
-    operating-system error on `executable_missing`, and `<name> could not be started: <error>`
-    for an argument the operating system cannot pass.
+    `status` is `"ok"` (the process finished, whatever its exit) or one of `lookup_timeout`,
+    `executable_missing` and `lookup_failed`, and then `process` is None. `detail` is empty on
+    `lookup_timeout`, the operating-system error on `executable_missing`, and
+    `<name> could not be started: <error>` for an argument the operating system cannot pass.
     """
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        return "lookup_timeout", -1, "", ""
+        return "lookup_timeout", None, ""
     try:
         done = subprocess.run(argv, capture_output=True, text=True, errors="replace",
                               timeout=remaining, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        return "lookup_timeout", -1, "", ""
+        return "lookup_timeout", None, ""
     except OSError as error:
-        return "executable_missing", -1, "", str(error)
+        return "executable_missing", None, str(error)
     except ValueError as error:
-        return "lookup_failed", -1, "", f"{argv[0]} could not be started: {error}"
+        return "lookup_failed", None, f"{argv[0]} could not be started: {error}"
+    return "ok", done, ""
+
+
+def _run(argv: list[str], deadline: float) -> tuple[str, int, str, str]:
+    """`_spawn` as `(status, code, stderr, detail)`: `code` is -1 unless `status` is `"ok"`.
+
+    `detail` is the bounded stderr when the process finished, else `_spawn`'s detail.
+    """
+    status, done, detail = _spawn(argv, deadline)
+    if done is None:
+        return status, -1, "", detail
     return "ok", done.returncode, done.stderr, done.stderr.strip()[:DETAIL_LIMIT]
 
 
@@ -202,9 +252,13 @@ def _signature(stderr: str) -> dict[str, Any]:
             "adhoc": adhoc}
 
 
+def _install_path(parameters: dict[str, Any]) -> str:
+    return os.path.expanduser("~") + "/" + parameters["target"]["path"][2:]
+
+
 def _classify(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
     """The effect observation of one valid install request: the spec's `inspect` table."""
-    path = os.path.expanduser("~") + "/" + parameters["target"]["path"][2:]
+    path = _install_path(parameters)
     candidate = parameters["candidate"]
 
     def seen(outcome: str, reason: str, **facts: Any) -> dict[str, Any]:
@@ -284,3 +338,227 @@ def inspect(request: Any) -> dict[str, Any]:
         return _effect(request["operation"], request["parameters"], deadline)
     return _observation("unknown", "parameters_invalid",
                         detail="request is not a closed effect or predicate request")
+
+
+class _Refusal(Exception):
+    """An `invoke` that ends here: the closed `InvokeResult` to return."""
+
+    def __init__(self, result: str, error_class: str, step: str, detail: str) -> None:
+        reference = f"{step}: {detail}"[:DETAIL_LIMIT]
+        super().__init__(reference)
+        self.answer = {"result": result, "error_class": error_class, "reference": reference}
+
+
+def _rejected(error_class: str, step: str, detail: str) -> _Refusal:
+    return _Refusal("rejected", error_class, step, detail)
+
+
+def _read(argv: list[str], step: str, deadline: float) -> str:
+    """Stdout of one read before any write; a failed read is a refusal (issue 547 D15)."""
+    status, done, detail = _spawn(argv, deadline)
+    if status == "lookup_timeout":
+        raise _rejected("transient_transport", step, "timed out")
+    if done is None:
+        raise _rejected("provider_unavailable", step, detail)
+    if done.returncode != 0:
+        raise _rejected("provider_unavailable", step,
+                        done.stderr.strip() or f"exit {done.returncode}")
+    return done.stdout
+
+
+def _invoke_shape(request: Any) -> dict[str, Any]:
+    """The parameters of a request that is a declared, valid install effect."""
+    if not (isinstance(request, dict) and set(request) == EFFECT_SHAPE
+            and request["kind"] == "effect" and isinstance(request["operation"], str)):
+        raise _rejected("invalid_input", "shape", "request is not a closed effect request")
+    operation = request["operation"]
+    if operation not in describe()["operations"]:
+        raise _rejected("unsupported_operation", "shape", f"{operation}: unknown_operation")
+    problem = _parameters_problem(request["parameters"])
+    if problem is not None:
+        raise _rejected("invalid_input", "shape", problem)
+    return request["parameters"]
+
+
+def _checkout(commit: str, deadline: float) -> str:
+    """The working checkout's root, when HEAD is `commit` and no tracked file is modified (D23)."""
+    root = _read(["git", "rev-parse", "--show-toplevel"], "checkout", deadline).strip()
+    if not os.path.isabs(root):
+        raise _rejected("provider_unavailable", "checkout", "rev-parse did not return a directory")
+    head = _read(["git", "-C", root, "rev-parse", "HEAD"], "checkout", deadline).strip()
+    if head != commit:
+        raise _rejected("precondition_failed", "checkout", f"HEAD is {head}, not {commit}")
+    modified = _read(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"],
+                     "checkout", deadline)
+    if modified.strip():
+        raise _rejected("precondition_failed", "checkout", "a tracked file is modified")
+    return root
+
+
+def _plist(path: str) -> tuple[dict[str, Any], bool]:
+    """The dictionary of the regular file at `path`, and whether it is a binary plist."""
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise ValueError("not a regular file")
+    with open(path, "rb") as handle:
+        data = handle.read()
+    info = plistlib.loads(data)
+    if not isinstance(info, dict):
+        raise ValueError("not a dictionary")
+    return info, data.startswith(b"bplist00")
+
+
+PLIST_ERRORS = (OSError, ValueError, xml.parsers.expat.ExpatError)
+
+
+def _source(root: str, source: str) -> str:
+    """The source bundle, when no link stands in for it, its `Contents` or its plist (D23)."""
+    bundle = os.path.join(root, source)
+    contents = os.path.join(bundle, "Contents")
+    try:
+        if not stat.S_ISDIR(os.lstat(bundle).st_mode):
+            raise ValueError(f"{source} is not a directory")
+        if stat.S_ISLNK(os.lstat(contents).st_mode):
+            raise ValueError(f"{source}/Contents is a symlink")
+        _plist(os.path.join(contents, "Info.plist"))
+    except PLIST_ERRORS as error:
+        raise _rejected("precondition_failed", "source", str(error)) from error
+    return bundle
+
+
+def _identity(config: dict[str, Any], deadline: float) -> str:
+    """The `codesign --sign` argument: a listed hash, or `-` when ad-hoc signing is allowed."""
+    listing = _read(["security", "find-identity", "-v", "-p", "codesigning"], "identity", deadline)
+    pairs = [match.groups() for match in map(IDENTITY_LINE.match, listing.splitlines()) if match]
+    variable = config.get("identity_env")
+    value = os.environ.get(variable, "") if variable else ""
+    if value:
+        for digest, name in pairs:
+            if value == name or value.lower() == digest.lower():
+                return digest
+        raise _rejected("precondition_failed", "identity",
+                        f"no_signing_identity: {variable} names no listed identity")
+    for digest, name in pairs:
+        if name.startswith(config["identity_prefix"]):
+            return digest
+    if config["adhoc_fallback"]:
+        return "-"
+    raise _rejected("precondition_failed", "identity",
+                    f"no_signing_identity: none starts with {config['identity_prefix']}")
+
+
+def _install_state(path: str) -> bool:
+    """Whether a bundle directory stands at `path`; a symlink or non-directory is a refusal."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise _rejected("provider_unavailable", "install path", str(error)) from error
+    if not stat.S_ISDIR(mode):
+        raise _rejected("precondition_failed", "install path", f"{path} is not a directory")
+    return True
+
+
+def _remove(path: str) -> None:
+    """Remove whatever stands at `path` without following a symlink."""
+    if os.path.islink(path) or not os.path.isdir(path):
+        if os.path.lexists(path):
+            os.unlink(path)
+    else:
+        shutil.rmtree(path)
+
+
+def _stamp_plist(staged: str, candidate: dict[str, str]) -> None:
+    """Set the two stamp keys by replacing `Info.plist`, never writing through it (D23)."""
+    contents = os.path.join(staged, "Contents")
+    target = os.path.join(contents, "Info.plist")
+    info, binary = _plist(target)
+    info[STAMP_VERSION], info[STAMP_COMMIT] = candidate["version"], candidate["commit"]
+    descriptor, temporary = tempfile.mkstemp(prefix=".Info.plist.", dir=contents)
+    with os.fdopen(descriptor, "wb") as handle:
+        os.fchmod(handle.fileno(), stat.S_IMODE(os.lstat(target).st_mode))
+        plistlib.dump(info, handle, fmt=plistlib.FMT_BINARY if binary else plistlib.FMT_XML)
+    os.replace(temporary, target)
+
+
+def _codesign(argv: list[str], step: str, deadline: float) -> None:
+    status, done, detail = _spawn(argv, deadline)
+    if status == "lookup_timeout":
+        raise _rejected("transient_transport", step, "timed out")
+    if done is None:
+        raise _rejected("provider_unavailable", step, detail)
+    if done.returncode != 0:
+        raise _rejected("precondition_failed", step, done.stderr.strip() or f"exit {done.returncode}")
+
+
+def _stage(source: str, staging: str, staged: str, candidate: dict[str, str], identity: str,
+           deadline: float) -> None:
+    """Build and sign the staged bundle (issue 547 D20); every failure is a `rejected` refusal."""
+    try:
+        os.mkdir(staging)
+        shutil.copytree(source, staged, symlinks=True)
+        _stamp_plist(staged, candidate)
+    except PLIST_ERRORS as error:
+        error_class = "provider_unavailable" if isinstance(error, OSError) else "precondition_failed"
+        raise _rejected(error_class, "stage", str(error)) from error
+    _codesign(["codesign", "--force", "--sign", identity, staged], "sign", deadline)
+    _codesign(["codesign", "--verify", "--deep", "--strict", staged], "verify", deadline)
+
+
+def _swap(path: str, previous: str, staging: str, staged: str, exists: bool) -> None:
+    """Move the staged bundle into place; the first rename is the first write to the install path."""
+    renamed = False
+    try:
+        if exists:
+            os.rename(path, previous)
+            renamed = True
+        os.rename(staged, path)
+    except OSError as error:
+        if renamed:
+            raise _Refusal("unknown", "transient_transport", "swap", str(error)) from error
+        shutil.rmtree(staging, ignore_errors=True)
+        raise _rejected("provider_unavailable", "swap", str(error)) from error
+    shutil.rmtree(previous, ignore_errors=True)
+    try:
+        os.rmdir(staging)
+    except OSError:
+        pass
+
+
+def _invoke(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
+    if os.getuid() == 0:
+        raise _Refusal("rejected", "authorization_denied", "authority", "refusing to install as uid 0")
+    candidate, config = parameters["candidate"], parameters["config"]
+    source = _source(_checkout(candidate["commit"], deadline), config["source"])
+    identity = _identity(config, deadline)
+    path = _install_path(parameters)
+    exists = _install_state(path)
+    parent, name = os.path.split(path)
+    staging = os.path.join(parent, f".{name}.release-staging")
+    previous = os.path.join(parent, f".{name}.release-previous")
+    staged = os.path.join(staging, name)
+    try:
+        os.makedirs(parent, exist_ok=True)
+        _remove(staging)
+        _remove(previous)
+    except OSError as error:
+        raise _rejected("provider_unavailable", "stage", str(error)) from error
+    try:
+        _stage(source, staging, staged, candidate, identity, deadline)
+    except _Refusal:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    _swap(path, previous, staging, staged, exists)
+    return {"result": "accepted", "error_class": None, "reference": path}
+
+
+def invoke(request: Any) -> dict[str, Any]:
+    """The `InvokeResult` of one install request: `{result, error_class, reference}`.
+
+    A refusal before the first rename leaves the install path as it was (issue 547 D15, D20).
+    """
+    deadline = time.monotonic() + INVOKE_BUDGET_SECONDS
+    try:
+        return _invoke(_invoke_shape(request), deadline)
+    except _Refusal as refusal:
+        return refusal.answer

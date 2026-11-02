@@ -1,7 +1,8 @@
 """Outcomes are observed after invocation (#124 AC8). Run: just agent-workflow-tests"""
 import unittest
 
-from agent_tools import actions_health_adapter, forge_adapter, release_adapter, release_profile
+from agent_tools import (actions_health_adapter, codesigned_artifact_adapter, forge_adapter,
+                         release_adapter, release_profile)
 from . import release_test_support as support
 from .forge_world import ForgeWorld
 from .test_forge_adapter import ROWS
@@ -61,6 +62,27 @@ class PublicationFreeBindingTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "is not a node bound to this alias"):
                     getattr(binding, name)(request)
         self.assertEqual(world.calls(), [])
+
+
+class RegistryTest(unittest.TestCase):
+    def test_codesigned_artifact_is_registered(self):
+        self.assertIs(release_adapter.REGISTRY["codesigned-artifact"], codesigned_artifact_adapter)
+        descriptor = release_adapter.DESCRIPTORS["codesigned-artifact"]
+        self.assertEqual(descriptor, codesigned_artifact_adapter.describe())
+        self.assertIsNone(release_adapter.watch_operation(descriptor))
+
+    def test_prior_descriptors_and_forge_profiles_keep_their_base_digests(self):
+        """Issue 547 D22: values measured at base 328f08da."""
+        digest = release_adapter.descriptor_digest
+        self.assertEqual(digest(release_adapter.DESCRIPTORS["github-forge"]),
+                         "sha256:efe2899b3f41bfde870ab28366beb81a8359e5eb050a2be1534b71810473004a")
+        self.assertEqual(digest(release_adapter.DESCRIPTORS["github-actions-health"]),
+                         "sha256:2453a459491301250c59b62fa08b4846b13ada3970a4b0583710426b251dc55e")
+        self.assertEqual(release_profile.profile_digest(support.forge_profile()),
+                         "sha256:4be9656c19dce516d183fb3c581fbf3be8026ea490497ff15d8292fc79f06573")
+        self.assertEqual(release_profile.profile_digest(support.publication_free_profile()),
+                         "sha256:f98d60dd0f7484bfee7fd017d4edd4b6c23007db767b0a2f2a504a9c4b6cddab")
+
 
 if __name__ == "__main__":
     unittest.main()

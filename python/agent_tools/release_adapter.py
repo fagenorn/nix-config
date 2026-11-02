@@ -28,8 +28,8 @@ from collections.abc import Mapping
 from types import MappingProxyType, ModuleType
 from typing import Any
 
-from agent_tools import (actions_health_adapter, forge_adapter, transaction_invocation,
-                         transaction_plan)
+from agent_tools import (actions_health_adapter, codesigned_artifact_adapter, forge_adapter,
+                         transaction_invocation, transaction_plan)
 from agent_tools.agent_platform import parse_semver
 from agent_tools.canonical import telemetry_digest
 
@@ -422,5 +422,6 @@ def core_binding(adapter: ModuleType, profile: Mapping[str, Any], alias: str) ->
 
 
 REGISTRY = MappingProxyType({"github-forge": forge_adapter,
-                             "github-actions-health": actions_health_adapter})
+                             "github-actions-health": actions_health_adapter,
+                             "codesigned-artifact": codesigned_artifact_adapter})
 DESCRIPTORS = build_descriptors(REGISTRY)

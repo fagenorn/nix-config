@@ -1,11 +1,15 @@
 """The codesigned-artifact adapter (issue 547). Run: just agent-workflow-tests"""
 import ast
+import contextlib
 import inspect as introspect
+import os
+import plistlib
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agent_tools import codesigned_artifact_adapter as adapter, release_adapter
-from .host_world import IDENTITY, HostWorld
+from .host_world import IDENTITY, OTHER, HostWorld
 
 PATH = "~/Library/Application Support/Notifier/Notifier.app"
 CONFIG = {"source": "build/Notifier.app", "identity_prefix": "Apple Development",
@@ -54,12 +58,12 @@ class Case(unittest.TestCase):
 
 
 class DescribeTest(Case):
-    def test_descriptor_is_exact_valid_and_fresh(self):
+    def test_descriptor_is_exact_valid_fresh_and_registered(self):
         self.assertEqual(adapter.describe(), DESCRIPTOR)
         self.assertEqual(release_adapter.descriptor_problems(adapter.describe()), [])
         adapter.describe()["operations"].clear()
         self.assertEqual(adapter.describe(), DESCRIPTOR)
-        self.assertNotIn("codesigned-artifact", release_adapter.REGISTRY)
+        self.assertIs(release_adapter.REGISTRY["codesigned-artifact"], adapter)
 
 
 class ClassificationTest(Case):
@@ -121,6 +125,236 @@ class ClassificationTest(Case):
             observed = self.effect()
         self.assertEqual((observed["outcome"], observed["reason"]), ("unknown", "lookup_timeout"))
         self.assertEqual(observed["facts"]["detail"], "")
+
+
+class InvokeTest(Case):
+    def invoke(self, parameters=None):
+        return adapter.invoke({"kind": "effect", "operation": "install",
+                               "parameters": parameters or self.parameters()})
+
+    def signed_with(self):
+        """The identity argument of every `codesign --sign` call, in order."""
+        return [c["argv"][2] for c in self.world.calls("codesign") if "--sign" in c["argv"]]
+
+    def installed_plist(self):
+        with open(self.world.home / PATH[2:] / "Contents/Info.plist", "rb") as handle:
+            return plistlib.load(handle)
+
+    def test_installs_a_stamped_signed_bundle_then_inspects_satisfied(self):
+        self.world.bundle()
+        installed = self.world.home / PATH[2:]
+        self.assertEqual(self.invoke(), {"result": "accepted", "error_class": None,
+                                         "reference": str(installed)})
+        self.assertEqual(self.installed_plist(), {
+            "CFBundleIdentifier": "dev.example.notifier", "CFBundleName": "Notifier",
+            "AgentReleaseVersion": "v1.2.3", "AgentReleaseCommit": self.candidate["commit"]})
+        self.assertEqual(os.readlink(installed / "Contents/Resources/current"), "../MacOS/notifier")
+        signs = [c["argv"] for c in self.world.calls("codesign") if "--sign" in c["argv"]]
+        self.assertEqual([argv[:3] for argv in signs], [["--force", "--sign", IDENTITY[0]]])
+        self.assertEqual((Path(signs[0][3]).name, Path(signs[0][3]).parent.name),
+                         ("Notifier.app", ".Notifier.app.release-staging"))
+        self.assertEqual(sorted(p.name for p in installed.parent.iterdir()), ["Notifier.app"])
+        self.assertEqual(self.world.calls("claude-bash-lifecycle-guard"), [])
+        observed = self.effect()
+        self.assertEqual((observed["outcome"], observed["reason"]), ("satisfied", "installed"))
+
+    def test_each_refusal_leaves_the_installed_bundle_unchanged(self):
+        outside = self.world.root / "outside.plist"
+
+        def old_release():
+            self.install(stamp=("v1.2.2", "f" * 40))
+
+        def operation(stack):
+            parameters = self.parameters()
+            parameters["operation"] = "publish"
+            return {"kind": "effect", "operation": "publish", "parameters": parameters}
+
+        def target(stack):
+            parameters = self.parameters()
+            parameters["target"]["path"] = "/abs/N.app"
+            return {"kind": "effect", "operation": "install", "parameters": parameters}
+
+        def uid_zero(stack):
+            stack.enter_context(mock.patch.object(adapter.os, "getuid", return_value=0))
+
+        def unknown_commit(stack):
+            self.candidate["commit"] = "f" * 40
+
+        def outside_directory(stack):
+            os.chdir(self.world.home)
+
+        def linked_plist(stack):
+            plist = self.world.checkout / "build/Notifier.app/Contents/Info.plist"
+            outside.write_bytes(plistlib.dumps({"CFBundleIdentifier": "dev.example.notifier"}))
+            plist.unlink()
+            plist.symlink_to(outside)
+
+        def linked_contents(stack):
+            contents = self.world.checkout / "build/Notifier.app/Contents"
+            contents.rename(self.world.root / "OutsideContents")
+            contents.symlink_to(self.world.root / "OutsideContents")
+
+        def list_plist(stack):
+            plist = self.world.checkout / "build/Notifier.app/Contents/Info.plist"
+            plist.write_bytes(plistlib.dumps([1]))
+
+        def nobody(stack):
+            self.world.environ(NOTIFIER_SIGNING_IDENTITY="Nobody")
+            return {"kind": "effect", "operation": "install",
+                    "parameters": self.parameters(adhoc_fallback=True)}
+
+        def linked_install(stack):
+            installed = self.world.home / PATH[2:]
+            installed.parent.mkdir(parents=True)
+            installed.symlink_to(self.world.checkout)
+
+        def sign_fails(stack):
+            old_release()
+            self.world.fail("codesign", "sign", exit=1, stderr="errSecInternalComponent")
+
+        def verify_fails(stack):
+            old_release()
+            self.world.fail("codesign", "verify", exit=1)
+
+        def sign_times_out(stack):
+            old_release()
+            self.world.fail("codesign", "sign", exit=0, sleep=3)
+            stack.enter_context(mock.patch.object(adapter, "INVOKE_BUDGET_SECONDS", 1))
+
+        def swap_fails(stack):
+            stack.enter_context(mock.patch.object(adapter.os, "rename", refuse_install))
+
+        real_rename = os.rename
+
+        def refuse_install(source, destination):
+            if str(destination) == str(self.world.home / PATH[2:]):
+                raise OSError("rename refused")
+            return real_rename(source, destination)
+
+        # (name, arrange(stack) -> request or None, (result, error_class), fragment, children, staging)
+        rows = (
+            ("target path", target, ("rejected", "invalid_input"), "", False, False),
+            ("operation", operation, ("rejected", "unsupported_operation"), "publish", False, False),
+            ("uid 0", uid_zero, ("rejected", "authorization_denied"), "", False, False),
+            ("other commit", unknown_commit, ("rejected", "precondition_failed"), "checkout",
+             "no-sign", False),
+            ("dirty", lambda stack: self.world.dirty(), ("rejected", "precondition_failed"),
+             "checkout", "no-sign", False),
+            ("no checkout", outside_directory, ("rejected", "provider_unavailable"), "checkout",
+             "no-sign", False),
+            ("no bundle", lambda stack: (self.world.checkout / "build/Notifier.app").rename(
+                self.world.root / "moved.app"), ("rejected", "precondition_failed"), "source",
+             "no-sign", False),
+            ("linked plist", linked_plist, ("rejected", "precondition_failed"), "source",
+             "no-sign", False),
+            ("linked contents", linked_contents, ("rejected", "precondition_failed"), "source",
+             "no-sign", False),
+            ("list plist", list_plist, ("rejected", "precondition_failed"), "source",
+             "no-sign", False),
+            ("security fails", lambda stack: self.world.identities(IDENTITY, exit=1,
+                                                                  stderr="keychain locked"),
+             ("rejected", "provider_unavailable"), "keychain locked", "no-sign", False),
+            ("no identity", lambda stack: self.world.identities(OTHER),
+             ("rejected", "precondition_failed"), "no_signing_identity", "no-sign", False),
+            ("env names nobody", nobody, ("rejected", "precondition_failed"),
+             "no_signing_identity", "no-sign", False),
+            ("linked install", linked_install, ("rejected", "precondition_failed"), "install",
+             "no-sign", False),
+            ("sign fails", sign_fails, ("rejected", "precondition_failed"),
+             "errSecInternalComponent", True, True),
+            ("verify fails", verify_fails, ("rejected", "precondition_failed"), "verify",
+             True, True),
+            ("sign times out", sign_times_out, ("rejected", "transient_transport"), "sign",
+             True, True),
+            ("rename refused", swap_fails, ("rejected", "provider_unavailable"), "swap",
+             True, True),
+        )
+        for name, arrange, expected, fragment, children, staging in rows:
+            with self.subTest(row=name), contextlib.ExitStack() as stack:
+                self.setUp()
+                self.world.bundle()
+                request = arrange(stack)
+                before, started = self.world.tree(), len(self.world.calls())
+                signed_before = len(self.signed_with())
+                result = adapter.invoke(request) if isinstance(request, dict) else self.invoke()
+                self.assertEqual((result["result"], result["error_class"]), expected)
+                self.assertIn(fragment, result["reference"])
+                self.assertEqual(release_adapter.invoke_result_problems(result), [])
+                installed = self.world.home / PATH[2:]
+                self.assertFalse((installed.parent / ".Notifier.app.release-staging").exists())
+                if staging:
+                    prefix = PATH[2:]
+                    kept = {k: v for k, v in before.items() if k.startswith(prefix)}
+                    self.assertEqual({k: v for k, v in self.world.tree().items()
+                                      if k.startswith(prefix)}, kept)
+                else:
+                    self.assertEqual(self.world.tree(), before)
+                if children is False:
+                    self.assertEqual(len(self.world.calls()), started)
+                else:
+                    signed = len(self.signed_with()) - signed_before
+                    self.assertEqual(signed, 1 if children is True else 0)
+                if name == "linked plist":
+                    self.assertEqual(outside.read_bytes(),
+                                     plistlib.dumps({"CFBundleIdentifier": "dev.example.notifier"}))
+                if name == "linked install":
+                    self.assertEqual(os.readlink(installed), str(self.world.checkout))
+
+    def test_identity_selection_and_replacement(self):
+        def stale_siblings():
+            parent = (self.world.home / PATH[2:]).parent
+            for name in (".Notifier.app.release-staging", ".Notifier.app.release-previous"):
+                (parent / name).mkdir()
+
+        cases = (
+            ("env hash", lambda: (self.world.identities(IDENTITY, OTHER),
+                                  self.world.environ(NOTIFIER_SIGNING_IDENTITY=OTHER[1])),
+             {}, OTHER[0]),
+            ("env hash lowercase", lambda: (self.world.identities(IDENTITY, OTHER),
+                                            self.world.environ(NOTIFIER_SIGNING_IDENTITY=OTHER[0].lower())),
+             {}, OTHER[0]),
+            ("empty env", lambda: (self.world.identities(IDENTITY, OTHER),
+                                   self.world.environ(NOTIFIER_SIGNING_IDENTITY="")), {}, IDENTITY[0]),
+            ("ad hoc", lambda: self.world.identities(), {"adhoc_fallback": True}, "-"),
+            ("old release and stale siblings",
+             lambda: (self.install(stamp=("v1.2.2", "f" * 40)), stale_siblings()), {}, IDENTITY[0]),
+        )
+        for name, arrange, config, identity in cases:
+            with self.subTest(case=name):
+                self.setUp()
+                self.world.bundle()
+                arrange()
+                baseline = len(self.signed_with())
+                result = self.invoke(self.parameters(**config))
+                self.assertEqual(result["result"], "accepted")
+                self.assertEqual(self.signed_with()[baseline:], [identity])
+                self.assertEqual(self.installed_plist()["AgentReleaseVersion"], "v1.2.3")
+                self.assertEqual(self.installed_plist()["AgentReleaseCommit"], self.candidate["commit"])
+                self.assertEqual(sorted(p.name for p in (self.world.home / PATH[2:]).parent.iterdir()),
+                                 ["Notifier.app"])
+                observed = self.effect(self.parameters(**config))
+                self.assertEqual((observed["outcome"], observed["reason"]), ("satisfied", "installed"))
+        with self.subTest(case="binary plist"):
+            self.setUp()
+            self.world.bundle(binary=True)
+            self.assertEqual(self.invoke()["result"], "accepted")
+            self.assertTrue((self.world.home / PATH[2:] / "Contents/Info.plist")
+                            .read_bytes().startswith(b"bplist00"))
+
+    def test_a_failed_swap_after_the_old_bundle_moved_is_unknown(self):
+        self.world.bundle()
+        self.install(stamp=("v1.2.2", "f" * 40))
+        real_rename, installed = os.rename, str(self.world.home / PATH[2:])
+
+        def refuse_install(source, destination):
+            if str(destination) == installed:
+                raise OSError("rename refused")
+            return real_rename(source, destination)
+
+        with mock.patch.object(adapter.os, "rename", refuse_install):
+            result = self.invoke()
+        self.assertEqual((result["result"], result["error_class"]), ("unknown", "transient_transport"))
+        self.assertEqual(release_adapter.invoke_result_problems(result), [])
 
 
 class ObservationTest(Case):
