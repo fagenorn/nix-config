@@ -47,9 +47,9 @@ lineages by when they started and counts each one's whole spend. Adding
 counts only once it has settled: it must have started at least
 `--settle-days` (default 4) before the report's end (D2). Spend and
 deliveries come from the same calls in every mode (D3). Each lineage gets a
-project (D4). Keepalive pings come from one or more `--proxy-log` files: each
-is matched to its conversation's transcript, priced, and added to its
-lineage, or reported as unattributed (D5, D6). One aggregate builds the arm
+project (D4). Keepalive pings come from the cache proxy's log
+(`--proxy-log`). Each ping is matched to its conversation's transcript,
+priced, and added to its lineage, or reported as unattributed (D5, D6). One aggregate builds the arm
 rows, the new per-project rows and the comparison (D7). The JSON document
 moves to schema version 2 (D8), and the text output gains a Projects table, a
 Comparison table and a Pings line.
@@ -77,7 +77,8 @@ selects (D1).
   mtime cutoff does not apply, as in eval mode, because an earlier launch of a
   lineage can be older than the window (D1).
 - **Replay.** `--policy` and `--sweep` work with `--started` alone. They are
-  refused with `--baseline` (D7).
+  refused with `--baseline` (D7). Simulated rows stay calls-only, because
+  the replay prices calls.
 
 ### Lineage start, settle and report end
 
@@ -115,26 +116,34 @@ selects (D1).
 
 ### Project (D4)
 
-A lineage's `project` is `agent_costs.project_name`, applied to the record
-`cwd`s of its owner transcripts: the basename of the busiest repo
-root, where `repo_root` trims a path at its first dot directory, so
-`.worktrees/…` and `.claude/worktrees/…` fold into their repository. When no
-cwd qualifies, it falls back to `project_name`'s directory-name rule, using
-the first launch's session project directory. To supply the cwds,
-`transcript_calls.Transcript` gains each record's `cwd` count. The project
-name is the same one the per-issue report already uses, and the same
-repository gets the same name on both hosts.
+A lineage's `project` is the repository that holds its run's ledger. It is
+the basename of `agent_costs.repo_root` applied to the first absolute
+`--repo-root` among its owner transcripts' registering commands, taken in
+launch order. `repo_root` trims a path at its first dot directory, so
+`.worktrees/…` and `.claude/worktrees/…` fold into their repository.
+
+When no registering command carries an absolute `--repo-root` (an owner can
+pass an unexpanded `"$R"`), the project falls back to
+`agent_costs.project_name` over the owner transcripts' record `cwd`s. That
+fallback ends in `project_name`'s own directory-name rule, using the first
+launch's session project directory. To supply the cwds,
+`transcript_calls.Transcript` gains each record's `cwd` count.
+
+The names match the per-issue report's, and the same repository gets the
+same name on both hosts. An eval trial row takes the project and start of
+its first lineage, and its ping fields are 0.
 
 ### Keepalive pings (D5, D6)
 
-- **Input.** `--proxy-log PATH` is repeatable and has no default. It reads
-  one cache-proxy log per value. On darwin that is
-  `~/Library/Logs/claude-cache-proxy.log`. On anis-desktop it is a file
-  exported with `journalctl --user -u claude-cache-proxy -o cat`. An
-  unreadable path exits 1 with `cannot read proxy log: <error>`.
+- **Input.** `--proxy-log PATH` reads one cache-proxy log and has no
+  default. A report reads one host's transcripts (D10), so it reads one
+  log. On darwin that is `~/Library/Logs/claude-cache-proxy.log`. On
+  anis-desktop it is a file exported with
+  `journalctl --user -u claude-cache-proxy -o cat`. An unreadable path exits
+  1 with `cannot read proxy log: <error>`.
 - **Lines read.** A ping line is a JSON object whose `event` is `ping`
   (the `cache-proxy` contract holds its fields). A line that is not a
-  JSON object, or a ping line without an RFC3339 `ts` and a string
+  JSON object, or a ping line that lacks an RFC3339 `ts` or a string
   `conversation`, is skipped and counted. Every other event is ignored.
 - **Pricing.** A ping is priced by `model_pricing.usage_cost(model, usage)`.
   A ping without a `usage` object costs $0 and is counted as `unpriced`. An
@@ -215,9 +224,9 @@ repository gets the same name on both hosts.
   owner_ping_dollars, total_dollars, ping_dollars`, ordered by arm as in
   `arms`, then by project.
 - **`pings`.** `null` without `--proxy-log`. Otherwise it is
-  `{logs, lines, skipped_lines, unpriced, attributed: {pings, dollars,
+  `{log, lines, skipped_lines, unpriced, attributed: {pings, dollars,
   owner_dollars}, unattributed: {pings, dollars}}`:
-  - `logs`: the paths as given
+  - `log`: the path as given
   - `lines`: the ping lines read
   - `unpriced`: counted pings without usage
 - **`comparison`.** `null` unless `--baseline` is given.
@@ -236,11 +245,11 @@ repository gets the same name on both hosts.
   change in percentage points, both owner $ per lineage values and their
   ratio. A `$ / delivered` line with both values and the ratio follows.
 - **Footer.**
-  - It always adds a `Pings:` line: the ping lines read and the logs; the
-    attributed dollars (owner share included); the unattributed pings and
-    dollars; and the unpriced and skipped counts. Without a log it reads
-    `Pings: not read (pass --proxy-log PATH)`, so ping spend is never
-    silently missing.
+  - Outside eval grouping it adds a `Pings:` line: the ping lines read and
+    the log; the attributed dollars (owner share included); the
+    unattributed pings and dollars; and the unpriced and skipped counts.
+    Without a log it reads `Pings: not read (pass --proxy-log PATH)`, so
+    ping spend is never silently missing.
   - Start mode adds an `Unsettled:` line per window.
 
 ### CLI rules
@@ -260,8 +269,8 @@ Each of these is a usage error (exit 2, nothing on stdout):
 
 ### Modules (D9)
 
-- **`agent_tools.keepalive_pings` (new).** Reads ping lines from log files
-  and prices them. It returns the pings (`ts`, `conversation`, dollars,
+- **`agent_tools.keepalive_pings` (new).** Reads the ping lines of one log
+  file and prices them. It returns the pings (`ts`, `conversation`, dollars,
   priced, approximate) and the skipped-line count.
 - **`agent_tools.agent_owner_rollup` (new).** Holds the one aggregate and
   builds the arm, project and comparison rows from lineage rows. The owner
@@ -285,8 +294,8 @@ existing seam: `report(root, *extra)` runs `python -m agent_tools.agent_costs
 5). Values are hand-computed with `owner_transcripts.cost` (D11).
 
 - **Fixture.** `owner_transcripts.Session` writes a `cwd` on every record
-  (default `/Users/me/repo`, overridable per session). A ping-log fixture
-  holds:
+  (default `/Users/me/repo`, overridable per session), and `progress` takes
+  the `--repo-root` value. A ping-log fixture holds:
   - `ping` lines in the real line's shape, with handles from
     `conversation_handle`
   - a `request` line
@@ -309,8 +318,9 @@ existing seam: `report(root, *extra)` runs `python -m agent_tools.agent_costs
   - One outside the scope is not counted.
   - The skipped and unpriced counts match.
 - **AC (b), per-project and two-window comparison.**
-  - Two projects, one of them through a `.worktrees/…` cwd that folds into
-    its repo, across a baseline and a candidate window.
+  - Two projects across a baseline and a candidate window. One project
+    comes from `--repo-root`. The other comes from a `"$R"` registering
+    command whose `.worktrees/…` cwd folds into its repository.
   - The project rows, the arm rows, both ratios and `delivery_rate_change`
     equal the hand-computed values.
   - A window with no lineage still has an arm row with `n` 0.
@@ -346,8 +356,8 @@ existing seam: `report(root, *extra)` runs `python -m agent_tools.agent_costs
 | D1 | Start mode: `--started SINCE..BEFORE` selects lineages by start; `--baseline SINCE..BEFORE` adds a non-overlapping second window and turns on the comparison; bounds are `YYYY-MM-DD` (00:00Z) or RFC3339 instants, half-open; start mode refuses the event window and eval grouping and reads every transcript (no mtime cutoff) | issue bullets 1 and 7; #432 AC6 writes its windows as `2026-10-12..2026-10-26`, and only a half-open end keeps that baseline before the 2026-10-26T08:39Z switch; the-bar token economy; eval mode's precedent of dropping the mtime cutoff | four paired flags in the `--events-*` style (double the surface; half a window is expressible); an mtime cutoff at the earliest window start (drops an earlier launch, so a lineage that started before the window would look started inside it) |
 | D2 | A lineage starts at the earliest call of its owner transcripts; it counts when that start is in the window and at least `--settle-days` (default 4; 0 disables; start mode only) before the report end, the latest call end among the transcripts read; unsettled lineages are reported per window with their spend | issue bullet 3; #432 AC6 "settled at least 4 days"; a descendant never starts before its owner; the-bar truthful terminal states | wall-clock now as the report end (a copied host root would count as settled lineages its data never saw finish, and the subprocess seam has no clock); an `--as-of` flag (a fourth flag for a value the data gives); the first counted call as the start (moves with the window) |
 | D3 | Spend and deliveries share one call set: a lineage counted in a start window counts every call of its transcripts, and in every mode `delivered` reads only counted calls' finish replies, so an event window now clips deliveries too | issue bullets 1 and 2; #432 D4's finish-reply rule | clipping start-mode spend at the window end (the bias the issue removes); unclipped event-window deliveries (the mismatch the issue names) |
-| D4 | A lineage's project is `agent_costs.project_name` over its owner transcripts' record `cwd`s, so dot-directory worktrees fold into their repo, falling back to the session's project directory; `transcript_calls` gains the cwd count | the per-issue report's naming (one home); #432's reading names projects by basename; a basename matches across hosts | the mangled project directory (worktree dirs differ, and the fallback turns `nix-config` into `config`); the full repo path (does not fold hosts) |
-| D5 | Ping input is `--proxy-log PATH`, repeatable, with no default; a ping belongs to the transcript whose `conversation_handle(session, agent id)` equals its `conversation`; non-JSON and malformed ping lines are skipped and counted; a ping without usage is $0 and `unpriced`; refused with eval grouping | mbp check 2026-11-02: all 1,757 ping handles (17,048 pings) match a subagent transcript this way; the log path's home is the nix module and anis-desktop logs to the journal; launchd appends stderr to the same file | a built-in default path (a second home for it, and wrong on Linux); matching by time and model (ambiguous across concurrent subagents) |
+| D4 | (grill) A lineage's project is the basename of `repo_root` of its owner transcripts' first absolute registering `--repo-root` (its ledger's repository), else `project_name` over their record `cwd`s; `transcript_calls` gains the cwd count | mbp probe 2026-11-02, 396 owners over 14 days: every one passed `--repo-root`, 5 as an unexpanded `$R`/`$W` that the cwd resolves, and 1 registered against another repository than its cwd; #432 D3 prefers lifecycle identity to cwd heuristics; `repo_root`/`project_name` are the per-issue report's naming | cwd only (misnames a cross-project owner); the mangled project directory (worktree dirs differ, and its fallback turns `nix-config` into `config`); the full path (does not fold hosts) |
+| D5 | (grill: one log, not repeatable, since a run reads one host per D10) Ping input is `--proxy-log PATH` with no default; a ping belongs to the transcript whose `conversation_handle(session, agent id)` equals its `conversation`; non-JSON and malformed ping lines are skipped and counted; a ping without usage is $0 and `unpriced`; refused with eval grouping | mbp check 2026-11-02: all 1,757 ping handles (17,048 pings) match a subagent transcript this way; the log path's home is the nix module and anis-desktop logs to the journal; launchd appends stderr to the same file | a built-in default path (a second home for it, and wrong on Linux); matching by time and model (ambiguous across concurrent subagents) |
 | D6 | Owner-conversation pings add to `owner_ping_dollars` and `ping_dollars`, descendants' to `ping_dollars`; `owner_dollars`/`total_dollars` stay calls-only and the aggregates add the pings; a lineage's pings count where its calls count, and a ping of no lineage counts as unattributed when its `ts` is in the report's time scope | issue: "owner transcripts only, including attributed pings"; the replay calibration compares the identity replay with calls-only `total_dollars` (#432 D5) | folding pings into `owner_dollars`/`total_dollars` (breaks the identity check); counting descendants' pings as owner spend (contradicts "owner transcripts only") |
 | D7 | The windows are the arms `baseline` and `candidate` (both always present); one aggregate builds arm and per-project rows; `comparison` holds candidate ÷ baseline ratios and each project's delivery-rate change (a fraction; text prints points); no #432 verdict is computed; `--policy`/`--sweep` are refused with `--baseline` | issue bullets 4, 6 and 7; #432 AC6's "pooled baseline" is the baseline arm; arms already group eval rows | a verdict in the report (the thresholds belong to #432's acceptance record); replaying a two-window corpus (its rows would pool before and after) |
 | D8 | `agent-owner-report` moves to `schema_version` 2, with `start_grouping`, `projects`, `pings` and `comparison` always present, and new lineage-row and arm-row keys | python/README.md pins exact key sets; the always-present `simulated`/`calibration` precedent | v1 with optional keys (silently breaks the pinned sets); a separate comparison document kind (a second contract for the same rows) |
