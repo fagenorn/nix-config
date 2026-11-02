@@ -163,7 +163,7 @@ class ParseTest(unittest.TestCase):
                          ["Spaced  out"])
 
     def test_only_a_line_feed_ends_a_line(self):
-        for separator in (" ", "\x0c", "\r"):
+        for separator in ("\u2028", "\x0c", "\r"):
             with self.subTest(separator=repr(separator)):
                 text = f"## A\nbody{separator}## Ghost\n"
                 self.assertEqual(parse(text), Document("", (Section("A", text),)))
