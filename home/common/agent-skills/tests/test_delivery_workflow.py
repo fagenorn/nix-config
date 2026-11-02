@@ -481,6 +481,42 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     self.assertIn("host admission library", refused.stderr)
                     library_file.write_bytes(library_bytes)
 
+    def test_a_second_init_run_compiles_nothing_into_its_bytecode_cache(self):
+        """Issue 499 AC1. Two source-layout `init-run`s, each in a fresh root,
+        share one fresh bytecode cache. The first leaves the delivery module's
+        own bytecode at its source's mirrored path; the second compiles
+        nothing, so every cache file keeps its bytes and modification time. The
+        main script is never cached and lies outside the check."""
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw).resolve()
+            cache = base / "pycache"; home = base / "home"
+            cache.mkdir(); home.mkdir()
+            env = {key: value for key, value in os.environ.items()
+                   if key != "PYTHONDONTWRITEBYTECODE"}
+            env.update(HOME=str(home), PYTHONPYCACHEPREFIX=str(cache))
+
+            def init_run(name):
+                repo = base / name; repo.mkdir()
+                completed = subprocess.run([sys.executable, str(WORKFLOW), "init-run",
+                    "--repo-root", str(repo), "--creation-key", "bytecode", "--now", NOW],
+                    capture_output=True, text=True, env=env, check=False)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
+            def cached():
+                return {str(path.relative_to(cache)): (path.read_bytes(), path.stat().st_mtime_ns)
+                        for path in cache.rglob("*") if path.is_file()}
+
+            with mock.patch.object(sys, "pycache_prefix", str(cache)):
+                delivery = Path(importlib.util.cache_from_source(
+                    str(SCRIPTS / "workflow_delivery.py")))
+            init_run("first")
+            self.assertTrue(delivery.is_file(), delivery)
+            first = cached()
+            init_run("second")
+            second = cached()
+            self.assertEqual(sorted(second), sorted(first))
+            self.assertEqual([name for name in first if second[name] != first[name]], [])
+
     def test_direct_checkpoint_and_failure_remainder_round_trip(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
         with tempfile.TemporaryDirectory() as raw:
