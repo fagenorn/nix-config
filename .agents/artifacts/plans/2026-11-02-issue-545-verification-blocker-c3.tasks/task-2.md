@@ -17,6 +17,7 @@
   - `delivery_model._wire`: `_verification(item)` and `_requirements(values, *, sorted_values, verification=False)`.
   - Harness (`test_verification_suspension.py`): `LOCK, NEXT = "a" * 40, "b" * 40`; `failure(failure_class="dependency", path="flake.lock", value=LOCK)`; `observed(blocker, value=LOCK)`; `VerificationHarness.recorded(*issues)`. `LifecycleHarness.control_request(..., verification=())`.
   - `test_verification_control.py`: `X`, `Y`, `X_ID`, `Y_ID`, `asked(blocker)`, `ControlHarness` (`parked`, `request`, `sweep`, `refused`, `blockers`, `summaries`, `awaited`, `dispatched`).
+  - `_verification` refuses any `kind` but the literal `verification`.
 
 **Invariants:**
 - Control request and reply are interface 4 only; a version-3 request exits 2 before any lock (D3, D6).
@@ -161,29 +162,48 @@ class ChangeTest(ControlHarness, unittest.TestCase):
                          ("resolved", {"facts": observed(Y, NEXT)["facts"]}))
         self.assertEqual(blockers[Y_ID]["attempts"], [{"issue": 62, "attempt": 1}])
 
+    def retained(self, *issues):
+        """Give each attempt the work a resume must keep: a handoff document, phase 2 after
+        the handoff's relaunch, and a progress marker on a real worktree."""
+        for issue in issues:
+            self.init_worktree(self.worktree(issue), branch=f"issue-{issue}")
+            self.progress(issue=issue, phase=2, now=T(1), turn_count=118,
+                          handoff_path=self.write_handoff(issue))
+        self.assertEqual(self.dispatched(self.sweep(2, issues=issues)),
+                         [("resume", f"{issue}:1:2") for issue in issues])
+        for issue in issues:
+            self.assertEqual(self.mark_progress(action_id=f"{issue}:1:2", now=T(3))["outcome"],
+                             "baseline")
+
     def test_capacity_resumes_in_request_order_and_keeps_the_retained_work(self):
-        self.parked((61, X), (62, X))
+        self.spawn_all(61, 62)
+        self.retained(61, 62)
+        for minute, issue in ((4, 61), (5, 62)):
+            self.park(issue, X, now=T(minute))
         before = {issue: self.attempt(issue) for issue in (61, 62)}
-        reply = self.sweep(7, observed(X, NEXT), max_parallel=1)
-        self.assertEqual(self.dispatched(reply), [("resume", "61:1:2")])
+        self.assertEqual((before[62]["phase"], before[62]["suspend_phase"]), (2, 2))
+        self.assertTrue(before[62]["handoff_path"] and before[62]["progress_marker"])
+        reply = self.sweep(7, observed(X, NEXT), issues=(62, 61), max_parallel=1)
+        self.assertEqual(self.dispatched(reply), [("resume", "62:1:3")])
         (action,) = [item for item in reply["actions"] if item["kind"] == "resume"]
-        self.assertEqual(action["deadline_at"], "2026-08-13T20:37:00Z")
-        self.assertEqual(self.awaited(self.summaries(reply)[62]), [])
+        self.assertEqual((action["handoff_path"], action["deadline_at"]),
+                         (before[62]["handoff_path"], "2026-08-13T20:37:00Z"))
+        self.assertEqual(self.awaited(self.summaries(reply)[61]), [])
         self.assertEqual(self.blockers()[X_ID]["state"], "resolved")
-        resumed = self.attempt(61)
+        resumed = self.attempt(62)
         for field in ("attempt", "owner", "worktree", "handoff_path", "phase",
                       "progress_marker", "suspend_phase", "stalled_resumes"):
             with self.subTest(field=field):
-                self.assertEqual(resumed[field], before[61][field])
+                self.assertEqual(resumed[field], before[62][field])
         self.assertEqual(
             (resumed["state"], resumed["blocked_on"], resumed["verification_blocker"],
              resumed["launch_kind"], len(resumed["launches"]), resumed["deadline_at"]),
-            ("active", None, None, "resume", 2, "2026-08-13T20:37:00Z"))
-        self.assertEqual(self.attempt(62), before[62])
-        self.assertEqual(self.check_launch(action_id="61:1:1")["reason"], "superseded_launch")
-        self.assertEqual(self.check_launch(action_id="61:1:2")["reason"], "current")
-        later = self.sweep(8, max_parallel=2)
-        self.assertEqual(self.dispatched(later), [("resume", "62:1:2")])
+            ("active", None, None, "resume", 3, "2026-08-13T20:37:00Z"))
+        self.assertEqual(self.attempt(61), before[61])
+        self.assertEqual(self.check_launch(action_id="62:1:2")["reason"], "superseded_launch")
+        self.assertEqual(self.check_launch(action_id="62:1:3")["reason"], "current")
+        later = self.sweep(8, issues=(62, 61), max_parallel=2)
+        self.assertEqual(self.dispatched(later), [("resume", "61:1:3")])
         self.assertEqual(self.blockers()[X_ID]["attempts"],
                          [{"issue": 61, "attempt": 1}, {"issue": 62, "attempt": 1}])
 
@@ -340,18 +360,11 @@ class WireTest(ControlHarness, unittest.TestCase):
         def other_cause(value, summary):
             summary["blocked_on"] = "transport"
 
-        def dispatched(value, summary):
-            value["actions"].insert(0, {"id": "61:1:2", "kind": "resume", "issue": 61,
-                                        "attempt": 1, "owner": summary["owner"],
-                                        "worktree": summary["worktree"],
-                                        "handoff_path": None,
-                                        "deadline_at": "2026-08-13T20:37:00Z"})
-
         def interface_three(value, summary):
             value["interface_version"] = 3
 
         for change in (added_member, removed_member, twice, not_parked, other_cause,
-                       dispatched, interface_three):
+                       interface_three):
             with self.subTest(case=change.__name__), \
                     self.assertRaises(model.DeliveryModelError):
                 self.validate(mutated(change))
@@ -359,6 +372,28 @@ class WireTest(ControlHarness, unittest.TestCase):
         owner = {**json.loads(json.dumps(owner)), "requirements": [asked(X)]}
         with self.assertRaises(model.DeliveryModelError):
             self.validate(owner)
+
+    def test_no_action_may_name_an_issue_its_summary_parks(self):
+        """The reply of a real resume validates while its summary only looks parked, so the
+        refusal of the same reply with the requirement is the parked-issue guard's."""
+        self.parked((61, X), (62, Y))
+        reply = self.sweep(7, observed(Y, NEXT))
+        self.assertEqual(self.dispatched(reply), [("resume", "62:1:2")])
+        model = self.delivery_model
+
+        def parked(requirement):
+            value = json.loads(json.dumps(reply))
+            summary = self.summaries(value)[62]
+            summary["state"], summary["blocked_on"] = "suspended", "verification"
+            if requirement:
+                summary["requirements"] = sorted(summary["requirements"] + [asked(Y)],
+                                                 key=model.canonical_bytes)
+            return value
+
+        for value in (reply, parked(False)):
+            self.assertEqual(self.validate(value), value)
+        with self.assertRaises(model.DeliveryModelError):
+            self.validate(parked(True))
 
 
 if __name__ == "__main__":
@@ -368,7 +403,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_verification_control.py 2>&1 | tail -3'`
-Expected: `Ran 8 tests` and `FAILED (failures=8)`, each `command failed with 2: workflow-state: invalid control request fields` (the interface-3 helper refuses the new member at the first spawn).
+Expected: `Ran 9 tests` and `FAILED (failures=9)`, each `command failed with 2: workflow-state: invalid control request fields` (the interface-3 helper refuses the new member at the first spawn).
 
 - [ ] **Step 3: Implement control interface 4**
 
@@ -404,7 +439,7 @@ Expected: `Ran 8 tests` and `FAILED (failures=8)`, each `command failed with 2: 
 `workflow_delivery.py`, `DeliveryRuntime.control_summary`: sort when `unresumable` is set **or** any requirement's `kind` is `verification`; the comment says a worktree fact or a verification requirement the projection appends joins the requirements in the validator's canonical-bytes order (#194 D13, issue 545 D6).
 
 `delivery_model/_wire.py` (D9; it still imports no `agent_tools`):
-- New `_verification(item)` before `_requirements`, docstring `The closed `verification` requirement (issue 545 D9): this module's own copy of the shape `agent_tools.verification_blocker` renders, without its path rules.`: `_object(item, _members("kind blocker_id sources"))`, `_digest(item["blocker_id"], ...)`, `sources` a list of 1 to 4 items, each `_object(source, _members("name paths"))` with a non-empty string `name` and `paths` a list of 1 to 8 non-empty strings.
+- New `_verification(item)` before `_requirements`, docstring `The closed `verification` requirement (issue 545 D9): this module's own copy of the shape `agent_tools.verification_blocker` renders, without its path rules.`: `_object(item, _members("kind blocker_id sources"))`, `_digest(item["blocker_id"], ...)`, `item["kind"] != "verification"` is `_reject()` (the bootstrap calls it directly, so it checks the literal itself), `sources` a list of 1 to 4 items, each `_object(source, _members("name paths"))` with a non-empty string `name` and `paths` a list of 1 to 8 non-empty strings.
 - `_requirements(values, *, sorted_values, verification=False)` (docstring `A requirement list; only a caller passing `verification` admits that kind (issue 545 D9).`): inside the loop, `if verification and item["kind"] == "verification": _verification(item); continue` before the existing kind branches.
 - `_control_response`: interface `4`; a `parked = set()` beside `unresumable`; summaries call `_requirements(..., sorted_values=True, verification=True)`; when a summary holds verification requirements, more than one, a `state` other than `suspended` or a `blocked_on` other than `verification` is `_reject()`, else the issue joins `parked`; the null-digest remainder drops kinds `{"worktree_fact", "verification"}`; no action may name an issue in `missing_contracts | unresumable | parked`.
 
@@ -446,5 +481,5 @@ launch-commit … -- -m "feat(workflow-state): control interface 4 resolves bloc
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":2,"records":[{"bounds":[{"added_lines":80,"boundary":"all","deleted_lines":25,"record_bytes":24576,"support":{"covers":["r2a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2a","last_task":4,"owner":2,"path":"home/common/agent-skills/scripts/workflow-state.py"},{"bounds":[{"added_lines":14,"boundary":"all","deleted_lines":3,"record_bytes":5632,"support":{"covers":["r2b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2b","last_task":3,"owner":2,"path":"home/common/agent-skills/scripts/workflow_delivery_wire.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":5,"record_bytes":2560,"support":{"covers":["r2c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2c","last_task":2,"owner":2,"path":"home/common/agent-skills/scripts/workflow_delivery.py"},{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":9,"record_bytes":11264,"support":{"covers":["r2d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2d","last_task":4,"owner":2,"path":"home/common/agent-skills/scripts/delivery_model/_wire.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":6,"record_bytes":5120,"support":{"covers":["r2e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2e","last_task":2,"owner":2,"path":"python/agent_tools/orchestrate_control.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":7,"record_bytes":6656,"support":{"covers":["r2f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2f","last_task":2,"owner":2,"path":"tests/test_orchestrate_control.py"},{"bounds":[{"added_lines":5,"boundary":"all","deleted_lines":4,"record_bytes":3584,"support":{"covers":["r2g"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2g","last_task":2,"owner":2,"path":"tests/orchestrate_world.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":3072,"support":{"covers":["r2h"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2h","last_task":2,"owner":2,"path":"home/common/agent-skills/skills/from-issue/acquire-durable.md"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":2560,"support":{"covers":["r2i"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2i","last_task":2,"owner":2,"path":"home/common/claude-code/skills/orchestrate-issues/SKILL.md"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":4,"record_bytes":32768,"support":{"covers":["r1e","r2j"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2j","last_task":2,"owner":2,"path":"python/README.md"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":2,"record_bytes":16896,"support":{"covers":["r2k"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2k","last_task":4,"owner":2,"path":"home/common/agent-skills/README.md"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":0,"record_bytes":2048,"support":{"covers":["r2l"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2l","last_task":4,"owner":2,"path":"justfile"},{"bounds":[{"added_lines":360,"boundary":"all","deleted_lines":0,"record_bytes":19456,"support":{"covers":["r2m"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r2m","last_task":3,"owner":2,"path":"home/common/agent-skills/tests/test_verification_control.py"},{"bounds":[{"added_lines":32,"boundary":"all","deleted_lines":12,"record_bytes":7680,"support":{"covers":["r2n"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2n","last_task":4,"owner":2,"path":"home/common/agent-skills/tests/test_verification_suspension.py"},{"bounds":[{"added_lines":7,"boundary":"all","deleted_lines":6,"record_bytes":6656,"support":{"covers":["r2o"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2o","last_task":4,"owner":2,"path":"home/common/agent-skills/tests/test_workflow_state.py"},{"bounds":[{"added_lines":9,"boundary":"all","deleted_lines":9,"record_bytes":10240,"support":{"covers":["r2p"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2p","last_task":4,"owner":2,"path":"home/common/agent-skills/tests/test_delivery_workflow.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2560,"support":{"covers":["r2q"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2q","last_task":3,"owner":2,"path":"home/common/agent-skills/tests/_delivery_model_fixtures.py"},{"bounds":[{"added_lines":28,"boundary":"all","deleted_lines":3,"record_bytes":5120,"support":{"covers":["r2r"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2r","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_control_cutover.py"},{"bounds":[{"added_lines":10,"boundary":"all","deleted_lines":4,"record_bytes":3072,"support":{"covers":["r2s"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2s","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_control_decisions.py"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":2,"records":[{"bounds":[{"added_lines":80,"boundary":"all","deleted_lines":25,"record_bytes":24576,"support":{"covers":["r2a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2a","last_task":4,"owner":2,"path":"home/common/agent-skills/scripts/workflow-state.py"},{"bounds":[{"added_lines":14,"boundary":"all","deleted_lines":3,"record_bytes":5632,"support":{"covers":["r2b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2b","last_task":3,"owner":2,"path":"home/common/agent-skills/scripts/workflow_delivery_wire.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":5,"record_bytes":2560,"support":{"covers":["r2c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2c","last_task":2,"owner":2,"path":"home/common/agent-skills/scripts/workflow_delivery.py"},{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":9,"record_bytes":11264,"support":{"covers":["r2d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2d","last_task":4,"owner":2,"path":"home/common/agent-skills/scripts/delivery_model/_wire.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":6,"record_bytes":5120,"support":{"covers":["r2e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2e","last_task":2,"owner":2,"path":"python/agent_tools/orchestrate_control.py"},{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":7,"record_bytes":6656,"support":{"covers":["r2f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2f","last_task":2,"owner":2,"path":"tests/test_orchestrate_control.py"},{"bounds":[{"added_lines":5,"boundary":"all","deleted_lines":4,"record_bytes":3584,"support":{"covers":["r2g"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2g","last_task":2,"owner":2,"path":"tests/orchestrate_world.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":3072,"support":{"covers":["r2h"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2h","last_task":2,"owner":2,"path":"home/common/agent-skills/skills/from-issue/acquire-durable.md"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":2560,"support":{"covers":["r2i"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2i","last_task":2,"owner":2,"path":"home/common/claude-code/skills/orchestrate-issues/SKILL.md"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":4,"record_bytes":32768,"support":{"covers":["r1e","r2j"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2j","last_task":2,"owner":2,"path":"python/README.md"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":2,"record_bytes":16896,"support":{"covers":["r2k"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2k","last_task":4,"owner":2,"path":"home/common/agent-skills/README.md"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":0,"record_bytes":2048,"support":{"covers":["r2l"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2l","last_task":4,"owner":2,"path":"justfile"},{"bounds":[{"added_lines":400,"boundary":"all","deleted_lines":0,"record_bytes":22528,"support":{"covers":["r2m"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r2m","last_task":3,"owner":2,"path":"home/common/agent-skills/tests/test_verification_control.py"},{"bounds":[{"added_lines":32,"boundary":"all","deleted_lines":12,"record_bytes":7680,"support":{"covers":["r2n"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2n","last_task":4,"owner":2,"path":"home/common/agent-skills/tests/test_verification_suspension.py"},{"bounds":[{"added_lines":7,"boundary":"all","deleted_lines":6,"record_bytes":6656,"support":{"covers":["r2o"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2o","last_task":4,"owner":2,"path":"home/common/agent-skills/tests/test_workflow_state.py"},{"bounds":[{"added_lines":9,"boundary":"all","deleted_lines":9,"record_bytes":10240,"support":{"covers":["r2p"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2p","last_task":4,"owner":2,"path":"home/common/agent-skills/tests/test_delivery_workflow.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2560,"support":{"covers":["r2q"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2q","last_task":3,"owner":2,"path":"home/common/agent-skills/tests/_delivery_model_fixtures.py"},{"bounds":[{"added_lines":28,"boundary":"all","deleted_lines":3,"record_bytes":5120,"support":{"covers":["r2r"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2r","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_control_cutover.py"},{"bounds":[{"added_lines":10,"boundary":"all","deleted_lines":4,"record_bytes":3072,"support":{"covers":["r2s"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2s","last_task":2,"owner":2,"path":"home/common/agent-skills/tests/test_control_decisions.py"}]}}
 ```

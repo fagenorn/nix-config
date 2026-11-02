@@ -14,7 +14,7 @@
 **Invariants:**
 - `verification` lists, once each and sorted by `blocker_id`, `requirement(record)` of every `open` record that the latest attempt of an issue whose delivery is not complete is parked on; a `resolved` record is never listed (D6).
 - The bootstrap stays a locked read; the projection reads the map it is given and writes nothing (D15).
-- The validator admits interface 3 only, with `verification` a sorted, unique list of closed requirements (D9).
+- The validator admits interface 3 only, with `verification` a sorted, unique list of closed requirements whose `kind` is the literal `verification`; a wrong string or a non-string `kind` is refused by Task 2's `_verification` (D9).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -68,9 +68,16 @@ class BootstrapTest(ControlHarness, unittest.TestCase):
         def opened(value):
             value["verification"][0]["note"] = "x"
 
+        def other_kind(value):
+            value["verification"][0]["kind"] = "worktree_fact"
+
+        def null_kind(value):
+            value["verification"][0]["kind"] = None
+
         self.assertEqual(model.validate_delivery_object(
             boot, expected_kind="workflow-response", notes_max_characters=4096), boot)
-        for change in (interface_two, without_member, unsorted, repeated, opened):
+        for change in (interface_two, without_member, unsorted, repeated, opened, other_kind,
+                       null_kind):
             with self.subTest(case=change.__name__), \
                     self.assertRaises(model.DeliveryModelError):
                 model.validate_delivery_object(
@@ -81,7 +88,7 @@ class BootstrapTest(ControlHarness, unittest.TestCase):
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_verification_control.py -k Bootstrap 2>&1 | tail -3'`
-Expected: `Ran 2 tests` and `FAILED (failures=2, errors=4)`: `AssertionError: 2 != 3` (the interface-2 bootstrap), `DeliveryModelError not raised` for `interface_two`, and `KeyError: 'verification'` for the other four mutations.
+Expected: `Ran 2 tests` and `FAILED (failures=2, errors=6)`: `AssertionError: 2 != 3` (the interface-2 bootstrap), `DeliveryModelError not raised` for `interface_two`, and `KeyError: 'verification'` for the other six mutations.
 
 - [ ] **Step 3: Implement bootstrap interface 3**
 
@@ -118,5 +125,5 @@ launch-commit … -- -m "feat(workflow-state): bootstrap 3 lists awaited blocker
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":3,"records":[{"bounds":[{"added_lines":28,"boundary":"all","deleted_lines":6,"record_bytes":10240,"support":{"covers":["r2b","r3a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3a","last_task":3,"owner":3,"path":"home/common/agent-skills/scripts/workflow_delivery_wire.py"},{"bounds":[{"added_lines":38,"boundary":"all","deleted_lines":11,"record_bytes":14848,"support":{"covers":["r2d","r3b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3b","last_task":4,"owner":3,"path":"home/common/agent-skills/scripts/delivery_model/_wire.py"},{"bounds":[{"added_lines":420,"boundary":"all","deleted_lines":0,"record_bytes":22528,"support":{"covers":["r2m","r3c"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r3c","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/test_verification_control.py"},{"bounds":[{"added_lines":9,"boundary":"all","deleted_lines":8,"record_bytes":7680,"support":{"covers":["r2o","r3d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3d","last_task":4,"owner":3,"path":"home/common/agent-skills/tests/test_workflow_state.py"},{"bounds":[{"added_lines":12,"boundary":"all","deleted_lines":12,"record_bytes":12800,"support":{"covers":["r2p","r3e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3e","last_task":4,"owner":3,"path":"home/common/agent-skills/tests/test_delivery_workflow.py"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":4,"record_bytes":3072,"support":{"covers":["r2q","r3f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3f","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/_delivery_model_fixtures.py"},{"bounds":[{"added_lines":16,"boundary":"all","deleted_lines":15,"record_bytes":11776,"support":{"covers":["r3g"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3g","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/test_artifact_budget.py"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":2,"record_bytes":17408,"support":{"covers":["r2k","r3h"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3h","last_task":4,"owner":3,"path":"home/common/agent-skills/README.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":3,"records":[{"bounds":[{"added_lines":28,"boundary":"all","deleted_lines":6,"record_bytes":10240,"support":{"covers":["r2b","r3a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3a","last_task":3,"owner":3,"path":"home/common/agent-skills/scripts/workflow_delivery_wire.py"},{"bounds":[{"added_lines":38,"boundary":"all","deleted_lines":11,"record_bytes":14848,"support":{"covers":["r2d","r3b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3b","last_task":4,"owner":3,"path":"home/common/agent-skills/scripts/delivery_model/_wire.py"},{"bounds":[{"added_lines":470,"boundary":"all","deleted_lines":0,"record_bytes":25600,"support":{"covers":["r2m","r3c"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r3c","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/test_verification_control.py"},{"bounds":[{"added_lines":9,"boundary":"all","deleted_lines":8,"record_bytes":7680,"support":{"covers":["r2o","r3d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3d","last_task":4,"owner":3,"path":"home/common/agent-skills/tests/test_workflow_state.py"},{"bounds":[{"added_lines":12,"boundary":"all","deleted_lines":12,"record_bytes":12800,"support":{"covers":["r2p","r3e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3e","last_task":4,"owner":3,"path":"home/common/agent-skills/tests/test_delivery_workflow.py"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":4,"record_bytes":3072,"support":{"covers":["r2q","r3f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3f","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/_delivery_model_fixtures.py"},{"bounds":[{"added_lines":16,"boundary":"all","deleted_lines":15,"record_bytes":11776,"support":{"covers":["r3g"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3g","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/test_artifact_budget.py"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":2,"record_bytes":17408,"support":{"covers":["r2k","r3h"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3h","last_task":4,"owner":3,"path":"home/common/agent-skills/README.md"}]}}
 ```
