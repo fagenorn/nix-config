@@ -2786,6 +2786,50 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertIn("repository acme/unrelated is outside standing authorization",
                       refused.stderr)
 
+    def test_an_argus_shaped_project_merges_under_the_plan_gated_floor(self):
+        """Issue 552 AC1, D8: a registered project whose forge cannot protect its default
+        branch, and whose own contract declares its CI check, is judged by the floor through
+        its compiled and confirmed row, and no central policy table names it."""
+        slug = "fagenorn/argus"
+        check = "memory foundation (unit + forced checks)"
+        world = GuardPolicyWorld(self)
+        world.project("argus", slug, publication_free=True, mutate=lambda contract: (
+            contract["bindings"]["vcs"]["merge"].update(required_checks=[check])))
+        code, report, stderr = world.compile(base=BASE_POLICY_PATH)
+        self.assertEqual((0, [slug], []), (code, report["derived"], report["refused"]), stderr)
+        row = world.policy()["derived_repositories"][slug]
+        self.assertEqual(("main", "main", [check]), (
+            row["default_branch"], row["integration_branch"], row["required_checks"]))
+        args = ("--gh-bin", str(self.fake_gh), "--policy", str(world.output),
+                "--derive-bin", str(world.row_check()), "--derive-timeout-seconds", "25")
+        repo = self.make_repo(f"git@github.com:{slug}.git")
+        merge = (f"unset GITHUB_TOKEN && gh pr merge 9 --repo {slug} --merge --subject "
+                 f'"feat: memory foundation (#9)" --match-head-commit {self.HEAD_SHA} '
+                 "--delete-branch")
+
+        def merged(rollup, mode="http_error"):
+            facts = {"state": "OPEN", "baseRefName": "main", "headRefName": "issue-9-topic",
+                     "headRefOid": self.HEAD_SHA, "mergeStateStatus": "CLEAN",
+                     "url": f"https://github.com/{slug}/pull/9", "statusCheckRollup": rollup}
+            return self.run_guard(merge, cwd=repo, guard_args=args, timeout=60, env={
+                "FAKE_PR_JSON": json.dumps(facts), "FAKE_PROTECTION_MODE": mode})
+
+        allowed = merged([self.check_run(check)])
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+        floor = f"{self.UNPROTECTED}, and the declared required check {check} "
+        self.assertEqual(floor + "is missing from the PR's check rollup",
+                         self.refusal_line(merged([self.check_run("CI / lint")])))
+        self.assertEqual(floor + "is not green (CheckRun COMPLETED/FAILURE)",
+                         self.refusal_line(merged([self.check_run(check,
+                                                                  conclusion="FAILURE")])))
+        self.assertTrue(self.refusal_line(merged([self.check_run(check)], mode="nonzero"))
+                        .startswith(self.LOOKUP_FAILED + "fake protection failure"))
+        root = Path(__file__).resolve().parents[1]
+        central = (BASE_POLICY_PATH, root / "home/common/claude-code/default.nix",
+                   root / "home/common/claude-code/lifecycle_guard.py")
+        self.assertEqual([], [str(path) for path in central
+                              if "argus" in path.read_text(encoding="utf-8").lower()])
+
     def test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries(self):
         """The compiler and the loader agree on names: one the loader refuses costs its
         project a row, and every row the compiler does write loads."""
