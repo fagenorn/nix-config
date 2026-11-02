@@ -66,3 +66,9 @@ Run: `rg -c 'issue 503 D3' python/README.md` — expected `1`.
 git add python/agent_tools/agent_owner_report.py tests/test_agent_owner_report.py python/README.md
 launch-commit --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- -m "fix(agent-costs): read owner deliveries from counted calls only (issue 503)" -m "<trailer lines>"
 ```
+
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":2,"records":[{"bounds":[{"added_lines":90,"boundary":"all","deleted_lines":16,"record_bytes":18432,"support":{"covers":["r1b","r2a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2a","last_task":7,"owner":2,"path":"python/agent_tools/agent_owner_report.py"},{"bounds":[{"added_lines":170,"boundary":"all","deleted_lines":6,"record_bytes":12288,"support":{"covers":["r1d","r2b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2b","last_task":7,"owner":2,"path":"tests/test_agent_owner_report.py"},{"bounds":[{"added_lines":9,"boundary":"all","deleted_lines":4,"record_bytes":36864,"support":{"covers":["r1e","r2c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2c","last_task":7,"owner":2,"path":"python/README.md"}]}}
+```

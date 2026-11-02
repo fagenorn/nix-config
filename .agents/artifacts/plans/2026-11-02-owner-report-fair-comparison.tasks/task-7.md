@@ -137,3 +137,9 @@ if rg -q 'agent-owner-report. document \(.schema_version. 1\)' python/README.md;
 git add python/agent_tools/agent_owner_report.py python/agent_tools/agent_costs.py tests/test_agent_owner_report.py python/README.md
 launch-commit --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- -m "feat(agent-costs): owner report schema 2 with project, comparison and ping text (issue 503)" -m "<trailer lines>"
 ```
+
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":7,"records":[{"bounds":[{"added_lines":360,"boundary":"all","deleted_lines":60,"record_bytes":53248,"support":{"covers":["r1b","r2a","r3b","r4a","r5b","r6b","r7a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7a","last_task":7,"owner":7,"path":"python/agent_tools/agent_owner_report.py"},{"bounds":[{"added_lines":80,"boundary":"all","deleted_lines":20,"record_bytes":16384,"support":{"covers":["r4b","r5c","r6c","r7b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7b","last_task":7,"owner":7,"path":"python/agent_tools/agent_costs.py"},{"bounds":[{"added_lines":720,"boundary":"all","deleted_lines":20,"record_bytes":57344,"support":{"covers":["r1d","r2b","r3c","r4c","r5d","r6e","r7c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7c","last_task":7,"owner":7,"path":"tests/test_agent_owner_report.py"},{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":12,"record_bytes":57344,"support":{"covers":["r1e","r2c","r3d","r4d","r5e","r6f","r7d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7d","last_task":7,"owner":7,"path":"python/README.md"}]}}
+```

@@ -188,3 +188,9 @@ Run: `rg -c 'delivery_rate_change' python/README.md` — expected at least `1`.
 git add python/agent_tools/agent_owner_rollup.py python/agent_tools/agent_owner_report.py python/agent_tools/agent_costs.py tests/test_agent_owner_report.py python/README.md
 launch-commit --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- -m "feat(agent-costs): compare a baseline and a candidate start window (issue 503)" -m "<trailer lines>"
 ```
+
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":5,"records":[{"bounds":[{"added_lines":170,"boundary":"all","deleted_lines":0,"record_bytes":10240,"support":{"covers":["r3a","r5a"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r5a","last_task":5,"owner":5,"path":"python/agent_tools/agent_owner_rollup.py"},{"bounds":[{"added_lines":270,"boundary":"all","deleted_lines":46,"record_bytes":43008,"support":{"covers":["r1b","r2a","r3b","r4a","r5b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5b","last_task":7,"owner":5,"path":"python/agent_tools/agent_owner_report.py"},{"bounds":[{"added_lines":55,"boundary":"all","deleted_lines":12,"record_bytes":10240,"support":{"covers":["r4b","r5c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5c","last_task":7,"owner":5,"path":"python/agent_tools/agent_costs.py"},{"bounds":[{"added_lines":480,"boundary":"all","deleted_lines":14,"record_bytes":34816,"support":{"covers":["r1d","r2b","r3c","r4c","r5d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5d","last_task":7,"owner":5,"path":"tests/test_agent_owner_report.py"},{"bounds":[{"added_lines":22,"boundary":"all","deleted_lines":9,"record_bytes":49152,"support":{"covers":["r1e","r2c","r3d","r4d","r5e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5e","last_task":7,"owner":5,"path":"python/README.md"}]}}
+```

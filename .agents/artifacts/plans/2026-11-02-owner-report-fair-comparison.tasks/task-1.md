@@ -126,3 +126,9 @@ Run: `rg -c 'Project and start \(issue 503\)' python/README.md` — expected `1`
 git add python/agent_tools/transcript_calls.py python/agent_tools/agent_owner_report.py tests/owner_transcripts.py tests/test_agent_owner_report.py python/README.md
 launch-commit --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- -m "feat(agent-costs): give owner lineages a project and a start (issue 503)" -m "<trailer lines>"
 ```
+
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":1,"records":[{"bounds":[{"added_lines":10,"boundary":"all","deleted_lines":4,"record_bytes":4096,"support":{"covers":["r1a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1a","last_task":1,"owner":1,"path":"python/agent_tools/transcript_calls.py"},{"bounds":[{"added_lines":70,"boundary":"all","deleted_lines":12,"record_bytes":14336,"support":{"covers":["r1b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1b","last_task":7,"owner":1,"path":"python/agent_tools/agent_owner_report.py"},{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":8,"record_bytes":6144,"support":{"covers":["r1c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1c","last_task":6,"owner":1,"path":"tests/owner_transcripts.py"},{"bounds":[{"added_lines":110,"boundary":"all","deleted_lines":4,"record_bytes":8192,"support":{"covers":["r1d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1d","last_task":7,"owner":1,"path":"tests/test_agent_owner_report.py"},{"bounds":[{"added_lines":6,"boundary":"all","deleted_lines":3,"record_bytes":32768,"support":{"covers":["r1e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1e","last_task":7,"owner":1,"path":"python/README.md"}]}}
+```
