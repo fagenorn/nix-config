@@ -178,6 +178,7 @@ agent-workflow-tests *args:
     tests/test_actions_health_adapter.py \
     tests/test_guard_policy.py \
     tests/test_release_adapter_core.py \
+    tests/test_codesigned_artifact_adapter.py \
     tests/test_agent_costs.py \
     tests/test_agent_owner_report.py \
     tests/test_agent_owner_replay.py \
