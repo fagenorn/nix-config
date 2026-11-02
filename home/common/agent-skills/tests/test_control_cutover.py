@@ -269,7 +269,7 @@ class CapacityWakeTest(Cutover, unittest.TestCase):
         self.generation = "head"
         self.assertEqual((answers(), self.tree()), (expected, before))  # a schema-9 ledger
         self.cli("migrate", "--repo-root", self.root, "--apply")
-        self.assertEqual(self.ledger_document()["schema_version"], 10)
+        self.assertEqual(self.ledger_document()["schema_version"], 11)
         bound = self.tree()
         self.assertEqual((answers(), self.tree()), (expected, bound))
 
@@ -297,7 +297,7 @@ class SchemaTenTest(Cutover, unittest.TestCase):
                          (9, "migrate", None))
         self.assertEqual(self.tree(), before)
         (row,) = self.migrate("--apply")["ledgers"]
-        self.assertEqual((row["schema_version"], row["verdict"]), (10, "migrated"))
+        self.assertEqual((row["schema_version"], row["verdict"]), (11, "migrated"))
         self.assertEqual(self.claim_ids(self.custody(DELIVERED)),
                          [f"admission-claim:{DELIVERED}:1:1:1"])
         self.assertEqual(self.custody(LIVE).state, "attention_required")

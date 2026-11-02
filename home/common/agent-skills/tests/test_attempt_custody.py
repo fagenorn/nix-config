@@ -129,7 +129,7 @@ class CustodyLeaseTest(LifecycleCustody, unittest.TestCase):
         lease = self.lease(self.worktree)
         self.assertEqual((lease["epoch"], lease["holder"]["term"],
                           lease["holder"]["expires_at"]), (1, 1, ac.at_ms(T(30))))
-        self.assertEqual(self.read_state()["schema_version"], 10)
+        self.assertEqual(self.read_state()["schema_version"], 11)
 
     def test_ac1_declare_lane_renews_in_place_and_reacquires_after_the_window(self):
         self.spawn_14()
@@ -272,7 +272,7 @@ class CustodyMigrationTest(LifecycleCustody, unittest.TestCase):
                          ("migrate", None, 8))
         self.assertEqual(self.tree(), before)
         self.register_worker(action_id="14:1:1", now=T(1))
-        self.assertEqual(self.read_state()["schema_version"], 10)
+        self.assertEqual(self.read_state()["schema_version"], 11)
         bound = self.custody(14)
         self.assertEqual((bound.subject["bound_launch"], bound.custody.executor_id),
                          (1, "14:1:1"))
@@ -311,7 +311,7 @@ class CustodyMigrationTest(LifecycleCustody, unittest.TestCase):
         self.install_legacy(self.read_state(), "orchestrate-14", version=8)
         self.contractless()
         self.assertEqual(self.finish_raw(1, self.stopped(), now=T(5))["state"], "stopped")
-        self.assertEqual(self.read_state()["schema_version"], 10)
+        self.assertEqual(self.read_state()["schema_version"], 11)
         bound = self.custody(14)
         self.assertEqual((bound.state, bound.custody, bound.subject["bound_launch"]),
                          ("abandoned", None, 1))
@@ -438,7 +438,7 @@ class LaunchFenceTest(LifecycleCustody, unittest.TestCase):
         self.install_legacy(self.read_state(), "orchestrate-14", version=8)
         replayed = self.finish(1, self.stopped(), now=T(6), action_id=False)
         self.assertEqual(replayed["state"], "stopped")
-        self.assertEqual(self.read_state()["schema_version"], 10)
+        self.assertEqual(self.read_state()["schema_version"], 11)
         self.assertIsNone(self.custody(14))
         conflict = self.finish(1, self.stopped("another"), now=T(7), action_id=False, ok=False)
         self.assertEqual(conflict.returncode, 2)
@@ -808,7 +808,7 @@ class CompatibilityTest(LifecycleCustody, unittest.TestCase):
             self.assertEqual((control.returncode, json.loads(control.stdout)["reason"]),
                              (0, "current"), control.stderr)
             self.register_worker(action_id="14:1:1", now=T(1))
-            self.assertEqual(self.read_state()["schema_version"], 10)
+            self.assertEqual(self.read_state()["schema_version"], 11)
             before = self.tree()
             for command, rest in (("check-launch", ()),
                                   ("register-worker", ("--now", T(2)))):
@@ -830,7 +830,7 @@ class CompatibilityTest(LifecycleCustody, unittest.TestCase):
 
         before = projections()
         self.register_worker(action_id="14:1:1", now=T(1))
-        self.assertEqual(self.read_state()["schema_version"], 10)
+        self.assertEqual(self.read_state()["schema_version"], 11)
         self.assertEqual(projections(), before)
 
 

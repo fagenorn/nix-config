@@ -164,15 +164,18 @@ class DeliveryAdmissionTest(unittest.TestCase):
         value = self.state_with_attempt()
         value["schema_version"] = version
         value.pop("admission"); value.pop("workers"); value.pop("transaction_id")
+        value.pop("verification_blockers")
         for issue in value["issues"].values():
             issue.pop("delivery"); issue.pop("delivery_remainders")
             for attempt in issue["attempts"]:
-                for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history"):
+                for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history",
+                              "verification_blocker"):
                     attempt.pop(field)
         if version == 1:
             value.pop("prior_run")
             for attempt in value["issues"]["151"]["attempts"]:
-                for field in self.workflow.SUSPENSION_DEFAULTS: attempt.pop(field)
+                for field in ("blocked_on", "suspend_phase", "stalled_resumes"):
+                    attempt.pop(field)
         migrated = self.workflow._delivery().migrate(value, migration_contracts={})
         self.workflow.validate_state(
             migrated, run_id="admission", identity=ORCHESTRATED, schema_version=7)
@@ -311,8 +314,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     str(root), "orchestrate-151", lambda state: (state, False),
                     migration_contracts={151: contract})
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 10)
-            self.assertEqual((result["schema_version"], result["transaction_id"]), (10,
+            self.assertEqual(write.call_args.args[2]["schema_version"], 11)
+            self.assertEqual((result["schema_version"], result["transaction_id"]), (11,
                 TransactionStore(root / ".superpowers/attempt-transactions").lookup(
                     attempt_identity.legacy_key("orchestrate-151"))))
 
@@ -2331,11 +2334,13 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
             run_id="orchestrate-151", transaction_id=TRANSACTION, now=NOW, issues={})
         legacy["schema_version"] = 2
         legacy.pop("admission"); legacy.pop("workers"); legacy.pop("transaction_id")
+        legacy.pop("verification_blockers")
         legacy["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
             workflow.new_control_attempt(issue=151, attempt_number=1,
                 worktree=str(self.root / "wt-151"), now=NOW,
                 deadline_at="2026-09-21T01:00:00Z")]}
-        for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history"):
+        for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history",
+                      "verification_blocker"):
             legacy["issues"]["151"]["attempts"][0].pop(field)
         legacy_state = self.root / ".superpowers/workflows/orchestrate-151/state.json"
         legacy_state.parent.mkdir(parents=True)
@@ -3010,6 +3015,9 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         state = self.workflow.new_run_state(
             run_id=run_id, transaction_id=TRANSACTION, now=NOW, issues={})
         state.pop("transaction_id")
+        state.pop("verification_blockers")
+        attempts = [{name: value for name, value in attempt.items()
+                     if name != "verification_blocker"} for attempt in attempts]
         if schema < 7:
             attempts = [{name: value for name, value in attempt.items()
                          if name not in ("lane", "lane_budget_minutes", "lane_history")}
@@ -3046,9 +3054,12 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             claims.append({"holder": "controller", "roles": {"controller": 1}, **held})
         expected = json.loads(before)
         expected.update(updated_at=now, admission={
-            "route": "claude-code", "releases": 0, "claims": claims}, schema_version=10,
-            transaction_id=TransactionStore(self.root / ".superpowers/attempt-transactions")
+            "route": "claude-code", "releases": 0, "claims": claims}, schema_version=11,
+            verification_blockers={}, transaction_id=TransactionStore(self.root / ".superpowers/attempt-transactions")
             .lookup(attempt_identity.legacy_key(expected["run_id"])))
+        for issue_state in expected["issues"].values():
+            for attempt in issue_state["attempts"]:
+                attempt["verification_blocker"] = None
         self.assertEqual(json.loads(path.read_bytes()), expected)
 
     def attempt(self, issue, number=1, *, worktree=None, **changes):
@@ -3333,6 +3344,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         holder = self.workflow.new_control_attempt(issue=172, attempt_number=1,
             worktree=str(self.root / ".worktrees/holder"), now=NOW,
             deadline_at="2026-09-21T01:00:00Z")
+        holder.pop("verification_blocker")
         state["issues"]["172"] = {"issue": 172, "attempts": [holder], "outcome": None,
             "delivery": self.workflow._delivery().empty_delivery(), "delivery_remainders": []}
         path.write_text(json.dumps(state))
@@ -3502,12 +3514,14 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             run_id=run_id, transaction_id=TRANSACTION, now=NOW, issues={})
         state["schema_version"] = 2
         state.pop("admission"); state.pop("workers"); state.pop("transaction_id")
+        state.pop("verification_blockers")
         for issue in (151, 152):
             state["issues"][str(issue)] = {"issue": issue, "outcome": None, "attempts": [
                 self.workflow.new_control_attempt(issue=issue, attempt_number=1,
                     worktree=str(self.root / f"wt-{issue}"), now=NOW,
                     deadline_at="2026-09-21T01:00:00Z")]}
-            for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history"):
+            for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history",
+                          "verification_blocker"):
                 state["issues"][str(issue)]["attempts"][0].pop(field)
         path = self.root / ".superpowers/workflows" / run_id / "state.json"
         path.parent.mkdir(parents=True); path.write_text(json.dumps(state), encoding="utf-8")
@@ -3515,7 +3529,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         boot = json.loads(self.cli("init-run", *run, "--now", NOW).stdout)
         self.assertEqual([(item["issue"], item["contract_digest"]) for item in boot["requirements"]],
                          [(151, None), (152, None)])
-        self.assertEqual(json.loads(path.read_text())["schema_version"], 10)
+        self.assertEqual(json.loads(path.read_text())["schema_version"], 11)
         swept = self.control("survive", self.control_request([151, 152]))
         self.assertEqual([action["kind"] for action in swept["actions"]], ["wait"])
         self.cli("progress", *run, "--now", LATER, "--issue", 151, "--attempt", 1,

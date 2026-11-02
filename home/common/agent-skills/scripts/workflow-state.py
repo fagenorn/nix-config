@@ -21,7 +21,7 @@ import tempfile
 import traceback
 from typing import Any, Callable, Iterator, NamedTuple
 
-from agent_tools import attempt_observations, attempt_store, phase_budget
+from agent_tools import attempt_observations, attempt_store, phase_budget, verification_blocker
 from agent_tools.attempt_custody import (
     AUTO_RESUMABLE_BLOCKED_ON,
     BLOCKED_ON_VALUES,
@@ -45,7 +45,7 @@ from agent_tools.attempt_identity import (
 from agent_tools.transaction_storage import is_id
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
@@ -94,10 +94,11 @@ PHASE_INPUT_FIELDS = (
 )
 STATE_FIELDS = frozenset(
     {"schema_version", "run_id", "transaction_id", "created_at", "updated_at", "prior_run",
-     "issues", "admission", "workers"}
+     "issues", "admission", "workers", "verification_blockers"}
 )
-# A schema-7 ledger, as it is read before it is bound to a run transaction (#337).
-LEGACY_STATE_FIELDS = STATE_FIELDS - {"transaction_id"}
+# A schema-7 ledger, as it is read before it is bound to a run transaction (#337) and
+# stepped to schema 11 (issue 544).
+LEGACY_STATE_FIELDS = STATE_FIELDS - {"transaction_id", "verification_blockers"}
 # The run's worker registry (#222 D2): every writing agent a launch dispatched,
 # in registration order. A worker is live while it is unreleased and its launch
 # is still current, so a superseded launch fences its workers with no write.
@@ -151,8 +152,10 @@ ATTEMPT_FIELDS = frozenset(
         "lane",
         "lane_budget_minutes",
         "lane_history",
+        "verification_blocker",
     }
 )
+LEGACY_ATTEMPT_FIELDS = ATTEMPT_FIELDS - {"verification_blocker"}
 # #280 D2, D3: an attempt's lane is declared once by triage and may escalate
 # from light to full, never back. The table is closed: a pair it does not name
 # is not a legal transition.
@@ -171,6 +174,7 @@ SUSPENSION_DEFAULTS = {
     "blocked_on": None,
     "suspend_phase": None,
     "stalled_resumes": 0,
+    "verification_blocker": None,
 }
 LAUNCH_FIELDS = frozenset({"kind", "owner", "worktree", "at"})
 
@@ -741,9 +745,10 @@ def validate_attempt_lane(value: dict[str, Any], *, started_at: datetime) -> Non
 
 
 def validate_attempt(
-    value: Any, *, issue: int, expected_number: int, direct: bool
+    value: Any, *, issue: int, expected_number: int, direct: bool, schema_version: int
 ) -> None:
-    if not isinstance(value, dict) or set(value) != ATTEMPT_FIELDS:
+    fields = ATTEMPT_FIELDS if schema_version == SCHEMA_VERSION else LEGACY_ATTEMPT_FIELDS
+    if not isinstance(value, dict) or set(value) != fields:
         raise WorkflowError("invalid attempt schema")
     if value["issue"] != issue or value["attempt"] != expected_number:
         raise WorkflowError("invalid attempt identity")
@@ -795,6 +800,13 @@ def validate_attempt(
             raise WorkflowError("invalid suspended attempt cause")
     elif value["blocked_on"] is not None:
         raise WorkflowError("only a suspended attempt carries a suspension cause")
+    if schema_version == SCHEMA_VERSION:
+        # The pointer names the blocker the attempt is parked on; R5, run by `validate_state`,
+        # refuses any pointer that is not a record's id (issue 544 D5, D17).
+        pointer = value["verification_blocker"]
+        parked = value["state"] == "suspended" and value["blocked_on"] == "verification"
+        if (pointer is not None) != parked or not (pointer is None or isinstance(pointer, str)):
+            raise WorkflowError("invalid attempt verification blocker")
     if value["suspend_phase"] is not None:
         require_plain_int(value["suspend_phase"], "attempt suspend phase")
     require_plain_int(value["stalled_resumes"], "attempt stalled resumes")
@@ -849,9 +861,9 @@ def validate_attempt(
 
 def validate_state(value: Any, *, run_id: str, identity: RunIdentity,
                    schema_version: int = SCHEMA_VERSION) -> dict[str, Any]:
-    """Validate one ledger at `schema_version` (10, or 7 for a document not yet bound).
+    """Validate one ledger at `schema_version` (11, or 7 for a document not yet bound).
 
-    `identity` is the run's identity: from its transaction's subject at schema 10, from its
+    `identity` is the run's identity: from its transaction's subject at schema 11, from its
     legacy name before it is bound.
     """
     fields = STATE_FIELDS if schema_version == SCHEMA_VERSION else LEGACY_STATE_FIELDS
@@ -906,7 +918,8 @@ def validate_state(value: Any, *, run_id: str, identity: RunIdentity,
             validate_result(result, expected_issue=issue)
         for number, attempt in enumerate(attempts, start=1):
             validate_attempt(
-                attempt, issue=issue, expected_number=number, direct=identity.direct
+                attempt, issue=issue, expected_number=number, direct=identity.direct,
+                schema_version=schema_version,
             )
             started_at = parse_utc(attempt["started_at"], "attempt start time")
             if started_at < created_at:
@@ -918,6 +931,16 @@ def validate_state(value: Any, *, run_id: str, identity: RunIdentity,
             validate_result(issue_value["outcome"], expected_issue=issue)
             if not attempts or attempts[-1]["result"] != issue_value["outcome"]:
                 raise WorkflowError("issue outcome does not match its latest attempt")
+    if schema_version == SCHEMA_VERSION:
+        pointers = {
+            (int(key), attempt["attempt"]): attempt["verification_blocker"]
+            for key, issue_value in value["issues"].items()
+            for attempt in issue_value["attempts"]
+        }
+        try:
+            verification_blocker.validate_blockers(value["verification_blockers"], pointers)
+        except verification_blocker.BlockerRefused as error:
+            raise WorkflowError(f"invalid verification blockers: {error}") from error
     validate_workers(value)
     validate_admission(value, library=_host_admission())
     return value
@@ -1863,6 +1886,7 @@ def new_run_state(
         "issues": issues,
         "admission": None,
         "workers": [],
+        "verification_blockers": {},
     }
 
 
@@ -1959,6 +1983,7 @@ def reconcile_merged_attempt(
     )
     attempt["state"] = "merged"
     attempt["blocked_on"] = None
+    attempt["verification_blocker"] = None
     attempt["result"] = result
     attempt["finished_at"] = finish_time(attempt, now)
     attempt["result_source"] = "superseded"
@@ -2016,6 +2041,7 @@ def stop_attempt(
     attempt["finished_at"] = finish_time(attempt, now)
     attempt["result_source"] = source
     attempt["blocked_on"] = None
+    attempt["verification_blocker"] = None
     return result
 
 
@@ -2141,6 +2167,7 @@ def resume_attempt(
         attempt["last_progress_at"] = now
     attempt["state"] = "active"
     attempt["blocked_on"] = None
+    attempt["verification_blocker"] = None
     attempt["launch_kind"] = "resume"
     attempt["launches"].append({
         "kind": "resume",
@@ -3874,7 +3901,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
             candidates = [retain(sequence, run_id, run_dir) for sequence, run_id, run_dir
                           in attempt_store.direct_runs(attempts, workflows_dir, issue)]
 
-            # Bind: a legacy ledger is committed as schema 10 at once, under its held lock.
+            # Bind: a legacy ledger is committed as schema 11 at once, under its held lock.
             retained: list[tuple[int, str, Path, Path, dict[str, Any], RunIdentity]] = []
             for sequence, run_id, run_dir, state_path in candidates:
                 read = read_locked_state(
