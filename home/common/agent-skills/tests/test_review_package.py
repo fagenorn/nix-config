@@ -157,6 +157,29 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertIn(b"deleted file mode 100644\n", rebuilt)
             self.assertIn(b"new file mode 120000\n", rebuilt)
 
+    def test_commit_subjects_ignore_log_show_signature(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env = self.setup_repo(repo)
+            (repo / "a.txt").write_text("before\n", encoding="utf-8")
+            base = self.commit(repo, "base", env)
+            (repo / "a.txt").write_text("after\n", encoding="utf-8")
+            head = self.commit(repo, "change a", env)
+            verifier = repo / "home/verify-signature"
+            verifier.write_text("#!/bin/sh\necho 'gpg: Good signature from fixture' >&2\n", encoding="utf-8")
+            verifier.chmod(0o755)
+            self.run_git(repo, "config", "gpg.program", str(verifier))
+            self.run_git(repo, "config", "log.showSignature", "true")
+            header, _, message = self.run_git(repo, "cat-file", "commit", head).partition("\n\n")
+            signed = f"{header}\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n fixture\n -----END PGP SIGNATURE-----\n\n{message}"
+            made = subprocess.run(["git", "-C", str(repo), "hash-object", "-t", "commit", "-w", "--stdin"],
+                                  input=signed, check=True, capture_output=True, text=True).stdout.strip()
+            out = repo / "review.json"
+            result = self.invoke(repo, plan, base, made, out, env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual([row["subject"] for row in manifest["commits"]], ["change a"])
+
     def run_git(self, repo: Path, *args: str, text: bool = True):
         return subprocess.run(["git", "-C", str(repo), *args], check=True,
                               capture_output=True, text=text).stdout

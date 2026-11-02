@@ -530,7 +530,7 @@ def _commits(repo: Path, base: str, head: str) -> list[dict[str, str]]:
         for sha in listed:
             if SHA_RE.fullmatch(sha) is None:
                 raise GenerationError("malformed Git commit list")
-            subject = _run_git(repo, "show", "-s", "--format=%s", sha, binary=True)
+            subject = _run_git(repo, "show", "-s", "--no-show-signature", "--format=%s", sha, binary=True)
             assert isinstance(subject, bytes)
             if subject.endswith(b"\n"):
                 subject = subject[:-1]
