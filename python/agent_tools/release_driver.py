@@ -31,6 +31,7 @@ from agent_tools.transaction_core import (
     CreationConflict, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
     TransactionBusy, TransactionError, TransactionStore)
 from agent_tools.transaction_history import TERMINALS, Custody, Transaction
+from agent_tools.transaction_storage import lstat_mode
 
 SCHEMA_VERSION = 1
 KEY_SCHEMA = "release/v1"
@@ -216,9 +217,10 @@ class Driver:
             ordinal = len(found) + 1
             transaction_id = store.lookup(
                 creation_key(self.project.project_id, self.profile_id, ordinal))
-            if transaction_id is None or not os.path.lexists(
-                    store.root / transaction_id / "state.json"):
-                break  # absent, or indexed by a create that died before its state.json
+            if transaction_id is None or lstat_mode(
+                    store.root / transaction_id / "state.json") is None:
+                break  # absent, or indexed by a create that died before its state.json;
+                # any other lstat failure propagates rather than truncating discovery
             found.append((ordinal, store.load(transaction_id)))
         return found
 

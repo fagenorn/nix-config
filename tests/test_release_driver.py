@@ -7,7 +7,7 @@ from unittest import mock
 
 from agent_tools import forge_adapter, release_driver, release_profile
 from agent_tools.canonical import telemetry_digest
-from agent_tools import transaction_core
+from agent_tools import transaction_core, transaction_storage
 from agent_tools.transaction_core import TransactionStore
 from agent_tools.transaction_proof import proof_refused
 from agent_tools.transaction_storage import ProofRefused, StateInvalid
@@ -384,6 +384,21 @@ class FinalReviewTest(DriverCase):
         self.assertEqual(driver.preview(rs.candidate()), shown)
         result = driver.run(rs.candidate(), tokens)
         self.assertEqual((result["transaction_id"], result["next"]), (torn, "done"))
+
+    def test_an_unreadable_state_is_not_taken_for_a_torn_create(self):
+        driver = self.driver()
+        rs.seed(driver)
+        real_lstat = transaction_storage.os.lstat
+
+        def denied(path, *args, **kwargs):
+            if str(path).endswith("state.json"):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_lstat(path, *args, **kwargs)
+
+        with mock.patch.object(transaction_storage.os, "lstat", denied):
+            for call in (driver.status, lambda: driver.preview(None)):
+                with self.assertRaises(PermissionError):
+                    call()
 
     def test_any_other_load_failure_still_propagates(self):
         driver = self.driver()
