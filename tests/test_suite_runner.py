@@ -3,7 +3,7 @@
 
 Most cases run `python -m agent_tools.suite_runner` in a temporary working
 directory over fixture members written there. The report-ordering case and the
-members' git environment cases (issue 496) call the module's functions
+members' environment cases (issues 496 and 499) call the module's functions
 directly, and one control runs a fixture member with `bash` outside the runner.
 Members that must overlap meet at a filesystem barrier instead of sleeping, so
 no assertion depends on how long anything took (D9). The one exception is
@@ -311,6 +311,31 @@ SLEEP_MEMBER = textwrap.dedent('''\
                     self.fail("the busy member never finished")
                 time.sleep(0.01)
             time.sleep(1.0)
+''')
+
+# A unittest module that records, from inside its run, the bytecode cache it
+# sees: the prefix, whether its own module's bytecode exists at the path CPython
+# derives for it there, whether bytecode writing is enabled, and whether a
+# `__pycache__` directory exists beside its source (issue 499).
+CACHE_MEMBER = textwrap.dedent('''\
+    import importlib.util
+    import json
+    import os
+    import sys
+    import unittest
+    from pathlib import Path
+
+    BARRIER = Path(os.environ["SUITE_RUNNER_TEST_BARRIER"])
+    NAME = Path(__file__).name
+
+
+    class Member(unittest.TestCase):
+        def test_member(self):
+            (BARRIER / "seen" / NAME).write_text(json.dumps({
+                "prefix": sys.pycache_prefix,
+                "cached": Path(importlib.util.cache_from_source(__file__)).is_file(),
+                "writing": not sys.dont_write_bytecode,
+                "beside": (Path(__file__).parent / "__pycache__").exists()}))
 ''')
 
 RUNNER_LINE = re.compile(r"^suite-runner: ")
@@ -742,7 +767,8 @@ class InterruptTest(RunnerCase):
 
 class MemberEnvironmentTest(unittest.TestCase):
     """`member_environment` observed through what git reads under its result
-    (issue 496). Each case fails for one wrong composition."""
+    (issue 496) and through its bytecode variables (issue 499). Each case
+    fails for one wrong composition."""
 
     def setUp(self) -> None:
         raw = tempfile.TemporaryDirectory()
@@ -750,6 +776,7 @@ class MemberEnvironmentTest(unittest.TestCase):
         self.scratch = Path(raw.name).resolve()
         self.parent = {**without_command_git_config(os.environ),
                        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        self.cache = str(self.scratch / "run-cache")
 
     def read(self, environment: Mapping[str, str], key: str) -> str | None:
         """The value git reads for `key` under `environment`, or None when it
@@ -766,7 +793,7 @@ class MemberEnvironmentTest(unittest.TestCase):
         parent = dict(self.parent)
         if inherited is not None:
             parent["GIT_CONFIG_PARAMETERS"] = inherited
-        return suite_runner.member_environment(parent)
+        return suite_runner.member_environment(parent, self.cache)
 
     def assert_suite_entries(self, environment: Mapping[str, str]) -> None:
         self.assertEqual(self.read(environment, "maintenance.auto"), "false")
@@ -794,16 +821,26 @@ class MemberEnvironmentTest(unittest.TestCase):
         self.assertEqual(self.read(environment, "user.name"), "Counted")
         self.assert_suite_entries(environment)
 
-    def test_only_git_config_parameters_changes_and_the_parent_is_untouched(self):
-        parent = {**self.parent, "GIT_CONFIG_PARAMETERS": "'user.name'='Inherited'"}
+    def test_the_run_cache_replaces_an_inherited_prefix(self):
+        parent = {**self.parent, "PYTHONPYCACHEPREFIX": str(self.scratch / "foreign")}
+        environment = suite_runner.member_environment(parent, self.cache)
+        self.assertEqual(environment["PYTHONPYCACHEPREFIX"], self.cache)
+
+    def test_an_inherited_dont_write_bytecode_is_dropped(self):
+        parent = {**self.parent, "PYTHONDONTWRITEBYTECODE": "1"}
+        environment = suite_runner.member_environment(parent, self.cache)
+        self.assertNotIn("PYTHONDONTWRITEBYTECODE", environment)
+
+    def test_only_the_git_and_bytecode_variables_change_and_the_parent_is_untouched(self):
+        parent = {**self.parent, "GIT_CONFIG_PARAMETERS": "'user.name'='Inherited'",
+                  "PYTHONPYCACHEPREFIX": str(self.scratch / "foreign"),
+                  "PYTHONDONTWRITEBYTECODE": "1"}
         before = dict(parent)
-        environment = suite_runner.member_environment(parent)
+        environment = suite_runner.member_environment(parent, self.cache)
         self.assertEqual(parent, before)
-        self.assertEqual(set(environment), set(before))
-        self.assertEqual({key: value for key, value in environment.items()
-                          if key != "GIT_CONFIG_PARAMETERS"},
-                         {key: value for key, value in before.items()
-                          if key != "GIT_CONFIG_PARAMETERS"})
+        changed = ("GIT_CONFIG_PARAMETERS", "PYTHONPYCACHEPREFIX", "PYTHONDONTWRITEBYTECODE")
+        self.assertEqual({key: value for key, value in environment.items() if key not in changed},
+                         {key: value for key, value in before.items() if key not in changed})
 
 
 class GitMaintenanceTest(RunnerCase):
@@ -853,6 +890,46 @@ class GitMaintenanceTest(RunnerCase):
                     if event["event"] == "child_start"]
         self.assertTrue(any(argv[:4] == ["git", "maintenance", "run", "--auto"]
                             for argv in children), children)
+
+
+class BytecodeCacheTest(RunnerCase):
+    """The members of a run share one bytecode cache that the runner creates and
+    removes, at both launch sites (issue 499). This module runs under the suite
+    runner, so each case hands the inner runner a sentinel `PYTHONPYCACHEPREFIX`
+    and `PYTHONDONTWRITEBYTECODE=1` of its own: a case that kept the outer run's
+    cache would pass against a runner that sets nothing."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.sentinel = self.work.parent / "sentinel-pycache"
+        self.sentinel.mkdir()
+
+    def environment(self, cap: int, total: int, extra: dict) -> dict:
+        return {**super().environment(cap, total, extra),
+                "PYTHONPYCACHEPREFIX": str(self.sentinel), "PYTHONDONTWRITEBYTECODE": "1"}
+
+    def assert_members_share_one_removed_cache(self, jobs: str) -> None:
+        members = [self.member(name, CACHE_MEMBER)
+                   for name in ("test_cache_a.py", "test_cache_b.py")]
+        result = self.run_suite("--jobs", jobs, *members)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        seen = {path.name: json.loads(path.read_text(encoding="utf-8"))
+                for path in (self.barrier / "seen").iterdir()}
+        self.assertEqual(sorted(seen), members)
+        prefixes = {record["prefix"] for record in seen.values()}
+        self.assertEqual(len(prefixes), 1, seen)
+        prefix = prefixes.pop()
+        self.assertIsNotNone(prefix, seen)
+        self.assertNotEqual(Path(prefix).resolve(), self.sentinel, seen)
+        self.assertEqual(seen, {member: {"prefix": prefix, "cached": True, "writing": True,
+                                         "beside": False} for member in members})
+        self.assertFalse(Path(prefix).exists(), prefix)
+
+    def test_serial_members_share_one_cache_the_run_removes(self):
+        self.assert_members_share_one_removed_cache("1")
+
+    def test_parallel_members_share_one_cache_the_run_removes(self):
+        self.assert_members_share_one_removed_cache("2")
 
 
 class RecipeWiringTest(unittest.TestCase):

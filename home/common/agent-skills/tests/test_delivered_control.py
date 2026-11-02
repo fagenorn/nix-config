@@ -376,7 +376,7 @@ class DeliveredControlTest(DeliveredControlHarness, unittest.TestCase):
         self.project()
         built = self.build("contract", self.contract_input())
         workflow = self.isolated_workflow(64)
-        env = {**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"}
+        env = {**os.environ, "HOME": str(self.home)}
         initialized = subprocess.run(
             [sys.executable, str(workflow), "init-run", "--repo-root", str(self.root),
              "--creation-key", "atomic", "--now", NOW],

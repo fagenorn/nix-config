@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -48,23 +49,31 @@ def member_command(member: str) -> list[str]:
     raise UsageError(f"{member}: a member must be a .py or a .sh file")
 
 
-def member_environment(parent: Mapping[str, str]) -> dict[str, str]:
+def member_environment(parent: Mapping[str, str], cache: str) -> dict[str, str]:
     """A copy of `parent` whose `GIT_CONFIG_PARAMETERS` ends with
     `SUITE_GIT_CONFIG`, so every git command run with it reads
-    `maintenance.auto=false` and `gc.auto=0` (issue 496).
+    `maintenance.auto=false` and `gc.auto=0` (issue 496), and whose Python
+    processes share the bytecode cache `cache` (issue 499).
 
     The entries are appended as `git -c` appends its own: after one space when
     the inherited value is non-empty, standing alone otherwise. Coming last,
     they win over an inherited entry for the same key, and a test's own
     `GIT_CONFIG_COUNT` entries still apply beside them. The inherited value is
     passed on unparsed: one git cannot parse already fails every git call with
-    exit 128. `parent` is not modified, and every other variable is copied
-    unchanged.
+    exit 128.
+
+    `PYTHONPYCACHEPREFIX` is set to `cache`, replacing an inherited value, and
+    an inherited `PYTHONDONTWRITEBYTECODE` is dropped, so a Python process run
+    with the copy writes its bytecode under `cache` and reads what an earlier
+    one wrote there. `parent` is not modified, and every other variable is
+    copied unchanged.
     """
     environment = dict(parent)
     inherited = environment.get("GIT_CONFIG_PARAMETERS", "")
     environment["GIT_CONFIG_PARAMETERS"] = (
         f"{inherited} {SUITE_GIT_CONFIG}" if inherited else SUITE_GIT_CONFIG)
+    environment["PYTHONPYCACHEPREFIX"] = cache
+    environment.pop("PYTHONDONTWRITEBYTECODE", None)
     return environment
 
 
@@ -310,21 +319,25 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO) -> int:
     A KeyboardInterrupt propagates after the running members have finished and
     written their blocks. Must be called from the main thread: the runner holds
     SIGINT while it launches or reaps a serial member or starts its parallel workers.
-    Every member runs with `member_environment(os.environ)`, computed once.
+    Every member runs with `member_environment(os.environ, cache)`, computed
+    once, where `cache` is the run's bytecode cache: a temporary directory
+    created before the first launch and removed however this call ends, a
+    removal error propagating (issue 499).
     """
     output = _Output(out)
-    environment = member_environment(os.environ)
-    started = time.monotonic()
-    if jobs == 1:
-        results = _run_serial(members, environment, output)
-    else:
-        results = _run_parallel(members, jobs, environment, output)
-    missing = [member for member, result in zip(members, results) if result is None]
-    if missing:
-        raise RuntimeError(f"members left without a result: {', '.join(missing)}")
-    report = report_lines(results, jobs=jobs, wall_seconds=time.monotonic() - started)
-    output.write(b"".join(_line(line) for line in report))
-    return 0 if all(result.passed for result in results) else 1
+    with tempfile.TemporaryDirectory(prefix="suite-runner-pycache-") as cache:
+        environment = member_environment(os.environ, cache)
+        started = time.monotonic()
+        if jobs == 1:
+            results = _run_serial(members, environment, output)
+        else:
+            results = _run_parallel(members, jobs, environment, output)
+        missing = [member for member, result in zip(members, results) if result is None]
+        if missing:
+            raise RuntimeError(f"members left without a result: {', '.join(missing)}")
+        report = report_lines(results, jobs=jobs, wall_seconds=time.monotonic() - started)
+        output.write(b"".join(_line(line) for line in report))
+        return 0 if all(result.passed for result in results) else 1
 
 
 def _jobs(text: str) -> int:

@@ -75,7 +75,7 @@ class Cutover(DeliveredCustody):
         completed = subprocess.run(
             [sys.executable, str(self.base / WORKFLOW.relative_to(REPO)), *map(str, args)],
             input=stdin, capture_output=True, check=False, cwd=cwd,
-            env={**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1",
+            env={**os.environ, "HOME": str(self.home),
                  "PYTHONPATH": str(self.base / "python")})
         if ok:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
