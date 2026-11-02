@@ -15,19 +15,24 @@ holds the contract.
 
 import functools
 import json
+import os
 import re
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.agent_costs import (
     DISCLAIMER,
     event_in_window,
     find_sessions,
+    format_rfc3339_utc,
     human,
     percentile,
     print_table,
+    project_name,
+    repo_root,
     scan_paths,
 )
 from agent_tools.context_meter import MEASURED_NOTE
@@ -119,6 +124,7 @@ class Lineage:
     delivered: bool
     facts: dict
     relauncher: tuple = field(default_factory=tuple)
+    started: float | None = None   # epoch seconds of the earliest call of the owner transcripts
 
 
 def call_cost(call: OwnerCall) -> float:
@@ -166,6 +172,7 @@ class _CallRead:
     bash: bool = False
     gate: Gate | None = None
     registration: tuple | None = None   # (helper kind, run ID, action ID)
+    repo_root: str | None = None        # the first absolute `--repo-root` of a registering invocation
     help: bool = False
     mark_progress: str | None = None
     measured: bool = False
@@ -209,9 +216,13 @@ def _read_invocation(read, inv: Invocation, reply, note):
         read.absolute += 1
     if inv.helper == "sdd-gate" and inv.subcommand == "review":
         read.review_tasks.append(_int(options.get("--task")))
-    if gate and options.get("--run-id") and options.get("--action-id") and read.registration is None:
-        kind = inv.helper if inv.helper == "sdd-gate" else inv.subcommand
-        read.registration = (kind, options["--run-id"], options["--action-id"])
+    if gate and options.get("--run-id") and options.get("--action-id"):
+        if read.registration is None:
+            kind = inv.helper if inv.helper == "sdd-gate" else inv.subcommand
+            read.registration = (kind, options["--run-id"], options["--action-id"])
+        root = options.get("--repo-root")
+        if read.repo_root is None and isinstance(root, str) and root.startswith("/"):
+            read.repo_root = root
     if inv.helper != "workflow-state":
         return
     if inv.subcommand in ("progress", "suspend"):
@@ -402,6 +413,8 @@ def _owner_scan(path, is_root, transcript, reads, counted):
     handoffs = sum(read.handed_off for read in live)
     return {
         **_own_identity(reads, run_id), "run_id": run_id, "action_id": action_id,
+        "repo_root": next((read.repo_root for read in reads if read.repo_root is not None), None),
+        "cwds": transcript.cwds,
         "calls": owner_calls, "counted": counted, "registered_index": registered,
         "transfer": "handoff" if handoffs else (replied[-1] if replied else None),
         "handoffs": handoffs, "measured": sum(read.measured for read in live),
@@ -425,12 +438,14 @@ def scan_owner_transcript(job, *, since, before):
     session, agent_id = _session_and_agent(path, is_root)
     parent, tool_use = (None, None) if is_root else _read_meta(path)
     ends = [call.end for call in calls if call.end is not None]
+    starts = [call.start for call in calls if call.start is not None]
     scan = {
         "path": str(path), "is_root": is_root, "session": session, "agent_id": agent_id,
         "parent": parent, "tool_use_id": tool_use, "counted_calls": len(priced),
         "dollars": sum(dollars for dollars, _ in priced),
         "approximate_calls": sum(approximate for _, approximate in priced),
         "last_end": max(ends).timestamp() if ends else None,
+        "first_start": min(starts).timestamp() if starts else None,
         "dispatched": {tool_id: index for index, call in enumerate(calls)
                        for tool_id, name in call.tool_names.items() if name in DISPATCH_TOOLS},
         "finishes": [pair for read in reads for pair in read.finishes],
@@ -519,7 +534,8 @@ def _phase_reached(calls):
     return max(reached, default=None)
 
 
-def _lineage_row(run_id, issue, launches, extras, *, direct, delivered, descendant_dollars):
+def _lineage_row(run_id, issue, launches, extras, *, direct, delivered, descendant_dollars,
+                 project, started):
     """The per-lineage JSON fields; `extras` are the owner scans' counts per launch."""
     calls = [call for launch in launches for call in launch.calls]
     owner_dollars = sum(call_cost(call) for call in calls)
@@ -538,7 +554,25 @@ def _lineage_row(run_id, issue, launches, extras, *, direct, delivered, descenda
         "measured_gate_calls": sum(extra["measured"] for extra in extras),
         "help_calls": sum(call.help for call in calls),
         "absolute_path_calls": sum(extra["absolute"] for extra in extras),
+        "project": project, "started": _instant(started),
     }
+
+
+def _instant(epoch):
+    """An epoch-seconds instant as an RFC3339 UTC string; None for None."""
+    if epoch is None:
+        return None
+    return format_rfc3339_utc(datetime.fromtimestamp(epoch, timezone.utc))
+
+
+def _project(owner_scans, homes):
+    """The repository holding the lineage's ledger (issue 503 D4): the first absolute registering
+    `--repo-root` in launch order, else `project_name` over the owners' record cwds."""
+    for scan in owner_scans:
+        if scan["owner"]["repo_root"] is not None:
+            return os.path.basename(repo_root(scan["owner"]["repo_root"]))
+    cwds = sum((scan["owner"]["cwds"] for scan in owner_scans), Counter())
+    return project_name(homes[owner_scans[0]["path"]], cwds)
 
 
 def _relauncher(launches):
@@ -559,7 +593,7 @@ def _launch_order(launch):
             launch.remainder or 0, launch.launch is None, launch.launch or 0, launch.calls[0].start)
 
 
-def _lineage(run_id, issue, group, child_ends):
+def _lineage(run_id, issue, group, child_ends, homes):
     """The lineage of one `(run_id, issue)`, from its `(scan, nearest owner scan)` members."""
     owners = [scan for scan, owner_scan in group if scan is owner_scan and scan["counted_calls"]]
     launches, extras = [], []
@@ -570,20 +604,24 @@ def _lineage(run_id, issue, group, child_ends):
         extras.append({"handoffs": owner["handoffs"], "measured": owner["measured"],
                        "absolute": owner["absolute"], "phase7": owner["phase7"],
                        "waits": _long_waits(owner["calls"], owner["counted"], children)})
-    ordered = sorted(zip(launches, extras), key=lambda pair: _launch_order(pair[0]))
-    launches = [launch for launch, _ in ordered]
-    extras = [extra for _, extra in ordered]
+    ordered = sorted(zip(launches, extras, owners), key=lambda triple: _launch_order(triple[0]))
+    launches = [launch for launch, _, _ in ordered]
+    extras = [extra for _, extra, _ in ordered]
+    project = _project([scan for _, _, scan in ordered], homes)
+    starts = [scan["first_start"] for scan, owner_scan in group
+              if scan is owner_scan and scan["first_start"] is not None]
+    started = min(starts, default=None)
     descendants = sum(scan["dollars"] for scan, owner_scan in group if scan is not owner_scan)
     key = (run_id, issue)
     delivered = any(key in scan["finishes"] for scan, _ in group)
     direct = any(key in scan["directs"] for scan, _ in group)
     facts = _lineage_row(run_id, issue, launches, extras, direct=direct, delivered=delivered,
-                         descendant_dollars=descendants)
+                         descendant_dollars=descendants, project=project, started=started)
     return Lineage(run_id, issue, direct, launches, descendants, delivered, facts,
-                   _relauncher(launches))
+                   _relauncher(launches), started)
 
 
-def _lineages(scans):
+def _lineages(scans, homes):
     """The lineages of `scans` and the unattributed transcripts, dollars and unresolved owners."""
     _resolve_owners(scans)
     by_agent = {(scan["session"], scan["agent_id"]): scan for scan in scans if not scan["is_root"]}
@@ -609,7 +647,7 @@ def _lineages(scans):
     lineages = []
     for (run_id, issue), group in sorted(members.items()):
         if any(scan is owner_scan and scan["counted_calls"] for scan, owner_scan in group):
-            lineages.append(_lineage(run_id, issue, group, child_ends))
+            lineages.append(_lineage(run_id, issue, group, child_ends, homes))
         else:
             for scan, _ in group:   # every owner transcript is outside the window
                 lose(scan)
@@ -684,12 +722,12 @@ def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory):
                 jobs.append((path, is_root))
     scans = _scan_all(jobs, since, before, executor_factory)
     if eval_rows is None:
-        lineages, unattributed = _lineages(scans)
+        lineages, unattributed = _lineages(scans, homes)
     else:
         lineages, unattributed = [], {"transcripts": 0, "dollars": 0.0, "unresolved_owners": 0}
         for row in samples:
             scoped = [scan for scan in scans if _in_workdir(homes[scan["path"]], str(row.get("workdir")))]
-            found, missing = _lineages(scoped)
+            found, missing = _lineages(scoped, homes)
             for name, value in missing.items():
                 unattributed[name] += value
             if found:

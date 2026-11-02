@@ -286,3 +286,48 @@ class OwnerReportTest(unittest.TestCase):
         self.assertAlmostEqual(row["owner_dollars"], sum(a2), places=9)
         self.assertAlmostEqual(row["total_dollars"] - row["owner_dollars"], cost(30_000, 30_000),
                                places=9)
+
+    def test_a_lineage_s_project_is_its_registering_repo_root_and_its_start_its_first_owner_call(self):
+        # o1 registers against /Users/me/repo while its records sit in another repository's
+        # worktree; the dispatching root is no owner, so the lineage starts at o1's first call,
+        # with or without an event window that cuts that call
+        session = Session(self.root, cwd="/Users/me/other/.worktrees/worktree-issue-7")
+        dispatch = session.call(None, 0, context=10_000, write=10_000, ttl="1h", agent_tool=True)
+        session.child("o1", tool_use_id=dispatch)
+        session.call("o1", 10, context=20_000, write=20_000)
+        g = session.call("o1", 20, context=30_000, write=10_000, bash=progress(3))
+        session.result("o1", 21, g, gate_reply("continue"))
+        session.write()
+        for extra in ((), ("--events-since", at(15), "--events-before", at(1_000))):
+            with self.subTest(extra=extra):
+                [row] = report(self.root, *extra)["lineages"]
+                self.assertEqual((row["project"], row["started"]), ("repo", "2026-10-25T09:00:10Z"))
+
+    def test_an_unexpanded_repo_root_takes_the_project_of_the_records_cwd(self):
+        session = Session(self.root, project="-Users-me-other--worktrees-worktree-issue-8",
+                          cwd="/Users/me/other/.worktrees/worktree-issue-8")
+        g = session.call(None, 0, context=20_000, write=20_000, ttl="1h",
+                         bash=progress(3, action_id="8:1:1", repo_root='"$R"'))
+        session.result(None, 5, g, gate_reply("continue", issue=8))
+        session.write()
+        [row] = report(self.root)["lineages"]
+        self.assertEqual(row["project"], "other")
+
+    def test_an_eval_trial_row_takes_the_project_and_start_of_its_first_lineage(self):
+        # issue 9 starts first, but the trial's first lineage is issue 7 (lineages sort by issue)
+        later = Session(self.root, project="-private-tmp-eval-from-issue-8-T1-repo", session="s1")
+        g9 = later.call(None, 0, context=20_000, write=20_000, ttl="1h",
+                        bash=progress(3, action_id="9:1:1", repo_root="/Users/me/zed"))
+        later.result(None, 5, g9, gate_reply("continue", issue=9))
+        later.write()
+        first = Session(self.root, project="-private-tmp-eval-from-issue-8-T1-repo", session="s2")
+        g7 = first.call(None, 30, context=20_000, write=20_000, ttl="1h", bash=progress(6))
+        first.result(None, 35, g7, gate_reply("continue"))
+        first.write()
+        results = self.root / "results.jsonl"
+        results.write_text(json.dumps({
+            "skill": "from-issue", "id": 8, "trial": 1, "verdict": "PASS",
+            "workdir": "/private/tmp/eval-from-issue-8.T1", "tree_rev": "a" * 40, "policy": None,
+            "claude_exit": 0}) + "\n", encoding="utf-8")
+        [row] = report(self.root, "--eval-results", str(results), "--eval", "from-issue:8")["lineages"]
+        self.assertEqual((row["project"], row["started"]), ("repo", "2026-10-25T09:00:30Z"))

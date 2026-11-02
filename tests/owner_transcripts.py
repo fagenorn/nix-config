@@ -18,9 +18,9 @@ def at(seconds):
     return (T0 + timedelta(seconds=seconds)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def progress(phase, *, action_id="7:1:1", handoff=None, absolute=False):
+def progress(phase, *, action_id="7:1:1", handoff=None, absolute=False, repo_root="/Users/me/repo"):
     helper = "/Users/me/.agents/bin/workflow-state" if absolute else "workflow-state"
-    words = [helper, "progress", "--repo-root", "/Users/me/repo", "--run-id", RUN,
+    words = [helper, "progress", "--repo-root", repo_root, "--run-id", RUN,
              "--issue", action_id.split(":")[0], "--attempt", action_id.split(":")[1],
              "--action-id", action_id,
              "--phase", str(phase), "--next-needs-context", "true",
@@ -48,8 +48,9 @@ FINISH = f"workflow-state finish --repo-root /Users/me/repo --run-id {RUN} --sum
 class Session:
     """One session under <root>/<project>/<session>.jsonl plus its subagents."""
 
-    def __init__(self, root, project="-Users-me-repo", session="s1"):
+    def __init__(self, root, project="-Users-me-repo", session="s1", cwd="/Users/me/repo"):
         self.dir = root / project
+        self.cwd = cwd
         self.session = session
         self.lines = {None: []}
         self.meta = {}
@@ -87,14 +88,14 @@ class Session:
         for index, block in enumerate(blocks):
             stamp = seconds if end is None or index == 0 else end
             self.lines[agent].append(_line({
-                "type": "assistant", "isSidechain": agent is not None, "timestamp": at(stamp),
+                "type": "assistant", "isSidechain": agent is not None, "cwd": self.cwd, "timestamp": at(stamp),
                 "message": {"id": message_id, "model": model, "role": "assistant",
                             "content": [block], "usage": usage}}))
         return tool_id
 
     def result(self, agent, seconds, tool_id, text="ok"):
         self.lines[agent].append(_line({
-            "type": "user", "isSidechain": agent is not None, "timestamp": at(seconds),
+            "type": "user", "isSidechain": agent is not None, "cwd": self.cwd, "timestamp": at(seconds),
             "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}))
 
@@ -121,13 +122,13 @@ class Session:
     def skill_body(self, agent, seconds, tool_id, text):
         """The meta user message that carries the body a Skill call loaded."""
         self.lines[agent].append(_line({
-            "type": "user", "isSidechain": agent is not None, "isMeta": True,
+            "type": "user", "isSidechain": agent is not None, "isMeta": True, "cwd": self.cwd,
             "sourceToolUseID": tool_id, "timestamp": at(seconds),
             "message": {"role": "user", "content": [{"type": "text", "text": text}]}}))
 
     def measured(self, agent, tool_id, tokens):
         self.lines[agent].append(_line({
-            "type": "attachment", "isSidechain": agent is not None, "attachment": {
+            "type": "attachment", "isSidechain": agent is not None, "cwd": self.cwd, "attachment": {
                 "type": "hook_additional_context", "hookName": "PreToolUse:Bash",
                 "toolUseID": tool_id,
                 "content": [f"context-meter: this workflow-state progress call carries "
