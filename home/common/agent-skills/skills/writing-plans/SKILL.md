@@ -5,7 +5,7 @@ description: Turns a spec into a task-by-task implementation plan. Use when requ
 
 # Writing Plans
 
-Write for a skilled engineer with no context on this codebase, toolset or domain, who reads exactly one task and none of the others. DRY, YAGNI, test-first, frequent commits.
+Write for a skilled engineer with no context on this codebase, toolset or domain, who reads one task and no other. DRY, YAGNI, test-first, frequent commits.
 
 **Resolve once at entry.** Run `resolve-project resolve --repo-root <the checkout you were called in>` and read the absolute `bindings.paths.artifacts.plans` from the snapshot it prints. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Never persist the snapshot or infer a policy value.
 
@@ -13,26 +13,26 @@ Write for a skilled engineer with no context on this codebase, toolset or domain
 
 ## Payload discipline
 
-Sibling skills cite this section and plans embed it in tasks. Move information as cheaply as it arrives: targeted `rg` over whole-file reads; bounded reads around the lines that matter; test and build output summarized to the failing lines; long logs written to disk and passed as paths; artifacts (briefs, packages, reports) handed between agents as paths, never inlined. Verification commands produce small output by construction (quiet flags, filters, tails).
+Move information as cheaply as it arrives: targeted `rg` over whole-file reads; bounded reads; test and build output cut to failing lines; long logs on disk, passed as paths; artifacts (briefs, packages, reports) handed between agents as paths, never inlined. Verification commands print small output by construction (quiet flags, tails).
 
 ## Scope and file structure
 
-A spec covering several independent subsystems gets one plan per subsystem, each yielding working, testable software; say so rather than fusing them.
+A spec covering several independent subsystems gets a plan each.
 
-Before mapping files, look for the spec's **code map**: the path your caller named, else the spec's file name with `.code-map.md` for `.md` in the git directory (`git rev-parse --git-dir`). None is no error: plan as usual. Read it first and take its entries as leads: open a mapped file only where a task needs detail the entry lacks (an exact signature, the test to extend), and expect to read beyond it. Check every mapped path and symbol you write into a task against the current tree with a bounded search; drop a wrong entry and search afresh. Never cite, link or copy it into the plan: implementers and reviewers cannot see it.
+Before mapping files, read the spec's **code map** if one exists: the path your caller named, else the spec's file name with `.code-map.md` for `.md` in the git directory (`git rev-parse --git-dir`). Its entries are leads: check every mapped path and symbol you write into a task against the current tree, and drop a wrong entry. Never cite, link or copy it into the plan: implementers and reviewers cannot see it.
 
-Before defining tasks, map the files to create or modify and each one's responsibility: one clear responsibility per file, files that change together kept together, split by responsibility rather than layer, existing patterns followed. Split a file you are already modifying when it helps; never restructure unilaterally.
+Before defining tasks, map the files to create or modify and each one's responsibility: one per file, files that change together kept together, split by responsibility rather than layer, existing patterns followed. Never restructure alone.
 
 When the file map depends on one bounded repository fact, keep the planning judgment here and delegate only the read-only lookup:
 
 <!-- agent-dispatch: id=planning-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only repository lookup without choosing task boundaries.
 
-If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and the selected role in the plan phase's existing fixed-schema report.
+If the lookup turns open-ended or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high, recording that escalation in the plan phase's fixed-schema report.
 
 ## Task size
 
-A task is the smallest unit with its own test cycle that is worth a fresh reviewer's gate: fold setup, configuration, scaffolding and documentation into the task that needs them, and split only where a reviewer could reject one task while approving its neighbour. Every task ends in an independently testable deliverable.
+A task is the smallest unit with its own test cycle worth a fresh reviewer's gate: fold setup, configuration, scaffolding and documentation into the task that needs them, and split only where a reviewer could reject one task while approving its neighbour. Each ends independently testable.
 
 ## Plan root
 
@@ -53,33 +53,25 @@ The root holds the header below and no numbered task bodies or copied ledger rat
 ## Global Constraints
 
 <The spec's project-wide requirements (version floors, dependency limits, naming
-and copy rules, platform requirements), one line each, values copied verbatim.
-Every task implicitly includes this section.>
+and copy rules, platform requirements), one line each, values verbatim. Every task
+includes this section.>
 
 ## Test seams
 
-<The seams the spec agreed, one line each. Implementers test only at these; a
-task needing a new seam is a plan bug.>
+<The spec's agreed seams, one line each. Implementers test only at these; a task
+needing a new seam is a plan bug.>
 
 ## Delivery estimate and boundaries
 
-<Expected changed files, likely aggregate-growth risks, and independently
-deliverable slices when the change may exceed a review-package boundary. Every
-number is labelled an estimate.>
+<Expected changed files, aggregate-growth risks, and independently deliverable
+slices when the change may exceed a review-package boundary; every number an estimate.>
 
 ## Task index
 
-<One line per task: ID, title, files touched, risk lane, and member link. Members
-are numbered contiguously from 1, one row each, at most eight. Every row ends
-exactly in `[task-N.md](<stem>.tasks/task-N.md)`. Lanes:
-- `mechanical` — deletion/renaming with no behavioral, configuration, interface,
-  generated-output, or semantic-documentation effect.
-- `low-risk` — small semantic changes: bounded, locally-verifiable behavior
-  changes — excluding anything touching concurrency, lifecycle, destructive
-  operations, security, release, migration, or public contracts.
-- `full` — everything else.
-
-Example: `Task 3 — Wire settings loader — src/config.py, tests/test_config.py — low-risk — [task-3.md](2026-08-19-feature.tasks/task-3.md)`>
+<One line per task: ID, title, files touched, risk lane, member link. Members
+are numbered contiguously from 1, at most eight. Every row ends exactly in
+`[task-N.md](<stem>.tasks/task-N.md)`. Lane: `mechanical`, `low-risk` or `full`,
+as defined in from-issue's § Risk lanes.>
 
 ## Acceptance map
 
@@ -91,11 +83,10 @@ holds the single line `None — no acceptance criteria.` Otherwise:
 |----|------|------|-------|
 | AC1 | code | Task 3 | `tests/test_config.py::test_loader_rejects_unknown_key` |
 
-- `AC` — `AC1` to `AC<n>` in issue order, each exactly once.
-- `Kind` — the issue's `[code|evidence|human]` tag, copied and never
-  reclassified; an untagged criterion gets your judgment, written
-  `<kind> (classified)`.
-- `Task` — exactly one owning `Task N`: the task that adds or runs the check.
+- `AC` — `AC1` to `AC<n>` in issue order, each once.
+- `Kind` — the issue's `[code|evidence|human]` tag, never reclassified; an
+  untagged criterion gets your judgment, written `<kind> (classified)`.
+- `Task` — the one `Task N` that adds or runs the check.
 - `Check` — `code`: the test, check or CI job; `evidence`: the command, its
   conditions, the literal threshold and the acceptance-record row `AC<n>` the
   owning implementer fills in; `human`: the judgment and who makes it.
@@ -106,16 +97,15 @@ This map is the plan's only acceptance surface.>
 
 <Cite the spec's `## Decision ledger` rows by ID ("per D3"); never copy them. A
 new non-obvious decision forced by planning (scope, interface, behavioral,
-test-seam, irreversible, user-preference) is appended to the spec's ledger and
-cited. Routine splits, commit boundaries and obvious verification get no row;
-merge related decisions into one.>
+test-seam, irreversible, user-preference) is appended to the ledger and cited;
+routine splits, commit boundaries and obvious verification get no row.>
 
 ---
 ```
 
 ## Task members
 
-Write each task to exactly `<stem>.tasks/task-N.md`, self-contained for one implementer: exact interfaces, invariants, assertions, verification commands, and step-by-step decisions where an algorithm embodies one. Full implementation code appears only when it preserves a decision prose and interfaces cannot (a subtle algorithm, an exact wire format). Failing tests are always written out in full: they are the contract. Cite decision IDs instead of copying Global Constraints or rationale, and carry every task-specific value.
+Write each task to exactly `<stem>.tasks/task-N.md`, self-contained for one implementer: exact interfaces, invariants, assertions, verification commands, and step-by-step decisions where an algorithm embodies one. Full implementation code appears only where prose and interfaces cannot preserve a decision (an exact wire format). Failing tests are written out in full. Cite decision IDs instead of copying Global Constraints or rationale, and carry every task-specific value.
 
 ````markdown
 # Task N: <Component>
@@ -150,11 +140,6 @@ Expected: FAIL — `function` is not defined
 <The exact signature, the invariants and assertions it satisfies, and the
 non-obvious decisions of its algorithm; full code only under the carve-out.>
 
-```python
-def function(input: InputType) -> Expected:
-    """Contract: <the invariant this function pins>."""
-```
-
 - [ ] **Step 4: Verify**
 
 Run: `pytest tests/path/test.py::test_name -v`
@@ -168,25 +153,41 @@ git commit -m "feat: add specific feature"
 ```
 ````
 
-**Every task has a verification line that can fail**: a command and the observation that would show the task incomplete; confirm by hand that the observation holds at the commit the implementer starts from. A shell gate needs care: `set -e` exempts a `!`-inverted command, so `! grep <forbidden> <file>` never aborts; write `if grep -q <forbidden> <file>; then exit 1; fi`. A terminal `grep -c` inverts the sense too: zero matches, the passing case, exits 1.
+**Every task has a verification line that can fail**: a command and the observation that would show the task incomplete, confirmed by hand at the commit the implementer starts from. `set -e` exempts a `!`-inverted command, so write `if grep -q <forbidden> <file>; then exit 1; fi`, not `! grep`; a terminal `grep -c` exits 1 on zero matches, the passing case.
 
-**Each task names its focused test commands**, red then green, plus the project's build check only when the task changes files that check evaluates (add it when unsure). No task runs the full declared verification as a per-task gate; sdd's final gate runs it once on the final head. Global Constraints may still name those commands with their timeouts.
+**Each task names its focused test commands**, red then green, plus the project's build check only when the task changes files that check evaluates. No task runs the full declared verification; sdd's final gate runs it once on the final head.
 
-**Scope every gate to the plan's files.** Give diffs a pathspec (`git diff --stat BASE..HEAD -- <the paths named in the plan's Files: blocks>`) or assert on file content; never expect a raw commit range ("exactly three files changed", "every commit is a `feat:`"), because plan and spec commits and a ship-time sync merge land in it too. Where commit shape is truly under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`) and exempt the artifact and review-fixup subjects.
+**Scope every gate to the plan's files.** Give diffs a pathspec (`git diff --stat BASE..HEAD -- <the plan's Files: paths>`) or assert on file content; never expect a raw commit range, because plan and spec commits and a ship-time sync merge land in it too. Where commit shape is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`) and exempt the artifact and review-fixup subjects.
 
 ## No placeholders
 
-Never write "TBD", "TODO", "implement later", "fill in details"; "add appropriate error handling", "add validation", "handle edge cases"; "write tests for the above" without the tests; "similar to Task N" (tasks are read alone); a step that does not pin its exact interface, invariants and assertions; or a type, function or method no task defines.
+Never write "TBD", "TODO", "implement later", "fill in details"; "add appropriate error handling", "add validation", "handle edge cases"; "write tests for the above" without the tests; "similar to Task N" (tasks are read alone); a step that does not pin its interface, invariants and assertions; or a type, function or method no task defines.
+
+## Review feasibility forecast
+
+The root carries one `## Review feasibility delivery` block and each member one `## Review feasibility task` block, each a heading and one fenced `json` line of canonical JSON. Field semantics: nix-config's `python/README.md` § Review feasibility forecast.
+
+- Delivery: `schema_version` 3, `kind`, `delivery_base`, `proposed_boundary`, `boundaries`, `process_records`, `actual_evidence` (`kind: git-range-ownership/v1`, the base's head and tree, no `process_ranges`) and `derived_from: null`.
+- Boundaries: the root holds every task and children partition their parents; `depends_on` chains carry `completed-tasks` prerequisites with null `commit` and `tree`; each has its own `process_package`, `process_forecast_ids` and one 64-byte `process_commit_subject_bytes` entry per future process commit.
+- Task: a record per `Files:` path, one `authored-cumulative/v1` bound per containing boundary, conservative whole-record sizes including fix rounds, recordings and the Phase-5 edit.
 
 ## Package budget
 
-Finish all content first, then run `artifact-budget check --kind implementation-plan --root <root-path> --format json`; the checker discovers the members and owns the thresholds. Never pass or report a member list.
+Finish all content first, then run `artifact-budget check --kind implementation-plan --root <root-path> --format json`; the checker discovers the members and owns the thresholds. Never pass a member list.
 
 - Exit 0 with `within_budget`: measured.
 - Exit 2: `failed`, with no prose fallback.
-- First exit 3: compact repeated prose into root or spec references, keeping task-specific contracts, and check again. Still over: split only where both halves are independently testable, update the contiguous index and links, and check again. Any root, member, count or aggregate violation that persists returns `decompose_required`; `complete` is forbidden.
+- First exit 3: compact repeated prose into root or spec references, keeping task-specific contracts, and recheck. Still over: split only where both halves are independently testable, update the contiguous index and links, and recheck. A persisting violation returns `decompose_required`; `complete` is forbidden.
 
-Any later writer, an accepted Phase-5 edit included, checks every artifact it changed before advancing.
+Any later writer, an accepted Phase-5 edit included, checks every artifact it changed first.
+
+**Projection gate.** After the final mutation (self-grade edits included) and a `within_budget` check, pin `<base>` with `git merge-base HEAD origin/<integration-branch>`, commit, then run `review-feasibility gate --plan <root> --base <base> --head <HEAD> --completed-through 0 --save-dir "$(sdd-workspace <root>)"` (`<HEAD>` is `git rev-parse HEAD`), which keeps the full validated result.
+
+- Exit 0: `complete`, the printed summary as `projection`.
+- Exit 3: `decompose_required`, its artifact still `within_budget`, plus `projection`.
+- Exit 2: one forecast correction round (commit, rerun), then `failed` with the tool's reason in notes.
+
+An artifact overage keeps the over-budget report below, without `projection`.
 
 ## Self-review
 
@@ -194,12 +195,12 @@ Reread the finished plan against the spec yourself (no dispatch) and fix inline:
 
 1. **Spec coverage**: every requirement maps to a task.
 2. **Type consistency**: later tasks use the names earlier tasks define.
-3. **Members**: every part of the member template, a scoped falsifiable gate, decision IDs and commit scope.
+3. **Members**: the whole member template, a scoped falsifiable gate, decision IDs, commit scope.
 4. **The rules above**: no placeholders; an index row per member with matching files and lane (a `mechanical` or `low-risk` lane for excluded work is a bug); a complete acceptance map; no numbered task body in the root.
 5. **Remeasure** the package after the last edit, and the spec if a ledger row was appended.
 
 ## Return control
 
-Build one producer report `{state, artifact, notes}`. `complete`: `kind: "implementation-plan"`, the root `path`, the checker's four `metrics` and `budget_status: "within_budget"`. `decompose_required`: the same with `budget_status: "over_budget"` and the checker's `violations`. `failed`: a null artifact, or only the known root `kind` and `path`. Notes may point to the root or spec, within shared policy; never artifact contents or member paths.
+Build one producer report `{state, artifact, notes}`. `complete`: `kind: "implementation-plan"`, the root `path`, the checker's four `metrics`, `budget_status: "within_budget"` and `projection`. `decompose_required`: the same with `budget_status: "over_budget"` and the checker's `violations`, or `within_budget` plus `projection`. `failed`: a null artifact, or only the known root `kind` and `path`. Notes never carry artifact contents or member paths.
 
-Write it to a candidate from `mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"`, run `artifact-budget validate-report --boundary producer --input <report-candidate>`, and remove the candidate in a cleanup that runs on every outcome (a `trap` on `EXIT HUP INT TERM`, or `finally`). Return only the validated stdout; validator exit 2 is `failed`, with no fallback. Do not offer or start execution: the caller owns standards review and execution.
+Write it to a candidate from `mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"`, run `artifact-budget validate-report --boundary producer --input <report-candidate>`, and remove the candidate in a cleanup that runs on every outcome (a `trap` on `EXIT HUP INT TERM`, or `finally`). Return only the validated stdout; validator exit 2 is `failed`, with no fallback. Do not offer or start execution: the caller owns review and execution.

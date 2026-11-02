@@ -4,29 +4,28 @@ Unless Phase 0 marked the issue `mechanical-only`:
 
 ## Caller input gate
 
-In order; any failure stops before reviewer dispatch, on both routes.
+In order; any failure stops before reviewer dispatch on both routes.
 
-1. Pipe the planning producer's received stdout bytes through `artifact-budget validate-report --boundary producer --input -`, then decode only those bytes.
+1. Pipe the planning producer's stdout bytes through `artifact-budget validate-report --boundary producer --input -`; decode only those.
 2. Require `state: complete`, an implementation-plan artifact and `budget_status: within_budget`.
-3. Run `artifact-budget check --kind implementation-plan --root <reported-root> --format json` and compare the root plus all four metrics. Exit 2, exit 3, malformed metrics or a claim mismatch fails.
-4. Read `capabilities.review.plan` from the retained snapshot, passing the snapshot's explicit hint paths to the packet:
-   - **Blocked** stops and surfaces its `reason_code` and `repair_id`; it never takes a fallback.
-   - **Available and `codex-collaboration` available** → invoke its `plan-review` operation. It assembles the packet. The one native fallback follows only a completed non-capacity runtime/output failure; a busy or concurrent reviewer never triggers it. Supply the issue number and acceptance criteria, the Phase-0 investigation and open questions, the worktree base SHA, the spec path, `bindings.tracker`, `bindings.paths`, the review capability, the plan root path and its four checker metrics (never a member list or contents), and the absolute path to `REVIEW-CONTRACT.md` beside `SKILL.md`.
-   - **Authored unsupported, or the completed non-capacity runtime/output failure above** (including when this skill runs natively in Codex) →
+3. Run `artifact-budget check --kind implementation-plan --root <reported-root> --format json` and compare the root and all four metrics. Exit 2, exit 3, malformed metrics or a mismatch fails.
+4. Compute `<base>`, never from the report: `git merge-base HEAD origin/<integration-branch>`. `review-feasibility confirm --plan <root> --base <base> --input -` over the report's `projection` must exit 0.
+5. Read `capabilities.review.plan` from the retained snapshot, passing its explicit hint paths to the packet:
+   - **Blocked** stops, surfacing its `reason_code` and `repair_id`; no fallback.
+   - **Available and `codex-collaboration` available** → invoke its `plan-review` operation, which assembles the packet. The one native fallback follows only a completed non-capacity runtime/output failure, never a busy reviewer. Supply the issue number and criteria, the Phase-0 investigation and open questions, the worktree base SHA, the spec path, `bindings.tracker`, `bindings.paths`, the review capability, the plan root with its four checker metrics (no member list or contents), and the absolute path (never the contents) of `REVIEW-CONTRACT.md` beside `SKILL.md`.
+   - **Authored unsupported, or that completed non-capacity failure** (including native Codex) →
 
 <!-- agent-dispatch: id=from-issue-plan-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") launches one fresh plan reviewer with no inherited context, the same inputs, and the same `REVIEW-CONTRACT.md` path, told to read that file first.
 
-Pass the contract by path; never inline it.
-
-**Mechanical-only:** replace the dispatch with a self-grade — read the issue, spec, plan, live files, and `REVIEW-CONTRACT.md`, then grade against the same Blocking / Should-fix / Discussion buckets. Any behavioral, configuration, interface, generated-output or semantic-documentation consequence disqualifies it.
+**Mechanical-only:** replace the dispatch with a self-grade — read the issue, spec, plan, live files and `REVIEW-CONTRACT.md`, then grade into the same buckets. Any behavioral, configuration, interface, generated-output or semantic-documentation effect disqualifies it.
 
 ## Dispositioning findings
 
-Verify every actionable finding against the live worktree first; stale or unsupported ones are recorded as rejected, not applied. Record provenance in the plan (reviewer, job id, base SHA, whether fallback was used) plus each disposition, and never copy a raw reviewer transcript into project artifacts.
+Verify every actionable finding against the live worktree; record stale or unsupported ones as rejected. Record provenance in the plan (reviewer, job id, base SHA, fallback used) plus each disposition; never copy a raw reviewer transcript into project artifacts.
 
-Apply blocking fixes inline to the plan (standing local-commit authorization). Bring should-fix items to the user; in `--auto`, apply them too. Append one ledger row per applied **non-obvious** finding — Choice = the edit, Grounding = the reviewer's rationale plus any doc cite, Rejected alternative = what you weighed (or "reviewer's call accepted as-is") — and a row that reverses an earlier decision names it.
+Apply blocking fixes inline to the plan (standing local-commit authorization). Bring should-fix items to the user (`--auto`: apply them). Append one ledger row per applied **non-obvious** finding — Choice = the edit, Grounding = the reviewer's rationale plus any doc cite, Rejected alternative = what you weighed (or "reviewer's call accepted as-is"); a row reversing a decision names it.
 
 ## Accepted-edit remeasurement
 
-After all accepted blocking and should-fix edits, treat the last plan or ledger write as the final mutation. Run `artifact-budget check --kind implementation-plan` over the full plan, then `artifact-budget check --kind design-spec` when the spec or its decision ledger changed. Compare each result with the previous report. Apply the owning producer's compact/split remediation once and recheck after its final mutation. If either final check remains over budget, return `decompose_required` to the decomposition checkpoint and do not dispatch SDD. Only a final `within_budget` advances.
+After all accepted blocking and should-fix edits, the last plan or ledger write is the final mutation. Run `artifact-budget check --kind implementation-plan` over the full plan, and `artifact-budget check --kind design-spec` when the spec or its ledger changed. Apply the owning producer's compact/split remediation once, then recheck. Still over: return `decompose_required` to the decomposition checkpoint, no SDD. After a plan edit, commit and rerun `review-feasibility gate --plan <root> --base <base> --head <HEAD> --completed-through 0 --save-dir "$(sdd-workspace <root>)"`; exit 3 or 2 stops likewise. Only `within_budget` with gate exit 0 advances.
