@@ -80,5 +80,5 @@ Expected: exit 0. A non-zero exit means the commit touched another file.
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":1,"records":[{"bounds":[{"added_lines":40,"boundary":"all","deleted_lines":24,"record_bytes":8192,"support":{"covers":["r1a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1a","last_task":1,"owner":1,"path":"tests/test_review_gate.py"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"5fd51f34df36339d9f4243b1b6841f845aa1bae2","head":"022c330e68e5603b0134f5b5105b1c9f59e9903e"}],"commit_subject_bytes":[64,64],"id":1,"records":[{"bounds":[{"added_lines":40,"boundary":"all","deleted_lines":24,"record_bytes":8192,"support":{"covers":["r1a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1a","last_task":1,"owner":1,"path":"tests/test_review_gate.py"}]}}
 ```
