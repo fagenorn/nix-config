@@ -188,8 +188,9 @@ class Driver:
                 "release.profile.merge_unsupported")
         if project.deploy_adapter != "none":
             return Refusal("deploy_watch_unowned",
-                           f"the deploy adapter {project.deploy_adapter!r} is watched by "
-                           "ship-release, not by the driver", "release.profile.activation_unbound")
+                           f"the deploy adapter {project.deploy_adapter!r} is not watched by "
+                           "the driver, so it cannot release this project",
+                           "release.profile.activation_unbound")
         if any(unit["posture"] == "restorable"
                for unit in compiled["recovery_declaration"]["units"]):
             return Refusal("anchors_unsupported", "the profile declares a restorable unit, "
@@ -215,8 +216,9 @@ class Driver:
             ordinal = len(found) + 1
             transaction_id = store.lookup(
                 creation_key(self.project.project_id, self.profile_id, ordinal))
-            if transaction_id is None:
-                break
+            if transaction_id is None or not os.path.lexists(
+                    store.root / transaction_id / "state.json"):
+                break  # absent, or indexed by a create that died before its state.json
             found.append((ordinal, store.load(transaction_id)))
         return found
 
@@ -299,6 +301,11 @@ class Driver:
         if candidate is not None:
             raise Refusal("release_in_flight", f"{stored['version']} is in flight as "
                           f"{transaction.transaction_id}; resume it with no candidate")
+        if transaction.subject["profile_digest"] != self.compiled["digest"]:
+            raise Refusal("profile_drift", f"{transaction.transaction_id} was created under "
+                          f"profile digest {transaction.subject['profile_digest']}, not the "
+                          f"current {self.compiled['digest']}: restore that profile or "
+                          "abandon the release")
         plan_digest = telemetry_digest({
             "transaction_id": transaction.transaction_id,
             "proof_plan_digest": transaction.events[0]["proof_plan_digest"]})
@@ -533,10 +540,16 @@ class _Drive:
         if self.transaction.state == "attention_required":
             self.advance(self.transaction.parked_from, "resume")
         for phase in (self.begin, self.verify, self.publish, self.activate):
+            self.renew()
             ending = phase()
             if ending is not None:
                 return self.finish(ending)
+        self.renew()
         return self.finish(self.prove())
+
+    def renew(self) -> None:
+        """Renew custody between actions (§5 item 3); a lapsed lease refuses and propagates."""
+        self.transaction = self.store.renew(self.custody)
 
     def advance(self, target: str, reason: str) -> None:
         self.transaction = self.store.advance(
@@ -624,6 +637,7 @@ class _Drive:
     def actions(self, phase: str) -> str | None:
         for unit in self.transaction.proof_plan["units"]:
             if unit["phase"] == phase:
+                self.renew()
                 ending = self.action(unit)
                 if ending is not None:
                     return ending
@@ -668,7 +682,9 @@ class _Drive:
     def prove(self) -> str:
         plan = self.transaction.proof_plan
         for entry in plan["obligations"]:
-            self.collect(entry["obligation_id"])
+            supported = entry["predicate"] in plan["collectors"][entry["collector"]]["predicates"]
+            if supported or entry["required"]:  # an optional unsupported one is never collected
+                self.collect(entry["obligation_id"])
         try:
             self.transaction = self.store.start_cohort(self.custody)
         except ProofRefused as refused:

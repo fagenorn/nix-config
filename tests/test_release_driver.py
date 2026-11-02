@@ -1,4 +1,5 @@
 """The release driver library against the real TransactionStore (#128 spec §1, §2, §4, §7)."""
+import dataclasses
 import json
 import re
 import unittest
@@ -6,9 +7,10 @@ from unittest import mock
 
 from agent_tools import forge_adapter, release_driver, release_profile
 from agent_tools.canonical import telemetry_digest
+from agent_tools import transaction_core
 from agent_tools.transaction_core import TransactionStore
 from agent_tools.transaction_proof import proof_refused
-from agent_tools.transaction_storage import ProofRefused
+from agent_tools.transaction_storage import ProofRefused, StateInvalid
 from . import release_driver_support as rs
 from . import release_test_support as support
 from .forge_world import CANONICAL, ROWS, ForgeWorld
@@ -63,6 +65,7 @@ class GateTest(DriverCase):
                 driver = self.driver(project, **kwargs)
                 refusal = self.assertRefusal(code, driver.preview, rs.candidate())
                 self.assertEqual(refusal.repair_id, repair)
+                self.assertNotIn("ship-release", refusal.detail)
                 self.assertEqual(driver.status()["shape"]["code"], code)
         self.assertEqual(self.world.calls(), [])
 
@@ -335,6 +338,83 @@ class AbandonTest(DriverCase):
         self.assertEqual(len(pushes(self.world)), 1)
         self.assertRefusal("abandon_refused", driver.abandon)
         self.assertEqual(driver.status()["release"]["state"], "attention_required")
+
+
+class FinalReviewTest(DriverCase):
+    """Custody renewal, a torn create, an optional unsupported obligation and profile drift."""
+
+    def forge(self, project=None):
+        self.world.verification_ready()
+        return self.driver(project, registry={"github-forge": rs.StatefulForge(self.world)})
+
+    def test_custody_is_renewed_before_every_action(self):
+        driver = self.forge()
+        calls = []
+        renew, invoke = TransactionStore.renew, TransactionStore.invoke_action
+
+        def spy_renew(store, custody, **kwargs):
+            calls.append("renew")
+            return renew(store, custody, **kwargs)
+
+        def spy_invoke(store, custody, **kwargs):
+            calls.append(kwargs["name"])
+            return invoke(store, custody, **kwargs)
+
+        with mock.patch.object(TransactionStore, "renew", spy_renew), \
+                mock.patch.object(TransactionStore, "invoke_action", spy_invoke):
+            _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "done")
+        invoked = [i for i, call in enumerate(calls) if call != "renew"]
+        self.assertEqual([calls[i] for i in invoked], ["tag", "github-release"])
+        for index in invoked:
+            self.assertEqual(calls[index - 1], "renew")
+
+    def test_a_create_torn_before_its_state_is_recreated_under_the_same_key(self):
+        driver = self.forge()
+        shown = driver.preview(rs.candidate())
+        tokens = [c["token"] for c in shown["confirmations"]]
+        with mock.patch.object(transaction_core, "materialize_plan",
+                               side_effect=rs.Crash("create")):
+            with self.assertRaises(rs.Crash):
+                driver.run(rs.candidate(), tokens)
+        key = release_driver.creation_key(rs.PROJECT_ID, driver.profile_id, 1)
+        torn = driver.store().lookup(key)
+        self.assertIsNotNone(torn)
+        self.assertIsNone(driver.status()["release"])
+        self.assertEqual(driver.preview(rs.candidate()), shown)
+        result = driver.run(rs.candidate(), tokens)
+        self.assertEqual((result["transaction_id"], result["next"]), (torn, "done"))
+
+    def test_any_other_load_failure_still_propagates(self):
+        driver = self.driver()
+        tid = rs.seed(driver)
+        (driver.store().root / tid / "state.json").write_text("{", encoding="utf-8")
+        for call in (driver.status, lambda: driver.preview(None)):
+            with self.assertRaises(StateInvalid):
+                call()
+
+    def test_an_optional_unsupported_obligation_is_never_collected(self):
+        profile = support.forge_profile()
+        profile["proof"]["obligations"].append({
+            "id": "optional-up", "semantic": "liveness", "form": "event",
+            "predicate": "service_up", "collector": "forge", "required": False, "deps": [],
+            "parameters": {}})
+        driver = self.forge(rs.project(self, profiles={"github-release": profile}))
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+
+    def test_a_changed_profile_refuses_resume_before_any_write(self):
+        driver = self.driver()
+        tid = rs.seed(driver)
+        profile = support.forge_profile()
+        profile["publication"]["actions"][0]["observation_deadline_ms"] += 1
+        drifted = self.driver(dataclasses.replace(driver.project, contract={
+            **driver.project.contract, "release": {"profiles": {"github-release": profile}}}))
+        before = driver.store().load(tid).events
+        self.assertRefusal("profile_drift", drifted.preview, None)
+        self.assertRefusal("profile_drift", drifted.run, None, [])
+        self.assertEqual(driver.store().load(tid).events, before)
+        self.assertEqual(drifted.status()["release"]["transaction_id"], tid)
 
 
 if __name__ == "__main__":
