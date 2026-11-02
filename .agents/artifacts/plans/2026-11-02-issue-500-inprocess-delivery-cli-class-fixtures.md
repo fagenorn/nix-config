@@ -9,7 +9,7 @@
 
 **Tech stack:** the Python 3.12+ standard library (`io`, `os`, `shutil`, `tempfile`, `unittest`, `sys.addaudithook`), git, and one `justfile` recipe line.
 
-Spec: `.agents/artifacts/specs/2026-11-02-issue-500-inprocess-delivery-cli-class-fixtures-design.md`. A bare "Dn" cites its `## Decision ledger`, to which this plan appends D9 and D10. "262 Dn" and "498 Dn" cite those issues' ledgers. Issue: https://github.com/fagenorn/nix-config/issues/500 (parent: issue 436).
+Spec: `.agents/artifacts/specs/2026-11-02-issue-500-inprocess-delivery-cli-class-fixtures-design.md`. A bare "Dn" cites its `## Decision ledger`, to which this plan appends D9 and D10, and its standards review D11. "262 Dn" and "498 Dn" cite those issues' ledgers. Issue: https://github.com/fagenorn/nix-config/issues/500 (parent: issue 436).
 
 ## Global Constraints
 
@@ -145,7 +145,12 @@ Task 4 — The orchestrate fixture project is built once per test class — `tes
 - The runner's keywords, directory handling and process-wide caches: D2, D3, D7 (Task 1).
 - The helper's transport and what stays a real process: D1, D2 (Task 2).
 - The migration ledger text per class: D4. The world template per class: D5. The cache shape for both: D9 (Tasks 3 and 4).
-- The four seams: D6. The scratch-only falsifiers and the paired base worktree: D10 (Tasks 3 and 4, final gate).
+- The four seams: D6. The scratch-only falsifiers and the paired base worktree: D10 (Tasks 3 and 4, final gate). Seam 3 red before its change, and `pipefail` on every counter command: D11 (Tasks 3 and 4).
 - AC2 as post-merge evidence, and the overlap with #499: D8.
+
+## Standards review provenance
+
+- Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only mode, no focus; base `0a25b8072c8252d069774f68e75981c39c137691`; no fallback.
+- Findings: 0 blocking, 2 should-fix, 0 discussion. Accepted 2 (SF-001: Task 3's guard is red before its change; SF-002: `set -o pipefail` on the Task 3 and Task 4 counter commands; both D11), rejected 0, deferred 0.
 
 ---

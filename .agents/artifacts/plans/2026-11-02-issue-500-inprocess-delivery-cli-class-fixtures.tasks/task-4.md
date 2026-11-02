@@ -40,7 +40,7 @@ print(f"WORLDS {len(worlds)} BUILDS {len(builds)} EXPECTED {expected}", file=sys
 sys.exit(0 if program.result.wasSuccessful() and len(builds) == expected else 1)
 ```
 
-Counter command (timeout 1800 s): `bash -c 'PYTHONPATH="$PWD/python" python3 "$SCRATCH/count-world-builds.py" 2>&1 | grep -E "^Ran |^OK|^FAILED|^WORLDS"'`
+Counter command (timeout 1800 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 "$SCRATCH/count-world-builds.py" 2>&1 | grep -E "^Ran |^OK|^FAILED|^WORLDS"'`
 
 - [ ] **Step 1: Write the guard test**
 

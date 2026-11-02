@@ -1,6 +1,6 @@
 # Task 3: Issue 207 is delivered once per migration test class
 
-This task implements spec § The attempt-migration fixture (D4, D9) and test seam 3 (D6). Today, `MigrationFixtures.delivered_207()` runs the whole #220 issue-207 delivery on every call: 10 calls in `MigrateOnWriteTest` and `MigrationAcceptanceTest`, each only to read the finished ledger. After this task, the first call in a concrete test class runs the driver. The method keeps the ledger as text and removes the driver's directories at once, and every call returns a fresh parse. The guard test passes before and after the change by design (D10). This task's falsifiable checks are therefore the scratch driver-run counter and a scratch mutation.
+This task implements spec § The attempt-migration fixture (D4, D9) and test seam 3 (D6). Today, `MigrationFixtures.delivered_207()` runs the whole #220 issue-207 delivery on every call: 10 calls in `MigrateOnWriteTest` and `MigrationAcceptanceTest`, each only to read the finished ledger. After this task, the first call in a concrete test class runs the driver. The method keeps the ledger as text and removes the driver's directories at once, and every call returns a fresh parse. The guard test fails before the change and passes after it (D11): at base every call delivers into a fresh temporary project, so two calls' ledgers name different roots and compare unequal. The scratch driver-run counter and a scratch mutation are this task's further falsifiable checks.
 
 **Files:**
 - Modify: `home/common/agent-skills/tests/test_attempt_migration.py`
@@ -33,7 +33,7 @@ print(f"DRIVER_RUNS {len(runs)}", file=sys.stderr)
 sys.exit(0 if program.result.wasSuccessful() else 1)
 ```
 
-Counter command (timeout 1800 s): `bash -c 'PYTHONPATH="$PWD/python" python3 "$SCRATCH/count-driver-runs.py" 2>&1 | grep -E "^Ran |^OK|^FAILED|^DRIVER_RUNS"'`
+Counter command (timeout 1800 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 "$SCRATCH/count-driver-runs.py" 2>&1 | grep -E "^Ran |^OK|^FAILED|^DRIVER_RUNS"'`
 
 - [ ] **Step 1: Write the guard test**
 
@@ -55,8 +55,8 @@ In `class MigrateOnWriteTest(MigrationFixtures, unittest.TestCase):`, insert thi
 
 - [ ] **Step 2: Run the guard and the counter before the change**
 
-1. Focused test form (timeout 1800 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_migration.py -k test_each_delivered_207_call 2>&1 | tail -6'`. Expected: `OK`. This is a guard: at base every call re-runs the driver, so the copies are trivially separate (D10).
-2. The counter command. Expected: `Ran 27 tests`, `OK` and `DRIVER_RUNS 13`: the 10 existing calls plus this test's 3. This is the observation Step 4 must change.
+1. Focused test form (timeout 1800 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_migration.py -k test_each_delivered_207_call 2>&1 | tail -6'`. Expected: `FAILED (failures=1)`. At base every call re-runs the driver in a fresh temporary project, so the second call's ledger names a different root than the first's and the equality fails (red before, D11).
+2. The counter command. Expected: `Ran 27 tests`, `FAILED (failures=1)` (the Step 1 guard) and `DRIVER_RUNS 13`: the 10 existing calls plus this test's 3; the command exits non-zero. This is the observation Step 4 must change.
 
 - [ ] **Step 3: Write the minimal implementation**
 
