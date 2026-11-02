@@ -502,5 +502,146 @@ class UpgradeTenTest(unittest.TestCase):
             vb.upgrade_ten([])
 
 
+AT = ("facts", 0, "value", "objects", 0)
+OTHER = failure(facts=[fact("a-lock", ("a.lock", "b.lock")), fact("c-lock", ("c.lock",))])
+OTHER_ID = vb.blocker_id(OTHER)
+
+
+def observed(value=None, **changes):
+    """The observation `verification-observe observe` prints for `value`'s record when
+    nothing changed: its id, repository and facts (issue 545 D4)."""
+    value = failure() if value is None else value
+    result = {"kind": "verification-observation", "schema_version": 1,
+              "blocker_id": vb.blocker_id(value),
+              "repository": copy.deepcopy(value["repository"]),
+              "facts": copy.deepcopy(value["facts"])}
+    result.update(changes)
+    return result
+
+
+def run_blockers():
+    """Two open records: the pinned one parked by 61:1, `OTHER` by 62:1."""
+    return {PINNED_ID: record(), OTHER_ID: record(OTHER, attempts=((62, 1),))}
+
+
+class RequirementTest(unittest.TestCase):
+    def test_the_requirement_names_each_source_in_order_and_no_value(self):
+        held = record(OTHER)
+        before = copy.deepcopy(held)
+        rendered = vb.requirement(held)
+        self.assertEqual(rendered, {"kind": "verification", "blocker_id": OTHER_ID,
+                                    "sources": [{"name": "a-lock", "paths": ["a.lock", "b.lock"]},
+                                                {"name": "c-lock", "paths": ["c.lock"]}]})
+        self.assertIs(vb.validate_requirement(rendered), rendered)
+        rendered["sources"][0]["paths"].append("d.lock")
+        self.assertEqual(held, before)
+
+
+class ObservationListTest(unittest.TestCase):
+    def test_a_list_of_distinct_observations_is_returned_itself(self):
+        value = [observed(), observed(OTHER)]
+        self.assertIs(vb.validate_observations(value), value)
+        empty = []
+        self.assertIs(vb.validate_observations(empty), empty)
+
+    def test_a_bad_list_is_refused_naming_the_element(self):
+        cases = {
+            "not a list": ({"0": observed()}, "verification: must be a list"),
+            "invalid element": ([observed(), observed(schema_version=2)],
+                                "verification[1]: observation.schema_version: must be 1"),
+            "secret-shaped": ([observed(facts=[fact(paths=(".env",))])],
+                              "verification[0]: facts[0].source.paths[0]: secret-shaped"),
+            "repeated id": ([observed(), observed()],
+                            "verification[1].blocker_id: repeats an earlier observation"),
+        }
+        for label, (value, line) in cases.items():
+            with self.subTest(case=label):
+                with self.assertRaises(vb.BlockerRefused) as caught:
+                    vb.validate_observations(value)
+                self.assertEqual(str(caught.exception), line)
+
+
+class ResolveTest(unittest.TestCase):
+    POINTERS = {(61, 1): None, (62, 1): None}
+
+    def test_an_equal_observation_resolves_nothing(self):
+        blockers = run_blockers()
+        before = copy.deepcopy(blockers)
+        self.assertEqual(vb.resolve(blockers, [observed()]),
+                         (frozenset(), frozenset({PINNED_ID})))
+        self.assertEqual(blockers, before)
+        self.assertEqual(vb.resolve(blockers, []), (frozenset(), frozenset()))
+
+    def test_a_changed_value_resolves_with_a_copy_of_the_observed_facts(self):
+        deleted = edited(edited(observed(), (*AT, "object"), None), (*AT, "mode"), None)
+        for label, value in (("object", edited(observed(), (*AT, "object"), B)),
+                             ("mode only", edited(observed(), (*AT, "mode"), "100755")),
+                             ("path deleted", deleted)):
+            with self.subTest(change=label):
+                blockers = run_blockers()
+                self.assertEqual(vb.resolve(blockers, [value]),
+                                 (frozenset({PINNED_ID}), frozenset()))
+                self.assertEqual(blockers, {
+                    PINNED_ID: record(state="resolved", resolution={"facts": value["facts"]}),
+                    OTHER_ID: record(OTHER, attempts=((62, 1),))})
+                self.assertIsNone(vb.validate_blockers(blockers, self.POINTERS))
+                value["facts"][0]["name"] = "renamed"
+                self.assertEqual(blockers[PINNED_ID]["resolution"]["facts"][0]["name"],
+                                 "flake-lock")
+
+    def test_one_equal_beside_one_changed_resolves_only_the_changed(self):
+        blockers = run_blockers()
+        changed = edited(observed(OTHER), ("facts", 1, "value", "objects", 0, "object"), B)
+        self.assertEqual(vb.resolve(blockers, [observed(), changed]),
+                         (frozenset({OTHER_ID}), frozenset({PINNED_ID})))
+        self.assertEqual(blockers[PINNED_ID], record())
+        self.assertEqual(blockers[OTHER_ID], record(OTHER, attempts=((62, 1),),
+                                                    state="resolved",
+                                                    resolution={"facts": changed["facts"]}))
+
+    def test_an_observation_that_answers_no_open_blocker_exactly_is_refused(self):
+        resolved = run_blockers()
+        resolved[PINNED_ID].update(state="resolved", resolution={"facts": changed_facts()})
+        two = observed(OTHER)
+        moved = observed()
+        moved["facts"][0]["source"]["paths"] = ["other.lock"]
+        moved["facts"][0]["value"]["objects"][0]["path"] = "other.lock"
+        unknown = "verification[0].blocker_id: names no open blocker of this run"
+        sources = "verification[0].facts: must carry the blocker's names and sources in order"
+        cases = {
+            "unknown id": (run_blockers(), observed(blocker_id=ZERO_ID), unknown),
+            "resolved record": (resolved, observed(), unknown),
+            "other repository": (run_blockers(), edited(
+                observed(), ("repository", "integration_branch"), "release"),
+                "verification[0].repository: must equal the blocker's repository"),
+            "missing fact": (run_blockers(), {**two, "facts": two["facts"][:1]}, sources),
+            "extra fact": (run_blockers(), {**observed(), "facts": observed()["facts"] + [
+                fact("g-lock", ("g.lock",))]}, sources),
+            "renamed fact": (run_blockers(), edited(observed(), ("facts", 0, "name"),
+                                                    "flake-lockfile"), sources),
+            "substituted source": (run_blockers(), moved, sources),
+            "reordered facts": (run_blockers(), {**two, "facts": two["facts"][::-1]},
+                                "verification[0]: facts[1].name: must be sorted and unique"),
+        }
+        for label, (blockers, value, line) in cases.items():
+            with self.subTest(case=label):
+                before, kept = copy.deepcopy(blockers), copy.deepcopy(value)
+                with self.assertRaises(vb.BlockerRefused) as caught:
+                    vb.resolve(blockers, [value])
+                self.assertEqual(str(caught.exception), line)
+                self.assertEqual((blockers, value), (before, kept))
+
+    def test_a_refused_later_observation_leaves_the_earlier_record_open(self):
+        blockers = run_blockers()
+        before = copy.deepcopy(blockers)
+        values = [edited(observed(), (*AT, "object"), B), observed(blocker_id=ZERO_ID)]
+        kept = copy.deepcopy(values)
+        with self.assertRaises(vb.BlockerRefused) as caught:
+            vb.resolve(blockers, values)
+        self.assertEqual(str(caught.exception),
+                         "verification[1].blocker_id: names no open blocker of this run")
+        self.assertEqual((blockers, values), (before, kept))
+
+
 if __name__ == "__main__":
     unittest.main()
