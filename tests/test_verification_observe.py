@@ -429,6 +429,27 @@ class ObserveAllTest(ObserveCase):
                           for requirement in (self.NESTED, self.LOCK)])
         self.assertEqual(self.tracking(), self.git(self.origin, "rev-parse", "main"))
 
+    def test_two_requirements_are_served_by_one_fetch_of_the_tracking_ref(self):
+        """Every observation of a batch is read at one commit (issue 546 D2)."""
+        real = shutil.which("git", path=self.env.get("PATH"))
+        shim = self.scratch / "shim"
+        shim.mkdir()
+        log = self.scratch / "git.log"
+        (shim / "git").write_text(
+            '#!/bin/sh\nprintf \'%s\\n\' "$*" >> ' + shlex.quote(str(log))
+            + '\nexec ' + shlex.quote(real) + ' "$@"\n', encoding="utf-8")
+        (shim / "git").chmod(0o755)
+        self.patch_environment({**self.env, "PATH": f"{shim}{os.pathsep}{self.env['PATH']}"})
+        self.publish({"flake.lock": "lock 2\n"})
+        observations, refused = vo.observe_all(str(self.root), [self.NESTED, self.LOCK])
+        self.assertEqual((len(observations), refused), (2, []))
+        calls = [line.split() for line in log.read_text(encoding="utf-8").splitlines()]
+        subcommands = [call[2] for call in calls]  # `git -C <directory> <subcommand> ...`
+        self.assertEqual(subcommands.count("fetch"), 1, subcommands)
+        self.assertEqual(sum(call[2] == "rev-parse" and TRACKING + "^{commit}" in call
+                             for call in calls), 1, calls)
+        self.assertEqual(subcommands.count("ls-tree"), 2, subcommands)
+
     def test_an_unreachable_origin_refuses_every_requirement(self):
         before = self.tracking()
         self.git(self.root, "remote", "set-url", "origin", str(self.scratch / "missing.git"))
