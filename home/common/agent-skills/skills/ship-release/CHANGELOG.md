@@ -111,7 +111,7 @@ Tone: factual, not promotional; `Merged 57 PRs from <integration> — see list b
 </details>
 
 ## Verification (post-merge)
-- <when bindings.deploy.adapter != none: per-service running-commit check (SKILL.md §5d) — SUCCESS status AND a commit starting with the merge SHA; a health 200 is *not* proof.>
+- <when bindings.deploy.adapter != none: per-service running-commit check — SUCCESS status AND a commit starting with the merge SHA; a health 200 is *not* proof.>
 ```
 
 Skip an empty section. When `deploy.adapter == none`, drop the Verification deploy line and keep only the merged+tagged record.
@@ -131,7 +131,7 @@ Any "no" or "not sure" means iterate before opening.
 
 ## Version bump signals
 
-Feeds [`SKILL.md` Phase 4.5d](./SKILL.md#45d-decide-major--minor--patch). **This table is the only copy of the rubric**. Walk top-down, **stop at the first matching rule**.
+Feeds [`SKILL.md` Phase 2](./SKILL.md#phase-2--version). **This table is the only copy of the rubric**. Walk top-down, **stop at the first matching rule**.
 
 | Bucket evidence | Bump |
 |---|---|
