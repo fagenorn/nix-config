@@ -67,9 +67,9 @@ included, although those owners never receive a producer report.
   stdout, the opening (with `--opening`) and then each selected section's bytes unchanged, in file
   order. A section is printed once, however often or in whatever order it was named. It exits 0.
 - **Failure.** An unknown or ambiguous name, an unreadable or non-UTF-8 file, or a usage error
-  exits 2 with nothing on stdout. One stderr report names every unresolved name, says whether it
-  is unknown or ambiguous (with the candidates), and lists the file's `##` headings in order, so
-  the caller can correct the call without reading the file.
+  (an empty name among them) exits 2 with nothing on stdout. One stderr report names every
+  unresolved name, says whether it is unknown or ambiguous (with the candidates), and lists the
+  file's `##` headings in order, so the caller can correct the call without reading the file.
 - **Contract home.** `python/README.md` gains a `## skill-sections` section with this contract.
   `home/common/agent-skills/README.md`'s resume-pack paragraph says the owner prints `SKILL.md`'s
   index and sections through `skill-sections`.
@@ -79,8 +79,11 @@ included, although those owners never receive a producer report.
 - **Reading rule.** The sentence that tells the owner to read `SKILL.md` through the index
   becomes: print `SKILL.md`'s opening and index with
   `skill-sections --opening <from-issue-dir>/SKILL.md 'Files beside this one'`, then, the same
-  way, only the sections that index names for your phase, and start from `next_action`.
-  `<from-issue-dir>` is the directory of the entry the prompt names, as in `### Resume pack`.
+  way, only the sections that index names for your phase, and start from `next_action`. The
+  wording must make clear that the second call carries no `--opening`. `<from-issue-dir>` is the
+  directory of the entry the prompt names, as in `### Resume pack`. This is how the entry "names the helper with the section list" (the code criterion): it names
+  the helper and points the second call at the read list in the index, which the issue's demo
+  calls "the resume index".
 - **Check 2.** A Phase-5 rollover owner needs the index before its delegated-owner checks. Check 2
   points it at the same helper call, so no whole-file read remains anywhere in a verified-pack
   path. The order is unchanged: checks 1–3 come before the reading rule, and a failed check still
@@ -126,9 +129,10 @@ three. The change therefore holds:
 - `resume-pack.md` grows by at most 99 bytes;
 - `SKILL.md` does not grow.
 
-A measured candidate satisfies all three: the handle index line saves 80 bytes, the heading swap
-saves 9 more, and the entry's reading rule plus check 2's pointer add 84, so the corpus falls 5
-bytes. No ceiling is raised. `tighten` is needed only if a ceiling ends more than 5% above its
+A measured candidate satisfies all three. The handle index line saves 80 bytes and the heading
+swap saves 9 more. The entry's reading rule, which says the second call runs without `--opening`,
+and check 2's pointer add 86. The corpus therefore falls by 3 bytes. That margin is a few bytes,
+so the final text is measured with the gate before it is committed. No ceiling is raised. `tighten` is needed only if a ceiling ends more than 5% above its
 measure, and none comes close.
 
 ## Test seams
@@ -147,9 +151,13 @@ measure, and none comes close.
      stderr names each unresolved name and lists the headings.
 2. **The skill-text contracts** (`test_workflow_skill_contracts.py`, `SlimBootContractsTest`).
    They pin identifiers only, under agent-helpers rule 6 and #448 D20:
-   - every backticked section span on the verified-pack read lines resolves to exactly one heading
-     through `agent_tools.skill_sections` against its document. This replaces the heading-equality
-     check, so a renamed heading that breaks a handle fails it;
+   - every backticked section span on the verified-pack read lines (with any `## ` prefix
+     dropped) resolves to exactly one heading in its document: the helper, run on that document
+     with those spans, exits 0. This replaces the heading-equality check, so a renamed heading that
+     breaks a handle fails it. The test runs `python -m agent_tools.skill_sections` as a child
+     process whose `PYTHONPATH` is the source tree's `python/`, and never imports `agent_tools`:
+     `just agent-installed-skill-tests` runs this module without the package on its path, which
+     is why the file today reads package constants through `ast`;
    - `Phase <n>` resolves for every phase from 0 to 7, and `Producer reports` is named;
    - `resume-pack.md` carries the `skill-sections --opening <from-issue-dir>/SKILL.md 'Files beside
      this one'` argv after its check-3 anchors. This replaces the `## Files beside this one`
@@ -179,17 +187,19 @@ measure, and none comes close.
 - The `[evidence]` criterion: mean from-issue `SKILL.md` tokens per fresh boot at most 4k, over the
   7 days after the first `just switch` that includes this change. It is measured after deploy with
   `just agent-costs --report boot`. This design adds no measurement code, and ship handles the open
-  evidence row as #448 D12's hold did.
+  evidence row as #448 D12's hold did. The reading has one precondition (D9): the boot report must
+  first attribute `skill-sections` output to the file it reads.
 
 ## Decision ledger
 
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
-| D1 | One command, `skill-sections [--opening] <file> <section>...`: module `agent_tools.skill_sections`, a command-table row, a thin shell over a parse function and a resolve function. It takes the file by path. The opening prints only with `--opening`. | agent-helpers rules 1–2; the issue ("prints only the named `##` sections of a skill file"); the index's own word "the opening" (AUTO.md line); the entry prompt already holds the absolute `<from-issue-dir>` | `md-sections`/`doc-sections`: they name the syntax, not the use, and no caller outside skills is approved (#507 is human-gated). Repeated `--section` flags: more tokens per call. Locating the skill by name: it couples the helper to two hosts' install layouts. Always printing the opening: the second call would repeat 1,198 bytes, and the output would no longer be exactly the named sections |
+| D1 | One command, `skill-sections [--opening] <file> <section>...`: module `agent_tools.skill_sections`, a command-table row, a thin shell over a parse function and a resolve function. It takes the file by path. The opening prints only with `--opening`. | agent-helpers rules 1–2; the issue ("prints only the named `##` sections of a skill file"); the index's own word "the opening" (AUTO.md line); the entry prompt already holds the absolute `<from-issue-dir>` | `md-sections`/`doc-sections`: generic names for a tool whose approved callers all read skill files (#507, the one other candidate, is human-gated). Repeated `--section` flags: more tokens per call. Locating the skill by name: it couples the helper to two hosts' install layouts. Always printing the opening: the second call would repeat 1,198 bytes, and the output would no longer be exactly the named sections |
 | D2 | A name selects its exact heading, or else the one heading it prefixes at a non-alphanumeric boundary (`Phase 6` → `Phase 6 — Execute`). Unknown or ambiguous names exit 2 with empty stdout, and one stderr report lists every unresolved name and the file's `##` headings. | the-bar Token economy (short stable handles; forms a model emits reliably — the phase headings carry an em dash); the-bar Fail loud; AC "fails clearly on an unknown heading" | Exact match only: owners would have to spell `Phase 6 — Execute`, and the index would grow by the full phase titles. Case-insensitive or fuzzy matching: a typo could resolve silently to the wrong section. A `--list` mode: an extra call and parameter, when the error output already lists the headings |
 | D3 | A section runs to the next `#`/`##` heading outside a fenced block (backtick or tilde fences, closed by the same character at least as long, unclosed to the end of the file). `###` stays inside. The output is the selected byte slices verbatim, in file order, each once, and nothing is printed until every name resolves. | design, wayfind, writing-plans, ship-issue, ship-release and grill-with-docs files hold `##` lines inside fences; AC "in file order"; the-bar Truthful terminal states (no partial output on exit 2) | A plain `## ` line scan: it would split template headings out of prompts. Reusing `skill_lint`'s toggle: it knows only backticks and no closing-length rule, and it is private to lint L3. Printing in argument order: the AC says file order |
 | D4 | Only the resume entry names the helper: its reading rule, and check 2's index read for the rollover owner. The other index read lines, the Skill-tool rule and the allow list are unchanged. | Issue scope ("the from-issue resume entry uses it"); #506 owns AUTO.md and ship-handoff.md; check 2 already sends the rollover owner to the index (commit 314fe8dc), so leaving it out would keep one whole-file read | Converting `delegated-owner.md` reads as well: not in the issue, and the index already narrows them. Naming the helper in the index line: it costs hot bytes, and only the entry's readers use it. A `Bash(skill-sections:*)` allow entry: the allow list holds only ledger-writing lifecycle helpers, and `lane-triage` runs without one |
 | D5 | Two calls: `--opening` with `Files beside this one`, then the handles the index names for the phase. The read list stays in the index, which names short handles (`Decision ledger`, `Skill-tool`, `Dispatch`, `Terminal return`, `Suspension`, `Phase <n>`). | #448 D7 (the read list stays in the index; moving it breaches the controller's conditional ceiling); the corpus has 0 bytes of headroom; D2 makes the handles resolvable | One call with the whole list in the entry: about 250 bytes would move into a conditional member that has 99 bytes of headroom. Keeping the full heading texts in the index: the entry's growth would then have nothing to offset it |
 | D6 | Only the Artifact report boundary and the `implementation-plan` projection confirmation are Phase 2–4-only. They move verbatim into a new `## Producer reports` section before `## Phase 2`, under a heading that replaces the bold lead-in, and the index names it for Phases 2–4. Every other dispatch paragraph stays, the Decomposition stop included. | Each clause's text: producer reports arrive only from Phases 2–4 (AUTO.md's subagents, or the inline `design`/`grill-with-docs`/`writing-plans`); `standards-review.md`'s caller input gate re-validates the plan report at Phase 5; Phase 6 takes the Decomposition stop | Splitting the paragraphs across the Phase 2/3/4 sections: a Phase-3 or Phase-4 owner would also have to read Phase 2's section, or the text would be duplicated. AUTO.md's `Phases 2–4 run as subagents`: it is read only with `--auto`, durable interactive owners receive producer reports too, and AUTO.md is #506's file. Naming the section for Phases 2–5: Phase 5 never uses it |
 | D7 | Budget: the corpus does not grow, `resume-pack.md` grows by at most 99 bytes, and `SKILL.md` does not grow. The handle index line pays for the entry; no ceiling is raised and no other file is trimmed. | Issue and #448 decisions (no raise; byte-neutral move); the measured `328f08da` headroom; the `SKILL.md` size pins in the planning and execution contract tests | Raising the corpus or a conditional ceiling: forbidden without the label. Trimming AUTO.md or ship-handoff.md for bytes: #506's files |
-| D8 | Seams: CLI tests from source; contract pins that every verified-pack section span resolves through `agent_tools.skill_sections` (replacing heading equality), `Phase 0`–`Phase 7` resolve, the entry's argv follows its checks, and the dispatch section lost the `--boundary producer` and `review-feasibility confirm` argv to `## Producer reports`; `skill-sections` joins the shell-example vocabulary. | agent-helpers rules 5–6 (argv, identifiers and vetted shell examples only); #448 D20 and D23 (identifier pins); the-bar Tests that can fail (a renamed heading turns the resolution pin red) | English pins on the entry's sentences: rule 6 forbids them. Adding the command to `LAUNCHER_FLOOR`: it is a floor, and `just build`'s import check plus the table assertion already prove the launcher |
+| D8 | Seams: CLI tests from source; contract pins that every verified-pack section span resolves through the helper (replacing heading equality), `Phase 0`–`Phase 7` resolve, the entry's argv follows its checks, and the dispatch section lost the `--boundary producer` and `review-feasibility confirm` argv to `## Producer reports`; `skill-sections` joins the shell-example vocabulary. (grill) The contract test runs the helper as a child process with `PYTHONPATH` set to the source `python/`, and never imports it. | agent-helpers rules 5–6 (argv, identifiers and vetted shell examples only); #448 D20 and D23 (identifier pins); the-bar Tests that can fail (a renamed heading turns the resolution pin red); `just agent-installed-skill-tests` runs the contract module with no package path | English pins on the entry's sentences: rule 6 forbids them. Importing `agent_tools.skill_sections` in the contract module: the installed-mode run would fail to import it. Adding the command to `LAUNCHER_FLOOR`: it is a floor, and `just build`'s import check plus the table assertion already prove the launcher |
+| D9 | (grill) The boot report's Bash attribution (`READERS` in `agent_boot_report`) does not know `skill-sections`, so helper output would land outside `skill_files`, and the evidence criterion would read falsely low. This slice does not change the report. The post-deploy reading counts as evidence only once a change, in #504 or a follow-up, attributes `skill-sections` output to the file it reads. | Phase-0 scope boundary (boot report changes are out; #504 owns the report); the-bar Truthful terminal states (an unattributed read would show a cut that did not happen) | Adding `skill-sections` to `READERS` here: it crosses the agreed boundary into a module #504 may be editing in parallel. Reading the evidence row without attribution: it would meet the 4k threshold by construction |
