@@ -23,7 +23,7 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/test_agent_boot_report.py`, add after `WINDOW_BOOTS`:
+Extend Task 3's `WindowsTest.write_boots(boots, root=None)`: it writes under `root` (default `self.root`), and a boot tuple may carry a seventh element, its launch (default 2; launch 1 alone in its lineage is `spawned`). In `tests/test_agent_boot_report.py`, add after `WINDOW_BOOTS`:
 
 ```python
 COVERAGE_BOOTS = (  # baseline: alpha and delta in 6-7; event window: alpha and gamma in 6-7, alpha in 0-5
@@ -84,6 +84,23 @@ Add to `WindowsTest`:
                 ("0-5", (0, empty, empty)), ("6-7", (1, alpha_baseline, alpha_candidate)),
                 ("all", (1, alpha_baseline, alpha_candidate)))])
 
+    def test_reweighted_strata_keep_hosts_and_cohorts_apart(self):
+        """WINDOW_BOOTS with beta's boots on host b, every boot project alpha, plus a spawned
+        candidate boot on a: pooling hosts (common 1, mean 36,500) or cohorts fails (D13)."""
+        roots = {label: self.root / label for label in ("a", "b")}
+        for label, project in (("a", "alpha"), ("b", "beta")):
+            spawned = [(4_100, 25, "alpha", 6, 20_000, 90_000, 1)] if label == "a" else []
+            self.write_boots([(*boot[:2], "alpha", *boot[3:]) for boot in WINDOW_BOOTS
+                              if boot[2] == project] + spawned, root=roots[label])
+        document = report(*(f"{label}={root}" for label, root in roots.items()),
+                          extra=(*EVENTS, "--baseline", BASELINE))
+        rows = {(r["host"], r["cohort"], r["phase_group"]): (r["common_strata"], *(
+            r["candidate"][key] for key in ("count", "b_mean", "b_median")))
+            for r in document["reweighted"]}
+        self.assertEqual((rows[("all", "fresh", "all")], rows[("a", "fresh", "6-7")],
+                          rows[("all", "spawned", "all")]),
+                         ((2, 4, 45_500, 50_000), (1, 3, 32_000, 32_000), (0, 0, None, None)))
+
     def test_text_output_prints_the_reweighted_table_after_both_arms(self):
         self.write_boots(COVERAGE_BOOTS)
         completed = costs("--projects-dir", str(self.root), *EVENTS, "--baseline", BASELINE)
@@ -103,7 +120,7 @@ Add to `WindowsTest`:
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run the Boot tests (Global Constraints) with `-k reweighted -k strata_in_one_window`.
-Expected: FAIL. `reweighted` is `None`, so the first test fails its first `assertEqual` and the second raises `TypeError: 'NoneType' object is not iterable`. The text test does not find the `Reweighted to` heading.
+Expected: FAIL. `reweighted` is `None`, so the first test fails its first `assertEqual` and the second and the hosts-and-cohorts test raise `TypeError: 'NoneType' object is not iterable`. The text test does not find the `Reweighted to` heading.
 
 - [ ] **Step 3: Write the minimal implementation**
 
@@ -139,9 +156,9 @@ Check each README clause against the code you wrote, and correct the README wher
 - [ ] **Step 4: Verify**
 
 Run the Boot tests (Global Constraints), whole module.
-Expected: `Ran 24 tests`, `OK`.
+Expected: `Ran 25 tests`, `OK`.
 
-Run: `if grep -n "agent_boot_report" python/agent_tools/agent_boot_rollup.py; then exit 1; fi`
+Run: `if grep -nE "^ *(from|import) .*agent_boot_report" python/agent_tools/agent_boot_rollup.py; then exit 1; fi`
 Expected: exit 0, with no output.
 
 - [ ] **Step 5: Commit**

@@ -68,7 +68,11 @@ Task 4 — Reweighting to the baseline's host × phase group × project mix — 
 
 ## Decisions
 
-The plan rests on D1–D8. Planning appends three rows to the spec's ledger: D9 (the rollup owns the grouping axes and takes the bucket names as an argument), D10 (exact weighted means, every statistic a float or `null`) and D11 (text headings per arm).
+The plan rests on D1–D8. Planning appends three rows to the spec's ledger: D9 (the rollup owns the grouping axes and takes the bucket names as an argument), D10 (exact weighted means, every statistic a float or `null`) and D11 (text headings per arm). The standards review appends D12 (a command cut by a substitution is never a whole read) and D13 (a host-and-cohort reweighting test).
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, base 328f08daca0cd21e71a622f98c91c3f3a7a6728c, plan head a9446c4d, no focus, no fallback. Four findings, all accepted, none rejected or deferred: PR-001 (blocking, Task 1, D12), PR-002 (blocking, Tasks 2 and 4: the rollup check greps imports only), PR-003 (should fix, Task 2: four top-skills alignments), PR-004 (should fix, Task 4, D13).
 
 ---
 

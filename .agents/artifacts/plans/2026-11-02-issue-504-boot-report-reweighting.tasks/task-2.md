@@ -117,7 +117,7 @@ Expected: FAIL. The first test hits `KeyError: 'boot_reading'`. The second fails
   - The `boots` row puts the count under the group's column and `""` under `median` (D11).
   - Then one row per bucket: the mean from `buckets`, the median from `bucket_medians`.
   - Then `boot reading` (`boot_reading_mean`, `boot_reading_median`), `first-unit work` (`first_unit_work_mean`, `first_unit_work_median`), `B` (`b_mean`, `b_median`) and `B without tool schemas` (`b_without_schemas_mean`, `b_without_schemas_median`).
-- `_top_skills` keeps each key's per-fresh-boot values (0 for a boot without the key). Its rows are `[kind, key, _tokens(mean), _tokens(median(values))]`, sorted by mean as today. Its heading becomes `Top skill bodies and skill files (mean and median tokens per fresh boot, all hosts):` and its headers `["kind", "key", "mean", "median"]`.
+- `_top_skills` keeps each key's per-fresh-boot values (0 for a boot without the key). Its rows are `[kind, key, _tokens(mean), _tokens(median(values))]`, sorted by mean as today. Its heading becomes `Top skill bodies and skill files (mean and median tokens per fresh boot, all hosts):`, its headers `["kind", "key", "mean", "median"]` and its alignment `["l", "l", "r", "r"]` (`print_table` takes one alignment per header).
 - The boots table adds `human(boot["boot_reading"])` and `human(boot["first_unit_work"])` after `B`, with headers `boot reading` and `first-unit work` (alignment `"r"`). Its heading becomes `Boots by B (host, issue, cohort, phase, calls, start, B, boot reading, first-unit work, then each bucket):`.
 - Module docstring: add that `agent_tools.agent_boot_rollup` builds the group rows.
 
@@ -138,7 +138,7 @@ Check each README clause against the code you wrote, and correct the README wher
 Run the Boot tests (Global Constraints), whole module.
 Expected: `Ran 17 tests`, `OK`.
 
-Run: `if grep -nE "^(ALL|COHORTS|PHASE_GROUPS) =|def _group_rows" python/agent_tools/agent_boot_report.py; then exit 1; fi; if grep -n "agent_boot_report" python/agent_tools/agent_boot_rollup.py; then exit 1; fi`
+Run: `if grep -nE "^(ALL|COHORTS|PHASE_GROUPS) =|def _group_rows" python/agent_tools/agent_boot_report.py; then exit 1; fi; if grep -nE "^ *(from|import) .*agent_boot_report" python/agent_tools/agent_boot_rollup.py; then exit 1; fi`
 Expected: exit 0, with no output.
 
 - [ ] **Step 5: Commit**
