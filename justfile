@@ -103,6 +103,7 @@ agent-workflow-tests *args:
     tests/test_review_projection_cases.py \
     tests/test_review_history.py \
     tests/test_review_task7.py \
+    tests/test_review_expansion.py \
     tests/test_review_issue121.py \
     tests/test_review_compact121.py \
     tests/test_review_issue100.py \

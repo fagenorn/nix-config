@@ -9,7 +9,8 @@ from agent_tools.review_budget import describe
 from agent_tools.review_forecast import canonical_bytes
 from agent_tools.review_issue100 import Issue100Error, compact_100, derive_100, expand_100, model_100, validate_100
 
-from .retained_review_test_support import issue100_fixture, source_budget_env
+from .retained_review_test_support import (BOUND_PEAK, BOUND_SECONDS, SITES_100, WINDOW, amplified_100, committed,
+                                          issue100_fixture, maximal, measured, rename_chain_100, source_budget_env)
 
 MEMBERS = {"schema_version", "kind", "range", "commits", "parents", "paths", "entries", "records", "record_sha256",
            "edges", "tables", "live", "head_trees", "process", "pending_overlaps", "overlap_sha256", "criteria"}
@@ -235,6 +236,39 @@ class Compact100Test(unittest.TestCase):
         for n, side in sides:
             with self.subTest(record=n):
                 self.refused(lambda p: p["records"][n].__setitem__(side, blob))
+
+
+class Bounded100Test(unittest.TestCase):
+    """Issue 256: what `expand_100` builds from a forged payload is bounded (D3, D6, D8)."""
+
+    def refused(self, payload, *, bound=True):
+        for traced in ((False, True) if bound else (False,)):
+            error, elapsed, peak = measured(lambda: expand_100(payload), traced=traced)
+            self.assertIsInstance(error, Issue100Error, f"{error!r} after {elapsed:.2f} s")
+            self.assertEqual(error.code, "invalid_payload")
+            if traced:
+                self.assertLess(peak, BOUND_PEAK)
+            else:
+                self.assertLess(elapsed, BOUND_SECONDS)
+
+    def test_maximal_rename_chain_is_refused_within_the_bound(self):
+        self.assertEqual(expand_100(rename_chain_100(20))["schema_version"], 1)  # the forgery is well formed
+        payload, size = maximal(rename_chain_100)
+        self.assertTrue(WINDOW[0] <= size <= WINDOW[1], size)
+        self.refused(payload)
+
+    def test_each_amplified_site_is_refused(self):
+        for site in SITES_100:
+            with self.subTest(site=site):
+                self.refused(amplified_100(site), bound=False)
+
+    def test_the_budget_reads_the_public_bound(self):
+        payload = committed("issue-100-derived.json")
+        self.assertEqual(expand_100(payload)["schema_version"], 1)
+        with patch("agent_tools.review_expansion.MEMBER_MAX_BYTES", 100_000):  # below the real model's charge
+            with self.assertRaises(Issue100Error) as caught:
+                expand_100(payload)
+        self.assertEqual(caught.exception.code, "invalid_payload")
 
 
 if __name__ == "__main__":

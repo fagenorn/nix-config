@@ -14,13 +14,16 @@ from agent_tools.review_issue121 import ContributionError, expand_121
 from agent_tools.review_replay import ReplayUnavailable, replay
 from agent_tools.review_witness import ANCHOR_NAME, WitnessError, authenticate, build_anchor, build_witness
 
-from .retained_review_test_support import SOURCE, retained_fixture, source_budget_env, tool_fixture
+from .retained_review_test_support import (BOUND_PEAK, BOUND_SECONDS, SOURCE, edges_by_rows_121, maximal, measured,
+                                          rename_chain_100, retained_fixture, source_budget_env, tool_fixture)
 
 UNAVAILABLE = dict(owners=(1, 2, 3, 6, 3), touches={4: 3})
 NAMES = ("task7_pins", "issue121_pins", "issue100_pins")
 GROUPS = ("tool", "issue_121", "issue_100", "archive", "estimate")
 PREFIX = "replay-retained: "
 ZERO = "sha256:" + "0" * 64
+FORGED = (("issue-100-derived.json", rename_chain_100, Issue100Error),  # maximal forged members (issue 256)
+          ("issue-121.json", edges_by_rows_121, ContributionError))
 
 
 def derived_bundle(tmp, limits=None, **shape):
@@ -111,6 +114,28 @@ class ReplayTest(unittest.TestCase):
                 self.assertEqual(self.main(bundle, forger, kwargs), (2, b"", PREFIX + "invalid: invalid_payload\n"))
                 (bundle / ANCHOR_NAME).write_bytes(canonical_bytes(trusted_anchor))  # the trusted anchor again
                 self.refused("member_digest", bundle, expected, kwargs)
+
+    def test_maximal_forged_member_is_refused_within_the_bound(self):
+        """Decoding and expanding a maximal forged member under the forger's own digest (issue 256 D6). The
+        witness keeps the portable tables: expansion refuses before the tables are compared."""
+        source, expected, kwargs = self.shared()
+        for name, build, error_type in FORGED:
+            with self.subTest(member=name):
+                bundle = Path(shutil.copytree(source, self.tmp / name))
+                anchor, raw = authenticate(bundle, expected)
+                payloads = {member: json.loads(data) for member, data in raw.items()}
+                models = self.models(payloads)
+                forged, size = maximal(build)
+                raw = {**raw, name: canonical_bytes(forged)}
+                forger, _ = self.rebound(bundle, {group: anchor[group] for group in GROUPS}, payloads, raw, models)
+                for traced in (False, True):
+                    error, elapsed, peak = measured(lambda: replay(bundle, forger, **kwargs), traced=traced)
+                    self.assertIsInstance(error, error_type, f"{error!r} after {elapsed:.2f} s ({size} B)")
+                    self.assertEqual(error.code, "invalid_payload")
+                    if traced:
+                        self.assertLess(peak, BOUND_PEAK)
+                    else:
+                        self.assertLess(elapsed, BOUND_SECONDS)
 
     def test_unavailable_bundle_replays_without_sources_in_outcome_order(self):
         bundle, expected, kwargs = derived_bundle(self.tmp, **UNAVAILABLE)
