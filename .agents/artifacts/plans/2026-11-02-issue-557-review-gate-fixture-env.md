@@ -45,6 +45,10 @@ Task 1 — The capture test runs under the fixture's budget authority — `tests
 
 Per D1 (only the test changes), D2 (one environment block around `describe` and every `capture`), D3 (positive control) and D4 (where each criterion is read). Planning added no ledger row.
 
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, base `763d8d48`, no focus, no fallback. Accepted 1 (should-fix PR-001: the stand-in prefix now prints `$PATH` with a trailing newline so `read` keeps the last directory), rejected 0, deferred 0. No ledger row: a verification-command fix, not a decision.
+
 ---
 
 ## Review feasibility delivery

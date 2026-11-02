@@ -18,7 +18,7 @@
 **Hosted-runner stand-in.** Every run below uses this `bash -c` prefix, called `<no-installed>` here. It drops each `PATH` directory that holds an `artifact-budget` executable and fails when one is still found. The prefix runs from the worktree root:
 
 ```bash
-set -o pipefail; PATH="$(printf %s "$PATH" | tr ":" "\n" | while IFS= read -r d; do [ -x "$d/artifact-budget" ] || printf "%s\n" "$d"; done | paste -sd: -)"; if command -v artifact-budget >/dev/null; then echo "artifact-budget still on PATH"; exit 1; fi;
+set -o pipefail; PATH="$(printf "%s\n" "$PATH" | tr ":" "\n" | while IFS= read -r d; do [ -x "$d/artifact-budget" ] || printf "%s\n" "$d"; done | paste -sd: -)"; if command -v artifact-budget >/dev/null; then echo "artifact-budget still on PATH"; exit 1; fi;
 ```
 
 - [ ] **Step 1: Watch the existing test fail**
