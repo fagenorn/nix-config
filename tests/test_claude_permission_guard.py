@@ -17,7 +17,8 @@ from .guard_policy_world import GuardPolicyWorld
 SETTINGS_PATH = Path(os.environ["CLAUDE_SETTINGS_PATH"])
 BASE_POLICY_PATH = Path(os.environ["CLAUDE_GUARD_BASE_POLICY_PATH"])
 NODO = "elevenyellow/nodocom"
-NODO_ROW = {"default_branch": "main", "integration_branch": "dev", "evidence": {}}
+NODO_ROW = {"default_branch": "main", "integration_branch": "dev", "required_checks": [],
+            "evidence": {}}
 ABSENT = object()
 EXPECTED_ALLOW = [
     "Bash(git fetch:*)", "Bash(git status:*)", "Bash(git log:*)",
@@ -2169,13 +2170,26 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         "derived key is not a slug": {"derived_repositories": {"nodocom": NODO_ROW}},
         "row is not an object": {"derived_repositories": {NODO: "dev"}},
         "row lacks evidence": {"derived_repositories": {
-            NODO: {"default_branch": "main", "integration_branch": "dev"}}},
+            NODO: {"default_branch": "main", "integration_branch": "dev",
+                   "required_checks": []}}},
         "row has an extra member": {"derived_repositories": {NODO: {**NODO_ROW, "owner": "x"}}},
         "empty branch": {"derived_repositories": {NODO: {**NODO_ROW, "integration_branch": ""}}},
         "branch is not a ref name": {
             "derived_repositories": {NODO: {**NODO_ROW, "default_branch": "main; true"}}},
         "branch is not a string": {"derived_repositories": {NODO: {**NODO_ROW, "default_branch": None}}},
         "evidence is not an object": {"derived_repositories": {NODO: {**NODO_ROW, "evidence": []}}},
+        "the schema-2 row shape": {"derived_repositories": {
+            NODO: {"default_branch": "main", "integration_branch": "dev", "evidence": {}}}},
+        "required_checks is null": {"derived_repositories": {
+            NODO: {**NODO_ROW, "required_checks": None}}},
+        "required_checks is not a list": {"derived_repositories": {
+            NODO: {**NODO_ROW, "required_checks": "CI"}}},
+        "a required check is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "required_checks": ["CI", ""]}}},
+        "a required check is not a string": {"derived_repositories": {
+            NODO: {**NODO_ROW, "required_checks": ["CI", 7]}}},
+        "a required check repeats": {"derived_repositories": {
+            NODO: {**NODO_ROW, "required_checks": ["CI", "CI"]}}},
         "derivation is a list": {"derived_repositories": {NODO: NODO_ROW}, "derivation": []},
         "missing derivation": {"derived_repositories": {NODO: NODO_ROW}, "derivation": ABSENT},
         "an extra member": {"derived_repositories": {NODO: NODO_ROW}, "grants": []},
@@ -2267,7 +2281,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         slug = "fagenorn/literal-fixture"
         base = self.write_base(integration_bases={slug: "dev"})
         policy = self.write_policy(derivation={}, derived_repositories={
-            slug: {"default_branch": "trunk", "integration_branch": "release", "evidence": {}}})
+            slug: {"default_branch": "trunk", "integration_branch": "release",
+                   "required_checks": [], "evidence": {}}})
         args = ("--gh-bin", str(self.fake_gh), "--base-policy", str(base),
                 "--policy", str(policy))
         repo = self.make_repo(f"git@github.com:{slug}.git")
@@ -2443,7 +2458,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         """R6, D8: a derived row is checked even when the owner is a literal authorized owner."""
         slug = "fagenorn/nix-config"
         policy = self.write_policy(derivation={}, derived_repositories={
-            slug: {"default_branch": "main", "integration_branch": "main", "evidence": {}}})
+            slug: {"default_branch": "main", "integration_branch": "main",
+                   "required_checks": [], "evidence": {}}})
         self.assertIn("fagenorn", self.base_policy["authorized_owners"])
         args = ("--gh-bin", str(self.fake_gh), "--policy", str(policy))
         repo = self.make_repo(f"git@github.com:{slug}.git", default_branch="trunk")
@@ -2463,10 +2479,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_single_branch_derived_row_keeps_the_default_branch_only_rule(self):
         policy = self.write_policy(derivation={}, derived_repositories={
             "acme/tool": {"default_branch": "main", "integration_branch": "main",
-                          "evidence": {}}})
+                          "required_checks": [], "evidence": {}}})
         args = ("--gh-bin", str(self.fake_gh), "--policy", str(policy))
         env = self.rows_env({"acme/tool": {"default_branch": "main",
-                                           "integration_branch": "main", "evidence": {}}})
+                                           "integration_branch": "main",
+                                           "required_checks": [], "evidence": {}}})
         repo = self.make_repo("git@github.com:acme/tool.git")
         create = 'gh pr create --repo acme/tool --base {} --head t --title "x" --body "y"'
         self.assertEqual(
@@ -2502,7 +2519,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertIn("outside standing authorization", refused.stderr)
         forged = json.loads(world.output.read_text(encoding="utf-8"))
         forged["derived_repositories"]["acme/forged"] = {
-            "default_branch": "main", "integration_branch": "main", "evidence": {}}
+            "default_branch": "main", "integration_branch": "main", "required_checks": [],
+            "evidence": {}}
         forged_args = (*args, "--policy", str(self.write_policy(**forged)))
         forged_repo = self.make_repo("git@github.com:acme/forged.git")
         refused = self.run_guard("git push -u origin topic", cwd=forged_repo,
@@ -2612,7 +2630,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         slug = "acme/forged"
         policy = self.write_policy(derivation={}, derived_repositories={
             NODO: NODO_ROW,
-            slug: {"default_branch": "main", "integration_branch": "main", "evidence": {}}})
+            slug: {"default_branch": "main", "integration_branch": "main",
+                   "required_checks": [], "evidence": {}}})
         args = ("--gh-bin", str(self.fake_gh), "--policy", str(policy))
         self.assert_unconfirmed(slug, "refused (no registered project derives it)",
                                 guard_args=args)
@@ -2628,12 +2647,39 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             guard_args=("--gh-bin", str(self.fake_gh), "--policy", str(forged)))
         literal = "fagenorn/tool"
         widened = self.write_policy(derivation={}, derived_repositories={
-            literal: {"default_branch": "main", "integration_branch": "dev", "evidence": {}}})
+            literal: {"default_branch": "main", "integration_branch": "dev",
+                      "required_checks": [], "evidence": {}}})
         self.assert_unconfirmed(
             literal, "it derives main and main, the row names main and dev", base="dev",
             guard_args=("--gh-bin", str(self.fake_gh), "--policy", str(widened)),
             env=self.rows_env({literal: {"default_branch": "main", "integration_branch": "main",
-                                         "evidence": {}}}))
+                                         "required_checks": [], "evidence": {}}}))
+
+    def test_a_row_whose_required_checks_differ_from_the_derivation_is_refused(self):
+        """Issue 552 D5: the row check confirms the declared checks as lists, order
+        included, and a derived report whose checks are not a list of strings is
+        unreadable."""
+        slug = "acme/checks"
+        derived = {"default_branch": "main", "integration_branch": "main",
+                   "required_checks": ["CI", "lint"], "evidence": {}}
+        env = self.rows_env({slug: derived})
+        confirmed = self.write_policy(derivation={}, derived_repositories={slug: derived})
+        args = ("--gh-bin", str(self.fake_gh), "--policy", str(confirmed))
+        allowed = self.run_guard("git push -u origin topic", guard_args=args, env=env,
+                                 cwd=self.make_repo(f"git@github.com:{slug}.git"))
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+        for compiled, named in ((["lint"], '["lint"]'), (["lint", "CI"], '["lint","CI"]'),
+                                ([], "[]")):
+            policy = self.write_policy(derivation={}, derived_repositories={
+                slug: {**derived, "required_checks": compiled}})
+            self.assert_unconfirmed(
+                slug, f'it derives required checks ["CI","lint"], the row names {named}',
+                env=env, guard_args=("--gh-bin", str(self.fake_gh), "--policy", str(policy)))
+        for reported in (ABSENT, None, "CI", ["CI", 7]):
+            row = {key: value for key, value in {**derived, "required_checks": reported}.items()
+                   if value is not ABSENT}
+            self.assert_unconfirmed(slug, "unreadable report (exit 0)", guard_args=args,
+                                    env=self.rows_env({slug: row}))
 
     def test_a_failing_row_check_refuses_with_no_fallback(self):
         """Issue 377 R2, D3."""
@@ -2746,7 +2792,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         plain.write_text(f'#!{bash}\nexec {self.fake_derive} "$@"\n', encoding="utf-8")
         plain.chmod(0o755)
         slug = "acme/forged"
-        row = {"default_branch": "main", "integration_branch": "main", "evidence": {}}
+        row = {"default_branch": "main", "integration_branch": "main", "required_checks": [],
+               "evidence": {}}
         report = json.dumps({"schema_version": 1, "repository": slug, "outcome": "derived",
                              "row": row, "refused": [], "cause": None})
         forge = f"printf '%s\\n' {shlex.quote(report)}; builtin exit 0"

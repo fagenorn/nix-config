@@ -28,7 +28,9 @@ BASE_POLICY_KEYS = frozenset(
     {"authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin"}
 )
 COMPILED_POLICY_KEYS = frozenset({"derived_repositories", "derivation"})
-DERIVED_ROW_KEYS = frozenset({"default_branch", "integration_branch", "evidence"})
+DERIVED_ROW_KEYS = frozenset(
+    {"default_branch", "integration_branch", "required_checks", "evidence"}
+)
 # A policy file larger than this is refused unread. Either file is a few kilobytes,
 # so the cap only bounds the read of a file that is not what it claims to be.
 POLICY_MAX_BYTES = 1 << 20
@@ -1362,7 +1364,7 @@ def load_compiled_policy(path):
     """(rows, None) for a well-formed compiled policy at `path`, else ({}, reason).
 
     The file supplies derived rows alone: `derived_repositories` maps a repository
-    slug to its row, and the guard reads a row's two branches and leaves
+    slug to its row, and the guard reads a row's two branches and its required checks and leaves
     `evidence` and `derivation` to the compiler that wrote them. The path is read
     without blocking and only when it is a regular file of at most
     POLICY_MAX_BYTES (`_read_policy_bytes`). A file that is anything else, cannot
@@ -1388,6 +1390,16 @@ def load_compiled_policy(path):
             branch = row[key]
             if not isinstance(branch, str) or REF_NAME_PATTERN.fullmatch(branch) is None:
                 return {}, f"{path}: derived_repositories {repository} {key} must be a branch name"
+        checks = row["required_checks"]
+        if (
+            not isinstance(checks, list)
+            or not all(isinstance(check, str) and check for check in checks)
+            or len(set(checks)) != len(checks)
+        ):
+            return {}, (
+                f"{path}: derived_repositories {repository} required_checks "
+                "must be a list of distinct non-empty strings"
+            )
         if not isinstance(row["evidence"], dict):
             return {}, f"{path}: derived_repositories {repository} evidence must be an object"
     if document["derivation"] is not None and not isinstance(document["derivation"], dict):
@@ -1475,7 +1487,10 @@ class Context:
 def _report_mismatch(report, status, repository, row):
     """Why `report` (the row check's parsed stdout) does not confirm `row`, or None.
 
-    A shape failure is an unreadable report; `evidence` is never compared.
+    A shape failure, a `row.required_checks` that is not a list of strings
+    included, is an unreadable report. The branches are compared first, then the
+    required checks as lists, order included (issue 552 D5); `evidence` is never
+    compared.
     """
     unreadable = f"unreadable report (exit {status})"
     if not isinstance(report, dict) or report.get("repository") != repository:
@@ -1486,8 +1501,11 @@ def _report_mismatch(report, status, repository, row):
     if outcome == "derived":
         derived = report.get("row")
         branches = ("default_branch", "integration_branch")
-        if not isinstance(derived, dict) or not all(
-            isinstance(derived.get(key), str) for key in branches
+        if (
+            not isinstance(derived, dict)
+            or not all(isinstance(derived.get(key), str) for key in branches)
+            or not isinstance(derived.get("required_checks"), list)
+            or not all(isinstance(check, str) for check in derived["required_checks"])
         ):
             return unreadable
         if any(derived[key] != row[key] for key in branches):
@@ -1495,6 +1513,12 @@ def _report_mismatch(report, status, repository, row):
                 f"it derives {derived['default_branch']} and {derived['integration_branch']}, "
                 f"the row names {row['default_branch']} and {row['integration_branch']}"
             )
+        if derived["required_checks"] != row["required_checks"]:
+            derives, names = (
+                json.dumps(checks, separators=(",", ":"))
+                for checks in (derived["required_checks"], row["required_checks"])
+            )
+            return f"it derives required checks {derives}, the row names {names}"
         return None
     if outcome == "refused":
         refused = report.get("refused")
