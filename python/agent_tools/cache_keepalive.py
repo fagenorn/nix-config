@@ -31,10 +31,15 @@ AGENT_HEADER = "x-claude-code-agent-id"
 USAGE_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
                 "output_tokens", "cache_creation")
 
-END_REASONS = ("resumed", "ceiling", "session_idle", "ping_failed", "evicted")
+END_REASONS = ("resumed", "ceiling", "session_idle", "ping_failed", "evicted", "end_turn_cap")
 DUE_AFTER = 270.0
 TICK_INTERVAL = 5.0
 WINDOW = 3600.0
+# An idle period whose conversation's last reply was `end_turn` ends `end_turn_cap` at the first
+# due time at which it holds this many pings. Two keep the cache about 14 minutes past the request
+# (2 x 270 s, then the 5-minute lifetime) and gave the best net saving on mbp's proxy log for
+# 2026-10-26..11-01 (issue 502 D2).
+END_TURN_PINGS = 2
 MAX_CANDIDATES = 64
 PING_TIMEOUT = 30.0
 
@@ -253,6 +258,7 @@ class _Conversation:
     in_flight: dict["Track", float] = field(default_factory=dict)
     last_request: float | None = None
     pending_since: float | None = None
+    last_reply: str | None = None
     epoch: int = 0
     applied: int = 0
     pings: int = 0
@@ -350,8 +356,8 @@ class Keepalive:
 
         A thread request (any other outcome but `no_tail_mark`) is its conversation's next turn:
         it ends a pinged idle period `resumed`, stamps the last request, advances the sequence and
-        clears a pending tool. A side request (`no_tail_mark`) does none of these, so it counts as
-        session activity only while it is in flight (issue 501)."""
+        clears a pending tool and the last reply. A side request (`no_tail_mark`) does none of
+        these, so it counts as session activity only while it is in flight (issue 501)."""
         verdict = classify(method, path, headers, body)
         if verdict.outcome == "untracked":
             return Track(headers)
@@ -366,6 +372,7 @@ class Keepalive:
                 record.last_request = now
                 record.epoch += 1
                 record.pending_since = None
+                record.last_reply = None
                 sequence = record.epoch
             candidate = None
             if verdict.outcome == "tracked":
@@ -375,6 +382,10 @@ class Keepalive:
             return track
 
     def tick(self) -> list[Ping]:
+        """The pings now due. At its due time a candidate's conversation ends `ceiling` or
+        `session_idle` when their rules apply, else `end_turn_cap` when its last reply was
+        `end_turn` and its idle period already holds `END_TURN_PINGS` pings or more; otherwise it
+        is pinged."""
         now = self._clock()
         pings = []
         with self._lock:
@@ -387,6 +398,8 @@ class Keepalive:
                     self._end(record, "ceiling", now)
                 elif not self._active(record, now):
                     self._end(record, "session_idle", now)
+                elif record.last_reply == "end_turn" and record.pings >= END_TURN_PINGS:
+                    self._end(record, "end_turn_cap", now)
                 else:
                     pings.append(self._build_ping(record, candidate, now))
         return pings
@@ -505,6 +518,9 @@ class Keepalive:
                 raise ValueError(f"unhandled keepalive outcome {other!r}")
 
     def _done(self, track: Track, outcome: str) -> None:
+        """End a request's flight. A completed 2xx response to its conversation's newest thread
+        request sets the last reply to its `stop_reason` (`None` when the tap read none), and a
+        `tool_use` one also marks a tool pending."""
         with self._lock:
             if track._finished:
                 return
@@ -514,8 +530,10 @@ class Keepalive:
             if outcome == "complete" and track._reader is not None:
                 track.stop_reason = track._reader.stop_reason
             if (track._status is not None and 200 <= track._status < 300 and outcome == "complete"
-                    and track.stop_reason == "tool_use" and track._sequence == record.epoch):
-                record.pending_since = self._clock()
+                    and track._sequence == record.epoch):
+                record.last_reply = track.stop_reason
+                if track.stop_reason == "tool_use":
+                    record.pending_since = self._clock()
 
     def _exchange(self, ping: Ping, sent: float, result: _PingResult) -> None:
         """Send the ping and read its response, for at most `PING_TIMEOUT` overall (D31, D32).
