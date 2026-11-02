@@ -32,6 +32,7 @@ bare `origin` that a second clone, the publisher, advances.
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -296,6 +297,26 @@ class ObserveTest(ObserveCase):
         self.refused(self.observe(), "git fetch: ")
         self.assertEqual(self.tracking(), before)
 
+    def test_a_failed_or_malformed_read_after_the_fetch_is_refused(self):
+        """A `git` shim on the tool's PATH breaks only `ls-tree`; the fetch stays real."""
+        real = shutil.which("git", path=self.env.get("PATH"))
+        shim = self.scratch / "shim"
+        shim.mkdir()
+        env = {**self.env, "PATH": f"{shim}{os.pathsep}{self.env.get('PATH', '')}"}
+        for action, fragment in (
+                ("echo 'fatal: bad tree' >&2; exit 128", "git ls-tree: fatal: bad tree"),
+                ("printf 'garbage'; exit 0", "git ls-tree: unexpected output for ")):
+            with self.subTest(action=action):
+                (shim / "git").write_text(
+                    '#!/bin/sh\nfor a in "$@"; do [ "$a" = ls-tree ] && { ' + action
+                    + '; }; done\nexec ' + shlex.quote(real) + ' "$@"\n', encoding="utf-8")
+                (shim / "git").chmod(0o755)
+                done = subprocess.run(
+                    [*COMMAND, "observe", "--repo-root", str(self.root), "--input", "-"],
+                    input=json.dumps(self.REQUIREMENT), capture_output=True, text=True,
+                    env=env, timeout=300, check=False)
+                self.refused(done, fragment)
+
     def test_observe_needs_no_runnable_verification_command(self):
         def ghost(bindings):
             bindings["commands"]["ghost"] = {"argv": ["verification-observe-no-such-program"],
@@ -339,7 +360,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_verification_observe.py 2>&1 | tail -4'`
-Expected: `Ran 12 tests` and `FAILED`; every child's stderr names `No module named agent_tools.verification_observe`.
+Expected: `Ran 13 tests` and `FAILED`; every child's stderr names `No module named agent_tools.verification_observe`.
 
 - [ ] **Step 3: Write the adapter and its wiring**
 
@@ -361,7 +382,9 @@ Add the `justfile` line named under **Files**.
 - [ ] **Step 4: Verify**
 
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_verification_blocker.py tests/test_verification_observe.py 2>&1 | tail -4'`
-Expected: `Ran 26 tests` and `OK`.
+Expected: `Ran 27 tests` and `OK`.
+
+Stage first: the Git-backed flake cannot see an untracked file, so an unstaged module fails the row's module assertion. Run: `git add python/agent_tools/verification_observe.py tests/test_verification_observe.py lib/agent-tools.nix python/README.md justfile`
 
 Run (timeout 3600 s): `bash -c 'set -o pipefail; just build 2>&1 | tail -3'`
 Expected: exit 0 (the row's module check and the build-time import of every module pass).

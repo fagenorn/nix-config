@@ -19,7 +19,7 @@ Spec: `.agents/artifacts/specs/2026-11-02-issue-543-verification-blocker-c1-desi
 - Comments, docstrings and README sentences describe the code as it behaves at the task's commit, never a later task's. No `TODO` or `FIXME`. Code prose and the README cite this spec as `issue 543 Dn`, never a bare `Dn`. Commit messages say "issue 543", never a bare `#543`.
 - The live lifecycle guard reads a command's raw text, so no gate command or commit message pairs `git` with `push`; the tests run Git from Python, which no Bash call shows.
 - Run every long command, each test command included, in the foreground from the worktree root as `launch-scope exec --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- <argv>`, with an explicit timeout above its duration. Commit through `launch-commit --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- <git commit args>`; commits are SSH-signed, subjects at most 64 bytes, ending with the session's trailer lines. Scratch files go under the root `launch-scope scratch` prints. Never run `just switch`, and never push.
-- Focused tests: Task 1's module ends `Ran 14 tests` (under 1 s); Task 2's ends `Ran 12 tests` (about 20 s).
+- Focused tests: Task 1's module ends `Ran 14 tests` (under 1 s); Task 2's ends `Ran 13 tests` (about 20 s).
 - Final gate (sdd runs it once, on the final head): `just build` and `just agent-workflow-tests`, timeout 3600 s each.
 
 ## Test seams
@@ -46,13 +46,17 @@ Task 3 — Allow `verification-observe` in the Claude permission surface — `ho
 | AC | Kind | Task | Check |
 |----|------|------|-------|
 | AC1 | code (classified) | Task 1 | `tests/test_verification_blocker.py`: `ShapeTest` and `DeclarationTest` (malformed and unclassified refused), `SecretShapeTest` (every D4 clause, a superset of `is_secret_path`), `IdentityTest` (the pinned id, equal across key order, distinct per changed member, none for an invalid failure). No shape has a member for logs, env values, transcripts or the worktree path (closed objects, D2). Fails at Task 1 Step 2; green at the final gate. |
-| AC2 | code (classified) | Task 2 | `tests/test_verification_observe.py`: `FailureTest` (one resolved command, the guard, no host path in stdout) and `ObserveTest` (equal, changed, `null`, nested entries; `test_a_failed_fetch_prints_nothing_and_moves_nothing`). Fails at Task 2 Step 2; green at the final gate. |
+| AC2 | code (classified) | Task 2 | `tests/test_verification_observe.py`: `FailureTest` (one resolved command, the guard, no host path in stdout) and `ObserveTest` (equal, changed, `null`, nested entries; `test_a_failed_fetch_prints_nothing_and_moves_nothing`, `test_a_failed_or_malformed_read_after_the_fetch_is_refused`). Fails at Task 2 Step 2; green at the final gate. |
 | AC3 | code (classified) | Task 3 | Tasks 1 and 2 add both modules to `just agent-workflow-tests`; Task 3 Step 4 runs `tests/test_claude_permission_guard.py` against the build, ending `OK`. |
 | AC4 | code (classified) | Task 3 | Each task's focused tests; Task 3 Step 4 runs `just build`; sdd's final verification runs `just build` and `just agent-workflow-tests`, whose `verified-tree check` `run` holds `nix-build` and `agent-workflow-tests` and never `nix-activate`. No command in this plan runs `just switch`. |
 
 ## Decisions
 
-The plan rests on the spec's D1–D13. Planning appends D14 (one read per selected path, no optional locks) and D15 (the guard's ref-free checks before the fetch, the byte bound after it, the pure module's imports).
+The plan rests on the spec's D1–D13. Planning appends D14 (one read per selected path, no optional locks) and D15 (the guard's ref-free checks before the fetch, the byte bound after it, the pure module's imports). Standards review appends D16 (a PATH `git` shim as the post-fetch read-failure seam).
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, base `328f08daca0cd21e71a622f98c91c3f3a7a6728c`, plan head `0f0074a4`, no focus, no fallback. Accepted 3, rejected 0, deferred 0. PR543-B1 (Task 2 built before staging its new module): Task 2 Step 4 now stages before `just build`. PR543-B2 (Task 3 forecast undercounted `default.nix`): `r3a.added_lines` is 4. PR543-S1 (no post-fetch read failure tested): Task 2 adds `test_a_failed_or_malformed_read_after_the_fetch_is_refused` per D16; counts move to 13 and 27.
 
 ---
 
