@@ -287,7 +287,8 @@ class Track:
 
     A track of an untracked request has no owner and ignores every call. A side request's track
     (`no_tail_mark`) has no sequence: it holds no place in its conversation's request order, so it
-    never marks a tool pending and never supersedes a ping.
+    never marks a tool pending, never sets its conversation's last reply and never supersedes a
+    ping.
     """
 
     def __init__(self, headers: Headers, owner: "Keepalive | None" = None, outcome: str = "untracked",

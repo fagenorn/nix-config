@@ -49,12 +49,14 @@ Task 1 — Cap pings after an end_turn reply — `python/agent_tools/cache_keepa
 
 ## AC2 measurement
 
-Read-only, post-merge, on mbp (D7). Set `START` and `END` as the AC2 row says, as ISO-8601 UTC timestamps in the log's own `ts` format (for example `2026-11-03T09:00:00.000Z`). The script reads each JSON line whose `ts` lies in `[START, END)`. A conversation's last reply is the `stop_reason` of its newest `request` line whose `keepalive` is neither `untracked` nor `no_tail_mark`. An idle period is closed by a `keepalive_end` line, whose `pings` field is that period's count; a `listening` line (a restart forgets every conversation) or the end of the window closes each still-open period with the number of its `ping` lines since its last `keepalive_end`. It prints `end_turn_periods` (periods whose last reply was `end_turn`), `over_cap` (those with more than 2 pings) and `max_pings` among them. On the pre-change log of 2026-10-26..11-01 it prints `{"end_turn_periods": 2003, "over_cap": 1295, "max_pings": 13}`, so it detects the behaviour this issue removes.
+Read-only, post-merge, on mbp (D7). Choose `START` and `END` as the AC2 row says, as ISO-8601 UTC timestamps in the log's own `ts` format (for example `2026-11-03T09:00:00.000Z`), and replace the two `<ts>` placeholders with them: the inline assignments put both in the script's environment, which is where it reads them, and its only argument is the log path. It refuses, exiting non-zero with a message on stderr and printing nothing on stdout, when `START` or `END` is missing or empty or when `START` is not before `END`. The script reads each JSON line whose `ts` lies in `[START, END)`. A conversation's last reply is the `stop_reason` of its newest `request` line whose `keepalive` is neither `untracked` nor `no_tail_mark`. An idle period is closed by a `keepalive_end` line, whose `pings` field is that period's count; a `listening` line (a restart forgets every conversation) or the end of the window closes each still-open period with the number of its `ping` lines since its last `keepalive_end`. It prints `end_turn_periods` (periods whose last reply was `end_turn`), `over_cap` (those with more than 2 pings) and `max_pings` among them. On the pre-change log of 2026-10-26..11-01 it prints `{"end_turn_periods": 2003, "over_cap": 1295, "max_pings": 13}`, so it detects the behaviour this issue removes.
 
 ```bash
 START=<ts> END=<ts> python3 -I -c '
-import json, sys
-start, end, path = sys.argv[1], sys.argv[2], sys.argv[3]
+import json, os, sys
+start, end, path = os.environ.get("START", ""), os.environ.get("END", ""), sys.argv[1]
+if not start or not end or start >= end:
+    sys.exit("refusing: set START and END inline, non-empty, with START before END")
 last, open_pings, periods, over = {}, {}, 0, []
 def close(conversation, pings):
     global periods
@@ -84,7 +86,7 @@ for raw in open(path, encoding="utf-8", errors="replace"):
 for k, n in open_pings.items():
     close(k, n)
 print(json.dumps({"end_turn_periods": periods, "over_cap": len(over), "max_pings": max(over, default=0)}))
-' "$START" "$END" ~/Library/Logs/claude-cache-proxy.log
+' ~/Library/Logs/claude-cache-proxy.log
 ```
 
 ## Decisions
