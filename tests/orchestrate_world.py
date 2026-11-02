@@ -161,7 +161,7 @@ class OrchestrateWorld:
             shim.chmod(0o755)
         self.env = {**os.environ, "HOME": str(self.home),
                     "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
-                    "PYTHONPATH": str(ROOT / "python"), "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONPATH": str(ROOT / "python"),
                     "GITHUB_TOKEN": "harness-token", "GH_TOKEN": "harness-token",
                     "ORCH_TEST_SENTINEL": "harness-token",
                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,

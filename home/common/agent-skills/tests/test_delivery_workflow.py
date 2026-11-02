@@ -215,7 +215,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
 
     def test_contractless_public_outputs_are_requirement_only(self):
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+            root = Path(raw); env = dict(os.environ)
             def run(*args):
                 return subprocess.run([sys.executable, str(WORKFLOW), *map(str, args)],
                     capture_output=True, text=True, env=env, check=False)
@@ -388,7 +388,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             for layout in ("source", "installed"):
                 base = root / layout; home = base / "home"; repo = base / "repo"
                 home.mkdir(parents=True); repo.mkdir()
-                env = {**os.environ, "HOME": str(home), "PYTHONDONTWRITEBYTECODE": "1"}
+                env = {**os.environ, "HOME": str(home)}
                 store = base / ("toolchain/scripts" if layout == "source" else "store")
                 store.mkdir(parents=True)
                 shutil.copy2(WORKFLOW, store / "workflow-state.py")
@@ -1631,7 +1631,7 @@ class BuilderHarness:
         completed = subprocess.run(
             [sys.executable, str(WORKFLOW), *map(str, args)], input=stdin,
             capture_output=True, check=False, cwd=cwd,
-            env={**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"})
+            env={**os.environ, "HOME": str(self.home)})
         if ok:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         return completed
@@ -2149,7 +2149,7 @@ class LegacyWorktreeTest(BuilderHarness, unittest.TestCase):
         def git_failure(path):
             control = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
                 capture_output=True, check=False, timeout=60,
-                env={**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"})
+                env={**os.environ, "HOME": str(self.home)})
             self.assertNotEqual(control.returncode, 0)
             lines = [line.strip() for line in control.stderr.decode("utf-8", "replace").splitlines()
                      if line.strip()]
