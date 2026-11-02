@@ -13,7 +13,7 @@ Spec: `.agents/artifacts/specs/2026-11-02-issue-546-verification-blocker-c4-desi
 
 ## Global Constraints
 
-- Base `763d8d48570c747ad368d0849939328ad12b49ed`, the immutable delivery base. Spec commits `96de1c5a` and `6c84b89f`, plus the planning commit that appends D16–D17.
+- Base `763d8d48570c747ad368d0849939328ad12b49ed`, the immutable delivery base. Spec commits `96de1c5a` and `6c84b89f`, plus the planning commit that appends D16–D17 and the Phase-5 review commit that appends D18.
 - Standard library only: `python/pyproject.toml` keeps `dependencies = []`. `orchestrate_control` imports the adapter as a packaged sibling (agent-helpers rule 3).
 - Not edited: `workflow-state.py`, `delivery_model/*`, `verification_blocker.py`, the `attempt_*` modules, `lib/agent-tools.nix`, `lifecycle_guard.py`, the allow list's entries, `justfile`, `orchestrate-issues` (both trees), `acquire-durable.md`, `AUTO.md`, `rollover.md`, `delegated-owner.md`, `sdd/SKILL.md`, `CLAUDE.md`, `AGENTS.md`. No ledger schema, interface version or shape moves (D1, D7).
 - Comments, docstrings and README sentences describe the code as it behaves at the task's commit, never a later task's. No `TODO` or `FIXME`. Code prose cites `issue 546 Dn`, never a bare `Dn`; commit messages say "issue 546", never a bare `#546`.
@@ -46,12 +46,16 @@ Task 3 — Owner procedures, ceilings and the lifecycle README — `home/common/
 | AC | Kind | Task | Check |
 |----|------|------|-------|
 | AC1 | code (classified) | Task 3 | Step 4's AC1 set: `test_attempt_migration` (migration), `test_verification_suspension` (`HelperGenerationTest`: helper generation and stale-version refusals), `test_control_cutover`, `test_verification_control`, `test_verification_direct`, `test_verification_blocker`, `test_verification_observe` (`ObserveAllTest`, Task 1) and `test_orchestrate_control` (`GatherTest`, Task 2: the source `orchestrate-control` over the source `workflow-state` shim first on `PATH`), plus Task 3's caller pins; the README's source-helper paragraph states the until-activation rule (D10). Red at each task's Step 2. |
-| AC2 | evidence (classified) | Task 3 | Command: this plan's SDD workspace ledger (`sdd-workspace <plan root>`), read at the final review. Conditions: this delivery's own gates at the final head; parent and c1–c3 reviews do not count. Threshold: an `sdd-gate next` projection exit 0 recorded for each of Tasks 1–3, every `Delivery gate:` line recorded, a task review per task, separate conformance and correctness final verdicts with distinct reviewer identities, and `Final verification: passed` naming the final head. The final-review controller fills acceptance-record row AC2 from that ledger. |
+| AC2 | code (classified) | Task 3 | Graded in the order the records exist (D18). Final-head clause: the Declared verification line (`just build`, `just agent-workflow-tests`), which Final verification runs at the final head after the acceptance record's commit, so the row's `Observed` is `in final verification` and sdd's `verification_state` and its `Final verification: passed (head <sha>, …)` ledger line report the run. Process clauses, from records that exist before the record's commit: the conformance first pass reads `progress.md` in `sdd-workspace <plan root>` at HEAD and cites, for each of Tasks 1–3, its `Task N: complete` line and the `Delivery gate:` line `sdd-gate next` writes only after that task's projection exits 0; the controller then confirms from the same ledger that the conformance and correctness first-pass verdicts are ledgered separately with distinct reviewer identities before it writes AC2's `Verdict`. Parent and c1–c3 reviews do not count. |
 | AC3 | code (classified) | Task 3 | Each task's focused commands; Tasks 2 and 3 Step 4 run `just build`; sdd's final gate runs `just build` and `just agent-workflow-tests`. No command in this plan runs `just switch`; the ship report names source integration (the merge) and host activation (the user's `just switch`) as separate lines. |
 
 ## Decisions
 
-The plan rests on the spec's D1–D15. Planning appends D16 (the issue-227 growth pin drops `from-issue/SKILL.md`, whose growth the labelled ceilings gate) and D17 (refines D11: the behavioural skill-contract pins run their source validators in children, because the installed tier has no package on its path).
+The plan rests on the spec's D1–D15. Planning appends D16 (the issue-227 growth pin drops `from-issue/SKILL.md`, whose growth the labelled ceilings gate) and D17 (refines D11: the behavioural skill-contract pins run their source validators in children, because the installed tier has no package on its path). Phase-5 review appends D18 (AC2 graded in the order its records exist; every repair case named in Task 3's step-4 block).
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-companion` plan-review, gpt-6-astra, xhigh), isolated read-only mode, no focus, base `763d8d48570c747ad368d0849939328ad12b49ed`, plan head `3aed795f`. Accepted 2: B1 (AC2 required `Final verification: passed`, which exists only after the acceptance record's commit: AC2 regraded per D18) and S1 (Task 3's step-4 block named every repair case per D5, D18). Rejected 0, deferred 0. Discussion: the reviewer could not reach api.github.com and used the supplied issue text, which matches the live issue body. No fallback.
 
 ---
 

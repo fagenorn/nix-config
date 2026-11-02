@@ -17,7 +17,7 @@
 **Invariants:**
 - Instruction text grows only in `final-review.md`, `from-issue/SKILL.md` and `acquire-direct.md` (D8).
 - from-issue keeps one home for the `suspend` verb: its first template line is byte-identical, a second literal template follows it for `verification` only, the cause list orders `verification` after sdd's `deadline` and before the reaper's parenthesis, and the lifecycle-call rule lists `--verification-input -` (D5).
-- sdd classifies under a lifecycle identity, before the repair, only when every failing declared command qualifies, and declares the first in run order; the adapter runs before any worker release or reap; a refusal, or any change-caused failure, repairs as written (D5, D14).
+- sdd classifies under a lifecycle identity, before the repair, only when every failing declared command qualifies, and declares the first in run order; the adapter runs before any worker release or reap; every other case (no lifecycle identity, a `record` exit 3 or helper exit 2 with no failing command, a change-caused failure, a refusal) repairs as written (D5, D14, D18).
 - acquire-direct answers `verification` through `expects.build` without restating its command line, and item 5 names exactly the seven `suspended` members, after item 4 (D6).
 - Each breached hot ceiling and the corpus ceiling equal their measure at this task's head; each raised profile's `note` gains one sentence; no other ceiling, conditional ceiling or `description_ceiling_bytes` moves (D8).
 - `from-issue/SKILL.md` leaves the issue-227 growth pin, and every other document it lists keeps its pin (D16).
@@ -166,9 +166,9 @@ Expected: `Ran 5 tests`, `FAILED (failures=3, errors=2)`: no second template, no
    integration-branch paths decide it: a pinned dependency (`dependency`), the
    declared environment (`environment`), an external service
    (`external_service`) or the command's declared input (`command_input`); a
-   product, test or build failure of the change never is. When every failing
-   command qualifies, run for the first in run order, in the foreground and
-   before any worker release or reap:
+   product, test or build failure of the change never is. When at least one
+   command failed and every failing command qualifies, run for the first in
+   run order, in the foreground and before any worker release or reap:
 
    ```text
    verification-observe failure --repo-root <ledger_repo_root> --input - <<'EOF'
@@ -177,9 +177,10 @@ Expected: `Ran 5 tests`, `FAILED (failures=3, errors=2)`: no second template, no
    ```
 
    Exit 0: follow from-issue's suspension procedure with
-   `blocked_on=verification` and the printed failure. A refusal, or any
-   change-caused failure, takes the repair: dispatch the final-review fixer
-   above once, carrying the failing command and
+   `blocked_on=verification` and the printed failure. Every other case
+   repairs: no lifecycle identity, no failing command (a `record` exit 3 or
+   a helper exit 2 alone), a change-caused failure, or a refusal. Dispatch
+   the final-review fixer above once, carrying the failing command and
 ````
 
 `instruction-load.json` (D8): run `PYTHONPATH="$PWD/python" python3 -m agent_tools.instruction_load check --base 763d8d48570c747ad368d0849939328ad12b49ed`; it prints one `ceiling:` line per breached ceiling (the prototype measured `from-issue-controller` 72073 on both hosts, `implementation-owner` 133940 on both, `orchestrated-issue-owner` 138309 on `claude`, corpus 405818; use your own measures). Set each named `ceiling_bytes` host value and `corpus_ceiling_bytes` to exactly its printed measure; touch nothing it does not name. Append to the end of each raised profile's `note`, inside its string:
@@ -213,7 +214,7 @@ Expected: `check: pass`. Without `--raise-label` it fails with `raise:` lines: C
 Stage first, then run (timeout 3600 s): `just build`
 Expected: exit 0.
 
-AC2 is graded at the final review from this plan's SDD workspace (the controller reads every `sdd-gate next` exit, `Delivery gate:` line and both final verdicts); this task writes nothing for it.
+AC2 is graded at the final review as the root's acceptance map says (D18): its final-head clause through the Declared verification line, its process clauses from this plan's SDD workspace `progress.md`; this task writes nothing for it.
 
 - [ ] **Step 5: Commit**
 
