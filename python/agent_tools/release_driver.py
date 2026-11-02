@@ -674,9 +674,13 @@ class _Drive:
             self.transaction.state, "wait")
 
     def collect(self, obligation_id: str) -> None:
-        """Observe one obligation; the core refuses one it cannot take yet, which waits."""
+        """Observe one obligation. Only the two refusals that mean "not yet" wait, a
+        dependency not yet accepted and an event already accepted; every other reason
+        (an unknown or unsupported obligation, a clock regression, a state other than
+        proving, a non-member) is a defect and propagates, as in `prove`."""
         try:
             self.transaction = self.store.collect_obligation(
                 self.custody, obligation_id=obligation_id, observer=self.router)
-        except ProofRefused:
-            pass
+        except ProofRefused as refused:
+            if refused.reason not in ("dependency_not_accepted", "already_accepted"):
+                raise

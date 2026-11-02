@@ -2,9 +2,13 @@
 import json
 import re
 import unittest
+from unittest import mock
 
 from agent_tools import forge_adapter, release_driver, release_profile
 from agent_tools.canonical import telemetry_digest
+from agent_tools.transaction_core import TransactionStore
+from agent_tools.transaction_proof import proof_refused
+from agent_tools.transaction_storage import ProofRefused
 from . import release_driver_support as rs
 from . import release_test_support as support
 from .forge_world import CANONICAL, ROWS, ForgeWorld
@@ -229,6 +233,35 @@ class RunTest(DriverCase):
         self.assertEqual((status["state"], status["parked_from"], status["reason"],
                           status["terminal"]),
                          ("attention_required", "proving", "proof_did_not_converge", None))
+
+
+class CollectionRefusalTest(DriverCase):
+    """Only the two refusals that mean "not yet" wait; any other is a defect that surfaces."""
+
+    def refusing(self, reason):
+        def refuse(_store, custody, **_):
+            raise proof_refused(custody.transaction_id, reason, "collect_obligation")
+        return mock.patch.object(TransactionStore, "collect_obligation", refuse)
+
+    def run_released(self, reason):
+        self.world.verification_ready()
+        driver = self.driver(registry={"github-forge": rs.StatefulForge(self.world)})
+        with self.refusing(reason):
+            return rs.release(driver, rs.candidate())
+
+    def test_a_defect_refusal_propagates_instead_of_parking(self):
+        for reason in ("unknown_obligation", "unsupported_obligation", "state_not_proving",
+                       "clock_regressed", "not_cohort_member"):
+            with self.subTest(reason=reason):
+                with self.assertRaises(ProofRefused) as caught:
+                    self.run_released(reason)
+                self.assertEqual(caught.exception.reason, reason)
+
+    def test_a_dependency_not_yet_accepted_or_an_accepted_event_waits(self):
+        for reason in ("dependency_not_accepted", "already_accepted"):
+            with self.subTest(reason=reason):
+                _, result = self.run_released(reason)
+                self.assertEqual((result["state"], result["next"]), ("proving", "wait"))
 
 
 class RunRefusalTest(DriverCase):
