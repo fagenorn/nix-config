@@ -268,5 +268,30 @@ class PublicationFreeGrammarTest(unittest.TestCase):
                     "pointer": self.BASE + "/publication", "repair_id": "contract.release.invalid",
                     "message": 'publication must be "none" or {actions}'}])
 
+
+class HostLocalProfileTest(unittest.TestCase):
+    """Issue 547 AC1, against the real registry."""
+
+    def grammar(self, profile, contract=None):
+        return release_profile.grammar_violations(
+            support.release_of("argus", profile), contract or support.base_contract())
+
+    def test_the_argus_shaped_profile_has_no_violations(self):
+        self.assertEqual(self.grammar(support.argus_shaped_profile()), [])
+
+    def test_a_target_naming_another_domain_is_a_violation(self):
+        profile = support.argus_shaped_profile()
+        profile["bindings"]["targets"]["daemon"]["domain"] = "system"
+        self.assertEqual([(v["pointer"], v["repair_id"]) for v in self.grammar(profile)],
+                         [("/release/profiles/argus/bindings/targets/daemon", "contract.release.invalid")])
+
+    def test_an_activation_profile_still_refuses_a_supported_deploy(self):
+        contract = support.base_contract()
+        contract["capabilities"]["deploy"]["support"] = "supported"
+        contract["bindings"]["deploy"] = {"adapter": "github-actions-health", "command": None,
+                                          "config": {}}
+        self.assertIn("contract.release.deploy_conflict",
+                      [v["repair_id"] for v in self.grammar(support.argus_shaped_profile(), contract)])
+
 if __name__ == "__main__":
     unittest.main()

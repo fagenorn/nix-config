@@ -38,6 +38,10 @@ def publication_free_profile() -> dict:
     return _load("publication-free-profile.json")
 
 
+def argus_shaped_profile() -> dict:
+    return _load("argus-shaped-profile.json")
+
+
 def restorable_profile() -> dict:
     return _load("restorable-profile.json")
 

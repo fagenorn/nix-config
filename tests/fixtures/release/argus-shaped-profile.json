@@ -1,0 +1,169 @@
+{
+  "profile_version": 1,
+  "target": {
+    "environment": "local-host",
+    "concurrency_keys": [
+      "release/fagenorn/argus"
+    ]
+  },
+  "requirements": {
+    "adapters": {
+      "bundle": {
+        "min_inclusive": "1.0.0",
+        "max_exclusive": "2.0.0"
+      },
+      "launchd": {
+        "min_inclusive": "1.0.0",
+        "max_exclusive": "2.0.0"
+      }
+    }
+  },
+  "bindings": {
+    "adapters": {
+      "bundle": {
+        "adapter": "codesigned-artifact"
+      },
+      "launchd": {
+        "adapter": "launchd-agent"
+      }
+    },
+    "targets": {
+      "notifier": {
+        "adapter": "bundle",
+        "kind": "installed_bundle",
+        "path": "~/Library/Application Support/Argus/Argus.app"
+      },
+      "daemon": {
+        "adapter": "launchd",
+        "kind": "launchd_gui_agent",
+        "label": "dev.argus.daemon"
+      }
+    },
+    "principals": {
+      "owner": {
+        "class": "host_user"
+      }
+    },
+    "credentials": {
+      "keychain": {
+        "adapter": "bundle",
+        "class": "codesigning_identity"
+      },
+      "session": {
+        "adapter": "launchd",
+        "class": "gui_session"
+      }
+    }
+  },
+  "publication": {
+    "actions": [
+      {
+        "id": "notifier",
+        "mode": "materialize",
+        "adapter": "bundle",
+        "operation": "install",
+        "target": "notifier",
+        "principal": "owner",
+        "credential": "keychain",
+        "effect": "reversible_no_incremental_spend",
+        "config_schema_version": 1,
+        "config": {
+          "source": "daemon/notifyd/Argus.app",
+          "identity_prefix": "Apple Development",
+          "identity_env": "ARGUS_CODESIGN_IDENTITY",
+          "adhoc_fallback": false
+        },
+        "deps": [],
+        "observation_deadline_ms": 120000
+      }
+    ]
+  },
+  "activation": {
+    "units": [
+      {
+        "id": "daemon",
+        "mode": "local_apply",
+        "adapter": "launchd",
+        "operation": "activate",
+        "target": "daemon",
+        "principal": "owner",
+        "credential": "session",
+        "effect": "irreversible",
+        "config_schema_version": 1,
+        "config": {
+          "program": "devenv",
+          "arguments": [
+            "shell",
+            "--",
+            "daemon",
+            "run"
+          ],
+          "keep_alive": true,
+          "background": true,
+          "stdout_path": "home/daemon/logs/daemon.out.log",
+          "stderr_path": "home/daemon/logs/daemon.err.log"
+        },
+        "deps": [],
+        "observation_deadline_ms": 300000
+      }
+    ]
+  },
+  "proof": {
+    "convergence_window_ms": 1800000,
+    "obligations": [
+      {
+        "id": "daemon-live",
+        "semantic": "liveness",
+        "form": "snapshot",
+        "predicate": "agent_running",
+        "collector": "launchd",
+        "required": true,
+        "deps": [
+          "derived:running_subject_identity:daemon"
+        ],
+        "parameters": {
+          "parameters": {
+            "action": "daemon",
+            "operation": "activate",
+            "target": {
+              "handle": "daemon",
+              "kind": "launchd_gui_agent",
+              "label": "dev.argus.daemon"
+            },
+            "config": {
+              "program": "devenv",
+              "arguments": [
+                "shell",
+                "--",
+                "daemon",
+                "run"
+              ],
+              "keep_alive": true,
+              "background": true,
+              "stdout_path": "home/daemon/logs/daemon.out.log",
+              "stderr_path": "home/daemon/logs/daemon.err.log"
+            }
+          }
+        },
+        "freshness_ms": 600000
+      }
+    ]
+  },
+  "recovery": {
+    "units": {
+      "notifier": {
+        "posture": "supersedable_only",
+        "anchor": null,
+        "compatibility": null,
+        "edges": []
+      },
+      "daemon": {
+        "posture": "supersedable_only",
+        "anchor": null,
+        "compatibility": null,
+        "edges": []
+      }
+    }
+  },
+  "limits": {}
+}
