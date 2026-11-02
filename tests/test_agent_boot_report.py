@@ -1,5 +1,6 @@
 """agent-costs --report boot (issue 448, spec test seam 1)."""
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -330,6 +331,64 @@ class BootReportTest(unittest.TestCase):
             "Top skill bodies and skill files", "Boots by B", "Observed characters per token",
             "Unsplit boots", "NOTE: ")]
         self.assertNotIn(-1, positions)
+        self.assertEqual(positions, sorted(positions))
+
+
+    def test_group_rows_carry_medians_and_both_sub_totals(self):
+        session = Session(self.root)
+        sizes = ((1_000, 1_000, 1_000), (2_000, 3_000, 1_000), (4_000, 1_000, 2_000),
+                 (9_000, 2_000, 6_000))  # result characters of (plan read, other read, command)
+        for issue, (plan, other, command) in enumerate(sizes, start=7):
+            stepped_boot(session, f"o{issue}", 100 * issue, [
+                (read(f"{PLANS}/2026-10-26-x.md"), plan), (read("/r/src/app.py"), other),
+                (bash("ls /r"), command)], issue=issue)
+        session.write()
+        document = report(self.root)
+        for row in document["boots"]:
+            self.assertEqual(row["boot_reading"], sum(row["buckets"][name] for name in (
+                "skill_bodies", "skill_files", "plan_reads", "resume_reads", "rereads")))
+            self.assertEqual(row["first_unit_work"], sum(row["buckets"][name] for name in (
+                "commands", "assistant", "other_reads")))
+        self.assertEqual(
+            sorted((row["b"], row["boot_reading"], row["first_unit_work"])
+                   for row in document["boots"]),
+            [(23_120, 1_000, 2_120), (26_120, 2_000, 4_120), (27_120, 4_000, 3_120),
+             (37_120, 9_000, 8_120)])
+        pooled = next(g for g in document["groups"]
+                      if (g["host"], g["cohort"], g["phase_group"]) == ("all", "fresh", "all"))
+        # Four boots, so each median is the mean of the middle two (B: 23,120 26,120 27,120
+        # 37,120; without schemas, B less 19,800).
+        self.assertEqual(
+            {name: pooled[name] for name in (
+                "count", "b_mean", "b_median", "b_without_schemas_mean",
+                "b_without_schemas_median", "boot_reading_mean", "boot_reading_median",
+                "first_unit_work_mean", "first_unit_work_median")},
+            {"count": 4, "b_mean": 28_370, "b_median": 26_620, "b_without_schemas_mean": 8_570,
+             "b_without_schemas_median": 6_820, "boot_reading_mean": 4_000,
+             "boot_reading_median": 3_000, "first_unit_work_mean": 4_370,
+             "first_unit_work_median": 3_620})
+        self.assertEqual(pooled["buckets"], buckets(
+            tool_schemas=19_800, harness=100, prompt=100, plan_reads=4_000, other_reads=1_750,
+            commands=2_500, assistant=120))
+        self.assertEqual(pooled["bucket_medians"], buckets(
+            tool_schemas=19_800, harness=100, prompt=100, plan_reads=3_000, other_reads=1_500,
+            commands=1_500, assistant=120))
+        self.assertEqual(document["schema_version"], 2)
+
+    def test_text_output_prints_medians_beside_means_and_the_sub_total_rows(self):
+        session = Session(self.root)
+        stepped_boot(session, "o7", 0, [(read(f"{PLANS}/2026-10-26-x.md"), 1_000),
+                                        (bash("ls /r"), 1_000)])
+        session.write()
+        completed = costs("--days", "0", "--projects-dir", str(self.root))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        out = completed.stdout
+        self.assertRegex(out, r"(?m)fresh 6-7 +median +fresh all +median$")
+        self.assertRegex(out, r"(?m)^kind +key +mean +median$")
+        self.assertRegex(out, r"\bB +boot reading +first-unit work +tool_schemas\b")
+        positions = [re.search(pattern, out, re.M).start() for pattern in (
+            r"^unexplained ", r"^boot reading ", r"^first-unit work ", r"^B ",
+            r"^B without tool schemas ")]
         self.assertEqual(positions, sorted(positions))
 
 

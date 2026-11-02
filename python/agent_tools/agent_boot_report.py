@@ -7,7 +7,8 @@ harness and prompt from the transcript's request records (a fixed 2.44 character
 token), and every later call's growth by the character share of what the call added.
 collect_host reads one transcript root through agent_owner_report.collect; build_document
 projects the hosts as the `agent-boot-report` document and print_document prints it.
-agent_costs.main runs the report for `--report boot`. python/README.md (agent-costs) holds
+agent_tools.agent_boot_rollup builds the group rows. agent_costs.main runs the report for
+`--report boot`. python/README.md (agent-costs) holds
 the contract.
 """
 
@@ -28,19 +29,19 @@ from agent_tools.agent_owner_report import (
     boot_slice,
     collect,
 )
+from agent_tools.agent_boot_rollup import ALL, group_rows, median
 from agent_tools.context_meter_commands import SEPARATORS, lex
 from agent_tools.transcript_calls import read_transcript
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPORT_KIND = "agent-boot-report"
 CHARS_PER_TOKEN = 2.44
 RATIO_MIN_CHARS = 2_000
-ALL = "all"
 BUCKETS = ("tool_schemas", "harness", "prompt", "skill_bodies", "skill_files", "plan_reads",
            "resume_reads", "rereads", "other_reads", "commands", "assistant", "unexplained")
+BOOT_READING = ("skill_bodies", "skill_files", "plan_reads", "resume_reads", "rereads")
+FIRST_UNIT_WORK = ("commands", "assistant", "other_reads")
 READERS = ("cat", "sed", "head", "tail", "nl", "awk", "jq", "less")
-COHORTS = ("fresh", "spawned")
-PHASE_GROUPS = ("0-5", "6-7", ALL)
 
 _SYSTEM_REMINDER = "<system-reminder>"
 _RESUME_PACK = re.compile(r'"kind"\s*:\s*"resume_pack"')
@@ -519,6 +520,8 @@ def collect_host(label, root, *, cutoff, since, before, executor_factory):
         host["ratio_tokens"] += result["ratio_tokens"]
         host["boots"].append({
             **identity, "calls": calls, "start": result["start"], "b": result["b"],
+            "boot_reading": sum(result["buckets"][name] for name in BOOT_READING),
+            "first_unit_work": sum(result["buckets"][name] for name in FIRST_UNIT_WORK),
             "buckets": result["buckets"], "skills": result["skills"],
             "skill_files": result["skill_files"]})
     return host
@@ -527,31 +530,13 @@ def collect_host(label, root, *, cutoff, since, before, executor_factory):
 # ---- the document ----------------------------------------------------------------
 
 
-def _group_rows(label, boots):
-    rows = []
-    for cohort in COHORTS:
-        for group in PHASE_GROUPS:
-            members = [boot for boot in boots if boot["cohort"] == cohort
-                       and group in (ALL, boot["phase_group"])]
-            if not members:
-                continue
-            rows.append({
-                "host": label, "cohort": cohort, "phase_group": group, "count": len(members),
-                "b_mean": statistics.fmean(boot["b"] for boot in members),
-                "b_without_schemas_mean": statistics.fmean(
-                    boot["b"] - boot["buckets"]["tool_schemas"] for boot in members),
-                "buckets": {name: statistics.fmean(boot["buckets"][name] for boot in members)
-                            for name in BUCKETS}})
-    return rows
-
-
 def build_document(hosts, *, window):
     """The `agent-boot-report` document of the collected `hosts`."""
     boots = [boot for host in hosts for boot in host["boots"]]
     ratio_chars = sum(host["ratio_chars"] for host in hosts)
     ratio_tokens = sum(host["ratio_tokens"] for host in hosts)
-    groups = [row for host in hosts for row in _group_rows(host["label"], host["boots"])]
-    groups += _group_rows(ALL, boots)
+    groups = [row for host in hosts for row in group_rows(host["label"], host["boots"], BUCKETS)]
+    groups += group_rows(ALL, boots, BUCKETS)
     return {
         "kind": REPORT_KIND, "schema_version": SCHEMA_VERSION, "window": window,
         "hosts": [{"label": host["label"], "root": host["root"]} for host in hosts],
@@ -562,15 +547,25 @@ def build_document(hosts, *, window):
     }
 
 
+def _tokens(value):
+    return "-" if value is None else human(round(value))
+
+
 def _mean_table(groups):
-    names = [f"{group['cohort']} {group['phase_group']}" for group in groups]
-    rows = [["boots", *(f"{group['count']:,}" for group in groups)]]
-    rows += [[name, *(human(round(group["buckets"][name])) for group in groups)]
-             for name in BUCKETS]
-    rows.append(["B", *(human(round(group["b_mean"])) for group in groups)])
-    rows.append(["B without tool schemas",
-                 *(human(round(group["b_without_schemas_mean"])) for group in groups)])
-    print_table(rows, ["", *names], ["l"] + ["r"] * len(groups))
+    headers = [""]
+    for group in groups:
+        headers += [f"{group['cohort']} {group['phase_group']}", "median"]
+    rows = [["boots"]]
+    for group in groups:
+        rows[0] += [f"{group['count']:,}", ""]
+    rows += [[name] + [cell for group in groups for cell in (
+        _tokens(group["buckets"][name]), _tokens(group["bucket_medians"][name]))]
+        for name in BUCKETS]
+    for label, field in (("boot reading", "boot_reading"), ("first-unit work", "first_unit_work"),
+                         ("B", "b"), ("B without tool schemas", "b_without_schemas")):
+        rows.append([label] + [cell for group in groups for cell in (
+            _tokens(group[f"{field}_mean"]), _tokens(group[f"{field}_median"]))])
+    print_table(rows, headers, ["l"] + ["r"] * (2 * len(groups)))
 
 
 def _top_skills(boots, top):
@@ -578,10 +573,11 @@ def _top_skills(boots, top):
     rows = []
     for kind, field in (("skill", "skills"), ("file", "skill_files")):
         keys = {key for boot in fresh for key in boot[field]}
-        rows += [(statistics.fmean(boot[field].get(key, 0) for boot in fresh), kind, key)
-                 for key in keys]
+        for key in keys:
+            values = [boot[field].get(key, 0) for boot in fresh]
+            rows.append((statistics.fmean(values), kind, key, median(values)))
     rows.sort(key=lambda row: (-row[0], row[1], row[2]))
-    return [[kind, key, human(round(mean))] for mean, kind, key in rows[:top]]
+    return [[kind, key, _tokens(mean), _tokens(middle)] for mean, kind, key, middle in rows[:top]]
 
 
 def print_document(doc, *, top):
@@ -596,16 +592,20 @@ def print_document(doc, *, top):
         title = "all hosts" if label == ALL else f"host {label}"
         print(f"\nMean boot buckets, {title} (tokens per boot):\n")
         _mean_table([group for group in doc["groups"] if group["host"] == label])
-    print("\nTop skill bodies and skill files (mean tokens per fresh boot, all hosts):\n")
-    print_table(_top_skills(boots, top), ["kind", "key", "mean"], ["l", "l", "r"])
-    print("\nBoots by B (host, issue, cohort, phase, calls, start, B, then each bucket):\n")
+    print("\nTop skill bodies and skill files (mean and median tokens per fresh boot, all hosts):\n")
+    print_table(_top_skills(boots, top), ["kind", "key", "mean", "median"],
+                ["l", "l", "r", "r"])
+    print("\nBoots by B (host, issue, cohort, phase, calls, start, B, boot reading, "
+          "first-unit work, then each bucket):\n")
     ordered = sorted(boots, key=lambda boot: (-boot["b"], boot["transcript"]))
     _print_capped(
         [[boot["host"], str(boot["issue"]), boot["cohort"], boot["phase_group"],
           f"{boot['calls']:,}", human(boot["start"]), human(boot["b"]),
+          human(boot["boot_reading"]), human(boot["first_unit_work"]),
           *(human(boot["buckets"][name]) for name in BUCKETS)] for boot in ordered],
-        top, ["host", "issue", "cohort", "phase", "calls", "start", "B", *BUCKETS],
-        ["l", "r", "l", "l", "r", "r", "r"] + ["r"] * len(BUCKETS))
+        top, ["host", "issue", "cohort", "phase", "calls", "start", "B",
+                     "boot reading", "first-unit work", *BUCKETS],
+        ["l", "r", "l", "l", "r", "r", "r", "r", "r"] + ["r"] * len(BUCKETS))
     observed = doc["observed_chars_per_token"]
     print(f"\nObserved characters per token (boot calls adding more than "
           f"{RATIO_MIN_CHARS:,} characters): {'none' if observed is None else f'{observed:.2f}'}")
