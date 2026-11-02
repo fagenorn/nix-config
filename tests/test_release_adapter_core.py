@@ -1,7 +1,7 @@
 """Outcomes are observed after invocation (#124 AC8). Run: just agent-workflow-tests"""
 import unittest
 
-from agent_tools import forge_adapter, release_adapter, release_profile
+from agent_tools import actions_health_adapter, forge_adapter, release_adapter, release_profile
 from . import release_test_support as support
 from .forge_world import ForgeWorld
 from .test_forge_adapter import ROWS
@@ -64,3 +64,28 @@ class PublicationFreeBindingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatchOperationTest(unittest.TestCase):
+    """Only a publication_triggered operation is a deploy watch (issue 547 D10)."""
+
+    def descriptor(self, *modes, inspect="supported"):
+        descriptor = actions_health_adapter.describe()
+        entry = descriptor["operations"]["deploy"]
+        descriptor["operations"] = {f"op{index}": {**entry, "mode": mode, "inspect": inspect}
+                                    for index, mode in enumerate(modes)}
+        return descriptor
+
+    def test_only_a_single_inspectable_publication_triggered_operation_is_watched(self):
+        cases = ((("publication_triggered",), "supported", "op0"),
+                 (("local_apply",), "supported", None),
+                 (("provider_deploy",), "supported", None),
+                 (("convergent_pull",), "supported", None),
+                 (("materialize", "publication_triggered"), "supported", "op1"),
+                 (("local_apply", "publication_triggered"), "supported", "op1"),
+                 (("publication_triggered", "publication_triggered"), "supported", None),
+                 (("publication_triggered",), "unsupported", None))
+        for modes, inspect, expected in cases:
+            with self.subTest(modes=modes, inspect=inspect):
+                self.assertEqual(release_adapter.watch_operation(self.descriptor(*modes, inspect=inspect)),
+                                 expected)

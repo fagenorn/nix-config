@@ -263,13 +263,14 @@ def config_problems(schema: dict[str, Any], config: object) -> list[str]:
 
 
 def watch_operation(descriptor: Mapping[str, Any]) -> str | None:
-    """The one operation a deploy watch inspects, or None (issue 465 D3).
+    """The one operation a deploy watch inspects, or None (issue 465 D3, issue 547 D10).
 
-    That is the descriptor's single operation whose mode is an activation mode and whose
-    `inspect` is supported; none, or more than one, is None.
+    That is the descriptor's single operation whose mode is `publication_triggered` and whose
+    `inspect` is supported; none, or more than one, is None. A `local_apply` adapter, which
+    applies on the host rather than reacting to a publication, is therefore never a deploy watch.
     """
     names = [name for name, entry in descriptor["operations"].items()
-             if entry["mode"] in ACTIVATION_MODES and entry["inspect"] == "supported"]
+             if entry["mode"] == "publication_triggered" and entry["inspect"] == "supported"]
     return names[0] if len(names) == 1 else None
 
 
