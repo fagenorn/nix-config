@@ -72,7 +72,7 @@ Task 7 — Document version 2 and text output — `python/agent_tools/agent_owne
 
 ## Decisions
 
-The plan rests on D1 (start mode and its range grammar), D2 (start, report end and settle), D3 (one call set for spend and deliveries), D4 (project), D5 and D6 (ping input and attribution), D7 (arms, aggregate and comparison), D8 (schema version 2), D9 (modules), D10 (one root per run) and D11 (the subprocess seam and production-shaped fixtures). Planning appends D12 (how pings and left-out lineages are counted) and D13 (`collect`'s new keywords, project read order in an event window, `print_document`'s eval flag, and which fixture records carry a `cwd`). Phase 5 appends D14 (event mode's `started` and a dropped event-mode lineage's pings).
+The plan rests on the spec's D1–D11. Planning appends D12 and D13, and Phase 5 appends D14; each is stated in the spec's `## Decision ledger`.
 
 ## Standards review provenance
 
