@@ -143,8 +143,12 @@ class HelperGenerationTest(LedgerHarness, unittest.TestCase):
             request["interface_version"] = 3
             del request["verification"]
         control.write_text(json.dumps(request), "utf-8")
+        direct_request = self.direct_request(issue=61, now=T(6))
+        if generation == "base":
+            direct_request["interface_version"] = 2
+            del direct_request["verification"]
         direct = self.root / "direct-request.json"
-        direct.write_text(json.dumps(self.direct_request(issue=61, now=T(6))), "utf-8")
+        direct.write_text(json.dumps(direct_request), "utf-8")
         run = ("--repo-root", self.root, "--run-id", self.run_id)
         calls = {
             "check-launch": ("check-launch", *run, "--action-id", "61:1:1"),
@@ -365,7 +369,11 @@ class ParkedTest(VerificationHarness, unittest.TestCase):
         observe = direct(6, forge=None)
         self.assertEqual((observe["kind"], [item["kind"] for item in observe["requirements"]]),
                          ("observe", ["forge_pr"]))
-        self.assertEqual(direct(7), self.suspended_reply(73))
+        asked = direct(7)
+        self.assertEqual((asked["kind"], [item["kind"] for item in asked["requirements"]]),
+                         ("observe", ["verification"]))
+        self.assertEqual(direct(7, verification=[observed(failure())]),
+                         self.suspended_reply(73))
         self.assertEqual(self.tree_snapshot(), before)
         merged = {"state": "merged", "url": "https://github.com/fagenorn/nix-config/pull/73",
                   "merge_sha": "b" * 40}

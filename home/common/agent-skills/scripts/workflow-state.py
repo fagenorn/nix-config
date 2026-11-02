@@ -50,6 +50,9 @@ from agent_tools.transaction_storage import is_id
 SCHEMA_VERSION = 11
 CONTROL_INTERFACE_VERSION = 4
 DIRECT_OWNER_INTERFACE_VERSION = 2
+# A direct-owner request moves to interface 3 with `verification`; every reply stays at
+# DIRECT_OWNER_INTERFACE_VERSION (issue 545 D3).
+DIRECT_OWNER_REQUEST_INTERFACE_VERSION = 3
 ATTEMPT_STATES = frozenset(
     {"active", "handed_off", "suspended", "stopped", "failed", "merged"}
 )
@@ -225,6 +228,7 @@ DIRECT_OWNER_REQUEST_FIELDS = frozenset(
         "delivery_observations",
         "requested_scope",
         "recovery",
+        "verification",
     }
 )
 CONTROL_RESPONSE_FIELDS = frozenset(
@@ -2444,9 +2448,10 @@ def validate_direct_owner_request(value):
     )
     if (
         type(request["interface_version"]) is not int
-        or request["interface_version"] != DIRECT_OWNER_INTERFACE_VERSION
+        or request["interface_version"] != DIRECT_OWNER_REQUEST_INTERFACE_VERSION
     ):
         raise WorkflowError("unsupported direct owner interface version")
+    verification_observations(request["verification"])
     issue = require_plain_int(request["issue"], "direct owner issue", minimum=1)
     if not RUN_ID_PATTERN.fullmatch(f"direct-{issue}-000001"):
         raise WorkflowError("direct owner issue exceeds the run ID length limit")
@@ -2476,7 +2481,8 @@ def validate_direct_owner_request(value):
 
 
 def load_direct_owner_request(path_value):
-    return validate_direct_owner_request(load_json_request(path_value, "direct owner request"))
+    return validate_direct_owner_request(
+        load_json_request(path_value, "direct owner request", strict=True))
 
 
 def render_action_id(attempt: dict[str, Any]) -> str:
@@ -2731,6 +2737,7 @@ def _apply_one_issue_policy(
     contract: dict[str, Any] | None,
     reply_parked: bool = False,
     verification_blockers: dict[str, Any],
+    verification_equal: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
 
@@ -2775,7 +2782,9 @@ def _apply_one_issue_policy(
     not (issue 545 D5); while the blocker is ``open``, without ``reply_parked`` its
     verdict is ``terminal``, as control gets it; with it, as the direct owner asks,
     it passes the tracker halt and the forge requirement and then returns
-    ``parked``, which changes nothing (issue 544 D6, D7).
+    ``parked``, which changes nothing, when ``verification_equal`` holds the blocker's id
+    (this call observed it unchanged), else ``observe`` with the blocker's requirement
+    (issue 544 D7, issue 545 D7).
 
     An expired attempt is reaped before any lane predicate is derived: the
     single ``demote_expired_attempt`` call turns it into a ``suspended``
@@ -2953,7 +2962,10 @@ def _apply_one_issue_policy(
         unobserved_forge = forge_requirement()
         if unobserved_forge is not None:
             return decision("observe", requirements=unobserved_forge, expired=False)
-        return decision("parked", expired=False)
+        if blocker["id"] in verification_equal:
+            return decision("parked", expired=False)
+        return decision("observe", requirements=[verification_blocker.requirement(blocker)],
+                        expired=False)
 
     if active_unexpired or handed_off or suspended:
         assert latest is not None
@@ -4038,7 +4050,13 @@ def command_direct_owner(args: argparse.Namespace) -> int:
             ):
                 # A suspension is resumed in place and consumes no attempt, so
                 # it must never become an escape hatch into run fan-out: the
-                # re-entry command already reaches the work (per D5, D13).
+                # re-entry command already reaches the work (per D5, D13). A
+                # verification-parked one names the blocker it waits on (issue 545 D7).
+                parked_on = selected_attempts[-1]["verification_blocker"]
+                if parked_on is not None:
+                    raise WorkflowError(
+                        "new_run is not applicable: suspended attempt resumes in place "
+                        f"once verification blocker {parked_on} resolves")
                 raise WorkflowError(
                     "new_run is not applicable: suspended attempt is resumable"
                 )
@@ -4050,6 +4068,14 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 selected is None or selected_is_terminal
             ):
                 raise WorkflowError("owner_unavailable is not applicable")
+
+            # The observations resolve against a copy of the selected run's blockers (a new
+            # run's map is empty), before any mint, so a refused one mints nothing and records
+            # no resolution; only the write that resumes commits the copy (issue 545 D7, D19).
+            blockers = copy.deepcopy(
+                {} if selected is None or request["new_run"]
+                else selected[4]["verification_blockers"])
+            _, observed_equal = resolve_verification(blockers, request["verification"])
 
             if selected_is_terminal and not request["new_run"]:
                 assert selected is not None
@@ -4135,8 +4161,8 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     delivery_request=request, delivery_source_kind="direct",
                     contract=contract,
                     reply_parked=True,
-                    verification_blockers=(
-                        {} if state is None else state["verification_blockers"]),
+                    verification_blockers=blockers,
+                    verification_equal=observed_equal,
                 )
                 operation = policy["operation"]
                 if operation == "idle":
@@ -4248,6 +4274,8 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         )
                     else:
                         state["issues"][str(issue)] = policy["issue_state"]
+                    if operation == "resume":
+                        state["verification_blockers"] = blockers
                     changed, response = _call(
                         "delivery transition refused", runtime.complete_direct_policy,
                         state, issue=issue, request=request, policy=policy,
@@ -5886,12 +5914,12 @@ def build_parser() -> argparse.ArgumentParser:
     control.set_defaults(handler=command_control)
 
     direct_owner = subparsers.add_parser("direct-owner", description=(
-        "Acquire, resume or replay one issue's direct owner from one interface-2 "
+        "Acquire, resume or replay one issue's direct owner from one interface-3 "
         "request read from --request-file, and print one observe, owner, "
-        "delivery_remainder or terminal reply. Each requirement of an observe reply "
-        "carries expects: slot names the request member its answer fills, members maps "
-        "each member of that answer to its meaning, example is one illustrative answer, "
-        "and build is null or the workflow-state command that builds the answer."))
+        "delivery_remainder, suspended or terminal reply. Each requirement of an observe "
+        "reply carries expects: slot names the request member its answer fills, members "
+        "maps each member of that answer to its meaning, example is one illustrative "
+        "answer, and build is null or the command that builds the answer."))
     direct_owner.add_argument("--repo-root", required=True)
     direct_owner.add_argument("--request-file", required=True)
     direct_owner.set_defaults(handler=command_direct_owner)

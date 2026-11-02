@@ -59,25 +59,26 @@ def _requirements(values: Any, *, sorted_values: bool, verification: bool = Fals
 # is the validator's own copy; the AC1 scenarios pin it to the agent_tools catalogue.
 _OBSERVE_SLOTS = {"tracker": "tracker", "recorded_worktree": "worktree",
                   "candidate_worktree": "worktree", "forge_pr": "forge",
-                  "delivery_contract": "delivery_contract"}
+                  "delivery_contract": "delivery_contract", "verification": "verification"}
 
 
 def _observe_requirements(values: Any) -> list[Any]:
-    """A direct observe reply's requirements: the five direct kinds, no bare requirement
-    twice, each with its bare members and one closed `expects` (issue 473 D4)."""
+    """A direct observe reply's requirements: the six direct kinds, no bare requirement
+    twice, each with its bare members and one closed `expects` (issue 473 D4, issue 545 D9)."""
     if not isinstance(values, list): _reject()
     seen: set[bytes] = set()
     for item in values:
         if (not isinstance(item, dict) or not isinstance(item.get("kind"), str)
                 or item["kind"] not in _OBSERVE_SLOTS or "expects" not in item): _reject()
         bare = {name: member for name, member in item.items() if name != "expects"}
-        _requirements([bare], sorted_values=False)
+        _requirements([bare], sorted_values=False, verification=True)
         if canonical_bytes(bare) in seen: _reject()
         seen.add(canonical_bytes(bare))
         expects = _object(item["expects"], _members("slot members example build"),
                           "requirement expects")
         if expects["slot"] != _OBSERVE_SLOTS[item["kind"]]: _reject()
-        if item["kind"] == "delivery_contract": _string(expects["build"], "requirement build")
+        if item["kind"] in {"delivery_contract", "verification"}:
+            _string(expects["build"], "requirement build")
         elif expects["build"] is not None: _reject()
         members = expects["members"]
         if not isinstance(members, dict) or not members or any(

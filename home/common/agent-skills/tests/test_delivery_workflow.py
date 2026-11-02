@@ -109,13 +109,13 @@ class DeliveryAdmissionTest(unittest.TestCase):
             "recoveries": {"151": None}, "verification": []}
 
     def direct_request(self, contract=None):
-        return {"interface_version": 2, "issue": 151, "now": NOW,
+        return {"interface_version": 3, "issue": 151, "now": NOW,
             "attempt_budget_minutes": 30, "new_run": False,
             "owner_unavailable": False, "tracker": None, "worktree": None,
             "forge": None, "delivery_contract": contract,
             "authorization_intents": [], "authority_observations": [],
             "reevaluation_evidence": [], "delivery_observations": [],
-            "requested_scope": None, "recovery": None}
+            "requested_scope": None, "recovery": None, "verification": []}
 
     def all_stage_contract(self):
         contract, delivery = contract_and_delivery(self.model)
@@ -186,7 +186,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         self.assertEqual(context, {151: None}); self.assertEqual(request["interface_version"], 4)
         direct, direct_context = self.workflow.validate_direct_owner_request(
             self.direct_request())
-        self.assertEqual(direct_context, {151: None}); self.assertEqual(direct["interface_version"], 2)
+        self.assertEqual(direct_context, {151: None}); self.assertEqual(direct["interface_version"], 3)
         for variant in ("missing", "extra", "noncanonical", "legacy", "null_facts"):
             bad = self.control_request()
             if variant == "missing": bad.pop("requested_scopes")
@@ -1744,12 +1744,12 @@ class BuilderHarness:
         return value
 
     def direct_request(self, **changes):
-        value = {"interface_version": 2, "issue": 171, "now": NOW,
+        value = {"interface_version": 3, "issue": 171, "now": NOW,
             "attempt_budget_minutes": 30, "new_run": False, "owner_unavailable": False,
             "tracker": None, "worktree": None, "forge": None, "delivery_contract": None,
             "authorization_intents": [], "authority_observations": [],
             "reevaluation_evidence": [], "delivery_observations": [],
-            "requested_scope": None, "recovery": None}
+            "requested_scope": None, "recovery": None, "verification": []}
         value.update(changes)
         return value
 
@@ -2300,7 +2300,7 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
         self.assertEqual(self.pipe("workflow-response", stdout), stdout)
 
         built = self.build("contract", self.contract_input())
-        request = {"interface_version": 2, "issue": 171, "now": NOW,
+        request = {"interface_version": 3, "issue": 171, "now": NOW,
             "attempt_budget_minutes": 30, "new_run": False, "owner_unavailable": False,
             "tracker": {"issue": 171, "state": "open", "open_blockers": [],
                         "decision_blockers": []},
@@ -2310,7 +2310,8 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
             "delivery_contract": built["contract"],
             "authorization_intents": [built["initial_intent"]],
             "authority_observations": [], "reevaluation_evidence": [],
-            "delivery_observations": [], "requested_scope": None, "recovery": None}
+            "delivery_observations": [], "requested_scope": None, "recovery": None,
+            "verification": []}
         owner = json.loads(self.cli("direct-owner", "--repo-root", self.root,
                                     "--request-file", "-",
                                     stdin=json.dumps(request).encode()).stdout)

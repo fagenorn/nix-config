@@ -87,6 +87,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_attempt_custody.py \
     home/common/agent-skills/tests/test_verification_suspension.py \
     home/common/agent-skills/tests/test_verification_control.py \
+    home/common/agent-skills/tests/test_verification_direct.py \
     home/common/agent-skills/tests/test_control_cutover.py \
     home/common/agent-skills/tests/test_control_decisions.py \
     home/common/agent-skills/tests/test_delivery_sealing.py \
