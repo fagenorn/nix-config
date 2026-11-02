@@ -97,6 +97,15 @@ changes.
 - `derive_bundle` assembles the group privately, as it does every group (RP16):
   the commit, the digest of the rows and the three policy digests. The rows
   never leave derivation.
+- RP3 rejected a different digest design: a digest in the anchor with the list
+  only in the witness, because the components would then differ and the anchor
+  would not carry the reviewed identities. Here both copies hold the same
+  digest, so the components stay identical. The anchor still carries the
+  reviewed commit and binds every reviewed file by SHA-256. Nothing ever read
+  the listed rows: CORE's loader checks only that `tool` is an object, replay
+  never checks the closure (RP8), and Git-free validation checked their shape
+  only (RP16). Only `review_witness`, `derive_bundle` (which spreads the
+  closure into the group) and the witness suite touch `tool.files`.
 - The witness and anchor `schema_version` stay 2 and their keys stay the same.
   The anchor's version is CORE's `retained-anchor/v2` envelope (parent 234 D3),
   whose loader requires only that `tool` be an object. The witness's components
@@ -135,8 +144,10 @@ D5's adaptations:
    Through publication, `HEAD:python` equals `T:python`.
 2. **Host basis.** EVIDENCE's step 1, unchanged. Any attribute or `diff.*`
    setting stops publication (#255 is open, RP24).
-3. **Derivation A.** The source command, `--tool-commit T`, run against a
-   quiescent retained root that is compared before and after (RP11). The root
+3. **Derivation A.** The source command, `--tool-commit T`, in `T`'s matching
+   source environment: `T`'s package, and the budget helper and policy from
+   `T`'s tree, as the reproduction case runs them. It runs against a quiescent
+   retained root that is compared before and after (RP11). The root
    is the issue's private copy: a `git clone --no-local` with all refs, plus the
    main checkout's object store for the unreachable pins and its `.superpowers/`
    archive. A's three fixture payloads must equal the committed ones byte for
@@ -150,9 +161,14 @@ D5's adaptations:
    digest (EV4). Its launcher case proves built-and-source parity. EVIDENCE's
    design-time digest cannot exist here, because `T` does not exist while this
    is designed. The anchor binds `T`, so the digest is fixed only by A.
-5. A later `python/` change on this branch that changes any bundle byte
-   repeats steps 1–4. One that does not leaves the evidence bound to `T`, which
-   is exactly EV4's rule for any later package change.
+5. **A later change on this branch** repeats steps 1–4 only if the branch-head
+   tool would refuse the committed bundle, or would emit different bytes from
+   `T`'s for the pinned inputs beyond `tool.commit` and `files_sha256`. That
+   means a change to the encoding, to the derivation or validation code, or to
+   the review-package policy digest. A change
+   that only moves the package, such as a new module or a merge from `main`,
+   leaves the evidence bound to `T`. That is EV4's rule for any later package
+   change, and the reproduction case keeps deriving at `T`.
 
 ### Documents (D6)
 
@@ -178,7 +194,8 @@ Expected after the change: 166,257 B, with 30,351 B to spare, and an anchor of
 ### Delivery order
 
 1. Encoding, validator and their tests, with the docstrings and the README
-   sentence. This commit, once its review passes, is `T`.
+   sentence. Its last `python/` commit, once the review passes, is `T`
+   (D5 step 1).
 2. Re-issue the evidence and the literals (D5 steps 2–3).
 3. Final verification: `just agent-workflow-tests`, `just build` and
    `just agent-retained-tests <quiescent root>`, the last as D5 step 4. A
@@ -224,8 +241,13 @@ already does.
 - **Re-issue needs a quiescent full root.** The shared checkout changes under
   concurrent agents and voids runs (RP11). D5 names the private-copy recipe the
   issue used.
-- **A late source fix moves the evidence.** D5 step 5 bounds this to the fixes
-  that change bundle bytes.
+- **A late source fix moves the evidence.** D5 step 5 limits this to fixes
+  that change the bundle's encoding, its derivation or validation, or the
+  policy digest.
+- **A `main` change can stop step 3.** If a sync moves the review-package
+  policy digest or a retained input before publication, A's payloads differ.
+  Publication then stops and names that identity. It never adopts the new
+  bytes silently.
 - **The reproduction case needs `T` in the checkout's object store.** The merge
   strategy keeps branch commits, so `T` stays reachable from `main`.
 - **The tier takes about half an hour,** plus one derivation of about 2–7
@@ -242,3 +264,8 @@ already does.
 | D5 | The re-issue protocol refines EV5. `T` is the reviewed encoding commit. Derivation A, from source at `T` on the private quiescent root, must reproduce the three payloads exactly. Derivation B is the final tier run's reproduction case. A later bundle-changing `python/` fix repeats it | EV5, EV8, RP11, RP24; EV4 (evidence bound to its tool commit); the issue's root recipe; the anchor binds `T`, so no design-time digest can exist | EVIDENCE's design-time digest leg: impossible before `T` exists. A bespoke built-launcher derivation B: the tier's reproduction and launcher-parity cases already give an independent re-derivation and the built path |
 | D6 | One `python/README.md` sentence states the tool group's digest binding and why the bundle stays a constant size. Living docstrings and the tier's site comment are updated, and point-in-time records are not | `CLAUDE.md` names `python/README.md` as the home for retained-evidence detail; the-bar *Moves keep their history* (accepted records keep their bytes) | A new section or an ADR: the bindings carry no ADR route, and this ledger is the decision store. Amending the 249/254 specs: point-in-time records |
 | D7 | No new headroom target or size assertion. The existing per-file and five-file bounds become stable once the bundle is a constant of the encoding: 166,257 B expected, 30,351 B below the bound | CP10 (bounds stated, exact sizes rejected as fitted); CP11; the measured simulation above | A tighter tier bound or an exact-size pin: fitted to today's bytes. A test that varies the package's file count: verification refuses any package that is not the running one, and the closed fixed-width shape already makes the size constant |
+| D8 | Refines D5 (grill). Derivation A runs in `T`'s matching source environment: `T`'s package, budget helper and policy. Steps 1–4 repeat only for a later change that the branch-head tool would refuse the committed bundle over, or that changes its bytes beyond `tool.commit` and `files_sha256`: the encoding, the derivation or validation code, or the policy digest. A package-only move, a merge from `main` included, leaves the evidence bound to `T` | EVIDENCE publication step 2 ("in the matching source environment"); `validate_bundle`'s `policy_mismatch` ties issue 121's measurements to the tool group's policy digest; measured: the digest at this base equals the committed one; EV4 | Deriving A with the installed helper: its policy can differ and change `issue-121.json` for a reason unrelated to the encoding. Re-issuing after every `python/` change: EV4 rejected forced republication for unrelated changes |
+
+Design and grill frontier: closed within the approved scope. The resolved
+bindings carry no context map, glossary or ADR route, so this ledger is the
+issue's decision store and no domain document was written.
