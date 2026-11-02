@@ -279,6 +279,11 @@ class LoadTest(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(vb.BlockerRefused):
                 vb.strict_load(raw)
 
+    def test_strict_load_refuses_input_nested_past_the_parser_depth(self):
+        with self.assertRaises(vb.BlockerRefused) as caught:
+            vb.strict_load(b"[" * 100000)
+        self.assertTrue(str(caught.exception).startswith("input: "), str(caught.exception))
+
     def test_canonical_bytes_are_sorted_compact_ascii(self):
         self.assertEqual(vb.canonical_bytes({"b": [1], "a": "é"}),
                          b'{"a":"\\u00e9","b":[1]}')

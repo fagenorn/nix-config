@@ -321,7 +321,7 @@ class ObserveTest(ObserveCase):
                 done = self.run_tool(*argv)
                 self.assertEqual((done.returncode, done.stdout, done.stderr), (2, "", INVALID))
         for stdin, fragment in (("{", "input: "), ('{"kind": 1, "kind": 2}', "duplicate"),
-                                ('{"x": NaN}', "NaN")):
+                                ('{"x": NaN}', "NaN"), ("[" * 100000, "input: ")):
             with self.subTest(stdin=stdin):
                 self.refused(self.run_tool("observe", "--repo-root", root, "--input", "-",
                                            stdin=stdin), fragment)

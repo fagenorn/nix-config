@@ -57,11 +57,11 @@ def _refuse(label: str, reason: str) -> BlockerRefused:
 
 
 def strict_load(raw: bytes) -> object:
-    """Decode UTF-8 JSON, refusing repeated keys and non-finite literals."""
+    """Decode UTF-8 JSON, refusing repeated keys, non-finite literals and runaway nesting."""
     try:
         return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
                           parse_constant=reject_nonfinite_literal)
-    except (UnicodeError, ValueError) as error:
+    except (UnicodeError, ValueError, RecursionError) as error:
         raise BlockerRefused(f"input: {error}") from error
 
 
