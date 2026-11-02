@@ -306,6 +306,53 @@ class OwnerReportTest(unittest.TestCase):
                 self.assertEqual((row["delivered"], doc["arms"][0]["delivered"]),
                                  (delivered, int(delivered)))
 
+    def assert_rows(self, actual, expected):
+        """`actual` equals `expected` row for row and key for key, in order; floats to 9 places."""
+        self.assertEqual(len(actual), len(expected))
+        for got, want in zip(actual, expected):
+            self.assertEqual(list(got), list(want))
+            for name, value in want.items():
+                if isinstance(value, float):
+                    self.assertAlmostEqual(got[name], value, places=9, msg=name)
+                else:
+                    self.assertEqual(got[name], value, name)
+
+    def test_project_rows_and_owner_dollars_per_lineage(self):
+        delivered = Session(self.root, session="s1")
+        g = delivered.call(None, 0, context=20_000, write=20_000, ttl="1h", bash=progress(6))
+        delivered.result(None, 5, g, gate_reply("continue"))
+        keeper = delivered.call(None, 10, context=21_000, write=1_000, ttl="1h", agent_tool=True)
+        delivered.child("k1", tool_use_id=keeper)
+        f = delivered.call("k1", 20, context=15_000, write=15_000, bash=FINISH)
+        delivered.result("k1", 25, f, finish_reply(7))
+        delivered.write()
+        other = Session(self.root, project="-Users-me-other", session="s2", cwd="/Users/me/other")
+        g8 = other.call(None, 0, context=30_000, write=30_000, ttl="1h",
+                        bash=progress(3, action_id="8:1:1", repo_root="/Users/me/other"))
+        other.result(None, 5, g8, gate_reply("continue", issue=8))
+        other.write()
+        doc = report(self.root)
+        owner7 = cost(20_000, 20_000, write_price=8.0) + cost(21_000, 1_000, write_price=8.0)
+        total7 = owner7 + cost(15_000, 15_000)
+        owner8 = cost(30_000, 30_000, write_price=8.0)
+        self.assertEqual([(row["owner_ping_dollars"], row["ping_dollars"]) for row in doc["lineages"]],
+                         [(0.0, 0.0), (0.0, 0.0)])
+        self.assert_rows(doc["arms"], [{
+            "arm": "live", "n": 2, "delivered": 1, "delivery_rate": 0.5,
+            "dollars_per_delivered": total7 + owner8,
+            "owner_dollars_per_lineage": (owner7 + owner8) / 2, "sd": None,
+            "undelivered_dollars": owner8, "ping_dollars": 0.0, "peak_p50": 21_000,
+            "peak_p90": 30_000}])
+        self.assert_rows(doc["projects"], [
+            {"arm": "live", "project": "other", "n": 1, "delivered": 0, "delivery_rate": 0.0,
+             "dollars_per_delivered": None, "owner_dollars_per_lineage": owner8,
+             "owner_dollars": owner8, "owner_ping_dollars": 0.0, "total_dollars": owner8,
+             "ping_dollars": 0.0},
+            {"arm": "live", "project": "repo", "n": 1, "delivered": 1, "delivery_rate": 1.0,
+             "dollars_per_delivered": total7, "owner_dollars_per_lineage": owner7,
+             "owner_dollars": owner7, "owner_ping_dollars": 0.0, "total_dollars": total7,
+             "ping_dollars": 0.0}])
+
     def test_a_lineage_s_project_is_its_registering_repo_root_and_its_start_its_first_owner_call(self):
         # o1 registers against /Users/me/repo while its records sit in another repository's
         # worktree; the dispatching root is no owner, so the lineage starts at o1's first call,

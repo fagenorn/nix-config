@@ -6,9 +6,10 @@ A transcript is an owner's when one of its Bash calls is a registering command (
 every other transcript is attributed to its nearest owner through the `parentAgentId`
 of its `.meta.json`. scan_owner_transcript reads one transcript through
 agent_tools.transcript_calls and prices it through agent_tools.model_pricing; collect
-assembles lineages, build_document projects them (with arms and fresh-owner boots, and
-the replay of agent_tools.agent_owner_replay when asked) as the `agent-owner-report`
-document, and print_document prints its tables.
+assembles lineages, build_document projects them (with arms and projects, built by
+agent_tools.agent_owner_rollup, fresh-owner boots, and the replay of
+agent_tools.agent_owner_replay when asked) as the `agent-owner-report` document, and
+print_document prints its tables.
 agent_costs.main runs the report for `--report owners`. python/README.md (agent-costs)
 holds the contract.
 """
@@ -17,12 +18,12 @@ import functools
 import json
 import os
 import re
-import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_tools import agent_owner_rollup
 from agent_tools.agent_costs import (
     DISCLAIMER,
     event_in_window,
@@ -555,6 +556,7 @@ def _lineage_row(run_id, issue, launches, extras, *, direct, delivered, descenda
         "help_calls": sum(call.help for call in calls),
         "absolute_path_calls": sum(extra["absolute"] for extra in extras),
         "project": project, "started": _instant(started),
+        "owner_ping_dollars": 0.0, "ping_dollars": 0.0,
     }
 
 
@@ -762,26 +764,6 @@ def load_eval_rows(path, skill, case):
 # ---- the document ----------------------------------------------------------------
 
 
-def _arm_rows(rows):
-    arms = defaultdict(list)
-    for row in rows:
-        arms[row["arm"]].append(row)
-    result = []
-    for arm in sorted(arms):
-        members = arms[arm]
-        delivered = [row["total_dollars"] for row in members if row["delivered"]]
-        peaks = [row["peak_context"] for row in members]
-        result.append({
-            "arm": arm, "n": len(members), "delivered": len(delivered),
-            "dollars_per_delivered": (sum(row["total_dollars"] for row in members) / len(delivered)
-                                      if delivered else None),
-            "sd": statistics.stdev(delivered) if len(delivered) >= 2 else None,
-            "undelivered_dollars": sum(row["total_dollars"] for row in members if not row["delivered"]),
-            "peak_p50": percentile(peaks, 50), "peak_p90": percentile(peaks, 90),
-        })
-    return result
-
-
 def phase_group(phase):
     """The boot group (BOOT_GROUPS) of a working phase; an unknown phase is in "0-5"."""
     return "6-7" if phase is not None and phase >= 6 else "0-5"
@@ -841,9 +823,11 @@ def build_document(lineages, footer, *, window: str, arms=None, sweep=False) -> 
         if sweep:
             simulated += agent_owner_replay.sweep(lineages, model)
         calibration = agent_owner_replay.calibration(lineages, model)
+    arm_rows = agent_owner_rollup.arm_rows(rows)
     return {
         "kind": REPORT_KIND, "schema_version": SCHEMA_VERSION, "window": window,
-        "pricing": footer["pricing"], "lineages": rows, "arms": _arm_rows(rows),
+        "pricing": footer["pricing"], "lineages": rows, "arms": arm_rows,
+        "projects": agent_owner_rollup.project_rows(rows, [arm["arm"] for arm in arm_rows]),
         "boots": _boot_rows(lineages), "simulated": simulated, "calibration": calibration,
         "unattributed": footer["unattributed"], "interrupted": footer["interrupted"],
         "unmatched": footer["unmatched"],
