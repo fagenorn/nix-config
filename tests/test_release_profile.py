@@ -266,9 +266,6 @@ class HostLocalProfileTest(unittest.TestCase):
         self.assertEqual([unit["posture"] for unit in inputs["recovery"]["units"]],
                          ["supersedable_only", "supersedable_only"])
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class MergeBindingTest(unittest.TestCase):
     """Issue 554 D2, D15: `merge` is an identity member bound beside version and commit."""
@@ -328,3 +325,7 @@ class MergeBindingTest(unittest.TestCase):
         self.assertIsNone(release_profile.candidate_problem(dict(support.CANDIDATE)))
         self.assertIsNotNone(release_profile.candidate_problem({**support.CANDIDATE, "merge": support.MERGE}))
         self.assertIsNotNone(release_profile.candidate_problem({**support.CANDIDATE, "version": "1.2.3"}))
+
+
+if __name__ == "__main__":
+    unittest.main()
