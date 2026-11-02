@@ -52,4 +52,8 @@ Task 1 — Side requests leave a conversation's turn alone — `python/agent_too
 
 The plan rests on D1 (`no_tail_mark` is the only side outcome), D2 (`observe` registers only the side request's flight), D3 (the side sequence is `None`, set by `observe` alone, and `_done` and `_settle` stay unchanged), D4 (the seams and the failing-first cases) and D5 (AC2 is post-merge). Planning appends D6 (case 5 asserts the side track's `log_fields()`, and case 1 asserts the `resumed` line's `idle_s`).
 
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, `gpt-6-astra`, effort `xhigh`, thread `01a19af5-0378-7482-ab6e-b8cd3b0f12ed`), fresh isolated read-only mode, base `a40b1270`, plan at `d335703b`. Focus: whether the change reopens the overlapping-request races of #423 D27. No fallback. Findings: 0 Blocking, 0 Should fix; the Discussion section found no D27 regression and left only the planned test runs and AC2's post-switch measurement unverified, which Task 1 and the acceptance record already own. Accepted 0, rejected 0, deferred 0.
+
 ---
