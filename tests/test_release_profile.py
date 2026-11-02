@@ -243,5 +243,27 @@ class PublicationFreeTest(unittest.TestCase):
                         proof=inputs["proof"], recovery=inputs["recovery"], authority_class="test")
                 self.assertEqual(tree(root), before)
 
+
+class HostLocalProfileTest(unittest.TestCase):
+    def test_the_argus_shaped_profile_compiles_and_binds(self):
+        compiled = release_profile.compile_profile("argus", support.argus_shaped_profile(),
+                                                   support.base_contract())
+        self.assertEqual(([n["id"] for n in compiled["publication"]],
+                          [n["id"] for n in compiled["activation"]]), (["notifier"], ["daemon"]))
+        self.assertEqual(dict(compiled["deadlines"]), {"notifier": 120000, "daemon": 300000})
+        self.assertEqual(sorted(compiled["adapters"]), ["bundle", "launchd"])
+        inputs = release_profile.bind_candidate(compiled, support.CANDIDATE)
+        units = {unit["name"]: unit for unit in inputs["proof"]["units"]}
+        self.assertEqual((units["notifier"]["phase"], units["daemon"]["phase"]),
+                         ("publication", "activation"))
+        daemon = units["daemon"]["parameters"]
+        self.assertEqual(daemon["target"], {"handle": "daemon", "kind": "launchd_gui_agent",
+                                            "label": "dev.argus.daemon"})
+        self.assertEqual(daemon["candidate"], {"version": "v1.2.3", "commit": "1" * 40})
+        self.assertEqual(inputs["proof"]["obligations"][0]["parameters"]["parameters"],
+                         {key: value for key, value in daemon.items() if key != "candidate"})
+        self.assertEqual([unit["posture"] for unit in inputs["recovery"]["units"]],
+                         ["supersedable_only", "supersedable_only"])
+
 if __name__ == "__main__":
     unittest.main()
