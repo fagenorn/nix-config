@@ -87,10 +87,10 @@ DELEGATED_SHIP_EVALS = (
     "no-subagent-launch-ships-inline",
 )
 INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
-V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes",
+V3_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes",
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
     "authorization_intents", "authority_observations", "reevaluation_evidence",
-    "delivery_observations", "requested_scope", "recovery"}
+    "delivery_observations", "requested_scope", "recovery", "verification"}
 CODEX_ORCHESTRATE = REPO_ROOT / "home/common/codex/skills/orchestrate-issues/SKILL.md"
 CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
 SKILL_TREES = (REPO_ROOT / "home/common/agent-skills/skills",
@@ -939,11 +939,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("--summary-file", terminal)
         self.assertNotIn("--result-file <path>", terminal)
 
-    def test_direct_and_control_requests_are_interface_two(self):
+    def test_direct_and_control_requests_carry_their_interfaces(self):
         direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")
         request = json_block(direct)
-        self.assertEqual((set(request), request["interface_version"]),
-                         (V2_DIRECT_REQUEST_KEYS, 2))
+        self.assertEqual((set(request), request["interface_version"], request["verification"]),
+                         (V3_DIRECT_REQUEST_KEYS, 3, []))
         for anchor in ("`delivery_contract`", "--kind contract", "`authorization_intents`",
                        "kind: delivery_remainder", "--request-file -"):
             self.assertIn(anchor, normalized(direct))

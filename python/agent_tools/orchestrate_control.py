@@ -87,7 +87,7 @@ ISSUE_NUMBER = re.compile(r"[1-9][0-9]*")
 DECISION_LABELS = frozenset({"wayfinder:research", "wayfinder:prototype", "wayfinder:grilling",
                              "wayfinder:task"})
 TRACKER_CHUNK = 100
-CONTROL_VERSION = 3
+CONTROL_VERSION = 4
 CLOSED_KINDS = ("spawn", "resume", "retry", "delivery_remainder", "delivery_contract", "wait",
                 "finalize")
 DISPATCH_KINDS = ("spawn", "resume", "retry")
@@ -567,8 +567,9 @@ def worktree_facts(repo_root: str, b: Bindings, issues: Sequence[int],
 
 def control_request(b: Bindings, session: dict, tracker: list, forge: dict, worktrees: list,
                     owners: list, pairs: Mapping[int, dict], *, human_directed: bool) -> dict:
-    """The interface-3 `control` request: the facts, the bound policy, the built pairs and
-    `human_directed`, which only an explicit session's first sweep sets (issue 458 D4)."""
+    """The interface-4 `control` request: the facts, the bound policy, the built pairs and
+    `human_directed`, which only an explicit session's first sweep sets (issue 458 D4).
+    It reports no verification observation (`verification` is empty; issue 545 D11)."""
     issues = session["issues"]
 
     def keyed(value) -> dict:
@@ -584,7 +585,8 @@ def control_request(b: Bindings, session: dict, tracker: list, forge: dict, work
         "authority_observations": keyed(lambda n: []),
         "reevaluation_evidence": keyed(lambda n: []),
         "delivery_observations": keyed(lambda n: []),
-        "requested_scopes": keyed(lambda n: None), "recoveries": keyed(lambda n: None)}
+        "requested_scopes": keyed(lambda n: None), "recoveries": keyed(lambda n: None),
+        "verification": []}
 
 
 def run_control(repo_root: str, run_id: str, request: dict, *,

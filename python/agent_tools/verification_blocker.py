@@ -13,7 +13,10 @@ It is the one home of:
 - the content identity of a failure (issue 543 D3);
 - the ledger's schema-11 rules (issue 544 D2-D5, D9): `park`, which records an attempt
   parked on a failure in the run's blocker map, `validate_blockers`, which checks that map
-  against the run's attempt pointers, and `upgrade_ten`, the strict 10 -> 11 step.
+  against the run's attempt pointers, and `upgrade_ten`, the strict 10 -> 11 step;
+- the resolution rules (issue 545 D2, D4): `requirement`, the requirement that asks for
+  an observation of a record, `validate_observations`, the check of a request's list of
+  observations, and `resolve`, which marks each record an observation changes `resolved`.
 
 A shape validator returns its argument itself, never a copy, and never mutates
 it; `validate_blockers` returns None and mutates nothing. Every refusal is one
@@ -403,6 +406,76 @@ def _resolution(record: dict, label: str) -> None:
         raise _refuse(f"{at}.facts", "must keep the record's names and sources")
     if all(old["value"] == new["value"] for old, new in zip(held, now)):
         raise _refuse(f"{at}.facts", "must change at least one value")
+
+
+def _named(facts: list) -> list:
+    """Each fact's `(name, source)` in order."""
+    return [(each["name"], each["source"]) for each in facts]
+
+
+def requirement(record: Mapping) -> dict:
+    """The `verification` requirement that asks for an observation of `record` (issue 545 D2).
+
+    It names the record's id and each fact's name and paths in the record's order, and
+    carries no value. It is a new object that shares nothing with `record`.
+    """
+    return validate_requirement({
+        "kind": REQUIREMENT_KIND, "blocker_id": record["id"],
+        "sources": [{"name": fact["name"], "paths": list(fact["source"]["paths"])}
+                    for fact in record["facts"]]})
+
+
+def validate_observations(value: object) -> list:
+    """Check a request's list of observations; returns `value` itself (issue 545 D4).
+
+    Each element is a valid `verification-observation`, and no `blocker_id` appears twice.
+    A refusal names the element: `verification[<i>]: <that refusal>`.
+    """
+    if not isinstance(value, list):
+        raise _refuse("verification", "must be a list")
+    seen = set()
+    for index, observation in enumerate(value):
+        try:
+            validate_observation(observation)
+        except BlockerRefused as refusal:
+            raise BlockerRefused(f"verification[{index}]: {refusal}") from None
+        if observation["blocker_id"] in seen:
+            raise _refuse(f"verification[{index}].blocker_id", "repeats an earlier observation")
+        seen.add(observation["blocker_id"])
+    return value
+
+
+def resolve(blockers: dict, observations: object) -> tuple[frozenset[str], frozenset[str]]:
+    """Apply a list of observations to a run's blocker map (issue 545 D2, D4).
+
+    Every observation is checked before anything changes: it names an `open` record of
+    `blockers`, carries that record's `repository`, and carries exactly its fact names and
+    sources in order, or the whole list is refused. Then a record with at least one changed
+    value becomes `resolved`, holding a copy of the observed facts. `observations` is never
+    changed. Returns `(resolved ids, equal ids)`.
+    """
+    validate_observations(observations)
+    for index, observation in enumerate(observations):
+        label = f"verification[{index}]"
+        held = blockers.get(observation["blocker_id"])
+        if held is None or held["state"] != "open":
+            raise _refuse(f"{label}.blocker_id", "names no open blocker of this run")
+        if observation["repository"] != held["repository"]:
+            raise _refuse(f"{label}.repository", "must equal the blocker's repository")
+        if _named(observation["facts"]) != _named(held["facts"]):
+            raise _refuse(f"{label}.facts",
+                          "must carry the blocker's names and sources in order")
+    resolved, equal = set(), set()
+    for observation in observations:
+        held = blockers[observation["blocker_id"]]
+        if all(old["value"] == new["value"]
+               for old, new in zip(held["facts"], observation["facts"])):
+            equal.add(held["id"])
+            continue
+        held["state"] = "resolved"
+        held["resolution"] = {"facts": copy.deepcopy(observation["facts"])}
+        resolved.add(held["id"])
+    return frozenset(resolved), frozenset(equal)
 
 
 def validate_blockers(blockers: object, pointers: Mapping[tuple[int, int], str | None]) -> None:
