@@ -10,8 +10,9 @@ assembles lineages, build_document projects them (with arms and projects, built 
 agent_tools.agent_owner_rollup, fresh-owner boots, and the replay of
 agent_tools.agent_owner_replay when asked) as the `agent-owner-report` document, and
 print_document prints its tables.
-agent_costs.main runs the report for `--report owners`. python/README.md (agent-costs)
-holds the contract.
+With start windows, collect keeps the settled lineages that started in a window and counts
+their whole spend. agent_costs.main runs the report for `--report owners`. python/README.md
+(agent-costs) holds the contract.
 """
 
 import functools
@@ -22,6 +23,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_tools import agent_owner_rollup
 from agent_tools.agent_costs import (
@@ -30,6 +32,7 @@ from agent_tools.agent_costs import (
     find_sessions,
     format_rfc3339_utc,
     human,
+    parse_rfc3339_utc,
     percentile,
     print_table,
     project_name,
@@ -48,11 +51,13 @@ MEASURED_PREFIX = MEASURED_NOTE.partition("{tokens}")[0]
 DISPATCH_TOOLS = ("Agent", "Task")
 BOOT_GROUPS = ("0-5", "6-7")
 LIVE_ARM = "live"
+DEFAULT_SETTLE_DAYS = 4
 NONE_YET = "(none: pass --policy or --sweep)"
 BIAS_NOTE = ("The shift model keeps observed increments after a hand-off and cannot see a fresh "
              "owner's re-reads, so it favours hand-offs (D18); an arm with more hand-offs than "
              "the baseline is kept only if the live arm confirms it.")
 
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _MENTIONS = re.compile(r"workflow-state|sdd-gate")
 _FINISH_COMMAND = re.compile(r"(?<![\w-])workflow-state\s+finish(?![\w-])")
 _TASK_FILE = re.compile(r"\.tasks/task-(\d+)\.md$")
@@ -60,6 +65,14 @@ _SAVED_TO = re.compile(r"saved to: (\S+)")
 _SUMMED = ("launches", "handoffs", "boots", "deaths", "long_child_waits", "owner_dollars",
            "total_dollars", "gate_calls", "measured_gate_calls", "help_calls",
            "absolute_path_calls")
+
+
+class StartWindow(NamedTuple):
+    """A start window of `--started`: the lineages starting in [since, before) form `arm`."""
+
+    arm: str
+    since: datetime
+    before: datetime
 
 
 @dataclass(frozen=True)
@@ -126,6 +139,32 @@ class Lineage:
     facts: dict
     relauncher: tuple = field(default_factory=tuple)
     started: float | None = None   # epoch seconds of the earliest call of the owner transcripts
+
+
+def _bound(text):
+    """A range bound: a UTC day as its midnight, else an RFC3339 instant."""
+    if _DAY.fullmatch(text):
+        return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return parse_rfc3339_utc(text)
+
+
+def parse_range(text: str) -> tuple[datetime, datetime]:
+    """The `(since, before)` of `SINCE..BEFORE` (issue 503 D1); ValueError when it is not a range."""
+    since_text, separator, before_text = text.partition("..")
+    if not separator:
+        raise ValueError("expected SINCE..BEFORE")
+    since, before = _bound(since_text), _bound(before_text)
+    if since >= before:
+        raise ValueError("SINCE must be before BEFORE")
+    return since, before
+
+
+def start_window_label(windows) -> str:
+    """The report's window label for start windows."""
+    return "; ".join(
+        f"{'started' if window.arm == LIVE_ARM else window.arm} "
+        f"{format_rfc3339_utc(window.since)} → {format_rfc3339_utc(window.before)}"
+        for window in windows)
 
 
 def call_cost(call: OwnerCall) -> float:
@@ -393,6 +432,14 @@ def _counted(calls, since, before):
             for call in calls]
 
 
+def _in_windows(calls, windows):
+    """Per call, whether its start lies in any `(since, before)` pair of `windows`."""
+    flags = [False] * len(calls)
+    for since, before in windows:
+        flags = [seen or inside for seen, inside in zip(flags, _counted(calls, since, before))]
+    return flags
+
+
 def _owner_scan(path, is_root, transcript, reads, counted):
     calls = transcript.calls
     registered = next(index for index, read in enumerate(reads) if read.registration)
@@ -424,8 +471,12 @@ def _owner_scan(path, is_root, transcript, reads, counted):
     }
 
 
-def scan_owner_transcript(job, *, since, before):
-    """Scan one transcript `(path, is_root)`; None when it cannot be opened."""
+def scan_owner_transcript(job, *, since, before, windows=()):
+    """Scan one transcript `(path, is_root)`; None when it cannot be opened.
+
+    `windows` holds `(since, before)` pairs; the scan's `window_calls` and `window_dollars` are
+    the count and dollars of the calls starting in any of them.
+    """
     path, is_root = job
     try:
         with open(path, "r", errors="replace") as handle:
@@ -436,6 +487,8 @@ def scan_owner_transcript(job, *, since, before):
     counted = _counted(calls, since, before)
     reads = [_read_call(call, transcript) for call in calls]
     priced = [usage_cost(call.model, call.usage) for call, flag in zip(calls, counted) if flag]
+    windowed = [usage_cost(call.model, call.usage)
+                for call, flag in zip(calls, _in_windows(calls, windows)) if flag]
     session, agent_id = _session_and_agent(path, is_root)
     parent, tool_use = (None, None) if is_root else _read_meta(path)
     ends = [call.end for call in calls if call.end is not None]
@@ -445,6 +498,7 @@ def scan_owner_transcript(job, *, since, before):
         "parent": parent, "tool_use_id": tool_use, "counted_calls": len(priced),
         "dollars": sum(dollars for dollars, _ in priced),
         "approximate_calls": sum(approximate for _, approximate in priced),
+        "window_calls": len(windowed), "window_dollars": sum(dollars for dollars, _ in windowed),
         "last_end": max(ends).timestamp() if ends else None,
         "first_start": min(starts).timestamp() if starts else None,
         "dispatched": {tool_id: index for index, call in enumerate(calls)
@@ -623,8 +677,11 @@ def _lineage(run_id, issue, group, child_ends, homes):
                    _relauncher(launches), started)
 
 
-def _lineages(scans, homes):
-    """The lineages of `scans` and the unattributed transcripts, dollars and unresolved owners."""
+def _lineages(scans, homes, *, start_mode=False):
+    """The lineages of `scans` and the unattributed transcripts, dollars and unresolved owners.
+
+    With `start_mode` a transcript is lost by its calls inside the start windows, not by its counted ones.
+    """
     _resolve_owners(scans)
     by_agent = {(scan["session"], scan["agent_id"]): scan for scan in scans if not scan["is_root"]}
     roots = {scan["session"]: scan for scan in scans if scan["is_root"]}
@@ -633,10 +690,13 @@ def _lineages(scans, homes):
     members = defaultdict(list)
     unattributed = {"transcripts": 0, "dollars": 0.0, "unresolved_owners": 0}
 
+    calls_name, dollars_name = ("window_calls", "window_dollars") if start_mode else (
+        "counted_calls", "dollars")
+
     def lose(scan):
-        if scan["counted_calls"]:
+        if scan[calls_name]:
             unattributed["transcripts"] += 1
-            unattributed["dollars"] += scan["dollars"]
+            unattributed["dollars"] += scan[dollars_name]
 
     for scan in scans:
         owner_scan = _nearest_owner(scan, by_agent, roots)
@@ -644,7 +704,7 @@ def _lineages(scans, homes):
             members[(owner_scan["owner"]["run_id"], owner_scan["owner"]["issue"])].append(
                 (scan, owner_scan))
         else:
-            unattributed["unresolved_owners"] += owner_scan is scan
+            unattributed["unresolved_owners"] += owner_scan is scan and bool(scan[calls_name])
             lose(scan)
     lineages = []
     for (run_id, issue), group in sorted(members.items()):
@@ -696,20 +756,58 @@ def _interrupted(row):
             "claude_exit": row.get("claude_exit")}
 
 
-def _scan_all(jobs, since, before, executor_factory):
-    scanner = functools.partial(scan_owner_transcript, since=since, before=before)
+def _select_started(lineages, windows, settle_days, report_end):
+    """The kept lineages, the left-out ones and the `start_grouping` of start windows (issue 503 D2, D3).
+
+    A lineage that started in a window is kept for that window's arm once it has settled: it
+    started at least `settle_days` days before `report_end`. A younger one is counted in the
+    window's `unsettled`.
+    """
+    unsettled = [{"lineages": 0, "dollars": 0.0} for _ in windows]
+    kept, left = [], []
+    for lineage in lineages:
+        position = next((index for index, window in enumerate(windows)
+                         if lineage.started is not None
+                         and window.since.timestamp() <= lineage.started < window.before.timestamp()),
+                        None)
+        if position is None:
+            left.append(lineage)
+        elif lineage.started > report_end - settle_days * 86_400:
+            unsettled[position]["lineages"] += 1
+            unsettled[position]["dollars"] += lineage.facts["total_dollars"]
+            left.append(lineage)
+        else:
+            lineage.facts["arm"] = windows[position].arm
+            kept.append(lineage)
+    grouping = {
+        "settle_days": settle_days, "report_end": _instant(report_end),
+        "windows": [{"arm": window.arm, "since": format_rfc3339_utc(window.since),
+                     "before": format_rfc3339_utc(window.before), "unsettled": counts}
+                    for window, counts in zip(windows, unsettled)]}
+    return kept, left, grouping
+
+
+def _scan_all(jobs, since, before, executor_factory, windows=()):
+    scanner = functools.partial(scan_owner_transcript, since=since, before=before, windows=windows)
     return [scan for scan in scan_paths(jobs, executor_factory, scanner=scanner) if scan]
 
 
-def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory):
+def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory, windows=(),
+            settle_days=0):
     """The lineages of the transcripts under `root` and the footer facts.
+
+    With `windows` (StartWindow, never combined with `eval_rows`) the mtime `cutoff` and the
+    event window do not apply: every transcript is read and every call counted, and the
+    settled lineages that started in a window are kept (issue 503 D1, D3). The footer's
+    `start_grouping` is None without `windows`.
 
     With `eval_rows` the mtime `cutoff` does not apply: each row with `claude_exit` 0
     is one lineage row built from the sessions of its workdir's project directories, and
     every other row is listed as interrupted. A clean-exit row that yields no lineage (no
     matching session, or no resolved owner) is listed as unmatched, never dropped.
     """
-    sessions = list(find_sessions(root, None if eval_rows is not None else cutoff))
+    start_mode = bool(windows)
+    sessions = list(find_sessions(root, None if eval_rows is not None or start_mode else cutoff))
     interrupted, unmatched, samples = [], [], []
     if eval_rows is not None:
         samples = [row for row in eval_rows if _clean_exit(row)]
@@ -722,9 +820,16 @@ def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory):
             for path in paths:
                 homes[str(path)] = home
                 jobs.append((path, is_root))
-    scans = _scan_all(jobs, since, before, executor_factory)
+    pairs = tuple((window.since, window.before) for window in windows)
+    scans = _scan_all(jobs, None if start_mode else since, None if start_mode else before,
+                      executor_factory, pairs)
+    start_grouping = None
     if eval_rows is None:
-        lineages, unattributed = _lineages(scans, homes)
+        lineages, unattributed = _lineages(scans, homes, start_mode=start_mode)
+        if start_mode:
+            report_end = max((scan["last_end"] for scan in scans if scan["last_end"] is not None),
+                             default=None)
+            lineages, _, start_grouping = _select_started(lineages, windows, settle_days, report_end)
     else:
         lineages, unattributed = [], {"transcripts": 0, "dollars": 0.0, "unresolved_owners": 0}
         for row in samples:
@@ -740,7 +845,7 @@ def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory):
         "pricing": {"source": SOURCE_URL, "date": SOURCE_DATE,
                     "approximate_calls": sum(scan["approximate_calls"] for scan in scans)},
         "unattributed": unattributed, "interrupted": interrupted,
-        "unmatched": unmatched,
+        "unmatched": unmatched, "start_grouping": start_grouping,
     }
     return lineages, footer
 
@@ -826,7 +931,8 @@ def build_document(lineages, footer, *, window: str, arms=None, sweep=False) -> 
     arm_rows = agent_owner_rollup.arm_rows(rows)
     return {
         "kind": REPORT_KIND, "schema_version": SCHEMA_VERSION, "window": window,
-        "pricing": footer["pricing"], "lineages": rows, "arms": arm_rows,
+        "start_grouping": footer["start_grouping"], "pricing": footer["pricing"],
+        "lineages": rows, "arms": arm_rows,
         "projects": agent_owner_rollup.project_rows(rows, [arm["arm"] for arm in arm_rows]),
         "boots": _boot_rows(lineages), "simulated": simulated, "calibration": calibration,
         "unattributed": footer["unattributed"], "interrupted": footer["interrupted"],

@@ -9,6 +9,8 @@ from pathlib import Path
 
 from .owner_transcripts import FINISH, RUN, Session, at, cost, finish_reply, gate_reply, progress
 
+DAY, HOUR = 86_400, 3_600
+
 
 def report(root, *extra):
     completed = subprocess.run(
@@ -17,6 +19,13 @@ def report(root, *extra):
         capture_output=True, text=True, check=False)
     assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
+
+
+def run(root, *argv):
+    """agent-costs over `root` with `argv`; the completed process, its exit status unchecked."""
+    return subprocess.run(
+        [sys.executable, "-m", "agent_tools.agent_costs", "--projects-dir", str(root), *argv],
+        capture_output=True, text=True, check=False)
 
 
 class OwnerReportTest(unittest.TestCase):
@@ -189,6 +198,93 @@ class OwnerReportTest(unittest.TestCase):
                      "--projects-dir", str(self.root), *extra],
                     capture_output=True, text=True, check=False)
                 self.assertEqual(completed.returncode, 2)
+
+    def assert_usage_errors(self, *argvs):
+        """Each argv is refused by a rule of agent-costs: exit 2 and nothing on stdout."""
+        for argv in argvs:
+            with self.subTest(argv=argv):
+                completed = run(self.root, *argv)
+                self.assertEqual((completed.returncode, completed.stdout), (2, ""), completed.stderr)
+                self.assertNotIn("unrecognized arguments", completed.stderr)
+
+    def started_corpus(self):
+        """Issue 7 starts on day 1 (2026-10-26T09:00Z) and spends until day 6, the report end;
+        issue 8 starts the evening before 2026-10-25 and delivers on day 1; issue 9 starts on
+        day 2.5; s4 is no owner's and calls on days 1 and 5."""
+        s7 = Session(self.root, session="s7")
+        g = s7.call(None, DAY, context=20_000, write=20_000, ttl="1h", bash=progress(3))
+        s7.result(None, DAY + 5, g, gate_reply("continue"))
+        s7.call(None, 3 * DAY + 12 * HOUR, context=21_000, write=21_000, ttl="1h")
+        s7.call(None, 6 * DAY, context=22_000, write=22_000, ttl="1h")
+        s7.write()
+        s8 = Session(self.root, session="s8")
+        g = s8.call(None, -10 * HOUR, context=20_000, write=20_000, ttl="1h",
+                    bash=progress(3, action_id="8:1:1"))
+        s8.result(None, -10 * HOUR + 5, g, gate_reply("continue", issue=8))
+        f = s8.call(None, DAY, context=21_000, write=1_000, ttl="1h", bash=FINISH)
+        s8.result(None, DAY + 5, f, finish_reply(8))
+        s8.write()
+        s9 = Session(self.root, session="s9")
+        g = s9.call(None, 2 * DAY + 12 * HOUR, context=25_000, write=25_000, ttl="1h",
+                    bash=progress(3, action_id="9:1:1"))
+        s9.result(None, 2 * DAY + 12 * HOUR + 5, g, gate_reply("continue", issue=9))
+        s9.write()
+        s4 = Session(self.root, session="s4")
+        s4.call(None, DAY, context=10_000, write=10_000, ttl="1h")
+        s4.call(None, 5 * DAY, context=11_000, write=1_000, ttl="1h")
+        s4.write()
+        return {7: cost(20_000, 20_000, write_price=8.0) + cost(21_000, 21_000, write_price=8.0)
+                + cost(22_000, 22_000, write_price=8.0),
+                9: cost(25_000, 25_000, write_price=8.0),
+                "s4": cost(10_000, 10_000, write_price=8.0)}
+
+    def test_a_start_window_counts_whole_settled_lineages_that_started_inside_it(self):
+        costs = self.started_corpus()
+        doc = report(self.root, "--started", "2026-10-25..2026-10-28")
+        [row] = doc["lineages"]
+        self.assertEqual((row["issue"], row["arm"], row["started"]),
+                         (7, "live", "2026-10-26T09:00:00Z"))
+        self.assertAlmostEqual(row["owner_dollars"], costs[7], places=9)   # days 3.5 and 6 too
+        [arm] = doc["arms"]
+        self.assertEqual((arm["n"], arm["delivered"]), (1, 0))   # issue 8's delivery is out
+        self.assertEqual(doc["window"], "started 2026-10-25T00:00:00Z → 2026-10-28T00:00:00Z")
+        grouping = doc["start_grouping"]
+        self.assertEqual((grouping["settle_days"], grouping["report_end"]),
+                         (4, "2026-10-31T09:00:00Z"))
+        [window] = grouping["windows"]
+        self.assertEqual((window["arm"], window["since"], window["before"],
+                          window["unsettled"]["lineages"]),
+                         ("live", "2026-10-25T00:00:00Z", "2026-10-28T00:00:00Z", 1))
+        self.assertAlmostEqual(window["unsettled"]["dollars"], costs[9], places=9)
+        lost = doc["unattributed"]
+        self.assertEqual((lost["transcripts"], lost["unresolved_owners"]), (1, 0))
+        self.assertAlmostEqual(lost["dollars"], costs["s4"], places=9)   # its day-5 call is out
+
+    def test_settle_days_zero_counts_the_young_lineage_too(self):
+        self.started_corpus()
+        doc = report(self.root, "--started", "2026-10-25T00:00:00+00:00..2026-10-28T00:00:00Z",
+                     "--settle-days", "0")
+        self.assertEqual([(row["issue"], row["arm"]) for row in doc["lineages"]],
+                         [(7, "live"), (9, "live")])
+        self.assertEqual(doc["start_grouping"]["windows"][0]["unsettled"],
+                         {"lineages": 0, "dollars": 0.0})
+
+    def test_start_mode_usage_errors(self):
+        window = "2026-10-25..2026-10-28"
+        self.assert_usage_errors(
+            ["--report", "boot", "--started", window],
+            ["--settle-days", "4"],
+            ["--report", "owners", "--settle-days", "4"],
+            ["--report", "owners", "--started", window, "--events-since", at(0),
+             "--events-before", at(60)],
+            ["--report", "owners", "--started", window, "--eval-results", "r.jsonl",
+             "--eval", "from-issue:8"],
+            ["--report", "owners", "--started", window, "--settle-days", "-1"],
+            ["--report", "owners", "--started", "2026-10-25"],
+            ["--report", "owners", "--started", "2026-10-28..2026-10-25"],
+            ["--report", "owners", "--started", "2026-10-25..2026-10-25"],
+            ["--report", "owners", "--started", "2026-10-25..2026-10-32"],
+            ["--report", "owners", "--started", "2026-10-25T00:00:00..2026-10-28"])
 
     def test_text_output_prints_the_six_tables(self):
         self.chain(Session(self.root)).write()

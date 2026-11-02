@@ -44,7 +44,9 @@ their descendants), per arm and for fresh-owner boots, as text or `--format json
 With `--eval-results PATH --eval SKILL:ID` it groups the trials of a lifecycle eval
 instead of live issues. `--policy NAME=SPEC` (repeatable) and `--sweep` replay the lineages
 under hand-off policies (agent_tools.agent_owner_replay) and fill the simulated-arms and
-calibration tables.
+calibration tables. `--started SINCE..BEFORE` instead selects the lineages that started in that
+window and counts each one's whole spend once it has settled `--settle-days` (default 4) before
+the report end.
 """
 
 import argparse
@@ -1737,6 +1739,13 @@ def _positive_int(text):
     return value
 
 
+def _non_negative_int(text):
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{text} is not a non-negative integer")
+    return value
+
+
 def _window_label(args, cutoff, event_start, event_end):
     """The window a mtime-or-event report names: the event bounds, the day count or all time."""
     if event_start:
@@ -1795,11 +1804,25 @@ def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
             eval_rows = agent_owner_report.load_eval_rows(args.eval_results, skill, case)
         except (OSError, ValueError) as error:
             sys.exit(f"cannot read eval results: {error}")
+    windows, settle_days = (), 0
+    if args.started is not None:
+        try:
+            since, before = agent_owner_report.parse_range(args.started)
+        except ValueError as error:
+            ap.error(f"--started: {error}")
+        windows = (agent_owner_report.StartWindow(agent_owner_report.LIVE_ARM, since, before),)
+        settle_days = (agent_owner_report.DEFAULT_SETTLE_DAYS if args.settle_days is None
+                       else args.settle_days)
     lineages, footer = agent_owner_report.collect(
         root, cutoff=event_start.timestamp() if event_start else cutoff, since=event_start,
-        before=event_end, eval_rows=eval_rows, executor_factory=executor_factory)
-    window = (f"eval {args.eval_case}" if eval_rows is not None
-              else _window_label(args, cutoff, event_start, event_end))
+        before=event_end, eval_rows=eval_rows, executor_factory=executor_factory,
+        windows=windows, settle_days=settle_days)
+    if eval_rows is not None:
+        window = f"eval {args.eval_case}"
+    elif windows:
+        window = agent_owner_report.start_window_label(windows)
+    else:
+        window = _window_label(args, cutoff, event_start, event_end)
     document = agent_owner_report.build_document(lineages, footer, window=window, arms=arms,
                                                  sweep=args.sweep)
     if args.format == "json":
@@ -1851,6 +1874,12 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                          "--report owners only")
     ap.add_argument("--sweep", action="store_true",
                     help="replay the sweep of candidate policies; --report owners only")
+    ap.add_argument("--started", metavar="SINCE..BEFORE",
+                    help="select the lineages that started in [SINCE, BEFORE) (YYYY-MM-DD or "
+                         "RFC3339 bounds) and count their whole spend; --report owners only")
+    ap.add_argument("--settle-days", type=_non_negative_int, default=None, metavar="DAYS",
+                    help="count a lineage only when it started at least DAYS days before the "
+                         "report end (default 4, 0 = off); needs --started")
     ap.add_argument("--context-threshold", type=_positive_int, default=None, metavar="TOKENS",
                     help="context size above which cache reads are totalled; --report cache only "
                          "(default 120000)")
@@ -1885,6 +1914,14 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         ap.error("--eval-results and --eval must be used together")
     if args.eval_results is not None and not owners_report:
         ap.error("--eval-results and --eval are available only with --report owners")
+    if (args.started is not None or args.settle_days is not None) and not owners_report:
+        ap.error("--started and --settle-days are available only with --report owners")
+    if args.settle_days is not None and args.started is None:
+        ap.error("--settle-days needs --started")
+    if args.started is not None and (args.events_since or args.events_before):
+        ap.error("--started does not take --events-since/--events-before")
+    if args.started is not None and args.eval_results is not None:
+        ap.error("--started does not take --eval-results/--eval")
     if cache_report and json_mode:
         ap.error("--report cache is text only; it cannot be combined with --format json")
     if cache_report and args.project:
