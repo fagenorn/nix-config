@@ -85,6 +85,10 @@ class ClassificationTest(Case):
              ("absent", "bundle_other_release"), ("unsatisfied", "subject_mismatch")),
             ("unsigned", lambda: self.install(identity=None), ("diverged", "signature_invalid"),
              ("unsatisfied", "digest_mismatch")),
+            ("unloadable plist", lambda: self.install() and (
+                self.world.home / PATH[2:] / "Contents/Info.plist").write_bytes(
+                b'<?xml version="1.0"?><plist version="1.0"><dict><key>a</key><date>x</date></dict></plist>'),
+             ("diverged", "target_unexpected"), ("unsatisfied", "subject_mismatch")),
             ("tampered", tamper, ("diverged", "signature_invalid"), ("unsatisfied", "digest_mismatch")),
             ("ad hoc refused", lambda: self.install(identity="-"), ("diverged", "signature_policy"),
              ("unsatisfied", "subject_mismatch")),
@@ -159,7 +163,10 @@ class InvokeTest(Case):
         self.assertEqual((observed["outcome"], observed["reason"]), ("satisfied", "installed"))
 
     def test_each_refusal_leaves_the_installed_bundle_unchanged(self):
-        outside = self.world.root / "outside.plist"
+        date_plist = (b'<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+                      b'<key>CFBundleIdentifier</key><string>dev.example.notifier</string>'
+                      b'<key>Built</key><date>x</date></dict></plist>')
+        huge_plist = date_plist.replace(b"<date>x</date>", b"<integer>" + b"9" * 23 + b"</integer>")
 
         def old_release():
             self.install(stamp=("v1.2.2", "f" * 40))
@@ -185,6 +192,7 @@ class InvokeTest(Case):
 
         def linked_plist(stack):
             plist = self.world.checkout / "build/Notifier.app/Contents/Info.plist"
+            outside = self.world.root / "outside.plist"
             outside.write_bytes(plistlib.dumps({"CFBundleIdentifier": "dev.example.notifier"}))
             plist.unlink()
             plist.symlink_to(outside)
@@ -193,6 +201,11 @@ class InvokeTest(Case):
             contents = self.world.checkout / "build/Notifier.app/Contents"
             contents.rename(self.world.root / "OutsideContents")
             contents.symlink_to(self.world.root / "OutsideContents")
+
+        def source_plist(content):
+            def arrange(stack):
+                (self.world.checkout / "build/Notifier.app/Contents/Info.plist").write_bytes(content)
+            return arrange
 
         def list_plist(stack):
             plist = self.world.checkout / "build/Notifier.app/Contents/Info.plist"
@@ -249,6 +262,10 @@ class InvokeTest(Case):
              "no-sign", False),
             ("linked contents", linked_contents, ("rejected", "precondition_failed"), "source",
              "no-sign", False),
+            ("date plist", source_plist(date_plist), ("rejected", "precondition_failed"), "source",
+             "no-sign", False),
+            ("overflow plist", source_plist(huge_plist), ("rejected", "precondition_failed"),
+             "stage", "no-sign", True),
             ("list plist", list_plist, ("rejected", "precondition_failed"), "source",
              "no-sign", False),
             ("security fails", lambda stack: self.world.identities(IDENTITY, exit=1,
@@ -295,7 +312,7 @@ class InvokeTest(Case):
                     signed = len(self.signed_with()) - signed_before
                     self.assertEqual(signed, 1 if children is True else 0)
                 if name == "linked plist":
-                    self.assertEqual(outside.read_bytes(),
+                    self.assertEqual((self.world.root / "outside.plist").read_bytes(),
                                      plistlib.dumps({"CFBundleIdentifier": "dev.example.notifier"}))
                 if name == "linked install":
                     self.assertEqual(os.readlink(installed), str(self.world.checkout))
@@ -355,6 +372,13 @@ class InvokeTest(Case):
             result = self.invoke()
         self.assertEqual((result["result"], result["error_class"]), ("unknown", "transient_transport"))
         self.assertEqual(release_adapter.invoke_result_problems(result), [])
+        parent = Path(installed).parent
+        with open(parent / ".Notifier.app.release-previous/Contents/Info.plist", "rb") as handle:
+            self.assertEqual(plistlib.load(handle)["AgentReleaseVersion"], "v1.2.2")
+        with open(parent / ".Notifier.app.release-staging/Notifier.app/Contents/Info.plist",
+                  "rb") as handle:
+            self.assertEqual(plistlib.load(handle)["AgentReleaseVersion"], "v1.2.3")
+        self.assertFalse(Path(installed).exists())
 
 
 class ObservationTest(Case):

@@ -21,7 +21,7 @@ deadline per call. `publication_visible` maps the effect row by the table's last
 `invoke(request)` never raises and returns the closed `InvokeResult`. Every refusal reference is
 `<step>: <detail>`, cut to 240 characters, and one `INVOKE_BUDGET_SECONDS` deadline covers all its
 children, which run by name on `PATH` with the caller's environment unchanged: `git`, `security`
-and `codesign`, never the lifecycle guard (D12) and never a build (D9). It stops at the first
+and `codesign`, never the lifecycle guard (issue 547 D12) and never a build (issue 547 D9). It stops at the first
 refusal, in this order:
 
 1. Shape: not exactly an effect request is `invalid_input`, an operation `describe` does not
@@ -40,14 +40,14 @@ refusal, in this order:
    `adhoc_fallback` is true. No match is `precondition_failed` with `no_signing_identity`, and an
    env value that matches nothing never falls back.
 6. Install path: an existing one that is a symlink or not a directory is `precondition_failed`.
-7. Staging (D20): the parent is made, stale `.<name>.release-staging` and `.<name>.release-previous`
+7. Staging (issue 547 D20): the parent is made, stale `.<name>.release-staging` and `.<name>.release-previous`
    siblings are removed, the source is copied with its symlinks into the staging directory, the
    two stamp keys are written by replacing `Contents/Info.plist` with a temporary file in the
-   same directory (D23), and `codesign --force --sign` then `--verify --deep --strict` must pass.
+   same directory (issue 547 D23), and `codesign --force --sign` then `--verify --deep --strict` must pass.
    Any failure removes staging and is `rejected`: `provider_unavailable` for an operating-system
    error or a missing `codesign`, `transient_transport` for a timeout, `precondition_failed` for
    a non-zero exit.
-8. Swap (D15, D20): an existing bundle is renamed to the previous sibling, then the staged bundle
+8. Swap (issue 547 D15, D20): an existing bundle is renamed to the previous sibling, then the staged bundle
    to the install path. A failed rename did not happen: before any rename succeeded it is
    `rejected`/`provider_unavailable` with staging removed, after one it is
    `unknown`/`transient_transport` with the files left as they are. Then the previous sibling and
@@ -62,7 +62,6 @@ import stat
 import subprocess
 import tempfile
 import time
-import xml.parsers.expat
 from typing import Any
 
 INSPECT_BUDGET_SECONDS = 30
@@ -225,6 +224,18 @@ def _run(argv: list[str], deadline: float) -> tuple[str, int, str, str]:
     return "ok", done.returncode, done.stderr, done.stderr.strip()[:DETAIL_LIMIT]
 
 
+def _loads(data: bytes) -> Any:
+    """`plistlib.loads` with every parse failure as one `ValueError`.
+
+    The standard library raises more than `ValueError` and `ExpatError` for malformed input (a
+    `<date>` that is not a date raises `AttributeError`), so the translation is wide on purpose.
+    """
+    try:
+        return plistlib.loads(data)
+    except Exception as error:
+        raise ValueError("does not load as a plist") from error
+
+
 def _stamp(info: dict[str, Any]) -> dict[str, str] | None:
     version, commit = info.get(STAMP_VERSION), info.get(STAMP_COMMIT)
     if isinstance(version, str) and isinstance(commit, str):
@@ -274,8 +285,8 @@ def _classify(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
         return seen("diverged", "target_unexpected")
     try:
         with open(os.path.join(path, "Contents", "Info.plist"), "rb") as handle:
-            info = plistlib.load(handle)
-    except (OSError, ValueError, xml.parsers.expat.ExpatError):
+            info = _loads(handle.read())
+    except (OSError, ValueError):
         return seen("diverged", "target_unexpected")
     if not isinstance(info, dict):
         return seen("diverged", "target_unexpected")
@@ -381,7 +392,7 @@ def _invoke_shape(request: Any) -> dict[str, Any]:
 
 
 def _checkout(commit: str, deadline: float) -> str:
-    """The working checkout's root, when HEAD is `commit` and no tracked file is modified (D23)."""
+    """The working checkout's root, when HEAD is `commit` and no tracked file is modified (#124 D23)."""
     root = _read(["git", "rev-parse", "--show-toplevel"], "checkout", deadline).strip()
     if not os.path.isabs(root):
         raise _rejected("provider_unavailable", "checkout", "rev-parse did not return a directory")
@@ -401,17 +412,17 @@ def _plist(path: str) -> tuple[dict[str, Any], bool]:
         raise ValueError("not a regular file")
     with open(path, "rb") as handle:
         data = handle.read()
-    info = plistlib.loads(data)
+    info = _loads(data)
     if not isinstance(info, dict):
         raise ValueError("not a dictionary")
     return info, data.startswith(b"bplist00")
 
 
-PLIST_ERRORS = (OSError, ValueError, xml.parsers.expat.ExpatError)
+PLIST_ERRORS = (OSError, ValueError)
 
 
 def _source(root: str, source: str) -> str:
-    """The source bundle, when no link stands in for it, its `Contents` or its plist (D23)."""
+    """The source bundle, when no link stands in for it, its `Contents` or its plist (issue 547 D23)."""
     bundle = os.path.join(root, source)
     contents = os.path.join(bundle, "Contents")
     try:
@@ -469,7 +480,10 @@ def _remove(path: str) -> None:
 
 
 def _stamp_plist(staged: str, candidate: dict[str, str]) -> None:
-    """Set the two stamp keys by replacing `Info.plist`, never writing through it (D23)."""
+    """Set the two stamp keys by replacing `Info.plist`, never writing through it (issue 547 D23).
+
+    A failure leaves its temporary file inside the staging directory, which the caller removes.
+    """
     contents = os.path.join(staged, "Contents")
     target = os.path.join(contents, "Info.plist")
     info, binary = _plist(target)
@@ -477,7 +491,10 @@ def _stamp_plist(staged: str, candidate: dict[str, str]) -> None:
     descriptor, temporary = tempfile.mkstemp(prefix=".Info.plist.", dir=contents)
     with os.fdopen(descriptor, "wb") as handle:
         os.fchmod(handle.fileno(), stat.S_IMODE(os.lstat(target).st_mode))
-        plistlib.dump(info, handle, fmt=plistlib.FMT_BINARY if binary else plistlib.FMT_XML)
+        try:
+            plistlib.dump(info, handle, fmt=plistlib.FMT_BINARY if binary else plistlib.FMT_XML)
+        except (TypeError, OverflowError) as error:
+            raise ValueError("cannot be written back as a plist") from error
     os.replace(temporary, target)
 
 
