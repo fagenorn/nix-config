@@ -1,4 +1,4 @@
-"""The codesigned-artifact adapter (issue 547 D1, D4, D6-D9, D12, D15, D17, D19-D23): `describe`, `inspect`, `invoke`.
+"""The codesigned-artifact adapter (issue 547 D1, D4, D6-D9, D12, D15, D17, D19-D23, D26): `describe`, `inspect`, `invoke`.
 
 `describe()` returns a fresh descriptor with one operation, `install`: `materialize` mode,
 `in_place` mutability, `supported` for `inspect`. `publication_visible` is supported and
@@ -14,7 +14,9 @@ This module imports only the standard library and `agent_tools.canonical`: the r
 `publication_visible`, and any other predicate is `unknown`/`predicate_unsupported` (issue 547 D19).
 Otherwise it classifies the install path with `lstat`, the bundle's `Contents/Info.plist` stamp
 (`AgentReleaseVersion` and `AgentReleaseCommit`) and two `codesign` reads, `--verify --deep
---strict` and `-d --verbose=2` (stderr), by the table in the issue 547 spec. Every child runs by
+--strict` and `-d --verbose=2` (stderr), by the table in the issue 547 spec. An existing
+component between `$HOME` and the install path's parent that is a symlink or not a directory
+classifies as a symlinked install path does, `diverged`/`target_unexpected` (issue 547 D26). Every child runs by
 name on `PATH` with the caller's environment unchanged, under one `INSPECT_BUDGET_SECONDS`
 deadline per call. `publication_visible` maps the effect row by the table's last column.
 
@@ -39,7 +41,10 @@ refusal, in this order:
    any case), else the first listed name starting with `identity_prefix`, else `-` when
    `adhoc_fallback` is true. No match is `precondition_failed` with `no_signing_identity`, and an
    env value that matches nothing never falls back.
-6. Install path: an existing one that is a symlink or not a directory is `precondition_failed`.
+6. Install path: an existing one that is a symlink or not a directory, or an existing component
+   between `$HOME` and its parent that is a symlink or not a directory (issue 547 D26), is
+   `precondition_failed`, so no later step writes outside `$HOME`. Missing components are made
+   in step 7.
 7. Staging (issue 547 D20): the parent is made, stale `.<name>.release-staging` and `.<name>.release-previous`
    siblings are removed, the source is copied with its symlinks into the staging directory, the
    two stamp keys are written by replacing `Contents/Info.plist` with a temporary file in the
@@ -267,6 +272,25 @@ def _install_path(parameters: dict[str, Any]) -> str:
     return os.path.expanduser("~") + "/" + parameters["target"]["path"][2:]
 
 
+def _ancestor_problem(parameters: dict[str, Any]) -> str | None:
+    """The first existing component between `$HOME` and the install path's parent that is a
+    symlink or not a directory, or None (issue 547 D26).
+
+    A missing component ends the walk, since every deeper one is missing too. Any other
+    `lstat` failure propagates as `OSError`.
+    """
+    current = os.path.expanduser("~")
+    for segment in parameters["target"]["path"][2:].split("/")[:-1]:
+        current = current + "/" + segment
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(mode):
+            return f"{current} is a symlink or not a directory"
+    return None
+
+
 def _classify(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
     """The effect observation of one valid install request: the spec's `inspect` table."""
     path = _install_path(parameters)
@@ -276,6 +300,8 @@ def _classify(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
         return _observation(outcome, reason, path=path, **facts)
 
     try:
+        if _ancestor_problem(parameters) is not None:
+            return seen("diverged", "target_unexpected")
         mode = os.lstat(path).st_mode
     except FileNotFoundError:
         return seen("absent", "bundle_absent")
@@ -457,9 +483,13 @@ def _identity(config: dict[str, Any], deadline: float) -> str:
                     f"no_signing_identity: none starts with {config['identity_prefix']}")
 
 
-def _install_state(path: str) -> bool:
-    """Whether a bundle directory stands at `path`; a symlink or non-directory is a refusal."""
+def _install_state(parameters: dict[str, Any], path: str) -> bool:
+    """Whether a bundle directory stands at `path`; a symlink or non-directory there, or at an
+    existing component between `$HOME` and its parent, is a refusal (issue 547 D26)."""
     try:
+        problem = _ancestor_problem(parameters)
+        if problem is not None:
+            raise _rejected("precondition_failed", "install path", problem)
         mode = os.lstat(path).st_mode
     except FileNotFoundError:
         return False
@@ -549,7 +579,7 @@ def _invoke(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
     source = _source(_checkout(candidate["commit"], deadline), config["source"])
     identity = _identity(config, deadline)
     path = _install_path(parameters)
-    exists = _install_state(path)
+    exists = _install_state(parameters, path)
     parent, name = os.path.split(path)
     staging = os.path.join(parent, f".{name}.release-staging")
     previous = os.path.join(parent, f".{name}.release-previous")

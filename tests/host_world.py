@@ -16,7 +16,10 @@ prints the `-d --verbose=2` lines on stderr as the real tool does. `knobs.json` 
 The fake `launchctl` keeps `state/launchd.json` (`{"jobs": {label: job}, "next_pid": n}`) and
 answers `print gui/<uid>/<label>` with the block the real tool prints (issue 547 D21),
 `bootout gui/<uid>/<label>` and `bootstrap gui/<uid> <plist>`; `load_job` seeds a job directly. A
-knob on `launchctl` may also write `stdout`, before its stderr.
+`bootstrap` whose `StandardOutPath` or `StandardErrorPath` parent directory is missing leaves the
+job loaded but `not running`, with no pid, as launchd does (issue 547 D25). A knob on `launchctl`
+may also write `stdout`, before its stderr, and with `apply` it carries out the verb before
+exiting with its code: a `bootout` that unloaded the job yet exits non-zero (issue 547 D24).
 """
 import hashlib
 import json
@@ -183,7 +186,8 @@ if knob:
     sys.stdout.write(knob.get("stdout", ""))
     sys.stdout.flush()
     sys.stderr.write(knob["stderr"])
-    sys.exit(knob["exit"])
+    if not knob.get("apply"):
+        sys.exit(knob["exit"])
 store = state / "launchd.json"
 table = json.loads(store.read_text("utf-8"))
 jobs = table["jobs"]
@@ -233,13 +237,20 @@ else:
         sys.stderr.write("Bootstrap failed: 5: Input/output error\\n")
         sys.exit(5)
     arguments = definition["ProgramArguments"]
+    # launchd creates no missing parent of a log path: the job loads but cannot spawn.
+    spawns = all(os.path.isdir(os.path.dirname(definition[key]))
+                 for key in ("StandardOutPath", "StandardErrorPath") if key in definition)
     jobs[definition["Label"]] = {{
-        "path": argv[2], "state": "running", "pid": table["next_pid"], "runs": 1,
+        "path": argv[2], "state": "running" if spawns else "not running",
+        "pid": table["next_pid"] if spawns else None, "runs": 1,
         "program": arguments[0], "arguments": arguments,
         "working_directory": definition.get("WorkingDirectory"),
         "environment": definition.get("EnvironmentVariables", {{}}), "default_environment": {{}}}}
-    table["next_pid"] += 1
+    if spawns:
+        table["next_pid"] += 1
     save()
+if knob:
+    sys.exit(knob["exit"])
 """
 
 
@@ -350,18 +361,19 @@ class HostWorld:
              "sleep": sleep}), "utf-8")
 
     def fail(self, tool: str, verb: str, *, exit: int, stdout: str = "", stderr: str = "",
-             sleep: float = 0) -> None:
+             sleep: float = 0, apply: bool = False) -> None:
         """Make one verb of `tool` sleep, write `stdout` then `stderr` and exit with `exit`.
 
-        Only the fake `launchctl` writes a knob's `stdout`; `security` and `codesign` never print
-        on stdout from a knob, so a `stdout` for them is refused rather than silently dropped.
+        Only the fake `launchctl` writes a knob's `stdout` or honours `apply`, which carries out
+        the verb before exiting with `exit`; `security` and `codesign` have neither, so either is
+        refused for them rather than silently dropped.
         """
-        if stdout and tool != "launchctl":
-            raise ValueError(f"the fake {tool} has no knob stdout")
+        if (stdout or apply) and tool != "launchctl":
+            raise ValueError(f"the fake {tool} has no knob stdout or apply")
         knobs = self.state / "knobs.json"
         table = json.loads(knobs.read_text("utf-8")) if knobs.exists() else {}
         table.setdefault(tool, {})[verb] = {"exit": exit, "stdout": stdout, "stderr": stderr,
-                                            "sleep": sleep}
+                                            "sleep": sleep, "apply": apply}
         knobs.write_text(json.dumps(table), "utf-8")
 
     def program(self, name: str) -> str:

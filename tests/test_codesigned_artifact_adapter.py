@@ -56,6 +56,18 @@ class Case(unittest.TestCase):
         stamp = (self.candidate["version"], self.candidate["commit"]) if stamp == "candidate" else stamp
         return self.world.installed(PATH[2:], stamp=stamp, identity=identity)
 
+    def linked_ancestor(self):
+        """`~/Library/Application Support` links outside `$HOME` to a signed candidate bundle
+        and stale staging siblings (issue 547 D26); returns that outside directory."""
+        outside = self.world.root / "outside"
+        installed = self.install()
+        os.makedirs(outside)
+        os.rename(installed.parent.parent, outside / "Application Support")
+        (outside / "Application Support/Notifier/.Notifier.app.release-staging").mkdir()
+        (outside / "Application Support/Notifier/.Notifier.app.release-previous").mkdir()
+        (self.world.home / "Library/Application Support").symlink_to(outside / "Application Support")
+        return outside
+
 
 class DescribeTest(Case):
     def test_descriptor_is_exact_valid_fresh_and_registered(self):
@@ -78,6 +90,11 @@ class ClassificationTest(Case):
              ("diverged", "target_unexpected"), ("unsatisfied", "subject_mismatch")),
             ("regular file", lambda: (self.world.home / PATH[2:]).parent.mkdir(parents=True) or
              (self.world.home / PATH[2:]).write_text("x"),
+             ("diverged", "target_unexpected"), ("unsatisfied", "subject_mismatch")),
+            ("symlinked ancestor", self.linked_ancestor,
+             ("diverged", "target_unexpected"), ("unsatisfied", "subject_mismatch")),
+            ("regular-file ancestor", lambda: (self.world.home / "Library").mkdir() or
+             (self.world.home / "Library/Application Support").write_text("x"),
              ("diverged", "target_unexpected"), ("unsatisfied", "subject_mismatch")),
             ("no stamp", lambda: self.install(stamp=None), ("absent", "bundle_unmanaged"),
              ("unsatisfied", "subject_mismatch")),
@@ -357,6 +374,41 @@ class InvokeTest(Case):
             self.assertEqual(self.invoke()["result"], "accepted")
             self.assertTrue((self.world.home / PATH[2:] / "Contents/Info.plist")
                             .read_bytes().startswith(b"bplist00"))
+
+    def test_an_ancestor_outside_home_is_refused_before_any_write(self):
+        """Issue 547 D26: no component between `$HOME` and the install path's parent is a link."""
+        def outside_tree(root):
+            entries = {}
+            for current, directories, files in os.walk(root):
+                for name in directories + files:
+                    full = Path(current) / name
+                    entries[str(full.relative_to(root))] = (
+                        "dir" if full.is_dir() and not full.is_symlink() else full.read_bytes()
+                        if not full.is_symlink() else os.readlink(full))
+            return entries
+
+        def regular_file():
+            (self.world.home / "Library").mkdir()
+            (self.world.home / "Library/Application Support").write_text("x")
+            return None
+        for name, arrange in (("symlink", self.linked_ancestor), ("regular file", regular_file)):
+            with self.subTest(ancestor=name):
+                self.setUp()
+                self.world.bundle()
+                outside = arrange()
+                before = outside_tree(outside) if outside else None
+                home_before, signed = self.world.tree(), len(self.signed_with())
+                result = self.invoke()
+                self.assertEqual((result["result"], result["error_class"]),
+                                 ("rejected", "precondition_failed"))
+                self.assertTrue(result["reference"].startswith("install path: "), result["reference"])
+                self.assertEqual(release_adapter.invoke_result_problems(result), [])
+                self.assertEqual(len(self.signed_with()), signed)
+                self.assertEqual(self.world.tree(), home_before)
+                if outside:
+                    self.assertEqual(outside_tree(outside), before)
+                    self.assertTrue((outside / "Application Support/Notifier/"
+                                     ".Notifier.app.release-staging").is_dir())
 
     def test_a_failed_swap_after_the_old_bundle_moved_is_unknown(self):
         self.world.bundle()

@@ -167,7 +167,10 @@ contain a `..` segment, an empty segment or a control character.
    - An env value that matches nothing is refused the same way and never falls back.
    - A failed `security` read refuses before any write.
 4. **Install path check.** An existing install path that is a symlink or not a directory is
-   `precondition_failed`.
+   `precondition_failed`. So is an existing component between `$HOME` and the install path's
+   parent that is a symlink or not a directory, checked before step 5 creates the parent or
+   removes a stale sibling, so no write follows a link out of `$HOME` (D26). Missing components
+   are created in step 5.
 5. **Staging.** It creates the parent directory and removes stale `.<name>.release-staging` and
    `.<name>.release-previous` siblings. Then it copies the source into staging with symlinks
    preserved, and sets the `Info.plist` keys `AgentReleaseVersion` and `AgentReleaseCommit`,
@@ -191,7 +194,7 @@ package README states this limitation (D9).
 | State | `outcome` | `reason` | `publication_visible` |
 |---|---|---|---|
 | no entry | `absent` | `bundle_absent` | `unsatisfied`/`ref_absent` |
-| a symlink, a non-directory, or no readable `Contents/Info.plist` dictionary | `diverged` | `target_unexpected` | `unsatisfied`/`subject_mismatch` |
+| a symlink, a non-directory, an existing component between `$HOME` and its parent that is a symlink or not a directory (D26), or no readable `Contents/Info.plist` dictionary | `diverged` | `target_unexpected` | `unsatisfied`/`subject_mismatch` |
 | no stamp | `absent` | `bundle_unmanaged` | `unsatisfied`/`subject_mismatch` |
 | stamp of another candidate | `absent` | `bundle_other_release` | `unsatisfied`/`subject_mismatch` |
 | `codesign --verify --deep --strict` exits 1 or 3 | `diverged` | `signature_invalid` | `unsatisfied`/`digest_mismatch` |
@@ -240,12 +243,22 @@ The adapter renders the plist with `plistlib`. `WorkingDirectory` is always the 
    - Exit 0 means it is loaded, and the job's `path` must be the managed plist. Otherwise
      `precondition_failed`.
    - Any other exit is `rejected`/`provider_unavailable`.
-5. **Bootout.** If the agent is loaded, it runs `launchctl bootout gui/<uid>/<label>`. A non-zero
-   exit is `rejected`/`transient_transport`, since the job is still loaded. A timeout is `unknown`.
-6. **Plist write.** It writes the rendered plist atomically with mode 0644: a temporary file in
+5. **Log directories.** launchd creates no missing parent of `StandardOutPath` or
+   `StandardErrorPath`, and a job bootstrapped without one loads but never spawns. So, before any
+   bootout, it creates each configured log path's missing parent directories inside the checkout.
+   An existing component between the checkout root and that parent that is a symlink or not a
+   directory is `rejected`/`precondition_failed`, so nothing is created outside the checkout; an
+   operating-system error is `rejected`/`provider_unavailable` (D25).
+6. **Bootout.** If the agent is loaded, it runs `launchctl bootout gui/<uid>/<label>`. A
+   `launchctl` that cannot be started is `rejected`/`provider_unavailable`, and a timeout is
+   `unknown`. A non-zero exit may have begun tearing the agent down, so it re-runs the step 4
+   `print` within the remaining budget: a job still loaded from the managed plist is
+   `rejected`/`transient_transport`, since nothing changed; not loaded, loaded from another path,
+   or a re-read that fails or times out is `unknown`/`transient_transport` (D24).
+7. **Plist write.** It writes the rendered plist atomically with mode 0644: a temporary file in
    the same directory, then `os.replace`. It creates `~/Library/LaunchAgents` when missing.
    The bootout, or this write when nothing was loaded, is the first host write.
-7. **Bootstrap.** It runs `launchctl bootstrap gui/<uid> <plist>`. Exit 0 is `accepted`; anything
+8. **Bootstrap.** It runs `launchctl bootstrap gui/<uid> <plist>`. Exit 0 is `accepted`; anything
    else is `unknown`.
 
 Install, restart and status are one operation and its inspection. Every release re-renders the
@@ -402,10 +415,12 @@ compiles.
   case-insensitively. No module there contains it today.
 - **AC3**:
   - the release, conformance, adoption and guard-policy suites run unchanged and green;
-  - a test compiles the forge fixture profile against the full `DESCRIPTORS` and against the two
-    prior descriptors alone, and the digests are equal;
-  - ship-time evidence records the `release profile inspect github-release` digest on nix-config
-    before and after the change, and they are equal.
+  - `RegistryTest.test_prior_descriptors_and_forge_profiles_keep_their_base_digests` in
+    `tests/test_release_adapter_core.py` pins the `github-forge` and `github-actions-health`
+    descriptor digests, and the digests of the forge fixture profile and the publication-free
+    forge fixture profile, to their values at base `328f08da`. A profile digest covers only the
+    descriptors it binds, so the pin holds every forge or actions-health profile's digest, and no
+    ship-time digest comparison is recorded (D22).
 
 ## Test seams
 
@@ -492,3 +507,6 @@ compiles.
 | D21 | Host tool grammars, from read-only captures on this host (2026-11-02): a `launchctl print` field is a line with exactly one leading tab, `key = value`; the stamp is read only inside the block the one-tab line `environment = {` opens, as two-tab `K => V` lines up to the one-tab `}`; `codesign -d --verbose=2` is read from stderr; an identity is a `security find-identity` line matching `^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"(.+)"\s*$`; inspection runs `git --no-optional-locks`, so a status read never rewrites an index | the captured `launchctl print` (its `inherited environment` and `default environment` blocks use the same `=>` syntax) and `codesign -d` output; the bar (inspect never mutates; production-shaped fakes) | Matching `K => V` anywhere: a launchd-supplied variable could read as the stamp. Parsing `codesign -d` stdout: the real tool leaves it empty |
 | D22 | AC3 is a code check: a test pins the `github-forge` and `github-actions-health` descriptor digests and both forge fixture profile digests to their values at base `328f08da`. A profile digest covers only the descriptors it binds (124 D17), so the pin covers every forge or actions-health profile, nix-config's and Nodo's included; it replaces the ship-time `release profile inspect` comparison in § Acceptance mapping | 124 D17/D5; the bar (tests that can fail) | A ship-time digest comparison: an evidence row run by hand, for nix-config only, that no CI run repeats |
 | D23 | The source's `Contents` and `Contents/Info.plist` must not be symlinks and the plist must be a regular file, else `precondition_failed` at the source step; the stamp is written to a temporary file in the staged `Contents/` and `os.replace`d onto `Info.plist`, never through an existing path; other bundle symlinks stay preserved | Codex plan review PR547-03: `copytree(symlinks=True)` keeps a linked `Info.plist`, so writing the stamp through it would modify the checkout or an external file, and D20 confines staging writes to the staging root | Resolving the link and copying its target into the bundle: silently changes what is signed |
+| D24 | A `launchctl bootout` that exits non-zero is followed by the step 4 `print`, within the remaining `invoke` budget: only a job still loaded from the managed plist is `rejected`/`transient_transport`; not loaded, loaded from another path, or a failed or timed-out re-read is `unknown`/`transient_transport`; a `launchctl` that cannot be started stays `rejected`/`provider_unavailable` (refines the `activate` bootout step and D15) | final review (issue 547), conformance Task 5 ruling: a failing bootout may already have begun tearing the agent down, and D15 promises `unknown` once a host write may have happened | `rejected` for every non-zero exit: claims nothing changed when the job may be gone. `unknown` for every non-zero exit: parks a release whose host provably did not change |
+| D25 | Before the bootout, the first host write, `invoke` creates each configured log path's missing parent directories inside the checkout; an existing component between the checkout root and the parent that is a symlink or not a directory is `rejected`/`precondition_failed`, and an operating-system error `rejected`/`provider_unavailable`; the test world's `bootstrap` loads a job whose log parent is missing as `not running`, with no pid | final review (issue 547), C547-03: launchd creates no missing parent of `StandardOutPath`/`StandardErrorPath`, so on a fresh checkout the new job cannot spawn after the old one was stopped | Leaving log directories to the project: a fresh checkout stops the old agent and starts none. Creating them through `os.makedirs`: follows a symlinked component out of the checkout |
+| D26 | Every existing component between `$HOME` and an `installed_bundle` path's parent must be a real directory, not a symlink: otherwise `invoke` refuses `rejected`/`precondition_failed` at the install path step, before it creates the parent or removes a stale sibling, and `inspect` answers `diverged`/`target_unexpected` as for a symlinked install path (D6); missing components are still created | final review (issue 547), C547-02: D7 confines the path inside `$HOME`, but `os.makedirs`, the stale-sibling removal and the renames follow a symlinked ancestor such as `~/Apps -> /Applications` | Checking only the final component: a linked ancestor replaces or deletes files outside `$HOME`. Resolving the path and checking the result against `$HOME`: accepts a link that happens to point back inside, which the next release may not |

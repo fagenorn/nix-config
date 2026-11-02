@@ -1,4 +1,4 @@
-"""The launchd-agent adapter (issue 547 D1, D4-D8, D12, D13, D15, D17-D19, D21): `describe`, `inspect`, `invoke`.
+"""The launchd-agent adapter (issue 547 D1, D4-D8, D12, D13, D15, D17-D19, D21, D24, D25): `describe`, `inspect`, `invoke`.
 
 `describe()` returns a fresh descriptor with one operation, `activate`: `local_apply` mode,
 `in_place` mutability, `supported` for `inspect`. `agent_running` and `running_subject_identity`
@@ -56,17 +56,26 @@ and `launchctl`, by name, and never the lifecycle guard or `kickstart` (issue 54
 6. `print`: not loaded (exit 113) continues; loaded must come from the managed plist, else
    `precondition_failed`; any other outcome is `provider_unavailable`, a timeout
    `transient_transport`.
+7. `log directory` (issue 547 D25): launchd creates no missing parent of `StandardOutPath` or
+   `StandardErrorPath`, so each configured log path's parent is made inside the checkout. An
+   existing component between the checkout root and that parent that is a symlink or not a
+   directory is `precondition_failed`, so nothing is made outside the checkout; an operating-system
+   error is `provider_unavailable`.
 
-Steps 1 to 6 are `rejected`: nothing was written. The first host write is the `bootout` of a
-loaded agent, or the plist write when nothing was loaded (issue 547 D15), so from there a failure
-is `unknown`/`transient_transport` unless it provably left the host as it was:
+Steps 1 to 7 are `rejected`: no launchd state or plist was written. The first host write is the
+`bootout` of a loaded agent, or the plist write when nothing was loaded (issue 547 D15), so from
+there a failure is `unknown`/`transient_transport` unless it provably left the host as it was:
 
-7. `bootout`: a non-zero exit left the agent loaded (`rejected`), a timeout is `unknown`.
-8. `plist write`: the rendered plist goes to a temporary file in `~/Library/LaunchAgents`,
+8. `bootout`: a `launchctl` that cannot be started is `rejected`/`provider_unavailable` and a
+   timeout is `unknown`. A non-zero exit may have begun tearing the agent down, so the step
+   re-runs the `print` of step 6 within the same budget (issue 547 D24): a job still loaded from
+   the managed plist was left as it was (`rejected`/`transient_transport`); not loaded, loaded
+   from another path, or a re-read that fails or times out is `unknown`/`transient_transport`.
+9. `plist write`: the rendered plist goes to a temporary file in `~/Library/LaunchAgents`,
    mode 0644, then `os.replace`s the plist path. A failure removes the temporary file and is
    `rejected`/`provider_unavailable` when nothing was booted out, else `unknown`.
-9. `bootstrap`: exit 0 is `accepted` with the reference `gui/<uid>/<label>`; anything else is
-   `unknown`.
+10. `bootstrap`: exit 0 is `accepted` with the reference `gui/<uid>/<label>`; anything else is
+    `unknown`.
 
 The plist (issue 547 D8, D18) holds `Label`, `ProgramArguments` (the resolved program path and
 `arguments`, with no `/bin/wait4path` wrapper), `WorkingDirectory` (the checkout root),
@@ -552,17 +561,57 @@ def _write_plist(path: str, definition: dict[str, Any]) -> None:
         raise
 
 
-def _bootout(service: str, deadline: float) -> None:
-    """Boot the agent out. A command that failed or never started left it loaded; a timeout may not."""
+def _prepare_logs(root: str, config: dict[str, Any]) -> None:
+    """Make each configured log path's parent inside the checkout (issue 547 D25).
+
+    launchd makes no missing parent of a log path, so a job bootstrapped without one loads but
+    never spawns. Every existing component between `root` and the parent must be a real
+    directory, so nothing is made through a symlink outside the checkout.
+    """
+    for member in ("stdout_path", "stderr_path"):
+        if member not in config:
+            continue
+        current = root
+        for segment in config[member].split("/")[:-1]:
+            current = os.path.join(current, segment)
+            try:
+                mode = os.lstat(current).st_mode
+            except FileNotFoundError:
+                try:
+                    os.mkdir(current)
+                except OSError as error:
+                    raise _rejected("provider_unavailable", "log directory", str(error)) from error
+                continue
+            except OSError as error:
+                raise _rejected("provider_unavailable", "log directory", str(error)) from error
+            if not stat.S_ISDIR(mode):
+                raise _rejected("precondition_failed", "log directory",
+                                f"{current} is a symlink or not a directory")
+
+
+def _bootout(label: str, plist: str, deadline: float) -> None:
+    """Boot the agent out (issue 547 D15, D24).
+
+    A `launchctl` that never started left the agent loaded (`rejected`) and a timeout may not
+    have (`unknown`). A non-zero exit may have begun the teardown, so the same `print` is read
+    again: only a job still loaded from the managed plist is `rejected`, anything else `unknown`.
+    """
     try:
-        done = _run(["launchctl", "bootout", service], deadline)
+        done = _run(["launchctl", "bootout", f"{_domain()}/{label}"], deadline)
     except _Unreadable as error:
         if error.reason == "lookup_timeout":
             raise _Refusal("unknown", "transient_transport", "bootout", "timed out") from error
         raise _rejected("provider_unavailable", "bootout", error.detail or error.reason) from error
-    if done.returncode != 0:
-        raise _rejected("transient_transport", "bootout",
-                        done.stderr.strip() or f"exit {done.returncode}")
+    if done.returncode == 0:
+        return
+    detail = done.stderr.strip() or f"exit {done.returncode}"
+    try:
+        job = _load(label, deadline)
+    except _Unreadable:
+        job = None
+    if job is not None and job["path"] == plist:
+        raise _rejected("transient_transport", "bootout", detail)
+    raise _Refusal("unknown", "transient_transport", "bootout", detail)
 
 
 def _bootstrap(plist: str, deadline: float) -> None:
@@ -589,8 +638,9 @@ def _invoke(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
     plist, service = _plist_path(label), f"{_domain()}/{label}"
     _check_plist_path(plist)
     loaded = _loaded(label, plist, deadline)
+    _prepare_logs(root, config)
     if loaded:
-        _bootout(service, deadline)
+        _bootout(label, plist, deadline)
     try:
         _write_plist(plist, _render(label, program, root, config, candidate))
     except (OSError, ValueError, TypeError, OverflowError) as error:

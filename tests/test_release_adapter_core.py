@@ -216,10 +216,6 @@ class HostLocalCoreTest(CustodyCase):
         self.assertFalse(self.world.plist_path("dev.argus.daemon").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WatchOperationTest(unittest.TestCase):
     """Only a publication_triggered operation is a deploy watch (issue 547 D10)."""
 
@@ -243,3 +239,7 @@ class WatchOperationTest(unittest.TestCase):
             with self.subTest(modes=modes, inspect=inspect):
                 self.assertEqual(release_adapter.watch_operation(self.descriptor(*modes, inspect=inspect)),
                                  expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

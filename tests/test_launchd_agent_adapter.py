@@ -195,7 +195,10 @@ class InvokeTest(Case):
             ("print exit 5", "activate", None, knob("print", exit=5), None,
              ("rejected", "provider_unavailable", "print"), ["print"], False),
             ("bootout exit 1", "activate", None, loaded_with(("bootout", {"exit": 1})), None,
-             ("rejected", "transient_transport", "bootout"), ["print", "bootout"], False),
+             ("rejected", "transient_transport", "bootout"), ["print", "bootout", "print"], False),
+            ("bootout exit 1, job gone", "activate", None,
+             loaded_with(("bootout", {"exit": 1, "apply": True})), None,
+             ("unknown", "transient_transport", "bootout"), ["print", "bootout", "print"], False),
             ("bootout timeout", "activate", None, loaded_with(("bootout", {"exit": 0, "sleep": 3})),
              lambda: mock.patch.object(adapter, "INVOKE_BUDGET_SECONDS", 1),
              ("unknown", "transient_transport", "bootout"), ["print", "bootout"], False),
@@ -235,8 +238,86 @@ class InvokeTest(Case):
                     self.assertTrue(plist().is_symlink())
                 if name == "bootout exit 1":
                     self.assertIsNotNone(self.world.job(LABEL))
+                if name == "bootout exit 1, job gone":
+                    self.assertIsNone(self.world.job(LABEL))
                 if name == "write fails after bootout":
                     self.assertIsNone(self.world.job(LABEL))
+
+    def test_a_failed_bootout_is_rejected_only_while_the_job_stays_loaded(self):
+        """Issue 547 D24: after a non-zero bootout, a re-read decides `rejected` or `unknown`."""
+        stale = ("v1.2.2", "f" * 40)
+        rows = (("still loaded", {}, ("rejected", "transient_transport"), True),
+                ("unloaded", {"apply": True}, ("unknown", "transient_transport"), False))
+        for name, knob, expected, loaded in rows:
+            with self.subTest(row=name):
+                self.setUp()
+                self.managed(stamp=stale)
+                self.world.fail("launchctl", "bootout", exit=5, stderr="Boot-out failed: 5", **knob)
+                answer = self.invoke()
+                self.assertEqual((answer["result"], answer["error_class"]), expected)
+                self.assertEqual(answer["reference"], "bootout: Boot-out failed: 5")
+                self.assertEqual([c["argv"][0] for c in self.world.calls("launchctl")],
+                                 ["print", "bootout", "print"])
+                self.assertEqual(self.world.job(LABEL) is not None, loaded)
+                self.assertFalse(self.world.plist_path(LABEL).exists())
+
+    def test_a_failed_bootout_whose_re_read_fails_is_unknown(self):
+        self.managed(stamp=("v1.2.2", "f" * 40))
+        self.world.fail("launchctl", "bootout", exit=5, stderr="Boot-out failed: 5")
+        real_run = adapter._run
+
+        def run(argv, deadline):
+            if argv[1] == "print" and any(c["argv"][0] == "bootout"
+                                          for c in self.world.calls("launchctl")):
+                raise adapter._Unreadable("lookup_timeout")
+            return real_run(argv, deadline)
+
+        with mock.patch.object(adapter, "_run", run):
+            answer = self.invoke()
+        self.assertEqual((answer["result"], answer["error_class"]), ("unknown", "transient_transport"))
+        self.assertIsNotNone(self.world.job(LABEL))
+
+    def test_missing_log_parents_are_made_inside_the_checkout_and_the_job_runs(self):
+        """Issue 547 D25: launchd makes no log directory, so `invoke` does before the bootout."""
+        self.managed(stamp=("v1.2.2", "f" * 40))
+        parameters = self.parameters(stdout_path="home/daemon/logs/out.log",
+                                     stderr_path="home/daemon/err/err.log")
+        self.assertEqual(self.invoke(parameters)["result"], "accepted")
+        self.assertTrue((self.world.checkout / "home/daemon/logs").is_dir())
+        self.assertTrue((self.world.checkout / "home/daemon/err").is_dir())
+        job = self.world.job(LABEL)
+        self.assertEqual(job["state"], "running")
+        self.assertIsNotNone(job["pid"])
+        observed = self.effect(parameters)
+        self.assertEqual((observed["outcome"], observed["reason"]), ("satisfied", "running"))
+
+    def test_a_log_parent_that_is_not_a_directory_is_refused_before_the_bootout(self):
+        outside = self.world.root / "outside"
+
+        def linked():
+            outside.mkdir()
+            (self.world.checkout / "home").mkdir()
+            (self.world.checkout / "home/daemon").symlink_to(outside)
+
+        def regular_file():
+            (self.world.checkout / "home").mkdir()
+            (self.world.checkout / "home/daemon").write_text("x")
+        for name, arrange in (("symlink", linked), ("regular file", regular_file)):
+            with self.subTest(component=name):
+                self.setUp()
+                self.managed(stamp=("v1.2.2", "f" * 40))
+                pid = self.world.job(LABEL)["pid"]
+                arrange()
+                seed = len(self.world.calls("launchctl"))
+                answer = self.invoke(self.parameters(stdout_path="home/daemon/logs/out.log"))
+                self.assertEqual((answer["result"], answer["error_class"]),
+                                 ("rejected", "precondition_failed"))
+                self.assertTrue(answer["reference"].startswith("log directory: "), answer["reference"])
+                self.assertEqual({c["argv"][0] for c in self.world.calls("launchctl")[seed:]}, {"print"})
+                self.assertEqual(self.world.job(LABEL)["pid"], pid)
+                self.assertFalse(self.world.plist_path(LABEL).exists())
+                if name == "symlink":
+                    self.assertEqual(list(outside.iterdir()), [])
 
 
 class ClassificationTest(Case):
