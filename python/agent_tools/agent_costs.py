@@ -44,7 +44,11 @@ their descendants), per arm and for fresh-owner boots, as text or `--format json
 With `--eval-results PATH --eval SKILL:ID` it groups the trials of a lifecycle eval
 instead of live issues. `--policy NAME=SPEC` (repeatable) and `--sweep` replay the lineages
 under hand-off policies (agent_tools.agent_owner_replay) and fill the simulated-arms and
-calibration tables.
+calibration tables. `--started SINCE..BEFORE` instead selects the lineages that started in that
+window and counts each one's whole spend once it has settled `--settle-days` (default 4) before
+the report end. `--baseline SINCE..BEFORE` adds a second window and compares its lineages, the
+baseline arm, with those of `--started`, the candidate arm. `--proxy-log PATH` adds the
+keepalive ping spend of one cache-proxy log.
 """
 
 import argparse
@@ -1737,6 +1741,13 @@ def _positive_int(text):
     return value
 
 
+def _non_negative_int(text):
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{text} is not a non-negative integer")
+    return value
+
+
 def _window_label(args, cutoff, event_start, event_end):
     """The window a mtime-or-event report names: the event bounds, the day count or all time."""
     if event_start:
@@ -1773,7 +1784,7 @@ def _boot_report(ap, args, cutoff, event_start, event_end, executor_factory):
 
 def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
     """Run `--report owners`: collect the lineages, print the text tables or the JSON document."""
-    from agent_tools import agent_owner_replay, agent_owner_report  # only for the owner report (issue 432)
+    from agent_tools import agent_owner_replay, agent_owner_report, keepalive_pings  # only for the owner report (issue 432)
 
     try:
         arms = [agent_owner_replay.parse_arm(text) for text in args.policy or ()]
@@ -1795,18 +1806,50 @@ def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
             eval_rows = agent_owner_report.load_eval_rows(args.eval_results, skill, case)
         except (OSError, ValueError) as error:
             sys.exit(f"cannot read eval results: {error}")
+    pings = None
+    if args.proxy_log is not None:
+        try:
+            pings = keepalive_pings.read_pings(args.proxy_log)
+        except OSError as error:
+            sys.exit(f"cannot read proxy log: {error}")
+    windows, settle_days = (), 0
+    if args.started is not None:
+        try:
+            since, before = agent_owner_report.parse_range(args.started)
+        except ValueError as error:
+            ap.error(f"--started: {error}")
+        if args.baseline is None:
+            windows = (agent_owner_report.StartWindow(agent_owner_report.LIVE_ARM, since, before),)
+        else:
+            try:
+                base_since, base_before = agent_owner_report.parse_range(args.baseline)
+            except ValueError as error:
+                ap.error(f"--baseline: {error}")
+            if base_since < before and since < base_before:
+                ap.error("--baseline must not overlap --started")
+            windows = (
+                agent_owner_report.StartWindow(agent_owner_report.BASELINE_ARM, base_since, base_before),
+                agent_owner_report.StartWindow(agent_owner_report.CANDIDATE_ARM, since, before))
+        settle_days = (agent_owner_report.DEFAULT_SETTLE_DAYS if args.settle_days is None
+                       else args.settle_days)
     lineages, footer = agent_owner_report.collect(
         root, cutoff=event_start.timestamp() if event_start else cutoff, since=event_start,
-        before=event_end, eval_rows=eval_rows, executor_factory=executor_factory)
-    window = (f"eval {args.eval_case}" if eval_rows is not None
-              else _window_label(args, cutoff, event_start, event_end))
+        before=event_end, eval_rows=eval_rows, executor_factory=executor_factory,
+        windows=windows, settle_days=settle_days, pings=pings)
+    if eval_rows is not None:
+        window = f"eval {args.eval_case}"
+    elif windows:
+        window = agent_owner_report.start_window_label(windows)
+    else:
+        window = _window_label(args, cutoff, event_start, event_end)
     document = agent_owner_report.build_document(lineages, footer, window=window, arms=arms,
                                                  sweep=args.sweep)
     if args.format == "json":
         json.dump(document, sys.stdout, separators=(",", ":"))
         print()
     else:
-        agent_owner_report.print_document(document, top=args.top)
+        agent_owner_report.print_document(document, top=args.top,
+                                          eval_grouping=eval_rows is not None)
 
 
 def main(argv=None, *, executor_factory=ProcessPoolExecutor):
@@ -1851,6 +1894,19 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                          "--report owners only")
     ap.add_argument("--sweep", action="store_true",
                     help="replay the sweep of candidate policies; --report owners only")
+    ap.add_argument("--started", metavar="SINCE..BEFORE",
+                    help="select the lineages that started in [SINCE, BEFORE) (YYYY-MM-DD or "
+                         "RFC3339 bounds) and count their whole spend; --report owners only")
+    ap.add_argument("--baseline", metavar="SINCE..BEFORE",
+                    help="a second start window, not overlapping --started, whose lineages form "
+                         "the baseline arm against the candidate arm of --started; --report "
+                         "owners only")
+    ap.add_argument("--proxy-log", metavar="PATH",
+                    help="a cache-proxy log whose ping lines add keepalive spend (darwin: "
+                         "~/Library/Logs/claude-cache-proxy.log); --report owners only")
+    ap.add_argument("--settle-days", type=_non_negative_int, default=None, metavar="DAYS",
+                    help="count a lineage only when it started at least DAYS days before the "
+                         "report end (default 4, 0 = off); needs --started")
     ap.add_argument("--context-threshold", type=_positive_int, default=None, metavar="TOKENS",
                     help="context size above which cache reads are totalled; --report cache only "
                          "(default 120000)")
@@ -1885,6 +1941,24 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         ap.error("--eval-results and --eval must be used together")
     if args.eval_results is not None and not owners_report:
         ap.error("--eval-results and --eval are available only with --report owners")
+    if (args.started is not None or args.settle_days is not None) and not owners_report:
+        ap.error("--started and --settle-days are available only with --report owners")
+    if args.settle_days is not None and args.started is None:
+        ap.error("--settle-days needs --started")
+    if args.proxy_log is not None and not owners_report:
+        ap.error("--proxy-log is available only with --report owners")
+    if args.proxy_log is not None and args.eval_results is not None:
+        ap.error("--proxy-log does not take --eval-results/--eval")
+    if args.baseline is not None and not owners_report:
+        ap.error("--baseline is available only with --report owners")
+    if args.baseline is not None and args.started is None:
+        ap.error("--baseline needs --started")
+    if args.baseline is not None and (args.policy or args.sweep):
+        ap.error("--baseline does not take --policy/--sweep")
+    if args.started is not None and (args.events_since or args.events_before):
+        ap.error("--started does not take --events-since/--events-before")
+    if args.started is not None and args.eval_results is not None:
+        ap.error("--started does not take --eval-results/--eval")
     if cache_report and json_mode:
         ap.error("--report cache is text only; it cannot be combined with --format json")
     if cache_report and args.project:

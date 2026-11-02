@@ -6,47 +6,62 @@ A transcript is an owner's when one of its Bash calls is a registering command (
 every other transcript is attributed to its nearest owner through the `parentAgentId`
 of its `.meta.json`. scan_owner_transcript reads one transcript through
 agent_tools.transcript_calls and prices it through agent_tools.model_pricing; collect
-assembles lineages, build_document projects them (with arms and fresh-owner boots, and
-the replay of agent_tools.agent_owner_replay when asked) as the `agent-owner-report`
-document, and print_document prints its tables.
-agent_costs.main runs the report for `--report owners`. python/README.md (agent-costs)
-holds the contract.
+assembles lineages, build_document projects them (with arms and projects, built by
+agent_tools.agent_owner_rollup, fresh-owner boots, and the replay of
+agent_tools.agent_owner_replay when asked) as the `agent-owner-report` document, and
+print_document prints its tables.
+With start windows, collect keeps the settled lineages that started in a window and counts
+their whole spend. With a ping log, collect adds each counted lineage's keepalive pings to it and
+counts the rest as unattributed. agent_costs.main runs the report for `--report owners`. python/README.md
+(agent-costs) holds the contract.
 """
 
 import functools
 import json
+import os
 import re
-import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
+from agent_tools import agent_owner_rollup
 from agent_tools.agent_costs import (
     DISCLAIMER,
     event_in_window,
     find_sessions,
+    format_rfc3339_utc,
     human,
+    parse_rfc3339_utc,
     percentile,
     print_table,
+    project_name,
+    repo_root,
     scan_paths,
 )
+from agent_tools.cache_keepalive import conversation_handle
 from agent_tools.context_meter import MEASURED_NOTE
 from agent_tools.context_meter_commands import Invocation, invocations, lex
 from agent_tools.model_pricing import SOURCE_DATE, SOURCE_URL, cache_write_split, usage_cost
 from agent_tools.transcript_calls import TTL_SECONDS, is_death, read_transcript
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPORT_KIND = "agent-owner-report"
 LONG_WAIT_SECONDS = 300
 MEASURED_PREFIX = MEASURED_NOTE.partition("{tokens}")[0]
 DISPATCH_TOOLS = ("Agent", "Task")
 BOOT_GROUPS = ("0-5", "6-7")
 LIVE_ARM = "live"
+BASELINE_ARM = "baseline"
+CANDIDATE_ARM = "candidate"
+DEFAULT_SETTLE_DAYS = 4
 NONE_YET = "(none: pass --policy or --sweep)"
 BIAS_NOTE = ("The shift model keeps observed increments after a hand-off and cannot see a fresh "
              "owner's re-reads, so it favours hand-offs (D18); an arm with more hand-offs than "
              "the baseline is kept only if the live arm confirms it.")
 
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _MENTIONS = re.compile(r"workflow-state|sdd-gate")
 _FINISH_COMMAND = re.compile(r"(?<![\w-])workflow-state\s+finish(?![\w-])")
 _TASK_FILE = re.compile(r"\.tasks/task-(\d+)\.md$")
@@ -54,6 +69,14 @@ _SAVED_TO = re.compile(r"saved to: (\S+)")
 _SUMMED = ("launches", "handoffs", "boots", "deaths", "long_child_waits", "owner_dollars",
            "total_dollars", "gate_calls", "measured_gate_calls", "help_calls",
            "absolute_path_calls")
+
+
+class StartWindow(NamedTuple):
+    """A start window of `--started`: the lineages starting in [since, before) form `arm`."""
+
+    arm: str
+    since: datetime
+    before: datetime
 
 
 @dataclass(frozen=True)
@@ -119,6 +142,34 @@ class Lineage:
     delivered: bool
     facts: dict
     relauncher: tuple = field(default_factory=tuple)
+    started: float | None = None   # epoch seconds of the earliest call of the owner transcripts
+    members: tuple = ()   # (conversation handle, is an owner transcript) of each transcript of the group
+
+
+def _bound(text):
+    """A range bound: a UTC day as its midnight, else an RFC3339 instant."""
+    if _DAY.fullmatch(text):
+        return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return parse_rfc3339_utc(text)
+
+
+def parse_range(text: str) -> tuple[datetime, datetime]:
+    """The `(since, before)` of `SINCE..BEFORE` (issue 503 D1); ValueError when it is not a range."""
+    since_text, separator, before_text = text.partition("..")
+    if not separator:
+        raise ValueError("expected SINCE..BEFORE")
+    since, before = _bound(since_text), _bound(before_text)
+    if since >= before:
+        raise ValueError("SINCE must be before BEFORE")
+    return since, before
+
+
+def start_window_label(windows) -> str:
+    """The report's window label for start windows."""
+    return "; ".join(
+        f"{'started' if window.arm == LIVE_ARM else window.arm} "
+        f"{format_rfc3339_utc(window.since)} → {format_rfc3339_utc(window.before)}"
+        for window in windows)
 
 
 def call_cost(call: OwnerCall) -> float:
@@ -166,6 +217,7 @@ class _CallRead:
     bash: bool = False
     gate: Gate | None = None
     registration: tuple | None = None   # (helper kind, run ID, action ID)
+    repo_root: str | None = None        # the first absolute `--repo-root` of a registering invocation
     help: bool = False
     mark_progress: str | None = None
     measured: bool = False
@@ -209,9 +261,13 @@ def _read_invocation(read, inv: Invocation, reply, note):
         read.absolute += 1
     if inv.helper == "sdd-gate" and inv.subcommand == "review":
         read.review_tasks.append(_int(options.get("--task")))
-    if gate and options.get("--run-id") and options.get("--action-id") and read.registration is None:
-        kind = inv.helper if inv.helper == "sdd-gate" else inv.subcommand
-        read.registration = (kind, options["--run-id"], options["--action-id"])
+    if gate and options.get("--run-id") and options.get("--action-id"):
+        if read.registration is None:
+            kind = inv.helper if inv.helper == "sdd-gate" else inv.subcommand
+            read.registration = (kind, options["--run-id"], options["--action-id"])
+        root = options.get("--repo-root")
+        if read.repo_root is None and isinstance(root, str) and root.startswith("/"):
+            read.repo_root = root
     if inv.helper != "workflow-state":
         return
     if inv.subcommand in ("progress", "suspend"):
@@ -381,6 +437,14 @@ def _counted(calls, since, before):
             for call in calls]
 
 
+def _in_windows(calls, windows):
+    """Per call, whether its start lies in any `(since, before)` pair of `windows`."""
+    flags = [False] * len(calls)
+    for since, before in windows:
+        flags = [seen or inside for seen, inside in zip(flags, _counted(calls, since, before))]
+    return flags
+
+
 def _owner_scan(path, is_root, transcript, reads, counted):
     calls = transcript.calls
     registered = next(index for index, read in enumerate(reads) if read.registration)
@@ -402,6 +466,8 @@ def _owner_scan(path, is_root, transcript, reads, counted):
     handoffs = sum(read.handed_off for read in live)
     return {
         **_own_identity(reads, run_id), "run_id": run_id, "action_id": action_id,
+        "repo_root": next((read.repo_root for read in reads if read.repo_root is not None), None),
+        "cwds": transcript.cwds,
         "calls": owner_calls, "counted": counted, "registered_index": registered,
         "transfer": "handoff" if handoffs else (replied[-1] if replied else None),
         "handoffs": handoffs, "measured": sum(read.measured for read in live),
@@ -410,8 +476,12 @@ def _owner_scan(path, is_root, transcript, reads, counted):
     }
 
 
-def scan_owner_transcript(job, *, since, before):
-    """Scan one transcript `(path, is_root)`; None when it cannot be opened."""
+def scan_owner_transcript(job, *, since, before, windows=()):
+    """Scan one transcript `(path, is_root)`; None when it cannot be opened.
+
+    `windows` holds `(since, before)` pairs; the scan's `window_calls` and `window_dollars` are
+    the count and dollars of the calls starting in any of them.
+    """
     path, is_root = job
     try:
         with open(path, "r", errors="replace") as handle:
@@ -422,18 +492,24 @@ def scan_owner_transcript(job, *, since, before):
     counted = _counted(calls, since, before)
     reads = [_read_call(call, transcript) for call in calls]
     priced = [usage_cost(call.model, call.usage) for call, flag in zip(calls, counted) if flag]
+    windowed = [usage_cost(call.model, call.usage)
+                for call, flag in zip(calls, _in_windows(calls, windows)) if flag]
     session, agent_id = _session_and_agent(path, is_root)
     parent, tool_use = (None, None) if is_root else _read_meta(path)
     ends = [call.end for call in calls if call.end is not None]
+    starts = [call.start for call in calls if call.start is not None]
     scan = {
         "path": str(path), "is_root": is_root, "session": session, "agent_id": agent_id,
+        "handle": conversation_handle(session, agent_id),
         "parent": parent, "tool_use_id": tool_use, "counted_calls": len(priced),
         "dollars": sum(dollars for dollars, _ in priced),
         "approximate_calls": sum(approximate for _, approximate in priced),
+        "window_calls": len(windowed), "window_dollars": sum(dollars for dollars, _ in windowed),
         "last_end": max(ends).timestamp() if ends else None,
+        "first_start": min(starts).timestamp() if starts else None,
         "dispatched": {tool_id: index for index, call in enumerate(calls)
                        for tool_id, name in call.tool_names.items() if name in DISPATCH_TOOLS},
-        "finishes": [pair for read in reads for pair in read.finishes],
+        "finishes": [pair for read, flag in zip(reads, counted) if flag for pair in read.finishes],
         "directs": [pair for read in reads for pair in read.directs],
         "owner": None,
     }
@@ -519,7 +595,8 @@ def _phase_reached(calls):
     return max(reached, default=None)
 
 
-def _lineage_row(run_id, issue, launches, extras, *, direct, delivered, descendant_dollars):
+def _lineage_row(run_id, issue, launches, extras, *, direct, delivered, descendant_dollars,
+                 project, started):
     """The per-lineage JSON fields; `extras` are the owner scans' counts per launch."""
     calls = [call for launch in launches for call in launch.calls]
     owner_dollars = sum(call_cost(call) for call in calls)
@@ -538,7 +615,26 @@ def _lineage_row(run_id, issue, launches, extras, *, direct, delivered, descenda
         "measured_gate_calls": sum(extra["measured"] for extra in extras),
         "help_calls": sum(call.help for call in calls),
         "absolute_path_calls": sum(extra["absolute"] for extra in extras),
+        "project": project, "started": _instant(started),
+        "owner_ping_dollars": 0.0, "ping_dollars": 0.0,   # collect adds a ping log's share
     }
+
+
+def _instant(epoch):
+    """An epoch-seconds instant as an RFC3339 UTC string; None for None."""
+    if epoch is None:
+        return None
+    return format_rfc3339_utc(datetime.fromtimestamp(epoch, timezone.utc))
+
+
+def _project(owner_scans, homes):
+    """The repository holding the lineage's ledger (issue 503 D4): the first absolute registering
+    `--repo-root` in launch order, else `project_name` over the owners' record cwds."""
+    for scan in owner_scans:
+        if scan["owner"]["repo_root"] is not None:
+            return os.path.basename(repo_root(scan["owner"]["repo_root"]))
+    cwds = sum((scan["owner"]["cwds"] for scan in owner_scans), Counter())
+    return project_name(homes[owner_scans[0]["path"]], cwds)
 
 
 def _relauncher(launches):
@@ -559,7 +655,7 @@ def _launch_order(launch):
             launch.remainder or 0, launch.launch is None, launch.launch or 0, launch.calls[0].start)
 
 
-def _lineage(run_id, issue, group, child_ends):
+def _lineage(run_id, issue, group, child_ends, homes):
     """The lineage of one `(run_id, issue)`, from its `(scan, nearest owner scan)` members."""
     owners = [scan for scan, owner_scan in group if scan is owner_scan and scan["counted_calls"]]
     launches, extras = [], []
@@ -570,21 +666,29 @@ def _lineage(run_id, issue, group, child_ends):
         extras.append({"handoffs": owner["handoffs"], "measured": owner["measured"],
                        "absolute": owner["absolute"], "phase7": owner["phase7"],
                        "waits": _long_waits(owner["calls"], owner["counted"], children)})
-    ordered = sorted(zip(launches, extras), key=lambda pair: _launch_order(pair[0]))
-    launches = [launch for launch, _ in ordered]
-    extras = [extra for _, extra in ordered]
+    ordered = sorted(zip(launches, extras, owners), key=lambda triple: _launch_order(triple[0]))
+    launches = [launch for launch, _, _ in ordered]
+    extras = [extra for _, extra, _ in ordered]
+    project = _project([scan for _, _, scan in ordered], homes)
+    starts = [scan["first_start"] for scan, owner_scan in group
+              if scan is owner_scan and scan["first_start"] is not None]
+    started = min(starts, default=None)
     descendants = sum(scan["dollars"] for scan, owner_scan in group if scan is not owner_scan)
     key = (run_id, issue)
     delivered = any(key in scan["finishes"] for scan, _ in group)
     direct = any(key in scan["directs"] for scan, _ in group)
     facts = _lineage_row(run_id, issue, launches, extras, direct=direct, delivered=delivered,
-                         descendant_dollars=descendants)
+                         descendant_dollars=descendants, project=project, started=started)
+    members = tuple((scan["handle"], scan is owner_scan) for scan, owner_scan in group)
     return Lineage(run_id, issue, direct, launches, descendants, delivered, facts,
-                   _relauncher(launches))
+                   _relauncher(launches), started, members)
 
 
-def _lineages(scans):
-    """The lineages of `scans` and the unattributed transcripts, dollars and unresolved owners."""
+def _lineages(scans, homes, *, start_mode=False):
+    """The lineages of `scans` and the unattributed transcripts, dollars and unresolved owners.
+
+    With `start_mode` a transcript is lost by its calls inside the start windows, not by its counted ones.
+    """
     _resolve_owners(scans)
     by_agent = {(scan["session"], scan["agent_id"]): scan for scan in scans if not scan["is_root"]}
     roots = {scan["session"]: scan for scan in scans if scan["is_root"]}
@@ -593,10 +697,13 @@ def _lineages(scans):
     members = defaultdict(list)
     unattributed = {"transcripts": 0, "dollars": 0.0, "unresolved_owners": 0}
 
+    calls_name, dollars_name = ("window_calls", "window_dollars") if start_mode else (
+        "counted_calls", "dollars")
+
     def lose(scan):
-        if scan["counted_calls"]:
+        if scan[calls_name]:
             unattributed["transcripts"] += 1
-            unattributed["dollars"] += scan["dollars"]
+            unattributed["dollars"] += scan[dollars_name]
 
     for scan in scans:
         owner_scan = _nearest_owner(scan, by_agent, roots)
@@ -604,12 +711,13 @@ def _lineages(scans):
             members[(owner_scan["owner"]["run_id"], owner_scan["owner"]["issue"])].append(
                 (scan, owner_scan))
         else:
-            unattributed["unresolved_owners"] += owner_scan is scan
+            unattributed["unresolved_owners"] += owner_scan is scan and (
+                not start_mode or bool(scan["window_calls"]))
             lose(scan)
     lineages = []
     for (run_id, issue), group in sorted(members.items()):
         if any(scan is owner_scan and scan["counted_calls"] for scan, owner_scan in group):
-            lineages.append(_lineage(run_id, issue, group, child_ends))
+            lineages.append(_lineage(run_id, issue, group, child_ends, homes))
         else:
             for scan, _ in group:   # every owner transcript is outside the window
                 lose(scan)
@@ -656,20 +764,121 @@ def _interrupted(row):
             "claude_exit": row.get("claude_exit")}
 
 
-def _scan_all(jobs, since, before, executor_factory):
-    scanner = functools.partial(scan_owner_transcript, since=since, before=before)
+def _select_started(lineages, windows, settle_days, report_end):
+    """The kept lineages, the left-out ones and the `start_grouping` of start windows (issue 503 D2, D3).
+
+    A lineage that started in a window is kept for that window's arm once it has settled: it
+    started at least `settle_days` days before `report_end`. A younger one is counted in the
+    window's `unsettled`.
+    """
+    unsettled = [{"lineages": 0, "dollars": 0.0} for _ in windows]
+    kept, left = [], []
+    for lineage in lineages:
+        position = next((index for index, window in enumerate(windows)
+                         if lineage.started is not None
+                         and window.since.timestamp() <= lineage.started < window.before.timestamp()),
+                        None)
+        if position is None:
+            left.append(lineage)
+        elif lineage.started > report_end - settle_days * 86_400:
+            unsettled[position]["lineages"] += 1
+            unsettled[position]["dollars"] += lineage.facts["total_dollars"]
+            left.append(lineage)
+        else:
+            lineage.facts["arm"] = windows[position].arm
+            kept.append(lineage)
+    grouping = {
+        "settle_days": settle_days, "report_end": _instant(report_end),
+        "windows": [{"arm": window.arm, "since": format_rfc3339_utc(window.since),
+                     "before": format_rfc3339_utc(window.before), "unsettled": counts}
+                    for window, counts in zip(windows, unsettled)]}
+    return kept, left, grouping
+
+
+def _attribute_pings(log, counted, left_out, *, attributed_scope, unattributed_scope):
+    """The `pings` footer of `log` and the count of approximately priced pings it counts.
+
+    A ping whose conversation is a member of a counted lineage adds to that lineage (its owner
+    share too, for an owner transcript) when `attributed_scope` holds; one of a left-out
+    lineage is dropped; any other counts as unattributed when `unattributed_scope` holds."""
+    members = {handle: (lineage, owner) for lineage in counted for handle, owner in lineage.members}
+    dropped = {handle for lineage in left_out for handle, _ in lineage.members}
+    attributed = {"pings": 0, "dollars": 0.0, "owner_dollars": 0.0}
+    unattributed = {"pings": 0, "dollars": 0.0}
+    unpriced = approximate = 0
+    for ping in log.pings:
+        hit = members.get(ping.conversation)
+        if hit is not None:
+            if not attributed_scope(ping.ts):
+                continue
+            lineage, owner = hit
+            lineage.facts["ping_dollars"] += ping.dollars
+            attributed["pings"] += 1
+            attributed["dollars"] += ping.dollars
+            if owner:
+                lineage.facts["owner_ping_dollars"] += ping.dollars
+                attributed["owner_dollars"] += ping.dollars
+        elif ping.conversation in dropped or not unattributed_scope(ping.ts):
+            continue
+        else:
+            unattributed["pings"] += 1
+            unattributed["dollars"] += ping.dollars
+        unpriced += not ping.priced
+        approximate += ping.approximate
+    return ({"log": log.log, "lines": len(log.pings), "skipped_lines": log.skipped,
+             "unpriced": unpriced, "attributed": attributed, "unattributed": unattributed},
+            approximate)
+
+
+def _scan_all(jobs, since, before, executor_factory, windows=()):
+    scanner = functools.partial(scan_owner_transcript, since=since, before=before, windows=windows)
     return [scan for scan in scan_paths(jobs, executor_factory, scanner=scanner) if scan]
 
 
-def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory):
+def _in_event_window(ts, since, before):
+    return (since is None or ts >= since) and (before is None or ts < before)
+
+
+def _ping_scopes(windows, since, before, cutoff):
+    """The `(attributed, unattributed)` predicates over a ping's instant (issue 503 D6).
+
+    A ping of a counted lineage counts in the event window if there is one, else always. An
+    unmatched ping counts in a start window if there are windows, else in the event window if
+    there is one, else after the mtime `cutoff`."""
+    def attributed(ts):
+        return _in_event_window(ts, since, before)
+
+    if windows:
+        def unattributed(ts):
+            return any(window.since <= ts < window.before for window in windows)
+    elif since is not None or before is not None:
+        unattributed = attributed
+    else:
+        def unattributed(ts):
+            return cutoff is None or ts.timestamp() >= cutoff
+    return attributed, unattributed
+
+
+def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory, windows=(),
+            settle_days=0, pings=None):
     """The lineages of the transcripts under `root` and the footer facts.
+
+    With `windows` (StartWindow, never combined with `eval_rows`) the mtime `cutoff` and the
+    event window do not apply: every transcript is read and every call counted, and the
+    settled lineages that started in a window are kept (issue 503 D1, D3). The footer's
+    `start_grouping` is None without `windows`.
+
+    With `pings` (a keepalive_pings.PingLog, never combined with `eval_rows`) each ping adds to
+    its counted lineage, counts as unattributed, or is left out (issue 503 D5, D6, D12); the
+    footer's `pings` is None without it.
 
     With `eval_rows` the mtime `cutoff` does not apply: each row with `claude_exit` 0
     is one lineage row built from the sessions of its workdir's project directories, and
     every other row is listed as interrupted. A clean-exit row that yields no lineage (no
     matching session, or no resolved owner) is listed as unmatched, never dropped.
     """
-    sessions = list(find_sessions(root, None if eval_rows is not None else cutoff))
+    start_mode = bool(windows)
+    sessions = list(find_sessions(root, None if eval_rows is not None or start_mode else cutoff))
     interrupted, unmatched, samples = [], [], []
     if eval_rows is not None:
         samples = [row for row in eval_rows if _clean_exit(row)]
@@ -682,25 +891,39 @@ def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory):
             for path in paths:
                 homes[str(path)] = home
                 jobs.append((path, is_root))
-    scans = _scan_all(jobs, since, before, executor_factory)
+    pairs = tuple((window.since, window.before) for window in windows)
+    scans = _scan_all(jobs, None if start_mode else since, None if start_mode else before,
+                      executor_factory, pairs)
+    start_grouping, left_out = None, []
     if eval_rows is None:
-        lineages, unattributed = _lineages(scans)
+        lineages, unattributed = _lineages(scans, homes, start_mode=start_mode)
+        if start_mode:
+            report_end = max((scan["last_end"] for scan in scans if scan["last_end"] is not None),
+                             default=None)
+            lineages, left_out, start_grouping = _select_started(lineages, windows, settle_days, report_end)
     else:
         lineages, unattributed = [], {"transcripts": 0, "dollars": 0.0, "unresolved_owners": 0}
         for row in samples:
             scoped = [scan for scan in scans if _in_workdir(homes[scan["path"]], str(row.get("workdir")))]
-            found, missing = _lineages(scoped)
+            found, missing = _lineages(scoped, homes)
             for name, value in missing.items():
                 unattributed[name] += value
             if found:
                 lineages.append(_merge_trial(row, found))
             else:
                 unmatched.append(_interrupted(row))
+    approximate = sum(scan["approximate_calls"] for scan in scans)
+    ping_footer = None
+    if pings is not None:
+        attributed_scope, unattributed_scope = _ping_scopes(windows, since, before, cutoff)
+        ping_footer, approximate_pings = _attribute_pings(
+            pings, lineages, left_out, attributed_scope=attributed_scope,
+            unattributed_scope=unattributed_scope)
+        approximate += approximate_pings
     footer = {
-        "pricing": {"source": SOURCE_URL, "date": SOURCE_DATE,
-                    "approximate_calls": sum(scan["approximate_calls"] for scan in scans)},
+        "pricing": {"source": SOURCE_URL, "date": SOURCE_DATE, "approximate_calls": approximate},
         "unattributed": unattributed, "interrupted": interrupted,
-        "unmatched": unmatched,
+        "unmatched": unmatched, "start_grouping": start_grouping, "pings": ping_footer,
     }
     return lineages, footer
 
@@ -722,26 +945,6 @@ def load_eval_rows(path, skill, case):
 
 
 # ---- the document ----------------------------------------------------------------
-
-
-def _arm_rows(rows):
-    arms = defaultdict(list)
-    for row in rows:
-        arms[row["arm"]].append(row)
-    result = []
-    for arm in sorted(arms):
-        members = arms[arm]
-        delivered = [row["total_dollars"] for row in members if row["delivered"]]
-        peaks = [row["peak_context"] for row in members]
-        result.append({
-            "arm": arm, "n": len(members), "delivered": len(delivered),
-            "dollars_per_delivered": (sum(row["total_dollars"] for row in members) / len(delivered)
-                                      if delivered else None),
-            "sd": statistics.stdev(delivered) if len(delivered) >= 2 else None,
-            "undelivered_dollars": sum(row["total_dollars"] for row in members if not row["delivered"]),
-            "peak_p50": percentile(peaks, 50), "peak_p90": percentile(peaks, 90),
-        })
-    return result
 
 
 def phase_group(phase):
@@ -793,7 +996,8 @@ def _boot_rows(lineages):
 
 
 def build_document(lineages, footer, *, window: str, arms=None, sweep=False) -> dict:
-    """The `agent-owner-report` document; `arms` (replay Arms) and `sweep` fill the replay."""
+    """The `agent-owner-report` document; `arms` (replay Arms) and `sweep` fill the replay. Two
+    start windows make a comparison of the baseline and candidate arms (issue 503 D7)."""
     rows = [lineage.facts for lineage in lineages]
     simulated, calibration = [], None
     if arms or sweep:
@@ -803,10 +1007,18 @@ def build_document(lineages, footer, *, window: str, arms=None, sweep=False) -> 
         if sweep:
             simulated += agent_owner_replay.sweep(lineages, model)
         calibration = agent_owner_replay.calibration(lineages, model)
+    grouping = footer["start_grouping"]
+    compared = grouping is not None and len(grouping["windows"]) == 2
+    arm_rows = agent_owner_rollup.arm_rows(
+        rows, required=[BASELINE_ARM, CANDIDATE_ARM] if compared else ())
+    project_rows = agent_owner_rollup.project_rows(rows, [arm["arm"] for arm in arm_rows])
     return {
         "kind": REPORT_KIND, "schema_version": SCHEMA_VERSION, "window": window,
-        "pricing": footer["pricing"], "lineages": rows, "arms": _arm_rows(rows),
+        "start_grouping": grouping, "pricing": footer["pricing"],
+        "lineages": rows, "arms": arm_rows, "projects": project_rows,
         "boots": _boot_rows(lineages), "simulated": simulated, "calibration": calibration,
+        "pings": footer["pings"], "comparison": (agent_owner_rollup.comparison(arm_rows, project_rows, BASELINE_ARM,
+                                                     CANDIDATE_ARM) if compared else None),
         "unattributed": footer["unattributed"], "interrupted": footer["interrupted"],
         "unmatched": footer["unmatched"],
     }
@@ -866,28 +1078,99 @@ def _print_calibration(calibration, top):
         top, ["phase", "boots", "observed p50", "modelled p50"], ["l", "r", "r", "r"])
 
 
-def print_document(doc: dict, *, top: int) -> None:
-    """Print the six tables of the owner report for `doc` (build_document's result)."""
+def _rate(value):
+    return "-" if value is None else f"{value:.0%}"
+
+
+def _ratio_text(value):
+    return "-" if value is None else f"{value:.2f}"
+
+
+def _print_comparison(doc, top):
+    """The comparison table of the candidate against the baseline arm, and its $ / delivered line."""
+    comparison = doc["comparison"]
+    arms = {row["arm"]: row for row in doc["arms"]}
+    projects = {(row["arm"], row["project"]): row for row in doc["projects"]}
+
+    def side(row):
+        return (f"{row['n']:,}", _rate(row["delivery_rate"]), _money(row["owner_dollars_per_lineage"]),
+                row["delivery_rate"]) if row is not None else ("0", "-", "-", None)
+
+    def line(name, before, after, ratio):
+        (n0, rate0, owner0, raw0), (n1, rate1, owner1, raw1) = side(before), side(after)
+        change = "-" if raw0 is None or raw1 is None else f"{(raw1 - raw0) * 100:+.1f}"
+        return [name, n0, n1, rate0, rate1, change, owner0, owner1, _ratio_text(ratio)]
+
+    base, cand = arms[BASELINE_ARM], arms[CANDIDATE_ARM]
+    rows = [line("all", base, cand, comparison["owner_dollars_per_lineage_ratio"])]
+    rows += [line(entry["project"], projects.get((BASELINE_ARM, entry["project"])),
+                  projects.get((CANDIDATE_ARM, entry["project"])),
+                  entry["owner_dollars_per_lineage_ratio"]) for entry in comparison["projects"]]
+    print("\nComparison (candidate against the pooled baseline; rate change in percentage points):\n")
+    _print_capped(
+        rows, top,
+        ["project", "baseline n", "candidate n", "baseline rate", "candidate rate", "rate change",
+         "baseline owner $ / lineage", "candidate owner $ / lineage", "ratio"],
+        ["l"] + ["r"] * 8)
+    print(f"\n$ / delivered: baseline {_money(base['dollars_per_delivered'])}, candidate "
+          f"{_money(cand['dollars_per_delivered'])}, ratio "
+          f"{_ratio_text(comparison['dollars_per_delivered_ratio'])}")
+
+
+def _print_pings(pings):
+    if pings is None:
+        print("Pings: not read (pass --proxy-log PATH)")
+        return
+    found, lost = pings["attributed"], pings["unattributed"]
+    print(f"Pings: {pings['lines']:,} ping lines read from {pings['log']}; attributed "
+          f"{_money(found['dollars'])} (owner {_money(found['owner_dollars'])}); unattributed "
+          f"{lost['pings']:,} pings, {_money(lost['dollars'])}; {pings['unpriced']:,} unpriced; "
+          f"{pings['skipped_lines']:,} lines skipped")
+
+
+def print_document(doc: dict, *, top: int, eval_grouping: bool = False) -> None:
+    """Print the owner report's tables for `doc` (build_document's result), plus the comparison
+    table when there is one. An eval grouping prints no `Pings:` line (issue 503 D13)."""
     rows = sorted(doc["lineages"], key=lambda row: (-row["total_dollars"], row["key"]))
-    print(f"Owner report ({doc['window']}, {len(rows):,} lineages)\n")
+    grouping = doc["start_grouping"]
+    if grouping is None:
+        print(f"Owner report ({doc['window']}, {len(rows):,} lineages)\n")
+    else:
+        print(f"Owner report ({doc['window']}; settled {grouping['settle_days']}d before "
+              f"{grouping['report_end'] or '-'}, {len(rows):,} lineages)\n")
     print("Lineages (one per run and issue; one per trial in an eval; dollars are list-price "
           "estimates):\n")
     _print_capped(
-        [[row["key"], row["arm"], f"{row['launches']:,}", f"{row['handoffs']:,}",
+        [[row["key"], row["arm"], row["project"], (row["started"] or "-")[:16],
+          f"{row['launches']:,}", f"{row['handoffs']:,}",
           f"{row['boots']:,}", f"{row['deaths']:,}", f"{row['long_child_waits']:,}",
           human(row["peak_context"]), _money(row["owner_dollars"]), _money(row["total_dollars"]),
-          "yes" if row["delivered"] else "no"] for row in rows],
-        top, ["lineage", "arm", "launches", "hand-offs", "boots", "deaths", "child waits",
-              "peak", "owner $", "total $", "delivered"],
-        ["l", "l"] + ["r"] * 8 + ["l"])
+          _money(row["ping_dollars"]), "yes" if row["delivered"] else "no"] for row in rows],
+        top, ["lineage", "arm", "project", "started", "launches", "hand-offs", "boots", "deaths",
+              "child waits", "peak", "owner $", "total $", "ping $", "delivered"],
+        ["l", "l", "l", "l"] + ["r"] * 9 + ["l"])
     print("\nArms (dollars per delivered issue = all spend of the arm / delivered; sd is the "
           "sample standard deviation over delivered rows):\n")
     _print_capped(
-        [[arm["arm"], f"{arm['n']:,}", f"{arm['delivered']:,}", _money(arm["dollars_per_delivered"]),
-          _money(arm["sd"]), _money(arm["undelivered_dollars"]), human(arm["peak_p50"]),
-          human(arm["peak_p90"])] for arm in doc["arms"]],
-        top, ["arm", "n", "delivered", "$ / delivered", "sd", "undelivered $", "peak p50", "peak p90"],
-        ["l"] + ["r"] * 7)
+        [[arm["arm"], f"{arm['n']:,}", f"{arm['delivered']:,}", _rate(arm["delivery_rate"]),
+          _money(arm["dollars_per_delivered"]), _money(arm["owner_dollars_per_lineage"]),
+          _money(arm["sd"]), _money(arm["undelivered_dollars"]), _money(arm["ping_dollars"]),
+          human(arm["peak_p50"]), human(arm["peak_p90"])] for arm in doc["arms"]],
+        top, ["arm", "n", "delivered", "rate", "$ / delivered", "owner $ / lineage", "sd",
+              "undelivered $", "ping $", "peak p50", "peak p90"],
+        ["l"] + ["r"] * 10)
+    print("\nProjects (one row per arm and project; owner $ / lineage counts owner calls and "
+          "owner pings):\n")
+    _print_capped(
+        [[row["arm"], row["project"], f"{row['n']:,}", f"{row['delivered']:,}",
+          _rate(row["delivery_rate"]), _money(row["dollars_per_delivered"]),
+          _money(row["owner_dollars_per_lineage"]), _money(row["ping_dollars"])]
+         for row in doc["projects"]],
+        top, ["arm", "project", "n", "delivered", "rate", "$ / delivered", "owner $ / lineage",
+              "ping $"],
+        ["l", "l"] + ["r"] * 6)
+    if doc["comparison"] is not None:
+        _print_comparison(doc, top)
     print("\nFresh-owner boots by phase (B = context at the end of the boot, the registering call or the last call before the first child; slimmable = boot "
           "tokens a smaller resume would skip):\n")
     _print_capped(
@@ -903,6 +1186,13 @@ def print_document(doc: dict, *, top: int) -> None:
           f"{pricing['approximate_calls']:,} calls priced approximately")
     print(f"Unattributed: {lost['transcripts']:,} transcripts, {_money(lost['dollars'])}; "
           f"{lost['unresolved_owners']:,} owners without an issue")
+    if not eval_grouping:
+        _print_pings(doc["pings"])
+    for window in (grouping["windows"] if grouping is not None else ()):
+        unsettled = window["unsettled"]
+        print(f"Unsettled: {unsettled['lineages']:,} {window['arm']} lineages, "
+              f"{_money(unsettled['dollars'])} (started within {grouping['settle_days']}d of the "
+              f"report end)")
     if doc["interrupted"]:
         print(f"Interrupted trials left out (evidence gaps): {len(doc['interrupted']):,}")
     if doc["unmatched"]:

@@ -3,12 +3,13 @@
 read_transcript makes one pass over a transcript and returns its calls (usage merged
 per message ID, in first-line order, context above 0), its user entries, the first
 attachment of each type, its tool results and the notes a PreToolUse:Bash hook
-attached to a tool use. The cache report (agent_cache_report) and the owner report
+attached to a tool use, and the count of each record's cwd. The cache report (agent_cache_report) and the owner report
 (agent_owner_report) read through it, and is_death is their cache-death rule.
 python/README.md (agent-costs) holds the contract.
 """
 
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -70,6 +71,7 @@ class Transcript:
     attachments: dict
     results: dict
     hook_notes: dict
+    cwds: Counter = field(default_factory=Counter)
 
 
 def _count(value):
@@ -189,9 +191,11 @@ def _rendered_size(value):
 def read_transcript(handle):
     """One pass over the transcript: its calls, user entries, attachments, results, hook notes.
 
-    `attachments` maps each attachment type to `(line, rendered size)` of its first record.
+    `attachments` maps each attachment type to `(line, rendered size)` of its first record;
+    `cwds` counts the `cwd` string of every record read.
     """
     calls, user_entries, attachments, results, hook_notes = {}, [], {}, {}, {}
+    cwds = Counter()
     for line_no, line in enumerate(handle):
         if not any(marker in line for marker in _RECORD_MARKERS):
             continue
@@ -201,6 +205,8 @@ def read_transcript(handle):
             continue
         if not isinstance(value, dict):
             continue
+        if isinstance(value.get("cwd"), str) and value["cwd"]:
+            cwds[value["cwd"]] += 1
         kind = value.get("type")
         if kind == "assistant":
             _add_assistant(calls, value, line_no)
@@ -216,7 +222,7 @@ def read_transcript(handle):
                 _add_hook_note(hook_notes, body)
     ordered = sorted(calls.values(), key=lambda call: call.first_line)
     return Transcript([call for call in ordered if call.context > 0], user_entries,
-                      attachments, results, hook_notes)
+                      attachments, results, hook_notes, cwds)
 
 
 def is_death(prev, call, ttl):
