@@ -34,6 +34,7 @@ from typing import Mapping
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256, GenerationError, _run_git
+from agent_tools.review_expansion import MEMBER_MAX_BYTES
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, full_commit, raw_digest, read_regular,
                                          strict_json)
 from agent_tools.review_issue100 import expand_100, validate_100
@@ -44,7 +45,6 @@ ANCHOR_NAME = "derivation-anchor.json"
 # The four files the anchor hashes, in the order CORE's `retained-anchor/v2` loader requires.
 PAYLOAD_NAMES = ("derivation-witness.json", "issue-100-derived.json", "issue-121.json", "task7-estimate.json")
 ANCHOR_MAX_BYTES = 32768
-MEMBER_MAX_BYTES = 1048576
 
 _CODES = ("tool_closure", "anchor_unreadable", "anchor_shape", "anchor_digest", "expected_digest", "member_set",
           "member_digest", "member_noncanonical", "witness_shape", "component_mismatch", "table_mismatch",
