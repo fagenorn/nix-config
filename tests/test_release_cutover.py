@@ -54,6 +54,12 @@ class ClassifyTest(unittest.TestCase):
         for value in ("{", "[]", json.dumps(extra), json.dumps(missing), "x" * 70000):
             with self.subTest(value=value[:20]):
                 self.assertEqual(self.classify(value), "unreadable")
+        finished = {**STATE, "tag": "v1.0.0", "deployState": "none"}
+        for key, wrong in (("releaseUrl", False), ("tag", 1), ("prUrl", []), ("pr", "3"),
+                           ("pr", True), ("mergeSha", {}), ("headSha", None),
+                           ("deployState", None)):
+            with self.subTest(key=key, wrong=wrong):
+                self.assertEqual(self.classify({**finished, key: wrong}), "unreadable")
         path = self.root / cutover.LEGACY_PATH
         path.unlink()
         target = self.root / "elsewhere.json"

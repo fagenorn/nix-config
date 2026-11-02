@@ -22,6 +22,16 @@ LEGACY_KEYS = frozenset(("headSha", "pr", "prUrl", "mergeSha", "tag", "releaseUr
 CLASSES = ("absent", "completed", "in_flight", "unreadable")
 MAX_BYTES = 65536
 FINISHED_DEPLOY_STATES = ("done", "none")
+OPTIONAL_TEXTS = ("prUrl", "mergeSha", "tag", "releaseUrl")
+
+
+def _typed(state: dict) -> bool:
+    """Whether every field has the previous schema's type: `headSha` and `deployState`
+    strings, `pr` null or an integer, the rest null or strings."""
+    return (isinstance(state["headSha"], str) and isinstance(state["deployState"], str)
+            and (state["pr"] is None or (type(state["pr"]) is int))
+            and all(state[key] is None or isinstance(state[key], str)
+                    for key in OPTIONAL_TEXTS))
 
 
 def _read(path: Path) -> object:
@@ -64,7 +74,7 @@ def classify(repo_root: Path) -> dict[str, str]:
         state = _read(path)
     except ValueError:
         return {"class": "unreadable", "path": str(path)}
-    if not isinstance(state, dict) or set(state) != LEGACY_KEYS:
+    if not isinstance(state, dict) or set(state) != LEGACY_KEYS or not _typed(state):
         return {"class": "unreadable", "path": str(path)}
     return {"class": _classify_state(state), "path": str(path)}
 
