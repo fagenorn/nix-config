@@ -448,6 +448,10 @@ class RecordRulesTest(unittest.TestCase):
                                      "verification_blockers[a\\nb].id: must equal its key"),
             "a pointer with a newline": ({}, {(61, 1): "x\ny"},
                                          "verification_blockers: attempt 61:1 points at x\\ny"),
+            "a list pointer": ({}, {(61, 1): ["x"]},
+                               'verification_blockers: attempt 61:1 points at ["x"]'),
+            "a dict pointer": ({}, {(61, 1): {"a": 1}},
+                               'verification_blockers: attempt 61:1 points at {"a": 1}'),
         }
         for label, (blockers, pointers, prefix) in cases.items():
             with self.subTest(case=label):

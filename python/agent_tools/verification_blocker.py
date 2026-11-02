@@ -430,7 +430,8 @@ def validate_blockers(blockers: object, pointers: Mapping[tuple[int, int], str |
     for (issue, attempt), pointer in pointers.items():
         if pointer is None:
             continue
-        listed = blockers.get(pointer, {}).get("attempts", [])
+        listed = (blockers[pointer]["attempts"]
+                  if isinstance(pointer, str) and pointer in blockers else [])
         if {"issue": issue, "attempt": attempt} not in listed:
             raise _refuse("verification_blockers",
                           f"attempt {_shown(issue)}:{_shown(attempt)} points at "
