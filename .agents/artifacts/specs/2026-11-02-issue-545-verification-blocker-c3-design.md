@@ -59,7 +59,8 @@ No ledger schema step: schema 11 already defines and validates the `resolved` fo
 
 1. Issues 61 and 62 are parked on blocker X (`flake.lock`). A sweep with no observation
    resumes neither. Both summaries and the bootstrap carry X's requirement.
-2. An equal observation of X resumes nothing, and `.superpowers` is byte-identical.
+2. Repeating that sweep with an equal observation of X resumes nothing and leaves
+   `.superpowers` byte-identical.
 3. A substituted source, a missing fact or another repository exits 2, and nothing changes.
 4. At `max_parallel` 1 a changed observation resolves X:
    - 61 resumes in place with launch 2 and a fresh window;
@@ -140,7 +141,8 @@ record is `resolved`.
 - **Resolved.** It takes the ordinary suspension lane in control and `direct-owner` alike:
   forge reconciliation and the tracker halt first, then the handoff check, the recorded
   worktree and the contract, then `resume_attempt`. That keeps:
-  - the issue, attempt, owner, worktree, `handoff_path` and phase;
+  - the issue, attempt, owner, worktree, `handoff_path` and phase (the helper never touches
+    the worktree, so its reviewed commits stay);
   - the progress marker, `suspend_phase` and `stalled_resumes`.
 
   It appends the next launch ordinal and re-bases the window to the lane budget, or to the
@@ -186,6 +188,16 @@ every awaited blocker in one call.
 **Rendering.** `workflow_delivery_wire` builds the bootstrap and the summary. Both render
 with `verification_blocker.requirement`, so no second copy of the shape exists outside the
 validator (D9).
+
+### Concurrency (D15)
+
+The map is read and written only inside the run's locked transaction: `control`,
+`direct-owner` (under the issue and run locks), `suspend`'s `park`, and `init-run`'s
+bootstrap, which is a locked read. A `suspend` that joins or reopens a record is therefore
+ordered before or after a resolution, never interleaved. A resolution compares the
+observation with the record's stored facts at that moment. An attempt that joins between
+the observation and the sweep failed on those same stored values (equal ids mean equal
+facts), so the observed change releases it too.
 
 ### Direct-owner request interface 3 (D7)
 
@@ -282,8 +294,8 @@ from an `example`-shaped input (`delivery_contract`) or from the requirement les
   - Its known limitation becomes: no caller gathers observations yet. `orchestrate-control`
     sends `[]`, and acquire-direct fails loudly on a `verification` requirement and on
     `suspended`. That is https://github.com/fagenorn/nix-config/issues/546.
-- **`direct-owner --help`.** It says "interface-3 request" and that `build` is null or the
-  command that builds the answer.
+- **`direct-owner --help`.** It says "interface-3 request", lists the `suspended` reply, and
+  says that `build` is null or the command that builds the answer.
 
 ### Re-grounding against c1 and c2 (D14)
 
@@ -318,8 +330,9 @@ counts (D12).
 - **Vocabulary**, in `tests/test_attempt_custody.py`: the `resume_permitted` table gains
   `blocker_resolved`, plus `ValueError` for a resolved flag on another class.
 - **Control CLI**, in the new `test_verification_control.py` over `VerificationHarness`:
-  - **unchanged replay:** no observation, then an equal one, leaves both attempts parked, the
-    requirement in both summaries, and the tree byte-identical;
+  - **unchanged replay:** after a sweep with no observation, a repeat with an equal one
+    leaves both attempts parked, the requirement in both summaries and the tree
+    byte-identical;
   - **unrelated and selected changes:** blockers X and Y; X equal and Y changed in one sweep
     resumes only Y's attempt, and X's attempt keeps its requirement;
   - **human direction:** a directed sweep does not bypass the gate;
@@ -390,5 +403,6 @@ counts (D12).
 | D10 | The catalogue's `verification` entry describes one observation (members, closed values from the pure module's constants, a valid example). Its `build` is the adapter's `observe` over the requirement less `expects`. The docstring's `build` sentence is generalised. | Parent D24; #473 D4 catalogue; issue 543 (the adapter takes a bare requirement); The Bar DRY. | Teaching the adapter to accept `expects`, which reopens c1's closed shape. Describing the adapter input in `members`. |
 | D11 | Callers move within today's headroom. acquire-direct gains the member and the digits (about 22 of 116 bytes). acquire-durable (16 bytes) and orchestrate-issues (17 bytes) change only the digit. No ceiling moves. Both READMEs and `--help` are corrected where they turn false. | Measured `instruction_load report` at the base; CLAUDE.md (only the user labels a raise); The Bar (re-point living docs; known limitations in docs); issue 544 D11. | Naming `verification: []` in acquire-durable's prose (about 20 bytes, over its 16). Leaving the README's "nothing resumes yet" limitation, which c3 makes false. |
 | D12 | Test seams: pure tables; two new CLI modules, `test_verification_control` and `test_verification_direct`, over the extended `VerificationHarness`; behavioural wire pins; the rule-6 key-set pin. AC5's "unrelated change" is an equal blocker beside a changed one at the ledger level, while path-level unrelated commits stay in c1's adapter tests. | Agent-helpers rules 5–6; The Bar "Tests that can fail"; parent D25 file split; issue 544 D16 behavioural pin. | One module for both interfaces, which mixes two tasks' records. Constant-for-constant pins that never run the validator. |
-| D13 | Fixtures move with the versions in every module that builds or pins a control 3 request or reply, a bootstrap 2 or a direct-owner 2 request: `test_workflow_state`, `test_delivery_workflow`, `_delivery_model_fixtures`, `test_artifact_budget`, `test_workflow_skill_contracts`, `orchestrate_world` and `test_orchestrate_control`. Calls to an extracted older helper still send that helper's own versions, without `verification`, and a reply they validate goes through that helper's own extracted validator. These are `test_verification_suspension`'s base generation and `test_control_cutover`'s. Each keeps its fixed base. | Both base helpers load the request before the ledger and pin control 3 and direct 2, and `test_control_cutover` checks base replies with the head validator, so head shapes would fail on the version, not on the behaviour under test; issue 544 D13 (fixture blast radius). | Moving those tests' base commits, which changes what they prove. Teaching head builders a version switch every caller must thread. |
+| D13 | Fixtures move with the versions in every module that builds or pins a control 3 request or reply, a bootstrap 2 or a direct-owner 2 request. The known set: `test_workflow_state`, `test_delivery_workflow`, `_delivery_model_fixtures`, `test_artifact_budget`, `test_workflow_skill_contracts`, `orchestrate_world` and `test_orchestrate_control`. Calls to an extracted older helper still send that helper's own versions, without `verification`, and a reply they validate goes through that helper's own extracted validator. These are `test_verification_suspension`'s base generation and `test_control_cutover`'s. Each keeps its fixed base. | Both base helpers load the request before the ledger and pin control 3 and direct 2, and `test_control_cutover` checks base replies with the head validator, so head shapes would fail on the version, not on the behaviour under test; issue 544 D13 (fixture blast radius). | Moving those tests' base commits, which changes what they prove. Teaching head builders a version switch every caller must thread. |
 | D14 | Re-grounding: resolutions store `{"facts"}` only; objects carry `mode`; c3 adds `NEXT`, `observed`, a value parameter for `failure` and a multi-issue `recorded` to the c2 harness; c2's parked direct test now expects `observe verification` before `suspended`. | Issue 544 D4; issue 543 D17; the landed `test_verification_suspension` module. | Following parent Task 4–5 test code verbatim, which asserts a `changed` member and helper names that do not exist. |
+| D15 | Grill: the blocker map is read and written only inside the run's locked transaction (control, direct-owner, `park`, the bootstrap's locked read). A concurrent `suspend` that joins or reopens a record is ordered by the lock, and a resolution always compares against the stored facts at that moment. | Triage `concurrency_or_persistence`; `transact` and the direct-owner run locks; issue 544 D8 (suspensions serialize on the ledger lock). | Reading the map lock-free for the bootstrap or the gate, which could list or resolve a record a concurrent `park` has just reopened. |
