@@ -1,10 +1,10 @@
 # Task 3: `codesigned-artifact` install, registration and docs
 
-Per D1, D2, D3, D6, D7, D8, D9, D12, D15, D20, D21, D22. Read the plan root's Global Constraints and the spec's § `codesigned-artifact` `invoke` steps and § Shared rules first. This task implements those steps, with D20's staging layout.
+Per D1, D2, D3, D6, D7, D8, D9, D12, D15, D20, D21, D22, D23. Read the plan root's Global Constraints and the spec's § `codesigned-artifact` `invoke` steps and § Shared rules first. This task implements those steps, with D20's staging layout.
 
 **Files:**
 - Modify: `python/agent_tools/codesigned_artifact_adapter.py` (add `invoke`, `INVOKE_BUDGET_SECONDS = 120`, docstring)
-- Modify: `tests/test_codesigned_artifact_adapter.py` (new `InvokeTest`)
+- Modify: `tests/test_codesigned_artifact_adapter.py` (new `InvokeTest`; Task 2's `DescribeTest` absence assertion becomes a registration assertion)
 - Modify: `python/agent_tools/release_adapter.py` (import the module, add `"codesigned-artifact"` to `REGISTRY`)
 - Modify: `tests/test_release_adapter_core.py` (new `RegistryTest`)
 - Modify: `tests/test_release_grammar.py` (`DescriptorTest.test_registry_is_closed` expects three names)
@@ -16,7 +16,8 @@ Per D1, D2, D3, D6, D7, D8, D9, D12, D15, D20, D21, D22. Read the plan root's Gl
 
 **Invariants:**
 - `invoke` returns only a closed `InvokeResult` (`release_adapter.invoke_result_problems(result) == []`) and never raises.
-- A refusal before the first successful rename leaves `world.tree()` byte-identical and no `.<name>.release-staging` sibling. A shape, operation or uid refusal starts no child process. A refusal before the identity step runs no `codesign`.
+- A refusal before the first successful rename leaves the install path (the installed bundle, or its absence) byte-for-byte unchanged and no `.<name>.release-staging` sibling. A refusal before step 7 also leaves the whole `world.tree()` unchanged; one in steps 7–8 may only have created the parent directory and removed stale siblings (D20). A shape, operation or uid refusal starts no child process. A refusal before the identity step runs no `codesign`.
+- No write follows a symlink: the stamp lands only in the staged copy, and the source checkout and every link target keep their bytes (D23).
 - `invoke` runs `git`, `security` and `codesign` only, by name, with the environment unchanged. It never runs `claude-bash-lifecycle-guard` (D12) and never runs a build.
 - `accepted` means the install path holds the staged bundle with both stamp keys, signed with the selected identity's hash or `-`. Its siblings `.<name>.release-staging` and `.<name>.release-previous` are gone.
 - The `github-forge` and `github-actions-health` descriptor digests and both forge fixture profile digests equal their base values (D22).
@@ -27,7 +28,7 @@ The reference of a refusal is `<step>: <detail>`, cut to 240 characters. One `IN
 1. **Shape.** The request is exactly `{kind: "effect", operation, parameters}`, else `invalid_input`. An operation that `describe()` does not declare is `unsupported_operation`. Parameters that fail the module's existing shape check (the one `inspect` applies) are `invalid_input`. No child starts.
 2. **Authority.** `os.getuid() == 0` is `authorization_denied`.
 3. **Checkout** (124 D23). `git rev-parse --show-toplevel` in the process's working directory gives the root, which must be absolute. Then `git -C <root> rev-parse HEAD` must equal the candidate commit, and `git -C <root> status --porcelain --untracked-files=no` must print nothing, else `precondition_failed`. A read that times out is `transient_transport`. One that cannot start, or exits non-zero, is `provider_unavailable`. These answers also apply to the `security` read in step 5.
-4. **Source.** `<root>/<source>` must be a directory that is not a symlink, whose `Contents/Info.plist` loads as a dict. Otherwise `precondition_failed`.
+4. **Source.** `<root>/<source>` must be a directory that is not a symlink, `<source>/Contents` must not be a symlink, and `<source>/Contents/Info.plist` must be a regular file, not a symlink (`os.lstat`), that loads as a dict. Otherwise `precondition_failed` with reference `source: …` (D23).
 5. **Identity.** Parse `security find-identity -v -p codesigning` stdout with D21's pattern, keeping order.
    - When `identity_env` names a variable whose value is non-empty, that value must equal a listed name, or a listed hash case-insensitively. Its hash is used. Otherwise refuse `precondition_failed` with reference `identity: no_signing_identity …`, with no ad-hoc fallback.
    - Otherwise the first name that starts with `identity_prefix` gives the hash.
@@ -35,7 +36,7 @@ The reference of a refusal is `<step>: <detail>`, cut to 240 characters. One `IN
 6. **Install path.** An existing install path that is a symlink or not a directory is `precondition_failed`.
 7. **Staging** (D20). Make the parent directory if missing, and remove any stale `.<name>.release-staging` and `.<name>.release-previous` siblings.
    - Create `.<name>.release-staging/` and copy the source into it as `<name>` with `shutil.copytree(..., symlinks=True)`.
-   - Set `AgentReleaseVersion` and `AgentReleaseCommit` in its `Contents/Info.plist`. Write binary when the file starts with `b"bplist00"`, else XML.
+   - Set `AgentReleaseVersion` and `AgentReleaseCommit` in its `Contents/Info.plist`. Write binary when the file starts with `b"bplist00"`, else XML, to a `tempfile.mkstemp` file inside the staged `Contents/`, then `os.replace` it onto `Contents/Info.plist`: never write through an existing path (D23). Other bundle symlinks stay as copied.
    - Run `codesign --force --sign <hash or -> <staged>`, then `codesign --verify --deep --strict <staged>`.
    - Any failure removes the staging directory and returns `rejected`: an `OSError` is `provider_unavailable`, a timeout `transient_transport`, a missing `codesign` `provider_unavailable`, and a non-zero exit `precondition_failed`.
 8. **Swap** (D15, D20). When the install path exists, `os.rename` it to `.<name>.release-previous`, then `os.rename` the staged `<name>` onto the install path.
@@ -45,7 +46,7 @@ The reference of a refusal is `<step>: <detail>`, cut to 240 characters. One `IN
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/test_codesigned_artifact_adapter.py` (add `import os, plistlib` and `from pathlib import Path`, and import `OTHER`):
+In `tests/test_codesigned_artifact_adapter.py` (add `import os, plistlib` and `from pathlib import Path`, and import `OTHER`), first retire Task 2's absence assertion: rename `DescribeTest.test_descriptor_is_exact_valid_and_fresh` to `test_descriptor_is_exact_valid_fresh_and_registered`, and replace its line `self.assertNotIn("codesigned-artifact", release_adapter.REGISTRY)` with `self.assertIs(release_adapter.REGISTRY["codesigned-artifact"], adapter)`. Then add:
 
 ```python
 class InvokeTest(Case):
@@ -73,7 +74,7 @@ class InvokeTest(Case):
         self.assertEqual((observed["outcome"], observed["reason"]), ("satisfied", "installed"))
 ```
 
-Add `InvokeTest.test_each_refusal_leaves_the_install_path_untouched`, a table over rows `(name, arrange, (result, error_class), reference fragment, children)`. For each row: `self.setUp()`, `self.world.bundle()` (except where noted), `arrange()`, snapshot `world.tree()`, invoke, then assert the pair, that the fragment is in the reference, that the tree is unchanged, and that no `.Notifier.app.release-staging` exists. `children` is `False` where `world.calls()` must be `[]`, and `"no-sign"` where no codesign `--sign` call may appear. Rows:
+Add `InvokeTest.test_each_refusal_leaves_the_installed_bundle_unchanged`, a table over rows `(name, arrange, (result, error_class), reference fragment, children)`. For each row: `self.setUp()`, `self.world.bundle()` (except where noted), `arrange()`, snapshot `world.tree()`, invoke, then assert the pair, that the fragment is in the reference, and that no `.Notifier.app.release-staging` exists. A row marked `staging` fails in steps 7–8: it asserts only that the install path's `tree()` entries are unchanged (none, where nothing was installed), allowing the parent-directory creation and stale-sibling removal D20 specifies. Every other row asserts the whole tree unchanged. `children` is `False` where `world.calls()` must be `[]`, and `"no-sign"` where no codesign `--sign` call may appear. Rows:
 - target path `/abs/N.app`: `invalid_input`, no children.
 - operation `publish` in both the request and parameters: `unsupported_operation`, no children.
 - `mock.patch.object(adapter.os, "getuid", return_value=0)` around the call: `authorization_denied`, no children.
@@ -81,15 +82,16 @@ Add `InvokeTest.test_each_refusal_leaves_the_install_path_untouched`, a table ov
 - `world.dirty()`: `precondition_failed`, no-sign.
 - `os.chdir(world.home)`: `provider_unavailable`, no-sign.
 - no `world.bundle()`: `precondition_failed`, `source`, no-sign.
+- source `Contents/Info.plist` replaced by a symlink to `world.root / "outside.plist"` holding `plistlib.dumps({"CFBundleIdentifier": "dev.example.notifier"})`: `precondition_failed`, `source`, no-sign (only the checkout's `git` reads run), and the outside file's bytes are unchanged.
 - source `Contents/Info.plist` overwritten with `plistlib.dumps([1])`: `precondition_failed`, no-sign.
 - `world.identities(IDENTITY, exit=1, stderr="keychain locked")`: `provider_unavailable`, no-sign.
 - `world.identities(OTHER)`: `precondition_failed`, `no_signing_identity`, no-sign.
 - `environ(NOTIFIER_SIGNING_IDENTITY="Nobody")` with `adhoc_fallback=True`: `precondition_failed`, `no_signing_identity`, no-sign.
 - install path a symlink to `world.checkout`: `precondition_failed`, no-sign. The symlink is intact.
-- `fail("codesign", "sign", exit=1, stderr="errSecInternalComponent")`: `precondition_failed`, `errSecInternalComponent`.
-- `fail("codesign", "verify", exit=1)`: `precondition_failed`.
-- `adapter.INVOKE_BUDGET_SECONDS` patched to 1 with `fail("codesign", "sign", exit=0, sleep=3)`: `transient_transport`.
-- `os.rename` patched (`mock.patch.object(adapter.os, "rename", …)`) to raise `OSError` when the destination is the install path and otherwise call the real rename, with nothing installed: `provider_unavailable`.
+- `fail("codesign", "sign", exit=1, stderr="errSecInternalComponent")`: `precondition_failed`, `errSecInternalComponent`, staging.
+- `fail("codesign", "verify", exit=1)`: `precondition_failed`, staging.
+- `adapter.INVOKE_BUDGET_SECONDS` patched to 1 with `fail("codesign", "sign", exit=0, sleep=3)`: `transient_transport`, staging.
+- `os.rename` patched (`mock.patch.object(adapter.os, "rename", …)`) to raise `OSError` when the destination is the install path and otherwise call the real rename, with nothing installed: `provider_unavailable`, staging.
 
 Add `InvokeTest.test_identity_selection_and_replacement`. Each case is accepted, and the asserted codesign `--sign` argument and installed stamp hold:
 - `identities(IDENTITY, OTHER)` and `environ(NOTIFIER_SIGNING_IDENTITY=OTHER[1])` sign with `OTHER[0]`.
@@ -129,7 +131,7 @@ In `tests/test_release_grammar.py`, `test_registry_is_closed` expects `["codesig
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_codesigned_artifact_adapter.py tests/test_release_adapter_core.py tests/test_release_grammar.py 2>&1 | tail -4'`
-Expected: FAIL. `InvokeTest` fails with `AttributeError` (no `invoke`), and `test_codesigned_artifact_is_registered` and `test_registry_is_closed` with `KeyError`/inequality. The digest test passes: it pins.
+Expected: FAIL. `InvokeTest` fails with `AttributeError` (no `invoke`), and `test_codesigned_artifact_is_registered`, `test_descriptor_is_exact_valid_fresh_and_registered` and `test_registry_is_closed` with `KeyError`/inequality. The digest test passes: it pins.
 
 - [ ] **Step 3: Write the minimal implementation**
 
@@ -169,5 +171,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":3,"records":[{"bounds":[{"added_lines":440,"boundary":"all","deleted_lines":0,"record_bytes":34816,"support":{"covers":["r2b","r3a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3a","last_task":3,"owner":3,"path":"python/agent_tools/codesigned_artifact_adapter.py"},{"bounds":[{"added_lines":420,"boundary":"all","deleted_lines":0,"record_bytes":32768,"support":{"covers":["r2c","r3b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3b","last_task":3,"owner":3,"path":"tests/test_codesigned_artifact_adapter.py"},{"bounds":[{"added_lines":11,"boundary":"all","deleted_lines":5,"record_bytes":5120,"support":{"covers":["r1a","r3c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3c","last_task":5,"owner":3,"path":"python/agent_tools/release_adapter.py"},{"bounds":[{"added_lines":60,"boundary":"all","deleted_lines":0,"record_bytes":8192,"support":{"covers":["r1b","r3d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3d","last_task":7,"owner":3,"path":"tests/test_release_adapter_core.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2048,"support":{"covers":["r3e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3e","last_task":6,"owner":3,"path":"tests/test_release_grammar.py"},{"bounds":[{"added_lines":3,"boundary":"all","deleted_lines":1,"record_bytes":22528,"support":{"covers":["r1c","r3f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3f","last_task":7,"owner":3,"path":"python/README.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":3,"records":[{"bounds":[{"added_lines":455,"boundary":"all","deleted_lines":0,"record_bytes":36864,"support":{"covers":["r2b","r3a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3a","last_task":3,"owner":3,"path":"python/agent_tools/codesigned_artifact_adapter.py"},{"bounds":[{"added_lines":440,"boundary":"all","deleted_lines":0,"record_bytes":34816,"support":{"covers":["r2c","r3b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3b","last_task":3,"owner":3,"path":"tests/test_codesigned_artifact_adapter.py"},{"bounds":[{"added_lines":11,"boundary":"all","deleted_lines":5,"record_bytes":5120,"support":{"covers":["r1a","r3c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3c","last_task":5,"owner":3,"path":"python/agent_tools/release_adapter.py"},{"bounds":[{"added_lines":60,"boundary":"all","deleted_lines":0,"record_bytes":8192,"support":{"covers":["r1b","r3d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3d","last_task":7,"owner":3,"path":"tests/test_release_adapter_core.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2048,"support":{"covers":["r3e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3e","last_task":6,"owner":3,"path":"tests/test_release_grammar.py"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":2,"record_bytes":38912,"support":{"covers":["r1c","r3f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3f","last_task":7,"owner":3,"path":"python/README.md"}]}}
 ```

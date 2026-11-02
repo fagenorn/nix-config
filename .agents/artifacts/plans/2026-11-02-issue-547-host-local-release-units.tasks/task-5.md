@@ -4,7 +4,7 @@ Per D1, D2, D3, D7, D8, D12, D15, D18 and AC2. Read the plan root's Global Const
 
 **Files:**
 - Modify: `python/agent_tools/launchd_agent_adapter.py` (add `invoke`, `INVOKE_BUDGET_SECONDS = 60`, docstring)
-- Modify: `tests/test_launchd_agent_adapter.py` (new `InvokeTest`)
+- Modify: `tests/test_launchd_agent_adapter.py` (new `InvokeTest`; Task 4's `DescribeTest` absence assertion becomes a registration assertion)
 - Modify: `python/agent_tools/release_adapter.py` (import the module, add `"launchd-agent"` to `REGISTRY`)
 - Modify: `tests/test_release_adapter_core.py` (extend `RegistryTest`)
 - Modify: `tests/test_release_grammar.py` (`test_registry_is_closed` expects four names)
@@ -50,7 +50,7 @@ The rendered plist (D8, D18) holds:
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/test_launchd_agent_adapter.py` (add `import plistlib, stat`):
+In `tests/test_launchd_agent_adapter.py` (add `import plistlib, stat`), first retire Task 4's absence assertion: rename `DescribeTest.test_descriptor_is_exact_valid_fresh_and_unregistered` to `test_descriptor_is_exact_valid_fresh_and_registered`, and replace its `"launchd-agent"` not-in-`REGISTRY` assertion with `self.assertIs(release_adapter.REGISTRY["launchd-agent"], adapter)`. Then add:
 
 ```python
 class InvokeTest(Case):
@@ -127,7 +127,7 @@ In `tests/test_release_adapter_core.py`'s `RegistryTest` (add `REPO = Path(__fil
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_launchd_agent_adapter.py tests/test_release_adapter_core.py tests/test_release_grammar.py 2>&1 | tail -4'`
-Expected: FAIL. `InvokeTest` fails with `AttributeError` (no `invoke`), and the registry tests with `KeyError: 'launchd-agent'`. The `argus` scan passes: it pins.
+Expected: FAIL. `InvokeTest` fails with `AttributeError` (no `invoke`), and the registry tests and `test_descriptor_is_exact_valid_fresh_and_registered` with `KeyError: 'launchd-agent'`. The `argus` scan passes: it pins.
 
 - [ ] **Step 3: Write the minimal implementation**
 
@@ -168,5 +168,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":5,"records":[{"bounds":[{"added_lines":460,"boundary":"all","deleted_lines":0,"record_bytes":34816,"support":{"covers":["r4b","r5a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5a","last_task":5,"owner":5,"path":"python/agent_tools/launchd_agent_adapter.py"},{"bounds":[{"added_lines":440,"boundary":"all","deleted_lines":0,"record_bytes":32768,"support":{"covers":["r4c","r5b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5b","last_task":5,"owner":5,"path":"tests/test_launchd_agent_adapter.py"},{"bounds":[{"added_lines":13,"boundary":"all","deleted_lines":5,"record_bytes":6144,"support":{"covers":["r1a","r3c","r5c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5c","last_task":5,"owner":5,"path":"python/agent_tools/release_adapter.py"},{"bounds":[{"added_lines":90,"boundary":"all","deleted_lines":0,"record_bytes":12288,"support":{"covers":["r1b","r3d","r5d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5d","last_task":7,"owner":5,"path":"tests/test_release_adapter_core.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2048,"support":{"covers":["r3e","r5e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5e","last_task":6,"owner":5,"path":"tests/test_release_grammar.py"},{"bounds":[{"added_lines":5,"boundary":"all","deleted_lines":1,"record_bytes":26624,"support":{"covers":["r1c","r3f","r5f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5f","last_task":7,"owner":5,"path":"python/README.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":5,"records":[{"bounds":[{"added_lines":460,"boundary":"all","deleted_lines":0,"record_bytes":34816,"support":{"covers":["r4b","r5a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5a","last_task":5,"owner":5,"path":"python/agent_tools/launchd_agent_adapter.py"},{"bounds":[{"added_lines":445,"boundary":"all","deleted_lines":0,"record_bytes":33792,"support":{"covers":["r4c","r5b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5b","last_task":5,"owner":5,"path":"tests/test_launchd_agent_adapter.py"},{"bounds":[{"added_lines":13,"boundary":"all","deleted_lines":5,"record_bytes":6144,"support":{"covers":["r1a","r3c","r5c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5c","last_task":5,"owner":5,"path":"python/agent_tools/release_adapter.py"},{"bounds":[{"added_lines":90,"boundary":"all","deleted_lines":0,"record_bytes":12288,"support":{"covers":["r1b","r3d","r5d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5d","last_task":7,"owner":5,"path":"tests/test_release_adapter_core.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":2048,"support":{"covers":["r3e","r5e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5e","last_task":6,"owner":5,"path":"tests/test_release_grammar.py"},{"bounds":[{"added_lines":6,"boundary":"all","deleted_lines":2,"record_bytes":43008,"support":{"covers":["r1c","r3f","r5f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5f","last_task":7,"owner":5,"path":"python/README.md"}]}}
 ```

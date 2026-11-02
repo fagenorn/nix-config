@@ -153,8 +153,9 @@ contain a `..` segment, an empty segment or a control character.
 **`invoke`** takes these steps in order and stops at the first refusal:
 
 1. It runs the shared shape, authority and checkout checks.
-2. **Source check.** `<root>/<source>` must be a real directory whose `Contents/Info.plist` loads
-   with `plistlib` as a dictionary. Otherwise `precondition_failed`.
+2. **Source check.** `<root>/<source>` must be a real directory whose `Contents` is not a symlink
+   and whose `Contents/Info.plist` is a regular file, not a symlink, that loads with `plistlib` as
+   a dictionary. Otherwise `precondition_failed` (D23).
 3. **Identity.** It parses `security find-identity -v -p codesigning` for lines of the form
    `N) <40-hex> "<name>"`.
    - When `identity_env` names a set, non-empty variable, its value must equal a listed name or
@@ -170,7 +171,8 @@ contain a `..` segment, an empty segment or a control character.
 5. **Staging.** It creates the parent directory and removes stale `.<name>.release-staging` and
    `.<name>.release-previous` siblings. Then it copies the source into staging with symlinks
    preserved, and sets the `Info.plist` keys `AgentReleaseVersion` and `AgentReleaseCommit`,
-   keeping the file's XML or binary format. It runs
+   keeping the file's XML or binary format, by writing a temporary file in the staged `Contents/`
+   and replacing `Info.plist` with it (D23). It runs
    `codesign --force --sign <hash or -> <staging>` with no entitlements and no runtime options.
    Then `codesign --verify --deep --strict <staging>` must pass. On any failure it removes staging
    and returns `rejected`. The install path has not been touched.
@@ -489,3 +491,4 @@ compiles.
 | D20 | The bundle is staged as `.<name>.release-staging/<name>`: copied, stamped, signed and verified under its installed name, then swapped by renaming that inner `<name>` onto the install path. A rename that raised did not happen, so a failure before the first successful rename is `rejected` and after it `unknown` (refines the `install` steps 5 and 6 and D15) | the installed name is the one Notification Center records (§ Problem); `os.rename` is atomic; the live run is #129's, so no test here shows how the real `codesign` treats a directory named `.<name>.release-staging` | Signing the staging directory itself: the signed and installed directory names differ, on a path no test here runs against the real tool |
 | D21 | Host tool grammars, from read-only captures on this host (2026-11-02): a `launchctl print` field is a line with exactly one leading tab, `key = value`; the stamp is read only inside the block the one-tab line `environment = {` opens, as two-tab `K => V` lines up to the one-tab `}`; `codesign -d --verbose=2` is read from stderr; an identity is a `security find-identity` line matching `^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"(.+)"\s*$`; inspection runs `git --no-optional-locks`, so a status read never rewrites an index | the captured `launchctl print` (its `inherited environment` and `default environment` blocks use the same `=>` syntax) and `codesign -d` output; the bar (inspect never mutates; production-shaped fakes) | Matching `K => V` anywhere: a launchd-supplied variable could read as the stamp. Parsing `codesign -d` stdout: the real tool leaves it empty |
 | D22 | AC3 is a code check: a test pins the `github-forge` and `github-actions-health` descriptor digests and both forge fixture profile digests to their values at base `328f08da`. A profile digest covers only the descriptors it binds (124 D17), so the pin covers every forge or actions-health profile, nix-config's and Nodo's included; it replaces the ship-time `release profile inspect` comparison in § Acceptance mapping | 124 D17/D5; the bar (tests that can fail) | A ship-time digest comparison: an evidence row run by hand, for nix-config only, that no CI run repeats |
+| D23 | The source's `Contents` and `Contents/Info.plist` must not be symlinks and the plist must be a regular file, else `precondition_failed` at the source step; the stamp is written to a temporary file in the staged `Contents/` and `os.replace`d onto `Info.plist`, never through an existing path; other bundle symlinks stay preserved | Codex plan review PR547-03: `copytree(symlinks=True)` keeps a linked `Info.plist`, so writing the stamp through it would modify the checkout or an external file, and D20 confines staging writes to the staging root | Resolving the link and copying its target into the bundle: silently changes what is signed |

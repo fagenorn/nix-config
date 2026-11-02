@@ -5,7 +5,7 @@ Per D10 and D11. Read the plan root's Global Constraints first.
 **Files:**
 - Modify: `python/agent_tools/release_adapter.py` (`watch_operation` and its docstring)
 - Modify: `tests/test_release_adapter_core.py` (new `WatchOperationTest`)
-- Modify: `python/README.md` (§ Release adapters, the GitHub Actions paragraph's `watch_operation` sentence)
+- Modify: `python/README.md` (§ Release adapters, the GitHub Actions paragraph's `watch_operation` sentence; § Release profiles, one clause of the `resolve-project` deploy-binding sentence)
 
 **Interfaces:**
 - Consumes: `release_adapter.watch_operation(descriptor: Mapping[str, Any]) -> str | None` as it is at base.
@@ -57,6 +57,8 @@ In `watch_operation`, select `name` where `entry["mode"] == "publication_trigger
 
 In `python/README.md`, replace only the sentence "`release_adapter.watch_operation(descriptor)` names a descriptor's single inspectable activation-mode operation, or returns `None` when there is none or more than one." with one that states the narrowed rule and its consequence: the resolver reports a deploy binding naming an adapter without such an operation as `contract.deploy.adapter_unwatchable` (issue 547 D10). Change nothing else on that line.
 
+In `python/README.md`'s § Release profiles, the sentence beginning "`resolve-project` holds such a binding" states the old rule a second time. Replace only its clause "a descriptor with exactly one inspectable activation-mode operation (`contract.deploy.adapter_unwatchable`)" with "a descriptor with exactly one inspectable `publication_triggered` operation (`contract.deploy.adapter_unwatchable`, issue 547 D10)". Change nothing else on that line.
+
 - [ ] **Step 4: Verify**
 
 Run: `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_adapter_core.py tests/test_actions_health_adapter.py 2>&1 | tail -4'`
@@ -65,8 +67,8 @@ Expected: PASS, `OK`, and the count is base's 17 plus 1.
 Run: `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_resolve_project.py -k DeployWatchTest 2>&1 | tail -4'`
 Expected: PASS, `OK` (the `github-forge` unwatchable case still holds).
 
-Run: `if grep -q 'single inspectable activation-mode operation' python/README.md; then exit 1; fi`
-Expected: exit 0.
+Run: `if grep -q 'inspectable activation-mode operation' python/README.md; then exit 1; fi`
+Expected: exit 0 (neither statement of the old rule remains).
 
 Run (timeout 3600 s): `just build`
 Expected: exit 0.
@@ -81,5 +83,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":1,"records":[{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":4,"record_bytes":4096,"support":{"covers":["r1a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1a","last_task":5,"owner":1,"path":"python/agent_tools/release_adapter.py"},{"bounds":[{"added_lines":26,"boundary":"all","deleted_lines":0,"record_bytes":4096,"support":{"covers":["r1b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1b","last_task":7,"owner":1,"path":"tests/test_release_adapter_core.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":18432,"support":{"covers":["r1c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1c","last_task":7,"owner":1,"path":"python/README.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":1,"records":[{"bounds":[{"added_lines":8,"boundary":"all","deleted_lines":4,"record_bytes":4096,"support":{"covers":["r1a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1a","last_task":5,"owner":1,"path":"python/agent_tools/release_adapter.py"},{"bounds":[{"added_lines":26,"boundary":"all","deleted_lines":0,"record_bytes":4096,"support":{"covers":["r1b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1b","last_task":7,"owner":1,"path":"tests/test_release_adapter_core.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":34816,"support":{"covers":["r1c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1c","last_task":7,"owner":1,"path":"python/README.md"}]}}
 ```
