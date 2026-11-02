@@ -66,6 +66,7 @@ let
     "ship-delivery"
     "skill-lint"
     "skill-sections"
+    "verification-observe"
     "verified-tree"
   ];
 

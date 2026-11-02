@@ -151,6 +151,8 @@ agent-workflow-tests *args:
     tests/test_launch_scope.py \
     tests/test_review_range.py \
     tests/test_verified_tree.py \
+    tests/test_verification_blocker.py \
+    tests/test_verification_observe.py \
     tests/test_acceptance_record.py \
     tests/test_transaction_core.py \
     tests/test_attempt_identity.py \
