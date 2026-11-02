@@ -1,6 +1,6 @@
 ---
 name: sdd
-description: Execute an implementation plan with a fresh subagent per task, reviewed between tasks. Use when a written plan with independent tasks is ready to build.
+description: Executes an implementation plan with a fresh subagent per task, reviewed between tasks. Use when a written plan of independent tasks is ready to build.
 ---
 
 # Subagent-Driven Development
@@ -11,40 +11,38 @@ retained `capabilities.review.code` first: `blocked` stops and authored
 `unsupported` takes only its documented route. Only `available` dereferences
 `bindings.commands[review_id].argv` before launching it.
 
-Execute a plan by dispatching a fresh implementer per task, a lane-scoped task review after each, and one two-axis whole-branch review (conformance ∥ correctness) at the end. Subagents never inherit your session's history — you construct exactly what each needs, which also keeps your own context flat for coordination.
+Execute a plan with a fresh implementer per task, a lane-scoped task review after each, and one two-axis whole-branch review (conformance ∥ correctness) at the end.
 
-**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, or all-tasks-complete. Narrate at most one short line between tool calls — the ledger and tool results carry the record.
+**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, all-tasks-complete, or the deadline headroom rule. Narrate at most one short line between tool calls.
 
 ## Setup
 
-Work happens in an isolated workspace: invoke the `worktrees` skill to create or verify one. Never implement on a main/master branch without explicit consent.
+Work in an isolated workspace: invoke the `worktrees` skill to create or verify one. Never implement on a main/master branch without explicit consent.
 
 Before initial plan validation or brief extraction, run `artifact-budget check
---kind implementation-plan --root PLAN_FILE --format json`. Exit 2 is a package
-contract failure and exit 3 is an over-budget stop; neither may advance. On exit
-0, require `status: within_budget` and exactly the four non-boolean integer
-metrics `root_bytes`, `total_bytes`, `file_count`, and `largest_member_bytes`.
-Retain the root path and all four metrics for dispatches. Missing metrics or any
-other result shape is a contract error (D5, D6, D8).
+--kind implementation-plan --root PLAN_FILE --format json`. Exit 2 or 3 stops. On
+exit 0, require `status: within_budget` and the four non-boolean integer metrics
+`root_bytes`, `total_bytes`, `file_count`, and `largest_member_bytes`; any other
+shape stops as a contract error. Retain the root path and all four for dispatches.
 
-Conversation memory does not survive compaction; controllers that lost their place have re-dispatched entire completed task sequences. Track progress in a ledger file:
+Track progress in a ledger file:
 
-- Each plan owns a workspace: `scripts/sdd-workspace PLAN_FILE` prints the plan's git-ignored directory beneath the **primary checkout** — `<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`, where `<checkout-bucket>` is `primary` for the primary checkout itself and `wt-<worktree-name>` for a linked worktree — home to every artifact for THIS plan: ledger, briefs, reports, review packages. It is never rooted at your cwd, so running from a linked worktree leaves no nested ledger inside it. Another plan's directory, and another checkout's bucket, is never yours to read or write.
+- `scripts/sdd-workspace PLAN_FILE` prints the plan's git-ignored workspace — `<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`, where `<checkout-bucket>` is `primary` or `wt-<worktree-name>` for a linked worktree. Ledger, briefs, reports and review packages for THIS plan live there; another plan's directory or checkout's bucket is never yours.
 - Check `<workspace>/progress.md`. If its first line names your plan file, tasks with a `Task <N>: complete` line are DONE — resume at the first task without one; a task whose last line is a fix round resumes mid-loop. A ledger naming a different plan is not yours: leave it, start fresh.
 - Create the ledger with its identity as the first line: `# SDD ledger — plan: <plan file path>`.
-- After compaction, trust the ledger and `git log` over recollection. (`git clean -fdx` in the primary checkout destroys the workspace; recover from `git log`.)
+- After compaction, or if the workspace is gone, trust the ledger and `git log` over recollection.
 
-**Initial validation is the only whole-package read.** After the successful
-checker result, read the root and every indexed member once in discovery order
-and scan them for conflicts — tasks that contradict each other or the constraints,
-or anything the package mandates that the review rubric treats as a defect — and
-present findings as one batched question (each beside the plan text mandating it,
-asking which governs) before execution begins. A missing or unreadable member is a contract error, never a fallback to monolithic parsing. Clean scan → proceed
-without comment. After that, the controller holds only the plan root **header** —
-summary, Global Constraints, Test seams, Delivery estimate and boundaries, and the `## Task index` (ID, title,
-files touched, risk lane, member link per task) — its compact checker metrics,
-plus the current task's brief from `scripts/task-brief`; never re-read the whole
-package or retain other task bodies. Build the todo list from the Task index.
+**Initial validation, the only whole-package read, runs only on an unreviewed first
+entry** (no literal `--reviewed` token, no ledger line `Initial validation: done` for
+this plan): read the root and every indexed member once, in discovery order, and scan
+for conflicts — tasks that contradict each other or the constraints, or anything the
+package mandates that the review rubric treats as a defect. Present findings before
+execution as one batched question, each beside the plan text mandating it and asking
+which governs; a clean scan proceeds. A clean or answered scan writes that ledger
+line. A missing or unreadable member is a contract error. Otherwise and afterwards
+hold only the root header to its `## Task index`, its checker metrics and the current
+task's `sdd-gate` output, reading only `<plan stem>.tasks/task-<N>.md` before each
+dispatch. Build the todo list from the Task index.
 
 ### Cumulative delivery gate
 
@@ -52,47 +50,63 @@ Resolve the integration branch from the project bindings, then pin
 `DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD
 origin/<integration-branch>`. Never derive it from an independently advanced
 local integration branch. Before the first implementer, and after each completed
-task before any next dispatch, pin `DELIVERY_HEAD` to the full `git rev-parse
-HEAD` SHA and run `review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD`.
-Apply the producer-boundary validation and independent `artifact-budget check
---kind review-package` metric comparison defined in the task loop. This
-cumulative gate supplements the task-scoped package and review; it does not
-replace either.
+task before any next dispatch, `sdd-gate next` pins `DELIVERY_HEAD` to the full
+`git rev-parse HEAD` SHA, runs `review-package PLAN_FILE DELIVERY_BASE
+DELIVERY_HEAD` and applies the review-package gate.
 
 A validated existing package satisfies a gate only when its manifest's full
 `range.base` and `range.head` equal the intended full SHAs, its retained producer
 report still validates, and a fresh independent artifact check agrees with all
 four metrics. Seven-character path prefixes never establish range identity.
-Record both full SHAs and the four checked metrics in the ledger. Exit 2 or 3,
-malformed output, stale range identity, or metric disagreement cannot advance:
-preserve completed work and identify an independently deliverable split for the
-caller instead of dispatching more work.
+The helper records both full SHAs and the four checked metrics in the ledger. A non-passing
+gate cannot advance: preserve completed work and identify an independently
+deliverable split for the caller instead of dispatching more work.
+
+### Review-package gate
+
+Every `review-package` range, whether task, cumulative, fix-round or
+final-review, passes this gate before any reviewer dispatch:
+
+1. Record the full base and head SHAs before invoking the producer.
+2. Run `review-package PLAN_FILE <base> <head>`, capture its stdout unchanged and
+   pipe those bytes through `artifact-budget validate-report --boundary producer --input -`.
+3. Independently run `artifact-budget check --kind review-package` on the
+   report's root and compare all four metrics (`root_bytes`, `total_bytes`,
+   `file_count`, `largest_member_bytes`) with the report's.
+
+Then take one of three exits:
+
+- Generator exit 0, validator exit 0, a strict `complete` report and agreement
+  permit dispatch.
+- Generator exit 3 must validate as `decompose_required`: record and return it,
+  with no reviewer dispatched.
+- Generator or validator exit 2, malformed or unknown output, or any
+  report/checker disagreement (including `complete` with `over_budget`) is
+  `failed`: record and return it before dispatch through the failed SDD
+  candidate (`detail_state: "none"`, `report_path: null`), validated by
+  `artifact-budget validate-report --boundary sdd`, returning only canonical stdout.
 
 ## Agent tiers
 
-Dispatch by agent type — the definitions carry the model and effort tier; never leave the tier to inheritance:
+Dispatch by agent type, with the model and effort its dispatch site declares; never leave the tier to inheritance:
 
-- **`mechanic`** — transcription plus testing: the plan text contains the complete code, or the change is single-file mechanical. Also inventories and bulk sweeps.
-- **`implementer`** — every other implementation task: prose-specified work, multi-file integration, judgment inside a fixed scope.
+- **`mechanic`** — transcription plus testing (the plan text has the complete code, or the change is single-file mechanical), inventories and bulk sweeps.
+- **`implementer`** — every other implementation task. A planned task and its fix rounds 1–3 run on Sonnet/high (the `task-implementer` role); fix rounds 4–5, a reasoning-problem BLOCKED and the final-review fixer run on Opus/high (the `implementer` role).
 - **`reviewer`** — full-lane first-pass task review and every first-pass whole-branch review.
-- **`reviewer-lite`** — only a scoped re-review (named prior findings + bounded fix diff) or a mechanical/low-risk lane verification (declared lane + bounded task diff). Ambiguous adjudication or branch-wide review escalates to `reviewer` on Opus/high, recorded in the SDD ledger.
-- The **final review's two axes** dispatch per [final-review.md](final-review.md) — the conformance axis as `reviewer` on Sonnet/high; the correctness axis via `codex-collaboration`'s `diff-review` when `capabilities.review.code` is `available` and that skill is installed, and as `reviewer` on Opus/high when the capability is `unsupported` or the skill is not installed (`blocked` stops).
-- **Stuck tasks escalate across models, not just tiers** — see the fix loop's round 4.
+- **`reviewer-lite`** — only a scoped re-review (named prior findings + bounded fix diff) or a mechanical/low-risk lane verification (declared lane + bounded task diff). Ambiguity or branch-wide review escalates to `reviewer` on Opus/high, recorded in the ledger.
+- The **final review's two axes** dispatch per [final-review.md](final-review.md): conformance as `reviewer` on Opus/high; correctness via `codex-collaboration`'s `diff-review` when `capabilities.review.code` is `available` and that skill is installed, else as `reviewer` on Opus/high (`blocked` stops).
 
-Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi-step work and costs more overall. Unsure between mechanic and implementer → pick implementer.
+Unsure between mechanic and implementer → pick implementer.
 
-**Leaf-agent clauses.** Every prompt this skill composes for an `Agent` dispatch — here, in [fix-loop.md](fix-loop.md) or in [final-review.md](final-review.md) — carries these two sentences verbatim, as a paragraph of their own; a prompt built from one of the `*-prompt.md` templates already carries them:
+**Re-evaluating Sonnet task implementers.** Metric: first-pass approval of full-lane task reviews of `task-implementer` tasks (spec ✅, no Critical or Important finding, no fix round). Baseline: 84% over 153 reviews on Opus/high. Judge after about 10 delivered issues and at least 30 reviews; below 74% reverts the `sdd-nonmechanical-implementation` and `sdd-task-fix-redispatch` sites to the `implementer` role, otherwise keep Sonnet.
 
-> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see.
+**Leaf-agent clauses.** Every prompt this skill composes for an `Agent` dispatch — here, in [fix-loop.md](fix-loop.md) or in [final-review.md](final-review.md) — carries these four clauses verbatim, as a paragraph of their own; a prompt built from one of the `*-prompt.md` templates already carries them:
+
+> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see. Run each long command, every verification command included, in the foreground with an explicit timeout above its expected duration. If the host moves one to the background anyway, wait for it in the same turn: never end your turn while a command or agent you started still runs. Never loop `sleep` in the foreground or chain a check onto it: use Monitor with an until-condition, or one short bare `sleep N` call and check in the next.
 
 ## The task loop
 
-Everything you paste into a dispatch — and everything a subagent prints back — stays resident in your context for the session. Hand artifacts over as file paths; subagents write detail to files.
-
-All removable cleanup is downstream of the D15 `delivery-detail` publication
-contract. Its destination is derived by the producer beneath the primary
-checkout's `.superpowers/issue-delivery/` home; callers supply issue, branch,
-run, and head identity only, never an authoritative destination.
+Hand artifacts over as file paths; subagents write detail to files.
 
 ### Lifecycle workers
 
@@ -101,199 +115,188 @@ When the caller runs this skill under a lifecycle identity — its
 dispatches or resumes that can write (the implementer, the mechanic and each
 fix-round implementer) is a registered worker of that launch. Immediately
 before the dispatch or resume, run
-`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
+`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 and put its printed `worker_id` into the prompt as the single line
-`Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`.
+`Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`,
+followed by the sentences "Run each long command, every verification command included, as
+`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`,
+still in the foreground." and "Create every scratch directory or scratch worktree under the path that
+`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints."
 When that agent returns, run
-`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`.
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`.
 A resumed agent is registered again and gets a fresh `worker_id`.
-Read-only reviewers are not registered.
+Read-only reviewers are not registered. `sdd-gate` makes the register, release
+and progress calls for the two dispatches it renders.
 
 A report of `BLOCKED` with `launch fence refused: <reason>` means that
-worker's launch fence refused its commit. Whatever the reason, release that
-worker and make no retry and no re-dispatch; not every reason means a
-supersession, so then run
+worker's launch fence refused its commit. Release that worker, retry and
+re-dispatch nothing, then run
 `workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
-on this launch. On `current: false` or any helper failure, follow from-issue's
-superseded route: after that release nothing more is written; print
-`/from-issue <num> --auto` on its own line and stop. On `current: true` the
-refusal was no supersession: follow from-issue's suspension procedure with
-`blocked_on=transport`. Without a lifecycle identity none of this applies and
-workers commit with plain `git`.
+on this launch:
 
-Under a lifecycle identity, also record this launch's progress marker. Run
-`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
-once before dispatching the first task this session will execute, and again
-after each task completes (step 5). The helper reads the commit checked out
-in the attempt's worktree itself; a commit that strictly descends from the
-last recorded one starts a fresh anti-zombie stall count, so a long run that
-suspends between tasks is not stopped as stalled. The reply's `outcome` is
-informational. A refusal changes nothing, is not a suspension cause and
-never stops the task loop: the next `workflow-state progress` or
-`check-launch` remains the authority on the attempt's state.
+- `current: false` or any helper failure: follow from-issue's superseded route.
+  After that release nothing more is written; print `/from-issue <num> --auto`
+  on its own line and stop.
+- `current: true`: the refusal was no supersession; follow from-issue's
+  suspension procedure with `blocked_on=transport`.
+
+Without a lifecycle identity none of this applies and workers commit with plain `git`.
+
+With the attempt's `deadline_at` also handed over, check headroom at each
+task boundary: before dispatching a task, and after the last `complete` line,
+before the final review. `remaining` is `deadline_at` minus `date -u`;
+`longest` is the largest dispatch-to-`complete` wall time of a task completed
+this session (0 before the first). When `remaining` is under the larger of
+15 minutes and `longest`, stop any still-live worker and run
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event stopped`,
+then
+`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+(a refusal does not stop you), then
+`workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`.
+On `current: false` or any helper failure, write nothing more, print
+`/from-issue <num> --auto` on its own line and stop. On `current: true`,
+follow from-issue's suspension procedure with `blocked_on=deadline`; a suspend
+refused because the attempt is no longer active means the reaper expired it:
+follow from-issue's expired-deadline route, with no retry.
 
 ### 1. Dispatch the implementer
 
-Record BASE (`git rev-parse HEAD`) first — the review package and fix-round diffs need it.
+Run `sdd-gate next PLAN_FILE --skill-dir <skill-dir> --task N`
+(`<skill-dir>` is this file's directory), adding:
 
-- `scripts/task-brief PLAN_FILE N` revalidates the package, resolves exactly one
-  convention-linked member, copies it byte-for-byte, and prints the brief path.
-  Checker exit 2/3 or a missing, unreadable, duplicate, or nonconventional member
-  link stops before replacing an existing brief. The brief is the single source
-  of task-specific requirements; exact values (numbers, magic strings,
-  signatures, test cases) appear only there. Never make a subagent read the whole
-  plan package.
-- The dispatch contains: one line on where the task fits; the plan root path and
-  all four metrics; the brief path ("read this first — it is your requirements,
-  with the exact values to use verbatim"); interfaces and decisions from earlier
-  tasks the brief cannot know; your resolution of any ambiguity you noticed; the
-  report-file path (brief `…/task-N-brief.md` → report `…/task-N-report.md`) and
-  report contract. It never contains member lists, task contents, or accumulated
-  prior-task history (D6).
-- If an earlier task parked a finding in this task's area, carry a pointer to that ledger entry.
-- Record the implementer's agent identity — fix rounds 1–3 resume it.
+- `--completed <previous-task>` after that task's review, with `--parked <K>`
+  for parked findings (step 5);
+- `--delivery-base <DELIVERY_BASE>` on the run's first call;
+- one `--standards <path>` per retained `bindings.paths.standards` entry;
+- `--context-file <file>`, written with the file-writing tool: where the task
+  fits, interfaces and decisions from earlier tasks the brief cannot know, your
+  resolution of any ambiguity, a pointer to the ledger entry of a finding parked
+  in this area. Never member lists, task contents or prior-task history;
+- `--repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+  under a lifecycle identity.
+
+It prints one JSON object. On `outcome: ready` the whole prompt is
+`Read the dispatch brief at <brief_path> and follow it exactly.`
+
+On `outcome: refused` dispatch nothing: `gate: decompose_required` and
+`gate: failed` are the review-package gate's second and third exits; step
+`release-worker` or `register-worker` is a lifecycle failure under
+`### Lifecycle workers`; any other `step` is a contract error: stop.
+
+- Record the implementer's agent identity and `worker_id`: fix rounds 1–3 resume it.
 - Never dispatch multiple implementers in parallel (conflicts).
 
 Template: [implementer-prompt.md](implementer-prompt.md)
 
 ### 2. Handle the report
 
-- **DONE** → run `review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`, which silently drops all but the last commit), capture its compact JSON stdout unchanged, and pass those bytes through `artifact-budget validate-report --boundary producer --input -` before the step-3 gate.
+- **DONE** → run `sdd-gate review PLAN_FILE --skill-dir <skill-dir> --task N` with step 1's `--standards` and lifecycle flags plus `--worker-id <worker_id>`. A refusal routes as in step 1.
 - **DONE_WITH_CONCERNS** → correctness/scope concerns get addressed before review; observations get noted, review proceeds.
-- **NEEDS_CONTEXT** → provide it, re-dispatch.
-- **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: add context, re-dispatch same tier. Reasoning problem: re-dispatch `implementer` (or bump the model). Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
+- **NEEDS_CONTEXT** → release the worker, then repeat step 1's call with the context added.
+- **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: re-dispatch as for NEEDS_CONTEXT, at the same tier. Reasoning problem: the same, with the blocker and the report path in the context, to a fresh Opus/high implementer:
 
-If the implementer asks questions — before or during — answer completely; don't rush it.
+<!-- agent-dispatch: id=sdd-blocked-reasoning-escalation role=implementer model=opus effort=high -->
+Agent(subagent_type="implementer", model="opus", effort="high") takes over a task whose implementer reported BLOCKED on a reasoning problem.
 
-Every initial review-package call uses the same closed gate before any review
-dispatch. Generator exit 0 plus validator exit 0, a strict `complete` report,
-and report/checker agreement permits dispatch. Generator exit 3 must validate as
-`decompose_required`; record and return it with no reviewer dispatched.
-Generator exit 2, validator exit 2, malformed or unknown output, or any
-report/checker disagreement is `failed`; record and return it before dispatch.
+  Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry.
 
-A diff-review manifest may use interface version 2 only when an individually
-oversized file is a positively identified auto-generated EF Core migration
-designer. In that form every handwritten file remains byte-complete and the
-designer is replaced by bounded, deterministic evidence: its Git blob and
-content identities, migration/product identities, source-diff bytes, and model
-shape counts. The reviewer must inspect that evidence together with the
-companion migration/snapshot diff and the implementer's no-pending-model-change,
-generated-SQL, and provider-backed migration evidence. A large file that does
-not meet the exact generated-designer contract remains over budget and exits 3;
-never classify by suffix alone, truncate a diff, or treat generated evidence as
-a review waiver.
+**Interim child results.** A child's return that the host marks interim (its own background work still running, or a result that may be interim) is not a completion. Re-engage that same child by its recorded agent identity: tell it to wait for its job inside its turn and then return its final report, and wait for that report within your turn. Never answer an interim result with a text-only reply, never suspend for it (it is not an `external` wait), and never dispatch a replacement or stop the child. A registered lifecycle worker stays registered under its existing worker id and registers nothing new: an interim result is not its `returned` event. If the message cannot be delivered or its reply cannot be awaited in your turn, follow from-issue's **Writing workers** route (task-stop, then release `--event stopped`), then this skill's handling of a lost child, the one case that may lead to a fresh dispatch. Only the child's final hand-back counts as its result.
 
-Interface version 3 is the producer's bounded remediation only when the complete
-version-1/2 `-U10` package fails solely on `member_count` and/or
-`aggregate_bytes`. It retries the closed context sequence 7, 5, 3, 1, 0 and
-selects the first checker-valid package, packing complete file-diff records with
-`stable-first-fit-whole-file`. It never splits a file diff or omits a changed
-line. Reviewers read every shard, honor the declared `packaging.context_lines`,
-and inspect the live file when that bounded unchanged context is insufficient.
-Version 3 may also contain the same strictly identified generated evidence as
-version 2. `member_bytes` and `root_bytes` never take this remediation: an
-individually oversized handwritten diff or manifest still exits 3.
-
-Record the exact `base_sha and head_sha` before invoking any `review-package`
-producer. Parse every producer report only after the producer-boundary validator,
-then independently run `artifact-budget check --kind review-package` on its root
-and compare all four metrics before reviewer dispatch. On generator or validator
-exit 2, do not dispatch and construct the exact failed SDD candidate with
-`detail_state: "none"` and `report_path: null`; pass it through
-`artifact-budget validate-report --boundary sdd` and return only canonical stdout.
-Exit 3 must be a validated `decompose_required` producer report and also stops
-before dispatch. `complete` plus `over_budget` is a contract error.
+If the implementer asks questions — before or during — answer completely.
 
 ### 3. Review the task
 
-Per-task review is a task-scoped gate; never skip it, and never accept a report missing either verdict (spec compliance AND quality). Implementer self-review never substitutes. The gate's **form** follows the task's risk lane from the plan's task index:
+Per-task review is never skipped, and a report missing either verdict (spec compliance AND quality) is not accepted; implementer self-review never substitutes. Its **form** follows the task's risk lane from the plan's task index:
 
 - **full lane** — the full first-pass reviewer below, always.
-- **mechanical / low-risk lane** — scoped verification: dispatch reviewer-lite with the declared lane and the bounded task diff. For a mechanical microtask whose verify commands are deterministic, the controller may instead verify inline (run the commands, inspect the diff) and ledger `Task <N>: verified inline (mechanical)`.
+- **mechanical / low-risk lane** — scoped verification: dispatch reviewer-lite with the declared lane and the `manifest_root` and `metrics` `sdd-gate review` printed. For a mechanical microtask whose verify commands are deterministic, the controller may instead verify inline (run the commands, inspect the diff) and ledger `Task <N>: verified inline (mechanical)`.
 - **Batching** — adjacent same-lane microtasks in the same file neighborhood may share one verification context when isolation adds nothing; ledger the batch.
-- A lane verification that surfaces ambiguity, semantic doubt, or anything beyond its lane escalates to the full reviewer — never adjudicate inside the cheap gate, and never route a lane the plan didn't declare.
+- A lane verification that surfaces ambiguity, semantic doubt, or anything beyond its lane escalates to the full reviewer; never adjudicate inside the cheap gate or route a lane the plan didn't declare.
 
 <!-- agent-dispatch: id=sdd-lane-task-verification role=reviewer-lite model=sonnet effort=medium -->
 Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies the bounded mechanical/low-risk lane task diff against its brief.
 
 For the full-lane review:
 
-- The reviewer gets the plan root path and all four metrics, then the brief and
-  report paths plus the review-package manifest root path and all four metrics
-  (`root_bytes`, `total_bytes`, `file_count`,
-  `largest_member_bytes`). It never gets a member list, shard list, artifact
-  contents, diff contents, or another task body. The reviewer reads Global
-  Constraints from the bounded plan root, strictly checks the manifest, then
-  reads every shard once in manifest order and explicitly reports an unreadable
-  or mismatched shard. The template carries the process rules; the root carries
-  what THIS project's spec demands.
-- Don't add open-ended directives ("check all uses") without a concrete task-specific reason; don't ask it to re-run tests the implementer already ran; and never pre-judge — if your prompt contains "do not flag" or "at most Minor", stop: adjudication happens in the loop, not the dispatch.
-- **⚠️ Cannot-verify items** (requirements living in unchanged code or spanning tasks) don't block the review, but you resolve each yourself before marking the task complete — you hold the cross-task context. A confirmed gap enters the fix loop as a failed spec review.
+- The whole prompt is step 1's sentence with `sdd-gate review`'s `brief_path`:
+  adjudication happens in the loop.
+- **⚠️ Cannot-verify items** (requirements in unchanged code or spanning tasks) don't block the review, but you resolve each yourself before marking the task complete. A confirmed gap enters the fix loop as a failed spec review.
 
 Template: [task-reviewer-prompt.md](task-reviewer-prompt.md)
 
 ### 4. The fix loop
 
-Triggers on spec ❌, any Critical/Important finding, or a confirmed ⚠️ gap — read [fix-loop.md](fix-loop.md) beside this file and follow it: five capped rounds (rounds 1–3 resume the original implementer by its recorded identity, round 4 is the Codex-assisted stuck-breaker, round 5 the final fresh dispatch), scoped re-reviews, the explicit escalation dispatch, and the at-the-cap breaker that parks or blocks every residual with a ledger ruling.
+Triggers on spec ❌, any Critical/Important finding, or a confirmed ⚠️ gap — read [fix-loop.md](fix-loop.md) beside this file and follow it: five capped rounds, scoped re-reviews, and the at-the-cap breaker that parks or blocks every residual with a ledger ruling.
 
 Two routes exit before the loop starts:
 
 - **Minor findings** go to the ledger as they arrive (`Task <N>: minor (deferred): <one-liner>`); the final review triages them. They never enter the loop.
 - **Plan-mandated findings** — anything conflicting with the plan's own text — are the human's call: present finding and plan text, ask which governs.
 
-Never fix findings yourself in the controller session — controller fixes skip review and pollute the coordination context.
+Never fix findings yourself in the controller session.
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked. Under a lifecycle identity, run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>` immediately after appending that `complete` line, as `### Lifecycle workers` describes.
+Clean review — or everything parked-with-ruling at the cap — is recorded by the next `sdd-gate next --completed N` (step 1's call; without `--task` after the last task or before a headroom stop): it appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)` and runs the cumulative delivery gate. Mark the todo and move on only on `outcome: ready`. Never advance past open Critical/Important findings that are neither fixed nor parked.
 
 ## Final review — two axes
 
-Mandatory for **every** risk lane — lanes narrow per-task review, never this gate. When all tasks are complete, read [final-review.md](final-review.md) beside this file and follow it: it owns the two isolated axis dispatches, the single fix wave, the scoped per-axis re-reviews, and the escalation rules.
+Mandatory for **every** risk lane — lanes narrow per-task review, never this gate. When all tasks are complete, read [final-review.md](final-review.md) beside this file and follow it, through its **Final verification** step.
 
 ## Finish
 
 Before any workspace can disappear, collect every parked or residual finding as
 the strict non-empty detail input and write the retained candidate to
 `<workspace>/retained-detail.json`. Invoke review-package in `delivery-detail`
-mode with issue/branch/run/head identity; it alone derives the primary-checkout
-destination. Independently run `artifact-budget check --kind review-package` on
-the published root and compare its metrics with the producer report.
+mode with issue/branch/run/head identity; the producer alone derives the
+destination beneath the primary checkout's `.superpowers/issue-delivery/` home.
+Independently run `artifact-budget check --kind
+review-package` on the published root and compare its metrics with the producer
+report.
 
 Build one exact SDD JSON object with only `state`, `review_state`,
 `conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`,
-`head_sha`, `detail_state`, `report_path`, and `notes`, then run
-`artifact-budget validate-report --boundary sdd` and transport only canonical
-stdout. A non-empty detail set is `present` with one main-root-relative durable
-path. With genuinely no findings it is `none` with a null path; transient review
-evidence is never inlined.
+`head_sha`, `acceptance_state`, `detail_state`, `report_path`, and `notes`,
+then run `artifact-budget validate-report --boundary sdd` and transport only
+canonical stdout.
+
+- `base_sha` and `head_sha` are the `DELIVERY_BASE` and `DELIVERY_HEAD` the final
+  review's first pass covered, never the branch tip; ship-issue reviews the fix
+  wave's later commits as its delta.
+- `verification_state` is `passed` only when final-review.md's **Final
+  verification** step recorded a pass on the branch tip it ran on or took its
+  none-declared route with the per-task focused tests passing; `failed` when that
+  step's repair round did not pass.
+- `acceptance_state` derives from the final verdicts: `not_applicable` when there
+  was no criterion source or the run failed before the conformance axis graded;
+  otherwise `unmet` when any verdict is `unmet` or `unverified`; otherwise
+  `human_pending` when any is `human_pending`; otherwise `met`.
+- A non-empty detail set is `present` with one main-root-relative durable path.
+  With genuinely no findings it is `none` with a null path. Transient review
+  evidence is never inlined.
 
 If publication fails, run `artifact-budget validate-detail-input` against the
 no-follow retained file and consume canonical stdout, requiring non-empty findings
 and comparison with the candidate before setting `detail_state: "unpublished"`.
-That `report_path` is the `<workspace>/retained-detail.json` written above, and
-is **main-root-relative** like the durable path: the workspace lives beneath
-the primary checkout, never the process cwd, so both sdd detail states share
-one root — unlike ship-issue, which roots its retained candidate in the feature
-worktree instead. Name the root in notes.
-Then validate the failed candidate through `artifact-budget
-validate-report --boundary sdd`, keep the workspace and keep the worktree, and
-do not remove either. Missing, unreadable, empty, malformed, wrong-schema, or
-empty-findings input remains failed without an unpublished claim.
+That `report_path` is the `<workspace>/retained-detail.json` written above,
+**main-root-relative** like the durable path; name the root in notes. Validate the
+failed candidate through `artifact-budget validate-report --boundary sdd`, keep
+the workspace and the worktree, and remove neither. Missing, unreadable, empty,
+malformed, wrong-schema, or empty-findings input remains failed without an
+unpublished claim.
 
 Terminal states:
 
 - **Clean** — both axes clean (or clean after the fix wave), or every remaining
-  finding parked-with-ruling: delete this plan's workspace (`rm -rf <workspace>`;
-  sibling directories belong to other plans) and report `review_state: clean` —
-  parked findings are already available through the one durable report.
+  finding parked-with-ruling (an acceptance finding never is), and the **Final
+  verification** step recorded a pass on the branch tip or took its
+  none-declared route: delete this plan's workspace (`rm -rf <workspace>`;
+  sibling directories belong to other plans) and report `review_state: clean`.
 - **Residuals** — the breaker surfaced a load-bearing residual the caller must
-  decide on: keep the workspace and ledger for the caller's inspection and report
-  `review_state: residuals`; the retained or durable review package named by the
-  single `report_path` is the only findings transport.
+  decide on: keep the workspace and ledger and report `review_state: residuals`;
+  the retained or durable review package named by the single `report_path` is the
+  only findings transport.
 
 Report to the calling workflow only the validated SDD JSON above. `review_state`
-is `clean | residuals` — sdd never reports `unknown`; that third value exists for
-downstream callers describing a branch with no evidence of a completed sdd
-review. Do not ship, merge, or open PRs — the caller owns delivery.
+is `clean | residuals`; sdd never reports `unknown`. Do not ship, merge, or open
+PRs — the caller owns delivery.

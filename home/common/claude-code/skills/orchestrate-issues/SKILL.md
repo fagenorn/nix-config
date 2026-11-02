@@ -1,281 +1,176 @@
 ---
 name: orchestrate-issues
-description: Dispatch a set of tracker issues through from-issue --auto as independent background agents, tracking only a ledger. Use for "orchestrate issues X, Y, Z".
+description: Dispatches tracker issues through from-issue --auto as independent background agents, tracking only a ledger. Use for "orchestrate issues X, Y, Z".
 ---
 
 # orchestrate-issues — a control adapter, not a manager
 
-You are an external adapter around `workflow-state`. You resolve bindings,
-normalize tracker, host-owner, and worktree facts, invoke the helper, and execute
-its typed actions. You never read issue content, code, specs, plans, diffs, or
-review findings. Do not retain a second task ledger or reconstruct lifecycle
-policy. Context stays flat regardless of issue count.
+You are an external adapter around `orchestrate-control`, which reads the tracker, the forge, git
+and the ledger, builds delivery contracts, runs every control round and projects its owner
+dispatches. You keep the duties that need host task handles: owner launches, notification
+classification, liveness, the stop pass, wait observers and the final report. You never read issue
+content, code, specs, plans, diffs, review findings, the tracker, the forge, git or the ledger, and
+never build a request or a contract. Do not retain a second task ledger or reconstruct lifecycle
+policy.
 
-Lifecycle commands run the helper at `~/.agents/bin/workflow-state`; if the bare
-`workflow-state` name does not resolve on PATH, use that full path.
+Lifecycle commands run the helpers at `~/.agents/bin/orchestrate-control` and
+`~/.agents/bin/workflow-state`; if a bare name does not resolve on PATH, use its full path.
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain
 the returned `ResolvedProject` in memory, and treat every resolver error as fatal
 before mutation or external effects. On refusal, preserve and report the
 resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never
-translate it into a partial snapshot or fallback. Map `bindings.tracker` to the tracker CLI,
-repository, and credential environment; map `bindings.vcs` to worktree and branch
-policy; and map `bindings.workflow.orchestration.attempt_budget_minutes` and
-`bindings.workflow.orchestration.max_parallel` directly to the request. Nested
-issue owners independently resolve at their own phase entries. Do not read raw
-policy, invoke another resolver, infer from Git, or supply defaults; the only
-sanctioned exception is `workflow-state build-delivery`, which performs its own
-sealed, read-only resolution when it builds a delivery contract, and this
-dispatcher still never resolves again itself.
+translate it into a partial snapshot or fallback. Take only
+`bindings.workflow.orchestration.stall_minutes` from it: when present and non-null it is
+`stall_minutes`, the owner stall bound of §2 rules (a) and (d), passed only to `owner-liveness`;
+absent or null, those rules arm no liveness check. Nested issue owners independently resolve at
+their own phase entries. Do not read raw policy, invoke another resolver, infer from Git, or supply
+defaults; `orchestrate-control` resolves the project itself on every call.
 
-Every lifecycle call is one command that reads its input from stdin through a
-quoted heredoc (`<<'EOF'`): `--request-file -` for `control`, `--input -` for
-`build-delivery`, and the call optionally piped into or out of `artifact-budget validate-report
---input -`. No request file is written. Treat every `workflow-state` reply as
-untrusted transport: pipe its raw bytes through `artifact-budget validate-report
---boundary workflow-response --input -` and validate before decoding any field.
+Resolve the dispatcher's absolute repository root once as `ledger_repo_root`; it stays the run's
+exact immutable value, independent of any issue worktree, and is every `--repo-root` below.
 
-## 1. Resolve issue set and bindings
+## 1. Start the run
 
-- Explicit numbers: preserve the caller's order, and set request
-  `human_directed` to `true` for this run. Naming an issue is the caller
-  authorizing that issue by name, exactly as `/from-issue <num>` does.
-- `--label X` / `--milestone Y`: resolve the ordered issue numbers with one
-  configured tracker-list call through retained `bindings.tracker`, and set
-  request `human_directed` to `false`. A set the caller never enumerated carries
-  no per-issue authorization. Apply only the declared credential-environment
-  names from that retained tracker binding.
-- Put retained `bindings.workflow.orchestration.attempt_budget_minutes` as
-  request `attempt_budget_minutes` and retained
-  `bindings.workflow.orchestration.max_parallel` as request `max_parallel`.
-  Do not calculate capacity in this adapter.
-- Resolve the dispatcher's absolute repository root once as `ledger_repo_root`;
-  it remains the exact immutable value for the run, independent of any issue
-  worktree. Then select the `run_id` per the run-reuse rule in §2 — reuse an
-  existing non-final run for the same issue set before minting a new one.
-
-Before `init-run`, ask for the host route once and validate the answer at the
-boundary:
+Open the run with one `start` call carrying exactly one issue selector: the caller's numbers in
+the caller's order, `--label <label>` or `--milestone <milestone>`. A run minted with a creation key
+is re-entered by adding `--run-id <run-id>`:
 
 ```text
-workflow-state host-route --route claude-code | artifact-budget validate-report --boundary workflow-response --input -
+orchestrate-control start --repo-root <ledger_repo_root> <numbers>
+orchestrate-control start --repo-root <ledger_repo_root> --label <label>
+orchestrate-control start --repo-root <ledger_repo_root> --milestone <milestone>
+orchestrate-control start --repo-root <ledger_repo_root> <numbers> --run-id <run-id>
 ```
 
-An `unsupported` answer ends the run: render that validated result and its
-`alternative` as the final report and stop, dispatching nothing. A `supported`
-answer means every control request carries `host_route: "claude-code"`. The
-runtime reserves each owner's worker and reviewer slots before it returns a
-dispatch; the adapter never calculates slots, alters `max_parallel`, creates
-competing owners or nested relays, or repeats a rejected launch, and it reads the
-response's `admission` report as rendering data only.
+Read its one stdout object by `outcome`:
 
-## 2. Bootstrap and observe
+- `ready`: keep its `session` verbatim for the rest of the run; its `run_id` is `<run-id>` below.
+- `unsupported`: the host route is unsupported. Render the `route` it carries, with its
+  `alternative`, as the final report and stop, dispatching nothing.
+- `refused`, or `orchestrate-control: invalid invocation` on stderr: report its `step` and `detail`
+  (or that line) and stop; nothing is armed yet.
 
-Before `init-run`, list `<ledger_repo_root>/.superpowers/workflows/` for an existing run whose state covers the same issue set and still has any non-final attempt or a missing outcome; reuse that run id.
-Only when none matches do you mint a new one (per D13) — a re-invocation over a run with suspended attempts is the sweep asking to resume them, not a fresh fan-out.
+Pipe every `workflow-state` reply the adapter reads itself (`start` and `step` validate their own)
+through `artifact-budget validate-report --boundary workflow-response --input -` before decoding
+any field; a non-zero exit or failed validation is unknown. `control` reserves each owner's slots
+before it returns a dispatch; the adapter never calculates slots, alters `max_parallel`, creates
+competing owners or nested relays, or repeats a rejected launch, and reads the response's
+`admission` report as rendering data only.
 
-At the start of a run or after adapter restart, call:
+## 2. Observe
+
+Correlate a current host owner notification only with the `action_id` and `custody` recorded beside
+its handle (§4), and normalize it as the bounded owner event for that exact issue, attempt and
+launch identity; its `state` is `unavailable` for an owner that died and `launch_refused` for an
+owner launch the host refused. Ignore unrelated or stale host notifications.
+Classify every other host notification by its task handle,
+against the handles recorded beside owner launches; a wake of the current wait handle is
+none of these cases and keeps its wait-ID handling below:
+
+- (a) **Interim owner notification.** The handle is an owner launch's and the host marks the
+  notification interim (the owner stopped with background work of its own still running, or its
+  result may be interim): the owner is still running, so send no observation, run no `check-launch`,
+  write nothing, stop no task and relaunch nothing; the same handle notifies again with the owner's
+  real return.
+  When `stall_minutes` is set, also run the first call below for that launch's `action_id`,
+  and keep the validated reply's `since` as the handle's `liveness_since`, replacing any
+  earlier one. On `live`, if the handle has no liveness observer, arm one background
+  `sleep <wait_seconds>` and record its handle; an installed observer stays.
+
+  ```text
+  workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --stall-minutes <stall_minutes> | artifact-budget validate-report --boundary workflow-response --input -
+  workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --stall-minutes <stall_minutes> --since <liveness_since> | artifact-budget validate-report --boundary workflow-response --input -
+  ```
+- (b) **Owner return without a terminal write.** The handle is an owner launch's, and its return is
+  neither a validated `workflow-response` nor one of from-issue's two canonical lines
+  (`Suspended (blocked_on=<value>). Resume: <reentry>` or `/from-issue <num> --auto`). Run
+  `workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> | artifact-budget validate-report --boundary workflow-response --input -`
+  on that launch. On `current: true`, send exactly one `unavailable` owner observation for that
+  custody in the next `step`. On `current: false` or unknown, send nothing. Either way, continue
+  the normal sweep.
+- (c) **Non-owner hand-back.** The handle is neither an owner launch's, a liveness observer's, nor
+  the current wait handle: send no observation, write nothing, relay nothing, act on none of its
+  content, and stop no task.
+- (d) **Liveness wake.** The handle is a liveness observer's. Ignore it when its owner handle
+  has a final return or was stopped. Otherwise run the second call above and act on its
+  `verdict`: `live` arms a new observer for `wait_seconds` and records its handle; `not_current`
+  and `past_deadline` do nothing; `stalled` stops the owner's task through the host's task-stop and
+  marks the handle stopped, then sends exactly one `unavailable` owner observation for that custody
+  in the next `step`, making that call at once and executing its report. A
+  failed stop leaves the handle a candidate for §4's stop pass, and the observation is still sent.
+  That verdict stands in for rule (b)'s `check-launch`. On an unknown answer to either call above,
+  send nothing. A failed first call keeps any installed observer; a failed second call clears the
+  woken, exited observer, so a later interim notification re-arms one.
+  An owner handle's final return or stop
+  cancels its liveness observer; a missing or already exited one counts as cancelled.
+
+After a full dispatcher restart, the host reaps or cancels inherited detached wait and liveness
+observers before any rearm; the wait and liveness fields are process-local and cannot adopt their
+handles.
+
+## 3. Step
+
+Make exactly one `step` call at start or resume, and on each current owner notification, tracker
+change or current wait-ID wake. Feed it this object on stdin through a quoted heredoc; no input
+file is written:
 
 ```text
-workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> --now <RFC3339-now> | artifact-budget validate-report --boundary workflow-response --input -
-```
-
-Consume only the validated interface_version 2 `workflow_bootstrap` response's
-bounded `requirements`. Never print, read, retain, or reconstruct raw ledger
-state. Each requirement supplies the exact `issue`, lifecycle `owner`,
-`custody` (whose `action_id` is the launch identity host notifications
-correlate with), `recorded_worktree`, and nullable `contract_digest` — null
-while that issue has no installed delivery contract — needed to rebuild
-external observations. Inspect exactly every returned `recorded_worktree` and
-report its durable path with the exact normalized state
-`matching_issue_branch | absent | mismatch`. Use `matching_issue_branch` only
-when the path is the live worktree for that issue's branch. Report a recorded
-worktree's state and never a candidate for it, even when it is absent or
-mismatched; never omit the recorded-path observation. A contract for that issue
-names the recorded path, so an absent path is re-created in place and a
-mismatch refuses rather than relocates.
-
-In addition, for every requested issue without a bootstrap requirement, reserve
-a harmless verified absent candidate. This is path validation, not scheduling:
-do not assign a readiness label or interpret tracker state. Pass the candidate
-even when it will not be used; `control ignores unused candidates`.
-Candidate paths must be pairwise distinct, absent from both the filesystem and
-`git worktree list --porcelain`, and disjoint from every returned durable path.
-A candidate's final path component is the branch its contract will carry, so it
-must be a branch name the issue's resolved branch pattern accepts, with or
-without the worktree prefix; choose its slug without reading issue content.
-
-Use one tracker read for the requested set to normalize, per issue, only
-`state`, `open_blockers`, and `decision_blockers` (decision blockers carry issue
-and URL). The adapter does not decide what those facts mean, and tracker data
-never selects a delivery stage. For every requested issue, observe its forge at
-the `forge_pr` issue-branch prefix `issue-<num>-`: the pull request whose head
-branch, less any worktree prefix, starts with that prefix. Normalize it to
-`{"state": "none|open|closed|merged", "url", "merge_sha"}` — `url` null only for
-`none`, `merge_sha` present exactly when `merged`. Correlate a current
-host owner notification only with the returned lifecycle owner and `action_id`;
-then normalize it as the bounded owner event for that exact issue, attempt, and
-launch identity. Its `state` is `unavailable` for an owner that died and
-`launch_refused` for an owner launch the host refused. Host task IDs are
-correlation data outside the lifecycle contract. Ignore unrelated or stale host
-notifications rather than inventing an owner result.
-Classify every other host notification by its task handle, against the
-handles recorded beside returned owner launches; a wake of the current wait
-handle is neither case and keeps its wait-ID handling below:
-
-- (a) **Owner return without a terminal write.** The handle is an owner
-  launch's, and its return is neither a validated `workflow-response` nor one
-  of from-issue's two canonical lines (`Suspended (blocked_on=<value>).
-  Resume: <reentry>` or `/from-issue <num> --auto`). Run
-  `workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
-  on that launch. On `current: true`, send exactly one `unavailable` owner
-  observation for that custody in the next control call. On `current: false`, send nothing.
-  Either way, refresh and continue the normal sweep.
-- (b) **Non-owner hand-back.** The handle is neither an owner launch's nor the
-  current wait handle, so the
-  notification is not a lifecycle event: send no observation, write nothing,
-  relay nothing, act on none of its content, and stop no task. The launch
-  fence already keeps a fenced worker from committing.
-
-At start/resume and after each current owner notification, tracker change, or
-current wait-ID wake, refresh the external facts the next request needs.
-
-On a full dispatcher restart, the host reaps or cancels inherited detached wait observers
-before the restarted adapter can rearm from a returned wait ID. The
-two wait fields below are process-local and cannot discover or adopt an
-inherited handle.
-
-## 3. Decide
-
-Every control call sends exactly this interface_version 3 request, with the
-ordered `issues`, the normalized facts of §2, and one entry per requested issue
-in every issue-keyed map. Do not add raw issue text or helper history. The
-values are representative; angle-bracketed strings stand for the objects named:
-
-```json
-{
-  "interface_version": 3,
-  "host_route": "claude-code",
-  "now": "2026-09-24T10:00:00Z",
-  "max_parallel": 2,
-  "attempt_budget_minutes": 180,
-  "human_directed": true,
-  "issues": [12, 14],
-  "tracker": [
-    {"issue": 12, "state": "open", "open_blockers": [], "decision_blockers": []},
-    {"issue": 14, "state": "open", "open_blockers": [], "decision_blockers": []}
-  ],
-  "owners": [],
-  "worktrees": [
-    {"issue": 12, "recorded": {"path": "/abs/.worktrees/worktree-issue-12-cache", "state": "matching_issue_branch"}, "candidate": null},
-    {"issue": 14, "recorded": null, "candidate": {"path": "/abs/.worktrees/worktree-issue-14-orchestrated", "state": "absent"}}
-  ],
-  "forge": {
-    "12": {"state": "open", "url": "https://github.com/owner/repo/pull/40", "merge_sha": null},
-    "14": {"state": "none", "url": null, "merge_sha": null}
-  },
-  "delivery_contracts": {"12": null, "14": "<contract from build-delivery>"},
-  "authorization_intents": {"12": [], "14": ["<initial_intent from build-delivery>"]},
-  "authority_observations": {"12": [], "14": []},
-  "reevaluation_evidence": {"12": [], "14": []},
-  "delivery_observations": {"12": [], "14": []},
-  "requested_scopes": {"12": null, "14": null},
-  "recoveries": {"12": null, "14": null}
-}
-```
-
-The adapter sends `[]` for every issue's `authority_observations`,
-`reevaluation_evidence` and `delivery_observations`, and null for its
-`requested_scopes` and `recoveries`: owners submit delivery facts through
-`checkpoint-delivery`, and this adapter never proposes a scope or a recovery.
-
-**Per-issue contract rule.** On the first sweep, build a delivery contract for
-every bootstrap requirement whose `contract_digest` is null, and for every
-requested issue without a bootstrap requirement only when this invocation created the run
-(it minted the run id rather than reusing one; an adapter restart counts as
-reuse). On a reused run, send null for an issue without a requirement until its
-latest summary carries `delivery_contract_required`, and build its contract
-then: bootstrap omits delivery-complete issues, and a fresh contract for one
-would differ from its installed contract and make control refuse the whole
-sweep. Build each contract with one command:
-
-```text
-workflow-state build-delivery --repo-root <ledger_repo_root> --kind contract --input - <<'EOF'
-{"issue": <num>, "worktree": "<absolute-worktree>", "source_kind": "<source-kind>", "source_reference": "<source-reference>", "now": "<RFC3339-now>"}
+orchestrate-control step --repo-root <ledger_repo_root> --input - <<'EOF'
+{"session": <session>, "first_sweep": <first_sweep>, "owners": <owners>, "contracts_due": <contracts_due>, "refused_contracts": <refused_contracts>}
 EOF
 ```
 
-- `worktree` is the requirement's `recorded_worktree` when the issue has one,
-  and only otherwise the candidate reserved in §2. Never build a recorded
-  issue's contract from a candidate: control refuses a retry or new-run
-  contract whose worktree differs from the recorded path. The builder seals
-  the policy `resolve-project` resolves at `--repo-root`, the ledger
-  repository root; when `worktree` already exists, it also resolves there and
-  refuses if any sealed policy member differs.
-- An explicit number list uses `source_kind` `explicit_user` with
-  `source_reference` `invocation:/orchestrate-issues <numbers>` (the caller's
-  numbers, in order, space-separated). A `--label`/`--milestone` sweep uses
-  `standing_repository` with `sweep:<label|milestone>:<value>`.
-- On success the builder prints `{"contract": …, "initial_intent": …}`. Send
-  that `contract` in `delivery_contracts` and `[initial_intent]` in
-  `authorization_intents` on the sweep the rule above builds it for, then only
-  while its latest summary carries `delivery_contract_required`; otherwise send
-  null and `[]`. A non-null summary `contract_digest` means a contract is
-  installed, and from then on null means the installed contract governs. A
-  `delivery_contract` action asks for exactly the contracts of the issues it
-  lists; §4 holds its rule.
-- The built pair is process-local request data: never persist it. After a
-  restart, the new bootstrap's null `contract_digest` values and each later
-  summary's `delivery_contract_required` say which issues still need one.
-- On a builder refusal (exit 2, empty stdout, the rule named on stderr), send
-  null and `[]` for that issue and report the refusal in the final report; that
-  issue stays lifecycle-only. For the refusal, report the builder's stderr line
-  verbatim: for a resolver refusal it carries the resolver's `error.code`,
-  `repair_id` and ordered `violations` exactly.
+- `session` is `start`'s `session` member, unchanged.
+- `first_sweep` is `true` on the first `step` after `start` in this adapter process, `false` after.
+- `owners` holds this event's observations: one `unavailable` from §2 rule (b) or (d), or the
+  `launch_refused` observations of §4. Each rides exactly one call and is cleared after it.
+- `contracts_due` and `refused_contracts` are the previous ready report's members of those names,
+  passed back verbatim; both are `[]` on the first `step`.
 
-Invoke the helper as one command that feeds the request on stdin as
-`--request-file -` and validates the response before anything decodes it.
+`step` gathers the facts, builds the delivery contracts and runs the control round itself; the
+adapter never builds a contract, assembles a request or calls `control`. Read its one stdout object
+by `outcome`:
 
-```text
-workflow-state control --repo-root <ledger_repo_root> --run-id <run-id> --request-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
-<request JSON>
-EOF
-```
-
-Call `workflow-state control` at start/resume and for every normalized current
-owner, tracker, or current wait-ID event. Its response is the only source of action order, kind, and lifecycle identity.
-Do not infer, reorder, omit, or add another action. The helper owns readiness, precedence, retryability, capacity,
-deadline, and completion decisions; the dispatcher only applies the returned
-envelopes.
-
-Accept only the validated interface_version 3 control response with its bounded
-`run_id`, `now`, `summaries`, `deltas`, `actions`, `next_deadline`, and
-`admission` fields.
-It omits `attempts`, `launches`, `phase_inputs`, and older results. Use those
-values only for rendering and action execution; do not rebuild policy from them.
+- `ready`: execute it as §4 says. Its `response` is the validated control response; its
+  `dispatches` are the owner launches; keep its `contract_refusals` only for §5.
+- `refused`, `orchestrate-control: invalid invocation`, or any other exit or stdout: end the run as
+  `finalize` does, executing no action of the `response` it carries, and report its `step` and
+  `detail` verbatim (or that stderr line) with the `action_id` of every owner handle still running,
+  so the report never reads as a finished run. A re-invocation re-enters the run.
 
 ## 4. Execute control actions
 
-Validate each action as one of the closed kinds `spawn`, `resume`, `retry`,
-`delivery_remainder`, `delivery_contract`, `wait`, or `finalize`, and execute
-actions in returned order. Any other kind is a contract error: stop without executing it and surface the unknown kind; fail loudly.
+Validate each action of a ready report's `response` as one of the closed kinds `spawn`, `resume`,
+`retry`, `delivery_remainder`, `delivery_contract`, `wait`, or `finalize`, and execute actions in
+returned order. Any other kind is a contract error: stop without executing it and surface the
+unknown kind; fail loudly. The response is the only source of action order, kind and lifecycle
+identity: never infer, reorder, omit or add an action.
 
-For `spawn`, `resume`, and `retry`, project the action into the interface-2
-owner object: rename `id` to `action_id` and `kind` to `launch_kind`, add
-`kind: owner`, `interface_version: 2`, `ledger_repo_root` and `run_id`, and keep
-every other member verbatim (`issue`, `attempt`, `owner`, `worktree`,
-`handoff_path`, `deadline_at`, `custody`, `contract`, `contract_digest`,
-`pending_stage_ids`, `requirements`, `authority_evaluation`, `requested_scope`).
-For `delivery_remainder`, the object is the action itself, verbatim. Pipe the
-object through `artifact-budget validate-report --boundary workflow-response
---input -` and put only its stdout — the canonical JSON — in the owner prompt
-below; the owner validates it again at the same boundary before use.
+**Stop pass.** Before executing the first action of a report whose `dispatches` is non-empty,
+stop the superseded owners. The candidates are every owner
+handle this adapter process recorded beside an owner launch's `action_id` that has produced no final
+return. An interim notification under §2 rule (a) is not a final return. The current wait handle and
+non-owner handles are never candidates; a handle this response dispatches becomes one only once
+dispatched. For each candidate, run rule (b)'s `check-launch` call with the `action_id` recorded
+beside it. On `current: false`, stop that handle through the host's task-stop and mark it stopped;
+a missing or already exited handle counts as stopped. On `current: true`, leave it running. An
+unknown answer, like a failed stop, leaves the handle a candidate, and the next pass tries both
+again. A stop failure never blocks dispatch.
+The pass sends no observation, makes no `step` and writes nothing to the ledger, so
+a later notification from a stopped handle still falls under §2 rule (b). The pass ends by running
+`launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep` once. A sweep that
+exits non-zero never blocks dispatch: keep its exit code and, when it printed a report, its
+`skipped` launches for §5.
 
-Dispatch the owner in the background using the action's identity and paths
-verbatim. Pass the helper-issued action ID and owner token unchanged; never
-substitute a host task ID. Both object kinds use this one dispatch; a
-`delivery_remainder` owner is `from-issue` launching ship-issue remainder mode.
-The owner dispatch envelope is:
+Each `spawn`, `resume`, `retry` and `delivery_remainder` action arrives as one `dispatches[]`
+entry, in the same order. Fill the envelope from the entry's members of the same names
+(`action_id`, `issue`, `attempt`, `owner`, `worktree`, and `handoff_path` only when non-null), with
+this adapter's `ledger_repo_root` and the `session`'s `run_id`; `<from-issue-dir>` is the `from-issue`
+directory beside this skill's own, as an absolute path. Put the entry's `owner_object`
+verbatim in the prompt as its canonical JSON, and, when its `resume_pack` is non-null, that text
+verbatim as the `Resume pack` paragraph; never decode either. Dispatch the owner with these values; pass the helper-issued action ID and owner token unchanged and never substitute
+a host task ID. Both object kinds use this one dispatch. The owner dispatch envelope is:
 
 ```text
 --repo-root <ledger_repo_root>
@@ -290,24 +185,16 @@ handoff_path=<exact-handoff-path>  # only when non-null
 from-issue <num> --auto
 ```
 
-The `ledger_repo_root` line carries the exact immutable value resolved for the
-run and is independent of any issue worktree. The worktree is the exact returned
-path. For `resume`, include the returned `handoff_path` when present. For a
-`delivery_remainder`, `attempt` is its `source_attempt`, `action_id` is its
-custody's `action_id`, and there is no `handoff_path`. Record the host task
-handle beside the returned action ID only for later notification correlation; it
-is never an owner token or action identity.
+Record the host task handle beside the entry's `action_id` and the `custody` of the
+`response.actions` entry whose `custody.action_id` equals it, only for notification correlation and
+the stop pass; it is never an owner token or action identity.
 
-If the host refuses an owner launch, never retry it: make exactly one control
-call carrying a `launch_refused` owner observation for that action's `custody`,
-and execute that response. The runtime parks the refused owner and dispatches it
-again only after some later claim release other than a refusal — another
-owner's, or the controller's `finalized` release, so an issue left in
-`admission.waiting` resumes on the next orchestrate invocation, or on the
-follow-up call a `delivery_contract` action asks for.
+If the host refuses an owner launch, never retry it, and keep launching the report's later
+dispatches and executing its later actions. Once the report has executed, make one `step` carrying
+a `launch_refused` owner observation for each refused launch's `custody`, and execute its report.
 
 <!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
-Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
+Agent(subagent_type="issue-owner", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
 
 > Immutable lifecycle envelope:
 > `--repo-root <ledger_repo_root>`
@@ -325,13 +212,22 @@ Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_backg
 > `artifact-budget validate-report --boundary workflow-response --input -`
 > before use and require its identity to equal the lines above):
 > `<canonical-json>`
-> Invoke the `from-issue` skill via the Skill tool with the literal arguments
+> Resume pack (only for a `resume` action whose `resume-pack` call exited 0):
+> `<resume-pack-json>`
+> With a pack, read `<from-issue-dir>/resume-pack.md` first, else invoke the
+> `from-issue` skill via the Skill tool, with the literal arguments
 > `from-issue <num> --auto`. Preserve the lifecycle identity and exact worktree.
 >
 > Launch any subagent by type only, never by name: a subagent cannot spawn a
 > named teammate, and a named launch returns an error instead of work. Read an
 > existing file before writing to it: overwriting content you have not read
-> destroys work you cannot see.
+> destroys work you cannot see. Run each long command, every verification
+> command included, in the foreground with an explicit timeout above its
+> expected duration. If the host moves one to the background anyway, wait for it
+> in the same turn: never end your turn while a command or agent you started
+> still runs.
+> Never loop `sleep` in the foreground or chain a check onto it: use Monitor with
+> an until-condition, or one short bare `sleep N` call and check in the next.
 >
 > Persist the terminal result through `from-issue`'s terminal return procedure,
 > whose `workflow-state finish --summary-file -` is the durable write, then
@@ -339,93 +235,74 @@ Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_backg
 
 Never inline issue bodies or any content artifact in that prompt.
 
-For `wait`, adapter state consists only of `current_wait_id` and
-`current_wait_handle`:
+For `wait`, adapter state consists only of `current_wait_id` and `current_wait_handle`:
 
-- If the response carries the same wait ID as `current_wait_id`, keep the
-  installed handle; the adapter does not arm another observer.
-- For a different ID, save the old `current_wait_id` and `current_wait_handle` pair,
-  publish the new wait ID with the handle marked uninstalled, cancel the old handle,
-  then arm and store the new one-shot observer. This ordering must never leave the new wait ID paired with the old handle.
-- A missing or already exited old handle is an idempotent cancellation outcome;
-  continue to arm the replacement.
-- On unexpected cancellation failure, restore the old `current_wait_id` and `current_wait_handle` pair,
-  do not arm the replacement, and fail loudly. The next identical response retries replacement.
-- If arming fails after cancellation, clear `current_wait_id`, clear `current_wait_handle`,
-  surface that no wake is installed, and fail loudly.
-- Each wake carries its wait ID; ignore it unless it equals `current_wait_id`;
-  a stale wake cannot trigger control or disturb the replacement observer.
+- If the response carries the same wait ID as `current_wait_id`, keep the installed handle and arm
+  no other observer.
+- For a different ID, save the old `current_wait_id` and `current_wait_handle` pair, publish the new
+  wait ID with the handle marked uninstalled, cancel the old handle, then arm and store the new
+  one-shot observer; never leave the new wait ID paired with the old handle.
+- A missing or already exited old handle is an idempotent cancellation; continue arming the
+  replacement.
+- On unexpected cancellation failure, restore the old pair, do not arm the replacement, and fail
+  loudly; the next identical response retries replacement.
+- If arming fails after cancellation, clear `current_wait_id` and `current_wait_handle`, surface
+  that no wake is installed, and fail loudly.
+- A wake counts only when its handle is the one paired with `current_wait_id`; ignore a wake of any
+  other handle (a stale wake cannot trigger control or disturb the replacement observer).
 
-Arm the one-shot observer for the returned wake conditions and its `deadline_at`.
-control never returns a deadline-less wait; every wait carries deadline_at, and when nothing can proceed without a human, control returns finalize instead, or `delivery_contract` when a missing contract is all that stops an issue.
-No polling or repeated short sleeps are allowed.
+Arm the observer as one background `sleep <wait_seconds>`; every wait carries
+one (when nothing can proceed without a human, control returns `finalize`, or `delivery_contract`
+when a missing contract is all that stops an issue). Never poll or repeat short sleeps.
 
-For `finalize`, first clear `current_wait_id`, then cancel the outstanding handle
-(a missing/already-exited handle is harmless), and clear
-`current_wait_handle`. Do not issue another control call merely to prepare the
-report.
+For `finalize`, first run the stop pass, then clear `current_wait_id`, then cancel the outstanding
+handle (a missing/already-exited handle is harmless), and clear `current_wait_handle`. Make no
+further `step` to prepare the report.
 
-For `delivery_contract`, a missing delivery contract is all that stops each
-issue in its `issues` list, and nothing else will wake the run: control armed
-no deadline. This is the one rule for such an issue. Send each listed issue's
-contract as §3 describes (the pair built for it earlier in this invocation,
-else build it now) and make the next control call at once; that response
-takes over from this one. Never rebuild an issue whose build this invocation
-refused: send null and `[]` for it. When the builder has refused every listed
-issue in this invocation, the action ends the run as `finalize` does: clear
-the wait state as for `finalize` and render §5 from this response.
+For `delivery_contract`, a missing delivery contract is all that stops each issue in its `issues`
+list, and control armed no deadline, so nothing else will wake the run. When the report's
+`ends_run` is true, every listed issue's build was refused: the action ends the run as `finalize`
+does, and §5 renders from this response. Otherwise make the next `step` at once; it passes this
+report's `contracts_due` back, `step` builds those contracts, and its report takes over from this
+one.
 
 ## 5. Final report
 
-Render a `finalize` action, or a `delivery_contract` action that ends the run
-because every listed build was refused, from the bounded summaries in the same
-interface_version 3 control response. Produce a per-issue table with issue,
-state, custody, PR, one-line reason, `blocked_on`, open delivery stages, and a re-entry line —
-`/from-issue <issue> --auto` for an issue suspended on a cause that a `--label`
-or `--milestone` sweep does not resume (`human_gate`, `external` or
-`agent_dispatch`), and the orchestrate re-invocation itself for the whole run —
-every column sourced from
-those finalize summaries: `custody` names the implementation attempt or delivery
-remainder that holds the issue, `pending_stage_ids` are the delivery stages
-still open, and the PR and `discussion_items` come from the summary's `result`.
-A null `contract_digest` means the issue ran lifecycle-only: say so, and name
-the builder refusal from §3 when there was one; a summary still carrying
-`delivery_contract_required` is an issue that never received a contract. A
-summary with a non-null `contract_digest`, an empty `pending_stage_ids`, an
-empty `requirements`, a null `owner` and a non-null `custody` is a delivered
-issue whose `custody` names a stale record that control will never dispatch:
-report it as delivered with that stale custody, never as an active or
-progressing owner. A summary whose `worktree_fact` requirement reads
-`recorded_worktree_absent` or `recorded_worktree_mismatch` is an issue that
-cannot resume, because its recorded worktree is gone or is not on the issue
-branch: report it as unable to resume for that reason, never as progressing.
-Then group every `discussion_items` entry by issue and call out anything needing
-a human. List every issue in that same control response's `admission.waiting` as
-queued for agent slots, with its summary state. Do not perform a second ledger
-read or reconstruct omitted history.
+Render a `finalize` action, or a `delivery_contract` action whose report's `ends_run` is true,
+from the bounded summaries in the same interface_version 3 control response.
+Produce a per-issue table with issue, state, custody, PR, one-line reason, `blocked_on`, open
+delivery stages, and a re-entry line — `orchestrate-control start --repo-root <ledger_repo_root>
+<issue> --run-id <run-id>` for an issue suspended on `human_gate`, `external` or `agent_dispatch`
+(a direct `/from-issue` is refused with it), and the orchestrate re-invocation for the whole run — every column sourced
+from those finalize summaries: `custody` names the attempt or delivery remainder that holds the
+issue, `pending_stage_ids` the open delivery stages, and the PR and `discussion_items` come from the
+summary's `result`. A null `contract_digest` means the issue ran lifecycle-only: say so, and name
+that issue's retained `contract_refusals` `detail` when there was one; a summary still carrying
+`delivery_contract_required` is an issue that never received a contract. A summary with a non-null
+`contract_digest`, an empty `pending_stage_ids`, an empty `requirements`, a null `owner` and a
+non-null `custody` is a delivered issue whose `custody` is a stale record that control will never
+dispatch: report it as delivered with that stale custody, never as active or progressing. A `held`
+summary is an issue whose PR merged while ship held the issue open with the `needs-verification`
+label: report it as held, waiting for a human to verify it, never as queued, progressing or closed,
+and with no re-entry line; it stays open, so its dependents stay `blocked` until a human closes it.
+A summary whose `worktree_fact` requirement reads `recorded_worktree_absent` or
+`recorded_worktree_mismatch` is an issue that cannot resume (its recorded worktree is gone or not on
+the issue branch): report it as unable to resume for that reason, never as progressing. Then group
+every `discussion_items` entry by issue and call out anything needing a human. List every issue in
+that same control response's `admission.waiting` as queued for agent slots, with its summary state.
+Below the table, under **Stop failures**, list each owner handle the final stop pass still left a
+candidate because its stop failed or its `check-launch` answer was unknown, with its `action_id` and
+the failure, and the pass's last sweep when it exited non-zero, with its exit code and, when it
+printed a report, its `skipped` launches; omit the list when there is none.
+Do not perform a second ledger read or reconstruct omitted history.
 
-An `expired` delta is an interruption, not a verdict on the work: it consumes
-no attempt, and the attempt number never advances because of it. Three things
-can follow it. Usually it is a `resumed` on the same attempt in this same
-sweep, or a `suspended` summary that a later eligible sweep resumes — eligible
-meaning that sweep finds the tracker neither closed nor blocked, a dispatch
-slot free, and that attempt's recorded worktree observed. But at the
-anti-zombie bound, where the attempt has already been parked too many times in
-a row without a phase advance or a newly recorded progress marker, the expiry
-ends the work instead of parking it: that delta's own state reads `stopped`,
-the attempt is a `stopped(stalled)` terminal, and no resume follows in this or
-any later sweep. A parked
-suspension arms no deadline of its own, so once nothing else in the run is
-still running the sweep renders `finalize` (or `delivery_contract` when a
-missing contract is all that stops some issue) and the later sweep is the one a
-re-invocation starts; report such an issue as paused, not as progressing, and
-report a `stopped(stalled)` issue as finished. An expiry is never `retried`
-and never `retry_refused`, so never report it as a spent attempt.
-
-## Notes
-
-Claude-only skill: it depends on background agents and host task notifications,
-so it lives outside the shared skills tree. Codex users continue to run
-`/from-issue` per issue. Codex has its own `orchestrate-issues` stub, which
-answers with `workflow-state host-route --route codex` and names
-`/from-issue <n> --auto`.
+An `expired` delta consumes no attempt and never advances the attempt number. Usually it is a
+`resumed` on the same attempt in this same sweep, or a `suspended` summary that a later eligible
+sweep resumes (tracker neither closed nor blocked, a dispatch slot free, that attempt's recorded
+worktree observed). At the anti-zombie bound (parked too many times in a row without a phase advance
+or a newly recorded progress marker) the delta's own state reads `stopped`, the attempt is a
+`stopped(stalled)` terminal and no resume follows in any later sweep: report it as finished. A
+parked suspension arms no deadline, so once nothing else is running the sweep renders `finalize` (or
+`delivery_contract` when a missing contract is all that stops some issue) and a re-invocation starts
+the later sweep; report such an issue as paused, not progressing. Never report an expiry as
+`retried`, `retry_refused` or a spent attempt.

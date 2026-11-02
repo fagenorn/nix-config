@@ -91,6 +91,29 @@ class RoutingEvaluationTest(DriftCliCase):
                 self.assertIn("REQUEST_DECLARATION_MISMATCH",
                               self.finding_codes(report))
 
+    def test_a_known_dispatch_resolves_an_absent_role_from_its_site(self):
+        # agent-costs leaves the role absent for the implementer agent type,
+        # which serves two roles; the carried dispatch still names the site.
+        item = observation(self.matrix, "sdd-post-rescue-implementation")
+        item["declaration"].update(role=None, authority="unknown")
+        code, out, err = self.run_observations([item])
+        self.assertEqual((code, err), (0, ""))
+        report = json.loads(out)
+        self.assertEqual(report["state"], "conforming")
+        self.assertNotIn("REQUEST_DECLARATION_MISMATCH", self.finding_codes(report))
+        self.assertEqual(report["routing"]["comparisons"][0]["declaration"]["role"],
+                         "implementer")
+
+    def test_an_unknown_dispatch_with_an_absent_role_is_drift(self):
+        item = observation(self.matrix, "sdd-post-rescue-implementation")
+        item["declaration"].update(dispatch_id="unknown-dispatch", role=None,
+                                   authority="unknown")
+        code, out, _ = self.run_observations([item])
+        self.assertEqual(code, 3)
+        report = json.loads(out)
+        self.assertEqual(report["state"], "drifted")
+        self.assertIn("REQUEST_DECLARATION_MISMATCH", self.finding_codes(report))
+
     def test_missing_requested_tiers_are_coverage_inconclusive(self):
         item = observation(self.matrix)
         item["requested"].update(model=None, effort=None)

@@ -1,6 +1,8 @@
 {
   inputs,
   lib,
+  libx,
+  osConfig,
   pkgs,
   ...
 }:
@@ -13,20 +15,22 @@ let
   ];
 in
 {
-  # nix-darwin runs Homebrew activation before the Home Manager user activation,
-  # so Spotify has already been installed/upgraded when this helper executes.
-  home.activation.spotifySpotx = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-    previousPath=$PATH
-    export PATH="${toolPath}:/usr/bin:/bin:/usr/sbin:/sbin"
+  config = lib.mkIf (libx.hasCask osConfig "spotify") {
+    # nix-darwin runs Homebrew activation before the Home Manager user activation,
+    # so Spotify has already been installed/upgraded when this helper executes.
+    home.activation.spotifySpotx = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      previousPath=$PATH
+      export PATH="${toolPath}:/usr/bin:/bin:/usr/sbin:/sbin"
 
-    run ${pkgs.bash}/bin/bash \
-      ${./activate.sh} \
-      ${inputs.spotx-bash}/spotx.sh \
-      /Applications/Spotify.app \
-      "$HOME/Library/Application Support/SpotX-Nix" \
-      --blockupdates \
-      --hide
+      run ${pkgs.bash}/bin/bash \
+        ${./activate.sh} \
+        ${inputs.spotx-bash}/spotx.sh \
+        /Applications/Spotify.app \
+        "$HOME/Library/Application Support/SpotX-Nix" \
+        --blockupdates \
+        --hide
 
-    export PATH=$previousPath
-  '';
+      export PATH=$previousPath
+    '';
+  };
 }

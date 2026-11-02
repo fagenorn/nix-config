@@ -21,6 +21,20 @@
       flake = false;
     };
 
+    # oMLX (MLX inference server) Homebrew tap: the formula lives in the project repo itself.
+    # Advances with `just update`; the eleven-m5 host installs the formula.
+    omlx-tap = {
+      url = "github:jundot/omlx";
+      flake = false;
+    };
+
+    # Splash (external Metal engine oMLX serves Qwen GGUFs through) Homebrew tap; the eleven-m5
+    # host installs the formula.
+    splash-tap = {
+      url = "github:incoai/homebrew-tap";
+      flake = false;
+    };
+
     nikitabobko-tap = {
       url = "github:nikitabobko/homebrew-tap";
       flake = false;
@@ -92,9 +106,30 @@
     in
     {
 
+      checks = inputs.nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" ] (
+        system:
+        let
+          pkgs = import inputs.nixpkgs { inherit system; };
+          configure = self.darwinConfigurations.eleven-m5.config.system.build.omlxConfigure;
+        in
+        {
+          omlx-adapter = import ./lib/omlx-check.nix {
+            inherit pkgs;
+            omlxSource = inputs.omlx-tap;
+            inherit (configure) modelSettings serverSettings steering;
+          };
+        }
+      );
+
       darwinConfigurations = {
         mbp = libx.mkDarwin {
           hostname = "mbp";
+          username = myvars.username;
+          system = "aarch64-darwin";
+          inherit libx myvars;
+        };
+        eleven-m5 = libx.mkDarwin {
+          hostname = "eleven-m5";
           username = myvars.username;
           system = "aarch64-darwin";
           inherit libx myvars;

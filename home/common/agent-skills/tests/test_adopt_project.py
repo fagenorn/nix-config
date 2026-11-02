@@ -30,7 +30,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import adopt_planning, adopt_project
+from agent_tools import adopt_inspection, adopt_links, adopt_planning, adopt_project
 
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -47,7 +47,9 @@ OPERATION_KINDS = ("git-mv", "write-file", "delete-file",
 PROVENANCES = ("tracked", "targeted-ignored",
                "targeted-ignored-metadata-only", "git-worktree-metadata-only",
                "untracked-explicit-paths")
-TOP_LEVEL_MEMBERS = ["changes", "decisions", "evidence", "handoff", "plan",
+TOP_LEVEL_MEMBERS = ["changes", "decisions", "evidence", "handoff",
+                     "link_rewrites", "path_references", "plan",
+                     "reference_formatting", "reference_policies",
                      "schema_version", "verification"]
 PLAN_MEMBERS = ["base_revision", "blockers", "input_digest", "outcome",
                 "plan_id", "platform", "project_id", "state"]
@@ -181,6 +183,23 @@ def fixture_contract(**overrides: object) -> dict:
     return contract
 
 
+def host_independent(contract: dict) -> dict:
+    """`contract`, changed in place so that no capability depends on the host.
+
+    This repository's GitHub release profile derives a `blocked` release
+    capability on any host without the forge adapter's executables on `PATH`,
+    and its plan and code review commands run `codex-companion`, which the
+    hosted CI runner lacks. No fixture built on this is about release or
+    review, so release is opted out and both review commands become `true`,
+    which every host resolves: the verdicts are the same everywhere.
+    """
+    contract["release"] = "unsupported"
+    review = contract["bindings"]["workflow"]["review"]
+    for role in ("plan", "code"):
+        contract["bindings"]["commands"][review[role]]["argv"] = ["true"]
+    return contract
+
+
 def scaffold(root: Path, contract: dict, home: Path) -> None:
     """Write `contract`, its instruction source and both rendered projections.
 
@@ -265,7 +284,7 @@ def adopted_repo(home: Path, *, records: bool = True) -> Path:
     (D34). `records=False` is the fixture the discovery negatives start from.
     """
     root = init_repo()
-    scaffold(root, fixture_contract(), home)
+    scaffold(root, host_independent(fixture_contract()), home)
     write(root, ".agents/runtime/.gitignore", "*\n")
     git(root, "add", "-f", ".agents/runtime/.gitignore")
     git(root, "remote", "add", "origin",
@@ -307,6 +326,449 @@ def nix_config_shape_repo(home: Path) -> Path:
         "https://github.com/fixture/target.git")
     commit(root)
     return root
+
+
+def record_trees_repo(home: Path) -> Path:
+    """`nix_config_shape_repo` plus one tracked record under each of
+    `.claude/handoffs`, `.claude/notes` and `.claude/research` (#340)."""
+    root = nix_config_shape_repo(home)
+    write(root, ".claude/handoffs/h.md", "# handoff h\n")
+    write(root, ".claude/notes/n.md", "# note n\n")
+    write(root, ".claude/research/r.md", "# research r\n")
+    commit(root, "add agent records")
+    return root
+
+
+LINK_README_BEFORE = (
+    "# readme\n"
+    "\n"
+    "See [spec x](.claude/specs/x.md#intro) and [plans](./.claude/plans/).\n"
+    "Image: ![diagram](<.claude/specs/x.md> \"Spec x\") and [plan y][y].\n"
+    "Broken: [gone](.claude/specs/missing.md). "
+    "Web: [site](https://example.com/.claude/specs/x.md).\n"
+    "Self: [me](README.md). Code: `[c](.claude/specs/x.md)`.\n"
+    "\n"
+    "~~~\n"
+    "[fenced](.claude/specs/x.md)\n"
+    "~~~\n"
+    "\n"
+    "[y]: .claude/plans/y.md \"Plan y\"\n")
+LINK_README_AFTER = (
+    "# readme\n"
+    "\n"
+    "See [spec x](.agents/artifacts/specs/x.md#intro) and "
+    "[plans](./.agents/artifacts/plans/).\n"
+    "Image: ![diagram](<.agents/artifacts/specs/x.md> \"Spec x\") and "
+    "[plan y][y].\n"
+    "Broken: [gone](.claude/specs/missing.md). "
+    "Web: [site](https://example.com/.claude/specs/x.md).\n"
+    "Self: [me](README.md). Code: `[c](.claude/specs/x.md)`.\n"
+    "\n"
+    "~~~\n"
+    "[fenced](.claude/specs/x.md)\n"
+    "~~~\n"
+    "\n"
+    "[y]: .agents/artifacts/plans/y.md \"Plan y\"\n")
+
+# Base path -> base text, and path after the moves -> rewritten text (#345).
+LINKED_BASE = {
+    "README.md": LINK_README_BEFORE,
+    ".claude/rules/r.md": "# rule r\n\nFollow [spec x](../specs/x.md).\n",
+    ".claude/specs/x.md": (
+        "# spec x\n\nBack to [readme](../../README.md), "
+        "[plan y](../plans/y.md) and "
+        "[rejected z](../../.out-of-scope/z.md).\n"),
+}
+LINKED_AFTER = {
+    "README.md": LINK_README_AFTER,
+    ".claude/rules/r.md": (
+        "# rule r\n\nFollow [spec x](../../.agents/artifacts/specs/x.md).\n"),
+    ".agents/artifacts/specs/x.md": (
+        "# spec x\n\nBack to [readme](../../../README.md), "
+        "[plan y](../plans/y.md) and "
+        "[rejected z](../../knowledge/rejections/z.md).\n"),
+}
+LINKED_SOURCES = {"README.md": "README.md",
+                  ".claude/rules/r.md": ".claude/rules/r.md",
+                  ".agents/artifacts/specs/x.md": ".claude/specs/x.md"}
+LINKED_SUMMARY = {
+    "inbound": {"links": 5, "files": [".claude/rules/r.md", "README.md"]},
+    "outbound": {"links": 2, "files": [".agents/artifacts/specs/x.md"]},
+    "unrewritable": [],
+    "already_broken": 1,
+}
+DISSOLVED_README = "# readme\n\nAgent records: [records](.claude/).\n"
+
+
+def write_linked_tree(root: Path) -> None:
+    """Inbound links from a root file and a retained `.claude/` file, and
+    outbound links from a moved spec, over any fixture carrying
+    `.claude/specs/x.md`, `.claude/plans/y.md` and `.out-of-scope/z.md`."""
+    for path, text in LINKED_BASE.items():
+        write(root, path, text)
+    commit(root, "link the agent trees")
+
+
+def linked_repo(home: Path) -> Path:
+    root = nix_config_shape_repo(home)
+    write_linked_tree(root)
+    return root
+
+
+CHECK_LINKS = "tools/check_links.py"
+UNRELATED_SCRIPT = "tools/list_docs.py"
+# A repository's own link check (#350): it exempts `.claude/`, where the
+# already-broken link of `REFERENCE_TREE` lives. Line 7 holds the one path
+# reference; every other token names nothing the plan moves.
+CHECK_LINKS_SCRIPT = r'''#!/usr/bin/env python3
+# Fail when a Markdown file outside the exempt trees has a broken relative link.
+import os
+import re
+import sys
+
+EXEMPT = ("docs/archive/", ".claude/")
+LINK = re.compile(r"\]\(([^)#\s]+)")
+
+
+def main(root):
+    broken = []
+    for folder, _, names in sorted(os.walk(root)):
+        for name in sorted(names):
+            path = os.path.relpath(os.path.join(folder, name), root)
+            if not path.endswith(".md") or path.startswith(EXEMPT):
+                continue
+            with open(os.path.join(root, path), encoding="utf-8") as handle:
+                text = handle.read()
+            for target in LINK.findall(text):
+                if "://" not in target and not os.path.exists(
+                        os.path.join(root, os.path.dirname(path), target)):
+                    broken.append(f"{path}: {target}")
+    print("\n".join(broken) or "ok")
+    return 1 if broken else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1]))
+'''
+CHECK_LINKS_EXTENDED = CHECK_LINKS_SCRIPT.replace(
+    '".claude/")',
+    '".claude/", ".agents/artifacts/plans/", ".agents/artifacts/specs/")')
+REFERENCE_SUBJECT = f"{CHECK_LINKS}:7:29"
+REFERENCE_ROW = {
+    "subject": REFERENCE_SUBJECT, "path": CHECK_LINKS, "line": 7,
+    "column": 29, "literal": ".claude/", "answers": ["extend", "retain"],
+    "answer": None,
+    "additions": [".agents/artifacts/plans/", ".agents/artifacts/specs/"],
+    "replacement": None, "target": CHECK_LINKS, "policy": None,
+    "decided_by": None}
+REFERENCE_TREE = {
+    "README.md": "# readme\n\nSee [spec x](.claude/specs/x.md).\n",
+    ".claude/specs/x.md": "# spec x\n\nGone: [gone](missing.md).\n",
+    ".claude/rules/r.md": "# rule r\n",
+    UNRELATED_SCRIPT: 'ROOTS = ("docs/standards/", "home/")\nprint(ROOTS)\n',
+}
+
+
+def write_reference_tree(root: Path, *, script: bool = True) -> None:
+    """An inbound link, an already-broken link inside a moved tree, retained
+    `.claude/` content, an unrelated script and, with `script`, the link
+    check, over any fixture carrying `.claude/specs` and `.claude/plans`."""
+    for path, text in REFERENCE_TREE.items():
+        write(root, path, text)
+    if script:
+        write(root, CHECK_LINKS, CHECK_LINKS_SCRIPT)
+    commit(root, "reference the agent trees")
+
+
+def referenced_repo(home: Path, *, script: bool = True) -> Path:
+    root = nix_config_shape_repo(home)
+    write_reference_tree(root, script=script)
+    return root
+
+
+MOVED_TOOL = ".claude/notes/tool.py"
+MOVED_TOOL_NEW = ".agents/artifacts/notes/tool.py"
+MOVED_TOOL_TEXT = 'SPEC = ".claude/specs/x.md"\n'
+MOVED_TOOL_AFTER = 'SPEC = ".agents/artifacts/specs/x.md"\n'
+MOVED_TOOL_SUBJECT = f"{MOVED_TOOL}:1:9"
+
+
+def write_moved_tool(root: Path) -> None:
+    """One script inside a moved tree that names a file of another."""
+    write(root, MOVED_TOOL, MOVED_TOOL_TEXT)
+    commit(root, "add a script to a moved tree")
+
+
+# Two scripts of different legacy trees that one classification target would
+# leave at one path, each naming a file another tree moves.
+SHARED_TOOLS = {
+    ".claude/research/check.py": 'SPEC = ".claude/specs/x.md"\n',
+    ".claude/specs/check.py": 'PLAN = ".claude/plans/y.md"\n',
+}
+SHARED_TOOL_NEW = ".agents/artifacts/specs/check.py"
+RESEARCH_TOOL_SUBJECT = ".claude/research/check.py:1:9"
+SPECS_TOOL_SUBJECT = ".claude/specs/check.py:1:9"
+
+
+def shared_destination_repo(home: Path) -> Path:
+    root = nix_config_shape_repo(home)
+    for path, text in SHARED_TOOLS.items():
+        write(root, path, text)
+    commit(root, "add two scripts that move to one path")
+    return root
+
+
+POLICY_DIR = ".claude/notes/study"
+POLICY_NEW = ".agents/artifacts/notes/study"
+RUN_REPORT = "tools/run_report.py"
+LINT_TOML = "tools/lint.toml"
+SETTINGS = ".claude/settings.json"
+# The Markdown of the policy fixture: one outbound link the move changes.
+POLICY_MARKDOWN = {
+    f"{POLICY_DIR}/README.md":
+        "# study\n\nIgnored: [ignore](../../../.gitignore).\n",
+}
+# Two scripts, a Nix module and a JSON record inside `.claude/notes` that each
+# name a path under a moved tree; a script outside it that runs one of them by
+# path; a TOML list with a regex-form exclude; a tracked native settings file.
+POLICY_CODE = {
+    f"{POLICY_DIR}/report.py": (
+        "import json\n\n"
+        f'RECORD = "{POLICY_DIR}/record.json"\n'
+        'print(json.load(open(RECORD))["title"])\n'),
+    f"{POLICY_DIR}/paths.py": (
+        'SPECS = ".claude/specs"\nPLAN = ".claude/plans/y.md"\n'),
+    f"{POLICY_DIR}/devenv.nix": (
+        "{ ... }:\n{\n" f'  env.STUDY_HOME = "{POLICY_DIR}";\n' "}\n"),
+    f"{POLICY_DIR}/record.json": (
+        '{"title": "study", "source": ".claude/specs/x.md"}\n'),
+    RUN_REPORT: (
+        "import subprocess\nimport sys\n\nsys.exit(subprocess.run(\n"
+        f'    [sys.executable, "{POLICY_DIR}/report.py"]).returncode)\n'),
+    LINT_TOML: (
+        "[tool.check]\n"
+        r'exclude = ["^var/", "^\\.claude/", "^\\.worktrees/"]' "\n"),
+    SETTINGS: '{"hooks": {}}\n',
+}
+# What each edited file holds, at the path it has after the moves, once every
+# policy and outside occurrence is answered as in `POLICY_READY_ANSWERS`.
+POLICY_REWRITTEN = {
+    f"{POLICY_NEW}/report.py":
+        POLICY_CODE[f"{POLICY_DIR}/report.py"].replace(POLICY_DIR, POLICY_NEW),
+    f"{POLICY_NEW}/paths.py": (
+        'SPECS = ".agents/artifacts/specs"\n'
+        'PLAN = ".agents/artifacts/plans/y.md"\n'),
+    f"{POLICY_NEW}/devenv.nix":
+        POLICY_CODE[f"{POLICY_DIR}/devenv.nix"].replace(POLICY_DIR,
+                                                        POLICY_NEW),
+    RUN_REPORT: POLICY_CODE[RUN_REPORT].replace(POLICY_DIR, POLICY_NEW),
+    LINT_TOML: (
+        "[tool.check]\n"
+        r'exclude = ["^var/", "^\\.claude/", '
+        r'"^\\.agents/artifacts/notes/", "^\\.agents/artifacts/plans/", '
+        r'"^\\.agents/artifacts/specs/", "^\\.worktrees/"]' "\n"),
+}
+JSON_POLICY = ".claude/notes:.json"
+NIX_POLICY = ".claude/notes:.nix"
+PY_POLICY = ".claude/notes:.py"
+RUN_SUBJECT = f"{RUN_REPORT}:5:23"
+LINT_SUBJECT = f"{LINT_TOML}:2:22"
+POLICY_READY_ANSWERS = (
+    ("reference-policy", JSON_POLICY, "retain"),
+    ("reference-policy", NIX_POLICY, "rewrite"),
+    ("reference-policy", PY_POLICY, "rewrite"),
+    ("path-reference", LINT_SUBJECT, "extend"),
+    ("path-reference", RUN_SUBJECT, "rewrite"),
+)
+# `(subject, answers, target, policy)` of every row, in row order.
+POLICY_ROWS = [
+    (f"{POLICY_DIR}/devenv.nix:3:21", ["rewrite", "retain"],
+     f"{POLICY_NEW}/devenv.nix", NIX_POLICY),
+    (f"{POLICY_DIR}/paths.py:1:10", ["rewrite", "retain"],
+     f"{POLICY_NEW}/paths.py", PY_POLICY),
+    (f"{POLICY_DIR}/paths.py:2:9", ["rewrite", "retain"],
+     f"{POLICY_NEW}/paths.py", PY_POLICY),
+    (f"{POLICY_DIR}/record.json:1:31", ["rewrite", "retain"],
+     f"{POLICY_NEW}/record.json", JSON_POLICY),
+    (f"{POLICY_DIR}/report.py:3:11", ["rewrite", "retain"],
+     f"{POLICY_NEW}/report.py", PY_POLICY),
+    (LINT_SUBJECT, ["extend", "retain"], LINT_TOML, None),
+    (RUN_SUBJECT, ["extend", "rewrite", "retain"], RUN_REPORT, None),
+]
+MAKEFILE = ".claude/notes/Makefile"
+MAKEFILE_NEW = ".agents/artifacts/notes/Makefile"
+MAKEFILE_TEXT = 'SKIP = (".claude",)\nSPEC = ".claude/specs/x.md"\n'
+MAKEFILE_AFTER = (
+    'SKIP = (".claude", ".agents/artifacts/notes", '
+    '".agents/artifacts/plans", ".agents/artifacts/specs",)\n'
+    'SPEC = ".agents/artifacts/specs/x.md"\n')
+
+
+def write_policy_tree(root: Path, *, code: bool = True) -> None:
+    """The policy fixture's files, over any fixture carrying `.claude/specs`,
+    `.claude/plans` and a tracked `.gitignore`; without `code`, only its
+    Markdown."""
+    for path, text in {**POLICY_MARKDOWN,
+                       **(POLICY_CODE if code else {})}.items():
+        write(root, path, text)
+    commit(root, "add a moved tree that holds working code")
+
+
+def policy_repo(home: Path, *, code: bool = True) -> Path:
+    root = nix_config_shape_repo(home)
+    write_policy_tree(root, code=code)
+    return root
+
+
+JOBS_DIR = ".claude/notes/jobs"
+JOBS_NEW = ".agents/artifacts/notes/jobs"
+JOBS_SCRIPT = f"{JOBS_DIR}/run.sh"
+COLLECT = "tools/collect"
+SH_POLICY = ".claude/notes:.sh"
+SH_VARIABLE_POLICY = ".claude/notes:.sh/variable"
+JOBS_LITERAL = f"{JOBS_SCRIPT}:3:6"
+JOBS_VARIABLE = f"{JOBS_SCRIPT}:4:6"
+COLLECT_SUBJECT = f"{COLLECT}.sh:2:6"
+VARIABLE_REWRITE_ANSWERS = (
+    ("path-reference", COLLECT_SUBJECT, "rewrite"),
+    ("reference-policy", SH_POLICY, "rewrite"),
+    ("reference-policy", SH_VARIABLE_POLICY, "rewrite"),
+)
+VARIABLE_RETAIN_ANSWERS = tuple(
+    (question, subject, "retain")
+    for question, subject, _ in VARIABLE_REWRITE_ANSWERS)
+
+
+def variable_code(suffix: str = ".sh") -> dict[str, str]:
+    """#376: a moved script with one literal and one `$root/`-joined path
+    into its own tree, the file both name, and an unmoved script with one
+    `${ROOT}/`-joined path into it; `suffix` is both scripts' class."""
+    return {
+        f"{JOBS_DIR}/run{suffix}": (
+            "#!/bin/sh\n"
+            'root="$1"\n'
+            f'cat "{JOBS_DIR}/data.txt"\n'
+            f'cat "$root/{JOBS_DIR}/data.txt"\n'),
+        f"{JOBS_DIR}/data.txt": "jobs\n",
+        f"{COLLECT}{suffix}": (
+            "#!/bin/sh\n"
+            f'cat "${{ROOT}}/{JOBS_DIR}/data.txt"\n'),
+    }
+
+
+def write_variable_tree(root: Path, suffix: str = ".sh") -> None:
+    for path, text in variable_code(suffix).items():
+        write(root, path, text)
+    commit(root, "add shell scripts that join paths to a variable")
+
+
+def answer_args(*triples: tuple[str, str, str]) -> list[str]:
+    return [token for triple in triples for token in ("--answer", *triple)]
+
+
+def policy_row(subject: str, recommended: str | None, files: int,
+               occurrences: int, **changed: object) -> dict:
+    tree, _, file_class = subject.partition(":")
+    return {"subject": subject, "tree": tree, "class": file_class,
+            "recommended": recommended, "answer": None, "files": files,
+            "occurrences": occurrences, "rewritable": occurrences,
+            "rewritten": 0, "retained": 0, "extended": 0,
+            "open": occurrences, "overridden": 0, **changed}
+
+
+# #380: a `.claude/notes` tree one level shallower than its destination,
+# whose tooling climbs to the repository root (D1-D3, D6).
+DEPTH_DIR = ".claude/notes/tool"
+DEPTH_NEW = ".agents/artifacts/notes/tool"
+DEPTH_CODE = {
+    f"{DEPTH_DIR}/run.py": (
+        "from pathlib import Path\n"
+        "\n"
+        "HERE = Path(__file__).resolve().parent\n"
+        "ROOT = HERE.parents[2]\n"
+        "NOTES = HERE.parent\n"
+        'DATA = "../data/x"\n'),
+    f"{DEPTH_DIR}/pyproject.toml": (
+        "[tool.uv.sources]\n"
+        'lib = { path = "../../../vendor/lib" }\n'),
+    f"{DEPTH_DIR}/uv.lock": (
+        "[[package]]\n"
+        'name = "lib"\n'
+        'source = { editable = "../../../vendor/lib" }\n'),
+    "vendor/lib/__init__.py": "",
+}
+DEPTH_POLICIES = (".claude/notes:.lock/depth", ".claude/notes:.py/depth",
+                  ".claude/notes:.toml/depth")
+DEPTH_ROWS = (
+    (f"{DEPTH_DIR}/pyproject.toml:2:17", "../../../vendor/lib",
+     "../../../../vendor/lib", ".claude/notes:.toml/depth"),
+    (f"{DEPTH_DIR}/run.py:4:12", ".parents[2]", ".parents[3]",
+     ".claude/notes:.py/depth"),
+    (f"{DEPTH_DIR}/uv.lock:3:24", "../../../vendor/lib",
+     "../../../../vendor/lib", ".claude/notes:.lock/depth"))
+DEPTH_REWRITE_ANSWERS = tuple(("reference-policy", subject, "rewrite")
+                              for subject in DEPTH_POLICIES)
+DEPTH_RETAIN_ANSWERS = tuple(("reference-policy", subject, "retain")
+                             for subject in DEPTH_POLICIES)
+
+
+def write_depth_tree(root: Path) -> None:
+    for path, text in DEPTH_CODE.items():
+        write(root, path, text)
+    commit(root, "add tooling that climbs to the repository root")
+
+
+def write_dissolved_tree(root: Path) -> None:
+    """`.claude/` loses its last retained file and gains a research record,
+    so its members move under two different prefixes and a link to the
+    directory itself has no single successor (D5)."""
+    git(root, "rm", "--quiet", ".claude/skills.config.json")
+    write(root, ".claude/research/r.md", "# research r\n")
+    write(root, "README.md", DISSOLVED_README)
+    commit(root, "link the dissolving agent tree")
+
+
+def candidate_repo(home: Path, *paths: str) -> Path:
+    """`nix_config_shape_repo` plus tracked agent paths no row classifies."""
+    root = nix_config_shape_repo(home)
+    for path in paths:
+        write(root, path, f"# {path}\n")
+    commit(root, "add unclassified agent paths")
+    return root
+
+
+def ignored_symlink_repo(home: Path) -> Path:
+    """`nix_config_shape_repo` plus an ignored `.claude/settings.local.json`
+    that is a symlink out of the checkout: the one way an ignored candidate
+    stays `needs-decision`."""
+    root = nix_config_shape_repo(home)
+    outside = Path(tempfile.mkdtemp()).resolve() / "settings.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    with (root / ".gitignore").open("a", encoding="utf-8") as handle:
+        handle.write(".claude/settings.local.json\n")
+    (root / ".claude" / "settings.local.json").symlink_to(outside)
+    commit(root, "ignore an escaping local settings link")
+    return root
+
+
+def tracked_symlink_repo(home: Path) -> Path:
+    """`nix_config_shape_repo` plus a tracked `.claude/link.md` that is a
+    symlink out of the checkout: an unclassified candidate `apply` could
+    never move, because its stored operation would name an uncontained
+    path."""
+    root = nix_config_shape_repo(home)
+    outside = Path(tempfile.mkdtemp()).resolve() / "elsewhere.md"
+    outside.write_text("# outside the repository\n", encoding="utf-8")
+    (root / ".claude" / "link.md").symlink_to(outside)
+    commit(root, "track an escaping agent link")
+    return root
+
+
+LINK = ".claude/link.md"
+
+
+ODD = ".claude/odd.md"
+ARCHIVED = ".agents/knowledge/archive/adopted/.claude/odd.md"
 
 
 GITIGNORE_WITH_COMMENT = (
@@ -554,7 +1016,7 @@ class ProjectIdentityTest(AdoptTestCase):
 
 
 class DocumentShapeTest(AdoptTestCase):
-    def test_exactly_seven_top_level_members(self):
+    def test_exactly_eleven_top_level_members(self):
         for name, build in (("bootstrap", bootstrap_repo),
                             ("reconcile", reconcile_repo),
                             ("adopted", adopted_repo),
@@ -562,6 +1024,9 @@ class DocumentShapeTest(AdoptTestCase):
             with self.subTest(fixture=name):
                 doc = self.ready_plan(build(self.home))
                 self.assertEqual(sorted(doc), TOP_LEVEL_MEMBERS)
+                self.assertEqual(sorted(doc["link_rewrites"]),
+                                 ["already_broken", "inbound", "outbound",
+                                  "unrewritable"])
                 self.assertEqual(doc["schema_version"], 1)
                 self.assertEqual(sorted(doc["plan"]), PLAN_MEMBERS)
                 self.assertEqual(sorted(doc["handoff"]), HANDOFF_MEMBERS)
@@ -647,29 +1112,34 @@ class DocumentShapeTest(AdoptTestCase):
 # --------------------------------------------------------------------------
 
 
+def documented_plan_id(doc: object) -> str:
+    """D15's digest, recomputed here from the document's own inputs.
+
+    The formula is the spec's, not the implementation's: the ten named
+    members, canonical JSON, SHA-256. Nothing is pasted from a previous
+    run.
+    """
+    source = {
+        "adopt_schema_version": doc["schema_version"],
+        "project_id": doc["plan"]["project_id"],
+        "base_revision": doc["plan"]["base_revision"],
+        "platform": doc["plan"]["platform"],
+        "evidence": doc["evidence"],
+        "decisions_answered": doc["decisions"]["answered"],
+        "link_rewrites": doc["link_rewrites"],
+        "path_references": doc["path_references"],
+        "reference_policies": doc["reference_policies"],
+        "reference_formatting": doc["reference_formatting"],
+    }
+    payload = json.dumps(source, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 class PlanIdentityTest(AdoptTestCase):
-    def expected_plan_id(self, doc: object) -> str:
-        """D15's digest, recomputed here from the document's own inputs.
-
-        The formula is the spec's, not the implementation's: the six named
-        members, canonical JSON, SHA-256. Nothing is pasted from a previous
-        run.
-        """
-        source = {
-            "adopt_schema_version": doc["schema_version"],
-            "project_id": doc["plan"]["project_id"],
-            "base_revision": doc["plan"]["base_revision"],
-            "platform": doc["plan"]["platform"],
-            "evidence": doc["evidence"],
-            "decisions_answered": doc["decisions"]["answered"],
-        }
-        payload = json.dumps(source, sort_keys=True,
-                             separators=(",", ":")).encode("utf-8")
-        return "sha256:" + hashlib.sha256(payload).hexdigest()
-
     def test_plan_id_is_the_documented_digest_and_equals_input_digest(self):
         doc = self.ready_plan(nix_config_shape_repo(self.home))
-        self.assertEqual(doc["plan"]["plan_id"], self.expected_plan_id(doc))
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
         self.assertEqual(doc["plan"]["input_digest"], doc["plan"]["plan_id"])
 
     def test_platform_block_is_the_three_reproducible_manifest_values(self):
@@ -912,6 +1382,10 @@ class TypedOperationTest(AdoptTestCase):
                         for entry in doc["evidence"]],
             "checks": [{"id": gate["id"], "status": gate["status"]}
                        for gate in doc["verification"]["ready_gates"]],
+            "link_rewrites": doc["link_rewrites"],
+            "path_references": doc["path_references"],
+            "reference_policies": doc["reference_policies"],
+            "reference_formatting": doc["reference_formatting"],
             "path_migration_map": doc["handoff"]["migration_map"],
         }
         expected = json.dumps(record, sort_keys=True, indent=2,
@@ -955,6 +1429,20 @@ class TypedOperationTest(AdoptTestCase):
         self.assertEqual(op["after"], sha256_hash(expected.encode("utf-8")))
         self.assertIn("orchestration", config)
 
+    def test_the_legacy_deploy_member_is_generated(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, ".claude/skills.config.json",
+              json.dumps({"deploy": {"adapter": "none"}, "orchestration": {"maxParallel": 2}}))
+        commit(root, "carry a deploy member")
+        doc = self.ready_plan(root)
+        op = self.only_write(doc, ".claude/skills.config.json")
+        config = {"orchestration": {"maxParallel": 2},
+                  "specDir": ".agents/artifacts/specs",
+                  "planDir": ".agents/artifacts/plans",
+                  "rejectionsDir": ".agents/knowledge/rejections"}
+        expected = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
+        self.assertEqual(op["after"], sha256_hash(expected.encode("utf-8")))
+
     def test_only_the_declared_legacy_binding_config_is_rewritten(self):
         root = nix_config_shape_repo(self.home)
         write(root, ".claude/other.config.json", json.dumps({"specDir": "x"}))
@@ -962,6 +1450,1455 @@ class TypedOperationTest(AdoptTestCase):
         doc = self.ready_plan(root)
         for op in doc["changes"]:
             self.assertNotIn(".claude/other.config.json", op["targets"])
+
+
+class RecordTreeClassificationTest(AdoptTestCase):
+    """#340 AC1: the three record trees are classified centrally."""
+
+    def test_the_three_record_trees_plan_to_ready(self):
+        doc = self.ready_plan(record_trees_repo(self.home))
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        pairs = [(op["sources"][0], op["targets"][0])
+                 for op in doc["changes"] if op["op"] == "git-mv"]
+        for pair in ((".claude/handoffs/h.md",
+                      ".agents/artifacts/handoffs/h.md"),
+                     (".claude/notes/n.md", ".agents/artifacts/notes/n.md"),
+                     (".claude/research/r.md",
+                      ".agents/artifacts/specs/r.md")):
+            self.assertIn(pair, pairs)
+        entries = {entry["path"]: entry for entry in doc["evidence"]}
+        for group, target in (
+                (".claude/handoffs", ".agents/artifacts/handoffs"),
+                (".claude/notes", ".agents/artifacts/notes"),
+                (".claude/research", ".agents/artifacts/specs")):
+            with self.subTest(group=group):
+                entry = entries[group]
+                self.assertEqual(
+                    (entry["provenance"], entry["lifecycle_class"],
+                     entry["action"], entry["target"], entry["count"]),
+                    ("tracked", "durable-artifact", "move-canonical",
+                     target, 1))
+
+    def test_two_moves_into_one_destination_fail_the_destination_gate(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, ".claude/research/x.md", "# research x\n")
+        commit(root, "collide with .claude/specs/x.md")
+        doc = self.ready_plan(root)
+        gate = next(gate for gate in doc["verification"]["ready_gates"]
+                    if gate["id"] == "no-existing-destination")
+        self.assertEqual(gate, {"id": "no-existing-destination",
+                                "status": "failed",
+                                "repair_id": "adopt.destination.occupied"})
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertIn("no-existing-destination",
+                      [blocker["id"] for blocker in doc["plan"]["blockers"]])
+
+    def test_a_destination_inside_another_fails_the_destination_gate(self):
+        root = nix_config_shape_repo(self.home)
+        # `.agents/artifacts/specs/x.md` is `.claude/specs/x.md`'s destination
+        # and this record's destination's parent: distinct paths, one of
+        # which would have to be both a file and a directory.
+        write(root, ".claude/research/x.md/r.md", "# research r\n")
+        commit(root, "nest a destination inside another")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_destination_under_an_existing_file_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, ".agents/artifacts/notes", "a file, not a directory\n")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a file where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_dangling_symlink_destination_parent_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        (root / ".agents" / "artifacts").mkdir(parents=True, exist_ok=True)
+        (root / ".agents" / "artifacts" / "notes").symlink_to("missing")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a dangling link where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_dangling_symlink_at_a_destination_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        notes = root / ".agents" / "artifacts" / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "n.md").symlink_to("missing")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a dangling link where a destination goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_symlinked_directory_destination_parent_fails_the_gate(self):
+        """A link to a real directory is still a link, not a directory the
+        move can create its destination in."""
+        root = nix_config_shape_repo(self.home)
+        write(root, "elsewhere/keep.md", "# keep\n")
+        (root / ".agents" / "artifacts").mkdir(parents=True, exist_ok=True)
+        (root / ".agents" / "artifacts" / "notes").symlink_to(
+            "../../elsewhere", target_is_directory=True)
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a directory link where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def assert_destination_gate_fails(self, doc: object) -> None:
+        gate = next(gate for gate in doc["verification"]["ready_gates"]
+                    if gate["id"] == "no-existing-destination")
+        self.assertEqual(gate["status"], "failed", gate)
+        self.assertEqual(doc["plan"]["state"], "draft")
+
+
+class NativeSettingsTest(AdoptTestCase):
+    """#372 D7: a tracked `.claude/settings.json` is retained by its row."""
+
+    PATH = ".claude/settings.json"
+
+    def test_a_tracked_settings_file_is_retained_without_a_question(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, self.PATH, '{"hooks": {}}\n')
+        commit(root, "track the native settings file")
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertEqual(
+            [op for op in doc["changes"]
+             if self.PATH in op["sources"] + op["targets"]], [])
+        (entry,) = [entry for entry in doc["evidence"]
+                    if entry["path"] == self.PATH]
+        self.assertEqual(
+            (entry["provenance"], entry["lifecycle_class"], entry["action"],
+             entry["target"], entry["count"]),
+            ("tracked", "legacy-native-store", "retain-product", None, 1))
+        self.assertIsNotNone(entry["fingerprint"])
+
+
+class CandidateQuestionTest(AdoptTestCase):
+    """#340 AC2: every undecided candidate carries a stable question."""
+
+    OPEN_MEMBERS = ["basis", "id", "impact", "recommendation", "subject",
+                    "value"]
+
+    def only_open(self, doc: object) -> dict:
+        self.assertEqual(len(doc["decisions"]["open"]), 1,
+                         doc["decisions"]["open"])
+        entry = doc["decisions"]["open"][0]
+        self.assertEqual(sorted(entry), self.OPEN_MEMBERS)
+        self.assertEqual(entry["id"], "candidate-class")
+        return entry
+
+    def test_a_tracked_candidate_opens_one_archive_question(self):
+        doc = self.ready_plan(candidate_repo(self.home, ".claude/odd.md"))
+        entry = self.only_open(doc)
+        self.assertEqual((entry["subject"], entry["value"]),
+                         (".claude/odd.md", "archive-history"))
+        for member in ("basis", "impact", "recommendation"):
+            self.assertNotIn(".claude/odd.md", entry[member])
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            sorted(blocker["id"] for blocker in doc["plan"]["blockers"]),
+            ["no-needs-decision", "no-open-decisions"])
+
+    def test_the_prose_is_fixed_across_candidates(self):
+        doc = self.ready_plan(candidate_repo(
+            self.home, ".claude/zeta/b.md", ".claude/a.md"))
+        entries = doc["decisions"]["open"]
+        self.assertEqual([entry["subject"] for entry in entries],
+                         [".claude/a.md", ".claude/zeta/b.md"])
+        for member in ("basis", "impact", "recommendation"):
+            self.assertEqual(entries[0][member], entries[1][member])
+
+    def test_a_secret_shaped_candidate_has_no_answer(self):
+        doc = self.ready_plan(candidate_repo(
+            self.home, ".claude/secrets/key.md"))
+        entry = self.only_open(doc)
+        self.assertEqual(entry["subject"], ".claude/secrets/key.md")
+        self.assertIsNone(entry["value"])
+
+    def test_a_tracked_symlink_out_of_the_repository_has_no_answer(self):
+        doc = self.ready_plan(tracked_symlink_repo(self.home))
+        entry = self.only_open(doc)
+        self.assertEqual((entry["subject"], entry["value"]), (LINK, None))
+
+    def test_an_ignored_candidate_is_offered_retention(self):
+        doc = self.ready_plan(ignored_symlink_repo(self.home))
+        entry = self.only_open(doc)
+        self.assertEqual((entry["subject"], entry["value"]),
+                         (".claude/settings.local.json", "retain-product"))
+
+    def test_project_id_sorts_before_candidate_questions(self):
+        root = reconcile_repo(self.home, remotes=())
+        write(root, ".claude/odd.md", "# odd\n")
+        commit(root, "add an unclassified agent path")
+        doc = self.ready_plan(root)
+        self.assertEqual([entry["id"] for entry in doc["decisions"]["open"]],
+                         ["project-id", "candidate-class"])
+        self.assertEqual(sorted(doc["decisions"]["open"][0]),
+                         ["basis", "id", "impact", "recommendation", "value"])
+
+    def test_the_human_view_names_each_subject_and_its_answer(self):
+        root = candidate_repo(self.home, ".claude/odd.md",
+                              ".claude/secrets/key.md")
+        code, human, err = run("plan", "--repo-root", str(root),
+                               "--format", "human", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("open candidate-class .claude/odd.md "
+                      "(answer: archive-history): ", human)
+        self.assertIn("open candidate-class .claude/secrets/key.md "
+                      "(answer: none): ", human)
+
+    def test_the_question_set_is_closed(self):
+        self.assertEqual(adopt_inspection.QUESTION_IDS,
+                         ("project-id", "candidate-class", "path-reference",
+                          "reference-policy"))
+        for function in (adopt_inspection.question_impact,
+                         adopt_inspection.question_recommendation):
+            with self.subTest(function=function.__name__):
+                with self.assertRaises(ValueError):
+                    function("candidate-class:.claude/odd.md")
+        with self.assertRaises(ValueError):
+            adopt_inspection.candidate_answer("untracked-explicit-paths",
+                                              ".claude/odd.md", True)
+
+
+class CandidateAnswerTest(AdoptTestCase):
+    """#340 AC2: answering a candidate is reflected in the plan id."""
+
+    def answered(self, root: Path, *triples: tuple[str, str, str]):
+        args = [token for triple in triples
+                for token in ("--answer", *triple)]
+        return self.plan(root, *args)
+
+    def stored_plans(self) -> list[str]:
+        store = self.home / ".agents" / "state" / "adopt" / "plans"
+        return sorted(path.name for path in store.iterdir()) \
+            if store.is_dir() else []
+
+    def refused(self, root: Path, repair_id: str,
+                *triples: tuple[str, str, str]) -> None:
+        before = self.stored_plans()
+        code, payload, err = self.answered(root, *triples)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["code"], "adopt_failure")
+        self.assertEqual(payload["error"]["repair_id"], repair_id)
+        self.assertEqual(payload["error"]["violations"][0]["pointer"],
+                         "/decisions/answered")
+        self.assertEqual(self.stored_plans(), before)
+
+    def first_violation(self, root: Path, *triples) -> tuple[str, dict]:
+        code, payload, err = self.answered(root, *triples)
+        self.assertEqual(code, 2, err or payload)
+        return (payload["error"]["repair_id"],
+                payload["error"]["violations"][0])
+
+    def test_answering_reaches_ready_and_changes_the_plan_id(self):
+        root = candidate_repo(self.home, ODD)
+        draft = self.ready_plan(root)
+        code, doc, err = self.answered(
+            root, ("candidate-class", ODD, "archive-history"))
+        self.assertEqual(code, 0, err)
+        self.assertNotEqual(doc["plan"]["plan_id"], draft["plan"]["plan_id"])
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertEqual(doc["decisions"]["answered"], [
+            {"id": "candidate-class", "subject": ODD,
+             "value": "archive-history"}])
+        # The independent oracle, with every other digest input held
+        # constant: the id covers the non-empty answers, and the same
+        # document with no answers digests differently.
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+        unanswered = {**doc, "decisions": {**doc["decisions"],
+                                           "answered": []}}
+        self.assertNotEqual(doc["plan"]["plan_id"],
+                            documented_plan_id(unanswered))
+        entry = next(e for e in doc["evidence"] if e["path"] == ODD)
+        self.assertEqual(
+            (entry["lifecycle_class"], entry["action"], entry["target"]),
+            ("unclassified", "archive-history", ARCHIVED))
+        pairs = [(op["sources"][0], op["targets"][0])
+                 for op in doc["changes"] if op["op"] == "git-mv"]
+        self.assertIn((ODD, ARCHIVED), pairs)
+
+    def test_an_answered_ignored_candidate_is_retained_without_an_operation(self):
+        path = ".claude/settings.local.json"
+        code, doc, err = self.answered(
+            ignored_symlink_repo(self.home),
+            ("candidate-class", path, "retain-product"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        entry = next(e for e in doc["evidence"] if e["path"] == path)
+        self.assertEqual((entry["action"], entry["target"]),
+                         ("retain-product", None))
+        for op in doc["changes"]:
+            self.assertNotIn(path, op["sources"] + op["targets"])
+
+    def test_a_non_candidate_question_id_is_an_invalid_answer(self):
+        self.refused(candidate_repo(self.home, ODD),
+                     "adopt.decisions.invalid_answer",
+                     ("project-id", ODD, "archive-history"))
+
+    def test_a_value_the_question_does_not_offer_is_an_invalid_answer(self):
+        self.refused(candidate_repo(self.home, ODD),
+                     "adopt.decisions.invalid_answer",
+                     ("candidate-class", ODD, "retain-product"))
+
+    def test_every_answer_to_a_secret_shaped_candidate_is_invalid(self):
+        root = candidate_repo(self.home, ".claude/secrets/key.md")
+        for value in ("archive-history", "retain-product"):
+            with self.subTest(value=value):
+                self.refused(root, "adopt.decisions.invalid_answer",
+                             ("candidate-class", ".claude/secrets/key.md",
+                              value))
+
+    def test_archiving_a_tracked_symlink_out_of_the_repository_is_invalid(self):
+        root = tracked_symlink_repo(self.home)
+        for value in ("archive-history", "retain-product"):
+            with self.subTest(value=value):
+                self.refused(root, "adopt.decisions.invalid_answer",
+                             ("candidate-class", LINK, value))
+
+    def test_one_subject_answered_twice_is_an_invalid_answer(self):
+        self.refused(candidate_repo(self.home, ODD),
+                     "adopt.decisions.invalid_answer",
+                     ("candidate-class", ODD, "archive-history"),
+                     ("candidate-class", ODD, "archive-history"))
+
+    def test_a_subject_that_is_not_an_undecided_candidate_is_unmatched(self):
+        root = candidate_repo(self.home, ODD)
+        for subject in (".claude/missing.md", ".claude/specs/x.md"):
+            with self.subTest(subject=subject):
+                self.refused(root, "adopt.decisions.unmatched_answer",
+                             ("candidate-class", subject, "archive-history"))
+
+    def test_the_human_view_prints_the_answer(self):
+        root = candidate_repo(self.home, ODD)
+        code, human, err = run(
+            "plan", "--repo-root", str(root), "--format", "human",
+            "--answer", "candidate-class", ODD, "archive-history",
+            home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"answered candidate-class {ODD}: archive-history\n",
+                      human)
+
+    def test_answer_order_on_the_command_line_does_not_matter(self):
+        root = candidate_repo(self.home, ODD, ".claude/a.md")
+        first = ("candidate-class", ".claude/a.md", "archive-history")
+        second = ("candidate-class", ODD, "archive-history")
+        forward = run("plan", "--repo-root", str(root), "--answer", *first,
+                      "--answer", *second, home=self.home)
+        backward = run("plan", "--repo-root", str(root), "--answer", *second,
+                       "--answer", *first, home=self.home)
+        self.assertEqual(forward[0], 0, forward[2])
+        self.assertEqual(forward[1], backward[1])
+
+    def test_competing_violations_report_the_sorted_first_one(self):
+        root = candidate_repo(self.home, ODD)
+        bad_id = ("project-id", ODD, "archive-history")
+        unmatched = ("candidate-class", ".claude/missing.md",
+                     "archive-history")
+        expected = ("adopt.decisions.unmatched_answer",
+                    {"pointer": "/decisions/answered",
+                     "message": "the answered subject is not an undecided "
+                                "candidate of this inspection"})
+        for triples in ((bad_id, unmatched), (unmatched, bad_id)):
+            with self.subTest(triples=triples):
+                self.assertEqual(self.first_violation(root, *triples),
+                                 expected)
+
+    def test_a_duplicate_subject_is_reported_before_its_value(self):
+        root = candidate_repo(self.home, ODD)
+        good = ("candidate-class", ODD, "archive-history")
+        bad = ("candidate-class", ODD, "retain-product")
+        expected = ("adopt.decisions.invalid_answer",
+                    {"pointer": "/decisions/answered",
+                     "message": "a candidate is answered more than once"})
+        for triples in ((good, bad), (bad, good)):
+            with self.subTest(triples=triples):
+                self.assertEqual(self.first_violation(root, *triples),
+                                 expected)
+
+    def test_the_recommendation_names_the_answer_flag(self):
+        self.assertIn("plan --answer candidate-class <subject> <value>",
+                      adopt_inspection.question_recommendation(
+                          "candidate-class"))
+
+    def test_archive_history_relocates(self):
+        self.assertTrue(adopt_inspection.action_relocates("archive-history"))
+
+
+class LinkRewritePlanTest(AdoptTestCase):
+    """#345: `plan` rewrites relative Markdown links across the moves."""
+
+    def link_writes(self, doc: object) -> list[dict]:
+        return [op for op in doc["changes"] if op["op"] == "write-file"
+                and op["targets"][0] in LINKED_AFTER]
+
+    def test_the_linked_fixture_plans_to_ready_with_the_rewrites(self):
+        doc = self.ready_plan(linked_repo(self.home))
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        writes = self.link_writes(doc)
+        self.assertEqual([op["targets"] for op in writes],
+                         [[".agents/artifacts/specs/x.md"],
+                          [".claude/rules/r.md"], ["README.md"]])
+        for op in writes:
+            target = op["targets"][0]
+            self.assertEqual(op["sources"], [target])
+            self.assertEqual(op["before"], sha256_hash(
+                LINKED_BASE[LINKED_SOURCES[target]].encode("utf-8")))
+            self.assertEqual(op["after"], sha256_hash(
+                LINKED_AFTER[target].encode("utf-8")))
+        order = [(op["op"], op["targets"][0] if op["targets"] else None)
+                 for op in doc["changes"]]
+        legacy = order.index(("write-file", ".claude/skills.config.json"))
+        first = order.index(("write-file", ".agents/artifacts/specs/x.md"))
+        projections = [index for index, (kind, _) in enumerate(order)
+                       if kind == "regenerate-projection"]
+        self.assertLess(legacy, first)
+        self.assertTrue(projections)
+        self.assertLess(first + 2, min(projections))
+
+    def test_anchors_titles_and_reference_definitions_survive_and_urls_stay(self):
+        doc = self.ready_plan(linked_repo(self.home))
+        readme = next(op for op in self.link_writes(doc)
+                      if op["targets"] == ["README.md"])
+        self.assertEqual(readme["after"], sha256_hash(
+            LINK_README_AFTER.encode("utf-8")))
+        before = [link.target
+                  for link in adopt_links.links(LINK_README_BEFORE)]
+        after = [link.target for link in adopt_links.links(LINK_README_AFTER)]
+        self.assertEqual(list(zip(before, after)), [
+            (".claude/specs/x.md#intro", ".agents/artifacts/specs/x.md#intro"),
+            ("./.claude/plans/", "./.agents/artifacts/plans/"),
+            (".claude/specs/x.md", ".agents/artifacts/specs/x.md"),
+            (".claude/specs/missing.md", ".claude/specs/missing.md"),
+            ("https://example.com/.claude/specs/x.md",
+             "https://example.com/.claude/specs/x.md"),
+            ("README.md", "README.md"),
+            (".claude/plans/y.md", ".agents/artifacts/plans/y.md"),
+        ])
+
+    def test_the_summary_is_published_and_enters_the_plan_id(self):
+        doc = self.ready_plan(linked_repo(self.home))
+        self.assertEqual(doc["link_rewrites"], LINKED_SUMMARY)
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+    def test_a_different_rewrite_set_is_a_different_plan_id(self):
+        doc = self.ready_plan(linked_repo(self.home))
+        inputs = (doc["plan"]["project_id"], doc["plan"]["base_revision"],
+                  doc["plan"]["platform"], doc["evidence"],
+                  doc["decisions"]["answered"])
+        self.assertEqual(
+            adopt_planning.compute_plan_id(*inputs, doc["link_rewrites"],
+                                           doc["path_references"],
+                                           doc["reference_policies"],
+                                           doc["reference_formatting"]),
+            doc["plan"]["plan_id"])
+        other = json.loads(json.dumps(LINKED_SUMMARY))
+        other["inbound"] = {"links": 4, "files": ["README.md"]}
+        self.assertNotEqual(
+            adopt_planning.compute_plan_id(*inputs, other,
+                                           doc["path_references"],
+                                           doc["reference_policies"],
+                                           doc["reference_formatting"]),
+            doc["plan"]["plan_id"])
+
+    def test_the_human_view_prints_one_link_line(self):
+        code, out, err = run("plan", "--repo-root",
+                             str(linked_repo(self.home)), "--format", "human",
+                             home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nlinks: inbound 5 in 2 files, outbound 2 in 1 files, "
+                      "unrewritable 0, already broken 1\n", out)
+
+    def test_a_dissolved_directory_link_keeps_the_plan_draft(self):
+        root = nix_config_shape_repo(self.home)
+        write_dissolved_tree(root)
+        code, doc, err = self.plan(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [gate for gate in doc["verification"]["ready_gates"]
+             if gate["status"] == "failed"],
+            [{"id": "no-unrewritable-link", "status": "failed",
+              "repair_id": "adopt.link.unrewritable"}])
+        self.assertEqual(doc["link_rewrites"]["unrewritable"],
+                         [{"path": "README.md", "target": ".claude/"}])
+        self.assertIn(
+            {"id": "no-unrewritable-link",
+             "message": "a relative Markdown link into or out of a moved "
+                        "path cannot be rewritten to resolve to the same "
+                        "target"},
+            doc["plan"]["blockers"])
+
+    def test_the_link_gate_is_the_last_ready_gate(self):
+        self.assertEqual(adopt_inspection.READY_GATES[-2:],
+                         ("no-secret-path-in-moves", "no-unrewritable-link"))
+
+    def test_a_markdown_file_any_other_operation_names_is_a_derivation_bug(self):
+        op = adopt_planning.operation
+        link = op("write-file", ["README.md"], ["README.md"],
+                  "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        adopt_planning.check_markdown_writes([link], {"README.md"})
+        delete = op("delete-file", ["notes.md"], [],
+                    "git-object:" + "0" * 40, None)
+        for changes, targets in (([link], set()),
+                                 ([link, link], {"README.md"}),
+                                 ([], {"README.md"}),
+                                 ([delete], set())):
+            with self.subTest(changes=changes, targets=targets):
+                with self.assertRaises(ValueError):
+                    adopt_planning.check_markdown_writes(changes, targets)
+
+
+class PathReferencePlanTest(AdoptTestCase):
+    """#350: `plan` asks about every path literal naming a moved tree."""
+
+    def answered(self, root: Path, value: str,
+                 subject: str = REFERENCE_SUBJECT) -> object:
+        code, doc, err = self.plan(root, "--answer", "path-reference",
+                                   subject, value)
+        self.assertEqual(code, 0, err or doc)
+        return doc
+
+    def stored_plans(self) -> list[str]:
+        store = self.home / ".agents" / "state" / "adopt" / "plans"
+        return sorted(path.name for path in store.iterdir()) \
+            if store.is_dir() else []
+
+    def naming(self, doc: object, path: str) -> list[dict]:
+        return [op for op in doc["changes"]
+                if path in op["sources"] + op["targets"]]
+
+    def test_an_open_reference_keeps_the_plan_draft_with_a_stable_question(self):
+        root = referenced_repo(self.home)
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [gate["id"] for gate in doc["verification"]["ready_gates"]
+             if gate["status"] != "passed"], ["no-open-decisions"])
+        (question,) = [entry for entry in doc["decisions"]["open"]
+                       if entry["id"] == "path-reference"]
+        self.assertEqual(sorted(question), ["answers", "basis", "id", "impact",
+                                            "recommendation", "subject"])
+        self.assertEqual(question["subject"], REFERENCE_SUBJECT)
+        self.assertEqual(question["answers"], ["extend", "retain"])
+        for member in ("basis", "impact", "recommendation"):
+            self.assertNotIn("tools/", question[member])
+        self.assertEqual(doc["path_references"], [REFERENCE_ROW])
+        self.assertEqual(self.naming(doc, CHECK_LINKS), [])
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+        again = self.ready_plan(root)
+        self.assertEqual(again["decisions"]["open"], doc["decisions"]["open"])
+        self.assertEqual(again["plan"]["plan_id"], doc["plan"]["plan_id"])
+
+    def test_answering_extend_reaches_ready_with_one_write(self):
+        doc = self.answered(referenced_repo(self.home), "extend")
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertEqual(doc["decisions"]["answered"],
+                         [{"id": "path-reference",
+                           "subject": REFERENCE_SUBJECT, "value": "extend"}])
+        self.assertEqual(doc["path_references"],
+                         [{**REFERENCE_ROW, "answer": "extend",
+                           "decided_by": "occurrence"}])
+        (write_op,) = self.naming(doc, CHECK_LINKS)
+        self.assertEqual(write_op["op"], "write-file")
+        self.assertEqual(write_op["sources"], [CHECK_LINKS])
+        self.assertEqual(write_op["targets"], [CHECK_LINKS])
+        self.assertEqual(write_op["before"],
+                         sha256_hash(CHECK_LINKS_SCRIPT.encode("utf-8")))
+        self.assertEqual(write_op["after"],
+                         sha256_hash(CHECK_LINKS_EXTENDED.encode("utf-8")))
+        order = [(op["op"], op["targets"][0] if op["targets"] else None)
+                 for op in doc["changes"]]
+        script = order.index(("write-file", CHECK_LINKS))
+        self.assertLess(order.index(("write-file", "README.md")), script)
+        self.assertLess(script, min(
+            index for index, (kind, _) in enumerate(order)
+            if kind == "regenerate-projection"))
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+    def test_retain_reaches_ready_and_writes_nothing(self):
+        doc = self.answered(referenced_repo(self.home), "retain")
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["path_references"],
+                         [{**REFERENCE_ROW, "answer": "retain",
+                           "decided_by": "occurrence"}])
+        self.assertEqual(self.naming(doc, CHECK_LINKS), [])
+
+    def test_the_answer_is_covered_by_the_plan_id(self):
+        root = referenced_repo(self.home)
+        opened = self.ready_plan(root)
+        extended = self.answered(root, "extend")
+        retained = self.answered(root, "retain")
+        self.assertEqual(len({doc["plan"]["plan_id"]
+                              for doc in (opened, extended, retained)}), 3)
+        inputs = (extended["plan"]["project_id"],
+                  extended["plan"]["base_revision"],
+                  extended["plan"]["platform"], extended["evidence"],
+                  extended["decisions"]["answered"],
+                  extended["link_rewrites"])
+        self.assertEqual(
+            adopt_planning.compute_plan_id(*inputs,
+                                           extended["path_references"],
+                                           extended["reference_policies"],
+                                           extended["reference_formatting"]),
+            extended["plan"]["plan_id"])
+        other = [{**extended["path_references"][0],
+                  "additions": [".agents/artifacts/specs/"]}]
+        self.assertNotEqual(
+            adopt_planning.compute_plan_id(*inputs, other,
+                                           extended["reference_policies"],
+                                           extended["reference_formatting"]),
+            extended["plan"]["plan_id"])
+
+    def test_markdown_rewriting_is_unchanged_and_other_files_are_untouched(self):
+        def markdown_writes(doc: object) -> list[tuple]:
+            return [(op["targets"], op["before"], op["after"])
+                    for op in doc["changes"] if op["op"] == "write-file"
+                    and adopt_links.is_markdown_path(op["targets"][0])]
+
+        with_script = self.answered(referenced_repo(self.home), "extend")
+        without = self.ready_plan(referenced_repo(self.home, script=False))
+        self.assertEqual(without["plan"]["state"], "ready",
+                         without["plan"]["blockers"])
+        self.assertEqual(without["path_references"], [])
+        self.assertTrue(markdown_writes(without))
+        self.assertEqual(markdown_writes(with_script),
+                         markdown_writes(without))
+        self.assertEqual(with_script["link_rewrites"],
+                         without["link_rewrites"])
+        self.assertEqual(self.naming(with_script, UNRELATED_SCRIPT), [])
+        self.assertEqual(
+            [op["targets"] for op in with_script["changes"]
+             if op["op"] == "write-file"
+             and op["targets"][0].startswith("tools/")], [[CHECK_LINKS]])
+
+    def test_invalid_reference_answers_refuse_and_store_nothing(self):
+        root = referenced_repo(self.home)
+        ok = ("path-reference", REFERENCE_SUBJECT, "extend")
+        for triples, repair_id in (
+                ((("path-reference", f"{CHECK_LINKS}:1:1", "retain"),),
+                 "adopt.decisions.unmatched_answer"),
+                ((("path-reference", REFERENCE_SUBJECT, "rewrite"),),
+                 "adopt.decisions.invalid_answer"),
+                ((ok, ("path-reference", REFERENCE_SUBJECT, "retain")),
+                 "adopt.decisions.invalid_answer"),
+                ((ok, ("path-ref", REFERENCE_SUBJECT, "retain")),
+                 "adopt.decisions.invalid_answer")):
+            with self.subTest(triples=triples):
+                before = self.stored_plans()
+                code, payload, err = self.plan(root, *[
+                    token for triple in triples
+                    for token in ("--answer", *triple)])
+                self.assertEqual(code, 2, err or payload)
+                self.assertEqual(payload["error"]["code"], "adopt_failure")
+                self.assertEqual(payload["error"]["repair_id"], repair_id)
+                self.assertEqual(
+                    payload["error"]["violations"][0]["pointer"],
+                    "/decisions/answered")
+                self.assertEqual(self.stored_plans(), before)
+
+    def test_the_human_view_prints_the_references(self):
+        root = referenced_repo(self.home)
+        code, out, err = run("plan", "--repo-root", str(root), "--format",
+                             "human", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nreferences: 1 occurrences, extended 0, rewritten 0, "
+                      "retained 0, open 1\n", out)
+        self.assertIn(f"\nopen path-reference {REFERENCE_SUBJECT} "
+                      "(answers: extend|retain): ", out)
+        code, out, err = run("plan", "--repo-root", str(root), "--format",
+                             "human", "--answer", "path-reference",
+                             REFERENCE_SUBJECT, "extend", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nreferences: 1 occurrences, extended 1, rewritten 0, "
+                      "retained 0, open 0\n", out)
+
+    def test_a_reference_to_an_answered_candidate_is_asked_in_either_answer_order(self):
+        # Line 1 of the file holds `PATHS = [".claude/odd.md"]`: the quote
+        # opens in column 10, so the literal starts in column 11.
+        naming_file = "tools/odd_paths.py"
+        subject = f"{naming_file}:1:11"
+        root = candidate_repo(self.home, ODD)
+        write(root, naming_file, f'PATHS = ["{ODD}"]\n')
+        commit(root, "name the candidate")
+        candidate = ("candidate-class", ODD, "archive-history")
+        reference = ("path-reference", subject, "rewrite")
+
+        def questions(doc: object, question_id: str) -> list[dict]:
+            return [entry for entry in doc["decisions"]["open"]
+                    if entry["id"] == question_id]
+
+        unanswered = self.ready_plan(root)
+        self.assertEqual(len(questions(unanswered, "candidate-class")), 1)
+        self.assertEqual(questions(unanswered, "path-reference"), [])
+        self.assertEqual(unanswered["path_references"], [])
+
+        code, archived, err = self.plan(root, "--answer", *candidate)
+        self.assertEqual(code, 0, err or archived)
+        self.assertEqual(archived["plan"]["state"], "draft")
+        (question,) = questions(archived, "path-reference")
+        self.assertEqual(question["subject"], subject)
+        self.assertEqual(question["answers"],
+                         ["extend", "rewrite", "retain"])
+        self.assertEqual(len(archived["decisions"]["open"]), 1)
+        (row,) = archived["path_references"]
+        self.assertEqual((row["subject"], row["literal"], row["answer"]),
+                         (subject, ODD, None))
+
+        results = []
+        for triples in ((candidate, reference), (reference, candidate)):
+            code, doc, err = self.plan(root, *[
+                token for triple in triples
+                for token in ("--answer", *triple)])
+            self.assertEqual(code, 0, err or doc)
+            self.assertEqual(doc["plan"]["state"], "ready",
+                             doc["plan"]["blockers"])
+            results.append(doc)
+        first, second = results
+        self.assertEqual(first["path_references"], second["path_references"])
+        self.assertEqual(first["path_references"][0]["answer"], "rewrite")
+        self.assertEqual(first["plan"]["plan_id"], second["plan"]["plan_id"])
+        (write_op,) = self.naming(first, naming_file)
+        self.assertEqual(write_op["after"], sha256_hash(
+            f'PATHS = ["{ARCHIVED}"]\n'.encode("utf-8")))
+
+    def test_a_reference_target_any_other_operation_names_is_a_derivation_bug(self):
+        op = adopt_planning.operation
+        target = "tools/check_links.py"
+        write_op = op("write-file", [target], [target],
+                      "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        adopt_planning.check_reference_writes([write_op], {target})
+        delete = op("delete-file", [target], [],
+                    "git-object:" + "0" * 40, None)
+        move = op("git-mv", [target], ["tools/moved.py"],
+                  "git-object:" + "0" * 40, "git-object:" + "0" * 40)
+        different = op("write-file", ["tools/other.py"], [target],
+                       "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        for changes in ([], [write_op, write_op], [write_op, delete],
+                        [write_op, move], [different]):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    adopt_planning.check_reference_writes(changes, {target})
+
+    def test_a_projection_reading_a_reference_target_is_not_a_second_writer(self):
+        op = adopt_planning.operation
+        target = "tools/agents.tmpl"
+        write_op = op("write-file", [target], [target],
+                      "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        reads = op("regenerate-projection", [target], ["AGENTS.md"],
+                   "sha256:" + "2" * 64, None)
+        adopt_planning.check_reference_writes([write_op, reads], {target})
+        adopt_planning.check_reference_writes([reads, write_op, reads],
+                                              {target})
+        regenerates = op("regenerate-projection", ["tools/other.tmpl"],
+                         [target], "sha256:" + "0" * 64, None)
+        for changes in ([reads], [write_op, regenerates],
+                        [write_op, reads, write_op]):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    adopt_planning.check_reference_writes(changes, {target})
+
+
+class MovedFileReferencePlanTest(AdoptTestCase):
+    """#372 D1: a moved file is read, and written where the move leaves it."""
+
+    def repo(self) -> Path:
+        root = nix_config_shape_repo(self.home)
+        write_moved_tool(root)
+        return root
+
+    def test_a_moved_file_is_read_and_its_row_names_the_destination(self):
+        doc = self.ready_plan(self.repo())
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(doc["path_references"], [{
+            "subject": MOVED_TOOL_SUBJECT, "path": MOVED_TOOL, "line": 1,
+            "column": 9, "literal": ".claude/specs/x.md",
+            "answers": ["rewrite", "retain"], "answer": None,
+            "additions": [], "replacement": ".agents/artifacts/specs/x.md",
+            "target": MOVED_TOOL_NEW, "policy": ".claude/notes:.py",
+            "decided_by": None}])
+        self.assertEqual(
+            [op["op"] for op in doc["changes"]
+             if MOVED_TOOL_NEW in op["targets"]], ["git-mv"])
+
+    def test_an_answered_moved_file_is_written_once_at_its_destination(self):
+        code, doc, err = self.plan(self.repo(), "--answer", "path-reference",
+                                   MOVED_TOOL_SUBJECT, "rewrite")
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        (row,) = doc["path_references"]
+        self.assertEqual((row["answer"], row["decided_by"]),
+                         ("rewrite", "occurrence"))
+        move, write_op = [op for op in doc["changes"]
+                          if MOVED_TOOL_NEW in op["sources"] + op["targets"]]
+        self.assertEqual((move["op"], move["sources"], move["targets"]),
+                         ("git-mv", [MOVED_TOOL], [MOVED_TOOL_NEW]))
+        self.assertEqual(
+            (write_op["op"], write_op["sources"], write_op["targets"]),
+            ("write-file", [MOVED_TOOL_NEW], [MOVED_TOOL_NEW]))
+        self.assertEqual(write_op["before"],
+                         sha256_hash(MOVED_TOOL_TEXT.encode("utf-8")))
+        self.assertEqual(write_op["after"],
+                         sha256_hash(MOVED_TOOL_AFTER.encode("utf-8")))
+        self.assertEqual(
+            [op["op"] for op in doc["changes"]
+             if MOVED_TOOL in op["sources"] + op["targets"]], ["git-mv"])
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+    def test_a_reference_target_may_be_one_move_destination(self):
+        op = adopt_planning.operation
+        blob = "git-object:" + "0" * 40
+        write_op = op("write-file", [MOVED_TOOL_NEW], [MOVED_TOOL_NEW],
+                      "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        move = op("git-mv", [MOVED_TOOL], [MOVED_TOOL_NEW], blob, blob)
+        adopt_planning.check_reference_writes([move, write_op],
+                                              {MOVED_TOOL_NEW})
+        second = op("git-mv", ["tools/other.py"], [MOVED_TOOL_NEW], blob,
+                    blob)
+        away = op("git-mv", [MOVED_TOOL_NEW], ["tools/moved.py"], blob, blob)
+        for changes in ([move], [move, write_op, write_op],
+                        [move, second, write_op], [move, write_op, away]):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    adopt_planning.check_reference_writes(
+                        changes, {MOVED_TOOL_NEW})
+
+
+class SharedDestinationReferencePlanTest(AdoptTestCase):
+    """Two moves onto one path are a repository condition: the plan is a
+    draft the destination gate blocks, whatever its references are answered,
+    and no reference write lands on the shared path."""
+
+    ANSWERS = {
+        "one occurrence rewritten": (
+            ("path-reference", RESEARCH_TOOL_SUBJECT, "rewrite"),
+            ("path-reference", SPECS_TOOL_SUBJECT, "retain")),
+        "both rewritten by their policies": (
+            ("reference-policy", ".claude/research:.py", "rewrite"),
+            ("reference-policy", ".claude/specs:.py", "rewrite")),
+        "both rewritten, one by its policy": (
+            ("path-reference", SPECS_TOOL_SUBJECT, "rewrite"),
+            ("reference-policy", ".claude/research:.py", "rewrite")),
+    }
+    DECIDED = {
+        "one occurrence rewritten": [
+            (RESEARCH_TOOL_SUBJECT, "rewrite", "occurrence"),
+            (SPECS_TOOL_SUBJECT, "retain", "occurrence")],
+        "both rewritten by their policies": [
+            (RESEARCH_TOOL_SUBJECT, "rewrite", "policy"),
+            (SPECS_TOOL_SUBJECT, "rewrite", "policy")],
+        "both rewritten, one by its policy": [
+            (RESEARCH_TOOL_SUBJECT, "rewrite", "policy"),
+            (SPECS_TOOL_SUBJECT, "rewrite", "occurrence")],
+    }
+
+    def test_an_answered_rewrite_leaves_a_draft_plan_with_the_blocker(self):
+        root = shared_destination_repo(self.home)
+        for name, triples in self.ANSWERS.items():
+            with self.subTest(name):
+                code, doc, err = self.plan(root, *answer_args(*triples))
+                self.assertEqual(code, 0, err or doc)
+                self.assertEqual(doc["plan"]["state"], "draft")
+                self.assertEqual(
+                    [gate["id"] for gate in doc["verification"]["ready_gates"]
+                     if gate["status"] != "passed"],
+                    ["no-existing-destination"])
+                self.assertEqual(
+                    [blocker["id"] for blocker in doc["plan"]["blockers"]],
+                    ["no-existing-destination"])
+                self.assertEqual(doc["decisions"]["open"], [])
+                self.assertEqual(
+                    [(row["subject"], row["answer"], row["decided_by"])
+                     for row in doc["path_references"]], self.DECIDED[name])
+                self.assertEqual(
+                    {row["target"] for row in doc["path_references"]},
+                    {SHARED_TOOL_NEW})
+                # Both moves are listed, and neither file's edit is written
+                # where the other would also land.
+                self.assertEqual(
+                    [(op["op"], op["sources"]) for op in doc["changes"]
+                     if SHARED_TOOL_NEW in op["sources"] + op["targets"]],
+                    [("git-mv", [path]) for path in sorted(SHARED_TOOLS)])
+                self.assertEqual(doc["plan"]["plan_id"],
+                                 documented_plan_id(doc))
+
+    def test_an_edit_beside_the_shared_path_is_still_written(self):
+        root = shared_destination_repo(self.home)
+        write_moved_tool(root)
+        code, doc, err = self.plan(root, *answer_args(
+            *self.ANSWERS["both rewritten by their policies"],
+            ("path-reference", MOVED_TOOL_SUBJECT, "rewrite")))
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [(op["targets"][0], op["after"]) for op in doc["changes"]
+             if op["op"] == "write-file"
+             and op["targets"][0].endswith(".py")],
+            [(MOVED_TOOL_NEW,
+              sha256_hash(MOVED_TOOL_AFTER.encode("utf-8")))])
+
+
+class ReferencePolicyPlanTest(AdoptTestCase):
+    """#372: one answer per (moved tree, file class), overridable per
+    occurrence, reported before `ready`."""
+
+    def answered(self, root: Path, *triples: tuple[str, str, str]) -> object:
+        code, doc, err = self.plan(root, *answer_args(*triples))
+        self.assertEqual(code, 0, err or doc)
+        return doc
+
+    def opened(self, doc: object) -> list[tuple[str, str]]:
+        return [(entry["id"], entry["subject"])
+                for entry in doc["decisions"]["open"]]
+
+    def decided(self, doc: object) -> list[tuple]:
+        return [(row["subject"], row["answer"], row["decided_by"])
+                for row in doc["path_references"]]
+
+    def code_writes(self, doc: object) -> dict[str, dict]:
+        """The non-Markdown `write-file` operations under the moved study
+        tree and `tools/`, by target."""
+        return {op["targets"][0]: op for op in doc["changes"]
+                if op["op"] == "write-file"
+                and op["targets"][0].startswith((POLICY_NEW, "tools/"))
+                and not adopt_links.is_markdown_path(op["targets"][0])}
+
+    def stored_plans(self) -> list[str]:
+        store = self.home / ".agents" / "state" / "adopt" / "plans"
+        return sorted(path.name for path in store.iterdir()) \
+            if store.is_dir() else []
+
+    def makefile_repo(self) -> Path:
+        root = nix_config_shape_repo(self.home)
+        write(root, MAKEFILE, MAKEFILE_TEXT)
+        commit(root, "add a file of no known class to a moved tree")
+        return root
+
+    def test_moved_files_open_one_question_per_class(self):
+        doc = self.ready_plan(policy_repo(self.home))
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [gate["id"] for gate in doc["verification"]["ready_gates"]
+             if gate["status"] != "passed"], ["no-open-decisions"])
+        self.assertEqual(self.opened(doc), [
+            ("path-reference", LINT_SUBJECT), ("path-reference", RUN_SUBJECT),
+            ("reference-policy", JSON_POLICY),
+            ("reference-policy", NIX_POLICY),
+            ("reference-policy", PY_POLICY)])
+        policies = [entry for entry in doc["decisions"]["open"]
+                    if entry["id"] == "reference-policy"]
+        for entry in policies:
+            self.assertEqual(sorted(entry), [
+                "answers", "basis", "id", "impact", "recommendation",
+                "subject", "value"])
+            self.assertEqual(entry["answers"], ["rewrite", "retain"])
+            for member in ("basis", "impact", "recommendation"):
+                self.assertNotIn(".claude/notes", entry[member])
+                self.assertEqual(entry[member], policies[0][member])
+        self.assertEqual([entry["value"] for entry in policies],
+                         ["retain", "rewrite", "rewrite"])
+        self.assertEqual(
+            [(row["subject"], row["answers"], row["target"], row["policy"])
+             for row in doc["path_references"]], POLICY_ROWS)
+        self.assertEqual(self.decided(doc),
+                         [(subject, None, None)
+                          for subject, _, _, _ in POLICY_ROWS])
+        lint = doc["path_references"][5]
+        self.assertEqual(
+            (lint["literal"], lint["additions"], lint["replacement"]),
+            (r"^\\.claude/",
+             [r"^\\.agents/artifacts/notes/", r"^\\.agents/artifacts/plans/",
+              r"^\\.agents/artifacts/specs/"], None))
+        self.assertEqual(doc["reference_policies"], [
+            policy_row(JSON_POLICY, "retain", 1, 1),
+            policy_row(NIX_POLICY, "rewrite", 1, 1),
+            policy_row(PY_POLICY, "rewrite", 2, 3)])
+        self.assertEqual(self.code_writes(doc), {})
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+    def test_one_policy_answer_decides_both_scripts(self):
+        doc = self.answered(policy_repo(self.home),
+                            ("reference-policy", PY_POLICY, "rewrite"))
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(self.opened(doc), [
+            ("path-reference", LINT_SUBJECT), ("path-reference", RUN_SUBJECT),
+            ("reference-policy", JSON_POLICY),
+            ("reference-policy", NIX_POLICY)])
+        self.assertEqual(
+            [(subject, answer, by) for subject, answer, by
+             in self.decided(doc) if subject.endswith(
+                 ("paths.py:1:10", "paths.py:2:9", "report.py:3:11"))],
+            [(f"{POLICY_DIR}/paths.py:1:10", "rewrite", "policy"),
+             (f"{POLICY_DIR}/paths.py:2:9", "rewrite", "policy"),
+             (f"{POLICY_DIR}/report.py:3:11", "rewrite", "policy")])
+        self.assertEqual(doc["reference_policies"][2], policy_row(
+            PY_POLICY, "rewrite", 2, 3, answer="rewrite", rewritten=3,
+            open=0))
+
+    def test_answering_every_policy_and_outside_occurrence_reaches_ready(self):
+        doc = self.answered(policy_repo(self.home), *POLICY_READY_ANSWERS)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertEqual(
+            doc["decisions"]["answered"],
+            [{"id": question, "subject": subject, "value": value}
+             for question, subject, value in sorted(POLICY_READY_ANSWERS)])
+        self.assertEqual(self.decided(doc), [
+            (f"{POLICY_DIR}/devenv.nix:3:21", "rewrite", "policy"),
+            (f"{POLICY_DIR}/paths.py:1:10", "rewrite", "policy"),
+            (f"{POLICY_DIR}/paths.py:2:9", "rewrite", "policy"),
+            (f"{POLICY_DIR}/record.json:1:31", "retain", "policy"),
+            (f"{POLICY_DIR}/report.py:3:11", "rewrite", "policy"),
+            (LINT_SUBJECT, "extend", "occurrence"),
+            (RUN_SUBJECT, "rewrite", "occurrence")])
+        writes = self.code_writes(doc)
+        self.assertEqual(sorted(writes), sorted(POLICY_REWRITTEN))
+        for target, text in POLICY_REWRITTEN.items():
+            with self.subTest(target=target):
+                op = writes[target]
+                self.assertEqual(op["sources"], [target])
+                self.assertEqual(op["after"],
+                                 sha256_hash(text.encode("utf-8")))
+        order = [(op["op"], op["targets"][0] if op["targets"] else None)
+                 for op in doc["changes"]]
+        report = f"{POLICY_NEW}/report.py"
+        self.assertLess(order.index(("git-mv", report)),
+                        order.index(("write-file", report)))
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+    def test_an_occurrence_answer_overrides_its_policy(self):
+        override = f"{POLICY_DIR}/paths.py:2:9"
+        doc = self.answered(
+            policy_repo(self.home), *POLICY_READY_ANSWERS,
+            ("path-reference", override, "retain"))
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(
+            [(subject, answer, by) for subject, answer, by
+             in self.decided(doc) if answer == "rewrite"],
+            [(f"{POLICY_DIR}/devenv.nix:3:21", "rewrite", "policy"),
+             (f"{POLICY_DIR}/paths.py:1:10", "rewrite", "policy"),
+             (f"{POLICY_DIR}/report.py:3:11", "rewrite", "policy"),
+             (RUN_SUBJECT, "rewrite", "occurrence")])
+        self.assertIn((override, "retain", "occurrence"), self.decided(doc))
+        self.assertIn((f"{POLICY_DIR}/record.json:1:31", "retain", "policy"),
+                      self.decided(doc))
+        self.assertEqual(doc["reference_policies"], [
+            policy_row(JSON_POLICY, "retain", 1, 1, answer="retain",
+                       retained=1, open=0),
+            policy_row(NIX_POLICY, "rewrite", 1, 1, answer="rewrite",
+                       rewritten=1, open=0),
+            policy_row(PY_POLICY, "rewrite", 2, 3, answer="rewrite",
+                       rewritten=2, retained=1, open=0, overridden=1)])
+        writes = self.code_writes(doc)
+        self.assertEqual(sorted(writes), sorted(POLICY_REWRITTEN))
+        self.assertEqual(
+            writes[f"{POLICY_NEW}/paths.py"]["after"], sha256_hash((
+                'SPECS = ".agents/artifacts/specs"\n'
+                'PLAN = ".claude/plans/y.md"\n').encode("utf-8")))
+
+    def test_markdown_rewriting_is_unchanged(self):
+        def markdown_writes(doc: object) -> list[tuple]:
+            return [(op["targets"], op["before"], op["after"])
+                    for op in doc["changes"] if op["op"] == "write-file"
+                    and adopt_links.is_markdown_path(op["targets"][0])]
+
+        with_code = self.answered(policy_repo(self.home),
+                                  *POLICY_READY_ANSWERS)
+        without = self.ready_plan(policy_repo(self.home, code=False))
+        self.assertEqual(without["path_references"], [])
+        self.assertEqual(without["reference_policies"], [])
+        self.assertTrue(markdown_writes(without))
+        self.assertEqual(markdown_writes(with_code), markdown_writes(without))
+        self.assertEqual(with_code["link_rewrites"], without["link_rewrites"])
+
+    def test_the_policy_answer_is_covered_by_the_plan_id(self):
+        root = policy_repo(self.home)
+        others = [triple for triple in POLICY_READY_ANSWERS
+                  if triple[1] != PY_POLICY]
+        rewritten = self.answered(root, *POLICY_READY_ANSWERS)
+        retained = self.answered(
+            root, *others, ("reference-policy", PY_POLICY, "retain"))
+        self.assertEqual(retained["plan"]["state"], "ready",
+                         retained["plan"]["blockers"])
+        self.assertNotEqual(rewritten["plan"]["plan_id"],
+                            retained["plan"]["plan_id"])
+        inputs = (rewritten["plan"]["project_id"],
+                  rewritten["plan"]["base_revision"],
+                  rewritten["plan"]["platform"], rewritten["evidence"],
+                  rewritten["decisions"]["answered"],
+                  rewritten["link_rewrites"], rewritten["path_references"])
+        self.assertEqual(
+            adopt_planning.compute_plan_id(
+                *inputs, rewritten["reference_policies"],
+                rewritten["reference_formatting"]),
+            rewritten["plan"]["plan_id"])
+        other = [dict(row) for row in rewritten["reference_policies"]]
+        other[2]["rewritable"] += 1
+        self.assertNotEqual(
+            adopt_planning.compute_plan_id(
+                *inputs, other, rewritten["reference_formatting"]),
+            rewritten["plan"]["plan_id"])
+
+    def test_invalid_policy_answers_refuse_and_store_nothing(self):
+        root = policy_repo(self.home)
+        ok = ("reference-policy", PY_POLICY, "rewrite")
+        for triples, repair_id in (
+                ((("reference-policy", ".claude/notes:.md", "retain"),),
+                 "adopt.decisions.unmatched_answer"),
+                ((("reference-policy", ".claude/specs:.py", "retain"),),
+                 "adopt.decisions.unmatched_answer"),
+                ((("reference-policy", RUN_SUBJECT, "retain"),),
+                 "adopt.decisions.unmatched_answer"),
+                ((("reference-policy", PY_POLICY, "extend"),),
+                 "adopt.decisions.invalid_answer"),
+                ((ok, ("reference-policy", PY_POLICY, "retain")),
+                 "adopt.decisions.invalid_answer"),
+                ((ok, ("reference-policies", PY_POLICY, "retain")),
+                 "adopt.decisions.invalid_answer")):
+            with self.subTest(triples=triples):
+                before = self.stored_plans()
+                code, payload, err = self.plan(root, *answer_args(*triples))
+                self.assertEqual(code, 2, err or payload)
+                self.assertEqual(payload["error"]["code"], "adopt_failure")
+                self.assertEqual(payload["error"]["repair_id"], repair_id)
+                self.assertEqual(
+                    payload["error"]["violations"][0]["pointer"],
+                    "/decisions/answered")
+                self.assertEqual(self.stored_plans(), before)
+
+    def test_a_class_outside_the_table_keeps_what_it_cannot_rewrite_open(self):
+        root = self.makefile_repo()
+        policy = ".claude/notes:-"
+        skip = f"{MAKEFILE}:1:10"
+        doc = self.ready_plan(root)
+        self.assertEqual(self.opened(doc), [("reference-policy", policy)])
+        self.assertIsNone(doc["decisions"]["open"][0]["value"])
+        self.assertEqual(doc["reference_policies"],
+                         [policy_row(policy, None, 1, 2, rewritable=1)])
+        answered = self.answered(root, ("reference-policy", policy,
+                                        "rewrite"))
+        self.assertEqual(answered["plan"]["state"], "draft")
+        self.assertEqual(self.opened(answered), [("path-reference", skip)])
+        self.assertEqual(self.decided(answered), [
+            (skip, None, None), (f"{MAKEFILE}:2:9", "rewrite", "policy")])
+        self.assertEqual(answered["reference_policies"], [policy_row(
+            policy, None, 1, 2, rewritable=1, answer="rewrite", rewritten=1,
+            open=1)])
+        both = self.answered(root, ("reference-policy", policy, "rewrite"),
+                             ("path-reference", skip, "extend"))
+        self.assertEqual(both["plan"]["state"], "ready",
+                         both["plan"]["blockers"])
+        self.assertEqual(both["reference_policies"], [policy_row(
+            policy, None, 1, 2, rewritable=1, answer="rewrite", rewritten=1,
+            extended=1, open=0, overridden=1)])
+        (write_op,) = [op for op in both["changes"]
+                       if op["op"] == "write-file"
+                       and op["targets"] == [MAKEFILE_NEW]]
+        self.assertEqual(write_op["after"],
+                         sha256_hash(MAKEFILE_AFTER.encode("utf-8")))
+        only = self.answered(root, ("path-reference", skip, "extend"),
+                             ("path-reference", f"{MAKEFILE}:2:9", "retain"))
+        self.assertEqual(only["plan"]["state"], "ready",
+                         only["plan"]["blockers"])
+        self.assertEqual(only["reference_policies"], [policy_row(
+            policy, None, 1, 2, rewritable=1, retained=1, extended=1,
+            open=0, overridden=2)])
+
+    def test_the_human_view_prints_each_policy(self):
+        root = policy_repo(self.home)
+        code, out, err = run("plan", "--repo-root", str(root), "--format",
+                             "human", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nreferences: 7 occurrences, extended 0, rewritten 0, "
+                      "retained 0, open 7\n", out)
+        self.assertIn(f"\npolicy {PY_POLICY}: 2 files, 3 occurrences, "
+                      "rewritable 3, rewritten 0, retained 0, extended 0, "
+                      "open 3\n", out)
+        self.assertIn(f"\nopen reference-policy {JSON_POLICY} "
+                      "(answers: rewrite|retain, recommended: retain): ", out)
+        self.assertNotIn(f"open path-reference {POLICY_DIR}", out)
+        code, out, err = run("plan", "--repo-root", str(root), "--format",
+                             "human", *answer_args(*POLICY_READY_ANSWERS),
+                             home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"\npolicy {PY_POLICY}: 2 files, 3 occurrences, "
+                      "rewritable 3, rewritten 3, retained 0, extended 0, "
+                      "open 0\n", out)
+        self.assertNotIn("open reference-policy", out)
+        code, out, err = run("plan", "--repo-root", str(self.makefile_repo()),
+                             "--format", "human", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nopen reference-policy .claude/notes:- "
+                      "(answers: rewrite|retain, recommended: none): ", out)
+
+
+class VariablePolicyPlanTest(AdoptTestCase):
+    """#376 D7, D8, D10: variable-joined paths in shell files are asked
+    about under their own policy, never with `extend`."""
+
+    def answered(self, root: Path, *triples: tuple[str, str, str]) -> object:
+        code, doc, err = self.plan(root, *answer_args(*triples))
+        self.assertEqual(code, 0, err or doc)
+        return doc
+
+    def variable_repo(self, suffix: str = ".sh") -> Path:
+        root = nix_config_shape_repo(self.home)
+        write_variable_tree(root, suffix)
+        return root
+
+    def opened(self, doc: object) -> list[tuple]:
+        return [(entry["id"], entry["subject"], entry.get("value"))
+                for entry in doc["decisions"]["open"]]
+
+    def test_variable_paths_open_their_own_policy(self):
+        doc = self.answered(self.variable_repo())
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [(row["subject"], row["answers"], row["replacement"],
+              row["target"], row["policy"]) for row in doc["path_references"]],
+            [(JOBS_LITERAL, ["rewrite", "retain"], f"{JOBS_NEW}/data.txt",
+              f"{JOBS_NEW}/run.sh", SH_POLICY),
+             (JOBS_VARIABLE, ["rewrite", "retain"],
+              f"$root/{JOBS_NEW}/data.txt", f"{JOBS_NEW}/run.sh",
+              SH_VARIABLE_POLICY),
+             (COLLECT_SUBJECT, ["rewrite", "retain"],
+              f"${{ROOT}}/{JOBS_NEW}/data.txt", f"{COLLECT}.sh", None)])
+        self.assertEqual(self.opened(doc), [
+            ("path-reference", COLLECT_SUBJECT, None),
+            ("reference-policy", SH_POLICY, "rewrite"),
+            ("reference-policy", SH_VARIABLE_POLICY, None)])
+        self.assertEqual(doc["reference_policies"], [
+            policy_row(SH_POLICY, "rewrite", 1, 1),
+            policy_row(SH_VARIABLE_POLICY, None, 1, 1)])
+
+    def test_the_literal_policy_never_decides_a_variable_occurrence(self):
+        doc = self.answered(self.variable_repo(),
+                            ("reference-policy", SH_POLICY, "rewrite"))
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(self.opened(doc), [
+            ("path-reference", COLLECT_SUBJECT, None),
+            ("reference-policy", SH_VARIABLE_POLICY, None)])
+        self.assertEqual(
+            [(row["subject"], row["answer"], row["decided_by"])
+             for row in doc["path_references"]],
+            [(JOBS_LITERAL, "rewrite", "policy"), (JOBS_VARIABLE, None, None),
+             (COLLECT_SUBJECT, None, None)])
+
+    def test_every_answer_reaches_ready_with_one_write_per_script(self):
+        doc = self.answered(self.variable_repo(), *VARIABLE_REWRITE_ANSWERS)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        code = variable_code()
+        for target, text in (
+                (f"{JOBS_NEW}/run.sh",
+                 code[JOBS_SCRIPT].replace(JOBS_DIR, JOBS_NEW)),
+                (f"{COLLECT}.sh",
+                 code[f"{COLLECT}.sh"].replace(JOBS_DIR, JOBS_NEW))):
+            with self.subTest(target=target):
+                (op,) = [op for op in doc["changes"]
+                         if op["op"] == "write-file"
+                         and op["targets"] == [target]]
+                self.assertEqual(op["after"],
+                                 sha256_hash(text.encode("utf-8")))
+
+    def test_a_non_shell_class_reads_no_variable(self):
+        doc = self.answered(self.variable_repo(".py"))
+        self.assertEqual(
+            [(row["subject"], row["policy"])
+             for row in doc["path_references"]],
+            [(f"{JOBS_DIR}/run.py:3:6", ".claude/notes:.py")])
+
+
+class DepthPolicyPlanTest(AdoptTestCase):
+    """#380 AC1, AC2: climbs out of a moved tree are asked about under the
+    `<tree>:<class>/depth` policies, with no recommendation."""
+
+    def test_climbs_to_the_root_open_their_own_policies(self):
+        root = nix_config_shape_repo(self.home)
+        write_depth_tree(root)
+        code, doc, err = self.plan(root)
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [(row["subject"], row["literal"], row["replacement"],
+              row["policy"], row["answers"])
+             for row in doc["path_references"]],
+            [(*row, ["rewrite", "retain"]) for row in DEPTH_ROWS])
+        self.assertEqual(
+            [(entry["id"], entry["subject"], entry["value"])
+             for entry in doc["decisions"]["open"]],
+            [("reference-policy", subject, None)
+             for subject in DEPTH_POLICIES])
+        self.assertEqual(doc["reference_policies"],
+                         [policy_row(subject, None, 1, 1)
+                          for subject in DEPTH_POLICIES])
+
+    def test_answering_the_depth_policies_reaches_ready(self):
+        root = nix_config_shape_repo(self.home)
+        write_depth_tree(root)
+        code, doc, err = self.plan(root, *answer_args(*DEPTH_REWRITE_ANSWERS))
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(
+            [(row["subject"], row["answer"], row["decided_by"])
+             for row in doc["path_references"]],
+            [(row[0], "rewrite", "policy") for row in DEPTH_ROWS])
+        self.assertEqual(
+            [(row["class"], row["files"])
+             for row in doc["reference_formatting"]],
+            [(".lock", [f"{DEPTH_NEW}/uv.lock"]),
+             (".py", [f"{DEPTH_NEW}/run.py"]),
+             (".toml", [f"{DEPTH_NEW}/pyproject.toml"])])
+
+
+# What `POLICY_READY_ANSWERS` edits, by class, before any format answer.
+FORMAT_ROWS = [
+    {"class": ".nix", "command": None,
+     "files": [f"{POLICY_NEW}/devenv.nix"]},
+    {"class": ".py", "command": None,
+     "files": [f"{POLICY_NEW}/paths.py", f"{POLICY_NEW}/report.py",
+               RUN_REPORT]},
+    {"class": ".toml", "command": None, "files": [LINT_TOML]},
+]
+
+
+class ReferenceFormattingPlanTest(AdoptTestCase):
+    """#376 D2, D3, D11: a formatter is declared per edited class by an
+    answer, never asked for, and published in `reference_formatting`."""
+
+    def answered(self, root: Path, *triples: tuple[str, str, str]) -> object:
+        code, doc, err = self.plan(root, *answer_args(*triples))
+        self.assertEqual(code, 0, err or doc)
+        return doc
+
+    def command(self, root: Path) -> str:
+        """A command id the fixture's contract declares; `plan` never runs
+        it, and any declared id is accepted (D2)."""
+        contract = json.loads(
+            (root / ".agents" / "project.json").read_text("utf-8"))
+        return sorted(contract["bindings"]["commands"])[0]
+
+    def stored_plans(self) -> list[str]:
+        store = self.home / ".agents" / "state" / "adopt" / "plans"
+        return sorted(path.name for path in store.iterdir()) \
+            if store.is_dir() else []
+
+    def test_rows_list_every_edited_class_without_a_command(self):
+        self.assertEqual(
+            self.answered(nix_config_shape_repo(self.home))
+            ["reference_formatting"], [])
+        doc = self.answered(policy_repo(self.home), *POLICY_READY_ANSWERS)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["reference_formatting"], FORMAT_ROWS)
+
+    def test_a_format_answer_names_the_command_and_changes_the_id(self):
+        root = policy_repo(self.home)
+        command = self.command(root)
+        without = self.answered(root, *POLICY_READY_ANSWERS)
+        doc = self.answered(root, *POLICY_READY_ANSWERS,
+                            ("reference-format", ".py", command))
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertIn(
+            {"id": "reference-format", "subject": ".py", "value": command},
+            doc["decisions"]["answered"])
+        self.assertEqual(doc["reference_formatting"], [
+            FORMAT_ROWS[0], {**FORMAT_ROWS[1], "command": command},
+            FORMAT_ROWS[2]])
+        self.assertNotEqual(doc["plan"]["plan_id"],
+                            without["plan"]["plan_id"])
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+        def code_writes(document: object) -> dict[str, str]:
+            return {op["targets"][0]: op["after"]
+                    for op in document["changes"]
+                    if op["op"] == "write-file"
+                    and op["targets"][0].startswith((POLICY_NEW, "tools/"))}
+        self.assertEqual(code_writes(doc), code_writes(without))
+
+    def test_compute_plan_id_covers_the_rows(self):
+        root = policy_repo(self.home)
+        doc = self.answered(root, *POLICY_READY_ANSWERS,
+                            ("reference-format", ".py", self.command(root)))
+        inputs = (doc["plan"]["project_id"], doc["plan"]["base_revision"],
+                  doc["plan"]["platform"], doc["evidence"],
+                  doc["decisions"]["answered"], doc["link_rewrites"],
+                  doc["path_references"], doc["reference_policies"])
+        self.assertEqual(
+            adopt_planning.compute_plan_id(*inputs,
+                                           doc["reference_formatting"]),
+            doc["plan"]["plan_id"])
+        other = json.loads(json.dumps(doc["reference_formatting"]))
+        other[1]["files"] = other[1]["files"][:-1]
+        self.assertNotEqual(adopt_planning.compute_plan_id(*inputs, other),
+                            doc["plan"]["plan_id"])
+
+    def test_invalid_format_answers_refuse_and_store_nothing(self):
+        root = policy_repo(self.home)
+        command = self.command(root)
+        no_python_edit = tuple(
+            triple for triple in POLICY_READY_ANSWERS
+            if triple[1] not in (PY_POLICY, RUN_SUBJECT)) + (
+            ("reference-policy", PY_POLICY, "retain"),
+            ("path-reference", RUN_SUBJECT, "retain"))
+        unmatched = "adopt.decisions.unmatched_answer"
+        invalid = "adopt.decisions.invalid_answer"
+        for triples, repair_id in (
+                ((*POLICY_READY_ANSWERS,
+                  ("reference-format", ".md", command)), unmatched),
+                ((*POLICY_READY_ANSWERS,
+                  ("reference-format", ".json", command)), unmatched),
+                ((*no_python_edit,
+                  ("reference-format", ".py", command)), unmatched),
+                ((*POLICY_READY_ANSWERS,
+                  ("reference-format", ".py", "no-such-command")), invalid),
+                ((*POLICY_READY_ANSWERS,
+                  ("reference-format", ".py", command),
+                  ("reference-format", ".py", "zz-other")), invalid),
+                # Validated after the other ids, though it sorts first: the
+                # format answer alone is unmatched, the policy one invalid.
+                ((("reference-policy", PY_POLICY, "extend"),
+                  ("reference-format", ".md", command)),
+                 invalid)):
+            with self.subTest(triples=triples):
+                before = self.stored_plans()
+                code, payload, err = self.plan(root, *answer_args(*triples))
+                self.assertEqual(code, 2, err or payload)
+                self.assertEqual(payload["error"]["code"], "adopt_failure")
+                self.assertEqual(payload["error"]["repair_id"], repair_id)
+                self.assertEqual(
+                    payload["error"]["violations"][0]["pointer"],
+                    "/decisions/answered")
+                self.assertEqual(self.stored_plans(), before)
+
+    def test_the_human_view_prints_each_format_row(self):
+        root = policy_repo(self.home)
+        command = self.command(root)
+        code, out, err = run(
+            "plan", "--repo-root", str(root), "--format", "human",
+            *answer_args(*POLICY_READY_ANSWERS,
+                         ("reference-format", ".py", command)),
+            home=self.home)
+        self.assertEqual(code, 0, err)
+        for line in ("format .nix: 1 files, command none",
+                     f"format .py: 3 files, command {command}",
+                     "format .toml: 1 files, command none"):
+            with self.subTest(line=line):
+                self.assertIn(f"\n{line}\n", out)
+        self.assertLess(out.rindex("\npolicy "), out.index("\nformat "))
 
 
 class GitignoreAmendmentTest(AdoptTestCase):

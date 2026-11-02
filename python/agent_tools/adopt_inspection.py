@@ -1,15 +1,22 @@
-"""The bounded, read-only inspection of an adoption target, and its closed
-lifecycle vocabulary.
+"""The bounded inspection of an adoption target, and its closed lifecycle
+vocabulary.
 
 `adopt-project` owns adoption end to end; this module is the lower half it is
 built from — the closed sets every adoption verb dispatches over, the error
 contract they refuse through, the content hashes, the path predicates that keep
-the inspection inside the target root and away from secret-shaped paths, and
-the four bounded git queries that are the whole of R4.2.
+the inspection inside the target root and away from secret-shaped paths, the
+bounded git queries of the R4.2 inspection, and the git operations a
+registration reads `origin` through: listing its branches and the commit each
+lists, a pinned fetch, the pin of a listed commit and the export of a commit.
 
-It is imported, never run: no `main`, no argparse, and nothing that writes. It
-does not import `agent_tools.resolve_project` and never will (D26) — the resolver is
-reached only as a subprocess, by the entry point.
+It is imported, never run: no `main` and no argparse. Its only repository
+writes are `fetch_pinned`'s: the fetched objects and one
+`refs/remotes/origin/<branch>` ref per call; `pin_listed` writes only through
+`fetch_pinned`, so it writes nothing when the checkout already holds the commit
+`origin` lists. `export_commit` writes only into the directory its caller
+names. It does not import
+`agent_tools.resolve_project` and never will (D26) — the resolver is reached
+only as a subprocess, by the entry point.
 
 A module of the `agent_tools` package, imported by `agent_tools.adopt_project` and
 its sibling adoption modules.
@@ -17,10 +24,16 @@ its sibling adoption modules.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
+import tarfile
+import types
 
 # --------------------------------------------------------------------------
 # Closed sets
@@ -108,8 +121,29 @@ LIFECYCLE_CLASSES = (
 )
 
 # D35: the public question contract. An id is a literal, never formatted at
-# emission, so a caller can dispatch over the set exhaustively.
-QUESTION_IDS = ("project-id",)
+# emission, so a caller can dispatch over the set exhaustively. A
+# `candidate-class` entry is keyed by its `subject`, the candidate path, and a
+# `path-reference` entry by its `subject`, `<path>:<line>:<column>`, and a
+# `reference-policy` entry by its `subject`, `<tree>:<class>`.
+QUESTION_IDS = ("project-id", "candidate-class", "path-reference",
+                "reference-policy")
+
+# The archive bucket for adopted agent records.
+ARCHIVE_ADOPTED_DIR = ".agents/knowledge/archive/adopted"
+
+# The fixed basis of every `candidate-class` question (D8): it never names the
+# candidate, which the entry's `subject` carries.
+CANDIDATE_BASIS = "no classification row settles this agent path"
+
+# The fixed basis of every `path-reference` question (#350): like the
+# candidate's, it never names the file or the literal, which the entry's
+# `subject` carries.
+PATH_REFERENCE_BASIS = "a tracked non-Markdown file names a path this plan moves"
+
+# The fixed basis of every `reference-policy` question (#372): it names no
+# tree, class or file, which the entry's `subject` carries.
+REFERENCE_POLICY_BASIS = ("files of one class inside a tree this plan moves "
+                          "name paths this plan moves")
 
 READY_GATES = (
     "contract-valid-after-amendment",
@@ -119,6 +153,7 @@ READY_GATES = (
     "no-existing-destination",
     "move-sources-tracked",
     "no-secret-path-in-moves",
+    "no-unrewritable-link",
 )
 
 # The gates `apply` runs inside its isolated worktree before it commits. They
@@ -128,6 +163,7 @@ COMMIT_GATES = (
     "worktree-status-matches-operations",
     "projections-in-sync",
     "no-unclassified-agent-path",
+    "no-new-broken-link",
     "cold-clone-resolves",
     "resolve-capabilities-available",
     "workflow-verification-commands",
@@ -159,9 +195,12 @@ SECRET_MARKERS = ("credential", "credentials", "private", "secret", "secrets",
                   "token", "tokens")
 SECRET_PREFIXES = (".env",)
 
-# D30: the whole living-reference sweep. Nothing outside this tuple is ever a
-# rewrite target — a repository-wide reference scan is not mechanically
-# decidable and would risk re-pointing machine-global platform source.
+# D30: the whole living-reference sweep for non-link text. Nothing outside
+# this tuple is ever a rewrite target for a prose or configuration reference —
+# a repository-wide reference scan is not mechanically decidable and would risk
+# re-pointing machine-global platform source. Relative Markdown link targets are
+# the one exception, rewritten across every tracked Markdown file by
+# `adopt_links` (#345 D1).
 LEGACY_BINDING_CONFIGS = (".claude/skills.config.json",)
 LEGACY_BINDING_KEYS = (
     ("specDir", ("artifacts", "specs")),
@@ -189,11 +228,19 @@ CLASSIFICATION_RULES = (
      ".agents/artifacts/specs"),
     (".claude/plans", "prefix", "durable-artifact", "move-canonical",
      ".agents/artifacts/plans"),
+    (".claude/handoffs", "prefix", "durable-artifact", "move-canonical",
+     ".agents/artifacts/handoffs"),
+    (".claude/notes", "prefix", "durable-artifact", "move-canonical",
+     ".agents/artifacts/notes"),
+    (".claude/research", "prefix", "durable-artifact", "move-canonical",
+     ".agents/artifacts/specs"),
     (".out-of-scope", "prefix", "canonical-tracked", "move-canonical",
      ".agents/knowledge/rejections"),
     (".claude/skills.config.json", "exact", "legacy-native-store",
      "retain-product", None),
     (".claude/settings.local.json", "exact", "legacy-native-store",
+     "retain-product", None),
+    (".claude/settings.json", "exact", "legacy-native-store",
      "retain-product", None),
     (".claude/skills", "prefix", "legacy-native-store", "retain-product", None),
     (".claude/hints", "prefix", "legacy-native-store", "retain-product", None),
@@ -236,6 +283,8 @@ NOTES = {
                     "cannot proceed until it is classified",
     "escaping-symlink": "resolves outside the target root; contents are never "
                         "read",
+    "answered": "classified by an answered candidate-class question; the "
+                "inspection found no lifecycle class for it",
 }
 
 
@@ -270,10 +319,11 @@ def approval_class_for(kind: str) -> str:
 
 
 def action_relocates(action: str) -> bool:
-    """Whether an action moves a candidate to a new canonical home."""
-    if action == "move-canonical":
+    """Whether an action moves a candidate to a new home: a canonical one, or
+    the adoption archive."""
+    if action in ("move-canonical", "archive-history"):
         return True
-    if action in ("generate-projection", "retain-product", "archive-history",
+    if action in ("generate-projection", "retain-product",
                   "delete-exact-duplicate", "needs-decision"):
         return False
     raise ValueError(f"unknown adoption action: {action!r}")
@@ -326,6 +376,18 @@ def question_impact(question_id: str) -> str:
         return ("adoption cannot name the project it is adopting, so the "
                 "contract, the fleet registry and the adoption evidence "
                 "record would all disagree about its identity")
+    if question_id == "candidate-class":
+        return ("the candidate keeps the needs-decision action, so the "
+                "no-needs-decision and no-open-decisions gates fail and the "
+                "plan stays draft")
+    if question_id == "path-reference":
+        return ("the file keeps naming the old path and nothing in it is "
+                "edited until the reference is answered, so the "
+                "no-open-decisions gate fails and the plan stays draft")
+    if question_id == "reference-policy":
+        return ("nothing in those files is edited until the policy or each "
+                "of its occurrences is answered, so the no-open-decisions "
+                "gate fails and the plan stays draft")
     raise ValueError(f"unknown question id: {question_id!r}")
 
 
@@ -335,7 +397,53 @@ def question_recommendation(question_id: str) -> str:
         return ("declare exactly one remote naming the canonical repository, "
                 "or author .agents/project.json with the intended project id "
                 "before planning again")
+    if question_id == "candidate-class":
+        return ("answer it with plan --answer candidate-class <subject> "
+                "<value>, using this entry's subject and value, and apply "
+                "the plan id that run prints; a null value marks a "
+                "secret-shaped path or a symlink out of the repository, with "
+                "no answer: add a central classification row for a "
+                "secret-shaped path, or remove either from the repository in "
+                "its own commit, then plan again")
+    if question_id == "path-reference":
+        return ("answer it with plan --answer path-reference <subject> "
+                "<value>, using this entry's subject and one of its "
+                "answers, and apply the plan id that run prints: extend "
+                "adds the additions this occurrence's path_references row "
+                "lists beside the literal, rewrite replaces the literal "
+                "with that row's replacement, and retain leaves the file "
+                "unchanged")
+    if question_id == "reference-policy":
+        return ("answer it with plan --answer reference-policy <subject> "
+                "<value>, using this entry's subject and one of its "
+                "answers, and apply the plan id that run prints; value is "
+                "the answer recommended for the class, or null when the "
+                "class has none: rewrite replaces every literal whose "
+                "path_references row offers rewrite with that row's "
+                "replacement, at the file's target, and leaves the rest "
+                "open, retain leaves the class's files unchanged, and a "
+                "path-reference answer on one occurrence overrides the "
+                "policy")
     raise ValueError(f"unknown question id: {question_id!r}")
+
+
+def candidate_answer(provenance: str, path: str,
+                     contained: bool) -> str | None:
+    """The offered answer for one undecided candidate (D4, D7, D13).
+
+    A tracked candidate is offered the archive unless its name looks secret
+    or it is not `contained` (a symlink resolving outside the repository,
+    whose move `apply` refuses), in which case no answer is offered; a
+    targeted-ignored one is offered retention. Any other provenance is not a
+    candidate source.
+    """
+    if provenance == "tracked":
+        if is_secret_path(path) or not contained:
+            return None
+        return "archive-history"
+    if provenance == "targeted-ignored":
+        return "retain-product"
+    raise ValueError(f"unknown candidate provenance: {provenance!r}")
 
 
 def plan_state_is_terminal(state: str) -> bool:
@@ -501,6 +609,28 @@ def contained_path(root: Path, relative: str) -> Path | None:
     return None
 
 
+def contained_relative(root: Path, relative: object) -> bool:
+    """Whether `relative` is a repository-relative path inside `root`.
+
+    `apply`'s check on every stored operation path, and `plan`'s on a tracked
+    candidate it would offer to move. Resolved rather than merely inspected,
+    so a component that is a symlink out of the checkout is caught as well as
+    a literal `..` or a leading `/`.
+    `strict=False`: a planned destination does not exist yet.
+    """
+    if not isinstance(relative, str) or not relative:
+        return False
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    try:
+        anchor = root.resolve(strict=True)
+        resolved = (anchor / candidate).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return resolved != anchor and anchor in resolved.parents
+
+
 def read_bytes_bounded(path: Path) -> bytes | None:
     try:
         return path.read_bytes()
@@ -510,16 +640,41 @@ def read_bytes_bounded(path: Path) -> bytes | None:
 # --------------------------------------------------------------------------
 # Git, as a child process
 #
-# The only process this module starts. Every query below is read-only; the
-# resolver is not among them, because it is reached by the entry point alone
-# and only ever as a subprocess at its absolute installed path (D26).
+# The only process this module starts. Every query below is read-only except
+# `fetch_pinned`, which writes the fetched objects and one remote-tracking ref;
+# the resolver is not among them, because it is reached by the entry point
+# alone and only ever as a subprocess at its absolute installed path (D26).
 # --------------------------------------------------------------------------
 
 
-def run_git(root: Path, *args: str) -> tuple[int, bytes]:
+# The one remote a registration reads from (D2): never configurable.
+REMOTE = "origin"
+
+# The bound of one git child, in seconds, unless a caller passes a tighter one.
+GIT_TIMEOUT_SECONDS = 300
+
+
+def run_git(root: Path, *args: str, network: bool = False,
+            local_only: bool = False, input: bytes | None = None,
+            timeout: float = GIT_TIMEOUT_SECONDS) -> tuple[int, bytes]:
+    """`git -C root args`, and its exit code and stdout.
+
+    A `network` call never prompts for credentials: it runs with
+    `GIT_TERMINAL_PROMPT=0`, so an unauthenticated remote fails instead of
+    hanging. A `local_only` call runs with `GIT_NO_LAZY_FETCH=1`, so a partial
+    clone answers a missing object as missing instead of fetching it from its
+    promisor remote. Every other call inherits the environment unchanged.
+    `input` is written to the command's stdin. The child is killed after
+    `timeout` seconds, which refuses `adopt.git.unavailable` like a git that
+    cannot start.
+    """
+    overrides = {**({"GIT_TERMINAL_PROMPT": "0"} if network else {}),
+                 **({"GIT_NO_LAZY_FETCH": "1"} if local_only else {})}
+    environment = {**os.environ, **overrides} if overrides else None
     try:
         proc = subprocess.run(["git", "-C", str(root), *args],
-                              capture_output=True, timeout=300)
+                              capture_output=True, timeout=timeout,
+                              env=environment, input=input)
     except (OSError, subprocess.SubprocessError):
         raise refuse("adopt_failure", "adopt.git.unavailable", "",
                      "git could not be started") from None
@@ -542,10 +697,17 @@ def split_nul(data: bytes) -> list[str]:
 # --------------------------------------------------------------------------
 # Inspection
 #
-# The whole boundary of R4.2, and nothing wider: tracked object ids, a closed
-# list of targeted ignored paths, two metadata-only trees, registered worktree
-# names, and untracked files overlapping an inspected source or a planned
-# destination.
+# The R4.2 inspection queries: tracked object ids, a closed list of targeted
+# ignored paths, two metadata-only trees, registered worktree names, and
+# untracked files overlapping an inspected source or a planned destination.
+# Beside them sit the queries `verify` reads a pinned revision with (its tree
+# inventory, its blobs and evidence records, and their ancestry) and the
+# operations `--register` reaches `origin` through: `has_remote`,
+# `remote_heads`'s one listing, `fetch_pinned`'s pinned fetch, `pin_listed`'s
+# pin of a listed commit and `export_commit`'s `git archive` export. Only
+# `remote_heads` and `fetch_pinned` touch the network, and `pin_listed` reaches
+# it through `fetch_pinned` alone: it writes nothing when the checkout already
+# holds the commit.
 # --------------------------------------------------------------------------
 
 
@@ -560,6 +722,157 @@ def tracked_inventory(root: Path) -> list[tuple[str, str]]:
                          "a tracked index record could not be read")
         inventory.append((path, fields[1]))
     return sorted(inventory)
+
+
+def tree_records(root: Path, revision: str) -> list[tuple[str, str, str]]:
+    """Every path in the tree at `revision` as sorted `(path, mode, oid)`.
+
+    From `git ls-tree -r -z`, whose records are `<mode> <type> <object>\t<path>`.
+    A record that has no path or not exactly three head fields refuses
+    `adopt.git.unparseable_tree`.
+    """
+    records = []
+    for record in split_nul(git_or_fail(root, "ls-tree", "-r", "-z",
+                                        revision)):
+        head, _, path = record.partition("\t")
+        fields = head.split()
+        if len(fields) != 3 or not path:
+            raise refuse("adopt_failure", "adopt.git.unparseable_tree", "",
+                         "a tree record could not be read")
+        records.append((path, fields[0], fields[2]))
+    return sorted(records)
+
+
+def tree_inventory(root: Path, revision: str) -> list[tuple[str, str]]:
+    """Every path in the tree at `revision` with its git object id.
+
+    `tree_records` without the mode: the same `(path, object id)` shape
+    `tracked_inventory` reads from the index.
+    """
+    return [(path, object_id)
+            for path, _, object_id in tree_records(root, revision)]
+
+
+def has_remote(root: Path) -> bool:
+    """Whether `origin` is a configured remote, from `git remote`."""
+    return REMOTE in git_or_fail(root, "remote").decode(
+        "utf-8", "surrogateescape").split()
+
+
+@dataclass(frozen=True)
+class RemoteHeads:
+    """What `origin` advertises: its default branch, every branch name and the
+    commit each lists.
+
+    `default` is the branch `HEAD` points at, and `None` when `HEAD` is not a
+    symref to a branch the remote also lists. `listed` maps a branch name to
+    the object id `origin` listed for it, kept only when the id is 40 or 64
+    lowercase hex characters.
+    """
+
+    default: str | None
+    branches: frozenset[str]
+    listed: Mapping[str, str]
+
+
+def remote_heads(root: Path,
+                 timeout: float = GIT_TIMEOUT_SECONDS) -> RemoteHeads:
+    """`origin`'s default branch, branch names and their commits, in one
+    `git ls-remote`.
+
+    `git ls-remote --symref origin HEAD refs/heads/*`. A non-zero exit refuses
+    `adopt.git.remote_unreachable`; a listing still running after `timeout`
+    seconds refuses `adopt.git.unavailable`.
+    """
+    code, out = run_git(root, "ls-remote", "--symref", REMOTE, "HEAD",
+                        "refs/heads/*", network=True, timeout=timeout)
+    if code != 0:
+        raise refuse("adopt_failure", "adopt.git.remote_unreachable", "",
+                     "the remote could not be listed")
+    target = None
+    branches = set()
+    listed = {}
+    for line in out.decode("utf-8", "surrogateescape").splitlines():
+        value, _, name = line.partition("\t")
+        if name == "HEAD" and value.startswith("ref: refs/heads/"):
+            target = value[len("ref: refs/heads/"):]
+        elif name.startswith("refs/heads/"):
+            branch = name[len("refs/heads/"):]
+            branches.add(branch)
+            if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+                listed[branch] = value
+    return RemoteHeads(
+        default=target if target in branches else None,
+        branches=frozenset(branches),
+        listed=types.MappingProxyType(listed))
+
+
+def fetch_pinned(root: Path, branch: str,
+                 timeout: float = GIT_TIMEOUT_SECONDS) -> str:
+    """Fetch `origin`'s `branch` into its remote-tracking ref; its commit id.
+
+    The refspec is explicit and forced, and `--refmap=` discards every
+    configured `remote.origin.fetch` mapping, so nothing but
+    `refs/remotes/origin/<branch>` and fetched objects is written: no
+    `FETCH_HEAD`, no tags, no maintenance, no submodules (D4, D11). The id is
+    then read back with `git rev-parse --verify`. Either command failing
+    refuses `adopt.git.fetch_failed`. `timeout` bounds the fetch alone: a fetch
+    still running after it refuses `adopt.git.unavailable`, and the read-back
+    keeps the default bound.
+    """
+    tracking = f"refs/remotes/{REMOTE}/{branch}"
+    code, _ = run_git(
+        root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+        "--no-auto-maintenance", "--no-recurse-submodules", "--refmap=",
+        REMOTE, f"+refs/heads/{branch}:{tracking}", network=True,
+        timeout=timeout)
+    if code == 0:
+        code, out = run_git(root, "rev-parse", "--verify", "--quiet",
+                            f"{tracking}^{{commit}}")
+    if code != 0:
+        raise refuse("adopt_failure", "adopt.git.fetch_failed", "",
+                     "the remote branch could not be fetched")
+    return out.decode("ascii", "strict").strip()
+
+
+def pin_listed(root: Path, branch: str, listed: str | None,
+               timeout: float = GIT_TIMEOUT_SECONDS) -> str:
+    """The commit to read `origin`'s `branch` at: `listed` when held, else a fetch.
+
+    When `listed` is the commit id `origin` listed for `branch` and the checkout
+    already holds that commit, it is returned and nothing else runs: no
+    remote-tracking ref, no `FETCH_HEAD` and no object is written. The check is
+    `local_only`, so a partial clone's missing commit counts as missing instead
+    of being fetched from its promisor remote. Otherwise (`listed` is `None` or
+    the commit is absent) the result is `fetch_pinned(root, branch, timeout)`,
+    whose refusals and writes apply unchanged.
+    """
+    if listed is not None:
+        code, _ = run_git(root, "cat-file", "-e", f"{listed}^{{commit}}",
+                          local_only=True)
+        if code == 0:
+            return listed
+    return fetch_pinned(root, branch, timeout)
+
+
+def export_commit(root: Path, commit: str, destination: Path) -> None:
+    """Extract the tracked files of `commit` into the new `destination`.
+
+    `git archive` to a sibling tarball, then the same bounded extraction the
+    cold-clone gate uses (`filter="data"`). A failed archive, tar error or OS
+    error refuses `adopt.git.export_failed`. `destination` must not exist.
+    """
+    archive = destination.with_name(destination.name + ".tar")
+    code, _ = run_git(root, "archive", "-o", str(archive), commit)
+    try:
+        if code != 0:
+            raise OSError("git archive did not succeed")
+        destination.mkdir()
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(destination, filter="data")
+    except (tarfile.TarError, OSError):
+        raise refuse("adopt_failure", "adopt.git.export_failed", "",
+                     "the remote commit could not be exported") from None
 
 
 def targeted_ignored(root: Path, targets: tuple[str, ...]) -> list[str]:
@@ -602,24 +915,26 @@ def registered_worktrees(root: Path) -> list[str]:
     return sorted(names)
 
 
-def blob_at_head(root: Path, relative: str) -> bytes | None:
-    """The tracked bytes of `relative` at `HEAD`, or None when it is not there.
+def blob_at(root: Path, revision: str, relative: str) -> bytes | None:
+    """The bytes of `relative` in the commit `revision`, or None when absent.
 
-    Read out of the commit rather than off disk, because every question
-    `verify` asks is about the committed state: an untracked working-tree file
-    must not be able to answer for a record the history does not carry (D34).
+    Read out of the commit named by `revision` rather than off disk, because
+    every question `verify` asks is about committed state: an untracked
+    working-tree file must not be able to answer for a record the history does
+    not carry (D34).
     """
-    code, out = run_git(root, "show", f"HEAD:{relative}")
+    code, out = run_git(root, "show", f"{revision}:{relative}")
     return out if code == 0 else None
 
 
-def tracked_evidence_records(root: Path) -> list[str]:
-    """Every `.agents/artifacts/evidence/*.json` path in the tree at `HEAD`.
+def evidence_records_at(root: Path, revision: str) -> list[str]:
+    """Every `.agents/artifacts/evidence/*.json` path in the tree at `revision`.
 
-    Listed from the commit, not walked on disk, and one level deep exactly as
-    the glob reads: a nested file is not one of the candidates D34 counts.
+    Listed from the commit named by `revision`, not walked on disk, and one
+    level deep exactly as the glob reads: a nested file is not one of the
+    candidates D34 counts.
     """
-    out = git_or_fail(root, "ls-tree", "-r", "--name-only", "-z", "HEAD",
+    out = git_or_fail(root, "ls-tree", "-r", "--name-only", "-z", revision,
                       "--", EVIDENCE_RECORD_DIR)
     return sorted(path for path in split_nul(out)
                   if is_evidence_record_path(path))
@@ -670,24 +985,28 @@ def parses_as_migration_map(data: bytes | None) -> dict | None:
     return source
 
 
-def introducing_commit(root: Path, relative: str) -> str | None:
-    """The commit that added `relative`, or None when git names none.
+def introducing_commit(root: Path, revision: str,
+                       relative: str) -> str | None:
+    """The commit that added `relative` in the history of `revision`, or None.
+
+    Read from the commit named by `revision`, never the working tree, so an
+    untracked file cannot answer for a record the history does not carry.
 
     The adoption record carries no commit identity and cannot — it is created
     *by* the commit that would name it — so the introducing commit is the only
     identity git already holds (D34).
     """
     code, out = run_git(root, "log", "--diff-filter=A", "--format=%H", "-1",
-                        "--", relative)
+                        revision, "--", relative)
     if code != 0:
         return None
     text = out.decode("utf-8", "surrogateescape").strip()
     return text.splitlines()[0] if text else None
 
 
-def commit_is_ancestor(root: Path, commit: str, branch: str) -> bool:
-    """Whether `commit` is reachable from `branch` (D19)."""
-    code, _ = run_git(root, "merge-base", "--is-ancestor", commit, branch)
+def commit_is_ancestor(root: Path, commit: str, revision: str) -> bool:
+    """Whether `commit` is reachable from `revision`, a commit id or ref (D19)."""
+    code, _ = run_git(root, "merge-base", "--is-ancestor", commit, revision)
     return code == 0
 
 
@@ -780,6 +1099,8 @@ class Candidates:
         self.moves: list[tuple[str, str]] = []
         self.tracked_paths: set[str] = set()
         self.groups: dict[str, dict] = {}
+        # Tracked undecided candidates that resolve outside the root (D13).
+        self.uncontained: set[str] = set()
 
 
 def classify_inventory(root: Path, inventory: Inventory) -> Candidates:
@@ -796,6 +1117,8 @@ def classify_inventory(root: Path, inventory: Inventory) -> Candidates:
                 found.entries.append(evidence_entry(
                     path, "tracked", "unclassified", "needs-decision", None, 1,
                     object_hash(object_id), NOTES["unclassified"]))
+                if not contained_relative(root, path):
+                    found.uncontained.add(path)
             continue
         if is_secret_path(path):
             found.entries.append(evidence_entry(
@@ -870,7 +1193,8 @@ def overlap_targets(found: Candidates) -> list[str]:
     """
     targets = {".agents"}
     for group, info in found.groups.items():
-        if info["action"] in ("move-canonical", "generate-projection"):
+        if (action_relocates(info["action"])
+                or info["action"] == "generate-projection"):
             targets.add(group)
         if info["target"]:
             targets.add(info["target"])

@@ -1,0 +1,81 @@
+# Cache proxy: shared subagent start-up prefix, blind re-test then reorder Implementation Plan
+
+> **For agentic workers:** execute this plan with the `sdd` skill — one implementer
+> per task, reviewed between tasks. Steps use `- [ ]` checkboxes.
+
+**Goal:** Re-measure blind, on mbp under account `p2`, whether moving a subagent's delegation prompt after its start-up attachments, with one added breakpoint, lets sibling 2 read at least 4,000 more cached tokens, and only on that go ship it as `cache-proxy --reorder`, on in both hosts' services ahead of the keepalive.
+
+**Architecture:** Task 1 is a throwaway recording harness in launch scratch. It runs fresh, interleaved off/on sibling pairs under a default routed launch's environment and applies, in the on arm, the very module text Task 2 commits. It appends § Attempt 2 to the attempt-1 report, whose `Attempt 2 verdict:` line is a hard gate. On go, the library module `agent_tools.subagent_prefix` holds the transform and its agent-id registry, tested on the re-test's sanitised fixtures. `cache-proxy --reorder` calls it after assembling the upstream headers and before the keepalive observes the request. Two evidence tasks then run built, unactivated launcher instances on free ports, with and without the flag.
+
+**Tech stack:** Python 3 standard library (`json`, `hmac`, `http.client`, `http.server`, `socketserver`, `threading`, `unittest`), bash, Nix (home-manager `launchd.agents`, `systemd.user.services`), `git worktree`, `jq`, `plutil`, `just`.
+
+Spec: `.agents/artifacts/specs/2026-10-26-issue-429-shared-subagent-prefix-design.md`; its `## Decision ledger` rows are cited by ID, and this plan appended D24–D30. Issue: https://github.com/fagenorn/nix-config/issues/429
+
+## Global Constraints
+
+- Base `20241ee3` (`origin/main`); the spec commit is `dc5d7fac`. Tasks land in index order, each consuming the earlier tasks its `Interfaces` name.
+- **Hard gate (D2).** If the report reads `Attempt 2 verdict: no-go` or `instrument-failure`, Task 1 commits the report and its usage file alone and reports BLOCKED `re-test gate: <verdict>`. No fixture, product code, acceptance record or PR follows, and the issue stays open for the user. Tasks 2–5 start only from a commit whose `docs/spikes/cache-proxy-prefix-retest.md` holds the whole line `Attempt 2 verdict: go`, checked at each Step 1.
+- **Blind (D3, D24).** No rule, phrase, threshold or scoring step of the spec or of Task 1 changes once Task 1's first slot has started; a failed rule scores `instrument-failure`. The re-test's rules commit is the head Task 1 starts from.
+- Files this plan changes, and no others: `docs/spikes/cache-proxy-prefix-retest.md` (appended only; attempt 1's bytes stay identical, D10), `docs/spikes/cache-proxy-prefix-retest-2-usage.md` and, only past 65,536 bytes, `docs/spikes/cache-proxy-prefix-retest-2-structure.md` (D25); `tests/fixtures/cache_proxy/` (seven files, D19); `.agents/artifacts/plans/2026-10-26-issue-429-shared-subagent-prefix.acceptance.md`; `python/agent_tools/subagent_prefix.py` (new); `python/agent_tools/cache_proxy.py`; `tests/test_cache_proxy.py`; `tests/test_cache_keepalive.py` (D27); `home/common/claude-code/default.nix`; `home/common/claude-code/README.md`; `python/README.md`; and `home/common/agent-skills/evals/results/results.jsonl`, which the eval runs append to.
+- Unchanged: `python/agent_tools/cache_keepalive.py` and #423's spike record `docs/spikes/cache-proxy-keepalive.md` (§ Out of scope), `CLAUDE.md`, `AGENTS.md`, every skill text, `home/common/claude-code/accounts/`, `home/linux/claude-local/`, `lib/agent-tools.nix` (`subagent_prefix` is a library module, no command row), `justfile` (both test files already run in `agent-workflow-tests`), `flake.lock`.
+- `agent_tools` code is standard library only and starts nothing at import; it follows `docs/standards/agent-helpers.md` rules 1–5, and a strict JSON load uses the `agent_tools.canonical` hooks. The proxy never changes the billing header and never rewrites a TTL (D11, D16).
+- **Ports and services.** Every experiment and evidence proxy binds port 0 on `127.0.0.1` and refuses 27183, 8160, 4322, 27450 and 27451. The installed service on 27183 is never stopped, reconfigured or connected to, and a process a task did not start is never killed. Nobody runs `just switch`, `launchctl` or `systemctl`; live evidence uses the outputs of `./result` from `just build`.
+- **Account.** `CLAUDE_ACCOUNT=p2`, by name; credentials are never read and accounts never switched. A usage limit stops the task at once: it reports BLOCKED `blocked_on=usage_limit`.
+- Do not touch #423 or its spike record, and post nothing to anthropics/claude-code.
+- **Routed-launch environment (D5).** Every experiment session runs with the caller's environment plus exactly `ANTHROPIC_BASE_URL=http://127.0.0.1:<that run's own instance port>`, `ENABLE_TOOL_SEARCH=true`, `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown` and `CLAUDE_ACCOUNT=p2`, plus what its task adds.
+- **Parent prompt (Tasks 1 and 4)**, with `<N>` a fresh `secrets.token_hex(4)` per run: `I429-PARENT-<N>. Use the Agent tool exactly twice, strictly one after the other: make the second call only after the first has returned. Both calls use subagent_type general-purpose. First call: description "sibling 1", prompt "I429-SIBLING-1-<N>. Read the file flake.nix in the current directory with the Read tool, then reply with exactly its first line." Second call: description "sibling 2", prompt "I429-SIBLING-2-<N>. Read the file flake.nix in the current directory with the Read tool, then reply with exactly its first line." When both have answered, reply with exactly: done`.
+- **Scratch worktrees.** `$S` is what `launch-scope scratch --repo-root <R> --run-id <I> --worker-id <W>` prints; nothing under it is committed. Each run starts from a new worktree, `git worktree add --detach <path under $S/i429/> HEAD`, which its task removes with `git worktree remove --force`.
+- **Credential custody (#422 D2).** Bodies and any bearer stay in scratch or in memory. Header values are written only for `anthropic-version`, `anthropic-beta`, `content-type`, `user-agent`, `x-app` and `x-stainless-*`; agent ids only as 12 hex digits of their sha256. Before any commit touching `docs/spikes/`, `tests/fixtures/` or the acceptance record, `if grep -nE 'sk-ant-|Bearer |oat01' <those files>; then exit 1; fi` passes, and so does the same check for `$(git config user.email)`; fixtures also hold no `/Users/`.
+- **Process custody.** Every long command, test runs included, runs in the foreground from the worktree root with an explicit timeout as `launch-scope exec --repo-root <R> --run-id <I> --worker-id <W> -- <argv>` (`launch-scope exec … --`). A server is started with the Bash tool's `run_in_background: true` around that prefix, waited for with one bounded `sleep` and curl's own `--retry`, and stopped by pid before its task reports. Never `nohup`, `setsid`, `disown` or a `sleep` loop. Commits go through `launch-commit --repo-root <R> --run-id <I> --worker-id <W> -- <git commit args>`; they are signed and end with the session's trailers.
+- **Deadline (D23).** `DEADLINE_AT=2026-10-26T22:27:10Z`. Minutes left (timeout 30 s): `python3 -I -c 'import datetime as d, sys; t = d.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")); print(int((t - d.datetime.now(d.timezone.utc)).total_seconds() // 60))' "$DEADLINE_AT"`. The re-test starts only with at least 45 minutes left and each of its slots with 17 (D29), each AC3 run with 15 and each eval arm with 50. A re-test that cannot start is BLOCKED with nothing committed. An evidence run that does not fit is not run and is recorded `human-pending` with its exact command; only the runs that ran are measured.
+- Prose that lands in the repository describes the code as it behaves at that task's commit.
+- Focused tests (timeout 600 s): `env PYTHONPATH="$PWD/python" python3 -m unittest -v tests/test_cache_proxy.py tests/test_cache_keepalive.py 2>&1 | tail -n 30`. Build (timeout 3600 s): `launch-scope exec … -- just build`. Final gate (sdd's, once on the final head): `just build` and `just agent-workflow-tests` (timeout 3600 s each).
+
+## Test seams
+
+- Transform (D14–D17, D19): `agent_tools.subagent_prefix.SubagentPrefix().transform` called directly on the D19 fixtures and on variants the tests derive from them, in `tests/test_cache_proxy.py`.
+- Proxy in-process (#422 D15): `cache_proxy.ProxyServer` on port 0, with or without a transform object, against `FakeUpstream`, which records raw request bytes.
+- Keepalive composition (D18, D27): `KeepaliveProxyTest` in `tests/test_cache_keepalive.py`, the keepalive's `FakeClock` and `tick()`.
+- Command: `python -m agent_tools.cache_proxy` as a subprocess (`--help`, `--reorder`, the existing round trip).
+- Nix (#422 D17): `just build`, plus `nix eval` of both darwin agents and the anis-desktop unit. CI `Nix Eval` covers anis-desktop.
+- Live: Task 1's harness, then the evidence runs of Tasks 4 and 5.
+
+## Delivery estimate and boundaries
+
+Estimates: 14 repository files on go, 2 on no-go. `subagent_prefix.py` about 190 lines; `test_cache_proxy.py` about +420; `test_cache_keepalive.py` about +30; `cache_proxy.py` about +40; `default.nix` +2; the READMEs about 20 lines together. The report grows from 45.5 KB to about 51 KB with § Attempt 2 and to about 57 KB with the AC3 and AC4 sections; the usage file is about 40–50 KB (D25). Seven fixtures of about 5–30 KB, each under 64 KiB. One review package is expected to fit.
+
+Wall clock (estimates), against 218 minutes left at planning: Task 1 about 30–40 min of harness work plus 4–5 slots of about 4 min; Tasks 2–3 about 50–70 min with reviews; Task 4 about 15 min; Task 5 two eval arms of about 5 min each (from-issue 1 took 246–322 s on 2026-10-25), but each needs 50 minutes left to start (D23). Tasks 4–5 may hit the cutoff.
+
+## Task index
+
+Task 1 — Blind re-test and the go/no-go gate — `docs/spikes/cache-proxy-prefix-retest.md`, `docs/spikes/cache-proxy-prefix-retest-2-usage.md` (and `-2-structure.md` past 64 KiB); on go also `tests/fixtures/cache_proxy/*.json` and `.agents/artifacts/plans/2026-10-26-issue-429-shared-subagent-prefix.acceptance.md` — full — [task-1.md](2026-10-26-issue-429-shared-subagent-prefix.tasks/task-1.md)
+Task 2 — The transform module and its registry — `python/agent_tools/subagent_prefix.py`, `tests/test_cache_proxy.py` — full — [task-2.md](2026-10-26-issue-429-shared-subagent-prefix.tasks/task-2.md)
+Task 3 — `cache-proxy --reorder`, the keepalive composition, the service flag and the docs — `python/agent_tools/cache_proxy.py`, `tests/test_cache_proxy.py`, `tests/test_cache_keepalive.py`, `home/common/claude-code/default.nix`, `home/common/claude-code/README.md`, `python/README.md` — full — [task-3.md](2026-10-26-issue-429-shared-subagent-prefix.tasks/task-3.md)
+Task 4 — AC3 evidence: sibling 2's start-up read, on and off — `docs/spikes/cache-proxy-prefix-retest.md`, `.agents/artifacts/plans/2026-10-26-issue-429-shared-subagent-prefix.acceptance.md` (and `-2-usage.md` past 64 KiB) — full — [task-4.md](2026-10-26-issue-429-shared-subagent-prefix.tasks/task-4.md)
+Task 5 — AC4 evidence: the A/B pipeline eval — `docs/spikes/cache-proxy-prefix-retest.md`, `.agents/artifacts/plans/2026-10-26-issue-429-shared-subagent-prefix.acceptance.md`, `home/common/agent-skills/evals/results/results.jsonl` (and `-2-usage.md` past 64 KiB) — full — [task-5.md](2026-10-26-issue-429-shared-subagent-prefix.tasks/task-5.md)
+
+## Acceptance map
+
+| AC | Kind | Task | Check |
+|----|------|------|-------|
+| AC1 | evidence | Task 1 | § Attempt 2 of `docs/spikes/cache-proxy-prefix-retest.md`, from Task 1's harness, with `H="python3 -I $S/i429/harness.py"` and every call ending `--repo "$PWD" --out $S/i429/results`: `$H next --deadline "$DEADLINE_AT"`, each `run` it prints as `launch-scope exec … -- $H run --arm <arm> --slot <id>` (Step 5), then `$H report --doc docs/spikes/cache-proxy-prefix-retest.md --usage docs/spikes/cache-proxy-prefix-retest-2-usage.md --meta $S/i429/meta.json` (Step 6), then Step 7 (`retest-report-ok`); over four slots off, on, off, on (plus at most one invalid-pair rerun and excluded-attempt reruns, D28) on mbp, account `p2`, Claude Code through the deployed wrapper under the routed-launch environment (D4, D5). Validity rules 1–6 and the kinds reading as pinned (D7, D8, D24). It holds the whole lines `Attempt 2 billing suffix:`, `Attempt 2 gain:`, `Attempt 2 verdict:` and `Attempt 2 request log: <n> requests, 0 unaccounted`, the pair, arithmetic and billing sections, and the usage file with every request's raw usage (D10, D25). Threshold: `Gain = min(R2 on) − max(R2 off) ≥ 4000` with every sibling first request 2xx is `go` (D9). Acceptance-record row `AC1`, filled on go; the PR links the report |
+| AC2 | code | Task 3 | `tests/test_cache_proxy.py` and `tests/test_cache_keepalive.py` under `just agent-workflow-tests`, plus `just build`. `SubagentPrefixTest` (Task 2): fixture pairs, sibling agreement before the prompt, later turns, the registry, one added mark and non-increasing TTLs, the cap, inner-content marks and the top-level slot, budget lines, and the `shape`, `unparsed` and `not_subagent` outcomes. `ReorderProxyTest` and `CommandTest` (Task 3): transformed bytes with a matching `Content-Length`, byte-identical parent and count-tokens requests, byte-identical bodies without the flag, the `reorder` field and `reorder_error`. `KeepaliveProxyTest` (Task 3): the ping replays the reordered body (D18) |
+| AC3 | evidence | Task 4 | Two parent runs on mbp, on then off, each against its own built-launcher instance `--port 0 --keepalive [--reorder]` with the built wrapper first on `PATH`, the routed-launch environment and `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` (D23). Each is read with `just agent-costs --report cache --projects-dir <its isolated transcript copy> --events-since <sibling 2's first record> --events-before <run end + 1 s>`. Threshold: the `general-purpose` start-up row's `1st read` (exact value from `scan_transcript`) is ≥ 10,000 on, and on − off ≥ 4,000 (D22). Acceptance-record row `AC3`; a run past the cutoff is `human-pending` |
+| AC4 | evidence | Task 5 | `just evals from-issue 1` once per arm on mbp, on first, against its own built-launcher instance `--port 0 --keepalive [--reorder]`, with the built wrapper first on `PATH` and the routed-launch environment (D23). Threshold: the on run prints `VERDICT: PASS`, and its `just agent-costs --format json --days 0 --projects-dir <an isolated copy of that eval's transcripts>` `.strata.claude.totals.cost_usd` (`cost_basis` `list-price`) is ≤ the off run's; each arm's `ping` usage is reported beside it, not gating (D18). Both appended `results.jsonl` lines are cited. Acceptance-record row `AC4`; an arm past the cutoff is `human-pending` |
+
+## Decisions
+
+- Scope, gate and blind rules: per D1, D2 and D3, with the plan's pins per D24. Runs, environment and keepalive posture: per D4, D5 and D6. Kinds and marks validity: per D7 and D8. Gate and forecast: per D9 and D22. Report and its layout: per D10, refined by D25. Billing answer: per D11 and D24. Documented cache semantics: per D21.
+- The transform: selection per D12, registry per D13, shape and output per D14, budget lines per D15, breakpoint per D16, interface and switch per D17, failure posture per D20; its one text home, header helpers and lazy import per D26.
+- Keepalive composition: per D18, tested per D27. Fixtures: per D19. Evidence runs and cutoffs: per D23. Excluded attempts: D28; per-slot deadline: D29; AC4's copy: D30.
+
+## Standards review provenance
+
+- `Codex` (gpt-6-astra, xhigh), thread `01a179a9-5db7-7fd2-bc64-f0754aa1f37e`, isolated read-only, fallback not used; base `20241ee3d819dc37277c75f1c5bff63d35dd31a6`, head `cd7f29c6`. Accepted 5, rejected 0, deferred 0.
+- 429-B1 accepted: Task 5's copy is keyed by session id via `find_sessions` and checked (D30).
+- 429-B2 accepted: records persist before scoring; a cut-short slot is an excluded, logged attempt (D28).
+- 429-B3 accepted: AC1's row names the harness commands.
+- 429-S1 accepted: a slot starts only with 17 minutes left, else `stop deadline` (D29).
+- 429-S2 accepted: Task 2 tests inner-content marks.
+
+---

@@ -2,11 +2,14 @@
 
 Everything `adopt-project apply` is made of below its command function: the
 stored document's loader, the validation of every caller-reachable operation,
-the typed execution of the operations themselves, the six pre-commit gates and
-their ordered run, the fixed commit message (D28), the two proofs taken over
-the commit once it exists — that it changes exactly the planned paths, and
-that the branch carries it and nothing else — and the retention of a failed
-attempt beside its worktree (D17).
+the typed execution of the operations themselves, the declared reference
+formatter and the proof that it stayed on the files it was given, the seven
+pre-commit gates and their ordered run, the fixed commit message (D28), the
+three proofs taken over the commit once it exists — that it changes exactly
+the planned paths, that no Markdown file in it has more non-resolving relative
+links than its pre-move counterpart, and that the branch carries it and
+nothing else — and the retention of a failed attempt beside its worktree
+(D17).
 
 Every refusal here mutates nothing, and nothing here trusts a stored
 operation: the plan id authenticates the plan's *inputs*, and the entry point
@@ -28,21 +31,32 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import json
+import os
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 import tarfile
 import tempfile
 
 from agent_tools import agent_platform
+from agent_tools.adopt_links import (
+    Tree,
+    broken_count,
+    index_records,
+    markdown_texts,
+    tree_records,
+)
 from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     AdoptError,
     COMMIT_GATES,
+    CONTRACT_FILENAME,
     OPERATION_KINDS,
     RUNTIME_SENTINEL,
     canonical_json,
     classify,
+    contained_relative,
     gate_entry,
     git_or_fail,
     is_agent_path,
@@ -126,24 +140,27 @@ def load_stored_plan(digest: str) -> dict:
     return document
 
 
-def contained_relative(root: Path, relative: object) -> bool:
-    """Whether `relative` is a repository-relative path inside `root`.
+def stored_answers(document: dict) -> list[dict]:
+    """The operator's answers the stored plan carries, or a refusal.
 
-    Resolved rather than merely inspected, so a component that is a symlink
-    out of the checkout is caught as well as a literal `..` or a leading `/`.
-    `strict=False`: a planned destination does not exist yet.
+    `apply` re-applies them before re-deriving the plan, so a stored value of
+    any other shape is refused here rather than handed to the shared
+    validation: each answer is exactly `{id, subject, value}` with string
+    values (D9).
     """
-    if not isinstance(relative, str) or not relative:
-        return False
-    candidate = Path(relative)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    try:
-        anchor = root.resolve(strict=True)
-        resolved = (anchor / candidate).resolve()
-    except (OSError, RuntimeError):
-        return False
-    return resolved != anchor and anchor in resolved.parents
+    decisions = document.get("decisions")
+    answered = decisions.get("answered") if isinstance(decisions, dict) \
+        else None
+    if (not isinstance(answered, list)
+            or any(not isinstance(answer, dict)
+                   or set(answer) != {"id", "subject", "value"}
+                   or any(not isinstance(value, str)
+                          for value in answer.values())
+                   for answer in answered)):
+        raise refuse(
+            "adopt_failure", "adopt.plan.malformed", "/decisions/answered",
+            "the stored plan's answered decisions are not well formed")
+    return answered
 
 
 def validate_operations(root: Path, operations: list[object]) -> None:
@@ -228,10 +245,13 @@ def expected_status(operations: list[dict]) -> tuple[list[tuple], set[tuple]]:
 
     A projection regeneration is idempotent: it is a no-op on a conformant
     source and a rewrite otherwise, so it is the one operation whose status
-    entry is permitted rather than demanded.
+    entry is permitted rather than demanded. A write onto a move's target is
+    that move's content, so it is satisfied by the move's record.
     """
     required: list[tuple] = []
     optional: set[tuple] = set()
+    moved = {operation["targets"][0]
+             for operation in operations if operation["op"] == "git-mv"}
     for operation in operations:
         kind = operation["op"]
         if kind == "git-mv":
@@ -239,6 +259,8 @@ def expected_status(operations: list[dict]) -> tuple[list[tuple], set[tuple]]:
                                     operation["sources"][0])))
         elif kind == "write-file":
             target = operation["targets"][0]
+            if target in moved:
+                continue
             required.append(
                 ("A " if operation["before"] is None else "M ", (target,)))
         elif kind == "delete-file":
@@ -249,6 +271,42 @@ def expected_status(operations: list[dict]) -> tuple[list[tuple], set[tuple]]:
         else:
             raise ValueError(f"unknown operation kind: {kind!r}")
     return required, optional
+
+
+def fold_split_renames(actual: list[tuple],
+                       required: list[tuple]) -> list[tuple]:
+    """`actual` with each split rename the plan demanded joined back up.
+
+    A moved Markdown file whose links were rewritten may be too dissimilar for
+    git's rename detection, which then reports the planned move as a deletion
+    plus an addition. For every required rename absent from `actual` while both
+    halves are present, the two records become the rename, at the deletion's
+    position; every other record is returned unchanged and in order (D16).
+
+    Git's pairing of a rename's source is itself a similarity guess: a
+    rewritten moved file can come out byte-identical to another moved file's
+    original, and git may then pair the wrong source with it. So every rename
+    record the plan did not demand is first split into its deletion and
+    addition, and the planned renames are folded back from those halves: the
+    comparison is over path effects, never over git's inferred pairing.
+    """
+    folded: list[tuple] = []
+    for record in actual:
+        code, paths = record
+        if code == "R " and len(paths) == 2 and record not in required:
+            folded.extend([("D ", (paths[1],)), ("A ", (paths[0],))])
+        else:
+            folded.append(record)
+    for record in required:
+        code, paths = record
+        if code != "R " or len(paths) != 2 or record in folded:
+            continue
+        target, source = paths
+        deletion, addition = ("D ", (source,)), ("A ", (target,))
+        if deletion in folded and addition in folded:
+            folded[folded.index(deletion)] = record
+            folded.remove(addition)
+    return folded
 
 
 def staged_object_id(root: Path, relative: str) -> str | None:
@@ -332,6 +390,177 @@ def operation_failure(message: str) -> AdoptError:
         "verification_failed", "adopt.operation.failed", "/changes", message)
 
 
+# How much of a failed formatter's stderr its refusal carries.
+STDERR_TAIL = 2000
+
+
+def format_failure(repair_id: str, message: str) -> AdoptError:
+    return refuse(
+        "verification_failed", repair_id, "/reference_formatting", message)
+
+
+def generated_file_sources(worktree: Path) -> set[str] | None:
+    """The sources of the worktree contract's `generated_file` projections.
+
+    A `generated_file` target holds its source's bytes, while a
+    `managed_import` line names only the source's path. None when the
+    contract cannot be read as a projection list, so the caller keeps every
+    projection source rather than guess which kind it feeds.
+    """
+    raw = read_bytes_bounded(worktree / CONTRACT_FILENAME)
+    try:
+        contract = json.loads(raw) if raw is not None else None
+    except ValueError:
+        return None
+    entries = contract.get("projections") if isinstance(contract, dict) \
+        else None
+    if not isinstance(entries, list):
+        return None
+    return {posixpath.normpath(entry["source"]) for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("kind") == "generated_file"
+            and isinstance(entry.get("source"), str)}
+
+
+def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
+                   run_resolver: Resolver) -> None:
+    """Run each declared formatter over the files its row names, and stage them.
+
+    A row's `command` is a key of the worktree's `bindings.commands`, read from
+    a `resolve` of the worktree taken here. It runs as a verification command
+    runs: its `argv`, then the row's files as absolute worktree paths in row
+    order, at the entry's `cwd`, output captured and no timeout. The row's files
+    are staged afterwards. Rows with no command are skipped, and a plan with
+    none names no formatter, so the resolver is not called at all.
+
+    Before anything runs, a file of a row that names a command and is the
+    `sources[0]` of a `regenerate-projection` operation whose projection is a
+    `generated_file` is refused, the paths compared after
+    `posixpath.normpath`, since the contract accepts a source spelled with a
+    `./` or a repeated `/`: that projection was regenerated from the
+    file's bytes before formatting, and regenerating it again would change a
+    planned `after`, so the target would be left stale behind a gate that
+    names the projection rather than the formatter. A `managed_import` renders
+    from its source's path alone, so formatting its source is allowed.
+
+    Once every command has run, `prove_formatting_confined` holds the formatter
+    to the files it was given. Any failure here is `verification_failed` with
+    `adopt.format.failed` (a formatted projection source, no resolving
+    contract, no entry for the id, a command that cannot start or exits
+    non-zero, a file that cannot be staged) or `adopt.format.unplanned_content`.
+    A command that cannot start is named in the message with its launch
+    error, and one that exits non-zero with its exit status and the tail of
+    its stderr.
+    """
+    declared = [row for row in rows if row["command"] is not None]
+    if not declared:
+        return
+    projected = {posixpath.normpath(operation["sources"][0])
+                 for operation in operations
+                 if operation["op"] == "regenerate-projection"}
+    rendered_from_bytes = generated_file_sources(worktree)
+    if rendered_from_bytes is not None:
+        projected &= rendered_from_bytes
+    for row in declared:
+        for path in row["files"]:
+            if posixpath.normpath(path) in projected:
+                raise format_failure(
+                    "adopt.format.failed",
+                    f"{path} is the source of a regenerated projection, so "
+                    "formatting it would leave that projection stale")
+    resolve_code, payload = run_resolver(worktree, "resolve")
+    bindings = payload.get("bindings") if isinstance(payload, dict) else None
+    commands = bindings.get("commands") if isinstance(bindings, dict) \
+        else None
+    if resolve_code != 0 or not isinstance(commands, dict):
+        raise format_failure(
+            "adopt.format.failed",
+            "the worktree's contract did not resolve to a command set")
+    formatted: set[str] = set()
+    for row in declared:
+        entry = commands.get(row["command"])
+        if not isinstance(entry, dict):
+            raise format_failure(
+                "adopt.format.failed",
+                "a declared formatter names no command of the contract")
+        argv = [*entry["argv"], *(str(worktree / path)
+                                  for path in row["files"])]
+        try:
+            proc = subprocess.run(argv, cwd=entry["cwd"],
+                                  capture_output=True)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise format_failure(
+                "adopt.format.failed",
+                f"the declared formatter {row['command']!r} could not be "
+                f"started: {error}") from None
+        if proc.returncode != 0:
+            tail = proc.stderr.decode("utf-8", "replace")[-STDERR_TAIL:]
+            raise format_failure(
+                "adopt.format.failed",
+                f"the declared formatter {row['command']!r} exited "
+                f"{proc.returncode}; stderr ends: {tail}")
+        code, _ = run_git(worktree, "add", "--", *row["files"])
+        if code != 0:
+            raise format_failure(
+                "adopt.format.failed",
+                "a formatted file could not be staged")
+        formatted.update(row["files"])
+    prove_formatting_confined(worktree, operations, formatted)
+
+
+def on_disk_object_id(worktree: Path, relative: str) -> str | None:
+    """The object id `git add` would store for the path as it is on disk.
+
+    A symlink is stored as its link text, so that text is hashed rather than
+    the file the link points to, which `git hash-object -- <path>` would read
+    and which does not exist for a dangling link or a link to a directory.
+    """
+    path = worktree / relative
+    if path.is_symlink():
+        code, out = run_git(worktree, "hash-object", "--stdin",
+                            input=os.fsencode(os.readlink(path)))
+    else:
+        code, out = run_git(worktree, "hash-object", "--", relative)
+    return out.decode("ascii", "replace").strip() if code == 0 else None
+
+
+def prove_formatting_confined(worktree: Path, operations: list[dict],
+                              formatted: set[str]) -> None:
+    """Refuse a formatter that touched a path it was not given.
+
+    For every planned path that is not a formatted file, the *last* operation
+    naming it as its first target and publishing an `after` must still hold:
+    the last decides because a moved file a later write edits is judged by the
+    write (D9). A `git-object:` hash is answered from the index, so the bytes
+    on disk are also hashed as `git add` would store them (a symlink as its
+    link text, see `on_disk_object_id`), which catches an unstaged edit of a
+    move-only destination (D17). A formatted file must be a
+    regular file, not a symlink. Paths no operation names are left to the
+    worktree-status gate and the commit-content proof.
+    """
+    last: dict[str, dict] = {}
+    for operation in operations:
+        if operation["targets"] and operation["after"] is not None:
+            last[operation["targets"][0]] = operation
+    for target, operation in sorted(last.items()):
+        if target in formatted:
+            continue
+        unchanged = operation_result_matches(worktree, operation)
+        if unchanged and operation["after"].startswith("git-object:"):
+            unchanged = (on_disk_object_id(worktree, target)
+                         == operation["after"].split(":", 1)[1])
+        if not unchanged:
+            raise format_failure(
+                "adopt.format.unplanned_content",
+                "a declared formatter changed a planned file it was not "
+                "given")
+    for path in sorted(formatted):
+        if not (worktree / path).is_file() or (worktree / path).is_symlink():
+            raise format_failure(
+                "adopt.format.unplanned_content",
+                "a formatted file is no longer a regular file")
+
+
 class GateRun:
     """One evaluation of the commit gates, and what they all read.
 
@@ -355,26 +584,56 @@ class GateRun:
 
 def gate_worktree_status_matches(run: GateRun) -> bool:
     required, optional = expected_status(run.operations)
-    actual = status_records(run.worktree)
+    actual = fold_split_renames(status_records(run.worktree), required)
     remaining = list(required)
     for record in actual:
         if record in remaining:
             remaining.remove(record)
             continue
-        # Git's rename detection is a similarity heuristic, so a planned
-        # deletion and a planned new file with similar content — a superseded
-        # evidence record and its successor — can be reported as one rename.
-        # That record is exactly the planned pair, and is accepted as such.
-        code, paths = record
-        if code == "R " and len(paths) == 2:
-            pair = [("D ", (paths[1],)), ("A ", (paths[0],))]
-            if all(entry in remaining for entry in pair):
-                for entry in pair:
-                    remaining.remove(entry)
-                continue
+        # A rename the plan did not demand — git pairing a superseded evidence
+        # record with its successor, say — arrives here already split into its
+        # planned deletion and addition (`fold_split_renames`).
         if record not in optional:
             return False
     return not remaining
+
+
+def new_broken_link_files(worktree: Path, base: list[tuple[str, str, str]],
+                          result: list[tuple[str, str, str]],
+                          operations: list[dict]) -> list[str]:
+    """The result paths with more non-resolving relative links than before.
+
+    Each side is judged against its own tree: the base's links against the
+    base's tracked paths, the result's against the result's. A moved file is
+    compared with the file it came from, through the plan's `git-mv`
+    operations, and a result file with no base counterpart is compared with
+    zero. Sorted, so the gate and the post-commit proof — which both call this
+    — name the same files from the same records (D9).
+    """
+    origin = {operation["targets"][0]: operation["sources"][0]
+              for operation in operations if operation["op"] == "git-mv"}
+    base_tree = Tree(path for path, _, _ in base)
+    result_tree = Tree(path for path, _, _ in result)
+    base_texts = markdown_texts(worktree, base)
+    return sorted(
+        path for path, text in markdown_texts(worktree, result).items()
+        if broken_count(path, text, result_tree) > (
+            broken_count(origin.get(path, path),
+                         base_texts[origin.get(path, path)], base_tree)
+            if origin.get(path, path) in base_texts else 0))
+
+
+def gate_no_new_broken_link(run: GateRun) -> bool:
+    """No Markdown file in the staged index gains a non-resolving link.
+
+    The base is the worktree's `HEAD` — the plan's base revision until the
+    commit exists — and the result is the index, each counted against its own
+    tree's tracked paths. It stays a gate so that a plan whose rewrites cannot
+    keep a link resolving refuses before any commit exists (D9).
+    """
+    return not new_broken_link_files(
+        run.worktree, tree_records(run.worktree, "HEAD"),
+        index_records(run.worktree), run.operations)
 
 
 def gate_projections_in_sync(run: GateRun) -> bool:
@@ -475,6 +734,7 @@ COMMIT_GATE_CHECKS = {
     "worktree-status-matches-operations": gate_worktree_status_matches,
     "projections-in-sync": gate_projections_in_sync,
     "no-unclassified-agent-path": gate_no_unclassified_agent_path,
+    "no-new-broken-link": gate_no_new_broken_link,
     "cold-clone-resolves": gate_cold_clone_resolves,
     "resolve-capabilities-available": gate_resolve_capabilities_available,
     "workflow-verification-commands": gate_workflow_verification_commands,
@@ -605,6 +865,24 @@ def prove_commit_content(worktree: Path, commit: str,
             "verification_failed", "adopt.commit.unplanned_content", "",
             "the adoption commit does not change exactly the paths the "
             "plan's operations declare")
+
+
+def prove_commit_links(worktree: Path, commit: str,
+                       operations: list[dict]) -> None:
+    """No Markdown file in the commit has more broken links than it did.
+
+    The verification commands run after the link gate and a `pre-commit` hook
+    after every gate, and either can edit a Markdown file the plan already
+    writes without changing the path set `prove_commit_content` reads. So the
+    commit's own links are counted against its parent's, by the same rule the
+    gate applies to the index (D17).
+    """
+    if new_broken_link_files(worktree, tree_records(worktree, commit + "^"),
+                             tree_records(worktree, commit), operations):
+        raise refuse(
+            "verification_failed", "adopt.commit.new_broken_link", "",
+            "the adoption commit carries more non-resolving relative "
+            "Markdown links in a file than its pre-move counterpart had")
 
 
 def prove_branch_carries_commit(root: Path, worktree: Path, branch: str,

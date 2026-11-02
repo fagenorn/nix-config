@@ -22,12 +22,52 @@ content only — still resolves.
 from __future__ import annotations
 
 import json
+import posixpath
 import subprocess
+import sys
+import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from agent_tools import (adopt_apply, adopt_inspection, adopt_links,
+                         adopt_planning, resolve_project)
 
 from .test_adopt_project import (
+    CHECK_LINKS,
+    CHECK_LINKS_EXTENDED,
+    COLLECT,
+    DEPTH_CODE,
+    DEPTH_DIR,
+    DEPTH_NEW,
+    DEPTH_RETAIN_ANSWERS,
+    DEPTH_REWRITE_ANSWERS,
+    DEPTH_ROWS,
     GITIGNORE_WITH_COMMENT,
+    JOBS_DIR,
+    JOBS_NEW,
+    JOBS_SCRIPT,
+    LINKED_AFTER,
+    LINKED_BASE,
+    LINKED_SOURCES,
+    LINKED_SUMMARY,
+    LINT_TOML,
+    MOVED_TOOL,
+    MOVED_TOOL_AFTER,
+    MOVED_TOOL_NEW,
+    MOVED_TOOL_SUBJECT,
+    POLICY_CODE,
+    POLICY_DIR,
+    POLICY_NEW,
+    POLICY_READY_ANSWERS,
+    POLICY_REWRITTEN,
+    REFERENCE_ROW,
+    REFERENCE_SUBJECT,
+    RUN_REPORT,
+    SETTINGS,
+    UNRELATED_SCRIPT,
+    VARIABLE_RETAIN_ANSWERS,
+    VARIABLE_REWRITE_ANSWERS,
+    answer_args,
     commit,
     fixture_contract,
     git,
@@ -36,7 +76,15 @@ from .test_adopt_project import (
     run,
     scaffold,
     tree_snapshot,
+    variable_code,
     write,
+    write_depth_tree,
+    write_dissolved_tree,
+    write_linked_tree,
+    write_moved_tool,
+    write_policy_tree,
+    write_reference_tree,
+    write_variable_tree,
 )
 
 CONTRACT = ".agents/project.json"
@@ -49,13 +97,15 @@ MOVED = {
 
 
 def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
-               signed: bool = False) -> Path:
+               signed: bool = False,
+               commands: dict[str, list[str]] | None = None) -> Path:
     """This repository's shape at base, with cheap verification commands.
 
     A valid schema-1 contract without `platform`, the three legacy artifact
     trees, a `.claude/skills.config.json`, a `.gitignore` still carrying the
     runtime pattern, and no runtime sentinel — the `reconcile` shape whose plan
-    reaches `ready`.
+    reaches `ready`. `commands` declares further contract commands by id, each
+    its argv run from the repository root.
     """
     root = init_repo()
     contract = fixture_contract()
@@ -65,12 +115,21 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     contract["bindings"]["commands"] = {
         "verify": {"argv": list(verification), "cwd": ".", "env": []},
         "review": {"argv": ["true"], "cwd": ".", "env": []},
+        **{command: {"argv": list(argv), "cwd": ".", "env": []}
+           for command, argv in (commands or {}).items()},
     }
     contract["bindings"]["workflow"]["verification"] = ["verify"]
+    # This repository's conditions name its own verification ids, gone here.
+    contract["bindings"]["workflow"].pop("verification_conditions", None)
     contract["bindings"]["workflow"]["review"] = {
         "plan": "review", "code": "review"}
     contract["bindings"]["vcs"]["commit"] = {
         "co_authored_by": True, "signed": signed}
+    # This repository's GitHub release profile derives a `blocked` release
+    # capability on any host without the forge adapter's executables on PATH;
+    # no apply case is about release, so the fixture opts out of it to keep the
+    # verdicts host-independent.
+    contract["release"] = "unsupported"
     scaffold(root, contract, home)
     # The projections were rendered from a contract that still declared
     # `platform`; dropping the member afterwards leaves them in sync, because a
@@ -112,6 +171,32 @@ def readoption_repo(home: Path) -> tuple[Path, dict]:
     write(root, "AGENTS.md", "hand-edited\n")
     commit(root, "drift a projection")
     return root, first
+
+
+ODD = ".claude/odd.md"
+ARCHIVED = ".agents/knowledge/archive/adopted/.claude/odd.md"
+
+
+def answered_repo(home: Path) -> Path:
+    """`apply_repo` plus one tracked agent path no row classifies (#340)."""
+    root = apply_repo(home)
+    write(root, ODD, "# odd\n")
+    commit(root, "add an unclassified agent path")
+    return root
+
+
+def linked_apply_repo(home: Path, **options) -> Path:
+    """`apply_repo` plus #345's inbound and outbound relative links."""
+    root = apply_repo(home, **options)
+    write_linked_tree(root)
+    return root
+
+
+def referenced_apply_repo(home: Path) -> Path:
+    """`apply_repo` plus #350's link-check script and its reference tree."""
+    root = apply_repo(home)
+    write_reference_tree(root)
+    return root
 
 
 class ApplyTestCase(unittest.TestCase):
@@ -194,6 +279,27 @@ class ApplyTestCase(unittest.TestCase):
     def succeed(self, root: Path, plan_id: str, *extra: str) -> dict:
         exit_code, payload, err = self.apply(plan_id, *extra)
         self.assertEqual(exit_code, 0, err or payload)
+        return payload
+
+    def assert_retained(self, root: Path, plan_id: str, base: str,
+                        repair_id: str) -> dict:
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["code"], "verification_failed")
+        self.assertEqual(payload["error"]["repair_id"], repair_id)
+        self.assertTrue(self.worktree(plan_id).is_dir())
+        evidence = self.state(
+            "adopt", "worktrees", self.digest(plan_id) + ".failure.json")
+        self.assertTrue(evidence.is_file())
+        record = json.loads(evidence.read_text("utf-8"))
+        self.assertEqual(record["plan_id"], plan_id)
+        self.assertEqual(record["repair_id"], repair_id)
+        # The target branch never moved and the target holds no new commit.
+        self.assertEqual(git(root, "rev-parse", "HEAD").strip(), base)
+        self.assertEqual(git(root, "status", "--porcelain"), "")
+        self.assertEqual(
+            git(root, "rev-list", "--count",
+                f"{base}..adopt-{self.digest(plan_id)[:12]}").strip(), "0")
         return payload
 
     def branch_files(self, root: Path, branch: str) -> list[str]:
@@ -539,6 +645,83 @@ class DeletionAcknowledgementTest(ApplyTestCase):
         self.succeed(root, plan_id, "--acknowledge-deletions")
 
 
+class AnsweredCandidateApplyTest(ApplyTestCase):
+    """#340: `apply` re-derives an answered plan from its stored answers."""
+
+    MALFORMED = ([{"id": "candidate-class", "subject": ODD}],
+                 {"id": "candidate-class"},
+                 [{"id": "candidate-class", "subject": ODD, "value": None}])
+
+    def planned(self, root: Path, *extra: str) -> dict:
+        code, out, err = run("plan", "--repo-root", str(root), *extra,
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        return json.loads(out)
+
+    def answered_plan(self, root: Path) -> str:
+        document = self.planned(root, "--answer", "candidate-class", ODD,
+                                "archive-history")
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return document["plan"]["plan_id"]
+
+    def edit_answers(self, plan_id: str, answered: object) -> None:
+        document = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
+        document["decisions"]["answered"] = answered
+        self.rewrite_stored_plan(plan_id, document)
+
+    def assert_malformed(self, root: Path, plan_id: str) -> None:
+        for answered in self.MALFORMED:
+            with self.subTest(answered=answered):
+                self.edit_answers(plan_id, answered)
+                payload = self.refuse(root, plan_id, "adopt_failure")
+                self.assertEqual(payload["error"]["repair_id"],
+                                 "adopt.plan.malformed")
+
+    def test_an_answered_plan_archives_the_candidate(self):
+        root = answered_repo(self.home)
+        plan_id = self.answered_plan(root)
+        result = self.succeed(root, plan_id)
+        files = self.branch_files(root, result["branch"])
+        self.assertIn(ARCHIVED, files)
+        self.assertNotIn(ODD, files)
+        moves = json.loads(git(
+            root, "show", f"{result['branch']}:{result['migration_map']}"))
+        self.assertIn({"old_path": ODD, "new_path": ARCHIVED},
+                      moves["moves"])
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        self.assertIn({"id": "candidate-class", "subject": ODD,
+                       "value": "archive-history"},
+                      record["decisions_accepted"])
+        stored = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
+        self.assertEqual(
+            {gate["status"] for gate in stored["verification"]["commit_gates"]},
+            {"passed"})
+
+    def test_a_removed_stored_answer_is_plan_stale(self):
+        root = answered_repo(self.home)
+        plan_id = self.answered_plan(root)
+        self.edit_answers(plan_id, [])
+        self.refuse(root, plan_id, "plan_stale")
+
+    def test_a_malformed_stored_answer_refuses_before_anything_runs(self):
+        root = answered_repo(self.home)
+        self.assert_malformed(root, self.answered_plan(root))
+
+    def test_a_malformed_answer_on_a_draft_refuses_before_not_ready(self):
+        root = answered_repo(self.home)
+        draft = self.planned(root)
+        self.assertEqual(draft["plan"]["state"], "draft")
+        self.assert_malformed(root, draft["plan"]["plan_id"])
+
+    def test_an_unstaged_edit_to_an_archived_source_is_a_dirty_worktree(self):
+        root = answered_repo(self.home)
+        plan_id = self.answered_plan(root)
+        write(root, ODD, "# edited\n")
+        self.refuse(root, plan_id, "dirty_worktree")
+
+
 class ReadoptionTest(ApplyTestCase):
     """A second adoption supersedes the first one's evidence record.
 
@@ -573,32 +756,793 @@ class ReadoptionTest(ApplyTestCase):
                             self.first["evidence_record"])
 
 
+class LinkRewriteApplyTest(ApplyTestCase):
+    """#345: the adoption commit keeps every resolving relative link
+    resolving, and refuses one that would break."""
+
+    def test_the_linked_fixture_applies_with_every_link_resolving(self):
+        root = linked_apply_repo(self.home)
+        document = self.ready_plan(root)
+        branch = self.succeed(root, document["plan"]["plan_id"])["branch"]
+        for path, text in LINKED_AFTER.items():
+            self.assertEqual(git(root, "show", f"{branch}:{path}"), text)
+        # Already-broken links, URLs and files no link change touches are
+        # byte-identical, wherever they now live.
+        for old, new in ((".claude/plans/y.md", ".agents/artifacts/plans/y.md"),
+                         (".out-of-scope/z.md",
+                          ".agents/knowledge/rejections/z.md"),
+                         (".agents/instructions/bootstrap.md",
+                          ".agents/instructions/bootstrap.md")):
+            self.assertEqual(git(root, "show", f"{branch}:{new}"),
+                             git(root, "show", f"HEAD:{old}"))
+        base_tree = adopt_links.Tree(
+            git(root, "ls-tree", "-r", "--name-only", "HEAD").splitlines())
+        after_tree = adopt_links.Tree(
+            git(root, "ls-tree", "-r", "--name-only", branch).splitlines())
+        for new, source in LINKED_SOURCES.items():
+            before = adopt_links.links(LINKED_BASE[source])
+            after = adopt_links.links(LINKED_AFTER[new])
+            self.assertEqual(len(after), len(before), new)
+            for old_link, new_link in zip(before, after):
+                if not adopt_links.is_relative(old_link.target):
+                    self.assertEqual(new_link.target, old_link.target)
+                elif adopt_links.resolve(source, old_link.target,
+                                         base_tree) is None:
+                    self.assertEqual(new_link.target, old_link.target)
+                else:
+                    self.assertIsNotNone(adopt_links.resolve(
+                        new, new_link.target, after_tree), new_link.target)
+
+    def test_the_evidence_record_carries_the_summary(self):
+        root = linked_apply_repo(self.home)
+        document = self.ready_plan(root)
+        self.assertEqual(document["link_rewrites"], LINKED_SUMMARY)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        self.assertEqual(record["link_rewrites"], LINKED_SUMMARY)
+
+    def test_an_unrewritable_link_fails_the_commit_gate(self):
+        root = apply_repo(self.home)
+        write_dissolved_tree(root)
+        code, out, err = run("plan", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "draft")
+        plan_id = document["plan"]["plan_id"]
+        # Forced past the ready gate (D11): only the commit gate stands
+        # between this plan and a commit that breaks `README.md`'s link.
+        stored = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
+        stored["plan"]["state"] = "ready"
+        self.rewrite_stored_plan(plan_id, stored)
+        base = git(root, "rev-parse", "HEAD").strip()
+        self.assert_retained(root, plan_id, base,
+                             "adopt.gate.no-new-broken-link")
+        record = json.loads(self.state(
+            "adopt", "worktrees",
+            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+        self.assertEqual([gate["id"] for gate in record["gates"]
+                          if gate["status"] == "failed"],
+                         ["no-new-broken-link"])
+
+
+class PathReferenceApplyTest(ApplyTestCase):
+    """#350: an answered path reference is edited in the adoption commit."""
+
+    def answered_plan(self, root: Path, value: str) -> dict:
+        code, out, err = run("plan", "--repo-root", str(root), "--answer",
+                             "path-reference", REFERENCE_SUBJECT, value,
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return document
+
+    def check(self, root: Path, revision: str) -> tuple[int, str]:
+        """The fixture's own link check, run on an export of `revision`."""
+        export = Path(tempfile.mkdtemp()) / "tree"
+        adopt_inspection.export_commit(root, revision, export)
+        proc = subprocess.run(
+            [sys.executable, str(export / CHECK_LINKS), str(export)],
+            capture_output=True, text=True, timeout=120)
+        return proc.returncode, proc.stdout
+
+    def test_the_extended_script_passes_on_the_adopt_commit_as_on_base(self):
+        root = referenced_apply_repo(self.home)
+        document = self.answered_plan(root, "extend")
+        branch = self.succeed(root, document["plan"]["plan_id"])["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{CHECK_LINKS}"),
+                         CHECK_LINKS_EXTENDED)
+        self.assertEqual(git(root, "show", f"{branch}:{UNRELATED_SCRIPT}"),
+                         git(root, "show", f"HEAD:{UNRELATED_SCRIPT}"))
+        self.assertEqual(
+            git(root, "rev-list", "--count", f"HEAD..{branch}").strip(), "1")
+        base = self.check(root, "HEAD")
+        self.assertEqual(base, (0, "ok\n"))
+        self.assertEqual(self.check(root, branch), base)
+
+    def test_a_retained_reference_leaves_the_check_failing(self):
+        root = referenced_apply_repo(self.home)
+        document = self.answered_plan(root, "retain")
+        branch = self.succeed(root, document["plan"]["plan_id"])["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{CHECK_LINKS}"),
+                         git(root, "show", f"HEAD:{CHECK_LINKS}"))
+        self.assertEqual(self.check(root, branch),
+                         (1, ".agents/artifacts/specs/x.md: missing.md\n"))
+
+    def test_the_evidence_record_lists_the_answer_and_the_row(self):
+        root = referenced_apply_repo(self.home)
+        document = self.answered_plan(root, "extend")
+        result = self.succeed(root, document["plan"]["plan_id"])
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        self.assertIn({"id": "path-reference", "subject": REFERENCE_SUBJECT,
+                       "value": "extend"}, record["decisions_accepted"])
+        self.assertEqual(record["path_references"],
+                         [{**REFERENCE_ROW, "answer": "extend",
+                           "decided_by": "occurrence"}])
+        self.assertEqual(record["path_references"],
+                         document["path_references"])
+
+
+class MovedFileReferenceApplyTest(ApplyTestCase):
+    """#372 D1: the edit of a moved file is part of the adoption commit."""
+
+    def test_the_moved_script_is_rewritten_at_its_destination(self):
+        root = apply_repo(self.home)
+        write_moved_tool(root)
+        code, out, err = run("plan", "--repo-root", str(root), "--answer",
+                             "path-reference", MOVED_TOOL_SUBJECT, "rewrite",
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        branch = self.succeed(root, document["plan"]["plan_id"])["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{MOVED_TOOL_NEW}"),
+                         MOVED_TOOL_AFTER)
+        self.assertNotIn(MOVED_TOOL, self.branch_files(root, branch))
+        self.assertEqual(
+            git(root, "rev-list", "--count", f"HEAD..{branch}").strip(), "1")
+
+
+class ReferencePolicyApplyTest(ApplyTestCase):
+    """#372: moved code is rewritten at its destination, by class, in the
+    one adoption commit."""
+
+    def applied(self) -> tuple[Path, dict, dict]:
+        """The policy fixture, planned with every answer and applied."""
+        root = apply_repo(self.home)
+        write_policy_tree(root)
+        code, out, err = run("plan", "--repo-root", str(root),
+                             *answer_args(*POLICY_READY_ANSWERS),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return root, document, self.succeed(root, document["plan"]["plan_id"])
+
+    def run_report(self, root: Path, revision: str) -> tuple[int, str]:
+        """The fixture's outside script, run from the root of an export of
+        `revision`."""
+        export = Path(tempfile.mkdtemp()) / "tree"
+        adopt_inspection.export_commit(root, revision, export)
+        proc = subprocess.run(
+            [sys.executable, RUN_REPORT], cwd=export, capture_output=True,
+            text=True, timeout=120)
+        return proc.returncode, proc.stdout
+
+    def test_rewritten_files_land_at_their_destinations_in_one_commit(self):
+        root, _, result = self.applied()
+        branch = result["branch"]
+        self.assertEqual(
+            git(root, "rev-list", "--count", f"HEAD..{branch}").strip(), "1")
+        for path, text in POLICY_REWRITTEN.items():
+            with self.subTest(path=path):
+                self.assertEqual(git(root, "show", f"{branch}:{path}"), text)
+        for path in (f"{POLICY_NEW}/report.py", f"{POLICY_NEW}/paths.py",
+                     f"{POLICY_NEW}/devenv.nix", RUN_REPORT):
+            with self.subTest(path=path):
+                self.assertNotIn(".claude/",
+                                 git(root, "show", f"{branch}:{path}"))
+        self.assertEqual(
+            [path for path in self.branch_files(root, branch)
+             if path.startswith(".claude/notes")], [])
+
+    def test_the_outside_command_runs_on_the_adopt_commit_as_on_base(self):
+        root, _, result = self.applied()
+        base = self.run_report(root, "HEAD")
+        self.assertEqual(base, (0, "study\n"))
+        self.assertEqual(self.run_report(root, result["branch"]), base)
+
+    def test_the_pattern_exclusion_is_extended(self):
+        root, document, result = self.applied()
+        (row,) = [row for row in document["path_references"]
+                  if row["path"] == LINT_TOML]
+        self.assertEqual((row["literal"], row["answer"]),
+                         (r"^\\.claude/", "extend"))
+        text = git(root, "show", f"{result['branch']}:{LINT_TOML}")
+        self.assertEqual(text, POLICY_REWRITTEN[LINT_TOML])
+        for element in ('"^\\\\.claude/"', *(
+                f'"{addition}"' for addition in row["additions"])):
+            with self.subTest(element=element):
+                self.assertIn(element, text)
+        self.assertEqual(len(row["additions"]), 3)
+
+    def test_the_settings_file_stays_in_place_with_a_null_destination(self):
+        root, document, result = self.applied()
+        branch = result["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{SETTINGS}"),
+                         git(root, "show", f"HEAD:{SETTINGS}"))
+        self.assertEqual(
+            [op for op in document["changes"]
+             if SETTINGS in op["sources"] + op["targets"]], [])
+        record = json.loads(git(
+            root, "show", f"{branch}:{result['evidence_record']}"))
+        (source,) = [row for row in record["sources"]
+                     if row["path"] == SETTINGS]
+        self.assertIsNone(source["after"])
+        self.assertIsNotNone(source["before"])
+
+    def test_retained_and_unnamed_files_keep_their_bytes(self):
+        root, _, result = self.applied()
+        branch = result["branch"]
+        for old, new in ((f"{POLICY_DIR}/record.json",
+                          f"{POLICY_NEW}/record.json"),
+                         (".agents/instructions/bootstrap.md",
+                          ".agents/instructions/bootstrap.md")):
+            with self.subTest(path=new):
+                self.assertEqual(git(root, "show", f"{branch}:{new}"),
+                                 git(root, "show", f"HEAD:{old}"))
+        self.assertEqual(
+            git(root, "show", f"{branch}:{POLICY_NEW}/record.json"),
+            POLICY_CODE[f"{POLICY_DIR}/record.json"])
+
+    def test_the_evidence_record_lists_the_policy_answers_and_rows(self):
+        root, document, result = self.applied()
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        for question, subject, value in POLICY_READY_ANSWERS:
+            with self.subTest(subject=subject):
+                self.assertIn(
+                    {"id": question, "subject": subject, "value": value},
+                    record["decisions_accepted"])
+        self.assertEqual(record["reference_policies"],
+                         document["reference_policies"])
+        self.assertEqual(record["path_references"],
+                         document["path_references"])
+        self.assertEqual(
+            [(row["class"], row["answer"], row["open"])
+             for row in record["reference_policies"]],
+            [(".json", "retain", 0), (".nix", "rewrite", 0),
+             (".py", "rewrite", 0)])
+        self.assertEqual(record["plan_id"], document["plan"]["plan_id"])
+
+
+class VariablePolicyApplyTest(ApplyTestCase):
+    """#376 AC2: a `$var/`-joined path is rewritten at the destination in
+    the adoption commit, or its file is left byte-identical."""
+
+    def applied(self, answers: tuple) -> tuple[Path, dict, dict]:
+        root = apply_repo(self.home)
+        write_variable_tree(root)
+        code, out, err = run("plan", "--repo-root", str(root),
+                             *answer_args(*answers), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return root, document, self.succeed(root, document["plan"]["plan_id"])
+
+    def test_rewrite_lands_at_the_destination(self):
+        root, document, result = self.applied(VARIABLE_REWRITE_ANSWERS)
+        branch = result["branch"]
+        code = variable_code()
+        script = git(root, "show", f"{branch}:{JOBS_NEW}/run.sh")
+        self.assertEqual(script,
+                         code[JOBS_SCRIPT].replace(JOBS_DIR, JOBS_NEW))
+        self.assertIn(f'"$root/{JOBS_NEW}/data.txt"', script)
+        self.assertNotIn(".claude/", script)
+        self.assertEqual(
+            git(root, "show", f"{branch}:{COLLECT}.sh"),
+            code[f"{COLLECT}.sh"].replace(JOBS_DIR, JOBS_NEW))
+        record = json.loads(git(
+            root, "show", f"{branch}:{result['evidence_record']}"))
+        for question, subject, value in VARIABLE_REWRITE_ANSWERS:
+            with self.subTest(subject=subject):
+                self.assertIn(
+                    {"id": question, "subject": subject, "value": value},
+                    record["decisions_accepted"])
+        self.assertEqual(record["reference_policies"],
+                         document["reference_policies"])
+        self.assertEqual(record["path_references"],
+                         document["path_references"])
+
+    def test_retain_keeps_the_base_blob(self):
+        root, _, result = self.applied(VARIABLE_RETAIN_ANSWERS)
+        branch = result["branch"]
+        self.assertEqual(
+            git(root, "rev-parse", f"{branch}:{JOBS_NEW}/run.sh"),
+            git(root, "rev-parse", f"HEAD:{JOBS_SCRIPT}"))
+        self.assertEqual(git(root, "show", f"{branch}:{COLLECT}.sh"),
+                         git(root, "show", f"HEAD:{COLLECT}.sh"))
+
+
+def climbed(directory: str, climb: str) -> str:
+    """Where a text climb or a `.parents[N]` chain on `directory` lands,
+    under a stand-in root `/r`, so a climb above the root stays visible."""
+    start = PurePosixPath("/r", directory)
+    if climb.startswith(".parents["):
+        return str(start.parents[int(climb[len(".parents["):-1])])
+    return posixpath.normpath(posixpath.join(str(start), climb))
+
+
+class DepthPolicyApplyTest(ApplyTestCase):
+    """#380 AC1: `rewrite` keeps each climb's landing point, `retain` keeps
+    each file byte-identical."""
+
+    def applied(self, answers: tuple) -> tuple[Path, dict, dict]:
+        root = apply_repo(self.home)
+        write_depth_tree(root)
+        code, out, err = run("plan", "--repo-root", str(root),
+                             *answer_args(*answers), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return root, document, self.succeed(root, document["plan"]["plan_id"])
+
+    def test_rewrite_lands_where_the_base_climb_landed(self):
+        root, document, result = self.applied(DEPTH_REWRITE_ANSWERS)
+        branch = result["branch"]
+        rows = document["path_references"]
+        self.assertEqual([row["subject"] for row in rows],
+                         [row[0] for row in DEPTH_ROWS])
+        for row in rows:
+            with self.subTest(subject=row["subject"]):
+                base = posixpath.dirname(row["path"])
+                after = posixpath.dirname(row["target"])
+                self.assertEqual(climbed(after, row["replacement"]),
+                                 climbed(base, row["literal"]))
+                self.assertNotEqual(climbed(after, row["literal"]),
+                                    climbed(base, row["literal"]))
+                text = git(root, "show", f"{branch}:{row['target']}")
+                self.assertEqual(text, DEPTH_CODE[row["path"]].replace(
+                    row["literal"], row["replacement"]))
+        record = json.loads(git(
+            root, "show", f"{branch}:{result['evidence_record']}"))
+        for question, subject, value in DEPTH_REWRITE_ANSWERS:
+            with self.subTest(subject=subject):
+                self.assertIn(
+                    {"id": question, "subject": subject, "value": value},
+                    record["decisions_accepted"])
+        self.assertEqual(record["path_references"], rows)
+        self.assertEqual(record["reference_policies"],
+                         document["reference_policies"])
+
+    def test_retain_keeps_the_base_blobs(self):
+        root, _, result = self.applied(DEPTH_RETAIN_ANSWERS)
+        branch = result["branch"]
+        for name in ("run.py", "pyproject.toml", "uv.lock"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    git(root, "rev-parse", f"{branch}:{DEPTH_NEW}/{name}"),
+                    git(root, "rev-parse", f"HEAD:{DEPTH_DIR}/{name}"))
+
+
+# #376 D15: the fixture's own lint and formatter, standard-library scripts
+# that walk `*.py` from their working directory, so the same lint runs in
+# the adoption worktree and on an export of the adoption commit.
+LINT = "tools/lint.py"
+FORMATTER = "tools/format.py"
+LINT_TEXT = (
+    "import pathlib\n"
+    "import sys\n"
+    "\n"
+    "LIMIT = 60\n"
+    "long = []\n"
+    'for path in sorted(pathlib.Path(".").rglob("*.py")):\n'
+    '    text = path.read_text(encoding="utf-8")\n'
+    "    for number, line in enumerate(text.splitlines(), 1):\n"
+    "        if len(line) > LIMIT:\n"
+    '            long.append(f"{path}:{number}")\n'
+    'print("\\n".join(long))\n'
+    "sys.exit(1 if long else 0)\n")
+# Rewraps a `name = value` line over the limit and strips trailing
+# whitespace in the files it is given; `--fail` exits non-zero and each
+# `--touch PATH` appends a line to PATH first.
+FORMATTER_TEXT = (
+    "import sys\n"
+    "\n"
+    "LIMIT = 60\n"
+    "args = sys.argv[1:]\n"
+    'if args[:1] == ["--fail"]:\n'
+    "    sys.exit(3)\n"
+    'while args[:1] == ["--touch"]:\n'
+    '    with open(args[1], "a", encoding="utf-8") as handle:\n'
+    '        handle.write("# touched\\n")\n'
+    "    args = args[2:]\n"
+    "\n"
+    "\n"
+    "def wrapped(line):\n"
+    '    head, sep, tail = line.partition(" = ")\n'
+    "    if len(line) <= LIMIT or not sep:\n"
+    "        return [line]\n"
+    '    return [head + " = (", "    " + tail, ")"]\n'
+    "\n"
+    "\n"
+    "for name in args:\n"
+    '    with open(name, encoding="utf-8") as handle:\n'
+    "        lines = handle.read().splitlines()\n"
+    "    out = []\n"
+    "    for line in lines:\n"
+    "        out.extend(wrapped(line.rstrip()))\n"
+    '    with open(name, "w", encoding="utf-8") as handle:\n'
+    '        handle.write("".join(x + "\\n" for x in out))\n')
+ANALYZER = "tests/test_analyzer.py"
+ANALYZER_SUBJECT = f"{ANALYZER}:1:34"
+ANALYZER_TEXT = 'ANALYZER_SPEC_PATH_UNDER_TEST = ".claude/specs/x.md"\n'
+ANALYZER_REWRITTEN = ANALYZER_TEXT.replace(".claude/specs",
+                                           ".agents/artifacts/specs")
+# #376 COR-001: a `generated_file` projection rendered from the analyzer.
+PROJECTED_ANALYZER = "generated/analyzer.txt"
+# #376 COR-PROJECTION-KIND: a `managed_import` naming the analyzer by path.
+IMPORTED_ANALYZER = "generated/analyzer-import.txt"
+ANALYZER_FORMATTED = ('ANALYZER_SPEC_PATH_UNDER_TEST = (\n'
+                      '    ".agents/artifacts/specs/x.md"\n'
+                      ')\n')
+CLEAN = "tests/clean.py"
+CLEAN_TEXT = "VALUE = 1   \n"
+# A moved file no link rewrite edits: its last operation is the `git-mv`.
+SHIFTED = ".agents/artifacts/plans/y.md"
+FORMAT_COMMANDS = {
+    "format": [sys.executable, FORMATTER],
+    "broken": [sys.executable, FORMATTER, "--fail"],
+    "meddle": [sys.executable, FORMATTER, "--touch", ".gitignore"],
+    # #376 D17: a move-only destination (a `git-mv` whose `after` is a
+    # `git-object:` hash), edited on disk and never staged.
+    "shift": [sys.executable, FORMATTER, "--touch", SHIFTED],
+    "spill": [sys.executable, FORMATTER, "--touch", CLEAN],
+    "litter": [sys.executable, FORMATTER, "--touch", "stray.txt"],
+}
+ARCHIVED_LINK_SOURCE = ".claude/odd-link.md"
+ARCHIVED_LINK = ".agents/knowledge/archive/adopted/.claude/odd-link.md"
+REWRITE_ANALYZER = ("path-reference", ANALYZER_SUBJECT, "rewrite")
+
+
+def formatting_repo(home: Path) -> Path:
+    """`apply_repo` whose verification command is the line-limit lint, with
+    the formatter commands, #345's linked tree (a moved Markdown file whose
+    link is rewritten), a reference whose rewrite crosses the limit and a
+    second Python file that is not format-clean."""
+    root = apply_repo(home, verification=(sys.executable, LINT),
+                      commands=FORMAT_COMMANDS)
+    for path, text in ((LINT, LINT_TEXT), (FORMATTER, FORMATTER_TEXT),
+                       (ANALYZER, ANALYZER_TEXT), (CLEAN, CLEAN_TEXT)):
+        write(root, path, text)
+    commit(root, "add a lint, a formatter and two Python files")
+    write_linked_tree(root)
+    return root
+
+
+class ReferenceFormattingApplyTest(ApplyTestCase):
+    """#376 AC1, AC4: the declared formatter runs over the reference-edited
+    files inside `apply`, confined, before the commit gates."""
+
+    def planned(self, root: Path, *triples: tuple[str, str, str]) -> dict:
+        code, out, err = run("plan", "--repo-root", str(root),
+                             *answer_args(*triples), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return document
+
+    def lint(self, root: Path, revision: str) -> int:
+        export = Path(tempfile.mkdtemp()) / "tree"
+        adopt_inspection.export_commit(root, revision, export)
+        return subprocess.run([sys.executable, LINT], cwd=export,
+                              capture_output=True, timeout=120).returncode
+
+    def test_the_formatted_rewrite_commits_and_passes_the_lint(self):
+        self.assertLessEqual(len(ANALYZER_TEXT) - 1, 60)
+        self.assertGreater(len(ANALYZER_REWRITTEN) - 1, 60)
+        root = formatting_repo(self.home)
+        base = git(root, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.lint(root, "HEAD"), 0)
+        document = self.planned(root, REWRITE_ANALYZER,
+                                ("reference-format", ".py", "format"))
+        self.assertEqual(document["reference_formatting"], [
+            {"class": ".py", "command": "format", "files": [ANALYZER]}])
+        (write_op,) = [op for op in document["changes"]
+                       if op["op"] == "write-file"
+                       and op["targets"] == [ANALYZER]]
+        self.assertEqual(write_op["after"], adopt_inspection.sha256_hash(
+            ANALYZER_REWRITTEN.encode("utf-8")))
+        moved = {op["targets"][0] for op in document["changes"]
+                 if op["op"] == "git-mv"}
+        self.assertTrue(any(
+            op["op"] == "write-file" and op["targets"][0] in moved
+            and adopt_links.is_markdown_path(op["targets"][0])
+            for op in document["changes"]))
+        result = self.succeed(root, document["plan"]["plan_id"])
+        branch = result["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{ANALYZER}"),
+                         ANALYZER_FORMATTED)
+        self.assertEqual(git(root, "rev-parse", f"{branch}:{CLEAN}"),
+                         git(root, "rev-parse", f"HEAD:{CLEAN}"))
+        self.assertEqual(self.lint(root, branch), 0)
+        required, optional = adopt_apply.expected_commit_paths(
+            document["changes"])
+        changed = set(git(root, "diff", "--name-only", "--no-renames",
+                          base, branch).splitlines())
+        self.assertTrue(required <= changed <= required | optional,
+                        changed ^ required)
+        git(root, "merge", "--ff-only", "--quiet", branch)
+        code, out, err = run("verify", "--repo-root", str(root),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        (check,) = [entry for entry in json.loads(out)["checks"]
+                    if entry["id"] == "adoption-commit-derived"]
+        self.assertEqual(check["status"], "passed")
+
+    def test_without_a_format_answer_the_lint_gate_refuses(self):
+        root = formatting_repo(self.home)
+        base = git(root, "rev-parse", "HEAD").strip()
+        document = self.planned(root, REWRITE_ANALYZER)
+        self.assertEqual(document["reference_formatting"], [
+            {"class": ".py", "command": None, "files": [ANALYZER]}])
+        self.assert_retained(root, document["plan"]["plan_id"], base,
+                             "adopt.gate.workflow-verification-commands")
+
+    def test_an_unconfined_or_failing_formatter_is_refused(self):
+        for command, repair_id in (
+                ("broken", "adopt.format.failed"),
+                ("meddle", "adopt.format.unplanned_content"),
+                ("shift", "adopt.format.unplanned_content"),
+                ("spill", "adopt.gate.worktree-status-matches-operations"),
+                ("litter", "adopt.gate.worktree-status-matches-operations")):
+            with self.subTest(command=command):
+                root = formatting_repo(self.home)
+                base = git(root, "rev-parse", "HEAD").strip()
+                plan_id = self.planned(
+                    root, REWRITE_ANALYZER,
+                    ("reference-format", ".py", command))["plan"]["plan_id"]
+                if command == "shift":
+                    stored = json.loads(
+                        self.stored_plan(plan_id).read_text("utf-8"))
+                    (last,) = [op for op in stored["changes"]
+                               if op["targets"][:1] == [SHIFTED]][-1:]
+                    self.assertEqual(last["op"], "git-mv")
+                    self.assertTrue(last["after"].startswith("git-object:"))
+                payload = self.assert_retained(root, plan_id, base, repair_id)
+                record = json.loads(self.state(
+                    "adopt", "worktrees",
+                    self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+                if command == "broken":
+                    # The refusal names the command and its exit status (the
+                    # fixture formatter's `--fail` exits 3).
+                    (violation,) = payload["error"]["violations"]
+                    self.assertEqual(violation["pointer"],
+                                     "/reference_formatting")
+                    self.assertIn("'broken'", violation["message"])
+                    self.assertIn(" 3;", violation["message"])
+                if repair_id.startswith("adopt.format."):
+                    self.assertEqual(
+                        {gate["status"] for gate in record["gates"]},
+                        {"not_run"})
+
+    def test_a_formatted_projection_source_is_refused_before_formatting(self):
+        """A reference-edited file whose `generated_file` projection was
+        regenerated from its bytes before formatting would change them is
+        refused, rather than left to strand a stale target. The contract may
+        spell the source with a `./` or a repeated `/` (COR-002), and the
+        refusal still holds."""
+        for source in (ANALYZER, "./" + ANALYZER,
+                       ANALYZER.replace("/", "//", 1)):
+            with self.subTest(source=source):
+                self.assert_projection_source_refused(source)
+
+    def assert_projection_source_refused(self, source: str) -> None:
+        root = formatting_repo(self.home)
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        entry = {"id": "codex.analyzer", "agent": "codex",
+                 "kind": "generated_file", "target": PROJECTED_ANALYZER,
+                 "source": source}
+        contract["projections"].append(entry)
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+        # Rendered by the resolver's own function, so the target starts in
+        # sync: the fixture contract has no `platform`, which the
+        # `write-projections` verb would refuse.
+        write(root, PROJECTED_ANALYZER, resolve_project.render_projection(
+            entry, (root / ANALYZER).read_bytes(),
+            contract["schema_version"]).decode("utf-8"))
+        commit(root, "project the analyzer")
+        base = git(root, "rev-parse", "HEAD").strip()
+        document = self.planned(root, REWRITE_ANALYZER,
+                                ("reference-format", ".py", "format"))
+        self.assertEqual(document["reference_formatting"], [
+            {"class": ".py", "command": "format", "files": [ANALYZER]}])
+        self.assertIn(
+            [PROJECTED_ANALYZER],
+            [op["targets"] for op in document["changes"]
+             if op["op"] == "regenerate-projection"])
+        plan_id = document["plan"]["plan_id"]
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.format.failed")
+        self.assertEqual([v["pointer"] for v in payload["error"]["violations"]],
+                         ["/reference_formatting"])
+        record = json.loads(self.state(
+            "adopt", "worktrees",
+            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+        self.assertEqual({gate["status"] for gate in record["gates"]},
+                         {"not_run"})
+        # The formatter never ran: the file holds the rewrite it was given.
+        self.assertEqual(
+            (self.worktree(plan_id) / ANALYZER).read_text("utf-8"),
+            ANALYZER_REWRITTEN)
+
+    def test_a_managed_import_source_is_formatted(self):
+        """A `managed_import` line names its source by path alone, so
+        formatting that source leaves the projection in sync and is not
+        refused."""
+        root = formatting_repo(self.home)
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        entry = {"id": "codex.analyzer", "agent": "codex",
+                 "kind": "managed_import", "target": IMPORTED_ANALYZER,
+                 "source": ANALYZER}
+        contract["projections"].append(entry)
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+        write(root, IMPORTED_ANALYZER, resolve_project.render_projection(
+            entry, (root / ANALYZER).read_bytes(),
+            contract["schema_version"]).decode("utf-8"))
+        commit(root, "import the analyzer")
+        document = self.planned(root, REWRITE_ANALYZER,
+                                ("reference-format", ".py", "format"))
+        self.assertIn(
+            ([ANALYZER], [IMPORTED_ANALYZER]),
+            [(op["sources"], op["targets"]) for op in document["changes"]
+             if op["op"] == "regenerate-projection"])
+        result = self.succeed(root, document["plan"]["plan_id"])
+        self.assertEqual(git(root, "show", f"{result['branch']}:{ANALYZER}"),
+                         ANALYZER_FORMATTED)
+
+    def test_an_archived_contained_symlink_is_not_an_unplanned_change(self):
+        """`git add` stores a symlink's target text, so the confinement proof
+        hashes that text, not the file the link points to."""
+        root = formatting_repo(self.home)
+        (root / ARCHIVED_LINK_SOURCE).symlink_to("../README.md")
+        git(root, "add", ARCHIVED_LINK_SOURCE)
+        commit(root, "track a contained agent link")
+        document = self.planned(
+            root, REWRITE_ANALYZER, ("reference-format", ".py", "format"),
+            ("candidate-class", ARCHIVED_LINK_SOURCE, "archive-history"))
+        (last,) = [op for op in document["changes"]
+                   if op["targets"][:1] == [ARCHIVED_LINK]][-1:]
+        self.assertEqual(last["op"], "git-mv")
+        self.assertTrue(last["after"].startswith("git-object:"))
+        result = self.succeed(root, document["plan"]["plan_id"])
+        self.assertEqual(
+            git(root, "ls-tree", result["branch"], ARCHIVED_LINK).split()[0],
+            "120000")
+
+    def test_the_evidence_record_lists_the_format_answer_and_rows(self):
+        root = formatting_repo(self.home)
+        answers = (REWRITE_ANALYZER, ("reference-format", ".py", "format"))
+        document = self.planned(root, *answers)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        for question, subject, value in answers:
+            with self.subTest(subject=subject):
+                self.assertIn(
+                    {"id": question, "subject": subject, "value": value},
+                    record["decisions_accepted"])
+        for member in ("reference_formatting", "reference_policies",
+                       "path_references"):
+            with self.subTest(member=member):
+                self.assertEqual(record[member], document[member])
+        self.assertEqual(record["plan_id"], document["plan"]["plan_id"])
+
+
+class CommitLinkProofTest(ApplyTestCase):
+    """#345 D17: a broken link staged after the gates, into a file the plan
+    already writes, changes no planned path set — only the commit's own
+    links show it."""
+
+    BREAK = "printf '\\n[gone](nope.md)\\n' >> README.md && git add README.md"
+
+    def assert_link_proof_refused(self, root: Path) -> None:
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["code"], "verification_failed")
+        self.assertEqual(payload["error"]["repair_id"],
+                         "adopt.commit.new_broken_link")
+        self.assertEqual(git(root, "rev-parse", "HEAD").strip(), base)
+        self.assertTrue(self.worktree(plan_id).is_dir())
+        record = json.loads(self.state(
+            "adopt", "worktrees",
+            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+        self.assertEqual(record["repair_id"], "adopt.commit.new_broken_link")
+        # The pre-commit gate passed: it judged the index before the edit.
+        self.assertIn({"id": "no-new-broken-link", "status": "passed"},
+                      [{"id": gate["id"], "status": gate["status"]}
+                       for gate in record["gates"]])
+        branch = f"adopt-{self.digest(plan_id)[:12]}"
+        self.assertIn("[gone](nope.md)",
+                      git(root, "show", f"{branch}:README.md"))
+
+    def test_a_verification_command_that_breaks_a_planned_file(self):
+        self.assert_link_proof_refused(linked_apply_repo(
+            self.home, verification=("sh", "-c", self.BREAK)))
+
+    def test_a_pre_commit_hook_that_breaks_a_planned_file(self):
+        root = linked_apply_repo(self.home)
+        hook = root / ".git" / "hooks" / "pre-commit"
+        hook.write_text(f"#!/bin/sh\n{self.BREAK}\n", encoding="utf-8")
+        hook.chmod(0o755)
+        self.assert_link_proof_refused(root)
+
+
+class StatusFoldTest(unittest.TestCase):
+    """A rewritten move may be reported as a deletion plus an addition."""
+
+    def test_a_write_onto_a_move_target_folds_into_the_move(self):
+        move = adopt_planning.operation(
+            "git-mv", ["a.md"], ["b/a.md"], "git-object:" + "0" * 40,
+            "git-object:" + "0" * 40)
+        write = adopt_planning.operation(
+            "write-file", ["b/a.md"], ["b/a.md"], "sha256:" + "0" * 64,
+            "sha256:" + "1" * 64)
+        required, optional = adopt_apply.expected_status([move, write])
+        self.assertEqual(required, [("R ", ("b/a.md", "a.md"))])
+        self.assertEqual(optional, set())
+
+    def test_a_split_rename_folds_only_as_a_whole_pair(self):
+        required = [("R ", ("b/a.md", "a.md"))]
+        fold = adopt_apply.fold_split_renames
+        self.assertEqual(
+            fold([("M ", ("x",)), ("D ", ("a.md",)), ("A ", ("b/a.md",))],
+                 required),
+            [("M ", ("x",)), ("R ", ("b/a.md", "a.md"))])
+        self.assertEqual(fold([("D ", ("a.md",))], required),
+                         [("D ", ("a.md",))])
+        self.assertEqual(fold([("R ", ("b/a.md", "a.md"))], required),
+                         [("R ", ("b/a.md", "a.md"))])
+
+    def test_a_cross_paired_rename_folds_by_path_effects(self):
+        # A rewritten `n/a.md` byte-identical to the original `b.md` can be
+        # paired by git with the wrong source.
+        required = [("R ", ("n/a.md", "a.md")), ("R ", ("n/b.md", "b.md"))]
+        actual = [("R ", ("n/a.md", "b.md")), ("D ", ("a.md",)),
+                  ("A ", ("n/b.md",))]
+        self.assertEqual(adopt_apply.fold_split_renames(actual, required),
+                         [("R ", ("n/b.md", "b.md")),
+                          ("R ", ("n/a.md", "a.md"))])
+
+    def test_an_unplanned_rename_is_split_into_its_halves(self):
+        self.assertEqual(
+            adopt_apply.fold_split_renames([("R ", ("new.json", "old.json"))],
+                                           []),
+            [("D ", ("old.json",)), ("A ", ("new.json",))])
+
+    def test_the_commit_gates_place_the_link_gate_before_the_cold_clone(self):
+        gates = adopt_apply.COMMIT_GATES
+        self.assertEqual(gates.index("no-new-broken-link") + 1,
+                         gates.index("cold-clone-resolves"))
+        self.assertIn("no-new-broken-link", adopt_apply.COMMIT_GATE_CHECKS)
+
+
 # --------------------------------------------------------------------------
 # Commit gates
 # --------------------------------------------------------------------------
 
 
 class CommitGateTest(ApplyTestCase):
-    def assert_retained(self, root: Path, plan_id: str, base: str,
-                        repair_id: str) -> None:
-        code, payload, err = self.apply(plan_id)
-        self.assertEqual(code, 2, err or payload)
-        self.assertEqual(payload["error"]["code"], "verification_failed")
-        self.assertEqual(payload["error"]["repair_id"], repair_id)
-        self.assertTrue(self.worktree(plan_id).is_dir())
-        evidence = self.state(
-            "adopt", "worktrees", self.digest(plan_id) + ".failure.json")
-        self.assertTrue(evidence.is_file())
-        record = json.loads(evidence.read_text("utf-8"))
-        self.assertEqual(record["plan_id"], plan_id)
-        self.assertEqual(record["repair_id"], repair_id)
-        # The target branch never moved and the target holds no new commit.
-        self.assertEqual(git(root, "rev-parse", "HEAD").strip(), base)
-        self.assertEqual(git(root, "status", "--porcelain"), "")
-        self.assertEqual(
-            git(root, "rev-list", "--count",
-                f"{base}..adopt-{self.digest(plan_id)[:12]}").strip(), "0")
-
     def test_a_failing_verification_command_leaves_no_commit(self):
         root = apply_repo(self.home, verification=("false",))
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
@@ -667,7 +1611,7 @@ class CommitContentTest(ApplyTestCase):
 
     The gates judge the worktree *before* the commit, and they are ordered:
     the status gate runs first, the one that executes every declared
-    verification command runs last, and a `pre-commit` hook runs after all six
+    verification command runs last, and a `pre-commit` hook runs after all seven
     have passed. Whatever either of those stages is in the index `git commit`
     reads, so it lands in the commit — while the ref proofs stay true of it,
     because the branch still adds exactly one commit and the worktree is clean

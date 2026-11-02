@@ -13,6 +13,7 @@
         "status": "within_budget",
         "metrics": {"root_bytes": 1024, "total_bytes": 1024, "file_count": 1, "largest_member_bytes": 0},
         "violations": [],
+        "overages": {},
         "producer_state": "complete"
       }
     },
@@ -27,6 +28,7 @@
         "status": "within_budget",
         "metrics": {"root_bytes": 1024, "total_bytes": 1324, "file_count": 3, "largest_member_bytes": 200},
         "violations": [],
+        "overages": {},
         "producer_state": "complete"
       }
     },
@@ -41,6 +43,7 @@
         "status": "within_budget",
         "metrics": {"root_bytes": 512, "total_bytes": 512, "file_count": 1, "largest_member_bytes": 0},
         "violations": [],
+        "overages": {},
         "producer_state": "complete"
       }
     },
@@ -55,6 +58,7 @@
         "status": "within_budget",
         "metrics": {"root_bytes": 1024, "total_bytes": 1324, "file_count": 3, "largest_member_bytes": 200},
         "violations": [],
+        "overages": {},
         "producer_state": "complete"
       }
     }

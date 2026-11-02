@@ -1,0 +1,28 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "hit",
+      "evidence": "Control must return a new typed signal or documented non-final action instead of finalize, changing the control response contract the adapter consumes"
+    },
+    "concurrency_or_persistence": {
+      "value": "no",
+      "evidence": "Decision logic in control's finalize path; no new locking or persisted fields expected"
+    },
+    "open_design_questions": {
+      "value": "hit",
+      "evidence": "Issue leaves open whether the fix is a typed signal or a documented non-final action"
+    },
+    "criteria_shape": {
+      "value": "hit",
+      "evidence": "Five acceptance criteria (over four); one is skill-text wording, not a deterministic code check"
+    }
+  },
+  "paths": [
+    "home/common/agent-skills/scripts/workflow-state.py",
+    "home/common/agent-skills/scripts/delivery_model/_wire.py",
+    "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
+    "home/common/claude-code/skills/orchestrate-issues/evals/evals.json",
+    "home/common/agent-skills/tests/test_workflow_state.py",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py"
+  ]
+}

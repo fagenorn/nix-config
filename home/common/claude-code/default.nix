@@ -3,6 +3,7 @@
   lib,
   pkgs,
   inputs,
+  agentTools,
   ...
 }:
 let
@@ -25,28 +26,101 @@ let
     exec ${pkgs.nodejs}/bin/node ${agentPlugins.codex}/plugins/codex/scripts/codex-companion.mjs "$@"
   '';
 
+  # Latest Claude Code from the community flake: official native binary, autoupdater
+  # pre-disabled for the read-only store, served from its Cachix cache (no local compile).
+  # Advances on `just update` (nix flake update) + the next rebuild.
+  claudeUnwrapped = inputs.claude-code.packages.${pkgs.system}.default;
+
+  # The cache proxy (agent_tools.cache_proxy, #422). This port is its one home:
+  # the service below listens on it and the launcher's CACHE_PROXY_URL is
+  # rewritten to it, so `claude` routes through the proxy while it is healthy
+  # unless launched with CLAUDE_CACHE_PROXY=0 (on by default since #450).
+  # `--keepalive` (#423) turns on the keepalive pings; dropping it and rebuilding turns them off.
+  # `--reorder` (#429) reorders each subagent's first user message so siblings share a cached start-up prefix; dropping it and rebuilding turns that off.
+  cacheProxyPort = 27183;
+  cacheProxyUrl = "http://127.0.0.1:${toString cacheProxyPort}";
+  cacheProxyArgs = [
+    "${agentTools.launchers.cache-proxy}"
+    "--port"
+    (toString cacheProxyPort)
+    "--keepalive"
+    "--reorder"
+  ];
+  # launchd and systemd start services with a minimal environment, so upstream
+  # TLS verification is pinned to the nixpkgs CA bundle.
+  cacheProxyCaFile = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
+  # The `accounts` mod (./accounts): one config directory per Claude account,
+  # bound per project. Mod and launcher are one store path because the mod runs
+  # `$.plugin.root/bin/claude-account` and the launcher names its own folder in
+  # CLAUDE_CODE_PLUGIN_DIRS. The launcher's tools are rewritten to store paths
+  # rather than prefixed onto PATH, which the claude it execs would inherit, and its
+  # CACHE_PROXY_URL to the cache proxy's URL.
+  accountsMod =
+    pkgs.runCommand "claude-accounts-mod"
+      {
+        buildInputs = [ pkgs.bash ];
+      }
+      ''
+        cp -R ${./accounts} "$out"
+        chmod -R u+w "$out"
+        substituteInPlace "$out/bin/claude-account" \
+          --replace-fail 'JQ=jq' 'JQ=${pkgs.jq}/bin/jq' \
+          --replace-fail 'GIT=git' 'GIT=${pkgs.git}/bin/git' \
+          --replace-fail 'CURL=curl' 'CURL=${pkgs.curl}/bin/curl' \
+          --replace-fail 'DEFAULT_CLAUDE_BIN=' 'DEFAULT_CLAUDE_BIN=${claudeUnwrapped}/bin/claude' \
+          --replace-fail 'CACHE_PROXY_URL=' 'CACHE_PROXY_URL=${cacheProxyUrl}'
+        patchShebangs "$out/bin"
+        HOME="$(mktemp -d)" "$out/bin/claude-account" status
+      '';
+
+  # `claude` on PATH starts under the account the current project is bound to,
+  # for interactive and non-interactive callers alike. `claude-orchestrate` is the
+  # same launch with claude.ai connectors off, for orchestration sessions (issue 425);
+  # plain `claude` keeps them. All three entries are scripts, not links: the
+  # launcher finds the mod relative to its own real location.
+  claudeWithAccounts = pkgs.symlinkJoin {
+    name = "claude-code-with-accounts-${claudeUnwrapped.version}";
+    paths = [ claudeUnwrapped ];
+    postBuild = ''
+      rm "$out/bin/claude"
+      printf '%s\n' '#!${pkgs.runtimeShell}' 'exec ${accountsMod}/bin/claude-account run "$@"' > "$out/bin/claude"
+      printf '%s\n' '#!${pkgs.runtimeShell}' 'exec ${accountsMod}/bin/claude-account "$@"' > "$out/bin/claude-account"
+      printf '%s\n' '#!${pkgs.runtimeShell}' 'export ENABLE_CLAUDEAI_MCP_SERVERS=false' 'exec ${accountsMod}/bin/claude-account run "$@"' > "$out/bin/claude-orchestrate"
+      chmod +x "$out/bin/claude" "$out/bin/claude-account" "$out/bin/claude-orchestrate"
+    '';
+    inherit (claudeUnwrapped) meta version;
+  };
+
   # The GitHub owners whose repositories carry standing authorization for the
-  # guarded verbs (push, PR creation, merge). Membership is the whole of the
-  # ownership test, so adding a name here hands every repository under it the
-  # standing chain — keep the list to owners whose repos we actually ship from.
-  # Branch deletion stays guarded regardless of ownership.
+  # guarded verbs (push, PR creation, merge, release creation) without being
+  # registered projects. A registered project is not listed here: its
+  # repository gets a derived row in the compiled policy, which authorizes that
+  # one repository. Adding a name here hands every repository under it the
+  # standing chain, so keep the list to owners whose unregistered repos we
+  # ship from. Branch deletion stays guarded regardless of ownership.
   authorizedOwners = [
     "fagenorn"
-    "elevenyellow"
   ];
 
-  # Repositories whose integration branch is not the branch origin/HEAD points
-  # at. The guard otherwise requires every guarded PR to be opened against, and
-  # merged into, the default branch; nodo integrates on `dev` and promotes to
-  # `main` only at release, so both verbs have to accept that branch there. A
-  # repository absent from this set keeps the default-branch-only rule, and the
-  # default branch stays acceptable everywhere.
+  # Unregistered repositories whose integration branch is not the branch
+  # origin/HEAD points at. The guard otherwise requires every guarded PR to be
+  # opened against, and merged into, the default branch. A registered project
+  # never gets a row here: its integration branch comes from its derived row,
+  # and a repository present in both is refused: the compiler denies that project
+  # its derived row (`literal_conflict`), the literal row stays in the base
+  # policy, and the guard refuses the guarded verbs of a repository that has both
+  # a literal row and a compiled row. A repository with neither keeps the
+  # default-branch-only rule, and the default branch stays acceptable
+  # everywhere. The set is empty: every repository that has an integration
+  # branch is a registered project with a derived row. Add a row only for one
+  # that is not.
   #
   # Declaring a branch here widens which branch may be targeted AND waives the
   # merge's forge-protection demand for that branch: an integration branch is
   # the development-pace branch, deliberately unprotected, and its CI gate
-  # lives in the shipping flow's wait-for-checks (nodo's CI is path-filtered,
-  # so no required status check could report on every PR shape anyway). The
+  # lives in the shipping flow's wait-for-checks (a path-filtered CI has no
+  # required status check that could report on every PR shape anyway). The
   # default branch keeps the full demand for feature merges — required status
   # checks plus enforce_admins — even if it is ever also declared here.
   #
@@ -58,18 +132,15 @@ let
   # by the guard itself, in place of the forge-protection demand: the same
   # path-filtered CI means no required-status-check rule on the default branch
   # could stand in for the release PR's actual checks.
-  integrationBases = {
-    "elevenyellow/nodocom" = "dev";
-    # arcwave is a private free-plan repository: GitHub refuses branch
-    # protection there, so the default-branch merge demand can never be met.
-    # Feature PRs integrate on `dev`; releases promote `dev` to `main`.
-    "fagenorn/arcwave" = "dev";
-  };
+  integrationBases = { };
 
-  # The Nix-owned values the lifecycle guard reads at run time, as one store
-  # JSON file. The guard's source never embeds them, so an owner or base change
-  # moves only this file, and the tool paths keep git, gh and jq in the closure.
-  lifecycleGuardPolicy = pkgs.writeText "claude-bash-lifecycle-guard-policy.json" (
+  # The base policy: the five trusted members, the literal rows above and the
+  # tool paths, as one store JSON file. It is the only place the guard reads
+  # those members from, and no one copies it: `guard-policy compile` only
+  # validates it and checks derived slugs against its literal rows. The wrapper's
+  # build check and the guard suite load it. The tool paths keep git, gh and jq
+  # in the closure.
+  lifecycleGuardBasePolicy = pkgs.writeText "claude-bash-lifecycle-guard-base-policy.json" (
     builtins.toJSON {
       authorized_owners = authorizedOwners;
       integration_bases = integrationBases;
@@ -79,10 +150,57 @@ let
     }
   );
 
+  # The compiled policy the registered hook reads: derived rows only, one per
+  # registered project, written by `claude-guard-policy`.
+  lifecycleGuardPolicyPath = "${config.home.homeDirectory}/.agents/state/guard/policy.json";
+
+  # The store git, gh and ssh bin directories, as one PATH string shared by
+  # `claude-guard-policy` and the row check below.
+  guardToolPath = lib.makeBinPath [
+    pkgs.git
+    pkgs.gh
+    pkgs.openssh
+  ];
+
+  # `guard-policy compile` with the base policy and the compiled path fixed, and
+  # the store git, gh and ssh first on PATH. It takes no argument; the
+  # activation step below and a repair from an authenticated shell both run it.
+  claudeGuardPolicy = pkgs.writeShellScriptBin "claude-guard-policy" ''
+    export PATH="${guardToolPath}:$PATH"
+    exec ${agentTools.launchers.guard-policy} compile \
+      --base ${lifecycleGuardBasePolicy} --output ${lifecycleGuardPolicyPath}
+  '';
+
+  # The row check the guard runs before relying on a compiled row: `guard-policy
+  # derive`, which re-derives one repository's row from the fleet registry. It
+  # pins the store git, gh and ssh first on PATH as `claude-guard-policy` does.
+  # The hook wrapper names it by store path, and it is not installed on PATH.
+  # Bash's `-p` ignores BASH_ENV and inherited functions here, and the `unset`
+  # keeps BASH_ENV and ENV from the launcher it execs, which runs under `-p` too;
+  # the guard also drops them and every exported function from its environment.
+  lifecycleGuardRowCheck = pkgs.writeTextFile {
+    name = "claude-guard-row-check";
+    executable = true;
+    text = ''
+      #!${pkgs.runtimeShell} -p
+      unset BASH_ENV ENV
+      export PATH="${guardToolPath}:$PATH"
+      exec ${agentTools.launchers.guard-policy} derive "$@"
+    '';
+    checkPhase = ''
+      ${pkgs.stdenv.shellDryRun} "$target"
+    '';
+  };
+
   # The registered hook: one argument-free store path. Bash's `-p` ignores
   # BASH_ENV and inherited functions, `-I` and the unset keep PYTHONPATH, user
   # site and NIX_PYTHON* `.pth` hooks out, and `exec` hands the hook's timeout
-  # kill to Python. The check refuses a guard that cannot load its policy.
+  # kill to Python. `--base-policy` names the store base policy and `--policy`
+  # the compiled policy, whose path is fixed at evaluation time, and
+  # `--derive-bin` the row check. The check runs the wrapper on a payload with no
+  # repository-bound verb: the guard loads the base policy, so the build refuses
+  # a guard source or a base policy that cannot load, and never opens the
+  # compiled path or runs the row check.
   lifecycleGuard = pkgs.writeTextFile {
     name = "claude-bash-lifecycle-guard";
     executable = true;
@@ -90,10 +208,11 @@ let
     text = ''
       #!${pkgs.runtimeShell} -p
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --policy ${lifecycleGuardPolicy} "$@"
+      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} "$@"
     '';
     checkPhase = ''
-      if ! printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"}}' | "$target"; then
+      if ! printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"}}' \
+        | "$target"; then
         echo "claude-bash-lifecycle-guard: refused a harmless Bash payload" >&2
         exit 1
       fi
@@ -122,6 +241,9 @@ let
 
     env = {
       CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
+      # Ceiling for an explicit Bash timeout (60 min), so a long verification
+      # command can run in the foreground; the 120 s default is unchanged (#261).
+      BASH_MAX_TIMEOUT_MS = "3600000";
     };
 
     hooks.PreToolUse = [
@@ -133,6 +255,15 @@ let
             command = "${lifecycleGuard}/bin/claude-bash-lifecycle-guard";
             timeout = 30;
           }
+          # The context meter (issue 424): rewrites each `workflow-state progress` call to
+          # carry this agent's measured context and, once per crossing of the hand-off
+          # threshold, tells an owner to run its phase gate. It never grants or denies,
+          # so the guard above still judges every call.
+          {
+            type = "command";
+            command = "${agentTools.launchers.context-meter}";
+            timeout = 10;
+          }
         ];
       }
     ];
@@ -140,9 +271,11 @@ let
     # The broad push, PR-create, branch-delete and PR-merge entries are usable only
     # through the lifecycle guard above, which adjudicates every one of them at the
     # command position of a segment. Bare `Agent` remains inert while defaultMode is "auto".
-    # The two lifecycle helpers are allowed whole, bare and by their ~/.agents/bin path:
-    # their only writes are validated ledger transitions under .superpowers/workflows/, and
-    # every lifecycle call is one heredoc-fed command, so each pipeline segment matches a rule.
+    # The lifecycle helpers workflow-state, artifact-budget, ship-delivery and orchestrate-control
+    # are allowed whole, bare and by their ~/.agents/bin path: their only writes are validated
+    # ledger transitions under .superpowers/workflows/ (orchestrate-control's through its
+    # workflow-state children), and every lifecycle call is one heredoc-fed command, so each
+    # pipeline segment matches a rule.
     permissions = {
       defaultMode = "auto";
       allow = [
@@ -167,11 +300,34 @@ let
         "Bash(~/.agents/bin/workflow-state:*)"
         "Bash(artifact-budget:*)"
         "Bash(~/.agents/bin/artifact-budget:*)"
+        "Bash(ship-delivery:*)"
+        "Bash(~/.agents/bin/ship-delivery:*)"
+        "Bash(orchestrate-control:*)"
+        "Bash(~/.agents/bin/orchestrate-control:*)"
         "Agent"
       ];
       ask = [ ];
       deny = [ ];
     };
+
+    # Hidden from the model's skill listing, each still runnable as /<name> (issue 425):
+    # skills synced from claude.ai by their full `anthropic-skills:` name, which Claude
+    # Code matches before the bare one, bundled skills by their bare name. A plugin's
+    # skills ignore this map, so the skill-creator kept listed is the plugin's (below).
+    skillOverrides = lib.genAttrs [
+      "artifact-design"
+      "artifact-diagramming"
+      "artifact-capabilities"
+      "dataviz"
+      "anthropic-skills:docx"
+      "anthropic-skills:pptx"
+      "anthropic-skills:xlsx"
+      "anthropic-skills:pdf"
+      "anthropic-skills:google-workspace"
+      "anthropic-skills:morning"
+      "anthropic-skills:import-memory"
+      "anthropic-skills:skill-creator"
+    ] (_: "user-invocable-only");
 
     # Plugins + their marketplaces, declared so the setup is portable to a fresh machine.
     # The patched plugin sources are Nix store paths; Claude's install/cache state under
@@ -198,10 +354,8 @@ in
   programs.claude-code = {
     enable = true;
 
-    # Latest Claude Code from the community flake: official native binary, autoupdater
-    # pre-disabled for the read-only store, served from its Cachix cache (no local compile).
-    # Advances on `just update` (nix flake update) + the next rebuild.
-    package = inputs.claude-code.packages.${pkgs.system}.default;
+    # The pinned binary behind the account-aware launcher (see claudeWithAccounts).
+    package = claudeWithAccounts;
 
     # ~/.claude/CLAUDE.md — global user instructions (read-only store symlink is safe; static).
     memory.source = ../agent-guidance/AGENTS.md;
@@ -213,9 +367,9 @@ in
     # NOTE: MCP servers are intentionally NOT set here. The 25.11 module injects them via a
     # `--mcp-config` flag on a wrapper binary, but in Claude Code 2.1.183 that flag is variadic
     # (`--mcp-config <configs...>`), so the wrapper swallows any following args and breaks every
-    # `claude` subcommand (`claude mcp list`, `claude doctor`, opening a dir, ...). Instead the
-    # palmier-pro server is merged into ~/.claude.json (user scope) by the activation script
-    # below, which shows up natively in `claude mcp list` and `/mcp` and leaves subcommands intact.
+    # `claude` subcommand (`claude mcp list`, `claude doctor`, opening a dir, ...). Instead a
+    # server is merged into ~/.claude.json (user scope) by an idempotent jq activation script,
+    # which shows up natively in `claude mcp list` and `/mcp` and leaves subcommands intact.
 
     # NOTE: `settings` is deliberately left unset. The module writes ~/.claude/settings.json
     # as a READ-ONLY store symlink, which breaks Claude Code's in-app /config flow and the
@@ -223,11 +377,38 @@ in
   };
 
   # codex-plugin-cc is implemented in Node and shells out to the separately
-  # managed native Codex CLI.
+  # managed native Codex CLI. The lifecycle guard is also on PATH so the forge
+  # adapter and the project resolver find `claude-bash-lifecycle-guard` by name;
+  # the registered hook keeps its own store path.
   home.packages = [
     pkgs.nodejs
     codexCompanionBin
+    lifecycleGuard
+    claudeGuardPolicy
   ];
+
+  # The cache proxy as a user service on each platform (#422); README § Cache proxy.
+  launchd.agents.claude-cache-proxy = lib.mkIf pkgs.stdenv.isDarwin {
+    enable = true;
+    config = {
+      ProgramArguments = cacheProxyArgs;
+      EnvironmentVariables.SSL_CERT_FILE = cacheProxyCaFile;
+      RunAtLoad = true;
+      KeepAlive = true;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/claude-cache-proxy.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/claude-cache-proxy.log";
+    };
+  };
+
+  systemd.user.services.claude-cache-proxy = lib.mkIf pkgs.stdenv.isLinux {
+    Unit.Description = "Claude Code cache proxy (Anthropic API, with keepalive pings and the subagent prefix reorder)";
+    Service = {
+      ExecStart = lib.concatStringsSep " " cacheProxyArgs;
+      Environment = [ "SSL_CERT_FILE=${cacheProxyCaFile}" ];
+      Restart = "always";
+    };
+    Install.WantedBy = [ "default.target" ];
+  };
 
   # Claude-only bridge orchestration. Keeping this outside the shared
   # ~/.agents/skills tree prevents Codex from recursively invoking itself.
@@ -246,9 +427,15 @@ in
 
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
   # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
-  # subagents dispatch explicitly as implementer/reviewer (opus/high),
-  # mechanic (sonnet/high) or reviewer-lite (sonnet/medium). Skills reference
-  # them by name; home/common/agent-skills/model-matrix.json owns every tier.
+  # subagents dispatch explicitly as reviewer (opus/high), implementer
+  # (sonnet/high for a planned sdd task and its first fix rounds, opus/high
+  # for stuck-task escalation and the final-review fixer), mechanic
+  # (sonnet/high) or reviewer-lite (sonnet/medium). from-issue and
+  # orchestrate-issues launch their issue owners as issue-owner (opus/high,
+  # xhigh for the autonomous design and planning owners), a definition with
+  # no body that blocks the Artifact tools and the claude.ai Docs connector.
+  # Skills reference them by name; home/common/agent-skills/model-matrix.json
+  # owns every tier.
   home.file.".claude/agents" = {
     source = ./agents;
     recursive = true;
@@ -276,6 +463,35 @@ in
     fi
   '';
 
+  # Compile the guard policy the registered hook reads, on every switch. It runs
+  # after linkGeneration because the compiler loads the platform manifest from
+  # ~/.agents/share, and before the settings copy. It never aborts the switch:
+  # exit 1 leaves a policy without the refused projects' rows, and any other
+  # failure removes the policy file, so registered projects lose their derived
+  # guard row and with it their derived integration branch: only a repository
+  # that relies on a derived row for its authorization is refused until
+  # `claude-guard-policy` succeeds, while authorization from the base policy (an
+  # authorized owner or a literal integration row) still applies. The removal is
+  # an `if` condition because the activation script runs under `set -e`. When it
+  # fails the step says so instead, and the hook reads whatever is at the path:
+  # a directory or an unreadable or malformed file contributes no row, and a
+  # readable earlier policy stays in force.
+  home.activation.claudeGuardPolicy =
+    lib.hm.dag.entryBetween [ "claudeCodeSettings" ] [ "writeBoundary" "linkGeneration" ]
+      ''
+        guardPolicyStatus=0
+        run ${claudeGuardPolicy}/bin/claude-guard-policy >/dev/null || guardPolicyStatus=$?
+        if [ "$guardPolicyStatus" -eq 1 ]; then
+          echo "claude-guard-policy: the projects named above have no derived guard row; rerun claude-guard-policy from an authenticated shell" >&2
+        elif [ "$guardPolicyStatus" -ne 0 ]; then
+          if run rm -f ${lifecycleGuardPolicyPath}; then
+            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus), so registered projects lose their derived guard row and with it their derived integration branch, and the lifecycle guard refuses a repository that relies on one until it succeeds, while authorization from the base policy (an authorized owner or a literal integration row) still applies; rerun claude-guard-policy from an authenticated shell" >&2
+          else
+            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus) and ${lifecycleGuardPolicyPath} could not be removed, so the lifecycle guard reads whatever rows are there; remove it, then rerun claude-guard-policy from an authenticated shell" >&2
+          fi
+        fi
+      '';
+
   # Copy settings.json to a writable location on each activation. Nix is the source of truth
   # (re-asserted every `sudo just`), but Claude Code can still rewrite it at runtime — your
   # live edits persist until the next switch, which resets it to the declared content.
@@ -285,27 +501,14 @@ in
     run chmod u+w "$HOME/.claude/settings.json"
   '';
 
-  # Declaratively register the palmier-pro MCP server at user scope by merging it into
-  # ~/.claude.json (the file Claude Code reads natively). Idempotent: only rewrites when the
-  # entry is missing/changed, minimising any race with a running Claude Code. We do NOT own the
-  # whole file (it holds OAuth + runtime state) — just this one key.
-  home.activation.palmierProMcp = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+  # palmier-pro is no longer installed anywhere: drop the user-scope MCP entry an earlier
+  # generation merged into ~/.claude.json. Touches only that key; a no-op once it is gone.
+  home.activation.palmierProMcpRemove = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     cfg="$HOME/.claude.json"
     jq=${pkgs.jq}/bin/jq
-    want='{"type":"http","url":"http://127.0.0.1:19789/mcp"}'
-    wantC=$(printf '%s' "$want" | "$jq" -cS .)
-    if [ -f "$cfg" ] && "$jq" -e . "$cfg" >/dev/null 2>&1; then
-      haveC=$("$jq" -cS '.mcpServers["palmier-pro"] // null' "$cfg")
-      src=$(cat "$cfg")
-    else
-      haveC=null
-      src='{}'
-    fi
-    # Only rewrite when the entry is actually missing/different (idempotent → avoids churn
-    # and minimises any race with a concurrently-running Claude Code rewriting the file).
-    if [ "$haveC" != "$wantC" ]; then
+    if [ -f "$cfg" ] && "$jq" -e '.mcpServers["palmier-pro"]' "$cfg" >/dev/null 2>&1; then
       tmp="$cfg.hm-tmp.$$"
-      printf '%s' "$src" | "$jq" --argjson v "$want" '.mcpServers["palmier-pro"] = $v' > "$tmp"
+      "$jq" 'del(.mcpServers["palmier-pro"])' "$cfg" > "$tmp"
       chmod 600 "$tmp"
       mv -f "$tmp" "$cfg"
     fi

@@ -1,0 +1,473 @@
+#!/usr/bin/env bash
+# claude-account: one Claude Code config directory per account.
+#
+# Each account is a profile directory used as CLAUDE_CONFIG_DIR, so its login
+# is its own while settings, skills, plugins and transcripts stay shared with
+# ~/.claude through symlinks. A project is bound to an account once; `run`
+# then launches claude under whichever account the current project is bound to.
+set -euo pipefail
+
+ROOT="${CLAUDE_ACCOUNTS_DIR:-$HOME/.claude-accounts}"
+BASE="$HOME/.claude"
+PROFILES="$ROOT/profiles"
+BINDINGS="$ROOT/bindings.tsv"
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# The Nix build (home/common/claude-code/default.nix) rewrites these four to
+# store paths. The real binary is pinned because `claude` on PATH is a wrapper
+# that calls back into `run` here.
+JQ=jq
+GIT=git
+CURL=curl
+DEFAULT_CLAUDE_BIN=
+
+# The cache proxy's URL. Empty here, so a source copy never routes; the Nix
+# build writes in the URL of the port it gives the cache-proxy service.
+CACHE_PROXY_URL=
+
+# What a profile shares with ~/.claude. Everything else (the login, caches,
+# per-process state) is the profile's own.
+SHARED=(settings.json CLAUDE.md keybindings.json skills agents commands
+  plugins projects file-history history.jsonl output-styles rules)
+
+die() { echo "claude-account: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+usage: claude-account <command>
+
+  list                 accounts, which one this project is bound to
+  add <name>           create an account profile
+  login <name>         sign in to an account (opens the browser)
+  use <name|default>   bind the current project to an account
+  status               the account of this session and of this project, and
+                       every account's 5-hour and weekly usage
+  run [claude args]    start claude under this project's account (what plain
+                       `claude` does)
+  switch <name> <id>   from inside a session: restart it as session <id> under
+                       an account (what /account <name> does)
+  rm <name>            delete an account profile
+
+One-off override for a single launch: CLAUDE_ACCOUNT=<name> claude
+USAGE
+}
+
+valid_name() {
+  case "$1" in
+    ""|default|*[!a-z0-9_-]*) return 1 ;;
+  esac
+}
+
+profile_dir() { echo "$PROFILES/$1"; }
+
+require_account() {
+  [ "$1" = default ] && return 0
+  valid_name "$1" || die "'$1' is not an account name (use a-z, 0-9, - and _)"
+  [ -d "$(profile_dir "$1")" ] || die "no account '$1' (create it: /account add $1, or claude-account add $1)"
+}
+
+# The directory a binding is stored under: the main checkout of the repository
+# (so every worktree shares it), or the current directory outside a repository.
+project_key() {
+  local common
+  if common="$("$GIT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+    case "$common" in
+      */.git) dirname "$common"; return ;;
+    esac
+    "$GIT" rev-parse --show-toplevel 2>/dev/null && return
+  fi
+  pwd -P
+}
+
+# The account bound to a directory or the nearest bound parent; empty if none.
+bound_account() {
+  local dir="$1"
+  [ -f "$BINDINGS" ] || return 0
+  while :; do
+    awk -F'\t' -v d="$dir" '$1 == d { print $2; found = 1; exit } END { exit !found }' \
+      "$BINDINGS" && return 0
+    [ "$dir" = / ] && return 0
+    dir="$(dirname "$dir")"
+  done
+}
+
+# The account a launch from here would use.
+resolve_account() {
+  local account="${CLAUDE_ACCOUNT:-}"
+  [ -n "$account" ] || account="$(bound_account "$(project_key)")"
+  echo "${account:-default}"
+}
+
+# The account the calling process runs under, from its CLAUDE_CONFIG_DIR.
+active_account() {
+  local dir="${CLAUDE_CONFIG_DIR:-}"
+  dir="${dir%/}"
+  case "$dir" in
+    "") echo default ;;
+    "$PROFILES"/*) echo "${dir#"$PROFILES"/}" ;;
+    *) echo "custom ($dir)" ;;
+  esac
+}
+
+# Creates the profile directory if needed and links what it shares. Runs on
+# every launch, so something added to ~/.claude later is picked up.
+sync_profile() {
+  local dir entry
+  dir="$(profile_dir "$1")"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  # Shared state must exist in ~/.claude before it is linked, or claude would
+  # write it inside the profile, where no other account can see it.
+  mkdir -p "$BASE/projects" "$BASE/file-history"
+  for entry in "${SHARED[@]}"; do
+    if { [ -e "$BASE/$entry" ] || [ -L "$BASE/$entry" ]; } &&
+      [ ! -e "$dir/$entry" ] && [ ! -L "$dir/$entry" ]; then
+      ln -s "$BASE/$entry" "$dir/$entry"
+    fi
+  done
+  # Carry over onboarding state, MCP servers and project trust, minus the login.
+  if [ ! -e "$dir/.claude.json" ] && [ -f "$HOME/.claude.json" ]; then
+    (umask 077; "$JQ" 'del(.oauthAccount)' "$HOME/.claude.json" >"$dir/.claude.json") ||
+      rm -f "$dir/.claude.json"
+  fi
+}
+
+# Serializes every rewrite of the bindings file across concurrent sessions.
+# mkdir is atomic and, unlike flock, present on macOS.
+lock_bindings() {
+  local tries=0
+  mkdir -p "$ROOT"
+  until mkdir "$BINDINGS.lock" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || die "bindings are locked ($BINDINGS.lock); remove it if no claude-account is running"
+    sleep 0.1
+  done
+  trap 'rmdir "$BINDINGS.lock" 2>/dev/null' EXIT
+}
+
+unlock_bindings() {
+  rmdir "$BINDINGS.lock" 2>/dev/null
+  trap - EXIT
+}
+
+# <column> <value> [<key> <account>]: drop the bindings whose column equals
+# value, then append the given binding, as one locked, atomic replacement.
+rebind() {
+  local tmp="$BINDINGS.tmp.$$"
+  lock_bindings
+  if [ -f "$BINDINGS" ]; then
+    awk -F'\t' -v c="$1" -v v="$2" '$c != v' "$BINDINGS" >"$tmp"
+  else
+    : >"$tmp"
+  fi
+  [ -z "${3:-}" ] || printf '%s\t%s\n' "$3" "$4" >>"$tmp"
+  mv "$tmp" "$BINDINGS"
+  unlock_bindings
+}
+
+claude_bin() {
+  local bin="${CLAUDE_BIN:-$DEFAULT_CLAUDE_BIN}"
+  [ -n "$bin" ] || bin="$(command -v claude)" || die "claude is not on PATH"
+  echo "$bin"
+}
+
+# Prints `healthy` when the cache proxy at host $1, port $2 answers GET /_proxy/health with a
+# 2xx status and a body naming "service":"cache-proxy", and nothing otherwise. Only bash
+# builtins run here, so the probe starts no curl or jq process (#450); the caller bounds it.
+cache_proxy_health() {
+  local status line length="" body=""
+  {
+    printf 'GET /_proxy/health HTTP/1.0\r\nHost: %s:%s\r\nConnection: close\r\n\r\n' "$1" "$2" >&3
+    IFS= read -r status <&3 || return 1
+    case "$status" in "HTTP/1."[01]" 2"[0-9][0-9]" "*) ;; *) return 1 ;; esac
+    while IFS= read -r line <&3; do
+      line="${line%$'\r'}"
+      [ -n "$line" ] || break
+      case "${line,,}" in
+        content-length:*) length="${line#*:}"; length="${length//[!0-9]/}" ;;
+      esac
+    done
+    [ -n "$length" ] || return 1
+    IFS= read -r -N "$length" body <&3 || return 1
+    case "$body" in *'"service":"cache-proxy"'*) echo healthy ;; esac
+  } 3<>"/dev/tcp/$1/$2"
+}
+
+# Routes this launch through the cache proxy while the proxy's health check
+# answers, unless CLAUDE_CACHE_PROXY=0 (on by default since #450), and sends it
+# direct otherwise. 0 runs no probe and unsets a base URL equal to the proxy URL,
+# which a routed parent passed down; any value but unset, empty, 0 or 1 is
+# refused. Otherwise a base URL the caller set to anything but the proxy is the
+# caller's own endpoint and is left alone, and one equal to the proxy URL is
+# decided again. Silent except for the refusal: stdout and stderr belong to claude.
+route_cache_proxy() {
+  case "${CLAUDE_CACHE_PROXY:-}" in
+    "" | 1) ;;
+    0)
+      # Opted out: no probe, and a proxy URL inherited from a routed parent goes too.
+      if [ -n "$CACHE_PROXY_URL" ] && [ "${ANTHROPIC_BASE_URL:-}" = "$CACHE_PROXY_URL" ]; then
+        unset ANTHROPIC_BASE_URL
+      fi
+      return 0
+      ;;
+    *) die "CLAUDE_CACHE_PROXY must be 1, 0 or unset" ;;
+  esac
+  local verdict="" waited=0 hostport="${CACHE_PROXY_URL#http://}"
+  [ -n "$CACHE_PROXY_URL" ] || return 0
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ "$ANTHROPIC_BASE_URL" != "$CACHE_PROXY_URL" ]; then
+    return 0
+  fi
+  # One 0.5 s deadline covers the connect, the request and the answer, so a dead or hung proxy
+  # costs at most half a second. Only a probe the deadline cut off is signalled: one that
+  # answered or hit EOF is exiting by itself. Either way it is reaped, so a claude exec'd
+  # below inherits no exited child.
+  IFS= read -r -t 0.5 verdict < <(cache_proxy_health "${hostport%:*}" "${hostport##*:}" 2>/dev/null) || waited=$?
+  if [ "$waited" -gt 128 ]; then kill "$!" 2>/dev/null || true; fi
+  wait "$!" 2>/dev/null || true
+  if [ "$verdict" = healthy ]; then
+    export ANTHROPIC_BASE_URL="$CACHE_PROXY_URL"
+    # Before Claude Code 2.1.304 a non-first-party base URL turns tool search off.
+    [ -n "${ENABLE_TOOL_SEARCH+set}" ] || export ENABLE_TOOL_SEARCH=true
+    # Claude Code sends the <total_tokens> budget line only to api.anthropic.com; without it a
+    # routed turn opens with a thinking block far more often (#450). The variable is undocumented
+    # (https://github.com/anthropics/claude-code/issues/98464); verified on Claude Code 2.1.310.
+    [ -n "${CLAUDE_CODE_TOTAL_TOKENS_REMINDER+set}" ] || export CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown
+  else
+    unset ANTHROPIC_BASE_URL
+  fi
+}
+
+cmd_list() {
+  local bound active name mark
+  bound="$(resolve_account)"
+  active="$(active_account)"
+  for name in default $(ls "$PROFILES" 2>/dev/null); do
+    mark=""
+    [ "$name" = "$bound" ] && mark="  <- this project"
+    [ "$name" = "$active" ] && [ -n "${CLAUDE_CONFIG_DIR+x}${CLAUDECODE:-}" ] &&
+      mark="$mark  (this session)"
+    echo "$name$mark"
+  done
+}
+
+cmd_add() {
+  local name="${1:-}"
+  valid_name "$name" || die "'$name' is not an account name (use a-z, 0-9, - and _)"
+  [ -d "$(profile_dir "$name")" ] && die "account '$name' already exists"
+  sync_profile "$name"
+  echo "Created account '$name'. Bind a project to it with /account $name; its first launch asks you to sign in."
+}
+
+cmd_login() {
+  local name="${1:-}"
+  require_account "$name"
+  if [ "$name" = default ]; then
+    env -u CLAUDE_CONFIG_DIR "$(claude_bin)" auth login
+  else
+    sync_profile "$name"
+    CLAUDE_CONFIG_DIR="$(profile_dir "$name")" "$(claude_bin)" auth login
+  fi
+}
+
+cmd_use() {
+  local name="${1:-}" key
+  require_account "$name"
+  key="$(project_key)"
+  # default is recorded too, so it overrides a binding on a parent directory.
+  rebind 1 "$key" "$key" "$name"
+  echo "$key now uses account '$name'."
+}
+
+# The stored OAuth credentials (JSON) of an account; fails if it never signed
+# in. Claude Code keeps them in the macOS keychain under a name suffixed with a
+# hash of the config directory (none for ~/.claude), elsewhere in the config
+# directory itself.
+credentials() {
+  local dir service="Claude Code-credentials"
+  if [ "$1" = default ]; then dir="$BASE"; else dir="$(profile_dir "$1")"; fi
+  if [ "$(uname)" = Darwin ]; then
+    [ "$1" = default ] ||
+      service="$service-$(printf '%s' "$dir" | /usr/bin/shasum -a 256 | cut -c1-8)"
+    /usr/bin/security find-generic-password -s "$service" -w 2>/dev/null
+  else
+    cat "$dir/.credentials.json" 2>/dev/null
+  fi
+}
+
+# <name> <out>: writes the account's usage as one JSON object to out. The token
+# is only read, never refreshed (that would race a running claude), and goes to
+# curl on stdin so it never shows in the process list.
+fetch_usage() {
+  local creds token config response=null code=0
+  creds="$(credentials "$1")" || creds=""
+  token="$(printf '%s' "$creds" | "$JQ" -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)" ||
+    token=""
+  if [ "$1" = default ]; then config="$HOME/.claude.json"; else config="$(profile_dir "$1")/.claude.json"; fi
+  if [ -n "$token" ]; then
+    response="$(printf 'header = "Authorization: Bearer %s"\n' "$token" |
+      "$CURL" -sS --max-time 10 --config - -w '\n%{http_code}' \
+        -H 'anthropic-beta: oauth-2025-04-20' \
+        https://api.anthropic.com/api/oauth/usage 2>/dev/null)" || response=$'null\n0'
+    code="${response##*$'\n'}"
+    response="${response%$'\n'*}"
+    printf '%s' "$response" | "$JQ" -e . >/dev/null 2>&1 || response=null
+  fi
+  "$JQ" -n --arg name "$1" --argjson code "$code" --argjson usage "$response" \
+    --argjson signedIn "$([ -n "$token" ] && echo true || echo false)" \
+    --argjson creds "$(printf '%s' "$creds" | "$JQ" -c '.claudeAiOauth // {}' 2>/dev/null || echo '{}')" \
+    --argjson config "$("$JQ" -c '.oauthAccount // {}' "$config" 2>/dev/null || echo '{}')" \
+    '{name: $name, signedIn: $signedIn, code: $code, usage: $usage,
+      email: ($config.emailAddress // null),
+      plan: ($creds.subscriptionType // null), tier: ($creds.rateLimitTier // null)}' >"$2"
+}
+
+# Every account's 5-hour and weekly usage, fetched in parallel. Colored only on
+# a terminal, so /account status in a session shows it plain.
+show_usage() {
+  local tmp name i=0 color=false bound active
+  tmp="$(mktemp -d)"
+  bound="$(resolve_account)"
+  active="$(active_account)"
+  for name in default $(ls "$PROFILES" 2>/dev/null); do
+    fetch_usage "$name" "$tmp/$(printf '%03d' "$i")" &
+    i=$((i + 1))
+  done
+  wait
+  [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && color=true
+  cat "$tmp"/* | "$JQ" -rs --argjson color "$color" --arg bound "$bound" \
+    --arg active "$([ -n "${CLAUDE_CONFIG_DIR+x}${CLAUDECODE:-}" ] && echo "$active")" \
+    --argjson now "$(date +%s)" '
+    def c($code): if $color then "\u001b[\($code)m" + . + "\u001b[0m" else . end;
+    def epoch: sub("\\.[0-9]+"; "") | sub("(\\+00:00|Z)$"; "Z") | fromdateiso8601;
+    def pad($n): tostring | (" " * ([$n - length, 0] | max)) + .;
+    def rpad($n): tostring | . + (" " * ([$n - length, 0] | max));
+    def span: (. / 60 | floor) as $m |
+      if $m >= 1440 then "\($m / 1440 | floor)d \($m % 1440 / 60 | floor)h"
+      elif $m >= 60 then "\($m / 60 | floor)h \($m % 60)m"
+      else "\([$m, 1] | max)m" end;
+    def bar($pct): ($pct / 5 | round | [., 20] | min) as $n |
+      ("█" * $n) + ("░" * (20 - $n)) |
+      c(if $pct >= 90 then "31" elif $pct >= 70 then "33" else "32" end);
+    def window($label; $fmt):
+      if . == null then "    \($label | rpad(7)) " + ("no data" | c("2"))
+      else (.utilization // 0) as $pct |
+        "    \($label | rpad(7)) \(bar($pct)) \($pct | round | pad(3))%  " +
+        (if .resets_at == null then "" else (.resets_at | epoch) as $at |
+          ("resets \($at | strflocaltime($fmt)) (in \($at - $now | span))" | c("2")) end)
+      end;
+    def plan: if .tier != null and (.tier | test("max_[0-9]+x")) then
+        "Max " + (.tier | capture("max_(?<x>[0-9]+x)").x)
+      elif .plan != null then .plan | (.[:1] | ascii_upcase) + .[1:]
+      else null end;
+    (map(.name | length) | max) as $w |
+    "Usage",
+    (.[] |
+      ([ (if .name == $active then "this session" else empty end),
+         (if .name == $bound then "this project" else empty end) ] | join(", ")) as $marks |
+      "  " + (.name | rpad($w) | c("1")) +
+        ([.email, plan] | map(select(. != null)) | if length > 0 then "  " + join(" · ") else "" end) +
+        (if $marks != "" then "  " + ("← " + $marks | c("36")) else "" end),
+      (if .signedIn | not then "    " + ("not signed in (claude-account login \(.name))" | c("2"))
+       elif .code == 401 then "    " + ("login expired; run `CLAUDE_ACCOUNT=\(.name) claude` once to refresh it" | c("33"))
+       elif .code != 200 or .usage == null then "    " + ("usage unavailable (HTTP \(.code))" | c("33"))
+       else (.usage.five_hour | window("5-hour"; "%H:%M")),
+            (.usage.seven_day | window("weekly"; "%a %H:%M"))
+       end))
+  '
+  rm -rf "$tmp"
+}
+
+cmd_status() {
+  echo "this session: $(active_account)"
+  echo "this project: $(resolve_account)  ($(project_key))"
+  echo
+  show_usage
+}
+
+cmd_run() {
+  local name status request session
+  # A launch from inside a session inherits this, so the mod is added once.
+  case ":${CLAUDE_CODE_PLUGIN_DIRS:-}:" in
+    *":$MOD_DIR:"*) ;;
+    *) export CLAUDE_CODE_PLUGIN_DIRS="${CLAUDE_CODE_PLUGIN_DIRS:+$CLAUDE_CODE_PLUGIN_DIRS:}$MOD_DIR" ;;
+  esac
+  # A config directory the caller chose itself is not an account: leave it be.
+  if [ -z "${CLAUDE_ACCOUNT:-}" ]; then
+    case "${CLAUDE_CONFIG_DIR:-}" in
+      ""|"$PROFILES"/*) ;;
+      *) route_cache_proxy; exec "$(claude_bin)" "$@" ;;
+    esac
+  fi
+  name="$(resolve_account)"
+  # claude is waited on, not exec'd, so `switch` can end it and have it resumed
+  # here under another account. Without a switch request this exits as claude did.
+  export CLAUDE_ACCOUNT_LAUNCHER=$$
+  while :; do
+    require_account "$name"
+    if [ "$name" = default ]; then
+      unset CLAUDE_CONFIG_DIR
+    else
+      sync_profile "$name"
+      export CLAUDE_CONFIG_DIR="$(profile_dir "$name")"
+    fi
+    route_cache_proxy
+    status=0
+    "$(claude_bin)" "$@" || status=$?
+    request="$ROOT/switch/$$"
+    [ -f "$request" ] || exit "$status"
+    IFS=$'\t' read -r name session <"$request" || true
+    rm -f "$request"
+    [ -n "$session" ] || exit "$status"
+    # Only the conversation carries over, not the first launch's other flags.
+    set -- --resume "$session"
+  done
+}
+
+# <name> <session id>: from inside a session `run` started, ends that session's
+# claude and has `run` resume the conversation under the account. The claude to
+# end is the ancestor whose parent is the launcher, so nothing else is signalled.
+cmd_switch() {
+  local name="${1:-}" session="${2:-}" pid=$PPID parent
+  require_account "$name"
+  case "$session" in
+    ""|*[!A-Za-z0-9-]*) die "'$session' is not a session id" ;;
+  esac
+  [ -n "${CLAUDE_ACCOUNT_LAUNCHER:-}" ] ||
+    die "this session was not started by \`claude\`; exit and run \`claude -c\` to continue it as '$name'"
+  while parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" && [ -n "$parent" ] &&
+    [ "$parent" != "$CLAUDE_ACCOUNT_LAUNCHER" ]; do
+    [ "$parent" -gt 1 ] ||
+      die "this session's launcher is gone; exit and run \`claude -c\` to continue it as '$name'"
+    pid="$parent"
+  done
+  [ "$parent" = "$CLAUDE_ACCOUNT_LAUNCHER" ] ||
+    die "this session's launcher is gone; exit and run \`claude -c\` to continue it as '$name'"
+  mkdir -p "$ROOT/switch"
+  printf '%s\t%s\n' "$name" "$session" >"$ROOT/switch/$CLAUDE_ACCOUNT_LAUNCHER"
+  kill -TERM "$pid"
+}
+
+cmd_rm() {
+  local name="${1:-}"
+  require_account "$name"
+  [ "$name" = default ] && die "the default account is ~/.claude and is not removed here"
+  rm -rf "$(profile_dir "$name")"
+  rebind 2 "$name"
+  echo "Removed account '$name'. If it was signed in, its stored login was not removed."
+}
+
+command="${1:-}"
+[ $# -gt 0 ] && shift
+case "$command" in
+  list) cmd_list ;;
+  add) cmd_add "$@" ;;
+  login) cmd_login "$@" ;;
+  use) cmd_use "$@" ;;
+  status) cmd_status ;;
+  active) active_account ;;
+  run) cmd_run "$@" ;;
+  switch) cmd_switch "$@" ;;
+  rm) cmd_rm "$@" ;;
+  ""|help|-h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

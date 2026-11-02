@@ -1,0 +1,8 @@
+# Acceptance record — issue #472
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] A report rejected by `validate-report` exits 2 with a stderr line naming the failing member or bound, not only `invalid report`. — measured: new case in `home/common/agent-skills/tests/test_artifact_budget.py` (fails today: stderr is exactly `artifact-budget: invalid report`) | code | `test_artifact_budget.py::test_a_producer_refusal_names_its_member_or_bound` via `just agent-workflow-tests` | in final verification | — | — | met |
+| AC2 | [code] A `validate-detail` rejection names its reason the same way. — measured: new case in `home/common/agent-skills/tests/test_artifact_budget.py` | code | `test_artifact_budget.py::test_a_detail_refusal_names_the_failing_finding_member` via `just agent-workflow-tests` | in final verification | — | — | met |
+| AC3 | [code] An `over_budget` `check` result carries, per violated dimension, the limit and how far over it the artifact is, and existing consumers of the `violations` list still parse it. — measured: new case in `home/common/agent-skills/tests/test_artifact_budget.py`, plus the existing suite | code | `test_an_over_budget_check_reports_limit_and_overage`, `test_repository_descriptors_drive_cli_results`, `tests/test_sdd_gate.py` budget-check cases via `just agent-workflow-tests` | in final verification | — | — | met |
+| AC4 | [code] `just agent-workflow-tests` passes. — measured: `just agent-workflow-tests` | code | `just agent-workflow-tests` | in final verification | — | — | met |

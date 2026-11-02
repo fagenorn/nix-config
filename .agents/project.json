@@ -103,15 +103,52 @@
         "nix-build",
         "agent-workflow-tests"
       ],
+      "verification_conditions": {
+        "agent-workflow-tests": {
+          "when_changed": [
+            "python/*",
+            "home/common/agent-skills/*",
+            "home/common/claude-code/*",
+            "tests/*",
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".agents/instructions/*",
+            "home/common/agent-guidance/*",
+            "justfile",
+            ".agents/project.json",
+            ".agents/knowledge/*",
+            ".agents/artifacts/evidence/*",
+            ".agents/runtime/*",
+            "home/common/codex/*",
+            "lib/agent-tools.nix",
+            ".gitignore",
+            ".github/*"
+          ],
+          "skip_reason": "no agent-tooling paths changed"
+        }
+      },
       "orchestration": {
         "max_parallel": 2,
-        "attempt_budget_minutes": 180
+        "attempt_budget_minutes": 240
       },
       "review": {
         "plan": "codex-plan-review",
         "code": "codex-diff-review"
       },
-      "release": null
+      "light_lane": {
+        "mode": "shadow",
+        "budget_minutes": 90,
+        "risk_paths": [
+          "home/common/claude-code/lifecycle_guard.py",
+          "home/common/agent-skills/scripts/workflow-state.py",
+          "python/agent_tools/transaction_*.py",
+          "python/agent_tools/resolve_project.py",
+          "python/agent_tools/lane_triage.py",
+          "home/common/agent-skills/scripts/delivery_model/*",
+          "home/common/agent-skills/scripts/workflow_delivery*.py",
+          ".agents/project.json"
+        ]
+      }
     },
     "deploy": {
       "adapter": "none",
@@ -147,9 +184,6 @@
     "review.code": {
       "support": "supported"
     },
-    "release": {
-      "support": "unsupported"
-    },
     "deploy": {
       "support": "unsupported"
     }
@@ -173,5 +207,108 @@
   "platform": {
     "min_inclusive": "1.0.0",
     "max_exclusive": "2.0.0"
+  },
+  "release": {
+    "profiles": {
+      "github-release": {
+        "profile_version": 1,
+        "target": {
+          "environment": "github-main",
+          "concurrency_keys": [
+            "release/fagenorn/nix-config"
+          ]
+        },
+        "requirements": {
+          "adapters": {
+            "forge": {
+              "min_inclusive": "1.0.0",
+              "max_exclusive": "2.0.0"
+            }
+          }
+        },
+        "bindings": {
+          "adapters": {
+            "forge": {
+              "adapter": "github-forge"
+            }
+          },
+          "targets": {
+            "repository": {
+              "adapter": "forge",
+              "kind": "github_repository",
+              "repository": "fagenorn/nix-config",
+              "branch": "main"
+            }
+          },
+          "principals": {
+            "maintainer": {
+              "class": "forge_write"
+            }
+          },
+          "credentials": {
+            "forge-keyring": {
+              "adapter": "forge",
+              "class": "gh_keyring"
+            }
+          }
+        },
+        "publication": {
+          "actions": [
+            {
+              "id": "tag",
+              "mode": "index",
+              "adapter": "forge",
+              "operation": "tag",
+              "target": "repository",
+              "principal": "maintainer",
+              "credential": "forge-keyring",
+              "effect": "irreversible",
+              "config_schema_version": 1,
+              "config": {},
+              "deps": [],
+              "observation_deadline_ms": 600000
+            },
+            {
+              "id": "github-release",
+              "mode": "index",
+              "adapter": "forge",
+              "operation": "release",
+              "target": "repository",
+              "principal": "maintainer",
+              "credential": "forge-keyring",
+              "effect": "irreversible",
+              "config_schema_version": 1,
+              "config": {},
+              "deps": [
+                "tag"
+              ],
+              "observation_deadline_ms": 600000
+            }
+          ]
+        },
+        "activation": "none",
+        "proof": {
+          "convergence_window_ms": 1800000,
+          "obligations": []
+        },
+        "recovery": {
+          "units": {
+            "tag": {
+              "posture": "supersedable_only",
+              "anchor": null,
+              "compatibility": null,
+              "edges": []
+            },
+            "github-release": {
+              "posture": "supersedable_only",
+              "anchor": null,
+              "compatibility": null,
+              "edges": []
+            }
+          }
+        },
+        "limits": {}
+      }
+    }
   }
 }

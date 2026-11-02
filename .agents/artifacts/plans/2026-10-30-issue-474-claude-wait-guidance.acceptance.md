@@ -1,0 +1,7 @@
+# Acceptance record — issue #474
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] No skill file under the global or Claude-only skill trees instructs a foreground `sleep N` followed by a check as one step. A contract test pins this. — measured: new case in `home/common/agent-skills/tests/test_workflow_skill_contracts.py` (fails today: 7 matches) | code | `ClaudeCompatibleWaitContractsTest::test_no_skill_document_chains_a_check_onto_a_foreground_sleep` (with `::test_the_shapes_match_the_chained_forms_and_spare_the_rest`), run by `just agent-workflow-tests` | in final verification | 8107954a | worktree-issue-474-orchestrated | met |
+| AC2 | [code] Each former site names the Claude-compatible wait (Monitor until-condition, or a bare sleep as its own call), and from-issue states the end-the-turn rule for a blocker owned by another session. — measured: the same contract test asserts both phrases at each site | code | `ClaudeCompatibleWaitContractsTest::test_each_former_site_names_both_claude_compatible_waits` and `::test_from_issue_ends_the_turn_on_another_sessions_blocker`, run by `just agent-workflow-tests` | in final verification | 8107954a | worktree-issue-474-orchestrated | met |
+| AC3 | [code] `just agent-workflow-tests` passes. — measured: `just agent-workflow-tests` | code | `just agent-workflow-tests` | in final verification | 8107954a | worktree-issue-474-orchestrated | met |

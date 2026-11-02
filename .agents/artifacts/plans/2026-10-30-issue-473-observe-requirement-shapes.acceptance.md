@@ -1,0 +1,8 @@
+# Acceptance record — issue #473
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] Every requirement kind a direct-owner `observe` response can return carries a description of the observation it expects (member names and an example). A test enumerates the requirement kinds and fails when one lacks it. — measured: new case in `home/common/agent-skills/tests/test_workflow_state.py` (fails today: `{"kind":"tracker"}` carries nothing else) | code | `test_workflow_state.py::DirectObserveExpectsTest::test_every_observe_kind_is_described` | in final verification | — | — | met |
+| AC2 | [code] `workflow-state direct-owner --help` names where the observation shapes are described. — measured: new case in `home/common/agent-skills/tests/test_workflow_state.py` | code | `test_workflow_state.py::DirectOwnerHelpTest::test_direct_owner_help_names_expects_and_its_members` | in final verification | — | — | met |
+| AC3 | [code] The output of every `workflow-state` subcommand that a skill pipes into `artifact-budget validate-report` (`register-worker` included) passes validation at the boundary that skill uses. — measured: new contract case in `home/common/agent-skills/tests/test_workflow_skill_contracts.py` or `test_artifact_budget.py` | code | `test_artifact_budget.py::SkillNamedReplyTest::test_every_skill_named_reply_passes_the_workflow_response_boundary`, `::test_the_drivers_cover_exactly_the_skill_named_replies` | in final verification | — | — | met |
+| AC4 | [code] `just agent-workflow-tests` passes. — measured: `just agent-workflow-tests` | code | `just agent-workflow-tests` | in final verification | — | — | met |

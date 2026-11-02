@@ -38,9 +38,9 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v4
       - uses: DeterminateSystems/flake-checker-action@v5
 
-  # `Nix Eval` is the context in `.github/branch-protection.json`'s sole
-  # provider-bound check required on `main` once `just protect-main` has been
-  # applied. Renaming this job — or giving it a `strategy:` or a `uses:`, which
+  # `Nix Eval` is one of the two contexts `.github/branch-protection.json` requires on
+  # `main` (the other is `Instruction Budget`, in `instruction-budget.yaml`) once
+  # `just protect-main` has been applied. Renaming this job — or giving it a `strategy:` or a `uses:`, which
   # make GitHub report it under a different name — leaves that required context
   # unreportable and blocks every merge to `main` with no error pointing at the
   # cause. The inverse failure is quieter: a `needs:`, a `continue-on-error:`, or an
@@ -65,6 +65,8 @@ jobs:
           nix eval --show-trace \
             --extra-experimental-features 'nix-command flakes' \
             --raw '.#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath'
+      - name: Check oMLX adapter and host settings against pinned upstream
+        run: nix build --no-link '.#checks.x86_64-linux.omlx-adapter'
 
   agent-workflow-tests:
     name: Agent Workflow Tests (advisory)
@@ -81,6 +83,10 @@ jobs:
         id: checkout
         continue-on-error: true
         uses: actions/checkout@v4
+        # Full history: suite modules build fixtures from pinned ancestor
+        # commits and refuse to skip when one is missing (issue 436).
+        with:
+          fetch-depth: 0
       - name: Install Nix
         id: install_nix
         continue-on-error: true

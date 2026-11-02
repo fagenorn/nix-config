@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -12,6 +14,10 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+
+from agent_tools import attempt_identity
+from agent_tools.attempt_observations import describe
+from agent_tools.transaction_core import TransactionStore
 
 from ._delivery_model_fixtures import (
     authority, cleanup_contract_and_delivery, contract_and_delivery,
@@ -28,9 +34,20 @@ MODEL = SCRIPTS / "delivery_model/__init__.py"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 ARTIFACT_BUDGET = SCRIPTS / "artifact_budget.py"
 NOW = "2026-09-21T00:00:00Z"
+ORCHESTRATED = attempt_identity.RunIdentity("orchestrated", None, None)
+TRANSACTION = "rel_0190f0e0-0000-7000-8000-000000000000"
 WORKTREE_NAME = "worktree-issue-171-delivery-contract-source"
 LATER = "2026-09-21T00:10:00Z"
 SLUGLESS = "worktree-issue-171"
+CLOCK_ENV = "WORKFLOW_STATE_TEST_CLOCK"
+PINNED = "2026-09-30T12:00:00Z"
+SKEW = ("workflow-state: {label} {supplied} is {lead} seconds ahead of the clock {clock}; "
+        "a supplied time may lead it by at most 60 seconds — omit it to use the clock\n")
+PROGRESS_ARGS = ("--issue", 14, "--attempt", 1, "--phase", 1, "--turn-count", 10,
+                 "--context-tokens", 20000, "--turn-ceiling", 120, "--context-ceiling", 150000,
+                 "--turn-headroom", 2, "--context-headroom", 10000,
+                 "--next-needs-context", "true", "--artifacts-sufficient", "false",
+                 "--remainder-self-contained", "false")
 
 
 def authored_policy():
@@ -61,6 +78,10 @@ def load(path, name, *, package=False):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+LifecycleHarness = load(Path(__file__).with_name("test_workflow_state.py"),
+                        "delivery_workflow_lifecycle_harness").LifecycleHarness
 
 
 class DeliveryAdmissionTest(unittest.TestCase):
@@ -126,7 +147,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             "detail_state": "none", "report_path": None, "notes": notes}
 
     def state_with_attempt(self):
-        state = self.workflow.new_run_state(run_id="admission", now=NOW, issues={})
+        state = self.workflow.new_run_state(
+            run_id="admission", transaction_id=TRANSACTION, now=NOW, issues={})
         attempt = self.workflow.new_control_attempt(
             issue=151, attempt_number=1, worktree="/worktree", now=NOW,
             deadline_at="2026-09-21T01:00:00Z")
@@ -139,16 +161,19 @@ class DeliveryAdmissionTest(unittest.TestCase):
     def legacy(self, version):
         value = self.state_with_attempt()
         value["schema_version"] = version
-        value.pop("admission"); value.pop("workers")
+        value.pop("admission"); value.pop("workers"); value.pop("transaction_id")
         for issue in value["issues"].values():
             issue.pop("delivery"); issue.pop("delivery_remainders")
-            for attempt in issue["attempts"]: attempt.pop("progress_marker")
+            for attempt in issue["attempts"]:
+                for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history"):
+                    attempt.pop(field)
         if version == 1:
             value.pop("prior_run")
             for attempt in value["issues"]["151"]["attempts"]:
                 for field in self.workflow.SUSPENSION_DEFAULTS: attempt.pop(field)
         migrated = self.workflow._delivery().migrate(value, migration_contracts={})
-        self.workflow.validate_state(migrated, run_id="admission")
+        self.workflow.validate_state(
+            migrated, run_id="admission", identity=ORCHESTRATED, schema_version=7)
         return value
 
     def test_interface_two_maps_and_singular_inputs_are_closed(self):
@@ -194,9 +219,10 @@ class DeliveryAdmissionTest(unittest.TestCase):
             def run(*args):
                 return subprocess.run([sys.executable, str(WORKFLOW), *map(str, args)],
                     capture_output=True, text=True, env=env, check=False)
-            initialized = run("init-run", "--repo-root", root, "--run-id", "admission",
+            initialized = run("init-run", "--repo-root", root, "--creation-key", "admission",
                               "--now", NOW)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            minted = json.loads(initialized.stdout)["run_id"]
             direct_path = root / "direct.json"
             direct_path.write_text(json.dumps(self.direct_request()))
             direct = run("direct-owner", "--repo-root", root,
@@ -204,13 +230,13 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(direct.returncode, 0, direct.stderr)
             self.assertEqual(json.loads(direct.stdout), {"interface_version": 2,
                 "kind": "observe", "issue": 151, "run_id": None,
-                "requirements": [{"kind": "tracker"}]})
+                "requirements": [describe({"kind": "tracker"})]})
             control_request = self.control_request()
             control_request["worktrees"] = [{"issue": 151, "recorded": None, "candidate": {
                 "path": str(root / "worktree"), "state": "absent"}}]
             control_path = root / "control.json"
             control_path.write_text(json.dumps(control_request))
-            control = run("control", "--repo-root", root, "--run-id", "admission",
+            control = run("control", "--repo-root", root, "--run-id", minted,
                           "--request-file", control_path)
             self.assertEqual(control.returncode, 0, control.stderr)
             response = json.loads(control.stdout); summary = response["summaries"][0]
@@ -226,10 +252,11 @@ class DeliveryAdmissionTest(unittest.TestCase):
             root = Path(raw)
             initialized = subprocess.run(
                 [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
-                 "--run-id", "legacy-contractless", "--now", NOW],
+                 "--creation-key", "legacy-contractless", "--now", NOW],
                 capture_output=True, text=True, check=False)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
-            state_path = root / ".superpowers/workflows/legacy-contractless/state.json"
+            minted = json.loads(initialized.stdout)["run_id"]
+            state_path = root / ".superpowers/workflows" / minted / "state.json"
             worktree = str(root / "worktree")
             state = json.loads(state_path.read_text())
             state["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
@@ -245,8 +272,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             result_path.write_text(json.dumps(result), encoding="utf-8")
             finished = subprocess.run(
                 [sys.executable, str(WORKFLOW), "finish", "--repo-root", str(root),
-                 "--run-id", "legacy-contractless", "--issue", "151", "--attempt", "1",
-                 "--result-file", str(result_path), "--now", NOW],
+                 "--run-id", minted, "--issue", "151", "--attempt", "1",
+                 "--result-file", str(result_path), "--now", NOW, "--action-id", "151:1:1"],
                 capture_output=True, text=True, check=False)
             self.assertEqual(finished.returncode, 0, finished.stderr)
             # A failed result retains its worktree path in the notes (retain_worktree).
@@ -260,8 +287,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
         for version in (1, 2):
             legacy = self.legacy(version); original = copy.deepcopy(legacy)
             migrated = self.workflow.upgrade_state(
-                legacy, run_id="admission", migration_contracts={151: contract})
-            self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 6)
+                legacy, run_id="admission", identity=ORCHESTRATED,
+                migration_contracts={151: contract})
+            self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 7)
             self.assertEqual(migrated["issues"]["151"]["delivery"],
                              self.workflow._delivery().empty_delivery())
         # The adjacent step hands back the schema-2 shape itself, with nothing a
@@ -269,32 +297,36 @@ class DeliveryAdmissionTest(unittest.TestCase):
         adjacent = self.workflow._delivery().migrate_1_to_2(self.legacy(1))
         self.assertEqual(adjacent, self.legacy(2))
         self.assertEqual(self.workflow._delivery().migrate(
-            adjacent, migration_contracts={})["schema_version"], 6)
+            adjacent, migration_contracts={})["schema_version"], 7)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run = root / ".superpowers/workflows/admission"
+            root = Path(raw); run = root / ".superpowers/workflows/orchestrate-151"
             run.mkdir(parents=True)
-            (run / "state.json").write_text(json.dumps(self.legacy(2)))
+            (run / "state.json").write_text(
+                json.dumps({**self.legacy(2), "run_id": "orchestrate-151"}))
             with mock.patch.object(self.workflow, "atomic_write_state",
                                    wraps=self.workflow.atomic_write_state) as write:
                 result = self.workflow.transact(
-                    str(root), "admission", lambda state: (state, False),
+                    str(root), "orchestrate-151", lambda state: (state, False),
                     migration_contracts={151: contract})
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 6)
-            self.assertEqual(result["schema_version"], 6)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 10)
+            self.assertEqual((result["schema_version"], result["transaction_id"]), (10,
+                TransactionStore(root / ".superpowers/attempt-transactions").lookup(
+                    attempt_identity.legacy_key("orchestrate-151"))))
 
     def test_model_owns_nonempty_delivery_validation(self):
         contract, delivery = contract_and_delivery(self.model)
         state = self.state_with_attempt(); state["issues"]["151"]["delivery"] = delivery
-        self.assertEqual(self.workflow.validate_state(state, run_id="admission"), state)
+        self.assertEqual(self.workflow.validate_state(
+            state, run_id="admission", identity=ORCHESTRATED), state)
         bad = copy.deepcopy(state)
         bad["issues"]["151"]["delivery"]["authorization_chain_digest"] = "sha256:" + "f" * 64
         with self.assertRaises(self.workflow.WorkflowError):
-            self.workflow.validate_state(bad, run_id="admission")
+            self.workflow.validate_state(bad, run_id="admission", identity=ORCHESTRATED)
         absent = self.state_with_attempt()
         absent["issues"]["151"]["delivery"]["contract_digest"] = "sha256:" + "a" * 64
         with self.assertRaises(self.workflow.WorkflowError):
-            self.workflow.validate_state(absent, run_id="admission")
+            self.workflow.validate_state(absent, run_id="admission", identity=ORCHESTRATED)
 
     def test_bootstrap_uses_exact_custody_and_remainder_precedence(self):
         state = self.state_with_attempt()
@@ -318,7 +350,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             "result": None, "result_source": None, "recovery": None,
             "finished_at": None}]
         state["updated_at"] = NOW
-        self.workflow.validate_state(state, run_id="admission")
+        self.workflow.validate_state(state, run_id="admission", identity=ORCHESTRATED)
         requirement = self.workflow.bootstrap_response(state)["requirements"][0]
         self.assertEqual(requirement["custody"]["action_id"], "151:r1:1")
         self.assertEqual(set(requirement), {"issue", "owner", "custody", "recorded_worktree",
@@ -343,12 +375,12 @@ class DeliveryAdmissionTest(unittest.TestCase):
             mutations[name] = candidate
         for name, candidate in mutations.items():
             with self.subTest(invalid_remainder=name), self.assertRaises(self.workflow.WorkflowError):
-                self.workflow.validate_state(candidate, run_id="admission")
+                self.workflow.validate_state(candidate, run_id="admission", identity=ORCHESTRATED)
         for malformed in (None, {}, False):
             candidate = self.state_with_attempt()
             candidate["issues"]["151"]["delivery_remainders"] = malformed
             with self.subTest(absent_remainders=malformed), self.assertRaises(self.workflow.WorkflowError):
-                self.workflow.validate_state(candidate, run_id="admission")
+                self.workflow.validate_state(candidate, run_id="admission", identity=ORCHESTRATED)
 
     def test_public_source_and_installed_admission_fail_closed(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -393,11 +425,13 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     (share / "artifact-budget-policy.json").symlink_to(
                         store / "artifact-budget-policy.json")
                 completed = subprocess.run([sys.executable, str(cli), "init-run",
-                    "--repo-root", str(repo), "--run-id", "admission", "--now", NOW],
+                    "--repo-root", str(repo), "--creation-key", "admission", "--now", NOW],
                     capture_output=True, text=True, env=env, check=False)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertEqual(json.loads(completed.stdout), {"interface_version": 2,
-                    "kind": "workflow_bootstrap", "run_id": "admission", "requirements": []})
+                    "kind": "workflow_bootstrap", "requirements": [],
+                    "run_id": TransactionStore(repo / ".superpowers/attempt-transactions")
+                    .lookup(attempt_identity.run_key("admission"))})
                 malformed = base / "bad.json"; malformed.write_text("{malformed")
                 def rejects_dependency(fragment):
                     result = subprocess.run([sys.executable, str(cli), "direct-owner",
@@ -592,7 +626,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     suspended = invoke(
                         "suspend", "--repo-root", root, "--run-id", action["run_id"],
                         "--issue", 151, "--attempt", 1, "--blocked-on", "external",
-                        "--now", "2026-09-21T00:00:01Z")
+                        "--now", "2026-09-21T00:00:01Z",
+                        "--action-id", action["custody"]["action_id"])
                     self.assertEqual(suspended.returncode, 0, suspended.stderr.decode())
                 before_observation = (root / ".superpowers/workflows" /
                                       action["run_id"] / "state.json").read_bytes()
@@ -1101,8 +1136,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             def store(value):
                 nonlocal serial; serial += 1
                 path = root / f"input-{serial}.json"; path.write_text(json.dumps(value)); return path
-            run_id = "orchestrated"
-            invoke("init-run", "--repo-root", root, "--run-id", run_id, "--now", NOW)
+            run_id = invoke("init-run", "--repo-root", root, "--creation-key", "orchestrated",
+                            "--now", NOW)["run_id"]
             request = self.control_request(contract)
             request.update(tracker=[{"issue": 151, "state": "open", "open_blockers": [],
                 "decision_blockers": []}], worktrees=[{"issue": 151, "recorded": None,
@@ -1125,7 +1160,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                    "--checkpoint-file", store(checkpoint), "--now",
                    "2026-09-21T00:00:02Z")
             resume = self.control_request(contract)
-            resume.update(now="2026-09-21T00:00:03Z",
+            resume.update(now="2026-09-21T00:00:03Z", human_directed=True,
                 tracker=[{"issue": 151, "state": "closed", "open_blockers": [],
                           "decision_blockers": []}], worktrees=[{"issue": 151,
                     "recorded": {"path": worktree, "state": "matching_issue_branch"},
@@ -1137,7 +1172,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual((action["custody"]["remainder"],
                               action["custody"]["launch"], action["deadline_at"]),
                              (1, 2, remainder["deadline_at"]))
-            state = json.loads((root / ".superpowers/workflows/orchestrated/state.json").read_text())
+            state = json.loads((root / f".superpowers/workflows/{run_id}/state.json").read_text())
             self.assertEqual(len(state["issues"]["151"]["attempts"]), 1)
 
     def test_a_refused_remainder_launch_parks_under_host_capacity(self):
@@ -1146,7 +1181,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         home = make_home()
         self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); worktree = str(root / "worktree"); run_id = "refusal"
+            root = Path(raw); worktree = str(root / "worktree")
             def invoke(*args, stdin=None):
                 completed = subprocess.run(
                     [sys.executable, str(WORKFLOW), *map(str, args)],
@@ -1155,10 +1190,10 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     env={**os.environ, "HOME": str(home)})
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 return json.loads(completed.stdout)
-            run = ("--repo-root", root, "--run-id", run_id)
             def control(now, tracker, *, recorded, owners=()):
                 request = self.control_request(contract)
                 request.update(host_route="claude-code", now=now, owners=list(owners),
+                    human_directed=True,
                     tracker=[{"issue": 151, "state": tracker, "open_blockers": [],
                               "decision_blockers": []}],
                     worktrees=[{"issue": 151,
@@ -1168,7 +1203,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
                                                             "state": "absent"}}])
                 request["authorization_intents"]["151"] = delivery["authorization_intents"]
                 return invoke("control", *run, "--request-file", "-", stdin=request)
-            invoke("init-run", *run, "--now", NOW)
+            run_id = invoke("init-run", "--repo-root", root, "--creation-key", "refusal",
+                            "--now", NOW)["run_id"]
+            run = ("--repo-root", root, "--run-id", run_id)
             owner = control(NOW, "open", recorded=False)["actions"][0]
             failed = self.failed_summary(owner["custody"], digest)
             failed["delivery_observations"] = [observation(
@@ -1200,20 +1237,22 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(claims[action["custody"]["action_id"]]["release_event"],
                              "launch_refused")
 
-    def remainder_sweeps(self, root, home, run_id):
+    def remainder_sweeps(self, root, home, key):
         """Drive a claude-code run until remainder r1:1 is suspended on a denial (#190).
 
         Issue 151's owner spawns, fails after selecting its output, and an
         authority denial parks the minted remainder on ``human_gate``. Returns
-        ``(control, checkpoint)``. ``control(now, max_parallel=1)`` sweeps with
+        ``(control, checkpoint, run_id)``, the run minted under creation key ``key``. ``control(now, max_parallel=1)`` sweeps with
         the recorded worktree observed as ``recorded`` (``matching_issue_branch``
-        unless given) and returns the raw response bytes.
+        unless given) and returns the raw response bytes. ``human_directed`` is the request's value,
+        true by default because the remainder this fixture parks waits on ``human_gate`` and only a
+        directed sweep resumes it (issue 458 D3, D9).
         ``checkpoint(custody, now)`` reports that custody again without progress
         and returns the decoded response.
         """
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
-        worktree = str(root / "worktree"); run = ("--repo-root", root, "--run-id", run_id)
+        worktree = str(root / "worktree")
 
         def invoke(*args, stdin=None):
             completed = subprocess.run(
@@ -1223,9 +1262,11 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
             return completed.stdout
 
-        def control(now, max_parallel=1, *, spawn=False, recorded="matching_issue_branch"):
+        def control(now, max_parallel=1, *, spawn=False, recorded="matching_issue_branch",
+                    human_directed=True):
             request = self.control_request(contract)
             request.update(host_route="claude-code", now=now, max_parallel=max_parallel,
+                human_directed=human_directed,
                 tracker=[{"issue": 151, "state": "open" if spawn else "closed",
                           "open_blockers": [], "decision_blockers": []}],
                 worktrees=[{"issue": 151,
@@ -1242,7 +1283,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
             return json.loads(invoke("checkpoint-delivery", *run, "--checkpoint-file",
                                      "-", "--now", now, stdin=report))
 
-        invoke("init-run", *run, "--now", NOW)
+        run_id = json.loads(invoke("init-run", "--repo-root", root, "--creation-key", key,
+                                   "--now", NOW))["run_id"]
+        run = ("--repo-root", root, "--run-id", run_id)
         owner = json.loads(control(NOW, spawn=True))["actions"][0]
         failed = self.failed_summary(owner["custody"], digest)
         failed["delivery_observations"] = [observation(
@@ -1254,7 +1297,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         denial["observed_at"] = "2026-09-21T00:00:02Z"; seal(self.model, denial)
         parked = checkpoint(remainder["custody"], "2026-09-21T00:00:02Z", denial)
         self.assertEqual((parked["state"], parked["blocked_on"]), ("suspended", "human_gate"))
-        return control, checkpoint
+        return control, checkpoint, run_id
 
     @staticmethod
     def remainder_launch(response):
@@ -1266,8 +1309,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T1: a live remainder takes no free slot and the sweep does not crash."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "live-remainder"
-            control, _ = self.remainder_sweeps(root, home, run_id)
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "live-remainder")
             launch = self.remainder_launch(control("2026-09-21T00:00:03Z"))
             self.assertEqual((launch["custody"]["remainder"], launch["custody"]["launch"]),
                              (1, 2))
@@ -1291,8 +1334,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T3: the reap that crosses the stall bound fails the remainder, dispatching nothing."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "stalled-remainder"
-            control, checkpoint = self.remainder_sweeps(root, home, run_id)
+            root = Path(raw)
+            control, checkpoint, run_id = self.remainder_sweeps(root, home, "stalled-remainder")
             for launch, now, reported in (
                     (2, "2026-09-21T00:00:03Z", "2026-09-21T00:00:04Z"),
                     (3, "2026-09-21T00:00:05Z", "2026-09-21T00:00:06Z"),
@@ -1320,8 +1363,53 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T4: baseline, a resumable human-gate remainder still resumes at a free slot."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            control, _ = self.remainder_sweeps(Path(raw), home, "suspended-remainder")
+            control, _, _ = self.remainder_sweeps(Path(raw), home, "suspended-remainder")
             action = self.remainder_launch(control("2026-09-21T00:00:03Z", max_parallel=2))
+            self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
+                             (1, 2))
+
+    def test_an_undirected_sweep_parks_a_gated_remainder_until_a_directed_one(self):
+        """Issue 458 D3: no undirected sweep relaunches a `human_gate` remainder.
+
+        Each such sweep dispatches nothing, charges no slot, leaves the issue's
+        ledger entry alone and finalizes with the parked summary; the next
+        human-directed sweep resumes it.
+        """
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "parked-remainder")
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            before = json.loads(state_path.read_text())["issues"]["151"]
+            for now in ("2026-09-21T00:00:03Z", "2026-09-21T00:00:04Z"):
+                with self.subTest(now=now):
+                    value = json.loads(control(now, max_parallel=2, human_directed=False))
+                    self.assertEqual([item["kind"] for item in value["actions"]], ["finalize"])
+                    self.assertEqual(value["admission"]["waiting"], [])
+                    summary = next(item for item in value["summaries"] if item["issue"] == 151)
+                    self.assertEqual(
+                        (summary["state"], summary["blocked_on"], summary["custody"]["kind"]),
+                        ("suspended", "human_gate", "remainder"))
+                    self.assertEqual(json.loads(state_path.read_text())["issues"]["151"], before)
+            action = self.remainder_launch(
+                control("2026-09-21T00:00:05Z", max_parallel=2, human_directed=True))
+            self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
+                             (1, 2))
+
+    def test_an_auto_resumable_remainder_resumes_without_direction(self):
+        """Issue 458 D3, D9: only a gated cause waits for direction; `owner_unavailable`
+        does not. No control path this fixture drives writes that cause, so the test
+        rewrites the parked remainder's `blocked_on` in the ledger."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "auto-remainder")
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            state = json.loads(state_path.read_text())
+            state["issues"]["151"]["delivery_remainders"][0]["blocked_on"] = "owner_unavailable"
+            state_path.write_text(json.dumps(state))
+            action = self.remainder_launch(
+                control("2026-09-21T00:00:03Z", max_parallel=2, human_directed=False))
             self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
                              (1, 2))
 
@@ -1329,8 +1417,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T3 (#194): a resumable remainder on an absent worktree is reported, not raised."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "absent-remainder"
-            control, _ = self.remainder_sweeps(root, home, run_id)
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "absent-remainder")
             state_path = root / f".superpowers/workflows/{run_id}/state.json"
             before = json.loads(state_path.read_text())["issues"]["151"]
             response = control("2026-09-21T00:00:03Z", max_parallel=2, recorded="absent")
@@ -1360,7 +1448,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "claude-code": {"support": "supported", "agent_slots": 4},
                 "codex": {"support": "unsupported"}}}), encoding="utf-8")
         with tempfile.TemporaryDirectory() as raw:
-            control, _ = self.remainder_sweeps(Path(raw), home, "short-slots")
+            control, _, _ = self.remainder_sweeps(Path(raw), home, "short-slots")
             self.remainder_launch(control("2026-09-21T00:00:03Z"))
             response = json.loads(control("2026-09-21T00:00:04Z", max_parallel=2))
             self.assertEqual(response["admission"]["waiting"], [])
@@ -1371,7 +1459,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "recovery-control"; serial = 0
+            root = Path(raw); serial = 0
             def store(value):
                 nonlocal serial; serial += 1
                 path = root / f"control-recovery-{serial}.json"
@@ -1381,7 +1469,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     capture_output=True, text=True, check=False)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 return json.loads(completed.stdout)
-            invoke("init-run", "--repo-root", root, "--run-id", run_id, "--now", NOW)
+            run_id = invoke("init-run", "--repo-root", root, "--creation-key", "recovery-control",
+                            "--now", NOW)["run_id"]
             request = self.control_request(contract)
             request.update(tracker=[{"issue": 151, "state": "open", "open_blockers": [],
                 "decision_blockers": []}], worktrees=[{"issue": 151, "recorded": None,
@@ -1476,16 +1565,17 @@ class DeliveryAdmissionTest(unittest.TestCase):
             return {str(issue): copy.deepcopy(value) for issue in issues}
 
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "dispatch-wire"
+            root = Path(raw)
             home = make_home(); self.addCleanup(shutil.rmtree, home, True)
             env = {**os.environ, "HOME": str(home)}
             bound = {issue: self.issue_contract(issue, str(root / f"worktree-{issue}"))
                      for issue in issues}
             initialized = subprocess.run(
                 [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
-                 "--run-id", run_id, "--now", NOW], capture_output=True, check=False,
-                env=env)
+                 "--creation-key", "dispatch-wire", "--now", NOW], capture_output=True,
+                check=False, env=env)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            run_id = json.loads(initialized.stdout)["run_id"]
             request = {"interface_version": 3, "host_route": "claude-code", "now": NOW,
                 "max_parallel": 2,
                 "attempt_budget_minutes": 30, "human_directed": True, "issues": issues,
@@ -1537,14 +1627,30 @@ class BuilderHarness:
         self.worktree = str(self.root / ".worktrees" / WORKTREE_NAME)
         return self.root
 
-    def cli(self, *args, stdin=None, ok=True):
+    def cli(self, *args, stdin=None, ok=True, cwd=None):
         completed = subprocess.run(
             [sys.executable, str(WORKFLOW), *map(str, args)], input=stdin,
-            capture_output=True, check=False,
+            capture_output=True, check=False, cwd=cwd,
             env={**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"})
         if ok:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         return completed
+
+    @property
+    def runs(self):
+        """The run id each test-local label names."""
+        return self.__dict__.setdefault("_runs", {})
+
+    def run_of(self, label):
+        return self.runs.get(label, label)
+
+    def mint_run(self, key, *, now=NOW):
+        """`init-run --creation-key key`: sets `self.run_id` to the run it mints, labels it
+        `key`, and returns that run's `--repo-root` and `--run-id` arguments."""
+        self.run_id = self.runs[key] = json.loads(self.cli(
+            "init-run", "--repo-root", self.root, "--creation-key", key,
+            "--now", now).stdout)["run_id"]
+        return ("--repo-root", self.root, "--run-id", self.run_id)
 
     def build(self, kind, value, *, ok=True):
         completed = self.cli("build-delivery", "--repo-root", self.root, "--kind", kind,
@@ -1704,6 +1810,10 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
     def test_contract_refusals_exit_two_with_empty_stdout(self):
         def gitlab(contract_value):
             contract_value["bindings"]["tracker"]["kind"] = "gitlab"
+            # A declared GitHub release profile is refused on a non-GitHub
+            # tracker (G17) before the builder runs; the builder's tracker
+            # rule is what is under test.
+            contract_value["release"] = "unsupported"
         cases = (("non-github tracker", gitlab, {}, b"tracker kind"),
                  ("foreign issue branch", None, {"worktree": "/wt/issue-172-other"},
                   b"branch pattern"),
@@ -1720,7 +1830,7 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
                 self.assertIn(reason, refused.stderr)
         self.project()
-        missing = self.contract_input(); missing.pop("now")
+        missing = self.contract_input(); missing.pop("issue")
         for kind, value, reason in (("contract", missing, b"builder input keys"),
                                     ("nonsense", self.contract_input(), b"invalid choice")):
             with self.subTest(kind=kind):
@@ -1861,6 +1971,38 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
         self.assertIn(b"builder input keys", refused.stderr)
 
 
+    def test_a_contract_input_without_now_is_stamped_from_the_clock(self):
+        """#309 D5: the command fills `now`; the builder stays pure."""
+        self.project()
+        value = self.contract_input(); value.pop("now")
+        with mock.patch.dict(os.environ, {CLOCK_ENV: PINNED}):
+            pinned = self.build("contract", value)
+        self.assertEqual(pinned["contract"]["provenance"]["created_at"], PINNED)
+        with mock.patch.dict(os.environ):
+            os.environ.pop(CLOCK_ENV, None)
+            stamped = self.build("contract", value)["contract"]["provenance"]["created_at"]
+        recorded = datetime.fromisoformat(stamped.replace("Z", "+00:00"))
+        self.assertLessEqual(abs((datetime.now(timezone.utc) - recorded).total_seconds()), 5)
+
+    def test_a_contract_now_over_the_bound_is_refused(self):
+        """#309 D5, D12: a parsing future `now` is refused; a malformed one is the builder's."""
+        self.project()
+        ahead = "2026-09-30T12:15:00Z"
+        with mock.patch.dict(os.environ, {CLOCK_ENV: PINNED}):
+            refused = self.build("contract", self.contract_input(now=ahead), ok=False)
+            at_bound = self.build("contract", self.contract_input(now="2026-09-30T12:01:00Z"))
+            malformed = self.build("contract", self.contract_input(now="soon"), ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, b"", SKEW.format(label="contract now", supplied=ahead, lead=900,
+                                 clock=PINNED).encode()))
+        self.assertEqual(at_bound["contract"]["provenance"]["created_at"], "2026-09-30T12:01:00Z")
+        self.assertEqual((malformed.returncode, malformed.stdout), (2, b""))
+        self.assertTrue(malformed.stderr.startswith(b"workflow-state: build-delivery refused: "),
+                        malformed.stderr)
+        self.assertNotIn(b"ahead of the clock", malformed.stderr)
+
+
 class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
     """D3, D4, D7: an existing contract worktree can veto a build, never supply policy."""
 
@@ -1917,7 +2059,9 @@ class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
                 "and refuses if any sealed policy member differs.",
                 "when resolve-project refuses, that line ends with the resolver's error "
                 "document",
-                "It takes no lock, reads no clock and writes nothing.",
+                "It takes no lock and writes nothing, and it reads the clock only for a "
+                "--kind contract input's now: to stamp an omitted one and to skew-check a "
+                "supplied one.",
                 "A contract the builder cannot re-derive is served only when a ledger under "
                 "--repo-root has installed it, and then against that ledger's stored initial "
                 "intent.",
@@ -2002,6 +2146,16 @@ class LegacyWorktreeTest(BuilderHarness, unittest.TestCase):
             (Path(path) / ".git").write_text(f"gitdir: {self.root / 'missing'}\n",
                                              encoding="utf-8")
 
+        def git_failure(path):
+            control = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
+                capture_output=True, check=False, timeout=60,
+                env={**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"})
+            self.assertNotEqual(control.returncode, 0)
+            lines = [line.strip() for line in control.stderr.decode("utf-8", "replace").splitlines()
+                     if line.strip()]
+            self.assertTrue(lines, "the failing Git probe must explain its refusal")
+            return ("git failed: " + lines[0]).encode("utf-8")
+
         for label, arrange, clause in (
                 ("absent", None, lambda: b"the worktree is absent"),
                 ("regular file", regular_file, lambda: b"it is not a directory"),
@@ -2011,9 +2165,7 @@ class LegacyWorktreeTest(BuilderHarness, unittest.TestCase):
                 ("detached HEAD", detached, lambda: b"its HEAD is detached"),
                 ("unpatterned branch", feature_branch,
                  lambda: b"its checked-out branch 'feature-x' does not match either"),
-                ("git failure", broken_gitdir,
-                 lambda: b"git failed: fatal: not a git repository: "
-                         + str(self.root / "missing").encode())):
+                ("git failure", broken_gitdir, lambda: git_failure(value["worktree"]))):
             with self.subTest(label=label):
                 self.project()
                 value = self.slugless_input()
@@ -2073,8 +2225,8 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
                 self.assertEqual(refused.returncode, 2)
                 self.assertIn(b"file path must be absolute", refused.stderr)
 
-        self.cli("init-run", *run, "--now", NOW)
-        state = self.root / ".superpowers/workflows/inputs/state.json"
+        run = self.mint_run("inputs")
+        state = self.root / ".superpowers/workflows" / self.run_id / "state.json"
         candidate = {"issue": 151, "recorded": None, "candidate": {
             "path": str(self.root / ".worktrees/worktree-issue-151-inputs"), "state": "absent"}}
         stdout = self.assert_parity(state, ("control", *run), "--request-file", json.dumps(
@@ -2112,25 +2264,30 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
                            piped=self.pipe("ship-summary", summary))
 
         workflow = load(WORKFLOW, "workflow_state_inputs")
-        legacy = workflow.new_run_state(run_id="legacy-inputs", now=NOW, issues={})
+        legacy = workflow.new_run_state(
+            run_id="orchestrate-151", transaction_id=TRANSACTION, now=NOW, issues={})
         legacy["schema_version"] = 2
-        legacy.pop("admission"); legacy.pop("workers")
+        legacy.pop("admission"); legacy.pop("workers"); legacy.pop("transaction_id")
         legacy["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
             workflow.new_control_attempt(issue=151, attempt_number=1,
                 worktree=str(self.root / "wt-151"), now=NOW,
                 deadline_at="2026-09-21T01:00:00Z")]}
-        legacy["issues"]["151"]["attempts"][0].pop("progress_marker")
-        legacy_state = self.root / ".superpowers/workflows/legacy-inputs/state.json"
+        for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history"):
+            legacy["issues"]["151"]["attempts"][0].pop(field)
+        legacy_state = self.root / ".superpowers/workflows/orchestrate-151/state.json"
         legacy_state.parent.mkdir(parents=True)
         legacy_state.write_text(json.dumps(legacy), encoding="utf-8")
         self.assert_parity(legacy_state, ("finish", "--repo-root", self.root, "--run-id",
-                           "legacy-inputs", "--now", LATER, "--issue", 151, "--attempt", 1),
+                           "orchestrate-151", "--now", LATER, "--issue", 151, "--attempt", 1),
                            "--result-file", json.dumps({**historical, "issue": 151}).encode())
 
 
 URL = "https://github.com/fagenorn/nix-config/pull/5"
+HELD_COMMENT = "https://github.com/fagenorn/nix-config/issues/171#issuecomment-1"
+HELD_RECORD = ".claude/plans/2026-09-21-issue-171.acceptance.md"
 SOURCES = {"selected_output": "repository", "branch_published": "repository",
            "pr_opened": "provider", "pr_merged": "provider", "tracker_closed": "tracker",
+           "tracker_held": "tracker",
            "remote_branch_absent": "repository", "worktree_absent": "filesystem",
            "local_branch_absent": "repository", "implementation_delivered": "repository",
            "cleanup_complete": "filesystem"}
@@ -2182,8 +2339,8 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                 ".claude/specs/2026-09-23-issue-171-delivery-contract-source-design.md", 47301),
             "plan_artifact": artifact("implementation-plan",
                 ".claude/plans/2026-09-24-issue-171-delivery-contract-source.md", 8375),
-            "head_sha": "a" * 40, "review_state": "clean", "auto": True,
-            "report_path": None, "notes": "", "delivery_contract": self.contract,
+            "head_sha": "a" * 40, "review_state": "clean", "acceptance_state": "met",
+            "auto": True, "report_path": None, "notes": "", "delivery_contract": self.contract,
             "delivery_contract_digest": self.digest, "authorization_intents": [intent],
             "authorization_chain_digest": self.model.canonical_digest(
                 {"intent_ids": [intent["id"]]}),
@@ -2241,7 +2398,8 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                                  (2, b"", self.NOT_INSTALLED))
         self.assertFalse(os.path.lexists(self.root / ".superpowers"))
 
-    def deliver(self, proposed, *, hand_built=False):
+    def deliver(self, proposed, *, hand_built=False, tracker="tracker_closed",
+                issue_closed=None):
         """Drive one implementation custody through every stage with builder outputs only.
 
         With `hand_built`, the installed contract is `hand_built`'s: it is
@@ -2286,8 +2444,13 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
             "open_pr": [self.observed("pr_opened", pr_number=5, pr_url=URL, head=head)],
             "merge_pr": [self.observed("pr_merged", pr_number=5, pr_url=URL, head=head,
                                        merge_sha=merge_sha)],
-            "close_tracker": [self.observed("tracker_closed", close_reason="completed",
-                                            observation_identity="github:issue:171:closed")],
+            "close_tracker": [self.observed(tracker, **({
+                "close_reason": "completed",
+                "observation_identity": "github:issue:171:closed"}
+                if tracker == "tracker_closed" else {
+                "comment_url": HELD_COMMENT, "record_path": HELD_RECORD,
+                "acceptance_state": "unmet",
+                "observation_identity": "github:issue:171:held"}))],
             "delete_remote_branch": [self.observed("remote_branch_absent")],
             "remove_worktree": [self.observed("worktree_absent")],
             "delete_local_branch": [self.observed("local_branch_absent")]}
@@ -2323,9 +2486,11 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                           worktree_observation_ids=[by_kind["worktree_absent"]],
                           detail_pointer=".superpowers/issue-delivery/171/detail.json",
                           read_evidence="detail read")]
+        closed = (tracker == "tracker_closed") if issue_closed is None else issue_closed
         historical = {"issue": 171, "state": "merged", "pr_url": URL, "merge_sha": merge_sha,
-            "issue_closed": True, "discussion_items": [], "detail_state": "none",
-            "report_path": None, "notes": "delivered"}
+            "issue_closed": closed, "discussion_items": [], "detail_state": "none",
+            "report_path": None,
+            "notes": "delivered" if closed else f"held for verification: {HELD_COMMENT}"}
         summary = {"interface_version": 2, "issue": 171, "state": "delivery_complete",
             "custody": self.custody, "historical_owner_result": historical,
             "delivery_contract_digest": self.digest,
@@ -2334,6 +2499,14 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
             "detail_state": "none", "report_path": None, "notes": "delivered"}
         validated = self.validated("ship-summary", summary)
         self.assertLessEqual(len(validated), policy["phase_reports"]["wire_max_bytes"])
+        if closed is not (tracker == "tracker_closed"):
+            before = state.read_bytes()
+            refused = self.cli("finish", *self.run_args, "--now", LATER,
+                               "--summary-file", "-", stdin=validated, ok=False)
+            self.assertEqual((refused.returncode, state.read_bytes()), (2, before))
+            # `_call` swallows the ValueError text, so the refusal is the generic line.
+            self.assertEqual(refused.stderr, b"workflow-state: delivery finish refused\n")
+            return
         finished = json.loads(self.cli("finish", *self.run_args, "--now", LATER,
             "--summary-file", "-", stdin=validated).stdout)
         self.assertEqual((finished["kind"], finished["pending_stage_ids"]),
@@ -2341,6 +2514,23 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         stored = json.loads(state.read_text(encoding="utf-8"))["issues"]["171"]
         self.assertEqual(len(stored["delivery"]["authorization_intents"]), 1)
         self.assertEqual(stored["attempts"][-1]["state"], "merged")
+        self.assertIs(stored["attempts"][-1]["result"]["issue_closed"], closed)
+        held_id = stored["delivery"]["postconditions"]["tracker_closed"]["observation_id"]
+        self.assertEqual(next(item["observation_kind"]
+                              for item in stored["delivery"]["delivery_observations"]
+                              if item["id"] == held_id), tracker)
+
+    def test_a_held_delivery_completes_with_issue_closed_false(self):
+        """#273: tracker_held satisfies close_tracker; the owner row says not closed."""
+        self.deliver({"merge_pr", "close_tracker", "remove_worktree", "delete_local_branch"},
+                     tracker="tracker_held")
+
+    def test_finish_refuses_an_issue_closed_that_disagrees_with_the_tracker(self):
+        """#273 D6, D17: the historical row agrees with the observed tracker outcome."""
+        for tracker, closed in (("tracker_held", True), ("tracker_closed", False)):
+            with self.subTest(tracker=tracker, issue_closed=closed):
+                self.deliver({"merge_pr", "close_tracker", "remove_worktree",
+                              "delete_local_branch"}, tracker=tracker, issue_closed=closed)
 
     def test_every_builder_scope_is_covered_when_its_stage_is_ready(self):
         self.deliver({"select_reviewed_output", "publish_branch", "open_pr", "merge_pr",
@@ -2358,7 +2548,7 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
     def test_only_a_contract_that_does_not_re_derive_reads_a_ledger(self):
         self.project()
         built = self.build("contract", self.contract_input())
-        contract, _ = self.hand_built(built)
+        contract, intent = self.hand_built(built)
         workflows = self.root / ".superpowers" / "workflows"
         matching = json.dumps({"schema_version": 4, "issues": {"171": {
             "delivery": {"contract_digest": self.model.canonical_digest(
@@ -2366,33 +2556,65 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         outside = self.root / "outside"
         outside.mkdir()
         (outside / "state.json").write_bytes(matching)
-        for run_id, raw in (
-                ("-bad", matching),
-                ("a-unparsable", b"{"),
-                # Too deeply nested to parse: json.loads raises RecursionError (D14).
-                ("a-deep", b"[" * 100000),
-                ("run-blocked", b"{}"),
-                ("run-derived", json.dumps({"schema_version": 4, "issues": {"171": {
-                    "delivery": {"contract_digest": self.model.canonical_digest(
-                        built["contract"])}}}}).encode()),
-                ("run-legacy", matching)):
+        # Directories no delivery transaction names are never candidates, whatever they hold (D13).
+        for run_id, raw in (("-bad", matching), ("a-unparsable", b"{"), ("run-blocked", b"{}"),
+                            ("run-legacy", matching)):
             (workflows / run_id).mkdir(parents=True)
             (workflows / run_id / "state.json").write_bytes(raw)
-        # A symlinked run directory and a symlinked state file, both reaching the
-        # matching bytes outside the root, sort before run-legacy (D13).
         (workflows / "run-a-linked").symlink_to(outside, target_is_directory=True)
-        (workflows / "run-b-file").mkdir()
-        (workflows / "run-b-file" / "state.json").symlink_to(outside / "state.json")
-        # No search permission: lstat(state.json) raises PermissionError (D14).
-        os.chmod(workflows / "run-blocked", 0)
-        self.addCleanup(os.chmod, workflows / "run-blocked", 0o700)
-        invalid = (b"workflow-state: build-delivery refused: installing ledger "
-                   b"run-legacy is invalid\n")
         refused = self.build("initial-intent", {"contract": contract}, ok=False)
         self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
-                         (2, b"", invalid))
+                         (2, b"", self.NOT_INSTALLED))
+        owner = self.acquire(contract, intent)
+        run_dir = workflows / owner["run_id"]
+        ledger = run_dir / "state.json"
+        genuine = ledger.read_bytes()
+        self.assertEqual(self.build("initial-intent", {"contract": contract}), intent)
+        derived = json.dumps({"schema_version": 4, "issues": {"171": {"delivery": {
+            "contract_digest": self.model.canonical_digest(built["contract"])}}}}).encode()
         self.assertEqual(self.build("initial-intent", {"contract": built["contract"]}),
                          built["initial_intent"])
+        # Each damage to the one candidate skips it: the ledger is read only when it is a
+        # regular, parsable file that records the digest (D14).
+        held = run_dir.with_name("held")
+        damage = {
+            "unparsable": lambda: ledger.write_bytes(b"{"),
+            # Too deeply nested to parse: json.loads raises RecursionError.
+            "too deep": lambda: ledger.write_bytes(b"[" * 100000),
+            "absent": lambda: ledger.unlink(),
+            "another digest": lambda: ledger.write_bytes(derived),
+            "linked state": lambda: (ledger.unlink(), ledger.symlink_to(outside / "state.json")),
+            "linked run": lambda: (run_dir.rename(held),
+                                   run_dir.symlink_to(held, target_is_directory=True)),
+            # No search permission: lstat(state.json) raises PermissionError (D14).
+            "blocked": lambda: os.chmod(run_dir, 0),
+        }
+        for label, break_it in damage.items():
+            with self.subTest(label=label):
+                break_it()
+                try:
+                    refused = self.build("initial-intent", {"contract": contract}, ok=False)
+                finally:
+                    if run_dir.is_symlink():
+                        run_dir.unlink()
+                        held.rename(run_dir)
+                    os.chmod(run_dir, 0o700)
+                    ledger.unlink(missing_ok=True)
+                    ledger.write_bytes(genuine)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", self.NOT_INSTALLED))
+        # A ledger that records the digest but no longer validates refuses, naming its run.
+        invalid = (b"workflow-state: build-delivery refused: installing ledger "
+                   + owner["run_id"].encode() + b" is invalid\n")
+        before = sorted(path.name for path in run_dir.iterdir())
+        for raw in (matching, json.dumps({"schema_version": [], "issues": {"171": {"delivery": {
+                "contract_digest": self.model.canonical_digest(contract)}}}}).encode()):
+            ledger.write_bytes(raw)
+            refused = self.build("initial-intent", {"contract": contract}, ok=False)
+            self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                             (2, b"", invalid))
+        self.assertEqual(sorted(path.name for path in run_dir.iterdir()), before)
+        ledger.write_bytes(genuine)
         # A lone surrogate has no canonical bytes, so no ledger can record it (D14).
         uncanonical = copy.deepcopy(contract)
         uncanonical["provenance"]["reference"] = "\ud800"
@@ -2405,14 +2627,6 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         self.assertEqual((refused.returncode, refused.stdout), (2, b""))
         self.assertTrue(refused.stderr.startswith(b"workflow-state: build-delivery refused: "))
         self.assertEqual(refused.stderr.count(b"\n"), 1)
-        (workflows / "run-legacy" / "state.json").write_bytes(json.dumps({
-            "schema_version": [], "issues": {"171": {"delivery": {
-                "contract_digest": self.model.canonical_digest(contract)}}}}).encode())
-        refused = self.build("initial-intent", {"contract": contract}, ok=False)
-        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
-                         (2, b"", invalid))
-        self.assertEqual([path.name for path in (workflows / "run-legacy").iterdir()],
-                         ["state.json"])
         (self.root / ".superpowers").rename(self.root / "elsewhere")
         (self.root / ".superpowers").symlink_to(self.root / "elsewhere")
         self.assertEqual(self.build("initial-intent", {"contract": contract}, ok=False).stderr,
@@ -2608,8 +2822,7 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         self.sync_checkpoint(self.at_head(h1), [], self.scope_of("merge_pr"))
         self.assertEqual(self.current(), h1)
         shutil.copytree(self.ledger.parent, self.ledger.parent.with_name("zz-copy"))
-        refused(b"the contract is installed by more than one ledger: "
-                + self.ledger.parent.name.encode() + b", zz-copy")
+        self.assertEqual(self.current(), h1)  # a copy no index entry names is not a ledger
 
     def test_a_remainder_merges_after_a_post_selection_sync(self):
         """T7: the remainder reads H0 from the ledger; publish, open and merge follow H1."""
@@ -2702,6 +2915,7 @@ CONTRACT_REQUIRED = [{"kind": "delivery_contract", "subject_id": "171",
                       "reason_code": "delivery_contract_required", "detail_pointer": None}]
 CONTRACT_REQUIRED_172 = [{"kind": "delivery_contract", "subject_id": "172",
                           "reason_code": "delivery_contract_required", "detail_pointer": None}]
+DIRECT_CONTRACT_REQUIRED = [describe(item) for item in CONTRACT_REQUIRED]
 
 
 class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
@@ -2716,12 +2930,27 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return json.loads(completed.stdout) if ok else completed
 
     def control(self, run_id, request, *, ok=True):
-        completed = self.cli("control", "--repo-root", self.root, "--run-id", run_id,
+        completed = self.cli("control", "--repo-root", self.root, "--run-id", self.run_of(run_id),
             "--request-file", "-", stdin=json.dumps(request).encode(), ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
-    def write_run(self, run_id, attempts, *, schema=6):
-        state = self.workflow.new_run_state(run_id=run_id, now=NOW, issues={})
+    def bind_legacy(self):
+        """Bind the hand-written legacy ledgers into the index; `direct-owner` refuses an
+        unbound direct ledger (#339 D22)."""
+        self.cli("migrate", "--repo-root", self.root, "--apply")
+
+    def write_run(self, label, attempts, *, schema=7):
+        """A retained legacy ledger under `label`: a direct label is its own run id, any other
+        names a legacy orchestrate-<issue> run."""
+        run_id = self.runs[label] = label if attempt_identity.classify(label) == "direct" else (
+            f"orchestrate-{attempts[0]['issue']}-r{len(self.runs) + 1}")
+        state = self.workflow.new_run_state(
+            run_id=run_id, transaction_id=TRANSACTION, now=NOW, issues={})
+        state.pop("transaction_id")
+        if schema < 7:
+            attempts = [{name: value for name, value in attempt.items()
+                         if name not in ("lane", "lane_budget_minutes", "lane_history")}
+                        for attempt in attempts]
         if schema < 6:
             attempts = [{name: value for name, value in attempt.items()
                          if name != "progress_marker"} for attempt in attempts]
@@ -2754,7 +2983,9 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             claims.append({"holder": "controller", "roles": {"controller": 1}, **held})
         expected = json.loads(before)
         expected.update(updated_at=now, admission={
-            "route": "claude-code", "releases": 0, "claims": claims})
+            "route": "claude-code", "releases": 0, "claims": claims}, schema_version=10,
+            transaction_id=TransactionStore(self.root / ".superpowers/attempt-transactions")
+            .lookup(attempt_identity.legacy_key(expected["run_id"])))
         self.assertEqual(json.loads(path.read_bytes()), expected)
 
     def attempt(self, issue, number=1, *, worktree=None, **changes):
@@ -2764,7 +2995,9 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return value
 
     def direct_runs(self, issue):
-        return sorted((self.root / ".superpowers/workflows").glob(f"direct-{issue}-*"))
+        """The run directories whose ledger holds `issue`."""
+        return sorted(path.parent for path in (self.root / ".superpowers/workflows").glob(
+            "*/state.json") if str(issue) in json.loads(path.read_text())["issues"])
 
     FOLLOW_UP = "worktree-issue-172-chained-follow-up"
 
@@ -2893,7 +3126,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
     def test_a_contract_request_passes_the_workflow_response_boundary(self):
         """#221 D6: the T1 reply is what the adapter's pipe accepts, byte for byte."""
         _, request, _ = self.contract_chain()
-        raw = self.cli("control", "--repo-root", self.root, "--run-id", "chain",
+        raw = self.cli("control", "--repo-root", self.root, "--run-id", self.run_of("chain"),
                        "--request-file", "-", stdin=json.dumps(request).encode()).stdout
         self.assertEqual(json.loads(raw)["actions"][-1]["kind"], "delivery_contract")
         wire = subprocess.run([sys.executable, str(ARTIFACT_BUDGET), "validate-report",
@@ -2905,15 +3138,16 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
     def test_direct_acquisition_asks_for_the_contract_last(self):
         self.project()
         facts = {}
-        for key, value, expected in (("tracker", TRACKER, [{"kind": "tracker"}]),
-                ("forge", NO_PR, [{"kind": "forge_pr", "path": "issue-171-"}]),
+        for key, value, expected in (("tracker", TRACKER, [describe({"kind": "tracker"})]),
+                ("forge", NO_PR, [describe({"kind": "forge_pr", "path": "issue-171-"})]),
                 ("worktree", {"issue": 171, "recorded": None, "candidate": {
-                    "path": self.worktree, "state": "absent"}}, [{"kind": "candidate_worktree"}])):
+                    "path": self.worktree, "state": "absent"}},
+                 [describe({"kind": "candidate_worktree"})])):
             response = self.direct(**facts)
             self.assertEqual((response["kind"], response["requirements"]), ("observe", expected))
             facts[key] = value
         self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
-            "issue": 171, "run_id": None, "requirements": CONTRACT_REQUIRED})
+            "issue": 171, "run_id": None, "requirements": DIRECT_CONTRACT_REQUIRED})
         self.assertEqual(self.direct_runs(171), [])
         other = self.build("contract", self.contract_input(
             worktree=str(self.root / ".worktrees/worktree-issue-171-other")))
@@ -2926,7 +3160,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.assertEqual((owner["kind"], owner["worktree"], owner["contract"]),
                          ("owner", self.worktree, built["contract"]))
         self.cli("suspend", "--repo-root", self.root, "--run-id", owner["run_id"], "--now",
-                 LATER, "--issue", 171, "--attempt", 1, "--blocked-on", "usage_limit")
+                 LATER, "--issue", 171, "--attempt", 1, "--blocked-on", "usage_limit",
+                 "--action-id", owner["custody"]["action_id"])
         resumed = self.direct(now=LATER, tracker=TRACKER, forge=NO_PR, worktree={
             "issue": 171, "recorded": {"path": self.worktree,
                                        "state": "matching_issue_branch"}, "candidate": None})
@@ -2938,12 +3173,14 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         merged = self.workflow.reconciled_result(172, "https://example.invalid/pr/1", "b" * 40)
         self.write_run("direct-172-000001", [self.attempt(172, state="merged", result=merged,
             result_source="superseded", finished_at=NOW)], schema=2)
+        self.bind_legacy()
         replay = self.direct(issue=172)
         self.assertEqual((replay["kind"], replay["reason"], replay["result"]),
                          ("terminal", "merged", merged))
         suspended = self.attempt(173)
         self.workflow.suspend_attempt(suspended, blocked_on="external", now=NOW)
         path = self.write_run("direct-173-000001", [suspended], schema=2)
+        self.bind_legacy()
         recorded = {"issue": 173, "recorded": {"path": self.worktree,
                     "state": "matching_issue_branch"}, "candidate": None}
         tracker = {**TRACKER, "issue": 173}
@@ -2959,7 +3196,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
 
     def test_control_installs_a_built_contract_only_at_spawn_and_keeps_it(self):
         self.project()
-        self.cli("init-run", "--repo-root", self.root, "--run-id", "orch", "--now", NOW)
+        self.mint_run("orch")
         built = self.build("contract", self.contract_input())
         digest = self.model.canonical_digest(built["contract"])
         spawned = self.control("orch", self.control_request([171],
@@ -2969,12 +3206,13 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         action = spawned["actions"][0]
         self.assertEqual((action["kind"], action["contract"], action["worktree"]),
                          ("spawn", built["contract"], self.worktree))
-        boot = json.loads(self.cli("init-run", "--repo-root", self.root, "--run-id", "orch",
-                                   "--now", LATER).stdout)
+        boot = json.loads(self.cli("init-run", "--repo-root", self.root, "--run-id",
+                                   self.run_of("orch"), "--now", LATER).stdout)
         self.assertEqual([item["contract_digest"] for item in boot["requirements"]], [digest])
         governed = self.control("orch", self.control_request([171], now=LATER))
         self.assertEqual(governed["summaries"][0]["contract_digest"], digest)
-        state = self.root / ".superpowers/workflows/orch/state.json"; before = state.read_bytes()
+        state = self.root / ".superpowers/workflows" / self.run_of("orch") / "state.json"
+        before = state.read_bytes()
         other = self.build("contract", self.contract_input(now=LATER))
         refused = self.control("orch", self.control_request([171], now=LATER,
             contracts={"171": other["contract"]}, intents={"171": [other["initial_intent"]]}),
@@ -2989,7 +3227,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         for label, contracts, intents in (("null", None, None), ("supplied",
                 {"171": built["contract"]}, {"171": [built["initial_intent"]]})):
             with self.subTest(contract=label):
-                raw = self.cli("control", "--repo-root", self.root, "--run-id", "legacy",
+                raw = self.cli("control", "--repo-root", self.root, "--run-id",
+                               self.run_of("legacy"),
                     "--request-file", "-", stdin=json.dumps(self.control_request(
                         [171], now=LATER, contracts=contracts, intents=intents)).encode()).stdout
                 response = json.loads(raw); summary = response["summaries"][0]
@@ -3066,10 +3305,11 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
     def test_contractless_direct_retry_on_an_absent_path_asks_for_its_contract(self):
         self.project()
         self.write_run("direct-171-000001", [self.failed_attempt(171)])
+        self.bind_legacy()
         facts = {"tracker": TRACKER, "forge": NO_PR, "worktree": {"issue": 171,
                  "recorded": {"path": self.worktree, "state": "absent"}, "candidate": None}}
         self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
-            "issue": 171, "run_id": "direct-171-000001", "requirements": CONTRACT_REQUIRED})
+            "issue": 171, "run_id": "direct-171-000001", "requirements": DIRECT_CONTRACT_REQUIRED})
         built = self.build("contract", self.contract_input())
         owner = self.direct(delivery_contract=built["contract"],
                             authorization_intents=[built["initial_intent"]], **facts)
@@ -3109,11 +3349,12 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.write_run("direct-171-000001", [self.attempt(
             171, worktree=path, state="failed", result_source="owner", finished_at=NOW,
             result=self.workflow.terminal_result(171, "failed", "one"))], schema=2)
+        self.bind_legacy()
         facts = {"tracker": TRACKER, "forge": NO_PR, "worktree": {"issue": 171,
                  "recorded": {"path": path, "state": "matching_issue_branch"},
                  "candidate": None}}
         self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
-            "issue": 171, "run_id": "direct-171-000001", "requirements": CONTRACT_REQUIRED})
+            "issue": 171, "run_id": "direct-171-000001", "requirements": DIRECT_CONTRACT_REQUIRED})
         built = self.build("contract", self.contract_input(worktree=path))
         owner = self.direct(delivery_contract=built["contract"],
                             authorization_intents=[built["initial_intent"]], **facts)
@@ -3126,6 +3367,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                 "candidate": other if candidate else None}
 
     def assert_mismatch_refused(self, refused, path, before):
+        """A refusal leaves the ledger as it was."""
         self.assertEqual((refused.returncode, refused.stdout, path.read_bytes()), (2, b"", before))
         self.assertIn(b"recorded custody worktree does not match the issue branch", refused.stderr)
 
@@ -3141,6 +3383,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                     path, before)
             with self.subTest(lane="direct", candidate=candidate):
                 path = self.write_run("direct-171-000001", [self.failed_attempt(171)])
+                self.bind_legacy()
                 before = path.read_bytes()
                 self.assert_mismatch_refused(self.direct(ok=False, tracker=TRACKER, forge=NO_PR,
                     worktree=self.mismatched(candidate)), path, before)
@@ -3150,6 +3393,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         path = self.write_run("direct-171-000001", [self.attempt(171, state="failed",
             result_source="refused", finished_at=NOW,
             result=self.workflow.terminal_result(171, "failed", "refused"))])
+        self.bind_legacy()
         before = path.read_bytes()
         for candidate in (True, False):
             with self.subTest(candidate=candidate):
@@ -3163,8 +3407,10 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                 "detail_state": "none", "report_path": None, "notes": "merged"}
 
     def legacy_finish(self, run_id, issue, *, ok=True):
-        return self.cli("finish", "--repo-root", self.root, "--run-id", run_id, "--now", LATER,
+        return self.cli("finish", "--repo-root", self.root, "--run-id", self.run_of(run_id),
+                        "--now", LATER,
                         "--issue", issue, "--attempt", 1, "--result-file", "-",
+                        "--action-id", f"{issue}:1:1",
                         stdin=json.dumps(self.merged(issue)).encode(), ok=ok)
 
     def test_legacy_finish_lands_only_on_contractless_issues(self):
@@ -3175,34 +3421,38 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.assertEqual((persisted, stored["outcome"], stored["attempts"][0]["state"],
                           stored["delivery"]["contract"]),
                          (self.merged(171), self.merged(171), "merged", None))
-        self.cli("init-run", "--repo-root", self.root, "--run-id", "v2", "--now", NOW)
+        self.mint_run("v2")
         built = self.build("contract", self.contract_input())
         self.control("v2", self.control_request([171], contracts={"171": built["contract"]},
             intents={"171": [built["initial_intent"]]}, worktrees=[{"issue": 171,
                 "recorded": None, "candidate": {"path": self.worktree, "state": "absent"}}]))
-        state = self.root / ".superpowers/workflows/v2/state.json"; before = state.read_bytes()
+        state = self.root / ".superpowers/workflows" / self.run_of("v2") / "state.json"
+        before = state.read_bytes()
         refused = self.legacy_finish("v2", 171, ok=False)
         self.assertEqual((refused.returncode, state.read_bytes()), (2, before))
         self.assertIn(b"contracted issue", refused.stderr)
 
     def test_v1_owners_survive_the_migration_to_interface_two(self):
         self.project()
-        state = self.workflow.new_run_state(run_id="survive", now=NOW, issues={})
+        run_id = self.runs["survive"] = "orchestrate-151-152"
+        state = self.workflow.new_run_state(
+            run_id=run_id, transaction_id=TRANSACTION, now=NOW, issues={})
         state["schema_version"] = 2
-        state.pop("admission"); state.pop("workers")
+        state.pop("admission"); state.pop("workers"); state.pop("transaction_id")
         for issue in (151, 152):
             state["issues"][str(issue)] = {"issue": issue, "outcome": None, "attempts": [
                 self.workflow.new_control_attempt(issue=issue, attempt_number=1,
                     worktree=str(self.root / f"wt-{issue}"), now=NOW,
                     deadline_at="2026-09-21T01:00:00Z")]}
-            state["issues"][str(issue)]["attempts"][0].pop("progress_marker")
-        path = self.root / ".superpowers/workflows/survive/state.json"
+            for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history"):
+                state["issues"][str(issue)]["attempts"][0].pop(field)
+        path = self.root / ".superpowers/workflows" / run_id / "state.json"
         path.parent.mkdir(parents=True); path.write_text(json.dumps(state), encoding="utf-8")
-        run = ("--repo-root", self.root, "--run-id", "survive")
+        run = ("--repo-root", self.root, "--run-id", run_id)
         boot = json.loads(self.cli("init-run", *run, "--now", NOW).stdout)
         self.assertEqual([(item["issue"], item["contract_digest"]) for item in boot["requirements"]],
                          [(151, None), (152, None)])
-        self.assertEqual(json.loads(path.read_text())["schema_version"], 6)
+        self.assertEqual(json.loads(path.read_text())["schema_version"], 10)
         swept = self.control("survive", self.control_request([151, 152]))
         self.assertEqual([action["kind"] for action in swept["actions"]], ["wait"])
         self.cli("progress", *run, "--now", LATER, "--issue", 151, "--attempt", 1,
@@ -3232,7 +3482,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             "detail_state": "none", "report_path": None, "notes": "failed"}
 
     def spawn_contracted(self, run_id):
-        self.cli("init-run", "--repo-root", self.root, "--run-id", run_id, "--now", NOW)
+        self.mint_run(run_id)
         built = self.build("contract", self.contract_input())
         response = self.control(run_id, self.control_request([171],
             contracts={"171": built["contract"]}, intents={"171": [built["initial_intent"]]},
@@ -3275,23 +3525,27 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
     def test_contracted_reconciliation_mints_remainder_one(self):
         self.project()
         self.spawn_contracted("forge-v2")
-        self.cli("suspend", "--repo-root", self.root, "--run-id", "forge-v2", "--now", LATER,
-                 "--issue", 171, "--attempt", 1, "--blocked-on", "external")
+        self.cli("suspend", "--repo-root", self.root, "--run-id", self.run_of("forge-v2"),
+                 "--now", LATER,
+                 "--issue", 171, "--attempt", 1, "--blocked-on", "external",
+                 "--action-id", "171:1:1")
         response = self.control("forge-v2", self.forge_request())
         remainder = next(item for item in response["actions"]
                          if item["kind"] == "delivery_remainder")
         self.assertEqual((remainder["custody"]["action_id"], remainder["pending_stage_ids"][0]),
                          ("171:r1:1", "select_reviewed_output"))
-        path = self.root / ".superpowers/workflows/forge-v2/state.json"
+        path = self.root / ".superpowers/workflows" / self.run_of("forge-v2") / "state.json"
         self.assertEqual(self.latest(path)["result_source"], "superseded")
 
     def test_reconciled_remainder_waits_for_capacity(self):
         """A reconcile sweep without capacity persists the closeout; a later sweep mints r1."""
         self.project()
         self.spawn_contracted("forge-wait")
-        self.cli("suspend", "--repo-root", self.root, "--run-id", "forge-wait", "--now", LATER,
-                 "--issue", 171, "--attempt", 1, "--blocked-on", "external")
-        path = self.root / ".superpowers/workflows/forge-wait/state.json"
+        self.cli("suspend", "--repo-root", self.root, "--run-id", self.run_of("forge-wait"),
+                 "--now", LATER,
+                 "--issue", 171, "--attempt", 1, "--blocked-on", "external",
+                 "--action-id", "171:1:1")
+        path = self.root / ".superpowers/workflows" / self.run_of("forge-wait") / "state.json"
         state = json.loads(path.read_text())
         holder = self.workflow.new_control_attempt(issue=172, attempt_number=1,
             worktree=str(self.root / ".worktrees/holder"), now=NOW,
@@ -3314,7 +3568,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.project()
         contract, custody_value = self.spawn_contracted("orch-fail")
         digest = self.model.canonical_digest(contract)
-        run = ("--repo-root", self.root, "--run-id", "orch-fail", "--now", LATER)
+        run = ("--repo-root", self.root, "--run-id", self.run_of("orch-fail"), "--now", LATER)
         failed = json.loads(self.cli("finish", *run, "--summary-file", "-", stdin=json.dumps(
             self.failed_summary(custody_value, digest)).encode()).stdout)
         self.assertEqual(failed["kind"], "terminal_failed")
@@ -3335,6 +3589,347 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             self.failed_summary(action["custody"], digest, [selected])).encode()).stdout)
         self.assertEqual((minted["kind"], minted["custody"]["action_id"]),
                          ("delivery_remainder", "171:r1:1"))
+
+
+class LedgerClockTest(LifecycleHarness, unittest.TestCase):
+    """#309: ledger time comes from the clock; a future supplied time is refused (D3–D8)."""
+
+    def setUp(self):
+        super().setUp()
+        self.cli_env.pop(CLOCK_ENV, None)
+
+    @property
+    def run_args(self):
+        return ("--repo-root", self.root, "--run-id", self.run_id)
+
+    def run_cli(self, *args, ok=True):
+        """`init-run --run-id` of a run that is not there is the same call under `--creation-key`
+        (D12); `self.run_id` follows the run it mints."""
+        if args[0] == "init-run" and "--run-id" in args and self.run_id == "issue-14-test":
+            args = (*args[:args.index("--run-id")], "--creation-key", "ledger-clock",
+                    *args[args.index("--run-id") + 2:])
+        completed = super().run_cli(*args, ok=ok)
+        if args[0] == "init-run" and completed.returncode == 0:
+            self.run_id = json.loads(completed.stdout)["run_id"]
+        return completed
+
+    def pin(self, value=PINNED):
+        self.cli_env[CLOCK_ENV] = value
+
+    @staticmethod
+    def at(base, seconds):
+        moved = datetime.fromisoformat(base.replace("Z", "+00:00")) + timedelta(seconds=seconds)
+        return moved.isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def clock_text():
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def assert_clock_stamp(self, stamp):
+        self.assertRegex(stamp, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        recorded = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        self.assertLessEqual(abs((datetime.now(timezone.utc) - recorded).total_seconds()), 5,
+                             stamp)
+
+    def worktree(self, issue):
+        return str(self.root / f"wt-{issue}")
+
+    def spawn_two(self, now):
+        """One control sweep at `now` spawning issues 14 and 15; their spawn actions by issue."""
+        response = self.control_validated(
+            now=now, issues=[14, 15],
+            tracker=[self.tracker_fact(14), self.tracker_fact(15)],
+            worktrees=[self.worktree_fact(issue, candidate={
+                "path": self.worktree(issue), "state": "absent"}) for issue in (14, 15)],
+            max_parallel=100)
+        return {action["issue"]: action for action in response["actions"]
+                if action["kind"] == "spawn"}
+
+    def test_a_supplied_time_over_the_bound_is_refused_and_writes_nothing(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        ahead = self.at(PINNED, 900)
+        never_read = self.root / "never-read.json"
+        before = self.state_path.read_bytes()
+        for name, args in (
+                ("checkpoint-delivery", ("checkpoint-delivery", *self.run_args, "--now", ahead,
+                                         "--checkpoint-file", never_read)),
+                ("release-worker", ("release-worker", *self.run_args, "--now", ahead,
+                                    "--worker-id", worker, "--event", "returned")),
+                ("finish", ("finish", *self.run_args, "--now", ahead,
+                            "--summary-file", never_read))):
+            with self.subTest(command=name):
+                refused = self.run_cli(*args, ok=False)
+                self.assertEqual(
+                    (refused.returncode, refused.stdout, refused.stderr),
+                    (2, "", SKEW.format(label="--now", supplied=ahead, lead=900, clock=PINNED)))
+                self.assertEqual(self.state_path.read_bytes(), before)
+        at_bound = self.at(PINNED, 60)
+        released = json.loads(self.run_cli("release-worker", *self.run_args, "--now", at_bound,
+                                           "--worker-id", worker, "--event", "returned").stdout)
+        self.assertEqual(released["released"], [worker])
+        self.assertEqual(self.read_state()["updated_at"], at_bound)
+
+    def test_an_omitted_time_is_read_after_the_ledger_lock(self):
+        # D7: another writer may advance the ledger while this command waits for the
+        # lock. The in-process runner patches os.environ with cli_env, so a flock
+        # wrapper can move the pinned clock at the moment the lock is taken.
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        self.assertEqual(self.read_state()["updated_at"], PINNED)
+        self.pin(self.at(PINNED, -600))
+        later = self.at(PINNED, 30)
+        real_flock = fcntl.flock
+
+        def flock_then_advance(descriptor, operation):
+            real_flock(descriptor, operation)
+            if operation & fcntl.LOCK_EX:
+                os.environ[CLOCK_ENV] = later
+
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            completed = self.run_cli("release-worker", *self.run_args, "--worker-id", worker,
+                                     "--event", "returned")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.read_state()["updated_at"], later)
+        # A clock read before the lock would have seen PINNED-600s and been refused
+        # as moving backward.
+
+    def test_every_flag_command_without_a_time_stamps_the_clock(self):
+        self.run_cli("init-run", *self.run_args)
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        spawned = self.spawn_two(self.clock_text())
+        custody, digest = spawned[14]["custody"], spawned[14]["contract_digest"]
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.run_cli("release-worker", *self.run_args, "--worker-id", worker,
+                     "--event", "returned")
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.init_worktree(self.worktree(14), branch="issue-14-ledger-clock")
+        marked = json.loads(self.run_cli("mark-progress", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)
+        self.assertEqual(marked["outcome"], "baseline")
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.run_cli("progress", *self.run_args, *PROGRESS_ARGS, "--action-id", "14:1:1")
+        self.assert_clock_stamp(
+            self.read_state()["issues"]["14"]["attempts"][0]["last_progress_at"])
+        report = {"interface_version": 2, "issue": 14, "custody": custody,
+                  "contract_digest": digest, "delivery_observations": [],
+                  "authority_observations": [], "reevaluation_evidence": [],
+                  "requested_scope": None, "detail_state": "none", "report_path": None,
+                  "notes": ""}
+        checkpoint = self.root / "checkpoint.json"
+        checkpoint.write_text(json.dumps(report), encoding="utf-8")
+        self.run_cli("checkpoint-delivery", *self.run_args, "--checkpoint-file", checkpoint)
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        historical = {"issue": 14, "state": "failed", "pr_url": None, "merge_sha": None,
+                      "issue_closed": False, "discussion_items": [], "detail_state": "none",
+                      "report_path": None, "notes": "failed"}
+        summary = {"interface_version": 2, "issue": 14, "state": "terminal_failed",
+                   "custody": custody, "historical_owner_result": historical,
+                   "delivery_contract_digest": digest, "delivery_observations": [],
+                   "authority_observations": [], "reevaluation_evidence": [],
+                   "detail_state": "none", "report_path": None, "notes": "failed"}
+        summary_path = self.root / "summary.json"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        self.run_cli("finish", *self.run_args, "--summary-file", summary_path)
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.run_cli("suspend", *self.run_args, "--issue", 15, "--attempt", 1,
+                     "--blocked-on", "usage_limit", "--action-id", "15:1:1")
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+
+    def test_a_backward_refusal_names_the_wait(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        earlier = self.at(PINNED, -37)
+        before = self.state_path.read_bytes()
+        for name, args, expected in (
+                ("release-worker",
+                 ("release-worker", *self.run_args, "--now", earlier, "--worker-id", worker,
+                  "--event", "returned"),
+                 f"workflow-state: release-worker time must not move backward: {earlier} is "
+                 f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"),
+                ("progress",
+                 ("progress", *self.run_args, "--now", earlier, *PROGRESS_ARGS,
+                  "--action-id", "14:1:1"),
+                 f"workflow-state: progress time must not move backward: {earlier} is "
+                 f"before the attempt last_progress_at {PINNED}; it would succeed in "
+                 f"37 seconds\n")):
+            with self.subTest(command=name):
+                refused = self.run_cli(*args, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, "", expected))
+                self.assertEqual(self.state_path.read_bytes(), before)
+
+    def omitted(self, request):
+        request = copy.deepcopy(request)
+        del request["now"]
+        return request
+
+    def control_without_now(self, issues, *, ok=True, **facts):
+        request = self.omitted(self.control_request(now=PINNED, issues=issues, **facts))
+        completed = self.control_raw(request=request, legacy=False, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def recorded_facts(self, issues):
+        return {"tracker": [self.tracker_fact(issue) for issue in issues],
+                "worktrees": [self.worktree_fact(issue, recorded={
+                    "path": self.worktree(issue), "state": "matching_issue_branch"})
+                    for issue in issues],
+                "max_parallel": 100}
+
+    def test_a_control_time_over_the_bound_is_refused_and_writes_nothing(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        before = self.state_path.read_bytes()
+        ahead = self.at(PINNED, 900)
+        request = self.control_request(now=ahead, issues=[14, 15],
+                                       **self.recorded_facts([14, 15]))
+        refused = self.control_raw(request=request, legacy=False, ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, "", SKEW.format(label="control now", supplied=ahead, lead=900, clock=PINNED)))
+        self.assertEqual(self.state_path.read_bytes(), before)
+        direct = self.direct_request(issue=73, now=ahead)
+        refused = self.direct_owner_at_root(self.root, direct, ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, "", SKEW.format(label="direct owner now", supplied=ahead, lead=900,
+                                clock=PINNED)))
+        self.assertEqual(self.run_dirs(), [self.run_id])
+
+    def test_a_present_null_now_is_still_refused(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        request = self.control_request(now=None, issues=[14], **self.recorded_facts([14]))
+        refused = self.control_raw(request=request, legacy=False, ok=False)
+        self.assertEqual((refused.returncode, refused.stderr),
+                         (2, "workflow-state: invalid control now: expected an RFC3339 UTC "
+                             "timestamp\n"))
+
+    def test_control_and_direct_owner_without_now_stamp_the_clock(self):
+        self.run_cli("init-run", *self.run_args)
+        response = self.control_without_now(
+            [14], tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={
+                "path": self.worktree(14), "state": "absent"})],
+            max_parallel=100)
+        self.assertEqual([action["kind"] for action in response["actions"]][:1], ["spawn"])
+        self.assert_clock_stamp(response["now"])
+        self.assertEqual(self.read_state()["updated_at"], response["now"])
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        common = {"issue": 73, "now": PINNED, "attempt_budget_minutes": 180}
+        for extra in ({}, {"tracker": self.tracker_fact(73)},
+                      {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(
+                          73, candidate={"path": candidate, "state": "absent"})}):
+            completed = self.direct_owner_at_root(
+                self.root, self.omitted(self.direct_request(**common, **extra)))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["kind"], "owner")
+        self.assert_clock_stamp(json.loads(
+            self.direct_state_path("direct-73-000001").read_text(encoding="utf-8"))["updated_at"])
+
+    def test_control_reads_an_omitted_now_after_the_ledger_lock(self):
+        # D7, as in the flag-command lock-order test: seed the run at PINNED, re-pin
+        # the override to PINNED-600s, and patch fcntl.flock so a LOCK_EX acquisition
+        # moves the clock to PINNED+30s. A clock read before the lock would see
+        # PINNED-600s and be refused as moving backward.
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.assertEqual(self.read_state()["updated_at"], PINNED)
+        later = self.at(PINNED, 30)
+        real_flock = fcntl.flock
+
+        def flock_then_advance(descriptor, operation):
+            real_flock(descriptor, operation)
+            if operation & fcntl.LOCK_EX:
+                os.environ[CLOCK_ENV] = later
+
+        self.pin(self.at(PINNED, -600))
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            response = self.control_without_now(
+                [14], tracker=[self.tracker_fact(14)],
+                worktrees=[self.worktree_fact(14, candidate={
+                    "path": self.worktree(14), "state": "absent"})],
+                max_parallel=100)
+        self.assertEqual([action["kind"] for action in response["actions"]][:1], ["spawn"])
+        self.assertEqual((response["now"], self.read_state()["updated_at"]), (later, later))
+
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        common = {"issue": 73, "attempt_budget_minutes": 180}
+        self.pin()
+        for extra in ({}, {"tracker": self.tracker_fact(73)},
+                      {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(
+                          73, candidate={"path": candidate, "state": "absent"})}):
+            completed = self.direct_owner_at_root(
+                self.root, self.omitted(self.direct_request(**common, now=PINNED, **extra)))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        direct_state = self.direct_state_path("direct-73-000001")
+        self.assertEqual(json.loads(direct_state.read_text(encoding="utf-8"))["updated_at"],
+                         PINNED)
+        self.pin(self.at(PINNED, -600))
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            refused = self.direct_owner_at_root(self.root, self.omitted(self.direct_request(
+                **common, now=PINNED, owner_unavailable=True, tracker=self.tracker_fact(73),
+                worktree=self.worktree_fact(73, recorded={
+                    "path": candidate, "state": "matching_issue_branch"}))))
+        self.assertEqual(refused.returncode, 0, refused.stderr)
+        self.assertEqual(json.loads(direct_state.read_text(encoding="utf-8"))["updated_at"],
+                         later)
+
+    def test_a_pinned_clock_stamps_control_exactly(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        response = self.control_without_now(
+            [14], tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={
+                "path": self.worktree(14), "state": "absent"})],
+            max_parallel=100)
+        self.assertEqual((response["now"], self.read_state()["updated_at"]), (PINNED, PINNED))
+
+    def test_control_and_direct_owner_backward_refusals_name_the_wait(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        earlier = self.at(PINNED, -37)
+        before = self.state_path.read_bytes()
+        request = self.control_request(now=earlier, issues=[14, 15],
+                                       **self.recorded_facts([14, 15]))
+        refused = self.control_raw(request=request, legacy=False, ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, "", f"workflow-state: control time must not move backward: {earlier} is "
+                    f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"))
+        self.assertEqual(self.state_path.read_bytes(), before)
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        common = {"issue": 73, "attempt_budget_minutes": 180}
+        for extra in ({}, {"tracker": self.tracker_fact(73)},
+                      {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(
+                          73, candidate={"path": candidate, "state": "absent"})}):
+            self.direct_owner_at_root(self.root, self.omitted(
+                self.direct_request(**common, now=PINNED, **extra)))
+        direct_state = self.direct_state_path("direct-73-000001")
+        direct_before = direct_state.read_bytes()
+        refused = self.direct_owner_at_root(self.root, self.direct_request(
+            **common, now=earlier, owner_unavailable=True, tracker=self.tracker_fact(73),
+            worktree=self.worktree_fact(73, recorded={
+                "path": candidate, "state": "matching_issue_branch"})), ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stderr),
+            (2, f"workflow-state: direct owner time must not move backward: {earlier} is "
+                f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"))
+        self.assertEqual(direct_state.read_bytes(), direct_before)
+
 
 if __name__ == "__main__":
     unittest.main()

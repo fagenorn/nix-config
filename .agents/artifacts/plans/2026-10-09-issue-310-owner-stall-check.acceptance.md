@@ -1,0 +1,7 @@
+# Acceptance record — issue #310
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] An owner silent past the bound after an interim notification produces one `unavailable` observation and frees its slot. An owner that records progress inside the bound produces none. — measured: new scenario in `home/common/claude-code/skills/orchestrate-issues/evals/evals.json` or a replay test in `test_admission_replay.py` | code | `AdmissionReplayTest.test_a_silent_owner_is_freed_and_a_progressing_owner_is_left_alone` under `just agent-workflow-tests` | in final verification | — | — | met |
+| AC2 | [code] The wait observer's sleep duration comes from a helper-computed value, and the skill no longer instructs hand-written `date -d`/`date -j` math. — measured: `test_workflow_skill_contracts.py` pin plus a helper unit test for the computed wait | code | `ORCHESTRATE_MACHINE_TEXT` pins, `ObserverSleepExampleTest`, `ControlWaitSecondsTest`, `ControlWaitResponseTest` under `just agent-workflow-tests` | in final verification | — | — | met |
+| AC3 | [code] The stall bound is a single named setting, documented where `attempt_budget_minutes` is documented. — measured: binding schema test in `test_resolve_project.py` | code | `StallMinutesTest` under `just agent-workflow-tests`; documented in orchestrate-issues §1 beside `attempt_budget_minutes` (no value authored yet, per D15) | in final verification | — | — | met |

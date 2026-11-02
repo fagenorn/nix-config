@@ -2,6 +2,7 @@
   inputs,
   lib,
   pkgs,
+  agentTools,
   ...
 }:
 let
@@ -28,7 +29,6 @@ let
   # Each command-table row of lib/agent-tools.nix becomes ~/.agents/bin/<name>.
   # It enters home.file as a separate definition, so a leftover hand-written
   # entry for the same command is a conflicting definition, not a silent win.
-  agentTools = import ../../../lib/agent-tools.nix { inherit pkgs; };
   agentToolFiles = lib.mapAttrs' (
     name: launcher: lib.nameValuePair ".agents/bin/${name}" { source = launcher; }
   ) agentTools.launchers;
@@ -45,10 +45,8 @@ in
     # deltas) stays in each repo under docs/standards/.
     ".agents/standards".source = ./standards;
 
-    ".agents/bin/workflow-state" = {
-      source = ./scripts/workflow-state.py;
-      executable = true;
-    };
+    ".agents/bin/workflow-state".source =
+      agentTools.scriptLauncher "workflow-state" ./scripts/workflow-state.py;
 
     ".agents/bin/artifact-budget" = {
       source = ./scripts/artifact-budget;
@@ -60,6 +58,14 @@ in
       executable = true;
     };
 
+    ".agents/bin/task-brief" = {
+      source = ./skills/sdd/scripts/task-brief;
+      executable = true;
+    };
+
+    # The artifact-budget module. The `artifact-budget` wrapper runs it, and
+    # `workflow-state` loads the store file this link resolves to into its own
+    # process (issue 498 D2, D7).
     ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
     ".agents/lib/python/workflow_delivery.py".source = ./scripts/workflow_delivery.py;
     ".agents/lib/python/workflow_delivery_wire.py".source = ./scripts/workflow_delivery_wire.py;
@@ -69,6 +75,7 @@ in
       recursive = false;
     };
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
+    ".agents/share/ship-delivery.md".source = ../../../python/ship-delivery.md;
 
     # The platform manifest: authored data with nothing templated, so this
     # store copy is byte-identical to the repository's (D1).

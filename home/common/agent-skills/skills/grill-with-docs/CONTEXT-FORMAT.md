@@ -1,12 +1,16 @@
 # Context Map & Area Glossary Format
 
-This included format receives the phase owner's retained `ResolvedProject`. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter invocation, one selects that absolute path, and multiple matches are an invalid caller contract that stops before invocation. Never probe the filesystem, sort the list, take a first match, or infer a location.
+Domain knowledge lives as a **map plus area glossaries**. The map is an index, never a store: it names the areas, the paths each governs, and the area that owns each term; definitions live in the area files. Readers load the map every time and open only the areas whose `governs:` globs intersect the paths they touch. Use only the caller-selected map from `bindings.paths.context`; never read configuration or discover a location.
 
-Domain knowledge lives as a **map plus area glossaries**. The map is an index, never a store: it names the areas, the paths each one governs, and which area owns each term. The definitions live in the area files. Readers load the map every time (cheap) and open only the area files whose `governs:` globs intersect the paths they are touching.
+## Contents
 
-**Illustrative layout:** when the caller-selected map is in `docs/`, that docs
-root holds exactly two loose files — `README.md`, the routing index, and
-`CONTEXT-MAP.md`, the map. Everything else lives in a reserved directory:
+- Illustrative layout (below)
+- The map
+- Area glossary
+- Repos without a map yet
+- Linting
+
+**Illustrative layout**, for a selected map in `docs/`: the docs root holds only `README.md` (the routing index) and `CONTEXT-MAP.md`; everything else sits in a reserved directory.
 
 ```
 docs/
@@ -26,18 +30,11 @@ docs/
 └── archive/             ← dormant or superseded material
 ```
 
-`areas/`, `standards/`, `operations/`, `guides/` and `archive/` are **reserved, not required** — create one when you have something to put in it. A directory under `areas/` *is* an area, so every area directory needs a row in the map's Areas table and every Areas row must point into `areas/`. A project-specific extra directory at the docs root is allowed only when `docs/README.md`'s routing table carries a row for it.
+The reserved directories are created only when needed. Every directory under `areas/` is an area with a row in the map's Areas table, and every row points into `areas/`. An extra docs-root directory needs a row in `docs/README.md`'s routing table. `areas/system/` holds decisions spanning areas: its map row has gist "decisions spanning areas" and glob `*`, and its `CONTEXT.md` stays a stub because every grounding pass loads it. There is no central `docs/adr/`. Specs, plans, handoffs and notes are not documentation: they go to their retained `bindings.paths.artifacts` locations.
 
-`docs/areas/system/` is the reserved pseudo-area for decisions that belong to no single area. Its map row is real — gist "decisions spanning areas", `governs:` glob `*` — and its `CONTEXT.md` is a stub of a few lines, because every grounding pass loads it. **There is no central `docs/adr/`**: every ADR lives in exactly one `docs/areas/<slug>/adr/`, so tooling has one shape and no special cases.
+The Order / Invoice / Customer names below are illustrative.
 
-Use only the caller-selected path from `bindings.paths.context`; included formats never read configuration or discover locations.
-
-Skill output is not documentation and does not live here: specs, plans, handoffs
-and notes use their respective retained `bindings.paths.artifacts` locations.
-
-> The Order / Invoice / Customer names below are illustrative DDD samples — substitute the project's real terms.
-
-## `<selected-context-map>` — the index
+## The map: `<selected-context-map>`
 
 **Hard budget: 150 lines.** Three tables and nothing else.
 
@@ -66,15 +63,13 @@ and notes use their respective retained `bindings.paths.artifacts` locations.
 - **Ordering ↔ Billing**: shared `CustomerId` and `Money` types.
 ```
 
-Rules for the map:
+- A gist is one line of twelve words or fewer.
+- `governs:` globs are the load trigger: each matches at least one real path from the repo root, and they live only here, never restated in the area file.
+- Context-file links are map-relative: `./areas/<area-slug>/CONTEXT.md`.
+- Every term an area defines appears exactly once in Terms, sorted, with its owning area and no definition. A term with two homes is a modelling bug to resolve.
+- `## Relationships` carries cross-area edges only.
 
-- **The gist is one line, twelve words or fewer.** It exists so a reader can decide whether to open the file, not so they can skip opening it.
-- **`governs:` globs are the load trigger.** Every glob must match at least one real path, resolved from the repo root (the map lives in `docs/`, but the globs point at code). They live here and only here — an area file does not restate its own globs.
-- **Context-file links are map-relative**: `./areas/<area-slug>/CONTEXT.md`.
-- **Every term defined in an area file appears exactly once in the Terms table**, sorted alphabetically. The table carries the term and its owning area, never a definition — a term with two homes is a modelling bug to resolve, not a row to duplicate.
-- **`## Relationships` carries cross-area edges only.** Cardinality and event flow between areas; anything internal to one area belongs in that area's file.
-
-## Per-area `CONTEXT.md` — glossary only
+## Area glossary: `CONTEXT.md`
 
 ```md
 ---
@@ -97,56 +92,26 @@ A person or organisation that places Orders and is billed for them.
 _Avoid_: Client, buyer, account
 ```
 
-Rules for area files:
+- Glossary only: nothing that goes stale when the code changes (no implementation, spec, notes or decision log).
+- Each definition is one or two sentences on what the term *is*.
+- `_Avoid_:` is mandatory whenever rival names circulate.
+- Only concepts unique to this domain; general programming concepts (timeouts, retries, error types) stay out.
+- Group under `###` subheadings when clusters emerge.
+- At most one example dialogue per area, at most ten lines, only when two terms resist definition.
 
-- **Glossary and nothing else.** No implementation details, no spec, no scratch notes, no decision log. If it would go stale when the code changes, it does not belong here.
-- **Definitions are one to two sentences.** Define what the term *is*, not what it does.
-- **`_Avoid_:` is mandatory whenever rival names circulate.** Picking the winner and naming the losers is what stops the vocabulary drifting; be opinionated.
-- **Admission test:** is this concept unique to this project's domain, or a general programming concept? Only the former belongs — timeouts, retries, error types and utility patterns stay out however heavily the project uses them.
-- **Group under `###` subheadings** when natural clusters emerge; a flat list is fine for a cohesive area.
-- **Example dialogue is optional, at most one per area, at most ten lines.** Write one only when the boundary between two terms is genuinely hard to state as definitions.
-
-## Decisions ride with their area
-
-Every ADR lives in exactly one `docs/areas/<slug>/adr/` — the area it concerns, or `system` when it spans areas or belongs to none. Numbering is **per directory**: `NNN-kebab-title.md`, three digits, each directory running its own sequence from `001`. A new record takes the next free number in its directory at merge time.
-
-The id is `ADR-<area-slug>-NNN`: the slug of the containing directory plus the filename's number, and the header line restates it. **The full id is the only citation form, everywhere** — no bare short forms, not even inside the record's own area. It is a single grep token, and it is lexically disjoint from the old four-digit `ADR-NNNN` form, so ids left behind by a migration stay mechanically detectable. There is no global sequence and no cross-directory uniqueness to maintain.
-
-When an accepted record moves to another area, it takes the destination directory's next free number and gains a `- **Formerly:** ADR-<old-slug>-NNN` line; the move goes through the VCS's own move, and every *living* reference is re-pointed in the same commit. Historical citations inside other accepted records are part of those records and stay as written — the `Formerly` line is what carries identity across the move.
-
-Nobody hand-maintains an ADR index: a sorted `ls` of an `adr/` directory indexes itself, and the map's Areas table is the directory of directories. Record mechanics — the shape of a record, the admission gate, the parallel-session collision rule — live in [ADR-FORMAT.md](./ADR-FORMAT.md).
-
-## Delete on resolve
-
-An ambiguity is flagged *while it is open* and removed the moment it closes — the resolution lives in the winning term's definition (and its `_Avoid_:` line) or in an ADR, never in a permanent log. There is no "Flagged ambiguities" section: a list that only grows is a second, worse copy of the glossary.
-
-Mark an open ambiguity inline on the disputed term and delete the marker in the same commit that settles it:
+Mark an open ambiguity inline on the disputed term and delete the marker in the commit that settles it; there is no "flagged ambiguities" log:
 
 ```md
 **Account**:
 _Ambiguous_: used for both **Customer** and **User**. Unresolved.
 ```
 
-## Net-neutral writes
-
-Both files carry a hard budget (150 lines for the map, the front-matter `budget:` for each area). **A writer that pushes a file past its budget consolidates or splits in the same commit** — never "just this once", never a follow-up TODO. In practice a glossary at budget means either several entries have grown past two sentences and should be tightened, or the area covers two things and should become two areas. The split procedure lives in [SKILL.md](./SKILL.md).
-
-This is what keeps grounding cost flat as the project ages: every issue adds terms, so every issue must also pay down.
+A writer that pushes the map or an area past its budget consolidates or splits in the same commit; the split procedure is in [SKILL.md](./SKILL.md).
 
 ## Repos without a map yet
 
-A new repo may begin with a single `docs/CONTEXT.md` (or legacy root `CONTEXT.md`) in the area-file format above; create it lazily, when the first term resolves. The first split creates the map. Readers fall back to reading the whole file when no `CONTEXT-MAP.md` exists, so a repo mid-migration always works.
+Start with a single `docs/CONTEXT.md` (or a legacy root `CONTEXT.md`) in the area format, created when the first term resolves; the first split creates the map. Readers without a map read that whole file.
 
 ## Linting
 
-`~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>`, given the map selected from the retained `bindings.paths.context` list, checks that every term resolves to an area file that defines it, every file is within budget, every `governs:` glob matches something, and every relative link in the map resolves.
-
-Once `docs/areas/` exists it also enforces the layout above:
-
-- every directory under `docs/areas/` is the target of an Areas row, and every Areas row resolves under `docs/areas/`;
-- ADR filenames are `NNN-kebab-title.md`, the number is unique within its directory, and the header is `# ADR-<slug>-NNN — Title` with the slug and number matching the file's home;
-- every `ADR-<slug>-NNN` cited anywhere under `docs/` resolves to a record that exists;
-- no four-digit `ADR-NNNN` survives under `docs/`, except on a `- **Formerly:**` line or inside `docs/archive/`;
-- the docs root carries nothing but `README.md`, `CONTEXT-MAP.md`, the reserved directories, and whatever `docs/README.md` routes.
-
-A repo still on a legacy layout keeps passing exactly as before — these checks activate only where `docs/areas/` is present. Wire it into CI — a citation linter is the only anti-drift measure that has been observed to hold.
+`~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` checks term resolution, budgets, globs, links and, once `docs/areas/` exists, the layout and ADR ids above. Fix what it reports, and wire it into CI.

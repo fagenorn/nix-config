@@ -1,0 +1,147 @@
+{
+  "name": "fixture-store",
+  "adapter_contract_version": "1.4.0",
+  "operations": {
+    "publish": {
+      "mode": "materialize",
+      "support": "supported",
+      "inspect": "supported",
+      "reason": null,
+      "mutability": "create_if_absent",
+      "config_schema_version": 1,
+      "config_schema": {
+        "members": {
+          "bucket": "string"
+        },
+        "required": [
+          "bucket"
+        ]
+      },
+      "effects": [
+        "irreversible",
+        "reversible_no_incremental_spend"
+      ],
+      "recovery_capable": false,
+      "candidate_members": []
+    },
+    "promote": {
+      "mode": "promote",
+      "support": "supported",
+      "inspect": "supported",
+      "reason": null,
+      "mutability": "pointer_cas",
+      "config_schema_version": 1,
+      "config_schema": {
+        "members": {},
+        "required": []
+      },
+      "effects": [
+        "reversible_no_incremental_spend"
+      ],
+      "recovery_capable": false,
+      "candidate_members": []
+    },
+    "overwrite": {
+      "mode": "materialize",
+      "support": "supported",
+      "inspect": "supported",
+      "reason": null,
+      "mutability": "in_place",
+      "config_schema_version": 1,
+      "config_schema": {
+        "members": {},
+        "required": []
+      },
+      "effects": [
+        "reversible_no_incremental_spend"
+      ],
+      "recovery_capable": false,
+      "candidate_members": []
+    },
+    "repoint": {
+      "mode": null,
+      "support": "supported",
+      "inspect": "supported",
+      "reason": null,
+      "mutability": "pointer_cas",
+      "config_schema_version": 1,
+      "config_schema": {
+        "members": {},
+        "required": []
+      },
+      "effects": [
+        "reversible_no_incremental_spend"
+      ],
+      "recovery_capable": true,
+      "candidate_members": []
+    },
+    "retain": {
+      "mode": null,
+      "support": "supported",
+      "inspect": "supported",
+      "reason": null,
+      "mutability": "create_if_absent",
+      "config_schema_version": 1,
+      "config_schema": {
+        "members": {},
+        "required": []
+      },
+      "effects": [
+        "reversible_no_incremental_spend"
+      ],
+      "recovery_capable": true,
+      "candidate_members": []
+    },
+    "legacy": {
+      "mode": "index",
+      "support": "unsupported",
+      "inspect": "supported",
+      "reason": "fixture_unsupported",
+      "mutability": "create_if_absent",
+      "config_schema_version": 1,
+      "config_schema": {
+        "members": {},
+        "required": []
+      },
+      "effects": [
+        "reversible_no_incremental_spend"
+      ],
+      "recovery_capable": false,
+      "candidate_members": []
+    }
+  },
+  "predicates": {
+    "publication_visible": {
+      "support": "supported",
+      "reason": null
+    },
+    "pointer_at": {
+      "support": "supported",
+      "reason": null
+    },
+    "schema_compatible": {
+      "support": "supported",
+      "reason": null
+    },
+    "running_subject_identity": {
+      "support": "unsupported",
+      "reason": "no_activation_mode"
+    }
+  },
+  "collector": {
+    "max_collection_latency_ms": 1000,
+    "max_concurrent_collections": 2
+  },
+  "target_kinds": {
+    "object_store": [
+      "bucket_url"
+    ]
+  },
+  "credential_classes": [
+    "fixture_token"
+  ],
+  "executables": [
+    "fixture-store-cli"
+  ],
+  "host_capacity": "not_required"
+}

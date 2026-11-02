@@ -1,44 +1,36 @@
 ---
 name: prototype
-description: Build a throwaway prototype before committing to a design — terminal app for state/logic questions, or several UI variations on one route. Use for "prototype this".
+description: Builds throwaway code answering one design question, as a terminal app for logic or several UI variations on one route. Use for "prototype this".
 ---
 
 # Prototype
 
-A prototype is **throwaway code that answers a question**. The question decides the shape.
+A prototype is **throwaway code that answers a question**; the question decides its shape.
 
-## First, pin the question — read-only
+## 1. Pin the question, read-only
 
-Before creating anything, determine which question this prototype answers — from the user's prompt, a read-only look at the surrounding code, or by asking if the user is around. This step touches nothing: no worktree, no branch, no files. The question names the worktree and decides the branch below; a worktree created before the question is pinned gets a meaningless name and, when the question turns out pre-answered, exists for nothing.
+Settle which question the prototype answers (from the prompt, a read-only look at the code, or by asking a present user) before creating anything. No worktree, branch or file yet: the question names the worktree, and a question that turns out pre-answered needs none.
 
-## Then start in a fresh worktree
+## 2. Start in a fresh worktree
 
-Prototypes are throwaway by definition — they don't belong on the current working branch. Once the question is pinned, and before writing any code, set up an isolated worktree by invoking the `worktrees` skill — or, if that skill isn't available, run `git worktree add` directly. Name the worktree after the question (e.g. `prototype-settings-layout`, `prototype-billing-state-machine`) so it's obvious what's inside it and that it's disposable.
+Invoke the `worktrees` skill (or run `git worktree add` if it is unavailable) and name the worktree after the question, e.g. `prototype-billing-state-machine`. Outside a git repo, use a clearly named scratch directory outside the source tree. Reuse a worktree that already exists for this prototype; never nest worktrees.
 
-If the project isn't a git repo, work in a clearly-named scratch directory instead (e.g. `prototype-settings-layout/` outside the source tree, or a clearly-marked subfolder) so the throwaway code stays equally easy to spot and delete.
+## 3. Pick the branch
 
-This keeps experimental UI variants, scratch task-runner scripts, in-memory state hacks, and `NOTES.md` files from polluting the current branch — and makes the eventual "delete the prototype" step a one-liner (drop the worktree) rather than an audit.
+- **"Does this logic or state model feel right?"** → [LOGIC.md](LOGIC.md): a tiny interactive terminal app that drives the state model through hard cases.
+- **"What should this look like?"** → [UI.md](UI.md): several radically different variants on one route, switched by a URL search param and a floating bar.
 
-If a worktree already exists for this prototype (e.g. the user pre-created one or is continuing a previous prototype session), use that one instead of creating a new one. Don't nest worktrees.
+If the question is ambiguous and the user is away, pick by the surrounding code (backend module → logic; page or component → UI) and state the assumption at the top of the prototype.
 
-## Pick a branch
+## Rules for both
 
-The pinned question routes the build:
-
-- **"Does this logic / state model feel right?"** → [LOGIC.md](LOGIC.md). Build a tiny interactive terminal app that pushes the state machine through cases that are hard to reason about on paper.
-- **"What should this look like?"** → [UI.md](UI.md). Generate several radically different UI variations on a single route, switchable via a URL search param and a floating bottom bar.
-
-The two branches produce very different artifacts — getting this wrong wastes the whole prototype. If the question is genuinely ambiguous and the user isn't reachable, default to whichever branch better matches the surrounding code (a backend module → logic; a page or component → UI) and state the assumption at the top of the prototype.
-
-## Rules that apply to both
-
-1. **Throwaway from day one, and clearly marked as such.** Locate the prototype code close to where it will actually be used (next to the module or page it's prototyping for) so context is obvious — but name it so a casual reader can see it's a prototype, not production. For throwaway UI routes, obey whatever routing convention the project already uses; don't invent a new top-level structure.
-2. **One command to run.** Whatever the project's existing task runner supports — `pnpm <name>`, `python <path>`, `bun <path>`, etc. The user must be able to start it without thinking.
-3. **No persistence by default.** State lives in memory. Persistence is the thing the prototype is _checking_, not something it should depend on. If the question explicitly involves a database, hit a scratch DB or a local file with a clear "PROTOTYPE — wipe me" name.
-4. **Skip the polish.** No tests, no error handling beyond what makes the prototype _runnable_, no abstractions. The point is to learn something fast and then delete it.
-5. **Surface the state.** After every action (logic) or on every variant switch (UI), print or render the full relevant state so the user can see what changed.
-6. **Delete or absorb when done.** When the prototype has answered its question, drop the worktree (deleting is a one-liner precisely because everything lives there) or absorb: capture the validated decision durably and re-implement it properly on a real branch — the prototype worktree itself is never merged or promoted.
+1. **Marked throwaway.** Place the code near where it would be used, named so a reader sees it is a prototype; UI routes follow the project's routing convention.
+2. **One command to run**, through the project's existing task runner (`pnpm <name>`, `python <path>`, ...).
+3. **No persistence by default.** State lives in memory unless persistence is the question; then use a scratch DB or file named "PROTOTYPE — wipe me".
+4. **No polish.** No tests, no error handling beyond what keeps it runnable, no abstractions.
+5. **Surface the state** after every action (logic) or variant switch (UI).
+6. **Delete or absorb.** When the question is answered, drop the worktree, or capture the validated decision durably and re-implement it properly on a real branch. The prototype worktree is never merged or promoted.
 
 ## When done
 
-The _answer_ is the only thing worth keeping from a prototype — never the worktree. Capture it somewhere durable *outside* the prototype worktree (ADR, issue comment, spec's decision ledger, or a commit message on the real branch) along with the question it was answering; anything captured only inside the worktree dies with it. If the user is around, that capture is a quick conversation; if not, leave a `NOTES.md` placeholder in the worktree so they (or you, on the next pass) can fill in the verdict before dropping it.
+Only the answer survives. Record it with its question outside the worktree (ADR, issue comment, the spec's decision ledger, or a commit message on the real branch). If the user is away, leave a `NOTES.md` placeholder in the worktree for the verdict before it is dropped.

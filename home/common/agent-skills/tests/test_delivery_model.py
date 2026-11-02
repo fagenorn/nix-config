@@ -11,6 +11,8 @@ import tempfile
 import unittest
 import runpy
 
+from agent_tools import attempt_observations
+
 from ._delivery_model_fixtures import (
     seal,
     custody,
@@ -114,7 +116,8 @@ class DeliveryModelTest(unittest.TestCase):
                 remainder_deadline="2026-09-21T03:01:00Z",
                 owner_unavailable=False, tracker_halted=False,
                 recorded_worktree={"path": "/worktree",
-                                   "state": "matching_issue_branch"})
+                                   "state": "matching_issue_branch"},
+                human_directed=True)
             self.assertEqual(
                 (policy["operation"], issue["attempts"][0]["state"],
                  issue["delivery_remainders"][0]["owner"],
@@ -133,6 +136,7 @@ class DeliveryModelTest(unittest.TestCase):
                 "MODEL_INTERFACE_VERSION", "DeliveryModelError", "canonical_bytes",
                 "canonical_digest", "validate_delivery_object", "validate_custody_ref",
                 "match_scope", "current_selection", "reduce_delivery", "STAGE_ACTIONS",
+                "OBSERVATION_KINDS",
             })
             self.assertEqual(set(Path(raw).iterdir()), before)
             self.assertFalse(hasattr(module, "main"))
@@ -1014,7 +1018,7 @@ class DeliveryModelTest(unittest.TestCase):
     def test_suspended_reply_is_closed_and_names_an_owner_cause(self):
         """#191 D6: a granted suspension replies with one closed v2 `suspended`."""
         suspended = workflow_responses(self.model)["suspended"]
-        for cause in ("usage_limit", "transport", "human_gate", "external", "agent_dispatch"):
+        for cause in ("usage_limit", "transport", "human_gate", "external", "agent_dispatch", "deadline"):
             value = {**copy.deepcopy(suspended), "blocked_on": cause}
             with self.subTest(blocked_on=cause):
                 self.assertEqual(self.validate(value, "workflow-response"), value)
@@ -1171,7 +1175,7 @@ class DeliveryModelTest(unittest.TestCase):
         digest = fixtures["control"]["summaries"][0]["contract_digest"]
         finalize = {"id": "finalize", "kind": "finalize"}
         wait = {"id": "wait:2026-09-21T01:00:00Z", "kind": "wait", "wake_on": ["deadline"],
-                "deadline_at": "2026-09-21T01:00:00Z"}
+                "deadline_at": "2026-09-21T01:00:00Z", "wait_seconds": 3600}
         for name, change in {
                 "extra_member": lambda value: action(value).update(issue=151),
                 "missing_issues": lambda value: action(value).pop("issues"),
@@ -1213,6 +1217,21 @@ class DeliveryModelTest(unittest.TestCase):
         self.assert_invalid(bad, "ship-handoff")
         bad = copy.deepcopy(handoff); bad["branch"] = "other"
         self.assert_invalid(bad, "ship-handoff")
+
+    def test_ship_handoff_admits_acceptance_state_as_a_string(self):
+        """#272 D9: the model admits the key; artifact-budget owns its values."""
+        contract, delivery = contract_and_delivery(self.model)
+        handoff = ship_handoff(self.model, contract, delivery)
+        self.assertEqual(handoff["acceptance_state"], "met")
+        self.assertEqual(self.validate(handoff, "ship-handoff"), handoff)
+        missing = copy.deepcopy(handoff)
+        missing.pop("acceptance_state")
+        self.assert_invalid(missing, "ship-handoff")
+        for value in (None, 1, True, ["met"], ""):
+            bad = copy.deepcopy(handoff)
+            bad["acceptance_state"] = value
+            with self.subTest(value=value):
+                self.assert_invalid(bad, "ship-handoff")
 
     SYNC_H1, SYNC_H2 = "e" * 40, "9" * 40
     INTEGRATION_1, INTEGRATION_2 = "d" * 40, "f" * 40
@@ -1421,6 +1440,397 @@ class DeliveryModelTest(unittest.TestCase):
         self.assertIn("source = ./scripts/delivery_model;", nix)
         self.assertIn("recursive = false;", nix)
         self.assertIn("test_delivery_model.py", (ROOT / "justfile").read_text(encoding="utf-8"))
+
+
+class TrackerHeldModelTest(unittest.TestCase):
+    """#273 D1-D4: a tracker_held observation satisfies close_tracker and tracker_closed."""
+
+    HELD = {"tracker_repository_id": "sim-repo", "issue": 151, "state": "open",
+            "label": "needs-verification",
+            "comment_url": "https://sim.invalid/issues/151#issuecomment-1",
+            "record_path": ".agents/artifacts/plans/2026-10-07-x.acceptance.md",
+            "acceptance_state": "unmet",
+            "observation_identity": "github:issue:151:held"}
+    CLOSED = {"tracker_repository_id": "sim-repo", "issue": 151, "state": "closed",
+              "close_reason": "completed", "observation_identity": "tracker:151:closed"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load_model(SOURCE, "delivery_model_tracker_held_test")
+
+    def merged(self):
+        contract, delivery = cleanup_contract_and_delivery(self.model)
+        return contract, with_observed(self.model, contract, delivery,
+                                       ["select", "publish", "open", "merge"])
+
+    def reduce_with(self, contract, delivery, *items):
+        candidate = copy.deepcopy(delivery)
+        candidate["delivery_observations"] = sorted(
+            candidate["delivery_observations"] + list(items), key=lambda item: item["id"])
+        return self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+
+    def assert_rejected(self, item):
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(
+                item, expected_kind="delivery-observation", notes_max_characters=4096)
+
+    def test_the_observable_set_adds_tracker_held_and_keeps_the_stage_tuple(self):
+        self.assertIn("tracker_held", self.model.OBSERVATION_KINDS)
+        self.assertIn("tracker_closed", self.model.OBSERVATION_KINDS)
+        self.assertEqual(self.model.STAGE_ACTIONS["close_tracker"],
+                         ("close_issue", "tracker_write", "tracker_closed"))
+        self.assertEqual(
+            self.model.OBSERVATION_KINDS - {"tracker_held"},
+            {item[2] for item in self.model.STAGE_ACTIONS.values()}
+            | {"implementation_delivered", "pr_merged", "tracker_closed", "cleanup_complete"})
+
+    def test_a_held_observation_folds_close_tracker_and_the_postcondition(self):
+        contract, delivery = self.merged()
+        for acceptance in ("unmet", "human_pending"):
+            with self.subTest(acceptance=acceptance):
+                held = observation(self.model, contract, "tracker_held",
+                                   {**self.HELD, "acceptance_state": acceptance})
+                reduced = self.reduce_with(contract, delivery, held)
+                self.assertEqual(stage_state(reduced, "close"), "observed")
+                self.assertEqual(post_state(reduced, "tracker_closed"), "observed")
+                self.assertEqual(
+                    reduced["next_delivery"]["postconditions"]["tracker_closed"]
+                    ["observation_id"], held["id"])
+                fact = next(item for item in reduced["next_delivery"]["stage_facts"]
+                            if item["stage_id"] == "close")
+                self.assertEqual(fact["observation_id"], held["id"])
+
+    def test_a_closed_observation_still_folds_close_tracker(self):
+        contract, delivery = self.merged()
+        closed = observation(self.model, contract, "tracker_closed", self.CLOSED)
+        reduced = self.reduce_with(contract, delivery, closed)
+        self.assertEqual((stage_state(reduced, "close"),
+                          post_state(reduced, "tracker_closed")), ("observed", "observed"))
+
+    def test_malformed_held_subjects_are_rejected(self):
+        contract, _ = self.merged()
+        changes = {
+            "closed state": {"state": "closed"},
+            "other label": {"label": "verify"},
+            "met": {"acceptance_state": "met"},
+            "not applicable": {"acceptance_state": "not_applicable"},
+            "unknown acceptance": {"acceptance_state": "pending"},
+            "array acceptance": {"acceptance_state": ["unmet"]},
+            "object acceptance": {"acceptance_state": {"unmet": True}},
+            "absolute record": {"record_path": "/abs/x.acceptance.md"},
+            "parent record": {"record_path": "plans/../x.acceptance.md"},
+            "backslash record": {"record_path": "plans\\x.acceptance.md"},
+            "empty record": {"record_path": ""},
+            "null record": {"record_path": None},
+            "empty comment": {"comment_url": ""},
+            "empty identity": {"observation_identity": ""},
+            "issue zero": {"issue": 0},
+            "boolean issue": {"issue": True},
+        }
+        for label, change in changes.items():
+            with self.subTest(label=label):
+                self.assert_rejected(observation(self.model, contract, "tracker_held",
+                                                 {**self.HELD, **change}))
+        missing = {key: value for key, value in self.HELD.items() if key != "record_path"}
+        for label, subject in (("extra member", {**self.HELD, "close_reason": None}),
+                               ("missing member", missing)):
+            with self.subTest(label=label):
+                self.assert_rejected(observation(self.model, contract, "tracker_held",
+                                                 subject))
+
+    def test_a_foreign_held_subject_leaves_the_stage_pending(self):
+        contract, delivery = self.merged()
+        for label, change in (("foreign issue", {"issue": 152}),
+                              ("foreign repository", {"tracker_repository_id": "other"})):
+            with self.subTest(label=label):
+                foreign = observation(self.model, contract, "tracker_held",
+                                      {**self.HELD, **change})
+                reduced = self.reduce_with(contract, delivery, foreign)
+                self.assertEqual((stage_state(reduced, "close"),
+                                  post_state(reduced, "tracker_closed")),
+                                 ("pending", "pending"))
+
+    def test_held_and_closed_in_one_delivery_reject(self):
+        contract, delivery = self.merged()
+        held = observation(self.model, contract, "tracker_held", self.HELD)
+        closed = observation(self.model, contract, "tracker_closed", self.CLOSED)
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.reduce_with(contract, delivery, held, closed)
+
+
+class OwnerLivenessResponseTest(unittest.TestCase):
+    """#310 D5, D10: the closed `owner_liveness` reply at the workflow-response boundary."""
+
+    LIVE = {"interface_version": 1, "kind": "owner_liveness", "action_id": "14:1:1",
+            "reason": "current", "verdict": "live", "since": "2026-08-13T20:10:00Z",
+            "progress_at": "2026-08-13T20:00:00Z", "stall_at": "2026-08-13T20:40:00Z",
+            "wait_seconds": 1800}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load_model(SOURCE, "delivery_model_owner_liveness_test")
+
+    def validate(self, value):
+        return self.model.validate_delivery_object(
+            value, expected_kind="workflow-response", notes_max_characters=4096)
+
+    def changed(self, **members):
+        value = copy.deepcopy(self.LIVE)
+        value.update(members)
+        return value
+
+    def accepted(self):
+        return {
+            "live": self.LIVE,
+            "live_progress_later": self.changed(
+                progress_at="2026-08-13T20:20:00Z", stall_at="2026-08-13T20:50:00Z"),
+            "stalled": self.changed(verdict="stalled", wait_seconds=None),
+            "past_deadline": self.changed(verdict="past_deadline", wait_seconds=None),
+            "not_current": self.changed(reason="superseded_launch", verdict="not_current",
+                                        progress_at=None, stall_at=None, wait_seconds=None),
+            "unknown_run": self.changed(reason="unknown_run", verdict="not_current",
+                                        progress_at=None, stall_at=None, wait_seconds=None),
+        }
+
+    def test_each_verdict_shape_is_accepted_unchanged(self):
+        for name, value in self.accepted().items():
+            with self.subTest(name=name):
+                self.assertEqual(self.validate(copy.deepcopy(value)), value)
+
+    def test_every_broken_invariant_is_rejected(self):
+        missing = copy.deepcopy(self.LIVE)
+        del missing["since"]
+        rejected = {
+            "extra_member": self.changed(now="2026-08-13T20:10:00Z"),
+            "missing_member": missing,
+            "version_two": self.changed(interface_version=2),
+            "version_bool": self.changed(interface_version=True),
+            "unknown_reason": self.changed(reason="late"),
+            "unknown_verdict": self.changed(verdict="dead"),
+            "empty_action": self.changed(action_id=""),
+            "fractional_since": self.changed(since="2026-08-13T20:10:00.5Z"),
+            "current_but_not_current": self.changed(verdict="not_current", progress_at=None,
+                                                    stall_at=None, wait_seconds=None),
+            "superseded_but_live": self.changed(reason="superseded_launch"),
+            "not_current_with_times": self.changed(reason="superseded_launch",
+                                                   verdict="not_current", wait_seconds=None),
+            "live_without_progress": self.changed(progress_at=None),
+            "stall_not_whole_minutes": self.changed(stall_at="2026-08-13T20:40:30Z"),
+            "stall_before_since": self.changed(stall_at="2026-08-13T20:09:00Z",
+                                               progress_at="2026-08-13T19:00:00Z"),
+            "stall_at_base": self.changed(stall_at="2026-08-13T20:10:00Z"),
+            "stall_before_base": self.changed(stall_at="2026-08-13T20:05:00Z"),
+            "live_zero_wait": self.changed(wait_seconds=0),
+            "live_bool_wait": self.changed(wait_seconds=True),
+            "live_null_wait": self.changed(wait_seconds=None),
+            "stalled_with_wait": self.changed(verdict="stalled"),
+            "past_deadline_with_wait": self.changed(verdict="past_deadline"),
+        }
+        for name, value in rejected.items():
+            with self.subTest(name=name):
+                with self.assertRaises(self.model.DeliveryModelError):
+                    self.validate(value)
+
+    def test_the_check_launch_reply_is_unchanged(self):
+        reply = {"action_id": "14:1:1", "current": True, "current_action_id": "14:1:1",
+                 "reason": "current"}
+        self.assertEqual(self.validate(copy.deepcopy(reply)), reply)
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.validate({**reply, "reason": "late"})
+
+
+class ObserveExpectsResponseTest(unittest.TestCase):
+    """Issue 473 D4: a direct observe reply's requirements carry one closed `expects`."""
+
+    BARE = (
+        {"kind": "tracker"},
+        {"kind": "recorded_worktree", "path": "/repo/.worktrees/worktree-issue-73-example"},
+        {"kind": "candidate_worktree"},
+        {"kind": "forge_pr", "path": "issue-73-"},
+        {"kind": "delivery_contract", "subject_id": "73",
+         "reason_code": "delivery_contract_required", "detail_pointer": None},
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load_model(SOURCE, "delivery_model_observe_expects_test")
+
+    def validate(self, value):
+        return self.model.validate_delivery_object(
+            value, expected_kind="workflow-response", notes_max_characters=4096)
+
+    @staticmethod
+    def observe(*bare):
+        return {"interface_version": 2, "kind": "observe", "issue": 73, "run_id": None,
+                "requirements": [attempt_observations.describe(item) for item in bare]}
+
+    def test_each_direct_kind_is_accepted_with_its_description(self):
+        for value in (*(self.observe(item) for item in self.BARE), self.observe(*self.BARE)):
+            with self.subTest(kinds=[item["kind"] for item in value["requirements"]]):
+                self.assertEqual(self.validate(copy.deepcopy(value)), value)
+
+    def test_every_broken_expects_is_rejected(self):
+        tracker, contract = self.observe(self.BARE[0]), self.observe(self.BARE[4])
+
+        def mutated(base, change):
+            value = copy.deepcopy(base)
+            change(value["requirements"][0])
+            return value
+
+        scope_tuple = {"kind": "scope_tuple", "subject_id": "select",
+                       "reason_code": "scope_tuple_required", "detail_pointer": None,
+                       "expects": copy.deepcopy(tracker["requirements"][0]["expects"])}
+        duplicate = copy.deepcopy(tracker)
+        duplicate["requirements"].append(copy.deepcopy(duplicate["requirements"][0]))
+        rejected = {
+            "missing": mutated(tracker, lambda item: item.pop("expects")),
+            "extra_member": mutated(tracker, lambda item: item["expects"].update(extra=1)),
+            "missing_member": mutated(tracker, lambda item: item["expects"].pop("build")),
+            "wrong_slot": mutated(tracker, lambda item: item["expects"].update(slot="forge")),
+            "build_on_observed": mutated(
+                tracker, lambda item: item["expects"].update(build="workflow-state x")),
+            "null_build_on_contract": mutated(
+                contract, lambda item: item["expects"].update(build=None)),
+            "empty_build_on_contract": mutated(
+                contract, lambda item: item["expects"].update(build="")),
+            "example_keys_differ": mutated(
+                tracker, lambda item: item["expects"]["example"].pop("state")),
+            "example_not_object": mutated(
+                tracker, lambda item: item["expects"].update(example=[])),
+            "members_empty": mutated(tracker, lambda item: (
+                item["expects"]["members"].clear(), item["expects"]["example"].clear())),
+            "meaning_not_string": mutated(
+                tracker, lambda item: item["expects"]["members"].update(state=1)),
+            "meaning_empty": mutated(
+                tracker, lambda item: item["expects"]["members"].update(state="")),
+            "bare_extra_member": mutated(tracker, lambda item: item.update(path="issue-73-")),
+            "control_only_kind": {**copy.deepcopy(tracker), "requirements": [scope_tuple]},
+            "duplicate": duplicate,
+        }
+        for name, value in rejected.items():
+            with self.subTest(mutation=name), self.assertRaises(self.model.DeliveryModelError):
+                self.validate(value)
+
+    def test_the_shared_requirement_shape_is_unchanged(self):
+        checkpointed = copy.deepcopy(workflow_responses(self.model)["checkpointed"])
+        checkpointed["requirements"][0]["expects"] = copy.deepcopy(
+            self.observe(self.BARE[0])["requirements"][0]["expects"])
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.validate(checkpointed)
+
+
+class WorkerReplyResponseTest(unittest.TestCase):
+    """Issue 473 D6: the register-worker, release-worker and mark-progress replies at the
+    workflow-response boundary, matched by exact member set."""
+
+    REGISTERED = {"worker_id": "207:1:1:w1", "launch": "207:1:1", "parent": None}
+    RELEASED = {"worker_id": "207:1:1:w1", "release_event": "returned",
+                "released": ["207:1:1:w1"]}
+    MARKED = {"action_id": "207:1:1", "outcome": "baseline", "marker": "a" * 40}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load_model(SOURCE, "delivery_model_worker_reply_test")
+
+    def validate(self, value):
+        return self.model.validate_delivery_object(
+            value, expected_kind="workflow-response", notes_max_characters=4096)
+
+    def test_each_reply_shape_is_accepted_unchanged(self):
+        accepted = {
+            "registered": self.REGISTERED,
+            "registered_child": {**self.REGISTERED, "worker_id": "207:1:1:w2",
+                                 "parent": "207:1:1:w1"},
+            "registered_remainder": {"worker_id": "207:r1:1:w1", "launch": "207:r1:1",
+                                     "parent": None},
+            "released_returned": self.RELEASED,
+            "released_repeat": {**self.RELEASED, "released": []},
+            "released_stopped_subtree": {**self.RELEASED, "release_event": "stopped",
+                                         "released": ["207:1:1:w1", "207:1:1:w2"]},
+            "released_stopped_repeat": {**self.RELEASED, "release_event": "stopped",
+                                        "released": []},
+            **{f"marked_{outcome}": {**self.MARKED, "outcome": outcome}
+               for outcome in ("baseline", "advanced", "unchanged", "diverged")},
+            "marked_sha256": {**self.MARKED, "marker": "b" * 64},
+        }
+        for name, value in accepted.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.validate(copy.deepcopy(value)), value)
+
+    def test_every_broken_invariant_is_rejected(self):
+        rejected = {
+            "register_other_launch": {**self.REGISTERED, "worker_id": "207:1:2:w1"},
+            "register_bad_launch": {**self.REGISTERED, "launch": "207:1",
+                                    "worker_id": "207:1:w1"},
+            "register_zero_ordinal": {**self.REGISTERED, "worker_id": "207:1:1:w0"},
+            "register_parent_other_launch": {**self.REGISTERED, "worker_id": "207:1:1:w2",
+                                             "parent": "207:1:2:w1"},
+            "register_parent_not_worker": {**self.REGISTERED, "parent": "207:1:1"},
+            "register_extra": {**self.REGISTERED, "registered_at": "2026-09-21T00:00:00Z"},
+            "release_unknown_event": {**self.RELEASED, "release_event": "expired"},
+            "release_without_worker": {**self.RELEASED, "released": ["207:1:1:w2"]},
+            "release_returned_subtree": {**self.RELEASED,
+                                         "released": ["207:1:1:w1", "207:1:1:w2"]},
+            "release_other_launch": {**self.RELEASED, "release_event": "stopped",
+                                     "released": ["207:1:1:w1", "207:1:2:w1"]},
+            "release_duplicate": {**self.RELEASED, "release_event": "stopped",
+                                  "released": ["207:1:1:w1", "207:1:1:w1"]},
+            "release_not_list": {**self.RELEASED, "released": "207:1:1:w1"},
+            "release_bad_worker": {**self.RELEASED, "worker_id": "w1", "released": []},
+            "mark_unknown_outcome": {**self.MARKED, "outcome": "stalled"},
+            "mark_short_marker": {**self.MARKED, "marker": "a" * 39},
+            "mark_upper_marker": {**self.MARKED, "marker": "A" * 40},
+            "mark_null_marker": {**self.MARKED, "marker": None},
+            "mark_bad_action": {**self.MARKED, "action_id": "207:1"},
+            "mark_extra": {**self.MARKED, "changed": True},
+        }
+        for name, value in rejected.items():
+            with self.subTest(mutation=name), self.assertRaises(self.model.DeliveryModelError):
+                self.validate(value)
+
+
+class ControlWaitResponseTest(unittest.TestCase):
+    """#310 D9: the boundary recomputes a control wait's `wait_seconds`."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load_model(SOURCE, "delivery_model_control_wait_test")
+
+    def validate(self, value):
+        return self.model.validate_delivery_object(
+            value, expected_kind="workflow-response", notes_max_characters=4096)
+
+    def with_wait(self, deadline, seconds):
+        value = copy.deepcopy(workflow_responses(self.model)["control"])
+        self.assertEqual(value["now"], "2026-09-21T00:00:00Z")
+        value["next_deadline"] = deadline
+        value["actions"].append({"id": f"wait:{deadline}", "kind": "wait",
+                                 "wake_on": ["deadline", "owner_notification", "tracker_change"],
+                                 "deadline_at": deadline, "wait_seconds": seconds})
+        return value
+
+    def test_the_exact_value_is_accepted(self):
+        for deadline, seconds in (("2026-09-21T01:00:00Z", 3600),
+                                  ("2026-09-21T00:00:01Z", 1),
+                                  ("2026-09-21T00:00:00Z", 0),
+                                  ("2026-09-20T23:59:00Z", 0)):
+            with self.subTest(deadline=deadline):
+                value = self.with_wait(deadline, seconds)
+                self.assertEqual(self.validate(copy.deepcopy(value)), value)
+
+    def test_any_other_value_or_shape_is_rejected(self):
+        cases = {"one_short": self.with_wait("2026-09-21T01:00:00Z", 3599),
+                 "one_over": self.with_wait("2026-09-21T01:00:00Z", 3601),
+                 "negative_past": self.with_wait("2026-09-20T23:59:00Z", -60),
+                 "boolean": self.with_wait("2026-09-21T00:00:01Z", True),
+                 "float": self.with_wait("2026-09-21T01:00:00Z", 3600.0)}
+        missing = self.with_wait("2026-09-21T01:00:00Z", 3600)
+        del missing["actions"][-1]["wait_seconds"]
+        cases["missing"] = missing
+        for name, value in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(self.model.DeliveryModelError):
+                    self.validate(value)
 
 
 if __name__ == "__main__":

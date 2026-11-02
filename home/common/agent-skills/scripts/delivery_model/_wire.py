@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime
+import math
+import re
 from typing import Any
 
 from ._canonical import (canonical_bytes, canonical_digest, _boolean, _digest,
     _integer, _members, _object, _reject, _sorted_unique, _string, _utc)
-from ._objects import (_POSTCONDITIONS, _STAGE_ACTIONS, _authority, _consumption,
+from ._objects import (_POSTCONDITIONS, _POSTCONDITION_OBSERVATION_KINDS,
+    _STAGE_OBSERVATION_KINDS, _authority, _consumption,
     _contract, _custody_issue, _delivery_observation, _intent, _reevaluation,
     _recovery,
     _postcondition_observation_matches, _scope, _selected, _selection_chains,
@@ -28,6 +32,39 @@ def _requirements(values: Any, *, sorted_values: bool) -> list[Any]:
         elif item["kind"] in {"tracker", "candidate_worktree"}: _object(item, _members("kind"))
         elif item["kind"] in {"recorded_worktree", "forge_pr"}: _object(item, _members("kind path")); _string(item["path"], "requirement path")
         else: _reject()
+    return values
+
+
+# Issue 473 D4: the request member that answers each direct observe requirement kind. This
+# is the validator's own copy; the AC1 scenarios pin it to the agent_tools catalogue.
+_OBSERVE_SLOTS = {"tracker": "tracker", "recorded_worktree": "worktree",
+                  "candidate_worktree": "worktree", "forge_pr": "forge",
+                  "delivery_contract": "delivery_contract"}
+
+
+def _observe_requirements(values: Any) -> list[Any]:
+    """A direct observe reply's requirements: the five direct kinds, no bare requirement
+    twice, each with its bare members and one closed `expects` (issue 473 D4)."""
+    if not isinstance(values, list): _reject()
+    seen: set[bytes] = set()
+    for item in values:
+        if (not isinstance(item, dict) or not isinstance(item.get("kind"), str)
+                or item["kind"] not in _OBSERVE_SLOTS or "expects" not in item): _reject()
+        bare = {name: member for name, member in item.items() if name != "expects"}
+        _requirements([bare], sorted_values=False)
+        if canonical_bytes(bare) in seen: _reject()
+        seen.add(canonical_bytes(bare))
+        expects = _object(item["expects"], _members("slot members example build"),
+                          "requirement expects")
+        if expects["slot"] != _OBSERVE_SLOTS[item["kind"]]: _reject()
+        if item["kind"] == "delivery_contract": _string(expects["build"], "requirement build")
+        elif expects["build"] is not None: _reject()
+        members = expects["members"]
+        if not isinstance(members, dict) or not members or any(
+                not name or not isinstance(meaning, str) or not meaning
+                for name, meaning in members.items()): _reject()
+        if not isinstance(expects["example"], dict) or set(expects["example"]) != set(members):
+            _reject()
     return values
 
 
@@ -178,7 +215,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
     for item in value["summaries"]:
         item = _object(item, _members("issue state custody owner worktree deadline_at blocked_on blockers result contract_digest pending_stage_ids requirements"))
         issue = _integer(item["issue"], "summary issue", minimum=1)
-        if issue in issues or item["state"] not in {"queued", "blocked", "fogged", "active", "handed_off", "suspended", "merged", "stopped", "failed", "closed"}: _reject()
+        if issue in issues or item["state"] not in {"queued", "blocked", "fogged", "active", "handed_off", "suspended", "merged", "stopped", "failed", "closed", "held"}: _reject()
         issues.add(issue); order.append(issue)
         if item["custody"] is not None: validate_custody_ref(item["custody"], issue=issue)
         for name in ("owner", "worktree", "deadline_at", "blocked_on", "contract_digest"):
@@ -208,7 +245,10 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
         if not isinstance(item, dict) or "kind" not in item: _reject()
         if item["kind"] in {"spawn", "resume", "retry"}: _owner_action(item, notes_max, control=True)
         elif item["kind"] == "wait":
-            _object(item, _members("id kind wake_on deadline_at")); _string(item["id"], "wait id"); _utc(item["deadline_at"], "wait deadline"); _sorted_unique(item["wake_on"], "wake events")
+            _object(item, _members("id kind wake_on deadline_at wait_seconds")); _string(item["id"], "wait id"); _utc(item["deadline_at"], "wait deadline"); _sorted_unique(item["wake_on"], "wake events")
+            _integer(item["wait_seconds"], "wait seconds", minimum=0)
+            remaining = datetime.strptime(item["deadline_at"], "%Y-%m-%dT%H:%M:%SZ") - datetime.strptime(value["now"], "%Y-%m-%dT%H:%M:%SZ")
+            if item["wait_seconds"] != max(0, math.ceil(remaining.total_seconds())): _reject()
             if any(event not in {"owner_notification", "tracker_change", "deadline"} for event in item["wake_on"]): _reject()
         elif item["kind"] == "finalize": _object(item, _members("id kind")); _string(item["id"], "finalize id")
         elif item["kind"] == "delivery_remainder": _remainder(item, notes_max)
@@ -260,17 +300,85 @@ def _host_route(value: Any) -> dict[str, Any]:
     else: _reject()
     return value
 
+_LAUNCH_REASONS = frozenset({"unknown_run", "unknown_issue", "unknown_attempt", "superseded_attempt", "inactive_attempt", "superseded_launch", "current"})
+
+# Issue 473 D6: the worker and progress replies' identities, the validator's own copy of
+# the helper's grammar: a launch is `<issue>:[r]<attempt or remainder>:<launch>`.
+_LAUNCH = r"[1-9][0-9]{0,17}:r?[1-9][0-9]{0,17}:[1-9][0-9]{0,17}"
+_LAUNCH_ID = re.compile(_LAUNCH)
+_WORKER_ID = re.compile(rf"({_LAUNCH}):w[1-9][0-9]{{0,17}}")
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_RELEASE_EVENTS = frozenset({"returned", "stopped"})
+_PROGRESS_OUTCOMES = frozenset({"baseline", "advanced", "unchanged", "diverged"})
+
+
+def _launch_id(value: Any) -> str:
+    if not isinstance(value, str) or _LAUNCH_ID.fullmatch(value) is None: _reject()
+    return value
+
+
+def _worker_launch(value: Any) -> str:
+    """The launch id of worker id `value`."""
+    matched = _WORKER_ID.fullmatch(value) if isinstance(value, str) else None
+    if matched is None: _reject()
+    return matched[1]
+
+
+def _registered_worker(value: dict[str, Any]) -> dict[str, Any]:
+    if _worker_launch(value["worker_id"]) != _launch_id(value["launch"]): _reject()
+    if value["parent"] is not None and _worker_launch(value["parent"]) != value["launch"]: _reject()
+    return value
+
+
+def _released_worker(value: dict[str, Any]) -> dict[str, Any]:
+    launch = _worker_launch(value["worker_id"])
+    if not isinstance(value["release_event"], str) or value["release_event"] not in _RELEASE_EVENTS: _reject()
+    released = value["released"]
+    if not isinstance(released, list) or any(_worker_launch(item) != launch for item in released) \
+            or len(set(released)) != len(released): _reject()
+    if released and value["worker_id"] not in released: _reject()
+    if value["release_event"] == "returned" and released not in ([], [value["worker_id"]]): _reject()
+    return value
+
+
+def _progress_mark(value: dict[str, Any]) -> dict[str, Any]:
+    _launch_id(value["action_id"])
+    if not isinstance(value["outcome"], str) or value["outcome"] not in _PROGRESS_OUTCOMES: _reject()
+    if not isinstance(value["marker"], str) or _COMMIT_ID.fullmatch(value["marker"]) is None: _reject()
+    return value
+
+def _owner_liveness(value: dict[str, Any]) -> dict[str, Any]:
+    _object(value, _members("interface_version kind action_id reason verdict since progress_at stall_at wait_seconds"), "owner liveness")
+    if type(value["interface_version"]) is not int or value["interface_version"] != 1: _reject()
+    _string(value["action_id"], "action id")
+    if value["reason"] not in _LAUNCH_REASONS: _reject()
+    if value["verdict"] not in {"live", "stalled", "past_deadline", "not_current"}: _reject()
+    _utc(value["since"], "since")
+    if (value["verdict"] == "not_current") != (value["reason"] != "current"): _reject()
+    if value["verdict"] == "not_current":
+        if value["progress_at"] is not None or value["stall_at"] is not None or value["wait_seconds"] is not None: _reject()
+        return value
+    moments = [datetime.strptime(_utc(value[name], name), "%Y-%m-%dT%H:%M:%SZ") for name in ("progress_at", "stall_at", "since")]
+    seconds = (moments[1] - max(moments[0], moments[2])).total_seconds()
+    if seconds <= 0 or seconds % 60: _reject()
+    if value["verdict"] == "live": _integer(value["wait_seconds"], "wait seconds", minimum=1)
+    elif value["wait_seconds"] is not None: _reject()
+    return value
+
 def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if not isinstance(value, dict): _reject()
     if set(value) == {"action_id", "current", "current_action_id", "reason"}:
         _string(value["action_id"], "action id"); _boolean(value["current"], "current")
         if value["current_action_id"] is not None: _string(value["current_action_id"], "current action")
-        if value["reason"] not in {"unknown_run", "unknown_issue", "unknown_attempt", "superseded_attempt", "inactive_attempt", "superseded_launch", "current"}: _reject()
+        if value["reason"] not in _LAUNCH_REASONS: _reject()
         if value["current"] != (value["reason"] == "current") or (value["current"] and value["current_action_id"] != value["action_id"]): _reject()
         if value["reason"] in {"unknown_run", "unknown_issue"} and value["current_action_id"] is not None: _reject()
         if value["reason"] == "inactive_attempt" and value["current_action_id"] not in {None, value["action_id"]}: _reject()
         if value["reason"] in {"unknown_attempt", "superseded_attempt", "superseded_launch"} and value["current_action_id"] == value["action_id"]: _reject()
         return value
+    if set(value) == {"worker_id", "launch", "parent"}: return _registered_worker(value)
+    if set(value) == {"worker_id", "release_event", "released"}: return _released_worker(value)
+    if set(value) == {"action_id", "outcome", "marker"}: return _progress_mark(value)
     if value.get("kind") == "workflow_bootstrap":
         _object(value, _members("interface_version kind run_id requirements")); _v2(value); _string(value["run_id"], "run id")
         _sorted_unique(value["requirements"], "bootstrap requirements", key=lambda item: (item.get("issue", 0), item.get("custody", {}).get("action_id", "")))
@@ -281,7 +389,7 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if value.get("kind") == "observe":
         _object(value, _members("interface_version kind issue run_id requirements")); _v2(value); _integer(value["issue"], "observe issue", minimum=1)
         if value["run_id"] is not None: _string(value["run_id"], "observe run")
-        _requirements(value["requirements"], sorted_values=False); return value
+        _observe_requirements(value["requirements"]); return value
     if value.get("kind") == "owner": return _owner_action(value, notes_max)
     if value.get("kind") == "terminal":
         _object(value, _members("interface_version kind issue run_id source reason blockers result reentry")); _v2(value); _integer(value["issue"], "terminal issue", minimum=1)
@@ -300,12 +408,13 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
         _object(value, _members("interface_version kind run_id issue custody blocked_on reentry")); _v2(value); _string(value["run_id"], "suspended run")
         issue = _integer(value["issue"], "suspended issue", minimum=1)
         if validate_custody_ref(value["custody"], issue=issue)["kind"] != "implementation": _reject()
-        if value["blocked_on"] not in {"usage_limit", "transport", "human_gate", "external", "agent_dispatch"}: _reject()
+        if value["blocked_on"] not in {"usage_limit", "transport", "human_gate", "external", "agent_dispatch", "deadline"}: _reject()
         _string(value["reentry"], "reentry")
         return value
     if value.get("kind") == "delivery_remainder": return _remainder(value, notes_max)
     if value.get("kind") in {"delivery_checkpointed", "delivery_stalled"}: return _checkpoint_response(value, notes_max)
     if value.get("kind") in {"delivery_complete", "terminal_failed"}: return _finish_response(value)
+    if value.get("kind") == "owner_liveness": return _owner_liveness(value)
     if "kind" not in value: return _control_response(value, notes_max)
     if value.get("kind") == "host_route": return _host_route(value)
     _reject()
@@ -362,11 +471,11 @@ def _artifact(value: Any, label: str) -> dict[str, Any]:
 
 
 def _ship_handoff(value: Any, notes_max: int) -> dict[str, Any]:
-    keys = {"interface_version", "state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path", "spec_artifact", "plan_artifact", "head_sha", "review_state", "auto", "report_path", "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents", "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids", "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs", "requested_scope"}
+    keys = {"interface_version", "state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path", "spec_artifact", "plan_artifact", "head_sha", "review_state", "acceptance_state", "auto", "report_path", "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents", "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids", "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs", "requested_scope"}
     value = _object(value, keys, "ship handoff")
     if type(value["interface_version"]) is not int or value["interface_version"] != 2: _reject()
     issue = _integer(value["issue_number"], "handoff issue", minimum=1); validate_custody_ref(value["custody"], issue=issue)
-    for name in ("state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "branch", "worktree_path", "head_sha", "review_state"): _string(value[name], f"handoff {name}")
+    for name in ("state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "branch", "worktree_path", "head_sha", "review_state", "acceptance_state"): _string(value[name], f"handoff {name}")
     _bounded_notes(value["notes"], notes_max); _boolean(value["auto"], "handoff auto")
     if value["report_path"] is not None: _string(value["report_path"], "handoff report path")
     _artifact(value["spec_artifact"], "spec artifact"); _artifact(value["plan_artifact"], "plan artifact")
@@ -532,7 +641,7 @@ def _delivery(value: Any, notes_max: int) -> dict[str, Any]:
         if fact["state"] == "observed":
             observed = delivery_by_id.get(fact["observation_id"])
             stage = stages_by_id[fact["stage_id"]]
-            if observed is None or observed["observation_kind"] != _STAGE_ACTIONS[stage["kind"]][2] \
+            if observed is None or observed["observation_kind"] not in _STAGE_OBSERVATION_KINDS[stage["kind"]] \
                     or not _stage_observation_matches(contract, value, stage, observed): _reject()
     postconditions = _object(value["postconditions"], set(_POSTCONDITIONS), "postconditions")
     for key, state in postconditions.items():
@@ -541,7 +650,7 @@ def _delivery(value: Any, notes_max: int) -> dict[str, Any]:
         if (state["state"] == "observed") != (state["observation_id"] is not None): _reject()
         if state["state"] == "observed":
             observed = delivery_by_id.get(state["observation_id"])
-            if observed is None or observed["observation_kind"] != key: _reject()
+            if observed is None or observed["observation_kind"] not in _POSTCONDITION_OBSERVATION_KINDS[key]: _reject()
             if key == "pr_merged":
                 if not any(stage["kind"] == "merge_pr" and _stage_observation_matches(
                         contract, value, stage, observed) for stage in contract["stages"]): _reject()

@@ -49,10 +49,21 @@ class Fixture:
 
 
 class AncestryTest(Fixture, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        template = Path(tempfile.mkdtemp()); cls.addClassCleanup(shutil.rmtree, template)
+        repo, pins, task7_pins, table, authority = Fixture.build(cls, template)
+        edges = list(contribution_edges(repo, pins, classify(repo, pins)))
+        cls._template = (template, {"repo": repo, "pins": pins, "task7_pins": task7_pins, "table": table,
+                                    "authority": authority, "edges": edges})
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
-        self.repo, self.pins, self.task7_pins, self.table, self.authority = self.build(self.tmp)
-        self.edges = list(contribution_edges(self.repo, self.pins, classify(self.repo, self.pins)))
+        template, values = self._template
+        shutil.copytree(template, self.tmp, symlinks=True, dirs_exist_ok=True)
+        for name, value in values.items():
+            setattr(self, name, self.tmp / value.relative_to(template) if isinstance(value, Path)
+                    else copy.deepcopy(value))
 
     def selector(self, edges):
         return reconstruct_boundary(self.repo, self.pins, boundary="tasks-1",

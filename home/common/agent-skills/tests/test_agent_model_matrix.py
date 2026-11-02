@@ -19,8 +19,9 @@ EXPECTED_TIERS = {
     "auto-owner": ("opus", "xhigh"),
     "ship-owner": ("opus", "high"),
     "implementer": ("opus", "high"),
+    "task-implementer": ("sonnet", "high"),
     "reviewer": ("opus", "high"),
-    "conformance-reviewer": ("sonnet", "high"),
+    "conformance-reviewer": ("opus", "high"),
     "reviewer-lite": ("sonnet", "medium"),
     "mechanic": ("sonnet", "high"),
     "bookkeeper": ("haiku", "low"),
@@ -30,10 +31,11 @@ EXPECTED_TIERS = {
 }
 
 EXPECTED_SUBAGENT_TYPES = {
-    "issue-owner": {"general-purpose"},
-    "auto-owner": {"general-purpose"},
-    "ship-owner": {"general-purpose"},
+    "issue-owner": {"issue-owner", "general-purpose"},
+    "auto-owner": {"issue-owner"},
+    "ship-owner": {"issue-owner", "general-purpose"},
     "implementer": {"implementer"},
+    "task-implementer": {"implementer"},
     "reviewer": {"reviewer"},
     "conformance-reviewer": {"reviewer"},
     "reviewer-lite": {"reviewer-lite"},
@@ -41,7 +43,7 @@ EXPECTED_SUBAGENT_TYPES = {
     "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
-    "codex-transport": {"codex:rescue", "codex:codex-reviewer"},
+    "codex-transport": {"codex:codex-rescue", "codex:codex-reviewer"},
 }
 
 EXPECTED_OWNER_SITES = {
@@ -136,6 +138,11 @@ EXPECTED_OWNER_SITES = {
         "medium",
     ),
 }
+OWNER_ROLES = {"issue-owner", "auto-owner", "ship-owner"}
+OWNER_SKILL_DIRECTORIES = (
+    "home/common/agent-skills/skills/from-issue",
+    "home/common/claude-code/skills/orchestrate-issues",
+)
 
 EXPECTED_SDD_SITES = {
     "sdd-mechanic-implementation": (
@@ -152,10 +159,17 @@ EXPECTED_SDD_SITES = {
         "medium",
         ["risk-lane-mechanical-or-low", "bounded-task-diff"],
     ),
-    "sdd-nonmechanical-implementation": (
-        "home/common/agent-skills/skills/sdd/implementer-prompt.md",
+    "sdd-blocked-reasoning-escalation": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
         "implementer",
         "opus",
+        "high",
+        [],
+    ),
+    "sdd-nonmechanical-implementation": (
+        "home/common/agent-skills/skills/sdd/implementer-prompt.md",
+        "task-implementer",
+        "sonnet",
         "high",
         [],
     ),
@@ -172,6 +186,13 @@ EXPECTED_SDD_SITES = {
         "sonnet",
         "medium",
         ["named-prior-findings", "bounded-fix-diff"],
+    ),
+    "sdd-task-fix-redispatch": (
+        "home/common/agent-skills/skills/sdd/fix-loop.md",
+        "task-implementer",
+        "sonnet",
+        "high",
+        [],
     ),
     "sdd-codex-rescue-transport": (
         "home/common/agent-skills/skills/sdd/fix-loop.md",
@@ -218,7 +239,7 @@ EXPECTED_SDD_SITES = {
     "sdd-final-conformance-review": (
         "home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md",
         "conformance-reviewer",
-        "sonnet",
+        "opus",
         "high",
         [],
     ),
@@ -311,7 +332,7 @@ def write_fixture(root: Path, data: dict) -> None:
     matrix_path.write_text(json.dumps(data), encoding="utf-8")
     agents = root / "home/common/claude-code/agents"
     agents.mkdir(parents=True)
-    for role in ("implementer", "mechanic", "reviewer", "reviewer-lite"):
+    for role in ("implementer", "issue-owner", "mechanic", "reviewer", "reviewer-lite"):
         model, effort = EXPECTED_TIERS[role]
         (agents / f"{role}.md").write_text(
             f"---\nname: {role}\nmodel: {model}\neffort: {effort}\n---\n",
@@ -365,7 +386,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         files = sorted(AGENTS.glob("*.md"))
         self.assertEqual(
             [path.name for path in files],
-            ["implementer.md", "mechanic.md", "reviewer-lite.md", "reviewer.md"],
+            ["implementer.md", "issue-owner.md", "mechanic.md", "reviewer-lite.md", "reviewer.md"],
         )
         for path in files:
             metadata = frontmatter(path)
@@ -375,6 +396,42 @@ class AgentModelMatrixTest(unittest.TestCase):
             self.assertIn(role, data["roles"], path)
             self.assertEqual(metadata["model"], data["roles"][role]["model"], path)
             self.assertEqual(metadata["effort"], data["roles"][role]["effort"], path)
+
+    def test_only_the_brief_driven_agents_omit_claude_md(self):
+        found = {
+            path.stem: frontmatter(path).get("omitClaudeMd")
+            for path in sorted(AGENTS.glob("*.md"))
+        }
+        self.assertEqual(
+            found,
+            {
+                "implementer": None,
+                "issue-owner": None,
+                "mechanic": "true",
+                "reviewer": None,
+                "reviewer-lite": "true",
+            },
+        )
+
+    def test_issue_owner_blocks_exactly_the_listed_tools(self):
+        # Issue 447 (D1, D2): named tools, never an allowlist; no body, so the
+        # definition loads no instruction text into the owner profiles.
+        path = AGENTS / "issue-owner.md"
+        metadata = frontmatter(path)
+        self.assertEqual(
+            set(metadata), {"name", "description", "model", "effort", "disallowedTools"}
+        )
+        self.assertEqual(metadata["name"], "issue-owner")
+        blocked = [entry.strip() for entry in metadata["disallowedTools"].split(",")]
+        self.assertEqual(
+            blocked,
+            ["Artifact", "ArtifactComments", "ArtifactData", "mcp__claude_ai_Claude_Docs"],
+        )
+        for kept in ("Agent", "Skill", "Bash", "Read", "Edit", "Write", "Glob", "Grep",
+                     "NotebookEdit", "ToolSearch", "mcp__*"):
+            self.assertNotIn(kept, blocked)
+        body = path.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+        self.assertEqual(body.strip(), "")
 
     def test_repository_contract_validates(self):
         module = agent_model_matrix
@@ -399,17 +456,37 @@ class AgentModelMatrixTest(unittest.TestCase):
             )
             self.assertIn("Agent(", site["call"], site_id)
 
-    def test_cheap_tier_escalation_names_opus_role_and_durable_destination(self):
-        for relative in (
-            "home/common/agent-skills/skills/design/SKILL.md",
-            "home/common/agent-skills/skills/grill-with-docs/SKILL.md",
-            "home/common/agent-skills/skills/writing-plans/SKILL.md",
-            "home/common/agent-skills/skills/doc-grounded-questions/SKILL.md",
-            "home/common/agent-skills/skills/research/SKILL.md",
-        ):
-            text = (REPO_ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn("issue-owner` on Opus/high", text, relative)
-            self.assertRegex(text, r"ledger|fixed-schema report", relative)
+    def test_from_issue_and_orchestration_owner_sites_launch_issue_owner(self):
+        # Issue 447 (D4, D5): the five owner sites of from-issue and
+        # orchestrate-issues launch the issue-owner type, none general-purpose.
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        owner_sites = {
+            site["id"]: site
+            for site in data["dispatch_sites"]
+            if site["role"] in OWNER_ROLES
+            and any(site["path"].startswith(f"{d}/") for d in OWNER_SKILL_DIRECTORIES)
+        }
+        self.assertEqual(
+            set(owner_sites),
+            {
+                "orchestration-issue-owner",
+                "from-issue-phase-delegate",
+                "from-issue-design-grill",
+                "from-issue-planning",
+                "from-issue-ship-owner",
+            },
+        )
+        for site_id, site in owner_sites.items():
+            self.assertTrue(
+                site["call"].startswith('Agent(subagent_type="issue-owner", '), site_id
+            )
+            text = (REPO_ROOT / site["path"]).read_text(encoding="utf-8")
+            self.assertIn(site["call"], text, site_id)
+        for directory in OWNER_SKILL_DIRECTORIES:
+            for path in sorted((REPO_ROOT / directory).rglob("*")):
+                if path.is_file():
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                    self.assertNotIn('subagent_type="general-purpose"', text, path)
 
     def test_sdd_dispatches_select_exact_tiers(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
@@ -427,6 +504,69 @@ class AgentModelMatrixTest(unittest.TestCase):
                 site["marker"],
                 f"<!-- agent-dispatch: id={site_id} role={role} "
                 f"model={model} effort={effort} -->",
+            )
+
+    def test_task_implementer_is_a_sonnet_role_on_the_opus_implementer_type(self):
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        roles = data["roles"]
+        self.assertEqual(
+            roles["task-implementer"]["eligible"],
+            ["planned task implementation", "task fix rounds 1–3"],
+        )
+        self.assertEqual(
+            roles["task-implementer"]["prohibited"],
+            ["deterministic mechanical work", "stuck-task escalation"],
+        )
+        self.assertEqual(
+            roles["implementer"]["eligible"],
+            ["non-mechanical implementation", "stuck-task escalation"],
+        )
+        # No new agent file: an implementer dispatch that omitted its model
+        # still runs on the definition's Opus/high.
+        self.assertEqual(
+            agent_model_matrix.CUSTOM_AGENT_ROLES,
+            {"implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic"},
+        )
+        definition = frontmatter(AGENTS / "implementer.md")
+        self.assertEqual((definition["model"], definition["effort"]), ("opus", "high"))
+
+        by_role = {}
+        for site in data["dispatch_sites"]:
+            by_role.setdefault(site["role"], set()).add(site["id"])
+            if site["role"] in ("task-implementer", "implementer"):
+                model = "sonnet" if site["role"] == "task-implementer" else "opus"
+                self.assertTrue(
+                    site["call"].startswith(
+                        f'Agent(subagent_type="implementer", model="{model}", '
+                        'effort="high")'
+                    ),
+                    site["id"],
+                )
+        self.assertEqual(
+            by_role["task-implementer"],
+            {"sdd-nonmechanical-implementation", "sdd-task-fix-redispatch"},
+        )
+        self.assertEqual(
+            by_role["implementer"],
+            {
+                "sdd-post-rescue-implementation",
+                "sdd-rescue-fallback-implementation",
+                "sdd-round-five-implementation",
+                "sdd-blocked-reasoning-escalation",
+                "sdd-final-review-fixer",
+            },
+        )
+        for scenario in ("sdd", "representative"):
+            events = [
+                event
+                for event in agent_model_matrix.trace(REPO_ROOT, scenario)
+                if event["dispatch"] == "sdd-nonmechanical-implementation"
+            ]
+            self.assertEqual(len(events), 1, scenario)
+            self.assertEqual(
+                (events[0]["role"], events[0]["model"], events[0]["effort"]),
+                ("task-implementer", "sonnet", "high"),
+                scenario,
             )
 
     def test_shipping_and_codex_dispatches_select_exact_tiers(self):

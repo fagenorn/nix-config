@@ -559,7 +559,7 @@ class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
         with fixture() as tmp:
             code, out, err = run("run", "--purpose", "workflow_entry",
                                  "--repo-root", str(make_root(tmp)),
-                                 "--require", "release")
+                                 "--require", "deploy")
             self.assertEqual(code, 2, err)
             report = json.loads(out)
             self.assertEqual(len(report["checks"]), 1)
@@ -569,7 +569,7 @@ class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
                  check["repair_id"]],
                 ["host.capability.required", "failed", "capability_unavailable",
                  "capability.required.unavailable"])
-            self.assertEqual(report["request"]["required_capabilities"], ["release"])
+            self.assertEqual(report["request"]["required_capabilities"], ["deploy"])
             self.assert_validates(report)
 
     def test_repeated_requires_are_deduplicated_sorted_and_known_names(self):
@@ -989,6 +989,9 @@ class TrackerCredentialTest(ReportAssertions, unittest.TestCase):
             contract = root / ".agents/project.json"
             authored = json.loads(contract.read_text(encoding="utf-8"))
             authored["bindings"]["tracker"]["kind"] = "forgejo"
+            # A declared GitHub release profile fails on a non-GitHub tracker and would
+            # suppress this check; the tracker rule is what is under test.
+            authored["release"] = "unsupported"
             contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
             report, by_id = doctor(self, root, env=gh_env(tmp, 0))
             check = by_id[self.CHECK_ID]

@@ -1,0 +1,25 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "no",
+      "evidence": "Adds a pre-dispatch sweep step inside the orchestrate-issues adapter; ledger, workflow-state and notification rules (b)/(c) are stated unchanged"
+    },
+    "concurrency_or_persistence": {
+      "value": "hit",
+      "evidence": "Exists to stop two concurrent owners sharing one worktree after an expired launch is resumed; process reaping ordered against dispatch"
+    },
+    "open_design_questions": {
+      "value": "no",
+      "evidence": "Ordering, missing/exited-handle semantics and non-blocking stop failure are all stated; decisions cite spec rows D1/D2"
+    },
+    "criteria_shape": {
+      "value": "no",
+      "evidence": "Three [code] criteria, each measured by a contract test in test_workflow_skill_contracts.py"
+    }
+  },
+  "paths": [
+    "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
+    "home/common/claude-code/skills/orchestrate-issues/evals/evals.json",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py"
+  ]
+}
