@@ -268,3 +268,16 @@ def fixture_profile() -> dict:
     unit = {"posture": "supersedable_only", "anchor": None, "compatibility": None, "edges": []}
     profile["recovery"]["units"].update(merge=dict(unit), deploy=dict(unit))
     return profile
+
+
+def forge_merge_profile() -> dict:
+    """`fixture_profile()` with its `merge` node on the forge's `pr_merge`; `deploy` stays."""
+    profile = fixture_profile()
+    for node in profile["publication"]["actions"]:
+        if node["id"] == "merge":
+            node.update(adapter="forge", operation="pr_merge", target="repository",
+                        principal="maintainer", credential="forge-keyring")
+    requirements, bindings = profile["requirements"]["adapters"], profile["bindings"]
+    del requirements["merge"], bindings["adapters"]["merge"], bindings["targets"]["trunk"]
+    del bindings["credentials"]["merge-token"]
+    return profile

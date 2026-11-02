@@ -24,6 +24,14 @@ def descriptors() -> dict:
     return {"github-forge": forge_adapter.describe(), "fixture-store": copy.deepcopy(FIXTURE_STORE)}
 
 
+def merge_descriptors() -> dict:
+    """`descriptors()` with the forge's `pr_merge` entry as a supported merge that binds `merge`."""
+    result = descriptors()
+    result["github-forge"]["operations"]["pr_merge"].update(
+        support="supported", reason=None, candidate_members=["merge"])
+    return result
+
+
 def base_contract() -> dict:
     return {"bindings": {"tracker": {"kind": "github", "repo_slug": "fagenorn/nix-config"},
                          "vcs": {"default_branch": "main"}},
@@ -32,6 +40,24 @@ def base_contract() -> dict:
 
 def forge_profile() -> dict:
     return _load("github-release-profile.json")
+
+
+MERGE = {"pr": 336, "base_tip": "5" * 40}
+
+
+def merge_profile() -> dict:
+    """The JarBird shape: `pr_merge` -> `tag` -> `github-release` on one forge target."""
+    profile = forge_profile()
+    actions = profile["publication"]["actions"]
+    actions[0]["deps"] = ["merge"]
+    actions.insert(0, {
+        "id": "merge", "mode": "materialize", "adapter": "forge", "operation": "pr_merge",
+        "target": "repository", "principal": "maintainer", "credential": "forge-keyring",
+        "effect": "irreversible", "config_schema_version": 1, "config": {}, "deps": [],
+        "observation_deadline_ms": 600000})
+    units = profile["recovery"]["units"]
+    units["merge"] = copy.deepcopy(units["tag"])
+    return profile
 
 
 def publication_free_profile() -> dict:
