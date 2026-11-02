@@ -997,7 +997,7 @@ def _boot_rows(lineages):
 
 def build_document(lineages, footer, *, window: str, arms=None, sweep=False) -> dict:
     """The `agent-owner-report` document; `arms` (replay Arms) and `sweep` fill the replay. Two
-    start windows make a comparison of the baseline and candidate arms (issue 503 D4)."""
+    start windows make a comparison of the baseline and candidate arms (issue 503 D7)."""
     rows = [lineage.facts for lineage in lineages]
     simulated, calibration = [], None
     if arms or sweep:
@@ -1130,7 +1130,7 @@ def _print_pings(pings):
 
 def print_document(doc: dict, *, top: int, eval_grouping: bool = False) -> None:
     """Print the owner report's tables for `doc` (build_document's result), plus the comparison
-    table when there is one. An eval grouping prints no `Pings:` line (issue 503 D7)."""
+    table when there is one. An eval grouping prints no `Pings:` line (issue 503 D13)."""
     rows = sorted(doc["lineages"], key=lambda row: (-row["total_dollars"], row["key"]))
     grouping = doc["start_grouping"]
     if grouping is None:
