@@ -47,11 +47,11 @@ release transaction status --repo-root <main-checkout>
 
 A nonterminal `release` (any state outside `succeeded`, `failed`, `rolled_back`, `abandoned`) goes straight to Phase 3 in resume form, skipping item 5. A `legacy` class of `in_flight` or `unreadable`, or a `shape` refusal, is reported with its code and detail, not worked around.
 
-5. Only with no nonterminal release: `git describe --tags --abbrev=0 origin/<default>` prints the previous tag, `<prev-tag>`; a non-zero exit is the first release, not a failure. Write the tag in literally: `git log <prev-tag>..origin/<integration> --oneline` empty means nothing to release; report it and stop. A shell variable does not survive between calls, so never expand one.
+5. Only with no nonterminal release: `git describe --tags --abbrev=0 origin/<default>` prints the previous tag, `<prev-tag>`; a non-zero exit is the first release, not a failure. Write the tag in literally (none: drop `<prev-tag>..`): `git log <prev-tag>..origin/<integration> --oneline` empty means nothing to release; report it and stop. A shell variable does not survive between calls, so never expand one.
 
 ## Phase 1 — Changelog
 
-**Read [`CHANGELOG.md`](./CHANGELOG.md) first**: it owns the categorisation rubric, the output template and the version-bump signals. Assemble the template's body for the range `<prev-tag>..<commit>`, where `<commit>` is `git rev-parse origin/<integration>` (40 hex characters). The body becomes the release notes: write it with the file-writing tool to `<notes-path>`, a path outside both working trees, and pass it by path (`worktrees/SKILL.md`, `## Shell forms the isolation checker refuses`). The title is one line under 70 characters from the body's synthesis; a scope-hint argument seeds it. Do not create a tracked `CHANGELOG.md` unless the user asks.
+**Read [`CHANGELOG.md`](./CHANGELOG.md) first**: it owns the categorisation rubric, the output template and the version-bump signals. Assemble the template's body for the range `<prev-tag>..<commit>` (no tag: all of `<commit>`), where `<commit>` is `git rev-parse origin/<integration>` (40 hex characters). The body becomes the release notes: write it with the file-writing tool to `<notes-path>`, a path outside both working trees, and pass it by path (`worktrees/SKILL.md`, `## Shell forms the isolation checker refuses`). The title is one line under 70 characters from the body's synthesis; a scope-hint argument seeds it. Do not create a tracked `CHANGELOG.md` unless the user asks.
 
 ## Phase 2 — Version
 
