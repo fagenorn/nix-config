@@ -339,6 +339,14 @@ class TransactionCommandTest(ReleaseCommandCase):
         code, document, _ = self.run_release("transaction", "abandon", cwd=self.world.checkout)
         self.assertEqual((code, document["error"]["code"]), (3, "cwd_mismatch"))
 
+    def test_an_unexpected_failure_keeps_the_envelope_and_logs_the_original_error(self):
+        tokens = [c["token"] for c in self.preview()["confirmations"]]
+        (self.root / ".git/agent-release").write_text("not a directory", encoding="utf-8")
+        exit_code, document, err = self.run_with(tokens)
+        self.assertEqual((exit_code, document["error"]["code"]), (2, "resolver_failure"))
+        self.assertIn("Traceback", err)
+        self.assertRegex(err, r"(FileExistsError|NotADirectoryError)")
+
     def test_an_unadopted_repository_gets_the_resolver_refusal_byte_for_byte(self):
         bare = self.root.parent / "bare"
         (bare / ".git").mkdir(parents=True)

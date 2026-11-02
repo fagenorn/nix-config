@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -372,6 +373,9 @@ def main(argv: list[str] | None = None) -> int:
     except ContractError as error:
         return emit_error(error.code, error.repair_id, error.violations, error.reason_code)
     except Exception:
+        # The envelope below is the contract; the original error goes to stderr first so a
+        # failure after `run` has written is never reported as only a resolver problem.
+        traceback.print_exc()
         return emit_error("resolver_failure", "resolver.internal",
                           [{"pointer": "", "message": "the resolver failed unexpectedly"}])
 
