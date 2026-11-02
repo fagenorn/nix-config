@@ -448,7 +448,7 @@ def scan_owner_transcript(job, *, since, before):
         "first_start": min(starts).timestamp() if starts else None,
         "dispatched": {tool_id: index for index, call in enumerate(calls)
                        for tool_id, name in call.tool_names.items() if name in DISPATCH_TOOLS},
-        "finishes": [pair for read in reads for pair in read.finishes],
+        "finishes": [pair for read, flag in zip(reads, counted) if flag for pair in read.finishes],
         "directs": [pair for read in reads for pair in read.directs],
         "owner": None,
     }

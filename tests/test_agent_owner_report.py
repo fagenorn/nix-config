@@ -287,6 +287,25 @@ class OwnerReportTest(unittest.TestCase):
         self.assertAlmostEqual(row["total_dollars"] - row["owner_dollars"], cost(30_000, 30_000),
                                places=9)
 
+    def test_an_event_window_clips_deliveries_with_the_spend(self):
+        # the keeper's finish reply comes at t = 20, before a window opening at t = 50; the
+        # owner's call at t = 100 keeps the lineage in that window
+        session = Session(self.root)
+        g = session.call(None, 0, context=20_000, write=20_000, ttl="1h", bash=progress(6))
+        session.result(None, 5, g, gate_reply("continue"))
+        keeper = session.call(None, 10, context=21_000, write=1_000, ttl="1h", agent_tool=True)
+        session.child("k1", tool_use_id=keeper)
+        f = session.call("k1", 20, context=15_000, write=15_000, bash=FINISH)
+        session.result("k1", 25, f, finish_reply(7))
+        session.call(None, 100, context=22_000, write=1_000, ttl="1h")
+        session.write()
+        for since, delivered in ((0, True), (50, False)):
+            with self.subTest(since=since):
+                doc = report(self.root, "--events-since", at(since), "--events-before", at(1_000))
+                [row] = doc["lineages"]
+                self.assertEqual((row["delivered"], doc["arms"][0]["delivered"]),
+                                 (delivered, int(delivered)))
+
     def test_a_lineage_s_project_is_its_registering_repo_root_and_its_start_its_first_owner_call(self):
         # o1 registers against /Users/me/repo while its records sit in another repository's
         # worktree; the dispatching root is no owner, so the lineage starts at o1's first call,
