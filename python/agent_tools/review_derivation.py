@@ -112,8 +112,10 @@ def derive_bundle(inputs: DeriveInputs, *, task7_pins: Task7Pins, issue121_pins:
        repository as both its issue and its live repository (RP4);
     4. each payload is encoded, and one above `MEMBER_MAX_BYTES` is `member_oversize`;
     5. the witness, held to the same bound, and then the anchor, held to `ANCHOR_MAX_BYTES` under the same
-       code, are built over the five component groups, each assembled once (RP16); the witness's tables
-       are those of the two retained payloads' expansions and of the estimate table;
+       code, are built over the five component groups, each assembled once (RP16); the tool group holds the
+       tool commit, `files_sha256` (the `telemetry_digest` of the closure's rows) and the three policy
+       digests, and the witness's tables are those of the two retained payloads' expansions and of the
+       estimate table;
     6. `validate_bundle` accepts the anchor and the four raw members;
     7. the files are written into one private scratch directory beside the output, which is renamed onto
        the output. A failure from there on removes the scratch, so it leaves neither output nor scratch.
@@ -130,7 +132,8 @@ def derive_bundle(inputs: DeriveInputs, *, task7_pins: Task7Pins, issue121_pins:
                                        issue100_pins, authority.limits)}
     raw = {name: _encoded(payload, MEMBER_MAX_BYTES) for name, payload in payloads.items()}
     components = {
-        "tool": {**closure, "artifact_policy_sha256": authority.policy_sha256,
+        "tool": {"commit": closure["commit"], "files_sha256": telemetry_digest(closure["files"]),
+                 "artifact_policy_sha256": authority.policy_sha256,
                  "packing_policy_sha256": PACKING_POLICY_SHA256, "record_policy_sha256": RECORD_POLICY_SHA256},
         "issue_121": {"base": issue121_pins.base, "head": issue121_pins.head, "tree": task7_pins.prerequisite_tree,
                       "signer_sha256": raw_digest(issue121_pins.allowed_signer)},

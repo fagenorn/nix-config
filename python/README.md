@@ -257,7 +257,7 @@ as `~/.agents/share/ship-delivery.md` for agents working in other repositories.
 
 ## Retained review evidence
 
-The retained review evidence that `derive-review-feasibility-fixtures` derives is committed as five files under `tests/fixtures/retained-review-evidence/` (#235); `replay-retained` replays that directory under the anchor digest held in `tests/retained_evidence_test_support.py`, and an authentic replay exits 2 with `projection_unavailable`, because two of the retained issue-121 boundaries are authenticated refusals rather than measurements.
+The retained review evidence that `derive-review-feasibility-fixtures` derives is committed as five files under `tests/fixtures/retained-review-evidence/` (#235); `replay-retained` replays that directory under the anchor digest held in `tests/retained_evidence_test_support.py`, and an authentic replay exits 2 with `projection_unavailable`, because two of the retained issue-121 boundaries are authenticated refusals rather than measurements. The bundle's `tool` group binds the whole `agent_tools` package by the tool commit and `files_sha256`, the `telemetry_digest` of that commit's sorted `{path, blob, raw_sha256}` rows, so the bundle's size does not grow with the package (#556).
 
 ## agent-costs
 
