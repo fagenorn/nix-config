@@ -777,3 +777,35 @@ class OwnerReportTest(unittest.TestCase):
         completed = run(self.root, "--report", "owners", "--proxy-log", str(self.root / "missing.log"))
         self.assertEqual((completed.returncode, completed.stdout), (1, ""))
         self.assertTrue(completed.stderr.startswith("cannot read proxy log: "), completed.stderr)
+
+    def test_a_ping_whose_usage_cannot_be_priced_is_skipped(self):
+        session = Session(self.root)
+        g = session.call(None, 0, context=20_000, write=20_000, ttl="1h", bash=progress(3))
+        session.result(None, 5, g, gate_reply("continue"))
+        session.write()
+
+        def bad(seconds, **usage):
+            """An owner ping whose `usage` is the priced one with `usage`'s fields replaced."""
+            entry = json.loads(ping_line(seconds, "s1", read=20_000))
+            entry["usage"].update(usage)
+            return json.dumps(entry) + "\n"   # NaN and Infinity as Python's json writes them
+
+        log = self.root / "proxy.log"
+        log.write_text("".join([
+            ping_line(100, "s1", read=20_000),
+            bad(110, input_tokens="oops"),
+            bad(120, cache_read_input_tokens=float("nan")),
+            bad(130, output_tokens=-5),
+            bad(140, input_tokens=True),
+            bad(150, cache_creation="x"),
+            bad(160, cache_creation={"ephemeral_1h_input_tokens": float("inf")}),
+            ping_line(200, "s1", read=20_000),
+        ]), encoding="utf-8")
+        doc = report(self.root, "--proxy-log", str(log))
+        pings = doc["pings"]
+        self.assertEqual((pings["lines"], pings["skipped_lines"], pings["unpriced"],
+                          pings["attributed"]["pings"], pings["unattributed"]["pings"]),
+                         (2, 6, 0, 2, 0))
+        self.assertAlmostEqual(pings["attributed"]["owner_dollars"], 2 * ping_cost(20_000), places=9)
+        [row] = doc["lineages"]
+        self.assertAlmostEqual(row["ping_dollars"], 2 * ping_cost(20_000), places=9)

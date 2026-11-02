@@ -7,6 +7,7 @@ the contract.
 """
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -30,8 +31,30 @@ class PingLog:
     skipped: int          # lines that were not JSON objects or were unusable pings
 
 
+_TOKEN_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                 "cache_creation_input_tokens")
+_SPLIT_FIELDS = ("ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens")
+
+
+def _count(value):
+    """Whether `value` is a token count the pricing reads: absent (None), or a non-negative
+    finite int or float that is not a bool."""
+    return value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)
+                             and math.isfinite(value) and value >= 0)
+
+
+def _priceable(usage):
+    """Whether model_pricing.usage_cost can price `usage`: every token field it reads is a
+    `_count`, and `cache_creation` is absent, null or an object whose split fields are."""
+    split = usage.get("cache_creation")
+    return (all(_count(usage.get(field)) for field in _TOKEN_FIELDS)
+            and (split is None or (isinstance(split, dict)
+                                   and all(_count(split.get(field)) for field in _SPLIT_FIELDS))))
+
+
 def _ping(entry):
-    """The Ping of a `ping` object, None when its `ts` or `conversation` is unusable."""
+    """The Ping of a `ping` object, None when its `ts` or `conversation` is unusable or its
+    `usage` is an object that cannot be priced."""
     try:
         ts = parse_rfc3339_utc(entry.get("ts"))
     except ValueError:
@@ -42,6 +65,8 @@ def _ping(entry):
     usage = entry.get("usage")
     if not isinstance(usage, dict):
         return Ping(ts, conversation, 0.0, False, False)
+    if not _priceable(usage):
+        return None
     model = entry.get("model")
     dollars, approximate = usage_cost(model if isinstance(model, str) else None, usage)
     return Ping(ts, conversation, dollars, True, approximate)
