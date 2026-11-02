@@ -3230,7 +3230,7 @@ def command_control(args: argparse.Namespace) -> int:
         unavailable, refused = _call(
             None, runtime.validate_control_custody, state, request)
 
-        # Bind the run's route at its first interface-3 sweep and adopt every
+        # Bind the run's route at its first control sweep and adopt every
         # live custody it already holds, even beyond the declaration (D3, D11).
         admission_changed = False
         if state["admission"] is None:

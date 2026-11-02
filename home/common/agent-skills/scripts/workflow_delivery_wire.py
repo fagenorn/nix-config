@@ -20,7 +20,10 @@ _LIVE_STATES = {"active", "handed_off", "suspended"}
 
 
 class DeliveryProjection:
-    """Project validated workflow state into closed interface-2 values."""
+    """Project validated workflow state into closed wire values.
+
+    The bootstrap is interface 3; every other value it builds is interface 2.
+    """
 
     @staticmethod
     def historical_requested(issue_state: dict[str, Any], *, forge: object,

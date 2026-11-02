@@ -178,7 +178,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 result = self.run_validate("ship-handoff", payload, use_stdin=True)
                 self.assert_refusal(result, "invalid report")
 
-    def test_workflow_response_boundary_red_accepts_valid_v2_bootstrap_shape(self):
+    def test_workflow_response_boundary_red_accepts_valid_v3_bootstrap_shape(self):
         """Task 2 must add this closed raw boundary, not repair this fixture."""
         bootstrap = {
             "interface_version": 3,
