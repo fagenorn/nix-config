@@ -60,7 +60,7 @@ Task 2 — The resume entry reads `SKILL.md` by section — `home/common/agent-s
 
 | AC | Kind | Task | Check |
 |----|------|------|-------|
-| AC1 | code | Task 2 | Task 1's `tests/test_skill_sections.py`: `SkillSectionsCommandTest`, `ParseTest` and `ResolveTest`, 17 tests, red at Task 1's start commit (Step 2). Task 2's `home/common/agent-skills/tests/test_workflow_skill_contracts.py::SlimBootContractsTest::test_the_entry_runs_its_checks_before_any_skill_section`, `::test_every_section_and_file_the_verified_pack_reads_exists`, `::test_the_resume_read_list_names_producer_reports_and_every_phase_resolves` and `::test_producer_report_rules_left_the_always_read_dispatch_section`, red at Task 2's start commit (Step 2). `just agent-instruction-budget` with no raise label passes in Task 2 Step 4, and again as the required CI check `Instruction Budget`. `just build` and `just agent-workflow-tests` run green at the final gate. Task 2 writes acceptance-record row `AC1`. |
+| AC1 | code | Task 2 | Task 1's `tests/test_skill_sections.py`: `SkillSectionsCommandTest`, `ParseTest` and `ResolveTest`, 18 tests, red at Task 1's start commit (Step 2). Task 2's `home/common/agent-skills/tests/test_workflow_skill_contracts.py::SlimBootContractsTest::test_the_entry_runs_its_checks_before_any_skill_section`, `::test_every_section_and_file_the_verified_pack_reads_exists`, `::test_the_resume_read_list_names_producer_reports_and_every_phase_resolves` and `::test_producer_report_rules_left_the_always_read_dispatch_section`, red at Task 2's start commit (Step 2). `just agent-instruction-budget` with no raise label passes in Task 2 Step 4, and again as the required CI check `Instruction Budget`. `just build` and `just agent-workflow-tests` run green at the final gate. Task 2 writes acceptance-record row `AC1`. |
 | AC2 | evidence | Task 2 | Command: `just agent-costs --report boot` on mbp. Conditions: fresh owners in the 7 days after the first `just switch` on mbp that includes the merge, read only once the boot report attributes `skill-sections` output to the file it reads (D9). Threshold: mean from-issue `SKILL.md` tokens per fresh boot (skill bodies + skill files) ≤ 4k. Task 2 writes row `AC2` as `not measured — post-deploy (D9, D10)`. The delivery never claims AC2: it stays evidence-pending, and ship holds the issue for it. Planning projects a Phase 6–7 resume boot at 20,032–21,941 bytes of `SKILL.md`, about 5–6k tokens, so the threshold is likely missed without a follow-up (D10). |
 
 ## Decisions
@@ -68,6 +68,10 @@ Task 2 — The resume entry reads `SKILL.md` by section — `home/common/agent-s
 The plan rests on D1–D9. Planning appends two rows to the spec's ledger. D10 records the measured per-phase read against AC2's 4k threshold, with scope unchanged. D11 fixes the helper's byte output, its stderr report and its `\n`-only line split.
 
 Task 2's exact text measures −80 (index line), −10 (heading swap) and +83 (entry), so the corpus falls by 7 bytes. The spec's D7 candidate measured −80, −9 and +86, a 3-byte fall. Either way D7's three bounds hold: the corpus does not grow, `resume-pack.md` grows by at most 99 bytes, and `SKILL.md` does not grow.
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, base 328f08da, no fallback. Blocking: none. Should fix: 2 accepted — R1 (Task 2 Step 2 keeps the exit status with `pipefail` and shows `OK`; Step 4 already did) and R2 (Task 1 adds `test_only_a_line_feed_ends_a_line`, pinning D11's `\n`-only split; 18 tests). Rejected: 0. Deferred: 0.
 
 ---
 

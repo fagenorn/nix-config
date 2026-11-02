@@ -95,8 +95,8 @@ In `home/common/agent-skills/tests/test_shell_example_contracts.py`, add `"skill
 
 - [ ] **Step 2: Run the test and watch it fail**
 
-Run (timeout 300 s): `bash -c 'PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k SlimBootContractsTest 2>&1 | grep -E "^(FAIL|ERROR):|^[A-Za-z]*Error|^Ran |^FAILED"'`
-Expected: `Ran 7 tests`, `FAILED (failures=2, errors=1)`. The failures are `test_the_entry_runs_its_checks_before_any_skill_section` (anchor `` `skill-sections --opening <from-issue-dir>/SKILL.md 'Files beside this one'` `` not found) and `test_the_resume_read_list_names_producer_reports_and_every_phase_resolves` (`` '`Producer reports`' not found ``). The error is `test_producer_report_rules_left_the_always_read_dispatch_section` (`ValueError: substring not found`). The rewritten span test passes already: today's spans are full headings. Keep this output for the acceptance record.
+Run (timeout 300 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k SlimBootContractsTest 2>&1 | grep -E "^(FAIL|ERROR):|^[A-Za-z]*Error|^Ran |^FAILED|^OK"'`
+Expected: a non-zero exit, `Ran 7 tests`, `FAILED (failures=2, errors=1)`. The failures are `test_the_entry_runs_its_checks_before_any_skill_section` (anchor `` `skill-sections --opening <from-issue-dir>/SKILL.md 'Files beside this one'` `` not found) and `test_the_resume_read_list_names_producer_reports_and_every_phase_resolves` (`` '`Producer reports`' not found ``). The error is `test_producer_report_rules_left_the_always_read_dispatch_section` (`ValueError: substring not found`). The rewritten span test passes already: today's spans are full headings. Keep this output for the acceptance record.
 
 - [ ] **Step 3: Write the minimal implementation**
 

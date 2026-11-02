@@ -196,6 +196,12 @@ class ParseTest(unittest.TestCase):
         self.assertEqual([section.heading for section in parse("##   Spaced  out \r\n##\tTab\n").sections],
                          ["Spaced  out"])
 
+    def test_only_a_line_feed_ends_a_line(self):
+        for separator in (" ", "\x0c", "\r"):
+            with self.subTest(separator=repr(separator)):
+                text = f"## A\nbody{separator}## Ghost\n"
+                self.assertEqual(parse(text), Document("", (Section("A", text),)))
+
 
 class ResolveTest(unittest.TestCase):
     DOCUMENT = parse("## Notes\n## Notes on fences\n## Phase 6 — Execute\n## Phase 60 — Later\n"
@@ -278,7 +284,7 @@ The section names no caller: Task 2 points `home/common/agent-skills/README.md` 
 
 - [ ] **Step 4: Verify**
 
-1. Run the Step 2 command. Expected: `Ran 17 tests` and `OK`.
+1. Run the Step 2 command. Expected: `Ran 18 tests` and `OK`.
 2. Run `git add python/agent_tools/skill_sections.py tests/test_skill_sections.py` before building: the flake reads only files git tracks, so an unstaged new module fails the launcher's module assertion.
 3. Run (timeout 3600 s, about 80 s warm): `bash -c 'set -o pipefail; just build 2>&1 | tail -3'`. Expected: exit 0.
 4. Smoke-test the built launcher (timeout 60 s):
