@@ -269,7 +269,7 @@ one.
 ## 5. Final report
 
 Render a `finalize` action, or a `delivery_contract` action whose report's `ends_run` is true,
-from the bounded summaries in the same interface_version 3 control response.
+from the bounded summaries in the same control response.
 Produce a per-issue table with issue, state, custody, PR, one-line reason, `blocked_on`, open
 delivery stages, and a re-entry line — `orchestrate-control start --repo-root <ledger_repo_root>
 <issue> --run-id <run-id>` for an issue suspended on `human_gate`, `external` or `agent_dispatch`

@@ -1035,9 +1035,11 @@ class DeliveryRuntime:
 
     def control_summary(self, **values: Any) -> dict[str, Any]:
         summary = self._projection.control_summary(**values)
-        if values.get("unresumable") is not None:
-            # The projection holds no canonical form; the fact joins the
-            # requirements in the validator's canonical-bytes order (#194 D13).
+        if values.get("unresumable") is not None or any(
+                item["kind"] == "verification" for item in summary["requirements"]):
+            # The projection holds no canonical form; a worktree fact or a verification
+            # requirement it appends joins the requirements in the validator's
+            # canonical-bytes order (#194 D13, issue 545 D6).
             summary["requirements"].sort(key=self._model.canonical_bytes)
         return summary
 

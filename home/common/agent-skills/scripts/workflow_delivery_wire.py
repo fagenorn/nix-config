@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from agent_tools import verification_blocker
 from agent_tools.attempt_observations import (
     CANDIDATE_WORKTREE_STATES, RECORDED_WORKTREE_STATES, WORKTREE_ENTRY_FIELDS,
     WORKTREE_OBSERVATION_FIELDS)
@@ -361,7 +362,8 @@ class DeliveryProjection:
                         blockers: list[dict[str, Any]],
                         result_fields: tuple[str, ...],
                         contract_required: bool,
-                        unresumable: dict[str, str] | None) -> dict[str, Any]:
+                        unresumable: dict[str, str] | None,
+                        verification_blockers: dict[str, Any]) -> dict[str, Any]:
         latest_kind = None
         latest = None
         if issue_state is not None:
@@ -398,6 +400,13 @@ class DeliveryProjection:
             requirements.append({"kind": "worktree_fact", "subject_id": unresumable["path"],
                                  "reason_code": "recorded_worktree_" + unresumable["state"],
                                  "detail_pointer": None})
+        if (latest_kind == "implementation" and latest["state"] == "suspended"
+                and latest["blocked_on"] == "verification"):
+            record = verification_blockers[latest["verification_blocker"]]
+            # An attempt parked on an open blocker asks for its observation; one whose
+            # blocker is resolved waits only to resume (issue 545 D6).
+            if record["state"] == "open":
+                requirements.append(verification_blocker.requirement(record))
         return {"issue": issue, "state": state_name, "custody": custody,
             "owner": None if latest is None else latest["owner"],
             "worktree": None if latest is None else latest["worktree"],

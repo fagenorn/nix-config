@@ -551,10 +551,10 @@ class LifecycleHarness:
 
     def control_request(self, *, now, issues, tracker, worktrees, owners=None,
                         max_parallel=2, attempt_budget_minutes=30,
-                        human_directed=False, host_route="claude-code"):
+                        human_directed=False, host_route="claude-code", verification=()):
         contracts = {str(issue): self.delivery_contract(issue) for issue in issues}
         return {
-            "interface_version": 3,
+            "interface_version": 4,
             "host_route": host_route,
             "now": now,
             "max_parallel": max_parallel,
@@ -572,6 +572,7 @@ class LifecycleHarness:
             "delivery_observations": {str(issue): [] for issue in issues},
             "requested_scopes": {str(issue): None for issue in issues},
             "recoveries": {str(issue): None for issue in issues},
+            "verification": list(verification),
         }
 
     def control_raw(self, *, request=None, ok=True, legacy=True, **request_fields):
@@ -607,7 +608,7 @@ class LifecycleHarness:
         return json.loads(stdout)
 
     def control_validated(self, **request_fields):
-        """Sweep, returning interface-3 bytes the `workflow-response` boundary passes (#194)."""
+        """Sweep, returning interface-4 bytes the `workflow-response` boundary passes (#194)."""
         completed = self.control_raw(legacy=False, ok=False, **request_fields)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return self.validated_response(completed.stdout)
@@ -4613,7 +4614,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 "--request-file", zero_request,
             )
             controlled_value = json.loads(controlled.stdout)
-            self.assertEqual(controlled_value["interface_version"], 3)
+            self.assertEqual(controlled_value["interface_version"], 4)
             self.assertEqual(controlled_value["run_id"], zero_id)
             self.assertEqual(controlled_value["summaries"][0]["state"], "closed")
             self.assertEqual(controlled_value["actions"],

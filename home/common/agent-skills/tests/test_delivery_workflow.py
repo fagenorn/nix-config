@@ -94,7 +94,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
 
     def control_request(self, contract=None):
         empty = {"151": []}; scope = {"151": None}
-        return {"interface_version": 3, "host_route": "direct", "now": NOW, "max_parallel": 1,
+        return {"interface_version": 4, "host_route": "direct", "now": NOW, "max_parallel": 1,
             "attempt_budget_minutes": 30, "human_directed": False,
             "issues": [151], "tracker": [{"issue": 151, "state": "open",
                 "open_blockers": [], "decision_blockers": []}],
@@ -106,7 +106,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             "reevaluation_evidence": copy.deepcopy(empty),
             "delivery_observations": copy.deepcopy(empty),
             "requested_scopes": scope,
-            "recoveries": {"151": None}}
+            "recoveries": {"151": None}, "verification": []}
 
     def direct_request(self, contract=None):
         return {"interface_version": 2, "issue": 151, "now": NOW,
@@ -183,7 +183,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
 
     def test_interface_two_maps_and_singular_inputs_are_closed(self):
         request, context = self.workflow.validate_control_request(self.control_request())
-        self.assertEqual(context, {151: None}); self.assertEqual(request["interface_version"], 3)
+        self.assertEqual(context, {151: None}); self.assertEqual(request["interface_version"], 4)
         direct, direct_context = self.workflow.validate_direct_owner_request(
             self.direct_request())
         self.assertEqual(direct_context, {151: None}); self.assertEqual(direct["interface_version"], 2)
@@ -1617,7 +1617,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 check=False, env=env)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
             run_id = json.loads(initialized.stdout)["run_id"]
-            request = {"interface_version": 3, "host_route": "claude-code", "now": NOW,
+            request = {"interface_version": 4, "host_route": "claude-code", "now": NOW,
                 "max_parallel": 2,
                 "attempt_budget_minutes": 30, "human_directed": True, "issues": issues,
                 "tracker": [{"issue": issue, "state": "open", "open_blockers": [],
@@ -1631,7 +1631,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "authorization_intents": {str(issue): [bound[issue][1]] for issue in issues},
                 "authority_observations": keyed([]), "reevaluation_evidence": keyed([]),
                 "delivery_observations": keyed([]), "requested_scopes": keyed(None),
-                "recoveries": keyed(None)}
+                "recoveries": keyed(None), "verification": []}
             path = root / "control.json"; path.write_text(json.dumps(request))
             completed = subprocess.run(
                 [sys.executable, str(WORKFLOW), "control", "--repo-root", str(root),
@@ -1770,7 +1770,7 @@ class BuilderHarness:
                         worktrees=(), forge=None, max_parallel=2, host_route="claude-code"):
         def keyed(value):
             return {str(issue): copy.deepcopy(value) for issue in issues}
-        return {"interface_version": 3, "host_route": host_route, "now": now,
+        return {"interface_version": 4, "host_route": host_route, "now": now,
             "max_parallel": max_parallel,
             "attempt_budget_minutes": 30, "human_directed": True, "issues": list(issues),
             "tracker": [{"issue": issue, "state": "open", "open_blockers": [],
@@ -1781,7 +1781,7 @@ class BuilderHarness:
             "authorization_intents": intents or keyed([]),
             "authority_observations": keyed([]), "reevaluation_evidence": keyed([]),
             "delivery_observations": keyed([]), "requested_scopes": keyed(None),
-            "recoveries": keyed(None)}
+            "recoveries": keyed(None), "verification": []}
 
 
 class BuilderTransportTest(BuilderHarness, unittest.TestCase):

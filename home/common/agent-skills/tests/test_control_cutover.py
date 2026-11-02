@@ -18,7 +18,7 @@ from agent_tools import attempt_delivery as ad
 
 from .test_attempt_custody import DeliveredCustody, LifecycleCustody
 from .test_delivered_control import DELIVERED, DISPATCH, LIVE, at
-from .test_delivery_workflow import WORKFLOW
+from .test_delivery_workflow import ARTIFACT_BUDGET, POLICY, WORKFLOW
 
 REPO = Path(__file__).resolve().parents[4]
 BASE_COMMIT = "079b835c54fabe6baf550097c40debc595a81bda"
@@ -26,6 +26,8 @@ RUN_ID = re.compile(rb"rel_[0-9a-f-]{36}")
 MERGED = {"state": "merged", "url": f"https://github.com/fagenorn/nix-config/pull/{DELIVERED}",
           "merge_sha": "b" * 40}
 ROLES = {"owner": 1, "reviewer": 1, "worker": 1}
+# The request interface each command of the base helper reads; it refuses this checkout's (issue 545 D13).
+BASE_REQUESTS = {"control": 3}
 MATCHING = {DELIVERED: "matching_issue_branch"}
 BOTH = {**MATCHING, LIVE: "matching_issue_branch"}
 
@@ -72,6 +74,11 @@ class Cutover(DeliveredCustody):
     def cli(self, *args, stdin=None, ok=True, cwd=None):
         if self.generation == "head":
             return super().cli(*args, stdin=stdin, ok=ok, cwd=cwd)
+        if args[0] in BASE_REQUESTS and stdin is not None:
+            request = json.loads(stdin)
+            request["interface_version"] = BASE_REQUESTS[args[0]]
+            del request["verification"]
+            stdin = json.dumps(request).encode()
         completed = subprocess.run(
             [sys.executable, str(self.base / WORKFLOW.relative_to(REPO)), *map(str, args)],
             input=stdin, capture_output=True, check=False, cwd=cwd,
@@ -80,6 +87,19 @@ class Cutover(DeliveredCustody):
         if ok:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         return completed
+
+    def boundary(self, name, raw):
+        """A base reply carries the base helper's own interfaces, so its own extracted
+        validator checks it (issue 545 D13)."""
+        if self.generation == "head":
+            return super().boundary(name, raw)
+        return subprocess.run(
+            [sys.executable, str(self.base / ARTIFACT_BUDGET.relative_to(REPO)),
+             "validate-report", "--boundary", name, "--input", "-", "--policy",
+             str(self.base / POLICY.relative_to(REPO))],
+            input=raw if isinstance(raw, bytes) else json.dumps(raw).encode(),
+            capture_output=True, check=False,
+            env={**os.environ, "PYTHONPATH": str(self.base / "python")})
 
     def declare(self, slots):
         (self.home / ".agents/share/host-declaration.json").write_text(json.dumps(

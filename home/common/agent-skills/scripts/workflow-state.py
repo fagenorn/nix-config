@@ -43,11 +43,12 @@ from agent_tools.attempt_delivery_store import (
     delivery_pending, installing_runs, seal_delivery, settle_delivery, unconverged_deliveries)
 from agent_tools.attempt_identity import (
     RunIdentity, classify, issue_set_caller_key, minted_plan, prior_run_violation)
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.transaction_storage import is_id
 
 
 SCHEMA_VERSION = 11
-CONTROL_INTERFACE_VERSION = 3
+CONTROL_INTERFACE_VERSION = 4
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
     {"active", "handed_off", "suspended", "stopped", "failed", "merged"}
@@ -203,6 +204,7 @@ CONTROL_REQUEST_FIELDS = frozenset(
         "delivery_observations",
         "requested_scopes",
         "recoveries",
+        "verification",
     }
 )
 DIRECT_OWNER_REQUEST_FIELDS = frozenset(
@@ -2324,6 +2326,7 @@ def validate_control_request(value):
         or request["interface_version"] != CONTROL_INTERFACE_VERSION
     ):
         raise WorkflowError("unsupported control interface version")
+    verification_observations(request["verification"])
     if not omitted:
         if not isinstance(request["now"], str):
             raise WorkflowError("invalid control now: expected an RFC3339 UTC timestamp")
@@ -2393,20 +2396,42 @@ def read_input_bytes(value: str, label: str) -> bytes:
         raise WorkflowError(f"cannot read {label} file: {error}") from error
 
 
-def load_json_request(path_value: str, label: str) -> Any:
+def load_json_request(path_value: str, label: str, *, strict: bool = False) -> Any:
+    """Read and decode one JSON request file. ``strict`` also refuses a repeated key and a
+    non-finite literal, through the `agent_tools.canonical` hooks (issue 545 D8)."""
     raw = read_input_bytes(path_value, label)
     try:
         text = raw.decode("utf-8")
     except UnicodeError as error:
         raise WorkflowError(f"cannot read {label} file: {error}") from error
+    hooks = ({"object_pairs_hook": reject_duplicate_keys,
+              "parse_constant": reject_nonfinite_literal} if strict else {})
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as error:
+        return json.loads(text, **hooks)
+    except ValueError as error:
         raise WorkflowError(f"invalid {label} JSON: {error}") from error
 
 
 def load_control_request(path_value):
-    return validate_control_request(load_json_request(path_value, "control request"))
+    return validate_control_request(
+        load_json_request(path_value, "control request", strict=True))
+
+
+def verification_observations(value):
+    """A request's `verification` list, checked before any lock (issue 545 D4)."""
+    try:
+        return verification_blocker.validate_observations(value)
+    except verification_blocker.BlockerRefused as error:
+        raise WorkflowError(f"invalid verification observation: {error}") from error
+
+
+def resolve_verification(blockers, observations):
+    """Resolve the records `observations` answer in `blockers`; returns the resolved and the
+    equal ids. A refusal leaves `blockers` unchanged (issue 545 D2, D4)."""
+    try:
+        return verification_blocker.resolve(blockers, observations)
+    except verification_blocker.BlockerRefused as error:
+        raise WorkflowError(f"invalid verification observation: {error}") from error
 
 
 def validate_direct_owner_request(value):
@@ -2675,13 +2700,15 @@ def control_summary(
     reduction=None,
     contract_required: bool = False,
     unresumable: dict[str, str] | None = None,
+    verification_blockers: dict[str, Any],
 ) -> dict[str, Any]:
     return _delivery().control_summary(
         issue=issue, tracker=tracker, issue_state=issue_state, reduction=reduction,
         blockers=sorted(control_blockers(tracker),
                         key=lambda item: (item["kind"], item["issue"])),
         result_fields=RESULT_FIELDS,
-        contract_required=contract_required, unresumable=unresumable)
+        contract_required=contract_required, unresumable=unresumable,
+        verification_blockers=verification_blockers)
 
 
 def _apply_one_issue_policy(
@@ -2703,6 +2730,7 @@ def _apply_one_issue_policy(
     delivery_source_kind=None,
     contract: dict[str, Any] | None,
     reply_parked: bool = False,
+    verification_blockers: dict[str, Any],
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
 
@@ -2740,11 +2768,14 @@ def _apply_one_issue_policy(
     owner always carries it, and an orchestrated sweep carries it exactly when
     the caller listed the issue numbers itself, on the session's first sweep
     only (issue 458 D4). A `--label`/`--milestone` sweep never does, so it
-    leaves those parked and reports them. Nothing resumes an attempt suspended on
-    an observation-gated cause (`verification`, issue 544 D6, D7): without
-    ``reply_parked`` its verdict is ``terminal``, as control gets it; with it, as
-    the direct owner asks, it passes the tracker halt and the forge requirement
-    and then returns ``parked``, which changes nothing.
+    leaves those parked and reports them. An attempt suspended on an
+    observation-gated cause (`verification`) resumes exactly when its blocker in
+    ``verification_blockers``, the run's map after this call's resolution, is
+    ``resolved``, and then through the ordinary suspension lane below, directed or
+    not (issue 545 D5); while the blocker is ``open``, without ``reply_parked`` its
+    verdict is ``terminal``, as control gets it; with it, as the direct owner asks,
+    it passes the tracker halt and the forge requirement and then returns
+    ``parked``, which changes nothing (issue 544 D6, D7).
 
     An expired attempt is reaped before any lane predicate is derived: the
     single ``demote_expired_attempt`` call turns it into a ``suspended``
@@ -2875,17 +2906,19 @@ def _apply_one_issue_policy(
         demote_expired_attempt(ledger_issue, latest, now=now)
 
     handed_off = bool(latest is not None and latest["state"] == "handed_off")
+    blocker = (
+        verification_blockers[latest["verification_blocker"]]
+        if latest is not None and latest["state"] == "suspended"
+        and latest["blocked_on"] in OBSERVATION_GATED_BLOCKED_ON else None
+    )
+    blocker_resolved = blocker is not None and blocker["state"] == "resolved"
     suspended = bool(
         latest is not None
         and latest["state"] == "suspended"
-        and resume_permitted(latest["blocked_on"], human_directed=human_directed)
+        and resume_permitted(latest["blocked_on"], human_directed=human_directed,
+                             blocker_resolved=blocker_resolved)
     )
-    parked = bool(
-        reply_parked
-        and latest is not None
-        and latest["state"] == "suspended"
-        and latest["blocked_on"] in OBSERVATION_GATED_BLOCKED_ON
-    )
+    parked = bool(reply_parked and blocker is not None and not blocker_resolved)
     retryable = bool(
         latest is not None
         and (
@@ -3161,6 +3194,11 @@ def command_control(args: argparse.Namespace) -> int:
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise backward_refusal("control time must not move backward", now_value,
                                    "run updated_at", state["updated_at"])
+        # The observations resolve the run's open blockers before any issue is analysed; a
+        # resolution commits with this sweep's write whether or not its attempt resumes in it
+        # (issue 545 D6).
+        resolved, _ = resolve_verification(
+            state["verification_blockers"], request["verification"])
         # The store's one lock-free view of every current launch, taken before this
         # sweep changes `state` and read for occupancy and the capacity gate (D12).
         views = attempt_store.launch_views(
@@ -3270,6 +3308,7 @@ def command_control(args: argparse.Namespace) -> int:
                 forge=request["forge"][str(issue)],
                 delivery_request=request, delivery_source_kind="control",
                 contract=contracts[issue],
+                verification_blockers=state["verification_blockers"],
             )
 
         occupied = runtime.occupied_count(state, at_time=now, unavailable=unavailable)
@@ -3443,6 +3482,7 @@ def command_control(args: argparse.Namespace) -> int:
                 forge=request["forge"][str(issue)],
                 delivery_request=request, delivery_source_kind="control",
                 contract=contracts[issue],
+                verification_blockers=state["verification_blockers"],
             )
             planned[issue] = result
             return result
@@ -3696,7 +3736,7 @@ def command_control(args: argparse.Namespace) -> int:
             admission_changed = (admission_changed or acquired or new_controller
                                  or admission["releases"] != releases_before)
 
-        changed = (reconciled or delivery_changed or admission_changed
+        changed = (reconciled or delivery_changed or admission_changed or bool(resolved)
                    or any(result["changed"] for result in planned.values()))
         if changed:
             state["updated_at"] = now
@@ -3720,6 +3760,7 @@ def command_control(args: argparse.Namespace) -> int:
                     or (issue in waiting and contract_missing(issue))
                 ),
                 unresumable=unresumable.get(issue),
+                verification_blockers=state["verification_blockers"],
             )
             for issue in request["issues"]
         ]
@@ -4094,6 +4135,8 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     delivery_request=request, delivery_source_kind="direct",
                     contract=contract,
                     reply_parked=True,
+                    verification_blockers=(
+                        {} if state is None else state["verification_blockers"]),
                 )
                 operation = policy["operation"]
                 if operation == "idle":

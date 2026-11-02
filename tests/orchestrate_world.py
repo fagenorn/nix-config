@@ -355,7 +355,7 @@ class OrchestrateWorld:
         every = session["issues"]
         keyed = lambda value: {str(n): value(n) for n in every}
         request = {
-            "interface_version": 3, "host_route": ROUTE, "max_parallel": len(every),
+            "interface_version": 4, "host_route": ROUTE, "max_parallel": len(every),
             "attempt_budget_minutes": 240, "human_directed": session["human_directed"],
             "issues": every,
             "tracker": [{"issue": n, "state": "open", "open_blockers": [],
@@ -370,7 +370,8 @@ class OrchestrateWorld:
             "authority_observations": keyed(lambda n: []),
             "reevaluation_evidence": keyed(lambda n: []),
             "delivery_observations": keyed(lambda n: []),
-            "requested_scopes": keyed(lambda n: None), "recoveries": keyed(lambda n: None)}
+            "requested_scopes": keyed(lambda n: None), "recoveries": keyed(lambda n: None),
+            "verification": []}
         done = self.ws("control", "--repo-root", self.root, "--run-id", session["run_id"],
                        "--request-file", "-", stdin=json.dumps(request).encode())
         self.case.assertEqual(done.returncode, 0, done.stdout + done.stderr)
