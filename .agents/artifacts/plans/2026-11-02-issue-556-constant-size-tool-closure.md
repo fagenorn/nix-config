@@ -55,6 +55,12 @@ Task 2 — Re-issue the committed evidence at `T` — `tests/fixtures/retained-r
 
 The plan rests on the spec's D1–D8. Planning appends D9 (two tasks, the red window at `T` and each task's retained gate) and D10 (the private retained root).
 
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), fresh isolated read-only thread, no focus, no fallback. Base `e692c9685c3e4b08f55c327c5f2b8c699fc95bc4`, plan head `a638d4aa`. Accepted 0, rejected 1, deferred 0.
+
+- B1 (acceptance record absent from the forecast): rejected. The forecast's `process_package` is a closed `{spec, plan, tasks}` object (`python/agent_tools/review_forecast.py:83`, `:94`), so the current schema has no slot for `<plan stem>.acceptance.md`. sdd writes and commits that record after the last `sdd-gate next`, beside the plan, as the issue-544 and issue-547 deliveries did with forecasts of this same shape.
+
 ---
 
 ## Review feasibility delivery
