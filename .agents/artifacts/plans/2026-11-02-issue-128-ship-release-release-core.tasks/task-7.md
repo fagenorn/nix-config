@@ -10,11 +10,9 @@
 - Modify: `home/common/agent-skills/instruction-load.json` (ceilings, through `tighten`)
 
 **Interfaces:**
-- Consumes Task 4's CLI surface (`agent_tools.release.build_parser()` parses every example)
-  and Tasks 2–6's behaviour: the refusal codes, `next` values, `status` members (with
-  `reason` and `legacy`) and the token stability of D17.
-- Produces the skill text Task 8 measures. Task 8 cites the commit made here as the AC5
-  candidate (D24).
+- Consumes Task 4's CLI (`release.build_parser()` parses every example) and Tasks 2–6's
+  refusal codes, `next` values, `status` members (`reason`, `legacy`) and D17's tokens.
+- Produces the skill text Task 8 measures; this commit is the AC5 candidate (D24).
 
 **Invariants** (§8, D9, D10, D17; agent-helpers rule 6):
 - `SKILL.md` is at most 9,400 bytes (`wc -c`). Its sections, in order:
@@ -43,14 +41,14 @@
      - silence or any other reply is never yes;
      - a changed version needs a new preview.
   6. `## Doc-grounded escalations`, kept as is.
-  7. `## Phase 0 — Pre-flight`:
+  7. `## Phase 0 — Pre-flight`, in this order (D28):
      - main checkout, clean tree, `git fetch origin --prune --tags`, and local
        `<integration>` in sync with origin;
-     - "nothing to release" against the previous tag, keeping the line
-       `git describe --tags --abbrev=0 origin/<default>`;
      - then `release transaction status`. A nonterminal release goes straight to
-       Phase 3 in resume form, and `legacy` or `shape` refusals are reported, not worked
-       around.
+       Phase 3 in resume form, skipping the next item, and `legacy` or `shape` refusals
+       are reported, not worked around;
+     - only with no nonterminal release, "nothing to release" against the previous tag,
+       keeping the line `git describe --tags --abbrev=0 origin/<default>`.
   8. `## Phase 1 — Changelog`: read `CHANGELOG.md` first. The template's body becomes the
      notes, written with the file-writing tool to a path outside both working trees.
   9. `## Phase 2 — Version`:
@@ -84,10 +82,8 @@ release transaction run --repo-root <main-checkout> --confirm <token>
 release transaction abandon --repo-root <main-checkout>
 ```
 
-- **Deleted** (per §8): durable release state, gh hygiene, Phase 0 item 0 and its resume
-  table, the open-PR and CI-on-PR items, the PR, CI-on-PR and merge phases, 4.5a–4.5g, the
-  deploy watch, the tracker-free route and the `--auto` clause. Write all remaining prose
-  from the implemented commands' behaviour.
+- **Deleted:** all of §8's "What it deletes" list. Write the remaining prose from the
+  implemented commands' behaviour.
 - **`CHANGELOG.md`.**
   - Line `(SKILL.md §5d)`: drop that parenthetical only.
   - `[\`SKILL.md\` Phase 4.5d](./SKILL.md#45d-decide-major--minor--patch)`: becomes
@@ -107,10 +103,9 @@ release transaction abandon --repo-root <main-checkout>
     keep "origin carries no new tag" and add one for no new local `v*` tag:
     `[ "$(git -C "$REPO" tag -l 'v*')" = v0.1.0 ] || fail "local tags: $(git -C "$REPO" tag -l | tr '\n' ' ')"`.
   - `notes` is rewritten to match.
-- **Ceilings (D10).** After the rewrite, `instruction_load tighten` lowers the
-  `ship-release` and `release-owner` ceilings. `git diff` of `instruction-load.json` may
-  touch only those two profiles' `ceiling_bytes`, plus `corpus_ceiling_bytes` and
-  `description_ceiling_bytes` when `tighten` lowers them.
+- **Ceilings (D10).** `instruction_load tighten` after the rewrite; its diff touches only the
+  `ship-release` and `release-owner` `ceiling_bytes`, plus `corpus_ceiling_bytes` and
+  `description_ceiling_bytes` when lowered.
 
 - [ ] **Step 1: Rewrite the contract tests (red against the old skill)**
 
@@ -156,6 +151,11 @@ In `test_ship_release_contracts.py`:
         self.assertEqual(actions, {"status", "preview", "run", "abandon"})
         self.assertEqual(len(lines), 6)
 
+    def test_status_is_read_before_nothing_to_release(self):
+        phase0 = self.skill.split("## Phase 0", 1)[1].split("\n## ", 1)[0]
+        self.assertLess(phase0.index("release transaction status"),
+                        phase0.index("git describe --tags --abbrev=0"))
+
     def test_ownership_keeps_the_dispatch_marker_and_one_resolver_call(self):
         marker = ("<!-- agent-dispatch: id=ship-release-owner role=ship-owner model=opus "
                   "effort=high -->")
@@ -173,9 +173,8 @@ to `("bindings.tracker", "bindings.vcs")`.
 
 - [ ] **Step 2: Run the contract and watch it fail**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner home/common/agent-skills/tests/test_ship_release_contracts.py 2>&1 | tail -4`
-Expected: FAIL. `test_skill_names_no_legacy_state` finds `.superpowers/workflows`, and the
-anchor and examples tests fail against the old skill.
+Run the root's suite form on `home/common/agent-skills/tests/test_ship_release_contracts.py`.
+Expected: FAIL against the old skill (legacy state, anchors, examples).
 
 - [ ] **Step 3: Rewrite `SKILL.md`, edit `CHANGELOG.md` and `evals.json`, tighten**
 
@@ -206,14 +205,10 @@ Run: `just build` in the foreground with a timeout of at least 30 minutes. Skill
 in the home-manager closure.
 Expected: exit 0.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit** exactly the Files paths, subject `feat(issue-128/T7): ship-release becomes a release-core client`.
 
-```bash
-git add home/common/agent-skills/skills/ship-release/SKILL.md \
-  home/common/agent-skills/skills/ship-release/CHANGELOG.md \
-  home/common/agent-skills/skills/ship-release/evals/evals.json \
-  home/common/agent-skills/tests/test_ship_release_contracts.py \
-  home/common/agent-skills/tests/test_workflow_skill_contracts.py \
-  home/common/agent-skills/instruction-load.json
-git commit -m "feat(issue-128/T7): ship-release becomes a release-core client"
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":7,"records":[{"bounds":[{"added_lines":150,"boundary":"all","deleted_lines":316,"record_bytes":36864,"support":{"covers":["r7a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7a","last_task":7,"owner":7,"path":"home/common/agent-skills/skills/ship-release/SKILL.md"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":2,"record_bytes":8192,"support":{"covers":["r7b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7b","last_task":7,"owner":7,"path":"home/common/agent-skills/skills/ship-release/CHANGELOG.md"},{"bounds":[{"added_lines":45,"boundary":"all","deleted_lines":42,"record_bytes":16384,"support":{"covers":["r7c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7c","last_task":7,"owner":7,"path":"home/common/agent-skills/skills/ship-release/evals/evals.json"},{"bounds":[{"added_lines":75,"boundary":"all","deleted_lines":130,"record_bytes":20480,"support":{"covers":["r7d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7d","last_task":7,"owner":7,"path":"home/common/agent-skills/tests/test_ship_release_contracts.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":4096,"support":{"covers":["r7e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7e","last_task":7,"owner":7,"path":"home/common/agent-skills/tests/test_workflow_skill_contracts.py"},{"bounds":[{"added_lines":6,"boundary":"all","deleted_lines":6,"record_bytes":4096,"support":{"covers":["r7f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r7f","last_task":7,"owner":7,"path":"home/common/agent-skills/instruction-load.json"}]}}
 ```

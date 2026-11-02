@@ -4,6 +4,7 @@
 - Modify: `python/agent_tools/release.py`
 - Modify: `tests/test_release_command.py`
 - Modify: `python/README.md`
+- Modify: `python/agent_tools/actions_health_adapter.py` (one docstring clause only)
 
 **Interfaces:**
 - Consumes:
@@ -51,6 +52,10 @@ release transaction abandon [--profile P] [--repo-root R]
   module docstring both say that adapter `invoke` is reachable only through
   `release transaction run`, which drives the core (§9). The old "No adapter `invoke` is
   reachable from any command" sentence is gone from the docstring.
+- **`release deploy inspect` stays, unnamed by any skill** (Task 7 drops its caller). In
+  `release.py`'s docstring "the deploy read ship-release Phase 5 polls:" becomes "a
+  read-only deploy observation for one commit:"; in `actions_health_adapter.py`'s, "and
+  ship-release reaches it through" becomes "and it is read through", nothing else.
 
 - [ ] **Step 1: Write the failing command tests**
 
@@ -121,6 +126,8 @@ class TransactionCommandTest(ReleaseCommandCase):
 
     def test_a_release_already_on_the_forge_runs_to_done(self):
         self.world.canonical()
+        # canonical() overwrote the tip and protection reads.
+        self.world.verification_ready()
         tokens = [c["token"] for c in self.preview()["confirmations"]]
         exit_code, result, err = self.run_with(tokens)
         self.assertEqual((exit_code, result["state"], result["next"]), (0, "succeeded", "done"), err)
@@ -149,7 +156,7 @@ class TransactionCommandTest(ReleaseCommandCase):
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_command.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_command.py`.
 Expected: FAIL. argparse rejects `transaction` with exit 2 and empty stdout, so
 `json.loads` raises in `run_release`. The existing classes still pass.
 
@@ -162,6 +169,8 @@ and the `Refusal` handler in `main`, which comes before the `ContractError` hand
 - In `## Release profiles`, replace "No adapter `invoke` is reachable from any command; it
   is reachable only through the transaction core." with "Adapter `invoke` is reachable
   only through `release transaction run`, which drives the transaction core."
+- In the `release deploy inspect` paragraph, replace "is the deploy read that ship-release
+  Phase 5 polls." with "is a read-only deploy observation for one commit."
 - Add `## Release driver` after `## Release adapters`. Write it from the implemented code,
   covering:
   - the four subcommands and their arguments;
@@ -182,31 +191,24 @@ and the `Refusal` handler in `main`, which comes before the `ContractError` hand
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_command.py tests/test_release_driver.py tests/test_release_verification.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_command.py tests/test_release_driver.py tests/test_release_verification.py`.
 Expected: `summary members=3 passed=3 failed=0`.
 
 Run: `just build` in the foreground with a timeout of at least 30 minutes. The package's
 `pythonImportsCheck` now imports the three new modules.
 Expected: exit 0.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add python/agent_tools/release.py tests/test_release_command.py python/README.md
-git commit -m "feat(issue-128/T4): release transaction command"
-```
+- [ ] **Step 5: Commit** exactly the Files paths, subject `feat(issue-128/T4): release transaction command`.
 
 - [ ] **Step 6: P1 feasibility (P1 = Tasks 1–4, D23)**
 
-```bash
-set -euo pipefail
-BASE="$(git log --reverse --format=%H -F --grep='feat(issue-128/T1):' | head -1)"
-test -n "$BASE"
-OUT="$(mktemp -d "${TMPDIR:-/tmp}/rp-XXXXXX")/review.json"
-review-package .agents/artifacts/plans/2026-11-02-issue-128-ship-release-release-core.md \
-  "$(git rev-parse "$BASE^")" "$(git rev-parse HEAD)" "$OUT" > "$OUT.report"
-grep -q '"state":"complete"' "$OUT.report"
-```
+Run the root's package check with `<first>` = `T1`.
 
 Expected: exit 0. A `decompose_required` report names a member diff over the limit. Split
 that file, re-run Step 4, and commit before continuing. This step has nothing to commit.
+
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":4,"records":[{"bounds":[{"added_lines":130,"boundary":"all","deleted_lines":6,"record_bytes":12288,"support":{"covers":["r4a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r4a","last_task":4,"owner":4,"path":"python/agent_tools/release.py"},{"bounds":[{"added_lines":95,"boundary":"all","deleted_lines":2,"record_bytes":8192,"support":{"covers":["r4b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r4b","last_task":4,"owner":4,"path":"tests/test_release_command.py"},{"bounds":[{"added_lines":12,"boundary":"all","deleted_lines":3,"record_bytes":36864,"support":{"covers":["r4c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r4c","last_task":4,"owner":4,"path":"python/README.md"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":1,"record_bytes":4096,"support":{"covers":["r4d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r4d","last_task":4,"owner":4,"path":"python/agent_tools/actions_health_adapter.py"}]}}
+```

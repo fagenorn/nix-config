@@ -9,14 +9,9 @@
 - Modify: `justfile` (add `tests/test_release_crash_matrix.py` after `tests/test_release_driver.py`)
 
 **Interfaces:**
-- Consumes:
-  - Task 3's `Driver.run`, `Driver.preview`, `Driver.status`, `CUSTODY_TTL_MS`, and the
-    support module's `StatefulForge`, `release`, `Clock`, `project` and `candidate`.
-  - Task 1's `ForgeWorld.verification_ready(integration=..., default=...)`.
-  - `tests/release_test_support.forge_profile()` and `FIXTURE_STORE`, the descriptor
-    template.
-  - `tests/test_release_grammar.py`'s activation-unit example, the profile template for an
-    activation unit.
+- Consumes: Tasks 1–3's `Driver`, `CUSTODY_TTL_MS`, `verification_ready` and the support
+  module; `release_test_support`'s `forge_profile()` and `FIXTURE_STORE` (descriptor
+  template); `tests/test_release_grammar.py`'s activation-unit example (profile template).
 - Produces, in `tests/release_driver_support.py`:
 
 ```python
@@ -107,9 +102,7 @@ Add the fixtures above to `tests/release_driver_support.py`. Then create
 `tests/test_release_crash_matrix.py`:
 
 ```python
-"""Crash and retry matrix over merge, tag, Release and deploy (#128 AC3, AC8; spec Test seams).
-
-Run: just agent-workflow-tests"""
+"""Crash and retry matrix over merge, tag, Release and deploy (#128 AC3, AC8; spec Test seams)."""
 import unittest
 
 from agent_tools import release_adapter, release_driver
@@ -227,7 +220,7 @@ cleanups stack harmlessly.
 
 - [ ] **Step 2: Run the matrix and watch it fail**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_crash_matrix.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_crash_matrix.py`.
 Expected: FAIL, `AttributeError: module 'tests.release_driver_support' has no attribute
 'FixtureMerge'` until the fixtures exist. After that, any remaining failure is a driver
 defect or a fixture-shape error.
@@ -243,27 +236,19 @@ re-invoking a satisfied action, stop and report: that is a design defect, not a 
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_crash_matrix.py tests/test_release_driver.py tests/test_release_command.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_crash_matrix.py tests/test_release_driver.py tests/test_release_command.py`.
 Expected: `summary members=3 passed=3 failed=0`.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add tests/release_driver_support.py tests/test_release_crash_matrix.py justfile \
-  python/agent_tools/release_driver.py
-git commit -m "feat(issue-128/T5): release crash and retry matrix"
-```
+- [ ] **Step 5: Commit** exactly the Files paths, subject `feat(issue-128/T5): release crash and retry matrix`.
 
 - [ ] **Step 6: P2 feasibility (P2 = Task 5, D23)**
 
-```bash
-set -euo pipefail
-BASE="$(git log --reverse --format=%H -F --grep='feat(issue-128/T5):' | head -1)"
-test -n "$BASE"
-OUT="$(mktemp -d "${TMPDIR:-/tmp}/rp-XXXXXX")/review.json"
-review-package .agents/artifacts/plans/2026-11-02-issue-128-ship-release-release-core.md \
-  "$(git rev-parse "$BASE^")" "$(git rev-parse HEAD)" "$OUT" > "$OUT.report"
-grep -q '"state":"complete"' "$OUT.report"
-```
+Run the root's package check with `<first>` = `T5`.
 
 Expected: exit 0. This step has nothing to commit.
+
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":5,"records":[{"bounds":[{"added_lines":520,"boundary":"all","deleted_lines":0,"record_bytes":24576,"support":{"covers":["r2b","r3b","r5a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5a","last_task":5,"owner":5,"path":"tests/release_driver_support.py"},{"bounds":[{"added_lines":380,"boundary":"all","deleted_lines":0,"record_bytes":16384,"support":{"covers":["r5b"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r5b","last_task":5,"owner":5,"path":"tests/test_release_crash_matrix.py"},{"bounds":[{"added_lines":3,"boundary":"all","deleted_lines":0,"record_bytes":4096,"support":{"covers":["r1d","r2d","r5c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5c","last_task":5,"owner":5,"path":"justfile"}]}}
+```

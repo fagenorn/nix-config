@@ -96,9 +96,7 @@ Add to `ForgeWorld` (its docstring says the reads stay outside the spelling fixt
 Create `tests/test_release_verification.py`:
 
 ```python
-"""release_verification: the candidate's required-CI receipt (#128 spec §3, D5, D22).
-
-Run: just agent-workflow-tests"""
+"""release_verification: the candidate's required-CI receipt (#128 spec §3, D5, D22)."""
 import unittest
 from unittest import mock
 
@@ -218,7 +216,7 @@ The fake `gh` logs `argv` without the tool name.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_verification.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_verification.py`.
 Expected: FAIL, `ModuleNotFoundError: No module named 'agent_tools.release_verification'`.
 
 - [ ] **Step 3: Write `release_verification.py`**
@@ -234,14 +232,14 @@ Write it to the Interfaces and Invariants above. The design calls that are not o
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_verification.py tests/test_release_command.py tests/test_forge_adapter.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_verification.py tests/test_release_command.py tests/test_forge_adapter.py`.
 Expected: `summary members=3 passed=3 failed=0`. This shows the `ForgeWorld` addition broke no
 existing suite.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit** exactly the Files paths, subject `feat(issue-128/T1): release verification receipt`.
 
-```bash
-git add python/agent_tools/release_verification.py tests/forge_world.py \
-  tests/test_release_verification.py justfile
-git commit -m "feat(issue-128/T1): release verification receipt"
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":1,"records":[{"bounds":[{"added_lines":280,"boundary":"all","deleted_lines":0,"record_bytes":12288,"support":{"covers":["r1a"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r1a","last_task":1,"owner":1,"path":"python/agent_tools/release_verification.py"},{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":0,"record_bytes":4096,"support":{"covers":["r1b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1b","last_task":1,"owner":1,"path":"tests/forge_world.py"},{"bounds":[{"added_lines":300,"boundary":"all","deleted_lines":0,"record_bytes":12288,"support":{"covers":["r1c"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r1c","last_task":1,"owner":1,"path":"tests/test_release_verification.py"},{"bounds":[{"added_lines":1,"boundary":"all","deleted_lines":0,"record_bytes":2048,"support":{"covers":["r1d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r1d","last_task":1,"owner":1,"path":"justfile"}]}}
 ```

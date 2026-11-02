@@ -46,9 +46,8 @@ def retire(repo_root: Path) -> None: ...               # unlink a `completed` fi
   `ValueError` and touches nothing.
 - **Gate 2:**
   - `preview` and `run` refuse `legacy_release_in_flight` (repair `release.legacy.finish`)
-    for `in_flight` or `unreadable`. The detail names the class and the path, and says to
-    finish the release with the previous generation's ship-release, or to remove the file
-    once the user confirms the release is abandoned. Gate order is gate 2, then the shape
+    for `in_flight` or `unreadable`. The detail names the class and path: finish with
+    the previous ship-release, or remove the file once the user confirms it abandoned. Gate order is gate 2, then the shape
     gates (§1).
   - `status` reports and never refuses. `abandon` does not apply gate 2.
 - **Deletion.** In new mode only, `run` calls `retire` after the confirmation checks and
@@ -60,9 +59,7 @@ def retire(repo_root: Path) -> None: ...               # unlink a `completed` fi
 `tests/test_release_cutover.py`:
 
 ```python
-"""Legacy ship-release state at cutover (#128 AC6, spec §6, D8).
-
-Run: just agent-workflow-tests"""
+"""Legacy ship-release state at cutover (#128 AC6, spec §6, D8)."""
 import json
 import os
 import tempfile
@@ -214,7 +211,7 @@ nothing.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_cutover.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_cutover.py`.
 Expected: FAIL, `ModuleNotFoundError: No module named 'agent_tools.release_cutover'`.
 
 - [ ] **Step 3: Implement**
@@ -227,13 +224,13 @@ and the deletion point, written from the code.
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_cutover.py tests/test_release_command.py tests/test_release_driver.py tests/test_release_crash_matrix.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_cutover.py tests/test_release_command.py tests/test_release_driver.py tests/test_release_crash_matrix.py`.
 Expected: `summary members=4 passed=4 failed=0`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit** exactly the Files paths, subject `feat(issue-128/T6): legacy release state cutover`.
 
-```bash
-git add python/agent_tools/release_cutover.py python/agent_tools/release_driver.py \
-  tests/test_release_cutover.py tests/test_release_command.py python/README.md justfile
-git commit -m "feat(issue-128/T6): legacy release state cutover"
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":6,"records":[{"bounds":[{"added_lines":180,"boundary":"all","deleted_lines":0,"record_bytes":8192,"support":{"covers":["r6a"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r6a","last_task":6,"owner":6,"path":"python/agent_tools/release_cutover.py"},{"bounds":[{"added_lines":820,"boundary":"all","deleted_lines":0,"record_bytes":40960,"support":{"covers":["r2a","r3a","r6b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r6b","last_task":6,"owner":6,"path":"python/agent_tools/release_driver.py"},{"bounds":[{"added_lines":260,"boundary":"all","deleted_lines":0,"record_bytes":12288,"support":{"covers":["r6c"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r6c","last_task":6,"owner":6,"path":"tests/test_release_cutover.py"},{"bounds":[{"added_lines":175,"boundary":"all","deleted_lines":2,"record_bytes":14336,"support":{"covers":["r4b","r6d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r6d","last_task":6,"owner":6,"path":"tests/test_release_command.py"},{"bounds":[{"added_lines":14,"boundary":"all","deleted_lines":4,"record_bytes":40960,"support":{"covers":["r4c","r6e"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r6e","last_task":6,"owner":6,"path":"python/README.md"},{"bounds":[{"added_lines":4,"boundary":"all","deleted_lines":0,"record_bytes":4096,"support":{"covers":["r1d","r2d","r5c","r6f"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r6f","last_task":6,"owner":6,"path":"justfile"}]}}
 ```

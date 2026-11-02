@@ -226,9 +226,7 @@ def seed(driver, ordinal=1, **overrides) -> str:
 module):
 
 ```python
-"""The release driver library against the real TransactionStore (#128 spec §1, §2, §4, §7).
-
-Run: just agent-workflow-tests"""
+"""The release driver library against the real TransactionStore (#128 spec §1, §2, §4, §7)."""
 import os
 import re
 import unittest
@@ -404,7 +402,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_driver.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_driver.py`.
 Expected: FAIL, `ModuleNotFoundError: No module named 'agent_tools.release_driver'`.
 
 - [ ] **Step 3: Write `release_driver.py`**
@@ -420,13 +418,13 @@ are `candidate_stale`, `verification_unavailable`, `verification_pending`,
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_driver.py tests/test_release_verification.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_driver.py tests/test_release_verification.py`.
 Expected: `summary members=2 passed=2 failed=0`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit** exactly the Files paths, subject `feat(issue-128/T2): release driver selection, gates, status and preview`.
 
-```bash
-git add python/agent_tools/release_driver.py tests/release_driver_support.py \
-  tests/test_release_driver.py justfile
-git commit -m "feat(issue-128/T2): release driver selection, gates, status and preview"
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":2,"records":[{"bounds":[{"added_lines":450,"boundary":"all","deleted_lines":0,"record_bytes":18432,"support":{"covers":["r2a"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r2a","last_task":2,"owner":2,"path":"python/agent_tools/release_driver.py"},{"bounds":[{"added_lines":120,"boundary":"all","deleted_lines":0,"record_bytes":6144,"support":{"covers":["r2b"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r2b","last_task":2,"owner":2,"path":"tests/release_driver_support.py"},{"bounds":[{"added_lines":330,"boundary":"all","deleted_lines":0,"record_bytes":16384,"support":{"covers":["r2c"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r2c","last_task":2,"owner":2,"path":"tests/test_release_driver.py"},{"bounds":[{"added_lines":2,"boundary":"all","deleted_lines":0,"record_bytes":3072,"support":{"covers":["r1d","r2d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r2d","last_task":2,"owner":2,"path":"justfile"}]}}
 ```

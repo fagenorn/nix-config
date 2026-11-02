@@ -281,10 +281,10 @@ An `InvocationRefused` from the core also parks, and its reason is kept.
 - With `activation: none`, record one `event` evidence entry, `activation-not-applicable`, then
   advance `published → proving`. This is divergence 1.
 - Otherwise go through `activating`, using the same loop.
-- In `proving`, run one cohort: `start_cohort`, `collect_obligation` for every plan obligation
-  with `core_binding`'s observer, then `settle_proof`. The result is `next: done` with the
-  terminal receipt digest, a parked `proof_*` state (`next: attention`), or `next: wait` while
-  the cohort budget remains.
+- In `proving` (per D27), `collect_obligation` for every plan obligation with `core_binding`'s
+  observer, then `start_cohort`, then the cohort's members again, then `settle_proof`. The
+  result is `next: done` with the terminal receipt digest, a parked `proof_*` state
+  (`next: attention`), or `next: wait` while the cohort budget remains.
 
 **Ending the run.** Custody is released before `run` returns, unless the transaction is terminal.
 
@@ -355,9 +355,10 @@ This is the skill's re-entry question ("ask the core first") and the operator's 
 - an authorization section: invoking authorizes the reversible set, the preview is the one stop,
   silence is never yes, and a delegated owner returns at the preview;
 - doc-grounded escalations;
-- pre-flight: the main checkout, a clean tree, a fetch, local sync with origin, and "nothing to
-  release" against the previous tag;
-- `release transaction status` first, with a nonterminal release going straight to the preview;
+- pre-flight: the main checkout, a clean tree, a fetch and local sync with origin;
+- `release transaction status` next, with a nonterminal release going straight to the preview
+  (per D28);
+- only then "nothing to release" against the previous tag;
 - the changelog phase (`CHANGELOG.md` rubric, the `--merged` previous-tag command, the bootstrap
   `v0.1.0` rule, no silent `v1.0.0`);
 - the notes file written outside the working tree;
@@ -516,3 +517,6 @@ No seam below these is introduced.
 | D24 | Plan. The #70 trials manifest binds base `0a25b8072c8252d069774f68e75981c39c137691` and, as candidate, the skill-rewrite commit that AC5's measurement reads, in #127 D31's shape | D11; #127 D31 | Binding the evidence commit itself (a commit cannot name its own hash) |
 | D25 | Plan. `status`'s `release` also carries `reason`, the latest transition's reason, so §8's parked report has a core source. `run`'s `actions` entries are `{name, status, attempts}`. The resume `candidate.title` is read from the stored plan's first unit that carries a title | §8 "reported with its reason", rendered only from `status`; §5 output | A skill-side reason (narrative state outside the core). Re-reading the title from the notes file (it does not carry one) |
 | D26 | Plan. A compiled profile with any `restorable` recovery unit is refused at entry as `anchors_unsupported` (repair `release.profile.anchor_unbound`), a fifth shape gate. This narrows §5's `verify_anchors` step. `core_binding` observes only derived predicate requests, so an anchor request cannot be answered, and no operation in the closed registry is recovery-capable, so no admissible profile is restorable today | `release_adapter.CoreBinding.observe`; the registry's descriptors; D1's typed refusal for unrunnable shapes; the-bar no half-wired path | Calling `verify_anchors` through a binding that refuses its requests (a certain mid-run failure). Extending `core_binding` (out of this change's scope) |
+| D27 | Standards review. In `proving`, one `run` pass collects every plan obligation the core admits (a refused collection skips only that obligation), then calls `start_cohort`, collects the opened cohort's members, and always ends with `settle_proof`. A refused `start_cohort` goes straight to settlement, which parks `proof_rejected` and `proof_did_not_converge` itself; a refused `settle_proof` (`no_open_cohort`) is `next: wait`. Amends §5's proving step; D7's "at most one cohort" stands | Codex plan review: `transaction_proof.cohort_start` refuses `proof_incomplete` until every required obligation has an admissible `satisfied` observation, so a cohort-first pass returns `wait` forever; `settlement` judges rejection before any cohort and window exhaustion with none open (#207 D10, D11) | §5's original cohort-first order (never progresses). Treating a refused `start_cohort` as `wait` without settling (a rejected or exhausted proof would never park) |
+| D28 | Standards review. Pre-flight reads `release transaction status` before the "nothing to release" check. A nonterminal release goes straight to the resume preview and skips that check, which runs only when no release is in flight. Amends §8's keep list order | Codex plan review: once the tag is pushed and Release creation is interrupted, the fetched tag already names the integration tip, so a tag-first check stops with the transaction unfinished; §8 and #90 "ask the core first" | The tag-first order (strands an interrupted release behind "nothing to release") |
+| D29 | Standards review. Amends D23. The plan carries schema-3 review feasibility forecast blocks with one boundary, `all` (Tasks 1–8), because the three packages share one branch and the plan root cannot also carry three derived process packages within its 16 KB limit. `review-feasibility gate --completed-through 0` and `sdd-gate`'s per-task projection are the pre-dispatch gate; each package's last-task `review-package` run stays as AC10's actual measurement. D23's claim that writing-plans and sdd carry no projection step was wrong | Codex plan review: `review_forecast.load_plan` requires the delivery and task blocks, and sdd step 1 stops a plan without them at the first projection; writing-plans § Review feasibility forecast; `python/README.md` § Review feasibility forecast; spec acceptance row 10 | Package-end `review-package` runs alone (cannot replace the pre-dispatch gate). Child boundaries `p1`–`p3` with derived process packages (over the plan's root and aggregate budgets; derived packages exist only after a decomposition) |

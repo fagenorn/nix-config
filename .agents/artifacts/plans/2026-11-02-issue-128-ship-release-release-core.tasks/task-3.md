@@ -87,12 +87,17 @@ class Driver:
     "profile_digest": d})`, and is skipped when already recorded. Then advance
     `→ proving`. With activation nodes, advance `→ activating`, run the loop over
     `phase == "activation"`, then advance `→ proving`.
-  - In `proving`:
-    - call `start_cohort`, then `collect_obligation(obligation_id=…, observer=router)`
-      for each `proof_plan["obligations"]` entry, then `settle_proof`;
-    - `succeeded` gives `done` and `attention_required` gives `attention`; any other
-      state gives `wait`;
-    - a `ProofRefused` from those calls gives `wait`.
+  - In `proving` (D27), in this order:
+    1. `collect_obligation(obligation_id=…, observer=router)` for each
+       `proof_plan["obligations"]` entry in plan order. A `ProofRefused` (a dependency not
+       yet accepted, an event already accepted) skips that obligation only;
+    2. `start_cohort`. When it opens a cohort, collect each `proof_plan["cohort"]["members"]`
+       entry in order, again skipping a `ProofRefused` one. A `ProofRefused` from
+       `start_cohort` (`proof_incomplete`, `convergence_exhausted`) skips to step 3;
+    3. `settle_proof`, always. It parks `proof_rejected` and `proof_did_not_converge`
+       itself; its `ProofRefused` (`no_open_cohort`) gives `wait`;
+    - then `succeeded` gives `done` and `attention_required` gives `attention`; any other
+      state gives `wait`.
 - **The action loop** (per unit):
   1. Call `inspect_action`. `satisfied` moves on; `in_progress` or `unknown` gives `wait`;
      `diverged` parks with reason `<name>: diverged`.
@@ -230,11 +235,10 @@ class RunTest(DriverCase):
     def test_proof_that_never_converges_parks(self):
         driver = self.forge(rs.NeverVisible)
         _, result = rs.release(driver, rs.candidate())
-        for _ in range(4):
-            if result["state"] == "attention_required":
-                break
-            self.clock.advance(120_000)
-            result = driver.run(None, [])
+        self.assertEqual((result["state"], result["next"]), ("proving", "wait"))
+        self.clock.advance(1_800_000)
+        result = driver.run(None, [])
+        self.assertEqual(result["next"], "attention")
         status = driver.status()["release"]
         self.assertEqual((status["state"], status["parked_from"], status["reason"],
                           status["terminal"]),
@@ -316,7 +320,7 @@ class AbandonTest(DriverCase):
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_driver.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_driver.py`.
 Expected: FAIL, `AttributeError: 'Driver' object has no attribute 'run'`, and the Task 2
 classes still pass.
 
@@ -329,22 +333,21 @@ docstring cites D20 and says it adds no seam: fixture adapters enter only throug
 If the tag reads in `test_a_diverged_tag_parks…` make the forge adapter report another
 outcome than `diverged`, make the tag point at another commit the way
 `tests/test_forge_adapter.py` builds its `diverged` row. Keep the asserted reason
-`tag: diverged`. If `test_proof_that_never_converges_parks` needs a longer cohort spacing,
-change only the clock step, up to the profile's `convergence_window_ms` (1,800,000), and
-the loop bound, up to `transaction_plan.MAX_COHORT_ATTEMPTS + 1`. The final assertion
-stays. If the core's no-effect gate refuses `abandoned` after a guard-refused
+`tag: diverged`. In `test_proof_that_never_converges_parks` no cohort ever opens: the park
+is `settle_proof`'s window exhaustion once the clock passes `convergence_window_ms`
+(1,800,000) from entering `proving` (D27); keep that step. If the core's no-effect gate refuses `abandoned` after a guard-refused
 attempt, stop and report it: that contradicts D14's grounding and needs a ledger row, not
 a workaround.
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_driver.py tests/test_release_adapter_core.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_driver.py tests/test_release_adapter_core.py`.
 Expected: `summary members=2 passed=2 failed=0`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit** exactly the Files paths, subject `feat(issue-128/T3): release driver run and abandon`.
 
-```bash
-git add python/agent_tools/release_driver.py tests/release_driver_support.py \
-  tests/test_release_driver.py
-git commit -m "feat(issue-128/T3): release driver run and abandon"
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":3,"records":[{"bounds":[{"added_lines":700,"boundary":"all","deleted_lines":0,"record_bytes":32768,"support":{"covers":["r2a","r3a"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3a","last_task":3,"owner":3,"path":"python/agent_tools/release_driver.py"},{"bounds":[{"added_lines":220,"boundary":"all","deleted_lines":0,"record_bytes":10240,"support":{"covers":["r2b","r3b"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3b","last_task":3,"owner":3,"path":"tests/release_driver_support.py"},{"bounds":[{"added_lines":650,"boundary":"all","deleted_lines":0,"record_bytes":32768,"support":{"covers":["r2c","r3c"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r3c","last_task":3,"owner":3,"path":"tests/test_release_driver.py"}]}}
 ```

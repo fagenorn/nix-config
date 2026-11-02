@@ -15,10 +15,8 @@
   - the AC5 candidate (D24): the last commit touching `ship-release/SKILL.md` or
     `ship-release/CHANGELOG.md`, which is Task 7's commit or its review fix;
   - Tasks 4 and 6's `release transaction preview` for the demo.
-- Produces the committed evidence and three measured figures, reported in the commit body
-  and the task report: AC5's four hot head byte counts, the P3 feasibility state and the
-  demo's confirmations. sdd's final review copies them into the acceptance record rows
-  `AC5`, `AC9` and `AC10`.
+- Produces the evidence plus AC5's four hot head byte counts, the P3 feasibility state and
+  the demo's confirmations, for acceptance rows `AC5`, `AC9` and `AC10`.
 
 **Invariants** (D10, D11, D23, D24; #127 D31's shape):
 - The trials manifest is exactly #127's `promotion-127-trials.json` shape, with:
@@ -45,9 +43,7 @@
 - [ ] **Step 1: Write the failing evidence test**
 
 ```python
-"""The #70 evidence #128 carries (spec D11, D24): an honest `unmeasured` bundle.
-
-Run: just agent-workflow-tests"""
+"""The #70 evidence #128 carries (spec D11, D24): an honest `unmeasured` bundle."""
 import json
 import unittest
 from pathlib import Path
@@ -81,7 +77,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_evidence.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_evidence.py`.
 Expected: FAIL. `load_manifest` cannot read the missing trials file.
 
 - [ ] **Step 3: Measure, then write the manifest and generate the bundle**
@@ -107,9 +103,8 @@ for profile in ("ship-release", "release-owner"):
 EOF
 ```
 
-Expected: exit 0 and four printed lines. Keep them for the commit body. A failing head
-assertion means Task 7's skill is too long. Stop and report: shortening the skill is a
-Task 7 fix, not an evidence edit.
+Expected: exit 0 and four printed lines, kept for the commit body. A failing head assertion
+is a Task 7 fix (the skill is too long): stop and report.
 
 Write `release-128-trials.json` to the Invariants, with `candidate` = `$T7`. Then:
 
@@ -126,17 +121,11 @@ grep -q '"state":"unmeasured"' .agents/artifacts/evidence/release-128-bundle.jso
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m agent_tools.suite_runner tests/test_release_evidence.py tests/test_release_profile.py tests/test_release_grammar.py tests/test_agent_gate_bundle.py 2>&1 | tail -4`
+Run the root's suite form on `tests/test_release_evidence.py tests/test_release_profile.py tests/test_release_grammar.py tests/test_agent_gate_bundle.py`.
 Expected: `summary members=4 passed=4 failed=0`. The profile and grammar suites carry
 divergences 7 and 8 (spec's divergence table).
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add .agents/artifacts/evidence/release-128-trials.json \
-  .agents/artifacts/evidence/release-128-bundle.json tests/test_release_evidence.py justfile
-git commit -m "feat(issue-128/T8): #70 evidence bundle and context measurement"
-```
+- [ ] **Step 5: Commit** exactly the Files paths, subject `feat(issue-128/T8): #70 evidence bundle and context measurement`.
 
 The commit body lists Step 3's four measured lines and states that the bundle is
 `unmeasured`. AC5's approval stays `human_pending` (D11). A later commit that changes
@@ -161,15 +150,13 @@ and `github-release`, and `test ! -e "$MAIN/.git/agent-release"` holds afterward
 the main checkout, is a finding to report, never to fix by deleting the file. Never run
 `release transaction run` here.
 
-```bash
-set -euo pipefail
-BASE="$(git log --reverse --format=%H -F --grep='feat(issue-128/T6):' | head -1)"
-test -n "$BASE"
-OUT="$(mktemp -d "${TMPDIR:-/tmp}/rp-XXXXXX")/review.json"
-review-package .agents/artifacts/plans/2026-11-02-issue-128-ship-release-release-core.md \
-  "$(git rev-parse "$BASE^")" "$(git rev-parse HEAD)" "$OUT" > "$OUT.report"
-grep -q '"state":"complete"' "$OUT.report"
-```
+Run the root's package check with `<first>` = `T6`.
 
 Expected: exit 0. Report the demo's confirmations and the three packages' feasibility
 states. This step has nothing to commit.
+
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":8,"records":[{"bounds":[{"added_lines":100,"boundary":"all","deleted_lines":0,"record_bytes":6144,"support":{"covers":["r8a"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r8a","last_task":8,"owner":8,"path":".agents/artifacts/evidence/release-128-trials.json"},{"bounds":[{"added_lines":300,"boundary":"all","deleted_lines":0,"record_bytes":16384,"support":{"covers":["r8b"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r8b","last_task":8,"owner":8,"path":".agents/artifacts/evidence/release-128-bundle.json"},{"bounds":[{"added_lines":150,"boundary":"all","deleted_lines":0,"record_bytes":8192,"support":{"covers":["r8c"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r8c","last_task":8,"owner":8,"path":"tests/test_release_evidence.py"},{"bounds":[{"added_lines":5,"boundary":"all","deleted_lines":0,"record_bytes":5120,"support":{"covers":["r1d","r2d","r5c","r6f","r8d"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r8d","last_task":8,"owner":8,"path":"justfile"}]}}
+```
