@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
@@ -10,12 +11,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Sequence
+from typing import BinaryIO, Mapping, Sequence
 
 PREFIX = "suite-runner:"
 DEFAULT_JOBS = 4
 INTERRUPTED = f"{PREFIX} interrupted, waiting for running members"
 INTERRUPT_EXIT = 130
+# Appended to every member's GIT_CONFIG_PARAMETERS, in the form `git -c` exports
+# (issue 496).
+SUITE_GIT_CONFIG = "'maintenance.auto'='false' 'gc.auto'='0'"
 
 
 class UsageError(ValueError):
@@ -28,6 +32,7 @@ class MemberResult:
     member: str
     returncode: int | None
     seconds: float
+    cpu_seconds: float
 
     @property
     def passed(self) -> bool:
@@ -41,6 +46,26 @@ def member_command(member: str) -> list[str]:
     if suffix == ".sh":
         return ["bash", member]
     raise UsageError(f"{member}: a member must be a .py or a .sh file")
+
+
+def member_environment(parent: Mapping[str, str]) -> dict[str, str]:
+    """A copy of `parent` whose `GIT_CONFIG_PARAMETERS` ends with
+    `SUITE_GIT_CONFIG`, so every git command run with it reads
+    `maintenance.auto=false` and `gc.auto=0` (issue 496).
+
+    The entries are appended as `git -c` appends its own: after one space when
+    the inherited value is non-empty, standing alone otherwise. Coming last,
+    they win over an inherited entry for the same key, and a test's own
+    `GIT_CONFIG_COUNT` entries still apply beside them. The inherited value is
+    passed on unparsed: one git cannot parse already fails every git call with
+    exit 128. `parent` is not modified, and every other variable is copied
+    unchanged.
+    """
+    environment = dict(parent)
+    inherited = environment.get("GIT_CONFIG_PARAMETERS", "")
+    environment["GIT_CONFIG_PARAMETERS"] = (
+        f"{inherited} {SUITE_GIT_CONFIG}" if inherited else SUITE_GIT_CONFIG)
+    return environment
 
 
 def validate_members(members: Sequence[str], cwd: Path) -> None:
@@ -80,12 +105,14 @@ def report_lines(results: Sequence[MemberResult], *, jobs: int,
     lines = [f"{PREFIX} timings, slowest first"]
     for result in sorted(ordered, key=lambda r: (-round(r.seconds, 1), r.index)):
         state = "passed" if result.passed else "failed"
-        lines.append(f"{PREFIX} {result.seconds:7.1f}s {state} {result.member}")
+        lines.append(f"{PREFIX} {result.seconds:7.1f}s wall "
+                     f"{result.cpu_seconds:7.1f}s cpu {state} {result.member}")
     failed = [result for result in ordered if not result.passed]
     lines.extend(f"{PREFIX} failed {result.member}" for result in failed)
     lines.append(f"{PREFIX} summary members={len(ordered)} "
                  f"passed={len(ordered) - len(failed)} failed={len(failed)} "
-                 f"jobs={jobs} wall={wall_seconds:.1f}s")
+                 f"jobs={jobs} wall={wall_seconds:.1f}s "
+                 f"cpu={sum(result.cpu_seconds for result in ordered):.1f}s")
     return lines
 
 
@@ -109,9 +136,12 @@ class _Output:
 class _HeldSigint:
     """Records a SIGINT instead of raising it, from construction until
     `release`, which restores the caller's handler and re-delivers a recorded
-    SIGINT under it (D14). Construct it before the `try` that handles the
-    interrupt and release it inside that `try`, so a SIGINT on either side of
-    the held span reaches that handler or nothing has started yet."""
+    SIGINT under it (D14). Release it inside the `try` that handles the
+    interrupt. A hold over a launch or the parallel workers' start is
+    constructed before that `try`, so a SIGINT just before it finds nothing
+    started. A hold over a serial reap is constructed once the member has
+    exited, so a SIGINT just before it finds the member exited and unreaped
+    (issue 497 D2)."""
 
     def __init__(self) -> None:
         self.held = threading.Event()
@@ -123,38 +153,79 @@ class _HeldSigint:
             signal.raise_signal(signal.SIGINT)
 
 
-def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
+def _wait_exited(process: subprocess.Popen) -> None:
+    """Block until the member has exited, reaping nothing: `waitid` with
+    WNOWAIT leaves its status for `_reap`, so a SIGINT that interrupts this
+    wait loses nothing (issue 497 D2)."""
+    os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+
+
+def _reap(index: int, member: str, process: subprocess.Popen | None,
+          started: float) -> MemberResult:
+    """The member's result, reaping its process if it launched; one that never
+    launched has no exit code and 0.0 CPU. One `os.wait4` on its pid is the
+    only wait that reaps a member, in either mode (issue 497 D1), and its
+    status is stored as the Popen's `returncode`, so nothing waits on it again.
+    Its CPU seconds are the user plus system time that `wait4` reports for the
+    process and every descendant reaped beneath it. The wall time runs from
+    `started` to just after the reap."""
+    returncode, cpu_seconds = None, 0.0
+    if process is not None:
+        _, status, usage = os.wait4(process.pid, 0)
+        returncode = process.returncode = os.waitstatus_to_exitcode(status)
+        cpu_seconds = usage.ru_utime + usage.ru_stime
+    return MemberResult(index, member, returncode, time.monotonic() - started,
+                        cpu_seconds)
+
+
+def _run_serial(members: Sequence[str], environment: Mapping[str, str],
+                out: _Output) -> list[MemberResult]:
     results = []
     for index, member in enumerate(members):
         out.write(_line(f"{PREFIX} start {member}") + _line(f"{PREFIX} begin {member}"))
         started = time.monotonic()
-        process = None
+        process = result = None
         # A SIGINT while the member launches is held, so a launched member is
         # always waited for.
         hold = _HeldSigint()
         try:
             try:
-                process = subprocess.Popen(member_command(member))
+                process = subprocess.Popen(member_command(member), env=environment)
             except OSError as error:
                 out.write(_line(str(error)))
             finally:
                 hold.release()
-            returncode = None if process is None else process.wait()
+            if process is not None:
+                _wait_exited(process)
+            # The member has exited. A SIGINT while it is reaped is held until
+            # its result is bound (issue 497 D2).
+            hold = _HeldSigint()
+            try:
+                result = _reap(index, member, process, started)
+            finally:
+                hold.release()
         except KeyboardInterrupt:
             # The member shares the terminal's process group, so a Ctrl-C
-            # reaches it too: wait for it, close its block, then stop.
+            # reaches it too: wait for it, close its block, then stop. A result
+            # bound before the interrupt is reported without waiting again, and
+            # a further SIGINT is held until the end line is written.
             out.write(_line(INTERRUPTED))
-            returncode = None if process is None else process.wait()
-            out.write(_line(end_line(MemberResult(
-                index, member, returncode, time.monotonic() - started))))
+            if result is None and process is not None:
+                _wait_exited(process)
+            hold = _HeldSigint()
+            try:
+                if result is None:
+                    result = _reap(index, member, process, started)
+                out.write(_line(end_line(result)))
+            finally:
+                hold.release()
             raise
-        result = MemberResult(index, member, returncode, time.monotonic() - started)
         out.write(_line(end_line(result)))
         results.append(result)
     return results
 
 
-def _run_parallel(members: Sequence[str], jobs: int,
+def _run_parallel(members: Sequence[str], jobs: int, environment: Mapping[str, str],
                   out: _Output) -> list[MemberResult | None]:
     results: list[MemberResult | None] = [None] * len(members)
     stop = threading.Event()
@@ -177,15 +248,18 @@ def _run_parallel(members: Sequence[str], jobs: int,
                 started = time.monotonic()
                 try:
                     process = subprocess.Popen(
-                        member_command(member), stdin=subprocess.DEVNULL,
+                        member_command(member), env=environment, stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 except OSError as error:
                     process, output = None, _line(str(error))
             if process is not None:
-                output, _ = process.communicate()
-            result = MemberResult(
-                index, member, None if process is None else process.returncode,
-                time.monotonic() - started)
+                # Read the merged output to its end, then reap: what
+                # communicate() does for one pipe and no input. Signal handlers
+                # run on the main thread only, so this reap is never
+                # interrupted (issue 497 D2).
+                with process.stdout:
+                    output = process.stdout.read()
+            result = _reap(index, member, process, started)
             if output and not output.endswith(b"\n"):
                 output += b"\n"
             # One write per block, before this worker takes its next member.
@@ -235,14 +309,16 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO) -> int:
 
     A KeyboardInterrupt propagates after the running members have finished and
     written their blocks. Must be called from the main thread: the runner holds
-    SIGINT while it launches a serial member or starts its parallel workers.
+    SIGINT while it launches or reaps a serial member or starts its parallel workers.
+    Every member runs with `member_environment(os.environ)`, computed once.
     """
     output = _Output(out)
+    environment = member_environment(os.environ)
     started = time.monotonic()
     if jobs == 1:
-        results = _run_serial(members, output)
+        results = _run_serial(members, environment, output)
     else:
-        results = _run_parallel(members, jobs, output)
+        results = _run_parallel(members, jobs, environment, output)
     missing = [member for member, result in zip(members, results) if result is None]
     if missing:
         raise RuntimeError(f"members left without a result: {', '.join(missing)}")

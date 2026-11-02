@@ -1,14 +1,19 @@
 """End-to-end tests for `agent_tools.suite_runner`, the scheduler behind
 `just agent-workflow-tests` (issue 436).
 
-Every case but the report-ordering one runs `python -m agent_tools.suite_runner`
-in a temporary working directory over fixture members written there. Members
-that must overlap meet at a filesystem barrier instead of sleeping, so no
-assertion depends on how long anything took (D9).
+Most cases run `python -m agent_tools.suite_runner` in a temporary working
+directory over fixture members written there. The report-ordering case and the
+members' git environment cases (issue 496) call the module's functions
+directly, and one control runs a fixture member with `bash` outside the runner.
+Members that must overlap meet at a filesystem barrier instead of sleeping, so
+no assertion depends on how long anything took (D9). The one exception is
+`CpuTimeTest`, which compares each member's CPU with its wall time by design
+(issue 497 D4).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -18,6 +23,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 from agent_tools import suite_runner
@@ -167,6 +173,67 @@ SERIAL_LAUNCH_INTERRUPT = textwrap.dedent('''\
     sys.exit(suite_runner.main(sys.argv[1:]))
 ''')
 
+# Runs the runner with SIGINT raised right after it reaps its first member in
+# serial mode, before it records the result (issue 497 D2).
+SERIAL_REAP_INTERRUPT = textwrap.dedent('''\
+    import os
+    import signal
+    import sys
+
+    from agent_tools import suite_runner
+
+    wait4 = os.wait4
+    reaped = []
+
+
+    def wait4_then_interrupt(*args):
+        reaped.append(wait4(*args))
+        if len(reaped) == 1:
+            signal.raise_signal(signal.SIGINT)
+        return reaped[-1]
+
+
+    os.wait4 = wait4_then_interrupt
+    sys.exit(suite_runner.main(sys.argv[1:]))
+''')
+
+
+# Runs the runner with SIGINT raised right after its first non-reaping wait
+# returns in serial mode, so the member has exited unreaped, and a second SIGINT
+# raised right after the interrupt path's own reap, before its end line
+# (issue 497 D6, D7).
+SERIAL_INTERRUPTED_REAP_INTERRUPT = textwrap.dedent('''\
+    import os
+    import signal
+    import sys
+
+    from agent_tools import suite_runner
+
+    waitid = os.waitid
+    wait4 = os.wait4
+    waited = []
+
+
+    def waitid_then_interrupt(*args):
+        result = waitid(*args)
+        waited.append(result)
+        if len(waited) == 1:
+            signal.raise_signal(signal.SIGINT)
+        return result
+
+
+    def wait4_then_interrupt(*args):
+        reaped = wait4(*args)
+        signal.raise_signal(signal.SIGINT)
+        return reaped
+
+
+    os.waitid = waitid_then_interrupt
+    os.wait4 = wait4_then_interrupt
+    sys.exit(suite_runner.main(sys.argv[1:]))
+''')
+
+
 PLAIN_MEMBER = textwrap.dedent('''\
     import unittest
 
@@ -176,12 +243,94 @@ PLAIN_MEMBER = textwrap.dedent('''\
             pass
 ''')
 
+# A shell member that commits once in a fresh repository of its own, with
+# global and system git configuration nulled and a fixed identity. Only the
+# commit is traced, to the absolute file $SUITE_RUNNER_TEST_TRACE (issue 496).
+COMMIT_MEMBER = textwrap.dedent('''\
+    set -eu
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    export GIT_AUTHOR_NAME=Suite GIT_AUTHOR_EMAIL=suite@example.invalid
+    export GIT_COMMITTER_NAME=Suite GIT_COMMITTER_EMAIL=suite@example.invalid
+    repo=$(mktemp -d)
+    trap 'rm -rf "$repo"' EXIT
+    cd "$repo"
+    git init -q -b main
+    echo probe > probe.txt
+    git add probe.txt
+    GIT_TRACE2_EVENT="$SUITE_RUNNER_TEST_TRACE" git commit -q -m probe
+''')
+
+# A unittest module that runs a grandchild spinning until it has used 1.0 s of
+# its own CPU. Around the grandchild it measures its share of a CPU: the change
+# in its own and its children's CPU seconds over the change in wall seconds. It
+# writes the share to `seen`, then its `done` marker (issue 497 D4).
+BUSY_MEMBER = textwrap.dedent('''\
+    import os
+    import subprocess
+    import sys
+    import time
+    import unittest
+    from pathlib import Path
+
+    BARRIER = Path(os.environ["SUITE_RUNNER_TEST_BARRIER"])
+    NAME = Path(__file__).name
+    SPIN = "while __import__('time').process_time() < 1.0: pass"
+
+
+    def cpu_seconds():
+        times = os.times()
+        return times.user + times.system + times.children_user + times.children_system
+
+
+    class Member(unittest.TestCase):
+        def test_member(self):
+            cpu, wall = cpu_seconds(), time.monotonic()
+            subprocess.run([sys.executable, "-c", SPIN], check=True)
+            share = (cpu_seconds() - cpu) / (time.monotonic() - wall)
+            (BARRIER / "seen" / NAME).write_text(repr(share))
+            (BARRIER / "done" / NAME).touch()
+''')
+
+# A unittest module that waits for a `done` marker, then sleeps 1.0 s. Run
+# after the busy member in parallel mode, it is still running when the runner
+# reaps the busy member (issue 497 D4).
+SLEEP_MEMBER = textwrap.dedent('''\
+    import os
+    import time
+    import unittest
+    from pathlib import Path
+
+    BARRIER = Path(os.environ["SUITE_RUNNER_TEST_BARRIER"])
+
+
+    class Member(unittest.TestCase):
+        def test_member(self):
+            deadline = time.monotonic() + 60
+            while not any((BARRIER / "done").iterdir()):
+                if time.monotonic() > deadline:
+                    self.fail("the busy member never finished")
+                time.sleep(0.01)
+            time.sleep(1.0)
+''')
+
 RUNNER_LINE = re.compile(r"^suite-runner: ")
 START = re.compile(r"^suite-runner: start (\S+)$")
 END = re.compile(r"^suite-runner: end (\S+) (passed|failed) exit=(\S+) \d+\.\ds$")
-ROW = re.compile(r"^suite-runner: +(\d+\.\d)s (passed|failed) (\S+)$")
+ROW = re.compile(r"^suite-runner: +(?P<wall>\d+\.\d)s wall +(?P<cpu>\d+\.\d)s cpu "
+                 r"(?P<state>passed|failed) (?P<member>\S+)$")
 SUMMARY = re.compile(r"^suite-runner: summary members=(\d+) passed=(\d+) failed=(\d+) "
-                     r"jobs=(\d+) wall=\d+\.\ds$")
+                     r"jobs=(\d+) wall=\d+\.\ds cpu=(\d+\.\d)s$")
+
+
+def without_command_git_config(environ: Mapping[str, str]) -> dict[str, str]:
+    """`environ` less every variable that carries command-scope git
+    configuration: `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` and its key and
+    value variables. This module runs under the suite runner, which gives it the
+    suite's git entries (issue 496); a case that kept them would pass against a
+    runner that adds nothing."""
+    return {key: value for key, value in environ.items()
+            if key not in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
+            and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
 
 
 class RunnerCase(unittest.TestCase):
@@ -338,43 +487,86 @@ class ReportTest(RunnerCase):
         report = lines[lines.index("suite-runner: timings, slowest first") + 1:]
         rows = [ROW.match(line) for line in report[:len(members)]]
         self.assertTrue(all(rows), report)
-        self.assertEqual({row.group(3): row.group(2) for row in rows}, {
+        self.assertEqual({row["member"]: row["state"] for row in rows}, {
             "test_m0.py": "passed", "test_fail_m1.py": "failed",
             "test_m2.py": "passed", "test_fail_m3.py": "failed"})
-        seconds = [float(row.group(1)) for row in rows]
+        seconds = [float(row["wall"]) for row in rows]
         self.assertEqual(seconds, sorted(seconds, reverse=True))
         self.assertEqual(report[len(members):-1], [
             "suite-runner: failed test_fail_m1.py", "suite-runner: failed test_fail_m3.py"])
         summary = SUMMARY.match(report[-1])
         self.assertIsNotNone(summary, report[-1])
-        self.assertEqual(summary.groups(), ("4", "2", "2", "2"))
+        self.assertEqual(summary.group(1, 2, 3, 4), ("4", "2", "2", "2"))
 
     def test_rows_run_slowest_first_with_ties_in_list_order(self):
         results = [
-            MemberResult(index=0, member="a.py", returncode=0, seconds=2.0),
-            MemberResult(index=1, member="b.py", returncode=0, seconds=5.0),
-            MemberResult(index=2, member="c.py", returncode=1, seconds=2.0),
-            MemberResult(index=3, member="d.py", returncode=-9, seconds=0.04),
-            MemberResult(index=4, member="e.py", returncode=0, seconds=5.0),
-            MemberResult(index=5, member="f.py", returncode=0, seconds=3.21),
-            MemberResult(index=6, member="g.sh", returncode=None, seconds=3.24),
+            MemberResult(index=0, member="a.py", returncode=0, seconds=2.0, cpu_seconds=1.5),
+            MemberResult(index=1, member="b.py", returncode=0, seconds=5.0, cpu_seconds=2.0),
+            MemberResult(index=2, member="c.py", returncode=1, seconds=2.0, cpu_seconds=0.04),
+            MemberResult(index=3, member="d.py", returncode=-9, seconds=0.04, cpu_seconds=0.04),
+            MemberResult(index=4, member="e.py", returncode=0, seconds=5.0, cpu_seconds=4.9),
+            MemberResult(index=5, member="f.py", returncode=0, seconds=3.21, cpu_seconds=0.04),
+            MemberResult(index=6, member="g.sh", returncode=None, seconds=3.24, cpu_seconds=0.0),
         ]
         lines = suite_runner.report_lines(
             list(reversed(results)), jobs=3, wall_seconds=12.34)
+        # c, d and f spend 0.04 s each: their rows print 0.0, and the total
+        # counts their 0.12 s, so it is 8.5 where the printed rows add to 8.4.
         self.assertEqual(lines, [
             "suite-runner: timings, slowest first",
-            "suite-runner:     5.0s passed b.py",
-            "suite-runner:     5.0s passed e.py",
-            "suite-runner:     3.2s passed f.py",
-            "suite-runner:     3.2s failed g.sh",
-            "suite-runner:     2.0s passed a.py",
-            "suite-runner:     2.0s failed c.py",
-            "suite-runner:     0.0s failed d.py",
+            "suite-runner:     5.0s wall     2.0s cpu passed b.py",
+            "suite-runner:     5.0s wall     4.9s cpu passed e.py",
+            "suite-runner:     3.2s wall     0.0s cpu passed f.py",
+            "suite-runner:     3.2s wall     0.0s cpu failed g.sh",
+            "suite-runner:     2.0s wall     1.5s cpu passed a.py",
+            "suite-runner:     2.0s wall     0.0s cpu failed c.py",
+            "suite-runner:     0.0s wall     0.0s cpu failed d.py",
             "suite-runner: failed c.py",
             "suite-runner: failed d.py",
             "suite-runner: failed g.sh",
-            "suite-runner: summary members=7 passed=4 failed=3 jobs=3 wall=12.3s",
+            "suite-runner: summary members=7 passed=4 failed=3 jobs=3 wall=12.3s cpu=8.5s",
         ])
+
+
+class CpuTimeTest(RunnerCase):
+    """A busy member's CPU is close to its wall time and a sleeping member's far
+    below it, in both modes (issue 497 D4). No bound rests on host load: the
+    busy member spins to a CPU target and measures the share of a CPU it got,
+    and load only lengthens the sleeping member's wall time."""
+
+    def assert_cpu_follows_the_work(self, jobs: str) -> None:
+        members = [self.member("test_busy.py", BUSY_MEMBER),
+                   self.member("test_sleep.py", SLEEP_MEMBER)]
+        result = self.run_suite("--jobs", jobs, *members)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        report = lines[lines.index("suite-runner: timings, slowest first") + 1:]
+        rows = [ROW.match(line) for line in report[:2]]
+        self.assertTrue(all(rows), report)
+        figures = {row["member"]: (float(row["wall"]), float(row["cpu"])) for row in rows}
+        self.assertEqual(sorted(figures), sorted(members))
+        busy_wall, busy_cpu = figures["test_busy.py"]
+        sleep_wall, sleep_cpu = figures["test_sleep.py"]
+        share = float((self.barrier / "seen" / "test_busy.py").read_text())
+        # The grandchild alone spent 1.0 s.
+        self.assertGreaterEqual(busy_cpu, 1.0, report)
+        # The member and its grandchild never run at once, so their CPU cannot
+        # outrun the wall clock; 0.1 s covers the rounding of both figures.
+        self.assertLessEqual(busy_cpu, busy_wall + 0.1, report)
+        # Close to wall, scaled by the share of a CPU the host gave the member.
+        self.assertGreaterEqual(busy_cpu, share * busy_wall / 2, (share, report))
+        self.assertLessEqual(sleep_cpu, sleep_wall / 4, report)
+        summary = SUMMARY.match(report[-1])
+        self.assertIsNotNone(summary, report[-1])
+        total = float(summary.group(5))
+        self.assertGreaterEqual(total, 1.0, report[-1])
+        self.assertLessEqual(abs(total - busy_cpu - sleep_cpu), 0.15, report)
+
+    def test_parallel_rows_show_busy_cpu_near_wall_and_sleeping_cpu_far_below(self):
+        self.assert_cpu_follows_the_work("2")
+
+    def test_serial_rows_show_busy_cpu_near_wall_and_sleeping_cpu_far_below(self):
+        self.assert_cpu_follows_the_work("1")
 
 
 class ExitStatusTest(RunnerCase):
@@ -454,11 +646,12 @@ class InterruptTest(RunnerCase):
         self.addCleanup((self.barrier / "release").touch)
         return runner
 
-    def finish_interrupted(self, runner: subprocess.Popen) -> list[str]:
+    def interrupted_lines(self, runner: subprocess.Popen) -> list[str]:
         """Release the held members only once the runner says it is waiting for
         them, then require exit 130, the interrupted line, an end line for each
-        started member and no report. The held members write nothing to stdout,
-        so every stdout line is the runner's."""
+        started member and no report, and return the runner's stdout lines.
+        The members write nothing to stdout, so every stdout line is the
+        runner's."""
         lines = []
         for line in runner.stdout:
             lines.append(line.rstrip("\n"))
@@ -476,7 +669,12 @@ class InterruptTest(RunnerCase):
                          sorted(starts))
         self.assertEqual([line for line in lines if line.startswith(
             ("suite-runner: timings", "suite-runner: summary"))], [])
-        return starts
+        return lines
+
+    def finish_interrupted(self, runner: subprocess.Popen) -> list[str]:
+        """The members the interrupted run started, in start order."""
+        return [match.group(1) for match in map(START.match, self.interrupted_lines(runner))
+                if match]
 
     def interrupt_while_running(self, jobs: int) -> None:
         """SIGINT the runner alone once `jobs` held members are live."""
@@ -516,6 +714,145 @@ class InterruptTest(RunnerCase):
         self.assertEqual(sorted(path.name for path in (self.barrier / "done").iterdir()),
                          members[:1])
         self.assertEqual(list((self.barrier / "live").iterdir()), [])
+
+    def test_an_interrupt_right_after_a_serial_reap_keeps_the_members_exit_status(self):
+        """SIGINT lands right after the runner reaps its first member in serial
+        mode, before it records the result. The runner still reports that
+        member's own exit status, then stops (issue 497 D2)."""
+        members = [self.member("exit3.sh", "exit 3\n"),
+                   self.member("test_plain.py", PLAIN_MEMBER)]
+        runner = self.launch("-c", SERIAL_REAP_INTERRUPT, "--jobs", "1", *members)
+        lines = self.interrupted_lines(runner)
+        self.assertEqual([match.group(1, 2, 3) for match in map(END.match, lines) if match],
+                         [("exit3.sh", "failed", "3")], lines)
+
+    def test_a_second_interrupt_during_the_interrupted_serial_reap_waits_for_its_end_line(self):
+        """SIGINT lands once the first serial member has exited unreaped, and a
+        second one right after the interrupt path reaps it. The second is held
+        until that member's end line is written, so the runner still reports
+        its own exit status, then stops (issue 497 D6, D7). The test fails if
+        the interrupt path's hold is removed or released before the end line."""
+        members = [self.member("exit3.sh", "exit 3\n"),
+                   self.member("test_plain.py", PLAIN_MEMBER)]
+        runner = self.launch("-c", SERIAL_INTERRUPTED_REAP_INTERRUPT, "--jobs", "1", *members)
+        lines = self.interrupted_lines(runner)
+        self.assertEqual([match.group(1, 2, 3) for match in map(END.match, lines) if match],
+                         [("exit3.sh", "failed", "3")], lines)
+
+
+class MemberEnvironmentTest(unittest.TestCase):
+    """`member_environment` observed through what git reads under its result
+    (issue 496). Each case fails for one wrong composition."""
+
+    def setUp(self) -> None:
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        self.scratch = Path(raw.name).resolve()
+        self.parent = {**without_command_git_config(os.environ),
+                       "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def read(self, environment: Mapping[str, str], key: str) -> str | None:
+        """The value git reads for `key` under `environment`, or None when it
+        has none. Any other exit, such as 128 for a `GIT_CONFIG_PARAMETERS` git
+        cannot parse, fails the case."""
+        result = subprocess.run(
+            ["git", "config", "--get", key], cwd=self.scratch, env=environment,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+            check=False)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def compose(self, inherited: str | None) -> dict[str, str]:
+        parent = dict(self.parent)
+        if inherited is not None:
+            parent["GIT_CONFIG_PARAMETERS"] = inherited
+        return suite_runner.member_environment(parent)
+
+    def assert_suite_entries(self, environment: Mapping[str, str]) -> None:
+        self.assertEqual(self.read(environment, "maintenance.auto"), "false")
+        self.assertEqual(self.read(environment, "gc.auto"), "0")
+
+    def test_with_nothing_inherited_git_reads_the_suite_entries(self):
+        self.assert_suite_entries(self.compose(None))
+
+    def test_an_inherited_entry_still_reads_beside_the_suite_entries(self):
+        environment = self.compose("'user.name'='Inherited'")
+        self.assertEqual(self.read(environment, "user.name"), "Inherited")
+        self.assert_suite_entries(environment)
+
+    def test_an_empty_inherited_value_still_parses(self):
+        self.assert_suite_entries(self.compose(""))
+
+    def test_the_suite_entry_wins_over_an_inherited_entry_for_the_same_key(self):
+        environment = self.compose("'maintenance.auto'='true'")
+        self.assertEqual(self.read(environment, "maintenance.auto"), "false")
+
+    def test_a_tests_own_config_count_keeps_the_suite_entries(self):
+        # As tests/test_review_task7.py does with HOSTILE_GIT_ENV.
+        environment = {**self.compose(None), "GIT_CONFIG_COUNT": "1",
+                       "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "Counted"}
+        self.assertEqual(self.read(environment, "user.name"), "Counted")
+        self.assert_suite_entries(environment)
+
+    def test_only_git_config_parameters_changes_and_the_parent_is_untouched(self):
+        parent = {**self.parent, "GIT_CONFIG_PARAMETERS": "'user.name'='Inherited'"}
+        before = dict(parent)
+        environment = suite_runner.member_environment(parent)
+        self.assertEqual(parent, before)
+        self.assertEqual(set(environment), set(before))
+        self.assertEqual({key: value for key, value in environment.items()
+                          if key != "GIT_CONFIG_PARAMETERS"},
+                         {key: value for key, value in before.items()
+                          if key != "GIT_CONFIG_PARAMETERS"})
+
+
+class GitMaintenanceTest(RunnerCase):
+    """A commit under the runner starts no `git maintenance` child (issue 496),
+    against a control that shows the same commit outside the runner does."""
+
+    def environment(self, cap: int, total: int, extra: dict) -> dict:
+        return without_command_git_config(super().environment(cap, total, extra))
+
+    def trace_events(self) -> list[dict]:
+        return [json.loads(line)
+                for line in self.trace.read_text(encoding="utf-8").splitlines() if line]
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.trace = self.work.parent / "trace.jsonl"
+        self.commit = self.member("commit.sh", COMMIT_MEMBER)
+
+    def commit_under_the_runner(self, jobs: str) -> None:
+        result = self.run_suite("--jobs", jobs, self.commit,
+                                env={"SUITE_RUNNER_TEST_TRACE": str(self.trace)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        events = self.trace_events()
+        self.assertTrue(any(event["event"] == "start" and "commit" in event["argv"]
+                            for event in events), events)
+        self.assertEqual([event["argv"] for event in events
+                          if "maintenance" in event.get("argv", [])], [])
+
+    def test_a_commit_in_serial_mode_starts_no_maintenance_child(self):
+        self.commit_under_the_runner("1")
+
+    def test_a_commit_in_parallel_mode_starts_no_maintenance_child(self):
+        self.commit_under_the_runner("2")
+
+    def test_the_same_commit_outside_the_runner_starts_a_maintenance_child(self):
+        # maintenance.autoDetach=false runs the maintenance child in the
+        # foreground, so it has finished when the commit returns.
+        environment = {**self.environment(1, 1, {"SUITE_RUNNER_TEST_TRACE": str(self.trace)}),
+                       "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "maintenance.autoDetach",
+                       "GIT_CONFIG_VALUE_0": "false"}
+        result = subprocess.run(
+            ["bash", self.commit], cwd=self.work, env=environment,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+            check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        children = [event["argv"] for event in self.trace_events()
+                    if event["event"] == "child_start"]
+        self.assertTrue(any(argv[:4] == ["git", "maintenance", "run", "--auto"]
+                            for argv in children), children)
 
 
 class RecipeWiringTest(unittest.TestCase):

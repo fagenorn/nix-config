@@ -63,6 +63,9 @@ in
       executable = true;
     };
 
+    # The artifact-budget module. The `artifact-budget` wrapper runs it, and
+    # `workflow-state` loads the store file this link resolves to into its own
+    # process (issue 498 D2, D7).
     ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
     ".agents/lib/python/workflow_delivery.py".source = ./scripts/workflow_delivery.py;
     ".agents/lib/python/workflow_delivery_wire.py".source = ./scripts/workflow_delivery_wire.py;

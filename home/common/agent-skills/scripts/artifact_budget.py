@@ -1220,9 +1220,9 @@ def _validate_legacy_result_slot(
         raise ArtifactBudgetError("legacy result issue mismatch")
 
 
-def _input_bytes(path: str, wire_max: int) -> bytes:
+def _input_bytes(path: str, wire_max: int, read_stdin: Callable[[int], bytes]) -> bytes:
     if path == "-":
-        raw = sys.stdin.buffer.read(wire_max + 1)
+        raw = read_stdin(wire_max + 1)
         if len(raw) > wire_max:
             raise ArtifactBudgetError(f"input exceeds the {wire_max}-byte wire bound")
         return raw
@@ -1258,18 +1258,36 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _refuse(label: str, exc: BaseException) -> int:
-    """Write the one refusal line, `artifact-budget: <label>: <reason>`, and return 2.
+@dataclass(frozen=True)
+class Outcome:
+    """What one artifact-budget run produces: its exit code, its stdout bytes and
+    its stderr text (issue 498 D3)."""
+
+    exit_code: int
+    stdout: bytes
+    stderr: str
+
+
+def _refuse(label: str, exc: BaseException) -> Outcome:
+    """The one refusal: exit 2, no stdout, and the stderr line
+    `artifact-budget: <label>: <reason>`.
 
     The reason is the error's message with each whitespace run collapsed to one
     space, or the error's class name when the message is empty (issue 472 D1, D2).
     """
     reason = " ".join(str(exc).split()) or type(exc).__name__
-    sys.stderr.write(f"artifact-budget: {label}: {reason}\n")
-    return 2
+    return Outcome(2, b"", f"artifact-budget: {label}: {reason}\n")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def invoke(argv: Sequence[str], read_stdin: Callable[[int], bytes]) -> Outcome:
+    """Run one artifact-budget command and return its outcome instead of writing
+    it (issue 498 D3).
+
+    `argv` excludes the program name. `read_stdin(size)` is called once, and only
+    for `--input -`. Nothing is written to a process stream and nothing exits,
+    except argparse's own `-h`/`--help`. Only an `ArtifactBudgetError` becomes a
+    refusal; any other exception propagates.
+    """
     try:
         args = _parser().parse_args(argv)
         try:
@@ -1285,20 +1303,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _refuse(f"invalid {label}", exc)
         limits, notes_max, report_wire_max, response_wire_max = loaded
         if args.command == "describe":
-            sys.stdout.buffer.write(_canonical({"schema_version": 1,
+            return Outcome(0, _canonical({"schema_version": 1,
                 "kind": "artifact-budget-description", "artifact_kind": args.kind,
                 "limits": vars(limits[args.kind]), "report_wire_max_bytes": report_wire_max,
-                "policy_sha256": identity}))
-            return 0
+                "policy_sha256": identity}), "")
         if args.command == "check":
             result = _check_artifact(args.kind, args.root, limits)
-            sys.stdout.buffer.write(_canonical(result.to_dict()))
-            return 0 if result.status == "within_budget" else 3
+            return Outcome(0 if result.status == "within_budget" else 3,
+                           _canonical(result.to_dict()), "")
         wire_max = (response_wire_max if args.command == "validate-report"
                     and args.boundary in {"workflow-response", "ship-handoff"}
                     else report_wire_max)
         try:
-            raw = _input_bytes(args.input, wire_max)
+            raw = _input_bytes(args.input, wire_max, read_stdin)
         except InputReadError as exc:
             label = "report" if args.command == "validate-report" else "detail input"
             return _refuse(f"cannot read {label}", exc)
@@ -1336,10 +1353,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ArtifactBudgetError as exc:
             label = "report" if args.command == "validate-report" else "detail input"
             return _refuse(f"invalid {label}", exc)
-        sys.stdout.buffer.write(output)
-        return 0
+        return Outcome(0, output, "")
     except ArtifactBudgetError as exc:
         return _refuse("invalid input", exc)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """The CLI: `invoke` over this process's arguments and binary stdin, with the
+    outcome written to stdout and stderr."""
+    outcome = invoke(sys.argv[1:] if argv is None else argv,
+                     lambda size: sys.stdin.buffer.read(size))
+    sys.stdout.buffer.write(outcome.stdout)
+    sys.stderr.write(outcome.stderr)
+    return outcome.exit_code
 
 
 if __name__ == "__main__":

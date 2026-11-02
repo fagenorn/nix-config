@@ -29,7 +29,7 @@ DRY, cross-task integration); same output contract, reports kept separate.
 
 When the correctness axis came through `codex-collaboration`'s `diff-review`, it returns a scope
 alongside its verdict: `full` | `scoped: <N> of <M> product files` | `unmeasured`. Record that scope
-in the PR body beside the correctness verdict and Phase 5's `review range:` record.
+in the Delivery record beside the correctness verdict and Phase 5's `review range:` record.
 
 ## Delta route
 
@@ -42,7 +42,7 @@ without breaking a promise R already kept, with Phase 1's scope-creep categories
 addition) and every review hint path passed in the retained snapshot as its checklist. Third, a
 stale-prose audit limited to files the delta touches.
 
-**Range record.** Phase 5 records its route in the PR body as
+**Range record.** Phase 5 records its route in the Delivery record as
 `review range: delta <review_base7>..<head7> since final-review <R7> (<L> lines, <F> files)`,
 `review range: empty since final-review <R7>`, or `review range: full (<reason>)`,
 where `<reason>` is `review-range`'s `reason`, `review-range unavailable`, or the

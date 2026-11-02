@@ -299,6 +299,47 @@ SHIP_ISSUE_MACHINE_TEXT = {
     ),
 }
 
+# The ship-issue PR body template (#494 D2, D3, D9): the one fenced
+# `gh pr create` whose double-quoted body the agent renders verbatim. Its
+# markup is pinned in reading order; no placeholder sentence is.
+PR_BODY_TEMPLATE_RE = re.compile(r'```\ngh pr create [^\n]*--body "(.*?)"\n```', re.S)
+PR_BODY_MARKUP = (
+    "## Why", "## What changes", "## Evidence", "## Merge danger",
+    "<details><summary>Delivery record</summary>", "Spec: ", "plan: ", "## Acceptance",
+    "Acceptance state: <effective acceptance state>",
+    "Acceptance record: <record-path or none>", "<acceptance table>",
+    "<review and verification notes>", "</details>", "Closes #<num>",
+)
+# The blank lines the template keeps around its HTML: GitHub renders Markdown
+# inside `<details>` only after a blank line, and resumes it after `</details>`
+# only after another.
+PR_BODY_BLANK_LINE_BOUNDARIES = (
+    "<details><summary>Delivery record</summary>\n\n", "</details>\n\n",
+)
+PR_BODY_ONCE = (
+    "Acceptance state: <effective acceptance state>",
+    "Acceptance record: <record-path or none>", "<acceptance table>", "Closes #<num>",
+)
+# The printable characters the lifecycle guard refuses in a pr-create body.
+PR_BODY_UNSAFE = ('"', "$", "`", "\\")
+INLINE_FALLBACK_MARKUP = (
+    "`## Why`", "`## What changes`", "`## Evidence`", "`## Merge danger`", "`<details>`",
+    "Delivery record",
+)
+
+# Each closed note line and the document that sends it to the PR body
+# (#494 D6, D9): the paragraph or list item holding it names the Delivery record.
+NOTE_DESTINATION_ANCHORS = {
+    SHIP_ISSUE: ("`verification skipped: <id> (<reason>)`", "`verification reused: tree <id>`"),
+    SHIP_ISSUE_REVIEW: ("`review range: delta", "`unmeasured`"),
+}
+
+
+def note_blocks(text):
+    """Paragraphs and list items: the unit a note's destination sentence lives in."""
+    return re.split(r"\n\s*\n|\n(?=\d+\. |- )", text)
+
+
 # "sibling <=2 words> candidate" — the in-working-tree prescription being
 # removed. The bounded gap keeps it off handoff's legitimate
 # "candidate ... sibling temporary" sentences, where the words appear in the
@@ -1585,6 +1626,37 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 with self.subTest(path=path.name, item=item):
                     self.assertIn(item, text)
 
+    def test_ship_issue_pr_body_reads_first_then_records(self):
+        bodies = PR_BODY_TEMPLATE_RE.findall(self.ship_issue)
+        self.assertEqual(len(bodies), 1)
+        body = bodies[0]
+        self.assert_ordered(body, *PR_BODY_MARKUP)
+        for boundary in PR_BODY_BLANK_LINE_BOUNDARIES:
+            with self.subTest(boundary=boundary):
+                self.assertIn(boundary, body)
+        self.assertNotIn("## Summary", body)
+        for line in PR_BODY_ONCE:
+            with self.subTest(line=line):
+                self.assertEqual(body.count(line), 1)
+        for character in PR_BODY_UNSAFE:
+            with self.subTest(character=character):
+                self.assertNotIn(character, body)
+
+    def test_inline_fallback_names_the_readable_body(self):
+        fallback = self.section(self.ship_handoff, "## Inline fallback (no ship-issue skill)",
+                                "## Remainder owner prompt")
+        self.assert_ordered(normalized(fallback), *INLINE_FALLBACK_MARKUP)
+
+    def test_ship_issue_notes_go_to_the_delivery_record(self):
+        for path, anchors in NOTE_DESTINATION_ANCHORS.items():
+            blocks = note_blocks(path.read_text(encoding="utf-8"))
+            for anchor in anchors:
+                with self.subTest(document=path.name, anchor=anchor):
+                    holders = [block for block in blocks if anchor in block]
+                    self.assertEqual(len(holders), 1)
+                    self.assertIn("Delivery record", normalized(holders[0]))
+                    self.assertNotIn("Summary", holders[0])
+
     def test_sdd_documents_carry_their_machine_text(self):
         for path, items in SDD_MACHINE_TEXT.items():
             text = normalized(path.read_text(encoding="utf-8"))
@@ -2791,6 +2863,30 @@ class ToIssuesCriterionLineContractsTest(unittest.TestCase):
         self.assertIn(
             "`- [ ] [code|evidence|human] <observable outcome> — measured: <where>`",
             normalized(self.text))
+
+
+class ToIssuesStandaloneBodyContractsTest(unittest.TestCase):
+    """#495 AC1: the to-issues template puts Problem before What to build, and
+    the skill states the first-use and stranger-read rules (D3, D4, D6)."""
+
+    TEMPLATE_HEADINGS = ["Parent", "Problem", "What to build", "Decisions",
+                         "Acceptance criteria", "Blocked by"]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = ToIssuesCriterionLineContractsTest.TO_ISSUES.read_text(encoding="utf-8")
+
+    def test_the_template_sections_put_the_problem_before_what_to_build(self):
+        template = self.text[self.text.index("<issue-template>"):
+                             self.text.index("</issue-template>")]
+        headings = [line[3:] for line in template.splitlines() if line.startswith("## ")]
+        self.assertEqual(headings, self.TEMPLATE_HEADINGS)
+
+    def test_the_first_use_and_stranger_read_rules_are_stated(self):
+        text = normalized(self.text)
+        for token in ("at first use", "reread each body"):
+            with self.subTest(token=token):
+                self.assertIn(token, text)
 
 
 class AcceptanceMapContractsTest(unittest.TestCase):
