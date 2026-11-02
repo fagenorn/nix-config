@@ -122,10 +122,13 @@ the stall bound like any other.
 
 Every attempt gains `"verification_blocker": "sha256:<64 hex>" | null`. The suspension
 defaults that a new attempt is created with gain it as `null`. Delivery remainders do not
-change.
+change. An attempt is *parked on* a blocker while it is suspended on `verification` with
+its pointer naming that record. The suspension, its custody parking and `park` below are
+the same event at three levels.
 
-**Record rules** (`validate_blockers`, run by `validate_state` at 11 on every read and
-write):
+**Record rules** (`validate_blockers(blockers, pointers) -> None`, where `pointers` maps
+every attempt of the run, `(issue, attempt)`, to its pointer; run by `validate_state` at 11
+on every read and write):
 
 - R1. The map is an object. Each key equals its record's `id`. The `id` equals
   `blocker_id` of the failure rebuilt from the record's `repository`, `command`,
@@ -187,11 +190,12 @@ uses the attempt and state member sets without the two new members.
      `stopped(stalled)` and the reply is `terminal`, as today. No record is created or
      touched.
    - Otherwise `park` runs and the attempt's `verification_blocker` is set, in the same
-     write.
+     write. Suspensions serialize on the ledger lock, so concurrent owners with equal
+     failures join one record.
    - `transact` validates schema 11 and commits before anything is printed.
 3. **Reply.** The existing interface-2 `suspended` envelope with `blocked_on`
    `verification`. It is built by one shared `suspended_reply`, which the direct owner uses
-   too (D7).
+   too (D7). The closed envelope does not name the blocker; the ledger does.
 
 Only the failure's identity members are persisted: no `kind`, no version and no input
 bytes. The record therefore carries the selected typed facts and nothing else.
@@ -289,11 +293,16 @@ snapshots, never helper call counts (D12).
     `unknown_schema` with an unchanged tree through `check-launch`, `suspend`, `control`,
     `init-run`, `direct-owner` and `migrate`. `migrate` reports a `refused` row with exit
     0, with and without `--apply`.
-- **Fixtures**:
+- **Fixtures** (D13):
   - schema numbers move from 10 to 11 and the unknown-schema probes from 11 to 12 in
-    `test_workflow_state`, `test_attempt_migration`, `test_control_cutover` and the
-    agent-skills `test_attempt_custody`;
-  - literal schema-10 states and attempts gain the two members.
+    `test_workflow_state`, `test_attempt_migration`, `test_control_cutover`, the
+    agent-skills `test_attempt_custody`, `test_delivery_workflow`, `test_host_admission`
+    and `test_delivery_sealing`;
+  - literal schema-10 states, attempts and bound-ledger expectations (such as
+    `test_delivery_workflow`'s `assert_bound`) gain the two members;
+  - every builder that relabels a head state as an older schema (`_as_legacy`, which
+    `test_control_cutover` inherits, `test_delivery_workflow`'s `legacy`, and direct
+    relabels such as a document set to schema 8) drops both new members below 11.
 - **Integration**: the new module is listed in `just agent-workflow-tests` after
   `test_attempt_custody.py`. `just build`.
 
@@ -308,7 +317,8 @@ snapshots, never helper call counts (D12).
   fails loudly on the `suspended` kind, as it does on any unknown kind.
 - Verification blockers on delivery remainders, and any change to the adapter or to the
   secret-shape rule.
-- Cross-record invariants beyond R5, such as one repository per run.
+- Cross-record invariants beyond R5, such as one repository per run, and any blocker store
+  shared across runs: equal failures in two runs get two records with one id.
 - Live ledgers, retained attempts, host activation (`just switch`) and any reverse
   migration.
 
@@ -328,3 +338,4 @@ snapshots, never helper call counts (D12).
 | D10 | The `suspended` reply's literal cause set gains `verification`, and a test pins it to `OWNER_BLOCKED_ON_VALUES`. No interface version moves. | `delivery_model` imports no `agent_tools`; #473 D9 (reply additions keep version 2); #473 D11 pin precedent. | Importing `attempt_custody` into `delivery_model`. Bumping interface 2 for a value added to a closed list. |
 | D11 | Docs change only where this change makes them false or incomplete. In the agent-skills README § Lifecycle helpers: the schema-11 step, the cause in the vocabulary list, the flag, and the known limitation that nothing resumes it before c3. In `python/README.md`: the pure module's added rules. | The Bar: re-point living documents in the same change, and known limitations belong in docs; c4 owns the protocol docs. | Full protocol docs now (c4). Leaving the closed vocabulary list stale. |
 | D12 | Test seams: pure tables by import; vocabulary pins; CLI behaviour in a new `test_verification_suspension` module over `LifecycleHarness`, including the base helper and migration; schema-number and fixture updates in the four existing CLI modules. | agent-helpers rule 5; The Bar "Tests that can fail"; `LifecycleHarness` reuse precedent. | Call-count assertions. A separate migration module, which splits one schema's behaviour across files. |
+| D13 | Refines D12 (grill): the schema bump reaches every test that pins the current number, compares a bound ledger literally or relabels a head state as older, including three modules outside the triage paths (`test_delivery_workflow`, `test_host_admission`, `test_delivery_sealing`). Legacy builders drop both new members below 11. | Code reads during the grill (`_as_legacy`, `legacy`, `assert_bound`); D9's strict step refuses a present member. | Teaching the 10 → 11 step to tolerate present members so the fixtures need no change, which hides a corrupt ledger (D9). |
