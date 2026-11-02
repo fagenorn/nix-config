@@ -412,7 +412,7 @@ SHARED_POLICY_ENTRIES = {
     "grill-with-docs/SKILL.md": ("bindings.paths.context",),
     "research/SKILL.md": ("bindings.paths.artifacts.specs",),
     "ship-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.review.code", "bindings.workflow.verification"),
-    "ship-release/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.deploy"),
+    "ship-release/SKILL.md": ("bindings.tracker", "bindings.vcs"),
     "to-issues/SKILL.md": ("bindings.tracker", "bindings.paths"),
     "wayfind/SKILL.md": ("bindings.tracker",),
     "worktrees/SKILL.md": ("bindings.vcs",),
