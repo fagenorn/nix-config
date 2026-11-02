@@ -360,5 +360,32 @@ class TransactionCommandTest(ReleaseCommandCase):
         self.assertEqual(theirs.returncode, 2)
 
 
+class LegacyCommandTest(TransactionCommandTest):
+    """Cutover refuses while a legacy release is in flight (#128 AC6)."""
+
+    def legacy(self, text):
+        path = self.root / ".superpowers/workflows/ship-release/state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_in_flight_and_unreadable_refuse_and_touch_nothing(self):
+        in_flight = json.dumps({"headSha": "1" * 40, "pr": 7, "prUrl": "u", "mergeSha": None,
+                                "tag": None, "releaseUrl": None, "deployState": "pending"})
+        for text in (in_flight, "not json"):
+            with self.subTest(text=text[:10]):
+                path = self.legacy(text)
+                for argv, cwd in ((["preview", *self.candidate()], None),
+                                  (["run", *self.candidate()], self.root)):
+                    code, document, err = self.run_release("transaction", *argv, cwd=cwd)
+                    self.assertEqual((code, document["error"]["code"]),
+                                     (3, "legacy_release_in_flight"), err)
+                self.assertEqual(path.read_text(encoding="utf-8"), text)
+                code, status, _ = self.run_release("transaction", "status")
+                self.assertEqual(code, 0)
+                self.assertIn(status["legacy"]["class"], ("in_flight", "unreadable"))
+        self.assertFalse(self.store_exists())
+
+
 if __name__ == "__main__":
     unittest.main()

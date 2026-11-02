@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_tools import release_adapter, release_profile, release_verification
+from agent_tools import release_adapter, release_cutover, release_profile, release_verification
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_core import (
     CreationConflict, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
@@ -278,6 +278,13 @@ class Driver:
 
     def _plan(self, candidate: Mapping[str, str] | None) -> "_Plan":
         """What `preview` shows and `run` re-derives before it writes anything (§5)."""
+        legacy = release_cutover.classify(self.project.root)
+        if legacy["class"] in ("in_flight", "unreadable"):
+            raise Refusal(
+                "legacy_release_in_flight",
+                f"the previous ship-release left state that is {legacy['class']} at "
+                f"{legacy['path']}: finish it with the previous ship-release, or remove the "
+                "file once the user confirms it was abandoned", "release.legacy.finish")
         shape = self.shape_refusal()
         if shape is not None:
             raise shape
@@ -366,15 +373,19 @@ class Driver:
         if missing:
             raise Refusal("confirmation_required", "confirm: " + ", ".join(missing))
         router = _Router(self.compiled, self.registry)
+        legacy = None
         if plan.transaction is None:
             store = self.store(create=True)
+            if release_cutover.classify(self.project.root)["class"] == "completed":
+                release_cutover.retire(self.project.root)
+                legacy = "deleted"
             transaction = self._create(store, plan)
         else:
             store, transaction = self.store(), plan.transaction
         custody, transaction = self._acquire(store, transaction)
         acquisition = _openings(transaction)
         drive = _Drive(self, plan, store, router, custody, acquisition, transaction)
-        return drive.run(supplied)
+        return {**drive.run(supplied), "legacy": legacy}
 
     def _create(self, store: TransactionStore, plan: _Plan) -> Transaction:
         inputs = release_profile.bind_candidate(self.compiled, dict(plan.candidate))
@@ -417,6 +428,7 @@ class Driver:
         return {"schema_version": SCHEMA_VERSION,
                 "profile": {"id": self.profile_id, "digest": self.compiled["digest"]},
                 "shape": None if shape is None else shape.as_object(),
+                "legacy": release_cutover.classify(self.project.root),
                 "release": self._release(*found[-1]) if found else None}
 
     def _release(self, ordinal: int, transaction: Transaction) -> dict[str, Any]:
