@@ -222,6 +222,28 @@ FORM_TABLE = {
 # The value `--match-head-commit` takes: a full commit SHA (issue 402 D10), which
 # must also be the PR's head commit (issue 476 D3).
 HEAD_COMMIT = re.compile(r"[0-9a-f]{40}")
+# GitHub's answer to a branch-protection read on a plan that cannot protect the
+# branch (issue 552 D2): `gh api` exits non-zero and writes this body to stdout.
+PLAN_GATED_STATUS = "403"
+PLAN_GATED_MESSAGE = (
+    "Upgrade to GitHub Pro or make this repository public to enable this feature."
+)
+# The one home of a green check-rollup entry (issue 552 D6): the plan-gated floor
+# reads it, and the release arm's jq predicate is rendered from it.
+GREEN_CHECK_RUN_STATUS = "COMPLETED"
+GREEN_CHECK_RUN_CONCLUSIONS = ("SUCCESS", "SKIPPED", "NEUTRAL")
+GREEN_STATUS_CONTEXT_STATE = "SUCCESS"
+RELEASE_ROLLUP_PREDICATE = (
+    '(.statusCheckRollup | type) == "array" '
+    "and (.statusCheckRollup | length) > 0 "
+    "and all(.statusCheckRollup[]; "
+    f'(.__typename == "CheckRun" and .status == "{GREEN_CHECK_RUN_STATUS}" and ('
+    + " or ".join(
+        f'.conclusion == "{conclusion}"' for conclusion in GREEN_CHECK_RUN_CONCLUSIONS
+    )
+    + ")) "
+    f'or (.__typename == "StatusContext" and .state == "{GREEN_STATUS_CONTEXT_STATE}"))'
+)
 
 Literal = namedtuple("Literal", "word")
 Slot = namedtuple("Slot", "name quoted prefix")
@@ -1440,6 +1462,13 @@ class Context:
             self.derived_row["integration_branch"] != self.derived_row["default_branch"]
         ):
             self.integration_bases[self.repository] = self.derived_row["integration_branch"]
+        # A confirmed row's declared checks are the plan-gated merge floor's input
+        # (issue 552 D2); a row with a problem, a literal row and no row declare none.
+        self.required_checks = (
+            tuple(self.derived_row["required_checks"])
+            if self.derived_row is not None and self.row_problem is None
+            else ()
+        )
 
     @property
     def timeout(self):
@@ -2436,8 +2465,10 @@ def validate_merge(text, context, compiled):
     # protection demand: it is the development-pace branch, and its CI
     # gate lives in the shipping flow's wait-for-checks (nodo's CI is
     # path-filtered, so no required check could report on every PR shape
-    # anyway). The default branch keeps the full demand — even if it is
-    # ever also declared as the integration base.
+    # anyway). The default branch keeps the protection demand — even if it is
+    # ever also declared as the integration base — and only a plan-gated
+    # protection answer, for a confirmed row that declares required checks, is
+    # judged by the merge floor instead (issue 552 D2).
     if (
         integration_base is not None
         and base == integration_base
@@ -2457,6 +2488,11 @@ def validate_merge(text, context, compiled):
     except subprocess.TimeoutExpired:
         return block("protection lookup timed out")
     if protection_lookup.returncode != 0:
+        # Issue 552 D2: only the plan-gated answer, for a row that declares checks, is
+        # judged by the floor; every other failed read keeps its refusal.
+        if context.required_checks and plan_gated_answer(protection_lookup.stdout):
+            problem = merge_floor_problem(pr_facts, base, head_commit, context.required_checks)
+            return 0 if problem is None else refuse("merge", problem)
         return block_child_failure("protection lookup failed", protection_lookup)
 
     try:
@@ -2506,6 +2542,89 @@ def mergeability_problem(pr_facts, base, head_commit):
     return None
 
 
+def plan_gated_answer(stdout):
+    """Whether a failed protection read's stdout is GitHub's plan-gated answer (issue
+    552 D2): a JSON object whose status is PLAN_GATED_STATUS and whose message is
+    PLAN_GATED_MESSAGE."""
+    try:
+        answer = json.loads(stdout)
+    except ValueError:
+        return False
+    return (
+        isinstance(answer, dict)
+        and answer.get("status") == PLAN_GATED_STATUS
+        and answer.get("message") == PLAN_GATED_MESSAGE
+    )
+
+
+def rollup_entry_name(entry):
+    """The check a rollup entry names: a CheckRun's name or a StatusContext's context
+    when it is a string, else None, which makes the rollup unreadable."""
+    if not isinstance(entry, dict):
+        return None
+    typename = entry.get("__typename")
+    key = {"CheckRun": "name", "StatusContext": "context"}.get(typename)
+    name = entry.get(key) if key is not None else None
+    return name if isinstance(name, str) else None
+
+
+def rollup_entry_green(entry):
+    """Whether a rollup entry is green by the one rule the release arm's predicate is
+    rendered from (issue 552 D6)."""
+    if entry.get("__typename") == "CheckRun":
+        return (
+            entry.get("status") == GREEN_CHECK_RUN_STATUS
+            and entry.get("conclusion") in GREEN_CHECK_RUN_CONCLUSIONS
+        )
+    return (
+        entry.get("__typename") == "StatusContext"
+        and entry.get("state") == GREEN_STATUS_CONTEXT_STATE
+    )
+
+
+def observed_state(entry):
+    """A non-green entry as a refusal shows it: CheckRun <status>/<conclusion> or
+    StatusContext <state>, each fact escaped when a string and none otherwise (issue
+    552 D12)."""
+
+    def fact(key):
+        value = entry.get(key)
+        return shown_value(value) if isinstance(value, str) else "none"
+
+    if entry.get("__typename") == "CheckRun":
+        return f"CheckRun {fact('status')}/{fact('conclusion')}"
+    return f"StatusContext {fact('state')}"
+
+
+def merge_floor_problem(pr_facts, base, head_commit, required_checks):
+    """Why the plan-gated floor refuses this feature merge, or None (issue 552 D3,
+    D11).
+
+    It runs only after the protection read of `base` gave the plan-gated answer for
+    a confirmed row declaring `required_checks`, and starts no child. It judges in
+    order the `--match-head-commit` flag (`head_commit`, None without it, which
+    `mergeability_problem` has already held to `headRefOid`), a readable rollup and
+    each declared check in row order.
+    """
+    unprotectable = f"{shown_value(base)} cannot be protected on this repository's plan"
+    if head_commit is None:
+        return (f"{unprotectable}, so the merge must carry --match-head-commit "
+                "with the reviewed PR head")
+    rollup = pr_facts.get("statusCheckRollup")
+    if not isinstance(rollup, list) or any(rollup_entry_name(entry) is None for entry in rollup):
+        return "cannot read the PR check rollup"
+    for check in required_checks:
+        naming = [entry for entry in rollup if rollup_entry_name(entry) == check]
+        if not naming:
+            return (f"{unprotectable}, and the declared required check {shown_value(check)} "
+                    "is missing from the PR's check rollup")
+        for entry in naming:
+            if not rollup_entry_green(entry):
+                return (f"{unprotectable}, and the declared required check "
+                        f"{shown_value(check)} is not green ({observed_state(entry)})")
+    return None
+
+
 def validate_release_merge(pr_facts, base, integration_base, head_commit, context, compiled):
     """The release arm: the integration branch promoted into the default branch.
 
@@ -2539,13 +2658,7 @@ def validate_release_merge(pr_facts, base, integration_base, head_commit, contex
             [
                 context.jq_bin,
                 "-e",
-                '(.statusCheckRollup | type) == "array" '
-                "and (.statusCheckRollup | length) > 0 "
-                "and all(.statusCheckRollup[]; "
-                '(.__typename == "CheckRun" and .status == "COMPLETED" '
-                'and (.conclusion == "SUCCESS" or .conclusion == "SKIPPED" '
-                'or .conclusion == "NEUTRAL")) '
-                'or (.__typename == "StatusContext" and .state == "SUCCESS"))',
+                RELEASE_ROLLUP_PREDICATE,
             ],
             input=json.dumps(pr_facts),
             capture_output=True,

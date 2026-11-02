@@ -38,11 +38,21 @@ EXPECTED_ALLOW = [
 # Stand-in for `gh`. Answers the two lookups the guard makes for any slug and
 # any protected branch, so the merge path can be exercised in every fixture
 # repository. FAKE_<STAGE>_MODE injects failures; FAKE_<STAGE>_JSON overrides
-# the payload.
+# the payload. Mode `http_error` replays a failed `gh api` read as gh reports
+# it (issue 552): exit 1, the response body on stdout (FAKE_<STAGE>_JSON, else
+# GitHub's plan-gated protection answer) and `gh: <message> (HTTP <status>)` on
+# stderr, or `gh: HTTP 403` when the body holds no string message and status.
 FAKE_GH_SCRIPT = '''
+import json
 import os
 import sys
 import time
+
+PLAN_GATED_BODY = (
+    '{"message":"Upgrade to GitHub Pro or make this repository public to enable this '
+    'feature.","documentation_url":"https://docs.github.com/rest/branches/'
+    'branch-protection#get-branch-protection","status":"403"}'
+)
 
 # The guard must scrub the gh-recognised token variables from its lookups (an
 # ambient token, which gh would prefer, may be narrower than the keyring
@@ -90,6 +100,16 @@ if mode == "timeout":
 if mode == "invalid":
     print("{")
     raise SystemExit(0)
+if mode == "http_error":
+    body = os.environ.get("FAKE_" + stage.upper() + "_JSON", PLAN_GATED_BODY)
+    try:
+        answer = json.loads(body)
+        line = "gh: " + answer["message"] + " (HTTP " + answer["status"] + ")"
+    except (ValueError, KeyError, TypeError):
+        line = "gh: HTTP 403"
+    print(body)
+    print(line, file=sys.stderr)
+    raise SystemExit(1)
 
 if stage == "pr":
     default = (
@@ -1396,6 +1416,198 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(head=label, pin="none"):
                 result = self.run_guard(bare, cwd=repo, env=env(**change))
                 self.assertEqual(0, result.returncode, result.stderr)
+
+    # ------------------------------------------------------------------
+    # The plan-gated merge floor (issue 552): a feature merge into the default
+    # branch of a repository whose forge cannot protect it is judged on the PR's
+    # own rollup against the checks its confirmed derived row declares.
+    # ------------------------------------------------------------------
+
+    PLAN_GATED_MESSAGE = ("Upgrade to GitHub Pro or make this repository public to enable "
+                          "this feature.")
+    FLOOR = "acme/floor"
+    STAGED = "acme/staged"
+    BUILD = "CI / build (unit + forced)"
+    LINT = "lint"
+    FLOOR_ROWS = {
+        FLOOR: {"default_branch": "main", "integration_branch": "main",
+                "required_checks": [BUILD, LINT], "evidence": {}},
+        STAGED: {"default_branch": "main", "integration_branch": "dev",
+                 "required_checks": [BUILD, LINT], "evidence": {}},
+    }
+    UNPROTECTED = ("lifecycle guard: unsafe merge: main cannot be protected on this "
+                   "repository's plan")
+    LOOKUP_FAILED = "lifecycle guard: protection lookup failed: stderr="
+
+    @staticmethod
+    def check_run(name, status="COMPLETED", conclusion="SUCCESS"):
+        return {"__typename": "CheckRun", "name": name, "status": status,
+                "conclusion": conclusion}
+
+    @staticmethod
+    def status_context(context, state="SUCCESS"):
+        return {"__typename": "StatusContext", "context": context, "state": state}
+
+    def floor_merge(self, rollup, slug=None, base="main", pin=True, rows=None, env=None,
+                    guard_args=()):
+        """A feature merge of PR 9 into `base` of `slug` (FLOOR) whose rollup is `rollup`
+        (ABSENT drops the member), judged by the rows of `rows` (FLOOR_ROWS) as compiled and
+        confirmed, against the plan-gated protection answer unless `env` replaces it."""
+        slug = slug or self.FLOOR
+        rows = self.FLOOR_ROWS if rows is None else rows
+        policy = self.write_policy(derivation={}, derived_repositories=rows)
+        facts = {"state": "OPEN", "baseRefName": base, "headRefName": "issue-9-topic",
+                 "headRefOid": self.HEAD_SHA, "mergeStateStatus": "CLEAN",
+                 "url": f"https://github.com/{slug}/pull/9", "statusCheckRollup": rollup}
+        if rollup is ABSENT:
+            del facts["statusCheckRollup"]
+        pinned = f" --match-head-commit {self.HEAD_SHA}" if pin else ""
+        return self.run_guard(
+            f"gh pr merge 9 --repo {slug} --merge{pinned} --delete-branch",
+            cwd=self.make_repo(f"git@github.com:{slug}.git"),
+            guard_args=("--gh-bin", str(self.fake_gh), "--policy", str(policy), *guard_args),
+            env={**self.rows_env(rows), "FAKE_PROTECTION_MODE": "http_error",
+                 "FAKE_PR_JSON": json.dumps(facts), **(env or {})})
+
+    def test_the_floor_allows_a_merge_whose_declared_checks_are_green(self):
+        """Issue 552 D2, D3: every declared check named and green allows the merge;
+        SKIPPED and NEUTRAL count, so does a green StatusContext, and an entry naming no
+        declared check is ignored."""
+        for rollup in (
+            [self.check_run(self.BUILD), self.check_run(self.LINT)],
+            [self.check_run(self.BUILD, conclusion="SKIPPED"), self.status_context(self.LINT)],
+            [self.check_run("optional", conclusion="FAILURE"),
+             self.check_run(self.BUILD, conclusion="NEUTRAL"),
+             self.status_context("deploy", state="PENDING"), self.check_run(self.LINT)],
+        ):
+            with self.subTest(rollup=rollup):
+                result = self.floor_merge(rollup)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_the_floor_refuses_naming_its_first_failure(self):
+        """Issue 552 D3, D7, D11, D12: the head flag, then a readable rollup, then each
+        declared check in row order; each refusal names only its problem."""
+        build, lint = self.check_run(self.BUILD), self.status_context(self.LINT)
+        missing = f"{self.UNPROTECTED}, and the declared required check {self.BUILD} is missing "
+        not_green = f"{self.UNPROTECTED}, and the declared required check {{}} is not green ({{}})"
+        unreadable = "lifecycle guard: unsafe merge: cannot read the PR check rollup"
+        cases = (
+            ("no head flag", [build, lint], False, f"{self.UNPROTECTED}, so the merge must "
+             "carry --match-head-commit with the reviewed PR head"),
+            ("missing", [lint], True, missing + "from the PR's check rollup"),
+            ("empty", [], True, missing + "from the PR's check rollup"),
+            ("pending", [self.check_run(self.BUILD, "IN_PROGRESS", None), lint], True,
+             not_green.format(self.BUILD, "CheckRun IN_PROGRESS/none")),
+            ("no conclusion", [{"__typename": "CheckRun", "name": self.BUILD,
+                                "status": "QUEUED"}, lint], True,
+             not_green.format(self.BUILD, "CheckRun QUEUED/none")),
+            ("failed", [self.check_run(self.BUILD, conclusion="FAILURE"), lint], True,
+             not_green.format(self.BUILD, "CheckRun COMPLETED/FAILURE")),
+            ("pending status", [build, self.status_context(self.LINT, "PENDING")], True,
+             not_green.format(self.LINT, "StatusContext PENDING")),
+            ("red duplicate", [build, self.check_run(self.BUILD, conclusion="CANCELLED"), lint],
+             True, not_green.format(self.BUILD, "CheckRun COMPLETED/CANCELLED")),
+            ("row order", [self.status_context(self.LINT, "FAILURE"),
+                           self.check_run(self.BUILD, conclusion="FAILURE")], True,
+             not_green.format(self.BUILD, "CheckRun COMPLETED/FAILURE")),
+            ("escaped", [self.check_run(self.BUILD, "IN\nPROGRESS", None), lint], True,
+             not_green.format(self.BUILD, "CheckRun IN\\nPROGRESS/none")),
+            ("absent", ABSENT, True, unreadable),
+            ("null", None, True, unreadable),
+            ("a string", "green", True, unreadable),
+            ("an entry that is not an object", [build, self.LINT], True, unreadable),
+            ("a CheckRun without a name", [build, lint, {"__typename": "CheckRun",
+                                                         "status": "COMPLETED",
+                                                         "conclusion": "SUCCESS"}], True,
+             unreadable),
+            ("a StatusContext without a context", [build, lint, {
+                "__typename": "StatusContext", "state": "SUCCESS"}], True, unreadable),
+            ("a name that is not a string", [build, lint, self.check_run(7)], True, unreadable),
+            ("another typename", [build, lint, {"__typename": "Commit", "name": self.LINT}],
+             True, unreadable),
+        )
+        for name, rollup, pin, line in cases:
+            with self.subTest(case=name):
+                self.assertEqual(line, self.refusal_line(self.floor_merge(rollup, pin=pin)))
+
+    def test_readable_protection_governs_a_repository_with_declared_checks(self):
+        """Issue 552 D2: a protection read that exits 0 runs today's predicate, and the
+        declared checks are not consulted."""
+        allowed = self.floor_merge([], env={"FAKE_PROTECTION_MODE": "ok"})
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+        refused = self.floor_merge(
+            [self.check_run(self.BUILD), self.check_run(self.LINT)],
+            env={"FAKE_PROTECTION_MODE": "ok", "FAKE_PROTECTION_JSON": (
+                '{"required_status_checks":{"contexts":[]},"enforce_admins":{"enabled":true}}')})
+        self.assertTrue(self.refusal_line(refused).startswith(
+            "lifecycle guard: protection predicate failed"), refused.stderr)
+
+    def test_every_other_protection_answer_keeps_its_refusal(self):
+        """Issue 552 D2, AC2: with declared checks and a green rollup, every answer but the
+        plan-gated one keeps the refusal it gets without the floor."""
+        green = [self.check_run(self.BUILD), self.check_run(self.LINT)]
+        docs = "https://docs.github.com/rest/branches/branch-protection#get-branch-protection"
+
+        def body(message, status):
+            return json.dumps({"message": message, "documentation_url": docs,
+                               "status": status}, separators=(",", ":"))
+
+        for name, env, prefix in (
+            ("nonzero", {"FAKE_PROTECTION_MODE": "nonzero"}, "fake protection failure"),
+            ("404", {"FAKE_PROTECTION_JSON": body("Branch not protected", "404")},
+             "gh: Branch not protected (HTTP 404); stdout="),
+            ("admin 403", {"FAKE_PROTECTION_JSON": body("Must have admin rights to "
+                                                         "Repository.", "403")},
+             "gh: Must have admin rights to Repository. (HTTP 403); stdout="),
+            ("rate limit 403", {"FAKE_PROTECTION_JSON": body("API rate limit exceeded for "
+                                                              "user ID 1.", "403")},
+             "gh: API rate limit exceeded for user ID 1. (HTTP 403); stdout="),
+            ("numeric status", {"FAKE_PROTECTION_JSON": body(self.PLAN_GATED_MESSAGE, 403)},
+             "gh: HTTP 403; stdout="),
+            ("not JSON", {"FAKE_PROTECTION_JSON": self.PLAN_GATED_MESSAGE},
+             "gh: HTTP 403; stdout=Upgrade to GitHub Pro"),
+        ):
+            with self.subTest(answer=name):
+                line = self.refusal_line(self.floor_merge(green, env=env))
+                self.assertTrue(line.startswith(self.LOOKUP_FAILED + prefix), line)
+        timed_out = self.floor_merge(green, env={"FAKE_PROTECTION_MODE": "timeout"},
+                                     guard_args=("--child-timeout-seconds", "0.5"))
+        self.assertEqual("lifecycle guard: protection lookup timed out",
+                         self.refusal_line(timed_out))
+
+    def test_the_plan_gated_answer_without_declared_checks_keeps_its_refusal(self):
+        """Issue 552 D2, D7: a row declaring no check, a literal integration row and a
+        repository with no row keep today's refusal of the plan-gated answer."""
+        gated = (f"{self.LOOKUP_FAILED}gh: {self.PLAN_GATED_MESSAGE} (HTTP 403); "
+                 f'stdout={{"message":"{self.PLAN_GATED_MESSAGE}"')
+        green = [self.check_run(self.BUILD), self.check_run(self.LINT)]
+        literal = "fagenorn/literal-floor"
+        base = self.write_base(integration_bases={literal: "dev"})
+        for name, slug, rows, args in (
+            ("no declared check", self.FLOOR,
+             {self.FLOOR: {**self.FLOOR_ROWS[self.FLOOR], "required_checks": []}}, ()),
+            ("a literal integration row", literal, {}, ("--base-policy", str(base))),
+            ("no row", "fagenorn/tool", {}, ()),
+        ):
+            with self.subTest(case=name):
+                line = self.refusal_line(
+                    self.floor_merge(green, slug=slug, rows=rows, guard_args=args))
+                self.assertTrue(line.startswith(gated), line)
+
+    def test_declared_checks_leave_the_integration_base_and_the_release_arm_alone(self):
+        """Issue 552 D2, AC2: with checks declared, a feature merge into the declared
+        integration base stays exempt, and the release arm keeps its own rollup gate."""
+        exempt = self.floor_merge([], slug=self.STAGED, base="dev")
+        self.assertEqual(0, exempt.returncode, exempt.stderr)
+        policy = self.write_policy(derivation={}, derived_repositories=self.FLOOR_ROWS)
+        release = self.run_guard(
+            f"gh pr merge 1 --repo {self.STAGED} --merge",
+            cwd=self.make_repo(f"git@github.com:{self.STAGED}.git"),
+            guard_args=("--gh-bin", str(self.fake_gh), "--policy", str(policy)),
+            env={**self.rows_env(self.FLOOR_ROWS), **self.release_env(
+                url=f"https://github.com/{self.STAGED}/pull/1",
+                statusCheckRollup=[self.check_run("unrelated")])})
+        self.assertEqual(0, release.returncode, release.stderr)
 
     # ------------------------------------------------------------------
     # Forge adapter arms (#124): the tag push and the release creation the
