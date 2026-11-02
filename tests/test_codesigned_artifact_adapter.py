@@ -172,6 +172,8 @@ class ShapeTest(Case):
             "extra parameter": lambda p: p.update(title="t"),
             "parameter operation": lambda p: p.update(operation="publish"),
         }
+        self.install()
+        started = len(self.world.calls())
         for name, mutate in mutations.items():
             with self.subTest(mutation=name):
                 parameters = with_(mutate)
@@ -183,7 +185,7 @@ class ShapeTest(Case):
                 predicate = self.visible(parameters)
                 self.assertEqual((predicate["outcome"], predicate["reason"]),
                                  ("unknown", "store_unreachable"))
-                self.assertEqual(self.world.calls(), [])
+                self.assertEqual(len(self.world.calls()), started)
         with self.subTest(mutation="request operation"):
             request = {"kind": "effect", "operation": "publish", "parameters": self.parameters()}
             self.assertEqual(adapter.inspect(request)["reason"], "parameters_invalid")
@@ -195,7 +197,7 @@ class ShapeTest(Case):
                 observed = adapter.inspect(request)
                 self.assertEqual((observed["outcome"], observed["reason"]),
                                  ("unknown", "parameters_invalid"))
-        self.assertEqual(self.world.calls(), [])
+        self.assertEqual(len(self.world.calls()), started)
 
     def test_an_undeclared_predicate_is_unsupported(self):
         for predicate in ("running_subject_identity", "agent_running"):

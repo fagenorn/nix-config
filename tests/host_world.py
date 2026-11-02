@@ -58,12 +58,15 @@ if argv != ["find-identity", "-v", "-p", "codesigning"]:
     sys.exit(64)
 knobs = state / "knobs.json"
 knob = json.loads(knobs.read_text("utf-8")).get("security", {{}}).get("find-identity") if knobs.exists() else None
-listing = json.loads((state / "identities.json").read_text("utf-8"))
-knob = knob or listing
-time.sleep(knob["sleep"])
-sys.stderr.write(knob["stderr"])
-if knob["exit"]:
+if knob:
+    time.sleep(knob["sleep"])
+    sys.stderr.write(knob["stderr"])
     sys.exit(knob["exit"])
+listing = json.loads((state / "identities.json").read_text("utf-8"))
+time.sleep(listing["sleep"])
+sys.stderr.write(listing["stderr"])
+if listing["exit"]:
+    sys.exit(listing["exit"])
 for number, (digest, name) in enumerate(listing["pairs"], 1):
     sys.stdout.write(f'  {{number}}) {{digest}} "{{name}}"\\n')
 sys.stdout.write(f"     {{len(listing['pairs'])}} valid identities found\\n")

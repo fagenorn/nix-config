@@ -91,7 +91,7 @@ def _text(value: object) -> bool:
 
 
 def _parameters_problem(parameters: Any) -> str | None:
-    """The first way `parameters` departs from the closed install shape, or None (D17)."""
+    """The first way `parameters` departs from the closed install shape, or None (issue 547 D17)."""
     if not isinstance(parameters, dict):
         return "parameters is not an object"
     undeclared = sorted(set(parameters) - PARAMETER_MEMBERS, key=str)
