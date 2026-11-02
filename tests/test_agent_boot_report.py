@@ -653,7 +653,8 @@ class WindowsTest(unittest.TestCase):
 
     def test_reweighted_strata_keep_hosts_and_cohorts_apart(self):
         """WINDOW_BOOTS with beta's boots on host b, every boot project alpha, plus a spawned
-        candidate boot on a: pooling hosts (common 1, mean 36,500) or cohorts fails (D13)."""
+        candidate boot on a: pooling hosts (common 1, mean 36,500) or cohorts fails
+        (issue 504 D13)."""
         roots = {label: self.root / label for label in ("a", "b")}
         for label, project in (("a", "alpha"), ("b", "beta")):
             spawned = [(4_100, 25, "alpha", 6, 20_000, 90_000, 1)] if label == "a" else []
