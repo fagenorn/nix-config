@@ -163,9 +163,15 @@ def _join(cwd, operand):
 
 
 def _reader_operands(words, env, cwd):
-    """The expanded, cwd-joined file operands of a reader's words after its program word."""
+    """The expanded, cwd-joined file operands of a reader's words after its program word.
+
+    `skill-sections` has one file operand, its first word other than an option; the words
+    after it are section names, never paths (issue 504 D15).
+    """
     operands, consume, program_text = [], False, False
     needs_program = posixpath.basename(words[0]) in ("sed", "awk", "jq")
+    if posixpath.basename(words[0]) == "skill-sections":
+        words = words[:1] + [word for word in words[1:] if not word.startswith("-")][:1]
     for word in words[1:]:
         if consume:
             consume = False

@@ -336,6 +336,18 @@ class BootReportTest(unittest.TestCase):
                           row["buckets"]["commands"]), (3_000, 500, 0))
         self.assertEqual(row["skill_files"], {"from-issue/SKILL.md": 3_000})
 
+    def test_skill_sections_names_are_never_read_paths(self):
+        skill = "/h/.claude/skills/ship-issue/REVIEW.md"
+        session = Session(self.root)
+        stepped_boot(session, "o1", 0, [
+            (read(skill), 1_000),
+            (bash(f"skill-sections {skill} 'Input/Output' 'Phase 1.2'"), 2_000),
+        ])
+        session.write()
+        [row] = report(self.root)["boots"]
+        self.assertEqual((row["buckets"]["skill_files"], row["buckets"]["rereads"]),
+                         (1_000, 2_000))
+
     def test_cohorts_follow_lineage_position_and_launch_ordinal_and_groups_pool_them(self):
         session = Session(self.root)
         g1 = session.call(None, 0, context=40_000, write=40_000, ttl="1h", bash=progress(1))
