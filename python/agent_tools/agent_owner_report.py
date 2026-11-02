@@ -11,7 +11,8 @@ agent_tools.agent_owner_rollup, fresh-owner boots, and the replay of
 agent_tools.agent_owner_replay when asked) as the `agent-owner-report` document, and
 print_document prints its tables.
 With start windows, collect keeps the settled lineages that started in a window and counts
-their whole spend. agent_costs.main runs the report for `--report owners`. python/README.md
+their whole spend. With a ping log, collect adds each counted lineage's keepalive pings to it and
+counts the rest as unattributed. agent_costs.main runs the report for `--report owners`. python/README.md
 (agent-costs) holds the contract.
 """
 
@@ -39,6 +40,7 @@ from agent_tools.agent_costs import (
     repo_root,
     scan_paths,
 )
+from agent_tools.cache_keepalive import conversation_handle
 from agent_tools.context_meter import MEASURED_NOTE
 from agent_tools.context_meter_commands import Invocation, invocations, lex
 from agent_tools.model_pricing import SOURCE_DATE, SOURCE_URL, cache_write_split, usage_cost
@@ -141,6 +143,7 @@ class Lineage:
     facts: dict
     relauncher: tuple = field(default_factory=tuple)
     started: float | None = None   # epoch seconds of the earliest call of the owner transcripts
+    members: tuple = ()   # (conversation handle, is an owner transcript) of each transcript of the group
 
 
 def _bound(text):
@@ -497,6 +500,7 @@ def scan_owner_transcript(job, *, since, before, windows=()):
     starts = [call.start for call in calls if call.start is not None]
     scan = {
         "path": str(path), "is_root": is_root, "session": session, "agent_id": agent_id,
+        "handle": conversation_handle(session, agent_id),
         "parent": parent, "tool_use_id": tool_use, "counted_calls": len(priced),
         "dollars": sum(dollars for dollars, _ in priced),
         "approximate_calls": sum(approximate for _, approximate in priced),
@@ -612,7 +616,7 @@ def _lineage_row(run_id, issue, launches, extras, *, direct, delivered, descenda
         "help_calls": sum(call.help for call in calls),
         "absolute_path_calls": sum(extra["absolute"] for extra in extras),
         "project": project, "started": _instant(started),
-        "owner_ping_dollars": 0.0, "ping_dollars": 0.0,
+        "owner_ping_dollars": 0.0, "ping_dollars": 0.0,   # collect adds a ping log's share
     }
 
 
@@ -675,8 +679,9 @@ def _lineage(run_id, issue, group, child_ends, homes):
     direct = any(key in scan["directs"] for scan, _ in group)
     facts = _lineage_row(run_id, issue, launches, extras, direct=direct, delivered=delivered,
                          descendant_dollars=descendants, project=project, started=started)
+    members = tuple((scan["handle"], scan is owner_scan) for scan, owner_scan in group)
     return Lineage(run_id, issue, direct, launches, descendants, delivered, facts,
-                   _relauncher(launches), started)
+                   _relauncher(launches), started, members)
 
 
 def _lineages(scans, homes, *, start_mode=False):
@@ -790,19 +795,82 @@ def _select_started(lineages, windows, settle_days, report_end):
     return kept, left, grouping
 
 
+def _attribute_pings(log, counted, left_out, *, attributed_scope, unattributed_scope):
+    """The `pings` footer of `log` and the count of approximately priced pings it counts.
+
+    A ping whose conversation is a member of a counted lineage adds to that lineage (its owner
+    share too, for an owner transcript) when `attributed_scope` holds; one of a left-out
+    lineage is dropped; any other counts as unattributed when `unattributed_scope` holds."""
+    members = {handle: (lineage, owner) for lineage in counted for handle, owner in lineage.members}
+    dropped = {handle for lineage in left_out for handle, _ in lineage.members}
+    attributed = {"pings": 0, "dollars": 0.0, "owner_dollars": 0.0}
+    unattributed = {"pings": 0, "dollars": 0.0}
+    unpriced = approximate = 0
+    for ping in log.pings:
+        hit = members.get(ping.conversation)
+        if hit is not None:
+            if not attributed_scope(ping.ts):
+                continue
+            lineage, owner = hit
+            lineage.facts["ping_dollars"] += ping.dollars
+            attributed["pings"] += 1
+            attributed["dollars"] += ping.dollars
+            if owner:
+                lineage.facts["owner_ping_dollars"] += ping.dollars
+                attributed["owner_dollars"] += ping.dollars
+        elif ping.conversation in dropped or not unattributed_scope(ping.ts):
+            continue
+        else:
+            unattributed["pings"] += 1
+            unattributed["dollars"] += ping.dollars
+        unpriced += not ping.priced
+        approximate += ping.approximate
+    return ({"log": log.log, "lines": len(log.pings), "skipped_lines": log.skipped,
+             "unpriced": unpriced, "attributed": attributed, "unattributed": unattributed},
+            approximate)
+
+
 def _scan_all(jobs, since, before, executor_factory, windows=()):
     scanner = functools.partial(scan_owner_transcript, since=since, before=before, windows=windows)
     return [scan for scan in scan_paths(jobs, executor_factory, scanner=scanner) if scan]
 
 
+def _in_event_window(ts, since, before):
+    return (since is None or ts >= since) and (before is None or ts < before)
+
+
+def _ping_scopes(windows, since, before, cutoff):
+    """The `(attributed, unattributed)` predicates over a ping's instant (issue 503 D6).
+
+    A ping of a counted lineage counts in the event window if there is one, else always. An
+    unmatched ping counts in a start window if there are windows, else in the event window if
+    there is one, else after the mtime `cutoff`."""
+    def attributed(ts):
+        return _in_event_window(ts, since, before)
+
+    if windows:
+        def unattributed(ts):
+            return any(window.since <= ts < window.before for window in windows)
+    elif since is not None or before is not None:
+        unattributed = attributed
+    else:
+        def unattributed(ts):
+            return cutoff is None or ts.timestamp() >= cutoff
+    return attributed, unattributed
+
+
 def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory, windows=(),
-            settle_days=0):
+            settle_days=0, pings=None):
     """The lineages of the transcripts under `root` and the footer facts.
 
     With `windows` (StartWindow, never combined with `eval_rows`) the mtime `cutoff` and the
     event window do not apply: every transcript is read and every call counted, and the
     settled lineages that started in a window are kept (issue 503 D1, D3). The footer's
     `start_grouping` is None without `windows`.
+
+    With `pings` (a keepalive_pings.PingLog, never combined with `eval_rows`) each ping adds to
+    its counted lineage, counts as unattributed, or is left out (issue 503 D5, D6, D12); the
+    footer's `pings` is None without it.
 
     With `eval_rows` the mtime `cutoff` does not apply: each row with `claude_exit` 0
     is one lineage row built from the sessions of its workdir's project directories, and
@@ -826,13 +894,13 @@ def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory, w
     pairs = tuple((window.since, window.before) for window in windows)
     scans = _scan_all(jobs, None if start_mode else since, None if start_mode else before,
                       executor_factory, pairs)
-    start_grouping = None
+    start_grouping, left_out = None, []
     if eval_rows is None:
         lineages, unattributed = _lineages(scans, homes, start_mode=start_mode)
         if start_mode:
             report_end = max((scan["last_end"] for scan in scans if scan["last_end"] is not None),
                              default=None)
-            lineages, _, start_grouping = _select_started(lineages, windows, settle_days, report_end)
+            lineages, left_out, start_grouping = _select_started(lineages, windows, settle_days, report_end)
     else:
         lineages, unattributed = [], {"transcripts": 0, "dollars": 0.0, "unresolved_owners": 0}
         for row in samples:
@@ -844,11 +912,18 @@ def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory, w
                 lineages.append(_merge_trial(row, found))
             else:
                 unmatched.append(_interrupted(row))
+    approximate = sum(scan["approximate_calls"] for scan in scans)
+    ping_footer = None
+    if pings is not None:
+        attributed_scope, unattributed_scope = _ping_scopes(windows, since, before, cutoff)
+        ping_footer, approximate_pings = _attribute_pings(
+            pings, lineages, left_out, attributed_scope=attributed_scope,
+            unattributed_scope=unattributed_scope)
+        approximate += approximate_pings
     footer = {
-        "pricing": {"source": SOURCE_URL, "date": SOURCE_DATE,
-                    "approximate_calls": sum(scan["approximate_calls"] for scan in scans)},
+        "pricing": {"source": SOURCE_URL, "date": SOURCE_DATE, "approximate_calls": approximate},
         "unattributed": unattributed, "interrupted": interrupted,
-        "unmatched": unmatched, "start_grouping": start_grouping,
+        "unmatched": unmatched, "start_grouping": start_grouping, "pings": ping_footer,
     }
     return lineages, footer
 
@@ -942,7 +1017,7 @@ def build_document(lineages, footer, *, window: str, arms=None, sweep=False) -> 
         "start_grouping": grouping, "pricing": footer["pricing"],
         "lineages": rows, "arms": arm_rows, "projects": project_rows,
         "boots": _boot_rows(lineages), "simulated": simulated, "calibration": calibration,
-        "comparison": (agent_owner_rollup.comparison(arm_rows, project_rows, BASELINE_ARM,
+        "pings": footer["pings"], "comparison": (agent_owner_rollup.comparison(arm_rows, project_rows, BASELINE_ARM,
                                                      CANDIDATE_ARM) if compared else None),
         "unattributed": footer["unattributed"], "interrupted": footer["interrupted"],
         "unmatched": footer["unmatched"],

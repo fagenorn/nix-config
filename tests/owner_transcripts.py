@@ -5,6 +5,8 @@ Usage repeats on every content block of a message, as Claude Code writes it.
 import json
 from datetime import datetime, timedelta, timezone
 
+from agent_tools.cache_keepalive import conversation_handle
+
 T0 = datetime(2026, 10, 25, 9, 0, tzinfo=timezone.utc)
 RUN = "rel_01a1test-0000-7000-8000-000000000001"
 
@@ -152,3 +154,34 @@ def cost(context, write, *, fresh=2, out=40, write_price=5.0, read_price=0.20):
     write = min(write, context - fresh)
     return (fresh * 4.0 + out * 20.0 + write * write_price
             + (context - write - fresh) * read_price) / 1e6
+
+
+def ping_line(seconds, session, agent=None, *, read=50_000, priced=True, model="claude-opus-5-5"):
+    """One `ping` line as cache-proxy logs it: LineLog's `event` and `ts`, then the keepalive's
+    fields; a failed ping carries an error and no `usage`."""
+    fields = {"event": "ping", "ts": at(seconds), "conversation": conversation_handle(session, agent),
+              "model": model, "idle_s": 270.0, "status": 200 if priced else 529, "ttfb_ms": 80.0,
+              "duration_ms": 120.0, "outcome": "complete" if priced else "upstream_error"}
+    if priced:
+        fields["usage"] = {"input_tokens": 3, "cache_creation_input_tokens": 0,
+                           "cache_read_input_tokens": read, "output_tokens": 1,
+                           "cache_creation": {"ephemeral_5m_input_tokens": 0,
+                                              "ephemeral_1h_input_tokens": 0}}
+    else:
+        fields["error"] = "HTTP 529"
+    return _line(fields)
+
+
+def request_line(seconds):
+    """A forwarded request's line, which the ping reader ignores."""
+    return _line({"event": "request", "ts": at(seconds), "method": "POST", "path": "/v1/messages",
+                  "status": 200, "upstream_conn": "new", "ttfb_ms": 90.0, "duration_ms": 900.0,
+                  "bytes": 2048, "outcome": "complete"})
+
+
+STDERR_LINE = "Traceback (most recent call last):\n"   # launchd appends stderr to the same log
+
+
+def ping_cost(read):
+    """The Opus 5.5 list price of one priced `ping_line`: 3 fresh, `read` cached, 1 output."""
+    return cost(read + 3, 0, fresh=3, out=1)

@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .owner_transcripts import FINISH, RUN, Session, at, cost, finish_reply, gate_reply, progress
+from .owner_transcripts import (
+    FINISH, RUN, STDERR_LINE, Session, at, cost, finish_reply, gate_reply, ping_cost, ping_line,
+    progress, request_line)
 
 DAY, HOUR = 86_400, 3_600
 
@@ -629,3 +631,94 @@ class OwnerReportTest(unittest.TestCase):
             started + ["--baseline", "2026-10-25"],
             started + ["--baseline", "2026-10-25..2026-10-26", "--policy", "slim=boot=slim"],
             started + ["--baseline", "2026-10-25..2026-10-26", "--sweep"])
+
+    def test_pings_are_priced_and_attributed_or_unattributed_within_the_event_window(self):
+        session = Session(self.root)
+        dispatch = session.call(None, 0, context=10_000, write=10_000, ttl="1h", agent_tool=True)
+        session.child("o1", tool_use_id=dispatch)
+        g = session.call("o1", 10, context=30_000, write=30_000, bash=progress(3))
+        session.result("o1", 11, g, gate_reply("continue"))
+        work = session.call("o1", 20, context=31_000, write=1_000, agent_tool=True)
+        session.child("w1", tool_use_id=work, parent="o1")
+        session.call("w1", 30, context=20_000, write=20_000)
+        session.write()
+        log = self.root / "proxy.log"
+        log.write_text("".join([
+            ping_line(100, "s1", "o1", read=31_000),
+            ping_line(110, "s1", "w1", read=20_000, model="claude-opus-9"),   # priced approximately
+            ping_line(120, "s1", "o1", priced=False),
+            ping_line(130, "s9", "x1", read=40_000),                          # no such transcript
+            ping_line(5_000, "s9", "x1", read=40_000),
+            ping_line(5_000, "s1", "o1", read=31_000),
+            request_line(140), STDERR_LINE,
+            '{"event":"ping","conversation":"0123456789ab"}\n',               # no ts
+        ]), encoding="utf-8")
+        owner, worker, lost = ping_cost(31_000), ping_cost(20_000), ping_cost(40_000)
+        window = ("--events-since", at(0), "--events-before", at(1_000))
+        for extra, attributed, unattributed in (
+                (window, (3, owner + worker, owner), (1, lost)),
+                ((), (4, 2 * owner + worker, 2 * owner), (2, 2 * lost))):
+            with self.subTest(extra=extra):
+                doc = report(self.root, "--proxy-log", str(log), *extra)
+                pings = doc["pings"]
+                self.assertEqual((pings["log"], pings["lines"], pings["skipped_lines"],
+                                  pings["unpriced"], pings["attributed"]["pings"],
+                                  pings["unattributed"]["pings"]),
+                                 (str(log), 6, 2, 1, attributed[0], unattributed[0]))
+                self.assertAlmostEqual(pings["attributed"]["dollars"], attributed[1], places=9)
+                self.assertAlmostEqual(pings["attributed"]["owner_dollars"], attributed[2], places=9)
+                self.assertAlmostEqual(pings["unattributed"]["dollars"], unattributed[1], places=9)
+                self.assertEqual(doc["pricing"]["approximate_calls"], 1)
+                [row] = doc["lineages"]
+                self.assertAlmostEqual(row["owner_dollars"], cost(30_000, 30_000) + cost(31_000, 1_000),
+                                       places=9)   # calls only
+                self.assertAlmostEqual(row["owner_ping_dollars"], attributed[2], places=9)
+                self.assertAlmostEqual(row["ping_dollars"], attributed[1], places=9)
+                [arm] = doc["arms"]
+                self.assertAlmostEqual(arm["ping_dollars"], attributed[1], places=9)
+                self.assertAlmostEqual(arm["owner_dollars_per_lineage"],
+                                       row["owner_dollars"] + attributed[2], places=9)
+                self.assertAlmostEqual(arm["undelivered_dollars"],
+                                       row["total_dollars"] + attributed[1], places=9)
+
+    def test_a_left_out_lineage_s_pings_are_neither_attributed_nor_unattributed(self):
+        s7 = Session(self.root, session="s7")
+        g = s7.call(None, DAY, context=20_000, write=20_000, ttl="1h", bash=progress(3))
+        s7.result(None, DAY + 5, g, gate_reply("continue"))
+        s7.call(None, 6 * DAY, context=21_000, write=1_000, ttl="1h")
+        s7.write()
+        s9 = Session(self.root, session="s9")
+        g = s9.call(None, 2 * DAY + 12 * HOUR, context=25_000, write=25_000, ttl="1h",
+                    bash=progress(3, action_id="9:1:1"))
+        s9.result(None, 2 * DAY + 12 * HOUR + 5, g, gate_reply("continue", issue=9))
+        s9.write()
+        log = self.root / "proxy.log"
+        log.write_text("".join([
+            ping_line(DAY + 300, "s7", read=20_000),                   # settled issue 7's root
+            ping_line(6 * DAY + 300, "s7", read=21_000),               # ... after the start window
+            ping_line(2 * DAY + 12 * HOUR + 300, "s9", read=25_000),   # unsettled issue 9's root
+            ping_line(DAY + 600, "s0", "x1", read=40_000),             # no transcript, in the window
+            ping_line(4 * DAY, "s0", "x1", read=40_000),               # no transcript, after it
+        ]), encoding="utf-8")
+        doc = report(self.root, "--started", "2026-10-25..2026-10-28", "--proxy-log", str(log))
+        self.assertEqual([row["issue"] for row in doc["lineages"]], [7])
+        self.assertEqual(doc["start_grouping"]["windows"][0]["unsettled"]["lineages"], 1)
+        pings = doc["pings"]
+        self.assertEqual((pings["lines"], pings["attributed"]["pings"],
+                          pings["unattributed"]["pings"]), (5, 2, 1))
+        # an attributed ping counts in full, even after the start window (PR-02)
+        self.assertAlmostEqual(pings["attributed"]["owner_dollars"],
+                               ping_cost(20_000) + ping_cost(21_000), places=9)
+        [row] = doc["lineages"]
+        self.assertAlmostEqual(row["owner_ping_dollars"], ping_cost(20_000) + ping_cost(21_000),
+                               places=9)
+        self.assertAlmostEqual(pings["unattributed"]["dollars"], ping_cost(40_000), places=9)
+
+    def test_proxy_log_usage_errors_and_an_unreadable_log(self):
+        self.assert_usage_errors(
+            ["--report", "boot", "--proxy-log", "proxy.log"],
+            ["--report", "owners", "--proxy-log", "proxy.log", "--eval-results", "r.jsonl",
+             "--eval", "from-issue:8"])
+        completed = run(self.root, "--report", "owners", "--proxy-log", str(self.root / "missing.log"))
+        self.assertEqual((completed.returncode, completed.stdout), (1, ""))
+        self.assertTrue(completed.stderr.startswith("cannot read proxy log: "), completed.stderr)

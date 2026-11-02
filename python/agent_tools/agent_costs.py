@@ -47,7 +47,8 @@ under hand-off policies (agent_tools.agent_owner_replay) and fill the simulated-
 calibration tables. `--started SINCE..BEFORE` instead selects the lineages that started in that
 window and counts each one's whole spend once it has settled `--settle-days` (default 4) before
 the report end. `--baseline SINCE..BEFORE` adds a second window and compares its lineages, the
-baseline arm, with those of `--started`, the candidate arm.
+baseline arm, with those of `--started`, the candidate arm. `--proxy-log PATH` adds the
+keepalive ping spend of one cache-proxy log.
 """
 
 import argparse
@@ -1783,7 +1784,7 @@ def _boot_report(ap, args, cutoff, event_start, event_end, executor_factory):
 
 def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
     """Run `--report owners`: collect the lineages, print the text tables or the JSON document."""
-    from agent_tools import agent_owner_replay, agent_owner_report  # only for the owner report (issue 432)
+    from agent_tools import agent_owner_replay, agent_owner_report, keepalive_pings  # only for the owner report (issue 432)
 
     try:
         arms = [agent_owner_replay.parse_arm(text) for text in args.policy or ()]
@@ -1805,6 +1806,12 @@ def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
             eval_rows = agent_owner_report.load_eval_rows(args.eval_results, skill, case)
         except (OSError, ValueError) as error:
             sys.exit(f"cannot read eval results: {error}")
+    pings = None
+    if args.proxy_log is not None:
+        try:
+            pings = keepalive_pings.read_pings(args.proxy_log)
+        except OSError as error:
+            sys.exit(f"cannot read proxy log: {error}")
     windows, settle_days = (), 0
     if args.started is not None:
         try:
@@ -1828,7 +1835,7 @@ def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
     lineages, footer = agent_owner_report.collect(
         root, cutoff=event_start.timestamp() if event_start else cutoff, since=event_start,
         before=event_end, eval_rows=eval_rows, executor_factory=executor_factory,
-        windows=windows, settle_days=settle_days)
+        windows=windows, settle_days=settle_days, pings=pings)
     if eval_rows is not None:
         window = f"eval {args.eval_case}"
     elif windows:
@@ -1893,6 +1900,9 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                     help="a second start window, not overlapping --started, whose lineages form "
                          "the baseline arm against the candidate arm of --started; --report "
                          "owners only")
+    ap.add_argument("--proxy-log", metavar="PATH",
+                    help="a cache-proxy log whose ping lines add keepalive spend (darwin: "
+                         "~/Library/Logs/claude-cache-proxy.log); --report owners only")
     ap.add_argument("--settle-days", type=_non_negative_int, default=None, metavar="DAYS",
                     help="count a lineage only when it started at least DAYS days before the "
                          "report end (default 4, 0 = off); needs --started")
@@ -1934,6 +1944,10 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         ap.error("--started and --settle-days are available only with --report owners")
     if args.settle_days is not None and args.started is None:
         ap.error("--settle-days needs --started")
+    if args.proxy_log is not None and not owners_report:
+        ap.error("--proxy-log is available only with --report owners")
+    if args.proxy_log is not None and args.eval_results is not None:
+        ap.error("--proxy-log does not take --eval-results/--eval")
     if args.baseline is not None and not owners_report:
         ap.error("--baseline is available only with --report owners")
     if args.baseline is not None and args.started is None:
