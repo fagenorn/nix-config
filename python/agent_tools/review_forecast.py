@@ -227,7 +227,7 @@ def read_regular(repo: Path, relative: str, limit: int | None = None) -> bytes:
 
 
 def tree_entry(repo: Path, tree: str, path: str) -> dict | None:
-    raw = _run_git(repo, "ls-tree", "-z", tree, "--", path, binary=True)
+    raw = _run_git(repo, "--literal-pathspecs", "ls-tree", "-z", tree, "--", path, binary=True)
     if not raw:
         return None
     rows = raw.split(b"\0")

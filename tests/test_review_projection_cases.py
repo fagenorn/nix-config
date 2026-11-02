@@ -27,6 +27,22 @@ class ProofCases(source_cases.SourceProjectionFixture, unittest.TestCase):
         self.assertEqual(before, (self.git('status', '--porcelain'),
             self.git('write-tree'), self.git('count-objects', '-v')))
 
+    def test_rebuilt_commit_subjects_ignore_log_show_signature(self):
+        start = self.head
+        self.write('selected', 'selected effect\n')
+        self.commit('selected', 1)
+        verifier = self.top / 'verify-signature'
+        verifier.write_text("#!/bin/sh\necho 'gpg: Good signature from fixture' >&2\n")
+        verifier.chmod(0o755)
+        self.git('config', 'gpg.program', str(verifier))
+        self.git('config', 'log.showSignature', 'true')
+        header, _, message = self.git('cat-file', 'commit', 'HEAD').partition('\n\n')
+        signed = header + '\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n fixture\n -----END PGP SIGNATURE-----\n\n' + message + '\n'
+        forged = subprocess.run(['git', '-C', str(self.repo), 'hash-object', '-t', 'commit', '-w', '--stdin'],
+                                input=signed, check=True, capture_output=True, text=True).stdout.strip()
+        with reconstruct_owned(self.repo, start, [forged]) as rebuilt:
+            self.assertEqual([row['subject'] for row in rebuilt.commits], ['selected'])
+
 
 class IndependentPositiveCases(source_cases.SourceProjectionFixture, unittest.TestCase):
     def test_cheaper_unrelated_descendant_is_excluded_with_real_standalone_parity(self):
