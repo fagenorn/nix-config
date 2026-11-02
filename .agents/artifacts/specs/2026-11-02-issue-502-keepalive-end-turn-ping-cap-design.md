@@ -27,10 +27,10 @@ that was later used.
 This spec re-measured the same log (method in D2). Its totals differ from the
 issue's because it prices with `model_pricing.usage_cost`, but the shape is
 the same. Idle periods that followed an `end_turn` reply held $277.62 of the
-$333.73 of pings in ended periods. 456 of them ran all 13 pings to the
-ceiling and were never resumed. Of the 392 that were resumed, 236 (60%)
-resumed within two pings. A conversation pending on `tool_use` is a different
-case. It is mid-turn, a tool runs, and its result comes back (#423 D8).
+$333.73 of pings in ended periods. 456 of them sent 13 pings and were never
+resumed. Of the 392 that were resumed, 236 (60%) resumed within two pings. A
+conversation pending on `tool_use` is a different case. It is mid-turn, a
+tool runs, and its result comes back (#423 D8).
 
 ## Solution
 
@@ -69,7 +69,8 @@ The cap applies only when the last reply is `end_turn`. `tool_use` (pending a
 tool), any other stop reason (`max_tokens`, `stop_sequence`, `pause_turn`,
 `refusal`) and no last reply all keep today's behaviour. In the measured week
 subagent thread replies were 2,743 `end_turn`, 48,830 `tool_use`, 339 with
-no stop reason and none of any other kind.
+no stop reason and none of any other kind. The 28 ended periods with no
+recorded last reply held $4.05 of pings.
 
 The state is one more per-conversation field. It is written by `observe` and
 `_done` and read by `tick`, all under the keepalive's one lock and with no
@@ -110,8 +111,8 @@ ping holds the credential for 270 s more for no measured gain.
 
 At a due time the order is: `ceiling`, then `session_idle`, then the cap,
 then the ping. The cap ends the conversation when its last reply is
-`end_turn` and its idle period already holds `END_TURN_PINGS` pings. So
-`end_turn_cap` means exactly "the old rules would have pinged here". A
+`end_turn` and its idle period already holds at least `END_TURN_PINGS` pings.
+So `end_turn_cap` means exactly "the old rules would have pinged here". A
 session that goes idle at the same due time still ends `session_idle`.
 
 The count is the period's existing ping count. It covers every ping built
@@ -121,26 +122,31 @@ conversation that resumes and ends its turn again therefore gets up to two
 pings after each reply.
 
 The end comes at the due time after the last allowed ping, not when that
-ping settles. A thread request that arrives inside the last ping's 5-minute
-lifetime still ends the period `resumed` with its count. That is the line
-#423 D11 uses to tell pings that paid off from pings that were wasted.
+ping settles. A thread request that arrives after the last allowed ping but
+before that due time still ends the period `resumed` with its count. That is
+the line #423 D11 uses to tell pings that paid off from pings that were
+wasted.
 
 ### The end reason (D4)
 
 `end_turn_cap` joins `END_REASONS`, and `_log_end` keeps rejecting any reason
 outside the tuple. Its `keepalive_end` line carries today's fields:
-`conversation`, `reason`, `pings` (which equals the cap) and `idle_s`. Like
-every end except `resumed`, it clears the candidate and the headers it holds
-(#423 D24). No other log line or field changes.
+`conversation`, `reason`, `pings` and `idle_s`. `pings` equals the cap,
+unless pings sent while the reply streamed already went past it (§ Accepted
+costs). Like every end except `resumed`, it clears the candidate and the
+headers it holds (#423 D24). No other log line or field changes.
 
 ### Relation to #423 (D5)
 
 The cap refines #423 D10's stop rules and narrows D17's accepted waste. A
 conversation whose turn ended now costs at most two pings, where before it
 was pinged as long as its session stayed active, up to 60 minutes. #423 D22
-recorded a different first lever: ping an ended turn only while one of its
-own children is active. That rule stays unbuilt, because the issue asks for a
-cap.
+recorded a different lever: ping an ended turn only while one of its own
+children is active. That rule stays unbuilt, because the issue asks for a
+cap. D22's trigger is not what decided this: in the measured week the
+rewrites that resumed periods avoided ($720) still outweighed the $248 of
+pings to `end_turn` periods that never resumed. The cap removes most of that
+waste and keeps the resumes that come within about 14 minutes (D2).
 
 ### Accepted costs
 
@@ -158,8 +164,8 @@ cap.
 The `--keepalive` paragraph of `python/README.md` § `cache-proxy` gains three
 things: the last-reply definition, next to the pending-tool one; the cap in
 the due-time sentence ("with `end_turn_cap` when its last reply was
-`end_turn` and its idle period already holds two pings"); and `end_turn_cap`
-in the list of end reasons.
+`end_turn` and its idle period already holds at least two pings"); and
+`end_turn_cap` in the list of end reasons.
 
 `home/common/claude-code/README.md` § Cache proxy rewrites its accepted-cost
 sentence, which says a finished subagent is pinged for up to 60 minutes. It
@@ -199,8 +205,10 @@ request, which ends `end_turn` unless a case says otherwise.
    `tool_use` at 279. P is pinged at 540 and ends `end_turn_cap` with 2 at
    810.
 6. **Pings while the reply streams count.** Fails today. P's response starts
-   2xx and keeps streaming. It is pinged at 270 and 540, then completes
-   `end_turn`, and at 810 it ends `end_turn_cap` with 2.
+   2xx and keeps streaming. It is pinged at 270, 540 and 810, then completes
+   `end_turn`, and at 1080 it ends `end_turn_cap` with 3. A count already
+   past the cap ends the conversation, so the check is "at least", not
+   "equal".
 7. **`session_idle` comes before the cap.** A pin. The main conversation's
    pending tool is resolved at 300 by its next request ending `end_turn`. P
    is pinged at 270 and 540, the second time active through that request. At
@@ -233,8 +241,8 @@ the seam, the request line and the flag do not change.
 |----|--------|-----------|----------------------|
 | D1 | A conversation's last reply is the `stop_reason` of the 2xx, `complete`, streamed response to its newest thread request, recorded by `_done` under the guard that marks a tool pending and cleared by `observe` for every thread request; side requests never set or clear it; only `end_turn` is capped, and `tool_use`, every other stop reason and no last reply keep today's full window | Issue: "whose last reply ended the turn (`end_turn`)", "Conversations waiting on a tool call (`tool_use`) keep the full window"; #423 D27 and #501 D3 (one home for "newest thread request"); mbp 10-26..11-01: 2,743 `end_turn`, 48,830 `tool_use`, 339 without a stop reason and no other stop reason | Capping every reply that is not `tool_use` (`max_tokens` or `pause_turn` mean the client continues, none was seen, and the issue names only `end_turn`); letting a side request's stop reason count (#501 D3: a side request is not the conversation's turn) |
 | D2 | `END_TURN_PINGS = 2`, a module constant whose comment gives its reason: about 14 minutes of cache past the reply (2 × 270 s + 300 s) and the measured week's best net | mbp proxy log 10-26..11-01, pings priced with `model_pricing.usage_cost`: net of pings cut minus resumes lost is $83.91 at 1, $103.07 at 2, $101.67 at 3, $97.38 at 4; 236 of 392 resumed `end_turn` periods resumed within 2 pings; issue: "a small fixed number", "a named constant with its rationale documented beside it" | 1 (gives up 78 more resumes and nets $19 less); 3 (within noise of 2 but one more ping and 270 s more of a held credential per period for no measured gain); a flag or setting (YAGNI: the issue asks for a constant) |
-| D3 | The cap is checked at a due time after `ceiling` and `session_idle` and before a ping is built, against the idle period's existing ping count (every ping since the last thread request, those sent while the reply streamed included); the end comes at the due time after the last allowed ping, never when that ping settles | #423 D10's order and per-period `pings`; #423 D11: a `resumed` line tells paid-off pings from wasted ones; AC2 counts pings per period whose last reply is `end_turn`; mbp: no `end_turn` reply streamed past 270 s | Ending once the capped ping settles (a resume inside its lifetime would log no `resumed`, hiding pings that paid off); checking the cap before `session_idle` (`end_turn_cap` would then also count ends the old rules made); counting only pings after the reply (a second counter, and a period could then exceed the cap that AC2 checks) |
+| D3 | The cap is checked at a due time after `ceiling` and `session_idle` and before a ping is built, and ends the conversation once the idle period's existing ping count (every ping since the last thread request, those sent while the reply streamed included) is at least the cap; the end comes at the due time after the last allowed ping, never when that ping settles | #423 D10's order and per-period `pings`; #423 D11: a `resumed` line tells paid-off pings from wasted ones; AC2 counts pings per period whose last reply is `end_turn`; mbp: no `end_turn` reply streamed past 270 s | Ending once the capped ping settles (a resume inside its lifetime would log no `resumed`, hiding pings that paid off); checking the cap before `session_idle` (`end_turn_cap` would then also count ends the old rules made); counting only pings after the reply (a second counter, and a period could then exceed the cap that AC2 checks) |
 | D4 | The new reason is `end_turn_cap` in `END_REASONS`; its `keepalive_end` line carries today's fields (`conversation`, `reason`, `pings`, `idle_s`) and, like every end but `resumed`, clears the candidate and its headers; no other log field changes | Issue: "ends the conversation with a distinct end reason"; #423 D11's field set; #423 D24; the bar: fail loud at a closed set (`_log_end` rejects an unknown reason) | `capped` or `finished` (the first does not say which rule fired, and the second claims what the proxy cannot know, #423 D17); a `stop_reason` field on `keepalive_end` (a wider log-contract change that AC2 does not need, D7) |
-| D5 | The cap refines #423 D10 and narrows D17: an ended turn costs at most two pings, not the session's activity up to 60 minutes. It is taken over #423 D22's children rule, which stays unbuilt | Issue "What to build"; #423 D22 named the children rule as the first lever once pings to never-resumed conversations outweighed the saves, which the issue's numbers show; issue 432 measures #501 and #502 together after the first switch that includes both | Building D22's children rule now (it tracks `x-claude-code-parent-agent-id` per conversation, it misses wakes from background-command notifications, and the issue asks for a cap) |
+| D5 | The cap refines #423 D10 and narrows D17: an ended turn costs at most two pings, not the session's activity up to 60 minutes. It is taken over #423 D22's children rule, which stays unbuilt | Issue "What to build" names the cap; #423 D22 recorded the children rule as a lever, not a commitment, and its trigger is not met (mbp week: $720 of rewrites avoided by resumes against $248 of pings to never-resumed `end_turn` periods), so the cap is the issue's own choice; issue 432 measures #501 and #502 together after the first switch that includes both | Building D22's children rule now (it tracks `x-claude-code-parent-agent-id` per conversation, it misses wakes from background-command notifications, and the issue asks for a cap) |
 | D6 | AC1 is tested only through `KeepaliveCase` on the fake clock, asserting pings and `keepalive_end` lines and never `_Conversation` fields. Cases 1, 4, 5 and 6 fail today. Case 2 rewrites the existing ceiling test so that its P ends `tool_use`, and cases 3 and 7 pin D1 and D3 | Issue AC1: tests in `tests/test_cache_keepalive.py` that fail on the current code; #501 D4; #423 D12, D25; the bar: assert observable behaviour, fail for one reason | Asserting a private flag or counter (passes even if the pings continue); deleting the ceiling test (it is the only test of the 60-minute ceiling); a proxy round-trip case (the seam and the request line are unchanged) |
-| D7 | AC2 is post-merge evidence from mbp's proxy log over the 7 days from the first `just switch` with this change. Each idle period is a `keepalive_end` line, plus a conversation's `ping` lines after its last such line while that period is still open. Its last reply is the `stop_reason` of the conversation's newest thread-request line (`keepalive` neither `untracked` nor `no_tail_mark`) before the period ends. Threshold: every `end_turn` period has at most `END_TURN_PINGS` pings | Issue AC2; #501 D5 (post-merge, never claimed by the delivery); CLAUDE.md: switch only when asked; request lines already carry `keepalive`, `conversation` and `stop_reason` | Gating the merge on AC2 (no switched host runs the change before merge); a new log field so that AC2 becomes a grep (D4) |
+| D7 | AC2 is post-merge evidence from mbp's proxy log over the 7 days from the first `listening` line written after the first `just switch` with this change (a restart forgets every conversation, so no period straddles the old code). Each idle period is a `keepalive_end` line, plus a conversation's `ping` lines after its last such line while that period is still open. Its last reply is the `stop_reason` of the conversation's newest thread-request line (`keepalive` neither `untracked` nor `no_tail_mark`) before the period ends. Threshold: every `end_turn` period has at most `END_TURN_PINGS` pings | Issue AC2; #501 D5 (post-merge, never claimed by the delivery); CLAUDE.md: switch only when asked; request lines already carry `keepalive`, `conversation` and `stop_reason` | Gating the merge on AC2 (no switched host runs the change before merge); a new log field so that AC2 becomes a grep (D4) |
