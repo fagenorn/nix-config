@@ -157,7 +157,7 @@ make_root "$ROOT"
 ```
 
 Run: `env AGENT_RETAINED_ROOT="$ROOT" PYTHONPATH=python timeout 1800 python3 -m unittest tests.test_review_retained_full.RetainedFullTest.test_bundle_files_fit_the_whole_record_caps tests.test_review_retained_full.RetainedFullTest.test_two_derivations_are_byte_identical 2>&1 | tail -3`
-Expected: `OK` over 2 tests (about 15 minutes). At this task's start commit the cap case fails with `AssertionError: 203078 not less than or equal to 196608` (confirmed while planning on such a root); after it the fresh bundle is about 166,257 B. Report the root path to the controller.
+Expected: `OK` over 2 tests (about 10 minutes). At this task's start commit the cap case fails with `AssertionError: 203078 not less than or equal to 196608` (confirmed while planning on such a root); after it the fresh bundle is about 166,257 B. Report the root path to the controller.
 
 Then confirm the window D9 names, as an observation and not a repair: `env PYTHONPATH=python timeout 900 python3 -m unittest tests/test_review_evidence.py 2>&1 | grep -c 'component_mismatch'` prints a non-zero count (11 while planning, the suite ending `FAILED (failures=1, errors=4)`), because the committed bundle still holds the list. Do not touch `tests/fixtures/` or the literals: Task 2 re-derives them at `T`.
 
