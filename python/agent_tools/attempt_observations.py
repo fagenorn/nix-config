@@ -9,15 +9,19 @@ description of the answer that requirement asks for. `slot` is the request
 member the answer is sent in. `members` maps each member of that answer to a
 one-line meaning that lists any closed value set. `example` is one illustrative
 issue-73 answer with exactly those members. `build` is null, or the command that
-turns an `example`-shaped input into the slot's value.
+produces the slot's value from an `example`-shaped input (`delivery_contract`) or from the
+requirement less `expects` (`verification`, issue 545 D10).
 
 Pure: no I/O, and nothing imported from the skill scripts. The contract
 builder's input set and source kinds stay with the builder; the
-`delivery_contract` entry restates them, and a test pins the two together.
+`delivery_contract` entry restates them, and a test pins the two together. The
+`verification` entry reads its closed values from `agent_tools.verification_blocker`.
 """
 
 import copy
 from typing import Any
+
+from agent_tools import verification_blocker
 
 TRACKER_OBSERVATION_FIELDS = frozenset({"issue", "state", "open_blockers", "decision_blockers"})
 TRACKER_STATES = frozenset({"open", "closed"})
@@ -33,6 +37,7 @@ CANDIDATE_WORKTREE_STATES = frozenset({"available", "absent"})
 EXPECTS_MEMBERS = ("slot", "members", "example", "build")
 CONTRACT_BUILD = ("workflow-state build-delivery --repo-root <ledger_repo_root> "
                   "--kind contract --input -")
+VERIFICATION_BUILD = "verification-observe observe --repo-root <ledger_repo_root> --input -"
 
 
 def _listed(values: frozenset[str]) -> str:
@@ -52,6 +57,10 @@ _WORKTREE_MEMBERS = {
                   f"{_listed(WORKTREE_ENTRY_FIELDS)}, the path absolute and the state one of "
                   f"{_listed(CANDIDATE_WORKTREE_STATES)}; {_ONE_WORKTREE}"),
 }
+
+_EXAMPLE_FACTS = [{"name": "flake-lock", "source": {"paths": ["flake.lock"]},
+                   "value": {"objects": [{"path": "flake.lock", "mode": "100644",
+                                          "object": "a" * 40}]}}]
 
 _CATALOGUE: dict[str, dict[str, Any]] = {
     "tracker": {
@@ -110,6 +119,29 @@ _CATALOGUE: dict[str, dict[str, Any]] = {
                     "source_kind": "explicit_user",
                     "source_reference": "invocation:/from-issue 73 --auto"},
         "build": CONTRACT_BUILD,
+    },
+    "verification": {
+        "slot": "verification",
+        "members": {
+            "kind": (f"the literal {verification_blocker.OBSERVATION_KIND}; the whole "
+                     f"observation is one element of the request's verification list"),
+            "schema_version": f"the integer {verification_blocker.SCHEMA_VERSION}",
+            "blocker_id": "the requirement's blocker_id",
+            "repository": ("the observed repository: an object with members "
+                           "integration_branch, project_id"),
+            "facts": ("one object per requirement source, in its order: name and source "
+                      "{paths} as the requirement lists them, and value {objects}, one "
+                      "{path, mode, object} per path, mode one of "
+                      f"{', '.join(verification_blocker.ENTRY_MODES)}, and mode and object "
+                      "null for an absent path"),
+        },
+        "example": {"kind": verification_blocker.OBSERVATION_KIND,
+                    "schema_version": verification_blocker.SCHEMA_VERSION,
+                    "blocker_id": "sha256:" + "0" * 64,
+                    "repository": {"project_id": "fagenorn/nix-config",
+                                   "integration_branch": "main"},
+                    "facts": _EXAMPLE_FACTS},
+        "build": VERIFICATION_BUILD,
     },
 }
 OBSERVE_KINDS = frozenset(_CATALOGUE)

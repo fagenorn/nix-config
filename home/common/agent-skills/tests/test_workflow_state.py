@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from agent_tools import attempt_identity, attempt_observations, attempt_store
+from agent_tools import attempt_identity, attempt_observations, attempt_store, verification_blocker
 from agent_tools.transaction_core import TransactionStore
 
 if __package__:
@@ -49,20 +49,22 @@ BARE_REQUIREMENTS = {
     "delivery_contract": {"kind": "delivery_contract", "subject_id": "73",
                           "reason_code": "delivery_contract_required",
                           "detail_pointer": None},
+    "verification": {"kind": "verification", "blocker_id": "sha256:" + "0" * 64,
+                     "sources": [{"name": "flake-lock", "paths": ["flake.lock"]}]},
 }
 OBSERVE_SLOTS = {"tracker": "tracker", "recorded_worktree": "worktree",
                  "candidate_worktree": "worktree", "forge_pr": "forge",
-                 "delivery_contract": "delivery_contract"}
+                 "delivery_contract": "delivery_contract", "verification": "verification"}
 
 
 def empty_direct_request(issue=73):
-    """acquire-direct.md's interface-2 request before any observation is sent."""
-    return {"interface_version": 2, "issue": issue, "attempt_budget_minutes": 180,
+    """acquire-direct.md's interface-3 request before any observation is sent."""
+    return {"interface_version": 3, "issue": issue, "attempt_budget_minutes": 180,
             "new_run": False, "owner_unavailable": False, "tracker": None,
             "worktree": None, "forge": None, "delivery_contract": None,
             "authorization_intents": [], "authority_observations": [],
             "reevaluation_evidence": [], "delivery_observations": [],
-            "requested_scope": None, "recovery": None}
+            "requested_scope": None, "recovery": None, "verification": []}
 
 
 def load_source_module(path, name, *, package=False):
@@ -551,10 +553,10 @@ class LifecycleHarness:
 
     def control_request(self, *, now, issues, tracker, worktrees, owners=None,
                         max_parallel=2, attempt_budget_minutes=30,
-                        human_directed=False, host_route="claude-code"):
+                        human_directed=False, host_route="claude-code", verification=()):
         contracts = {str(issue): self.delivery_contract(issue) for issue in issues}
         return {
-            "interface_version": 3,
+            "interface_version": 4,
             "host_route": host_route,
             "now": now,
             "max_parallel": max_parallel,
@@ -572,6 +574,7 @@ class LifecycleHarness:
             "delivery_observations": {str(issue): [] for issue in issues},
             "requested_scopes": {str(issue): None for issue in issues},
             "recoveries": {str(issue): None for issue in issues},
+            "verification": list(verification),
         }
 
     def control_raw(self, *, request=None, ok=True, legacy=True, **request_fields):
@@ -607,7 +610,7 @@ class LifecycleHarness:
         return json.loads(stdout)
 
     def control_validated(self, **request_fields):
-        """Sweep, returning interface-3 bytes the `workflow-response` boundary passes (#194)."""
+        """Sweep, returning interface-4 bytes the `workflow-response` boundary passes (#194)."""
         completed = self.control_raw(legacy=False, ok=False, **request_fields)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return self.validated_response(completed.stdout)
@@ -624,10 +627,10 @@ class LifecycleHarness:
     def direct_request(self, *, issue=73, now="2026-08-20T10:00:00Z",
                        attempt_budget_minutes=180, new_run=False,
                        owner_unavailable=False, tracker=None, worktree=None,
-                       forge=UNOBSERVED):
+                       forge=UNOBSERVED, verification=()):
         contract, first = self.delivery_contract(issue)
         return {
-            "interface_version": 2,
+            "interface_version": 3,
             "issue": issue,
             "now": now,
             "attempt_budget_minutes": attempt_budget_minutes,
@@ -643,6 +646,7 @@ class LifecycleHarness:
             "delivery_observations": [],
             "requested_scope": None,
             "recovery": None,
+            "verification": list(verification),
         }
 
     @staticmethod
@@ -4600,8 +4604,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             )
             zero_id = json.loads(initialized.stdout)["run_id"]
             self.assertEqual(json.loads(initialized.stdout), {
-                "interface_version": 2, "kind": "workflow_bootstrap",
-                "run_id": zero_id, "requirements": [],
+                "interface_version": 3, "kind": "workflow_bootstrap",
+                "run_id": zero_id, "requirements": [], "verification": [],
             })
             zero_request = root / "control-zero.json"
             zero_request.write_text(json.dumps(self.control_request(
@@ -4613,7 +4617,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 "--request-file", zero_request,
             )
             controlled_value = json.loads(controlled.stdout)
-            self.assertEqual(controlled_value["interface_version"], 3)
+            self.assertEqual(controlled_value["interface_version"], 4)
             self.assertEqual(controlled_value["run_id"], zero_id)
             self.assertEqual(controlled_value["summaries"][0]["state"], "closed")
             self.assertEqual(controlled_value["actions"],
@@ -9115,9 +9119,9 @@ class ObservationCatalogueTest(unittest.TestCase):
                 expects = described["expects"]
                 self.assertEqual(set(expects), set(attempt_observations.EXPECTS_MEMBERS))
                 self.assertEqual(expects["slot"], OBSERVE_SLOTS[kind])
-                self.assertEqual(expects["build"],
-                                 attempt_observations.CONTRACT_BUILD
-                                 if kind == "delivery_contract" else None)
+                self.assertEqual(expects["build"], {
+                    "delivery_contract": attempt_observations.CONTRACT_BUILD,
+                    "verification": attempt_observations.VERIFICATION_BUILD}.get(kind))
                 self.assertTrue(expects["members"])
                 for name, meaning in expects["members"].items():
                     self.assertTrue(name)
@@ -9134,7 +9138,9 @@ class ObservationCatalogueTest(unittest.TestCase):
         for kind in sorted(attempt_observations.OBSERVE_KINDS - {"delivery_contract"}):
             expects = self.expects(kind)
             request = empty_direct_request()
-            request[expects["slot"]] = expects["example"]
+            # The verification slot is a list: the caller appends each observation to it.
+            request[expects["slot"]] = ([expects["example"]] if kind == "verification"
+                                        else expects["example"])
             with self.subTest(kind=kind):
                 self.workflow.validate_direct_owner_request(request)
             if "issue" in expects["example"]:
@@ -9143,6 +9149,19 @@ class ObservationCatalogueTest(unittest.TestCase):
                 with self.subTest(kind=kind, issue=74), \
                         self.assertRaises(self.workflow.WorkflowError):
                     self.workflow.validate_direct_owner_request(other)
+
+    def test_the_verification_description_reads_the_blocker_vocabulary(self):
+        """Issue 545 D10: one observation, its example valid, built by the adapter."""
+        expects = self.expects("verification")
+        self.assertEqual(set(expects["members"]),
+                         {"kind", "schema_version", "blocker_id", "repository", "facts"})
+        self.assertIs(verification_blocker.validate_observation(expects["example"]),
+                      expects["example"])
+        self.assertIn(str(verification_blocker.SCHEMA_VERSION),
+                      expects["members"]["schema_version"])
+        self.assertIn("null", expects["members"]["facts"])
+        self.assertEqual(expects["build"], "verification-observe observe --repo-root "
+                                           "<ledger_repo_root> --input -")
 
     def test_the_contract_description_restates_the_builder_input(self):
         expects = self.expects("delivery_contract")
@@ -9161,6 +9180,8 @@ class ObservationCatalogueTest(unittest.TestCase):
             ("recorded_worktree", "recorded"): attempt_observations.RECORDED_WORKTREE_STATES,
             ("candidate_worktree", "candidate"):
                 attempt_observations.CANDIDATE_WORKTREE_STATES,
+            ("verification", "kind"): {verification_blocker.OBSERVATION_KIND},
+            ("verification", "facts"): frozenset(verification_blocker.ENTRY_MODES),
         }
         for (kind, member), values in listed.items():
             meaning = self.expects(kind)["members"][member]
@@ -9209,6 +9230,25 @@ class DirectObserveExpectsTest(LifecycleHarness, unittest.TestCase):
             self.acquire_direct(issue=73)
             return self.direct_request(issue=73, owner_unavailable=True)
 
+        def parked():
+            self.acquire_direct(issue=75)
+            failure = self.root / "failure-75.json"
+            failure.write_text(json.dumps({
+                "kind": "verification-failure", "schema_version": 1,
+                "repository": {"project_id": "fagenorn/nix-config",
+                               "integration_branch": "main"},
+                "command": {"id": "nix-build", "argv": ["just", "build"], "cwd": ".",
+                            "env": []},
+                "failure_class": "dependency",
+                "facts": [{"name": "flake-lock", "source": {"paths": ["flake.lock"]},
+                           "value": {"objects": [{"path": "flake.lock", "mode": "100644",
+                                                  "object": "a" * 40}]}}]}), "utf-8")
+            self.run_cli("suspend", "--repo-root", self.root, "--run-id",
+                         self.direct_run_id(75, 1), "--issue", 75, "--attempt", 1,
+                         "--blocked-on", "verification", "--verification-input", failure,
+                         "--now", "2026-08-20T10:05:00Z", "--action-id", "75:1:1")
+            return self.direct_request(issue=75, now="2026-08-20T10:06:00Z")
+
         return {
             "tracker": lambda: self.direct_request(issue=71),
             "forge_pr": lambda: self.direct_request(
@@ -9217,6 +9257,7 @@ class DirectObserveExpectsTest(LifecycleHarness, unittest.TestCase):
                 issue=74, tracker=self.tracker_fact(74)),
             "delivery_contract": contract_missing,
             "recorded_worktree": resumed,
+            "verification": parked,
         }
 
     def test_every_observe_kind_is_described(self):

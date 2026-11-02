@@ -66,6 +66,17 @@ class VocabularyTest(unittest.TestCase):
                             or (cause in ac.HUMAN_GATED_BLOCKED_ON and directed))
                 with self.subTest(cause=cause, human_directed=directed):
                     self.assertIs(ac.resume_permitted(cause, human_directed=directed), expected)
+                    self.assertIs(ac.resume_permitted(cause, human_directed=directed,
+                                                      blocker_resolved=False), expected)
+                if cause in ac.OBSERVATION_GATED_BLOCKED_ON:
+                    with self.subTest(cause=cause, human_directed=directed, resolved=True):
+                        self.assertIs(ac.resume_permitted(cause, human_directed=directed,
+                                                          blocker_resolved=True), True)
+                else:
+                    with self.subTest(cause=cause, human_directed=directed, resolved=True), \
+                            self.assertRaises(ValueError):
+                        ac.resume_permitted(cause, human_directed=directed,
+                                            blocker_resolved=True)
         for value in ("owner_unavailable", "nonsense", None):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 ac.resume_permitted(value, human_directed=True)

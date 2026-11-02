@@ -20,11 +20,31 @@ def _v2(value: dict[str, Any]) -> None:
     if type(value["interface_version"]) is not int or value["interface_version"] != 2: _reject()
 
 
-def _requirements(values: Any, *, sorted_values: bool) -> list[Any]:
+def _verification(item: Any) -> None:
+    """The closed `verification` requirement (issue 545 D9): this module's own copy of the
+    shape `agent_tools.verification_blocker` renders, without its path rules."""
+    _object(item, _members("kind blocker_id sources"))
+    _digest(item["blocker_id"], "requirement blocker")
+    if item["kind"] != "verification": _reject()
+    sources = item["sources"]
+    if not isinstance(sources, list) or not 1 <= len(sources) <= 4: _reject()
+    for source in sources:
+        _object(source, _members("name paths"))
+        _string(source["name"], "requirement source name")
+        paths = source["paths"]
+        if not isinstance(paths, list) or not 1 <= len(paths) <= 8: _reject()
+        for path in paths: _string(path, "requirement source path")
+
+
+def _requirements(values: Any, *, sorted_values: bool, verification: bool = False) -> list[Any]:
+    """A requirement list; only a caller passing `verification` admits that kind (issue 545 D9)."""
     if not isinstance(values, list): _reject()
     if sorted_values: _sorted_unique(values, "requirements", key=lambda item: canonical_bytes(item))
     for item in values:
         if not isinstance(item, dict) or "kind" not in item: _reject()
+        if verification and item["kind"] == "verification":
+            _verification(item)
+            continue
         if item["kind"] in {"delivery_contract", "scope_tuple", "observation", "worktree_fact"}:
             _object(item, _members("kind subject_id reason_code detail_pointer"))
             _string(item["subject_id"], "requirement subject"); _string(item["reason_code"], "requirement reason")
@@ -39,25 +59,26 @@ def _requirements(values: Any, *, sorted_values: bool) -> list[Any]:
 # is the validator's own copy; the AC1 scenarios pin it to the agent_tools catalogue.
 _OBSERVE_SLOTS = {"tracker": "tracker", "recorded_worktree": "worktree",
                   "candidate_worktree": "worktree", "forge_pr": "forge",
-                  "delivery_contract": "delivery_contract"}
+                  "delivery_contract": "delivery_contract", "verification": "verification"}
 
 
 def _observe_requirements(values: Any) -> list[Any]:
-    """A direct observe reply's requirements: the five direct kinds, no bare requirement
-    twice, each with its bare members and one closed `expects` (issue 473 D4)."""
+    """A direct observe reply's requirements: the six direct kinds, no bare requirement
+    twice, each with its bare members and one closed `expects` (issue 473 D4, issue 545 D9)."""
     if not isinstance(values, list): _reject()
     seen: set[bytes] = set()
     for item in values:
         if (not isinstance(item, dict) or not isinstance(item.get("kind"), str)
                 or item["kind"] not in _OBSERVE_SLOTS or "expects" not in item): _reject()
         bare = {name: member for name, member in item.items() if name != "expects"}
-        _requirements([bare], sorted_values=False)
+        _requirements([bare], sorted_values=False, verification=True)
         if canonical_bytes(bare) in seen: _reject()
         seen.add(canonical_bytes(bare))
         expects = _object(item["expects"], _members("slot members example build"),
                           "requirement expects")
         if expects["slot"] != _OBSERVE_SLOTS[item["kind"]]: _reject()
-        if item["kind"] == "delivery_contract": _string(expects["build"], "requirement build")
+        if item["kind"] in {"delivery_contract", "verification"}:
+            _string(expects["build"], "requirement build")
         elif expects["build"] is not None: _reject()
         members = expects["members"]
         if not isinstance(members, dict) or not members or any(
@@ -208,10 +229,10 @@ def _finish_response(value: Any) -> dict[str, Any]:
 
 def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
     value = _object(value, _members("interface_version run_id now summaries deltas actions next_deadline admission")); _string(value["run_id"], "control run"); _utc(value["now"], "control now")
-    if type(value["interface_version"]) is not int or value["interface_version"] != 3: _reject()
+    if type(value["interface_version"]) is not int or value["interface_version"] != 4: _reject()
     if value["next_deadline"] is not None: _utc(value["next_deadline"], "next deadline")
     if not all(isinstance(value[name], list) for name in ("summaries", "deltas", "actions")): _reject()
-    issues = set(); missing_contracts = set(); asking = set(); unresumable = set(); order = []
+    issues = set(); missing_contracts = set(); asking = set(); unresumable = set(); parked = set(); order = []
     for item in value["summaries"]:
         item = _object(item, _members("issue state custody owner worktree deadline_at blocked_on blockers result contract_digest pending_stage_ids requirements"))
         issue = _integer(item["issue"], "summary issue", minimum=1)
@@ -221,7 +242,11 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
         for name in ("owner", "worktree", "deadline_at", "blocked_on", "contract_digest"):
             if item[name] is not None: (_digest if name == "contract_digest" else _string)(item[name], name)
         if item["result"] is not None and not isinstance(item["result"], dict): _reject()
-        _blockers(item["blockers"]); _pending(item["pending_stage_ids"], None); _requirements(item["requirements"], sorted_values=True)
+        _blockers(item["blockers"]); _pending(item["pending_stage_ids"], None); _requirements(item["requirements"], sorted_values=True, verification=True)
+        awaited = [entry for entry in item["requirements"] if entry["kind"] == "verification"]
+        if awaited:
+            if len(awaited) != 1 or item["state"] != "suspended" or item["blocked_on"] != "verification": _reject()
+            parked.add(issue)
         facts = [entry for entry in item["requirements"] if entry["kind"] == "worktree_fact"]
         if facts:
             if (len(facts) != 1
@@ -232,7 +257,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
         if item["contract_digest"] is None:
             expected = {"kind": "delivery_contract", "subject_id": str(issue),
                         "reason_code": "delivery_contract_required", "detail_pointer": None}
-            remaining = [entry for entry in item["requirements"] if entry["kind"] != "worktree_fact"]
+            remaining = [entry for entry in item["requirements"] if entry["kind"] not in {"worktree_fact", "verification"}]
             if item["pending_stage_ids"] or remaining not in ([], [expected]): _reject()
             if expected in remaining: asking.add(issue)
             missing_contracts.add(issue)
@@ -258,7 +283,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
             for issue in item["issues"]: _integer(issue, "contract issue", minimum=1)
             if item["issues"] != [issue for issue in order if issue in item["issues"]] or not set(item["issues"]) <= asking: _reject()
         else: _reject()
-    if any(action.get("issue") in missing_contracts | unresumable for action in value["actions"]): _reject()
+    if any(action.get("issue") in missing_contracts | unresumable | parked for action in value["actions"]): _reject()
     waiting = _admission_report(value["admission"], order)
     requests = [action for action in value["actions"] if action["kind"] == "delivery_contract"]
     if requests and (value["actions"][-1] is not requests[0] or value["next_deadline"] is not None
@@ -380,11 +405,17 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if set(value) == {"worker_id", "release_event", "released"}: return _released_worker(value)
     if set(value) == {"action_id", "outcome", "marker"}: return _progress_mark(value)
     if value.get("kind") == "workflow_bootstrap":
-        _object(value, _members("interface_version kind run_id requirements")); _v2(value); _string(value["run_id"], "run id")
+        _object(value, _members("interface_version kind run_id requirements verification"))
+        if type(value["interface_version"]) is not int or value["interface_version"] != 3: _reject()
+        _string(value["run_id"], "run id")
         _sorted_unique(value["requirements"], "bootstrap requirements", key=lambda item: (item.get("issue", 0), item.get("custody", {}).get("action_id", "")))
         for item in value["requirements"]:
             item = _object(item, _members("issue owner custody recorded_worktree contract_digest")); issue = _integer(item["issue"], "requirement issue", minimum=1); _string(item["owner"], "requirement owner"); validate_custody_ref(item["custody"], issue=issue); _string(item["recorded_worktree"], "recorded worktree")
             if item["contract_digest"] is not None: _digest(item["contract_digest"], "requirement contract")
+        # Issue 545 D9: the awaited open blockers, each the closed requirement, by id.
+        if not isinstance(value["verification"], list): _reject()
+        for item in value["verification"]: _verification(item)
+        _sorted_unique(value["verification"], "bootstrap verification", key=lambda item: item["blocker_id"])
         return value
     if value.get("kind") == "observe":
         _object(value, _members("interface_version kind issue run_id requirements")); _v2(value); _integer(value["issue"], "observe issue", minimum=1)

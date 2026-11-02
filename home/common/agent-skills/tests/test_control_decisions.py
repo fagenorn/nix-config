@@ -34,10 +34,16 @@ class DecisionTest(Cutover, unittest.TestCase):
             self.ledger = (self.root / ".superpowers/workflows" / minted["run_id"]
                            / "state.json")
             replies[generation] = [
-                RUN_ID.sub(b"RUN", self.validated("workflow-response", done.stdout))
+                json.loads(RUN_ID.sub(b"RUN", self.validated("workflow-response", done.stdout)))
                 for done in scenario()]
+        # A control reply carries its generation's interface, 3 or 4, and nothing else
+        # differs (issue 545 D16).
+        for generation, version in (("base", 3), ("head", 4)):
+            for reply in replies[generation]:
+                if "kind" not in reply:
+                    self.assertEqual(reply.pop("interface_version"), version)
         self.assertEqual(replies["head"], replies["base"])
-        return [json.loads(raw) for raw in replies["head"]]
+        return replies["head"]
 
     def spawned(self, *issues, **kwargs):
         return self.sweep(0, recorded=dict.fromkeys(issues), contracts=True, **kwargs)

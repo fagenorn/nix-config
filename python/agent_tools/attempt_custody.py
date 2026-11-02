@@ -42,8 +42,8 @@ FENCING_REASONS = ("custody_misbound", "superseded_launch", "launch_identity_req
 # because a resume's fresh window is the remedy (per #281 D2).
 # ``verification`` is an owner value: ``suspend --verification-input`` writes it when a
 # declared verification command fails for a reason outside the change, and parks the attempt
-# on the run's shared verification blocker. It is observation-gated: no sweep and no human
-# re-entry resumes it, and nothing records the observation that would (issue 544 D6).
+# on the run's shared verification blocker. It is observation-gated: only a resolution of the
+# blocker it names releases it, and a human re-entry never does (issue 544 D6, issue 545 D5).
 BLOCKED_ON_VALUES = frozenset({
     "usage_limit", "transport", "human_gate", "external", "unknown", "host_capacity",
     "agent_dispatch", "deadline", "verification",
@@ -112,16 +112,25 @@ def suspension_reason(blocked_on: str) -> str:
     return _SUSPENDED + blocked_on
 
 
-def resume_permitted(blocked_on: str, *, human_directed: bool) -> bool:
+def resume_permitted(blocked_on: str, *, human_directed: bool,
+                     blocker_resolved: bool = False) -> bool:
     """Whether a sweep may resume an attempt suspended on `blocked_on`: always for an
-    auto-resumable cause, only on a human-directed re-entry for a human-gated one, never for an
-    observation-gated one. ValueError outside `BLOCKED_ON_VALUES`: no attempt is suspended on
-    `owner_unavailable`, a cause only a delivery remainder takes."""
+    auto-resumable cause, only on a human-directed re-entry for a human-gated one, and for an
+    observation-gated one exactly when `blocker_resolved` says its blocker is resolved,
+    whatever `human_directed` says (issue 545 D5). ValueError outside `BLOCKED_ON_VALUES`: no
+    attempt is suspended on `owner_unavailable`, a cause only a delivery remainder takes. It
+    is also a ValueError to pass a true `blocker_resolved` for a cause that is not
+    observation-gated."""
     if type(blocked_on) is not str or blocked_on not in BLOCKED_ON_VALUES:
         raise ValueError(f"blocked_on {blocked_on!r} is not one of {sorted(BLOCKED_ON_VALUES)}")
+    if blocked_on in OBSERVATION_GATED_BLOCKED_ON:
+        return blocker_resolved
+    if blocker_resolved:
+        raise ValueError(
+            f"blocker_resolved applies only to an observation-gated cause, not {blocked_on!r}")
     if blocked_on in AUTO_RESUMABLE_BLOCKED_ON:
         return True
-    return human_directed if blocked_on in HUMAN_GATED_BLOCKED_ON else False
+    return human_directed
 
 
 def blocked_on_of(reason: str) -> str | None:

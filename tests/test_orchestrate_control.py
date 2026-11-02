@@ -174,19 +174,20 @@ class FactsTest(unittest.TestCase):
         self.assertEqual((out["command"], out["outcome"], out["run_id"]),
                          ("step", "ready", session["run_id"]))
         self.assertEqual((out["response"]["interface_version"], out["response"]["run_id"]),
-                         (3, session["run_id"]))
+                         (4, session["run_id"]))
         request = world.requests()[0]
         self.assertNotIn("now", request)
         self.assertEqual({k: v for k, v in request.items()
                           if k not in ("tracker", "worktrees", "forge")}, {
-            "interface_version": 3, "host_route": "claude-code", "max_parallel": 3,
+            "interface_version": 4, "host_route": "claude-code", "max_parallel": 3,
             "attempt_budget_minutes": 45, "human_directed": True, "issues": [12, 14],
             "owners": [], "delivery_contracts": keyed([12, 14], None),
             "authorization_intents": keyed([12, 14], []),
             "authority_observations": keyed([12, 14], []),
             "reevaluation_evidence": keyed([12, 14], []),
             "delivery_observations": keyed([12, 14], []),
-            "requested_scopes": keyed([12, 14], None), "recoveries": keyed([12, 14], None)})
+            "requested_scopes": keyed([12, 14], None), "recoveries": keyed([12, 14], None),
+            "verification": []})
 
     def test_direction_is_spent_on_the_first_sweep(self):
         """Issue 458 D4: an explicit session sends `human_directed` true only on its first
@@ -468,7 +469,7 @@ class ClosedSetTest(unittest.TestCase):
     def test_an_unknown_action_kind_refuses_at_project_with_the_response(self):
         world = OrchestrateWorld(self)
         session = world.start("12")["session"]
-        canned = {"interface_version": 3, "run_id": session["run_id"],
+        canned = {"interface_version": 4, "run_id": session["run_id"],
                   "now": "2026-10-22T00:00:00Z", "summaries": [], "deltas": [],
                   "actions": [{"id": "x", "kind": "teleport"}], "next_deadline": None,
                   "admission": None}
@@ -544,7 +545,7 @@ class ProjectTest(unittest.TestCase):
                      "worktree": world.candidate(12), "contract": None, "contract_digest": None,
                      "pending_stage_ids": [], "deadline_at": "2026-10-22T01:00:00Z",
                      "requirements": [], "authority_evaluation": None, "requested_scope": None}
-        canned = {"interface_version": 3, "run_id": session["run_id"],
+        canned = {"interface_version": 4, "run_id": session["run_id"],
                   "now": "2026-10-22T00:00:00Z", "summaries": [], "deltas": [],
                   "actions": [remainder], "next_deadline": None, "admission": None}
         world.fault("workflow-state", "control", stdout=json.dumps(canned) + "\n")
