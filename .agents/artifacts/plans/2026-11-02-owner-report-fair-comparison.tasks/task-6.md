@@ -37,7 +37,7 @@ Spec § Keepalive pings, § Aggregates (*Lineage values*), § Document (`pings`)
 - Scopes, built in `collect` (D6):
   - `attributed_scope(ts)` is `since <= ts < before` with an event window and always true otherwise.
   - `unattributed_scope(ts)` holds when `ts` lies in a start window if there are windows, else in the event window if there is one, else when `cutoff is None or ts.timestamp() >= cutoff`.
-- `left_out` is `_select_started`'s left-out list in start mode and empty otherwise. `pings=None` gives footer `"pings": None` and leaves every ping field 0.
+- `left_out` is `_select_started`'s left-out list in start mode and empty otherwise. In event mode a lineage none of whose owner calls start in the window is not a lineage of the report (`_lineages` drops it, as today), so its in-window pings are unattributed: the event window counts spend, not lineages, and the spec's neither-attributed-nor-unattributed rule covers only start mode's left-out lineages (PR-03). `pings=None` gives footer `"pings": None` and leaves every ping field 0.
 - `pricing.approximate_calls` gains the count `_attribute_pings` returns (D12).
 - `--proxy-log` is refused, exit 2 with nothing on stdout, without `--report owners` and with `--eval-results`/`--eval`. `_owners_report` reads the log before collecting. An `OSError` exits 1 through `sys.exit(f"cannot read proxy log: {error}")`.
 - Lineage rows' `owner_dollars` and `total_dollars` stay calls-only (D6).
@@ -182,6 +182,7 @@ In `tests/test_agent_owner_report.py`, import `STDERR_LINE`, `ping_cost`, `ping_
         log = self.root / "proxy.log"
         log.write_text("".join([
             ping_line(DAY + 300, "s7", read=20_000),                   # settled issue 7's root
+            ping_line(6 * DAY + 300, "s7", read=21_000),               # ... after the start window
             ping_line(2 * DAY + 12 * HOUR + 300, "s9", read=25_000),   # unsettled issue 9's root
             ping_line(DAY + 600, "s0", "x1", read=40_000),             # no transcript, in the window
             ping_line(4 * DAY, "s0", "x1", read=40_000),               # no transcript, after it
@@ -191,8 +192,13 @@ In `tests/test_agent_owner_report.py`, import `STDERR_LINE`, `ping_cost`, `ping_
         self.assertEqual(doc["start_grouping"]["windows"][0]["unsettled"]["lineages"], 1)
         pings = doc["pings"]
         self.assertEqual((pings["lines"], pings["attributed"]["pings"],
-                          pings["unattributed"]["pings"]), (4, 1, 1))
-        self.assertAlmostEqual(pings["attributed"]["owner_dollars"], ping_cost(20_000), places=9)
+                          pings["unattributed"]["pings"]), (5, 2, 1))
+        # an attributed ping counts in full, even after the start window (PR-02)
+        self.assertAlmostEqual(pings["attributed"]["owner_dollars"],
+                               ping_cost(20_000) + ping_cost(21_000), places=9)
+        [row] = doc["lineages"]
+        self.assertAlmostEqual(row["owner_ping_dollars"], ping_cost(20_000) + ping_cost(21_000),
+                               places=9)
         self.assertAlmostEqual(pings["unattributed"]["dollars"], ping_cost(40_000), places=9)
 
     def test_proxy_log_usage_errors_and_an_unreadable_log(self):

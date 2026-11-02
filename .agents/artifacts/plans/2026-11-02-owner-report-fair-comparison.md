@@ -72,6 +72,10 @@ Task 7 — Document version 2 and text output — `python/agent_tools/agent_owne
 
 ## Decisions
 
-The plan rests on D1 (start mode and its range grammar), D2 (start, report end and settle), D3 (one call set for spend and deliveries), D4 (project), D5 and D6 (ping input and attribution), D7 (arms, aggregate and comparison), D8 (schema version 2), D9 (modules), D10 (one root per run) and D11 (the subprocess seam and production-shaped fixtures). Planning appends D12 (how pings and left-out lineages are counted) and D13 (`collect`'s new keywords, project read order in an event window, `print_document`'s eval flag, and which fixture records carry a `cwd`).
+The plan rests on D1 (start mode and its range grammar), D2 (start, report end and settle), D3 (one call set for spend and deliveries), D4 (project), D5 and D6 (ping input and attribution), D7 (arms, aggregate and comparison), D8 (schema version 2), D9 (modules), D10 (one root per run) and D11 (the subprocess seam and production-shaped fixtures). Planning appends D12 (how pings and left-out lineages are counted) and D13 (`collect`'s new keywords, project read order in an event window, `print_document`'s eval flag, and which fixture records carry a `cwd`). Phase 5 appends D14 (event mode's `started` and a dropped event-mode lineage's pings).
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus, base SHA 4e944cb4639ee99c39a8b640ecc878838e16838c, no fallback. Findings: 3 accepted, 0 rejected, 0 deferred. PR-01 (Blocking): Task 1's claim that `started` is the same with and without an event window was false, because event mode passes the event start as the mtime cutoff; Task 1 now states the event-mode limit, per D14 (start mode already reads every transcript, per D1, so AC1 is unaffected). PR-02 (Should fix): Task 6's left-out test adds an owner ping after the start window and asserts it counts in full. PR-03 (Discussion): Task 6 states that a dropped event-mode lineage's in-window pings are unattributed, per D14.
 
 ---
