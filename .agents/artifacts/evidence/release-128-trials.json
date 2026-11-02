@@ -4,7 +4,7 @@
   "identity": {
     "bound": {
       "commit": {"base": "0a25b8072c8252d069774f68e75981c39c137691",
-                 "candidate": "6ec1d1339687dce4819bfd99900b987005b7adc8"},
+                 "candidate": "33149faddfc0e0f2259ee4b52b3995285b93ae57"},
       "project_contract_version": {"base": "1", "candidate": "1"},
       "shared_platform_version": {"base": "1.0.0", "candidate": "1.0.0"}
     },
