@@ -5,6 +5,7 @@ import errno
 import json
 import hashlib
 import importlib.util
+import io
 import os
 import re
 from copy import deepcopy
@@ -1733,6 +1734,90 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 path.write_text(json.dumps(policy), encoding="utf-8")
                 result = self.run_check("handoff", root, path)
                 self.assertEqual((result.returncode, result.stdout), (2, ""))
+
+
+class InvokeParityTest(unittest.TestCase):
+    """Issue 498 D3, D5: `invoke` returns exactly what one CLI run of the source
+    script produces, and touches no process stream."""
+
+    PRODUCER = ("validate-report", "--boundary", "producer", "--input", "-")
+
+    def rows(self, directory: Path):
+        """(name, argv without `--policy`, stdin, exit code, refusal label or None):
+        one row per exit code and refusal label `invoke` can return."""
+        wire = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["wire_max_bytes"]
+        within, over = directory / "within.md", directory / "over.md"
+        within.write_bytes(b"h" * 8_192)
+        over.write_bytes(b"h" * 8_193)
+        merged = {"issue": 14, "state": "merged",
+                  "pr_url": "https://github.com/fagenorn/nix-config/pull/15",
+                  "merge_sha": "abc123abc123abc123abc123abc123abc123abcd",
+                  "issue_closed": True, "discussion_items": [], "detail_state": "none",
+                  "report_path": None, "notes": ""}
+        return (
+            ("accepted producer report", self.PRODUCER,
+             b'{"state":"failed","artifact":null,"notes":"x"}', 0, None),
+            ("accepted ship-summary report",
+             ("validate-report", "--boundary", "ship-summary", "--input", "-"),
+             json.dumps(merged).encode("utf-8"), 0, None),
+            ("schema-refused report", self.PRODUCER,
+             b'{"state":"failed","artifact":null,"decisions":[]}', 2, "invalid report"),
+            ("report over the wire bound", self.PRODUCER, b" " * (wire + 1), 2,
+             "invalid report"),
+            ("unreadable detail input",
+             ("validate-detail-input", "--input", str(directory / "missing.json")), b"", 2,
+             "cannot read detail input"),
+            ("argparse refusal",
+             ("validate-report", "--boundary", "no-such-boundary", "--input", "-"), b"", 2,
+             "invalid input"),
+            ("check within budget",
+             ("check", "--kind", "handoff", "--root", str(within), "--format", "json"), b"", 0,
+             None),
+            ("check over budget",
+             ("check", "--kind", "handoff", "--root", str(over), "--format", "json"), b"", 3,
+             None),
+        )
+
+    def test_invoke_returns_exactly_what_the_cli_process_produces(self):
+        with tempfile.TemporaryDirectory() as raw:
+            for name, argv, stdin, code, label in self.rows(Path(raw)):
+                with self.subTest(name):
+                    argv = [*argv, "--policy", str(POLICY)]
+                    outcome = artifact_budget.invoke(argv, io.BytesIO(stdin).read)
+                    process = subprocess.run([sys.executable, str(SCRIPT), *argv], input=stdin,
+                                             capture_output=True, check=False)
+                    self.assertEqual(
+                        (outcome.exit_code, outcome.stdout, outcome.stderr),
+                        (process.returncode, process.stdout, process.stderr.decode("utf-8")))
+                    self.assertEqual(outcome.exit_code, code, outcome.stderr)
+                    if label is None:
+                        self.assertEqual(outcome.stderr, "")
+                        self.assertTrue(outcome.stdout.endswith(b"\n"), outcome.stdout)
+                    else:
+                        self.assertEqual(outcome.stdout, b"")
+                        self.assertTrue(outcome.stderr.startswith(f"artifact-budget: {label}: "),
+                                        outcome.stderr)
+
+    def test_invoke_touches_no_process_stream(self):
+        """`workflow-state` prints its own reply after a validation, so `invoke`
+        writes to neither process stream and reads stdin only through its reader,
+        which a command without `--input -` never calls."""
+        def no_stdin(size):
+            raise AssertionError(f"stdin read ({size} bytes) by a command without --input -")
+
+        stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        stderr = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(sys, "stdin", None), \
+                mock.patch.object(sys, "stdout", stdout), mock.patch.object(sys, "stderr", stderr):
+            rows = self.rows(Path(raw))
+            codes = [artifact_budget.invoke(
+                         [*argv, "--policy", str(POLICY)],
+                         io.BytesIO(stdin).read if "-" in argv else no_stdin).exit_code
+                     for _, argv, stdin, _, _ in rows]
+        self.assertEqual(codes, [code for *_, code, _ in rows])
+        for stream in (stdout, stderr):
+            stream.flush()
+            self.assertEqual(stream.buffer.getvalue(), b"")
 
 
 class SkillNamedReplyTest(DeliveredCustody, unittest.TestCase):

@@ -80,6 +80,35 @@ INPROCESS_CLI = load_source_module(
     Path(__file__).with_name("_inprocess_cli.py"), "workflow_state_test_inprocess_cli"
 )
 
+# The audit events that start a process (issue 498 D5).
+SPAWN_EVENTS = frozenset({"subprocess.Popen", "os.posix_spawn", "os.exec", "os.fork",
+                          "os.spawn", "os.system"})
+# The open recording window's events, or None while no window is open. An audit
+# hook cannot be removed, so one is added once per process and records only
+# inside a window.
+_SPAWN_WINDOW = None
+_SPAWN_HOOKED = False
+
+
+def _record_spawn(event, _arguments):
+    if _SPAWN_WINDOW is not None and event in SPAWN_EVENTS:
+        _SPAWN_WINDOW.append(event)
+
+
+@contextlib.contextmanager
+def recorded_spawns():
+    """The process-creation audit events raised inside the block, in order."""
+    global _SPAWN_WINDOW, _SPAWN_HOOKED
+    if not _SPAWN_HOOKED:
+        sys.addaudithook(_record_spawn)
+        _SPAWN_HOOKED = True
+    events = []
+    _SPAWN_WINDOW = events
+    try:
+        yield events
+    finally:
+        _SPAWN_WINDOW = None
+
 
 class LifecycleHarness:
     """The lifecycle suites' CLI runner, request builders and ledger helpers."""
@@ -8540,7 +8569,8 @@ class ResolverOutcomeTest(unittest.TestCase):
 
 
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
-    """Cover the installed layout, where the policy is a home-manager symlink."""
+    """Cover the installed layout, where the policy and the module are home-manager
+    symlinks and no `artifact-budget` wrapper is installed (issue 498 D2, D5, D7)."""
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
     def test_installed_symlinked_policy_validates_a_terminal_result(self):
@@ -8551,16 +8581,16 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
             binaries = home / ".agents/bin"
             library = home / ".agents/lib/python"
             share = home / ".agents/share"
-            for directory in (binaries, library, share):
+            store = home / "store"
+            for directory in (binaries, library, share, store):
                 directory.mkdir(parents=True)
             installed_script = binaries / "workflow-state.py"
             installed_script.write_bytes((scripts / "workflow-state.py").read_bytes())
-            wrapper = binaries / "artifact-budget"
-            wrapper.write_bytes((scripts / "artifact-budget").read_bytes())
-            wrapper.chmod(0o755)
-            (library / "artifact_budget.py").write_bytes(
+            # home-manager links the module to its store file (issue 498 D7).
+            (store / "artifact_budget.py").write_bytes(
                 (scripts / "artifact_budget.py").read_bytes()
             )
+            (library / "artifact_budget.py").symlink_to(store / "artifact_budget.py")
             (library / "workflow_delivery.py").write_bytes(
                 (scripts / "workflow_delivery.py").read_bytes()
             )
@@ -8570,12 +8600,18 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
 
             probe = (
                 "import importlib.util, json, sys\n"
+                f"SPAWN_EVENTS = {sorted(SPAWN_EVENTS)!r}\n"
+                "spawned = []\n"
                 "spec = importlib.util.spec_from_file_location('ws', sys.argv[1])\n"
                 "module = importlib.util.module_from_spec(spec)\n"
                 "spec.loader.exec_module(module)\n"
                 "_, resolved = module.artifact_budget_paths()\n"
+                "sys.addaudithook(lambda event, _: spawned.append(event)\n"
+                "                 if event in SPAWN_EVENTS else None)\n"
                 "summary = module.terminal_result(1320, 'stopped', 'attempt deadline expired')\n"
-                "print(json.dumps({'policy': str(resolved), 'state': summary['state']}))\n"
+                "print(json.dumps({'policy': str(resolved), 'state': summary['state'],\n"
+                "                  'spawned': spawned,\n"
+                "                  'module': module._artifact_budget().__file__}))\n"
             )
             completed = subprocess.run(
                 [sys.executable, "-c", probe, str(installed_script)],
@@ -8591,6 +8627,121 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
             self.assertEqual(
                 Path(observed["policy"]).resolve(), policy.resolve()
             )
+            # Validated in this process, from the link's store target: bytecode
+            # is never cached under the link's own name (issue 498 D5, D7).
+            self.assertEqual(observed["spawned"], [])
+            self.assertEqual(Path(observed["module"]), (store / "artifact_budget.py").resolve())
+            self.assertEqual(sorted((library / "__pycache__").glob("artifact_budget.*")), [])
+
+
+class InProcessArtifactBudgetTest(LifecycleHarness, unittest.TestCase):
+    """Issue 498 AC1, D1, D5: the legacy `finish` validates its result file, a
+    `present` detail and an `unpublished` detail without starting a process, and
+    reaches the CLI's verdict on the same bytes and policy."""
+
+    def cli_exit(self, *argv, stdin=b""):
+        """The exit code of the artifact-budget CLI, run as a child process outside
+        any recording window, on `argv` and the source policy."""
+        return subprocess.run(
+            [sys.executable, str(ARTIFACT_BUDGET), *map(str, argv),
+             "--policy", str(BUDGET_POLICY.resolve())],
+            input=stdin, capture_output=True, check=False).returncode
+
+    def finish_without_spawning(self, attempt, result, *, ok):
+        with recorded_spawns() as spawned:
+            outcome = self.finish(attempt, result, ok=ok)
+        self.assertEqual(spawned, [])
+        return outcome
+
+    def assert_refused(self, completed, line):
+        self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                         (2, "", line))
+
+    def test_a_result_file_is_validated_in_process_with_the_clis_verdict(self):
+        self.init_run()
+        attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
+        accepted = self.merged_result()
+        refused = {**accepted, "discussion_items": ["not durably moved"]}
+        verdicts = [self.cli_exit("validate-report", "--boundary", "ship-summary", "--input", "-",
+                                  stdin=json.dumps(result).encode("utf-8"))
+                    for result in (refused, accepted)]
+        self.assertEqual(verdicts, [2, 0])
+        self.assert_refused(
+            self.finish_without_spawning(attempt, refused, ok=False),
+            "workflow-state: artifact-budget validate-report rejected the ship-summary boundary\n")
+        self.finish_without_spawning(attempt, accepted, ok=True)
+        self.assertEqual(self.read_state()["issues"]["14"]["outcome"], accepted)
+
+    def test_a_present_detail_is_checked_in_process_with_the_clis_verdict(self):
+        self.init_run()
+        attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
+        paths = (".superpowers/issue-delivery/14/run-1/ship-review-refused.json",
+                 ".superpowers/issue-delivery/14/run-1/ship-review-a.json")
+        self.write_delivery_detail(paths[0]).write_text("{}", encoding="utf-8")
+        self.write_delivery_detail(paths[1])
+        refused, accepted = ({**self.merged_result(), "detail_state": "present",
+                              "report_path": path, "notes": f"details: {path}"}
+                             for path in paths)
+        verdicts = [self.cli_exit("check", "--kind", "review-package",
+                                  "--root", self.root.resolve() / path, "--format", "json")
+                    for path in paths]
+        self.assertEqual(verdicts, [2, 0])
+        self.assert_refused(
+            self.finish_without_spawning(attempt, refused, ok=False),
+            "workflow-state: durable detail is not a checker-valid review package\n")
+        self.finish_without_spawning(attempt, accepted, ok=True)
+        self.assertEqual(self.read_state()["issues"]["14"]["outcome"], accepted)
+
+    def test_an_unpublished_detail_is_validated_in_process_with_the_clis_verdict(self):
+        self.init_run()
+        worktree = self.root / "wt-a"
+        attempt = self.spawn(issue=14, worktree=worktree)["attempt"]
+        relative = ".superpowers/ship-review/14/retained-detail.json"
+        retained = worktree / relative
+        retained.parent.mkdir(parents=True)
+        refused = '{"interface_version":1,"findings":[]}'
+        accepted = ('{"interface_version":1,"findings":[{"axis":"ship","ruling":null,'
+                    '"severity":"Minor","status":"minor","text":"kept"}]}')
+        result = {**self.merged_result(), "state": "stopped", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False,
+                  "detail_state": "unpublished", "report_path": relative,
+                  "notes": f"publication failed; retained: {relative}"}
+        verdicts = []
+        for payload in (refused, accepted):
+            retained.write_text(payload, encoding="utf-8")
+            verdicts.append(self.cli_exit("validate-detail-input", "--input",
+                                          worktree.resolve() / relative))
+        self.assertEqual(verdicts, [2, 0])
+        retained.write_text(refused, encoding="utf-8")
+        self.assert_refused(
+            self.finish_without_spawning(attempt, result, ok=False),
+            "workflow-state: artifact-budget validate-detail-input rejected the detail input\n")
+        retained.write_text(accepted, encoding="utf-8")
+        self.finish_without_spawning(attempt, result, ok=True)
+        outcome = self.read_state()["issues"]["14"]["outcome"]
+        self.assertEqual((outcome["state"], outcome["detail_state"], outcome["report_path"]),
+                         ("stopped", "unpublished", relative))
+
+    def test_an_exception_escaping_the_validator_is_refused_as_a_crashed_child_was(self):
+        # A CLI child that crashed exited 1 with empty stdout, which the base mapped to
+        # the boundary's refusal. No wire-bounded input crashes the validator on the
+        # supported interpreters, so the seam is the loaded module's `invoke`
+        # (issue 498 D4, D8).
+        workflow = load_source_module(SCRIPT, "workflow_state_issue_498_crash")
+        module = workflow._artifact_budget()
+        wire = json.dumps(self.merged_result()).encode("utf-8")
+        argv = ["validate-report", "--boundary", "ship-summary", "--input", "-"]
+        with recorded_spawns() as spawned, \
+                mock.patch.object(module, "invoke", side_effect=RecursionError("deep")):
+            outcome = workflow.artifact_budget_invoke(argv, wire)
+            with self.assertRaises(workflow.WorkflowError) as caught:
+                workflow.artifact_budget_validate(
+                    "validate-report", boundary="ship-summary", input_bytes=wire)
+        self.assertEqual(spawned, [])
+        self.assertEqual((outcome.exit_code, outcome.stdout), (1, b""))
+        self.assertIn("RecursionError: deep", outcome.stderr)
+        self.assertEqual(str(caught.exception),
+                         "artifact-budget validate-report rejected the ship-summary boundary")
 
 
 if DeliveredControlHarness is not None:
