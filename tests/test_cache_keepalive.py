@@ -534,6 +534,88 @@ class KeepaliveTest(KeepaliveCase):
         self.assertEqual((ignored.headers, ignored.log_fields()), (headers, {"keepalive": "untracked"}))
 
 
+class SideRequestTest(KeepaliveCase):
+    """Side requests (`no_tail_mark`) in a conversation whose own request is pending a tool:
+    session activity only while in flight, never the conversation's next turn (issue 501)."""
+
+    def side(self, agent=AGENT_P, **kwargs):
+        """A side request as Claude Code sends a fork or side query: the conversation's own agent
+        id and no cache mark on the last message."""
+        return self.exchange(agent, document(tail_mark=False, note="side"), **kwargs)
+
+    def pinged(self, seconds):
+        """Advance the clock, send every ping now due, and return their conversations."""
+        pings = self.due(seconds)
+        for ping in pings:
+            self.keepalive.send(ping)
+        return [ping.conversation for ping in pings]
+
+    def test_a_side_request_after_a_tool_use_keeps_the_tool_pending_until_its_result(self):
+        self.exchange(AGENT_P, stop_reason="tool_use")
+        self.clock.advance(9)
+        self.side()
+        self.assertEqual([self.pinged(261), self.pinged(270), self.pinged(270)],
+                         [[self.handle(AGENT_P)]] * 3)
+        self.clock.advance(30)
+        self.exchange(AGENT_P, document(note="tool result"))
+        [end] = self.events("keepalive_end")
+        self.assertEqual((end["conversation"], end["reason"], end["pings"], end["idle_s"]),
+                         (self.handle(AGENT_P), "resumed", 3, 840.0))
+
+    def test_a_side_request_while_the_tool_use_still_streams_leaves_it_pending(self):
+        thread = self.exchange(AGENT_P, finish=False)
+        self.clock.advance(3)
+        self.side()
+        self.clock.advance(4)
+        for piece in pieces(sse("tool_use")):
+            thread.chunk(piece)
+        thread.done("complete")
+        self.assertEqual([self.pinged(263), self.pinged(270)], [[self.handle(AGENT_P)]] * 2)
+        self.assertEqual(self.ends(), [])
+
+    def test_a_side_request_inside_a_pinged_period_neither_ends_it_nor_resets_its_count(self):
+        self.exchange(AGENT_P, stop_reason="tool_use")
+        self.assertEqual(self.pinged(270), [self.handle(AGENT_P)])
+        self.clock.advance(9)
+        self.side()
+        self.assertEqual(self.ends(), [])
+        self.assertEqual(self.pinged(261), [self.handle(AGENT_P)])
+        self.clock.advance(30)
+        self.exchange(AGENT_P, document(note="tool result"))
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "resumed", 2)])
+
+    def test_a_side_request_while_a_ping_is_in_flight_does_not_supersede_it(self):
+        self.exchange(AGENT_P, stop_reason="tool_use")
+        [ping] = self.due(270)
+        self.clock.advance(5)
+        self.side()
+        self.clock.advance(5)
+        self.keepalive.send(ping)
+        self.assertEqual(self.due(5), [])
+        self.assertEqual(self.due(264), [])
+        self.assertEqual(self.pinged(1), [self.handle(AGENT_P)])
+
+    def test_a_finished_side_request_leaves_no_activity_whatever_its_stop_reason(self):
+        self.exchange(AGENT_P)
+        self.exchange(AGENT_Q, session=OTHER_SESSION)
+        self.clock.advance(9)
+        self.side()
+        forked = self.side(AGENT_Q, session=OTHER_SESSION, stop_reason="tool_use")
+        self.assertEqual(self.due(261), [])
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "session_idle", 0),
+                                       (self.handle(AGENT_Q, OTHER_SESSION), "session_idle", 0)])
+        self.assertEqual(forked.log_fields(),
+                         {"keepalive": "no_tail_mark",
+                          "conversation": self.handle(AGENT_Q, OTHER_SESSION),
+                          "stop_reason": "tool_use"})
+
+    def test_a_side_request_in_flight_keeps_the_session_active(self):
+        self.exchange(AGENT_P)
+        self.clock.advance(9)
+        self.side(finish=False)
+        self.assertEqual(self.pinged(261), [self.handle(AGENT_P)])
+
+
 class FailingPingTest(KeepaliveCase):
     ERROR = b'{"type":"error","error":{"type":"authentication_error","message":"expired"}}'
 

@@ -279,11 +279,13 @@ class Ping:
 class Track:
     """What the proxy tells `Keepalive` about one client request, from its first byte to its end.
 
-    A track of an untracked request has no owner and ignores every call.
+    A track of an untracked request has no owner and ignores every call. A side request's track
+    (`no_tail_mark`) has no sequence: it holds no place in its conversation's request order, so it
+    never marks a tool pending and never supersedes a ping.
     """
 
     def __init__(self, headers: Headers, owner: "Keepalive | None" = None, outcome: str = "untracked",
-                 record: _Conversation | None = None, sequence: int = 0, sent: float = 0.0,
+                 record: _Conversation | None = None, sequence: int | None = None, sent: float = 0.0,
                  candidate: _Candidate | None = None) -> None:
         self.outcome = outcome
         self.conversation = record.handle if record else None
@@ -344,6 +346,12 @@ class Keepalive:
         self._sessions: dict[str, dict[str | None, _Conversation]] = {}
 
     def observe(self, method: str, path: str, headers: Headers, body: bytes) -> Track:
+        """Classify one request and, unless it is `untracked`, register its flight.
+
+        A thread request (any other outcome but `no_tail_mark`) is its conversation's next turn:
+        it ends a pinged idle period `resumed`, stamps the last request, advances the sequence and
+        clears a pending tool. A side request (`no_tail_mark`) does none of these, so it counts as
+        session activity only while it is in flight (issue 501)."""
         verdict = classify(method, path, headers, body)
         if verdict.outcome == "untracked":
             return Track(headers)
@@ -351,15 +359,18 @@ class Keepalive:
         with self._lock:
             now = self._clock()
             record = self._conversation(verdict.session, verdict.agent)
-            if record.pings > 0:
-                self._log_end(record, "resumed", now)
-            record.last_request = now
-            record.epoch += 1
-            record.pending_since = None
+            sequence = None
+            if verdict.outcome != "no_tail_mark":
+                if record.pings > 0:
+                    self._log_end(record, "resumed", now)
+                record.last_request = now
+                record.epoch += 1
+                record.pending_since = None
+                sequence = record.epoch
             candidate = None
             if verdict.outcome == "tracked":
                 candidate = _Candidate(method, path, tuple(sent_headers), body, verdict.model, now)
-            track = Track(sent_headers, self, verdict.outcome, record, record.epoch, now, candidate)
+            track = Track(sent_headers, self, verdict.outcome, record, sequence, now, candidate)
             record.in_flight[track] = now
             return track
 
@@ -433,8 +444,8 @@ class Keepalive:
                 del self._sessions[session]
 
     def _active(self, record: _Conversation, now: float) -> bool:
-        """Some conversation of the session has a request in flight, a pending tool or a request
-        newer than this candidate's last touch (D8)."""
+        """Some conversation of the session has a request in flight, a pending tool or a thread
+        request newer than this candidate's last touch (D8)."""
         for other in self._sessions[record.session].values():
             if (any(now - sent < WINDOW for sent in other.in_flight.values())
                     or (other.pending_since is not None and now - other.pending_since < WINDOW)
