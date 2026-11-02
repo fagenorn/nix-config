@@ -387,5 +387,34 @@ class LegacyCommandTest(TransactionCommandTest):
         self.assertFalse(self.store_exists())
 
 
+
+class HostLocalInspectTest(ReleaseCommandCase):
+    """Issue 547 AC1: the Argus-shaped profile reports in full through `profile inspect`."""
+
+    def test_the_argus_shaped_profile_is_admissible(self):
+        fixtures = REPO / "tests/fixtures/release"
+        contract = self.contract()
+        contract["release"] = {"profiles": {
+            "argus": json.loads((fixtures / "argus-shaped-profile.json").read_text("utf-8")),
+            "forge-target": json.loads((fixtures / "publication-free-profile.json")
+                                       .read_text("utf-8"))}}
+        self.write_contract(contract)
+        code, report, err = self.run_release("profile", "inspect", "argus")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(report["profile"]["admissible"])
+        self.assertEqual(report["conformance"]["findings"], [])
+        graphs = report["graphs"]
+        self.assertEqual(([n["id"] for n in graphs["publication"]],
+                          [n["id"] for n in graphs["activation"]]), (["notifier"], ["daemon"]))
+        self.assertEqual(graphs["handoffs"], [
+            {"from": "publication", "to": "activation", "receipt": "publication_receipt"}])
+        self.assertEqual([(o["id"], o["predicate"]) for o in graphs["proof"]], [
+            ("derived:published_artifact_identity:notifier", "publication_visible"),
+            ("derived:running_subject_identity:daemon", "running_subject_identity"),
+            ("daemon-live", "agent_running")])
+        self.assertEqual(report["bindings"]["adapters"]["bundle"]["adapter"], "codesigned-artifact")
+        self.assertEqual(report["conformance"]["adapters"]["launchd"]["modes"],
+                         {"activate": "supported"})
+
 if __name__ == "__main__":
     unittest.main()

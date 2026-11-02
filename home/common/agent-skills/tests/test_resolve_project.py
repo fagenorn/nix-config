@@ -1376,6 +1376,60 @@ class DeployWatchTest(ResolverTestCase):
                         "config member 'region' is not declared",
                         "config member 'services' must be a string_list"])
 
+    def test_a_local_apply_adapter_is_unwatchable(self):
+        """Issue 547 D10: `launchd-agent` activates locally, so no deploy watch can name it."""
+        contract = self.jarbird()
+        contract["bindings"]["deploy"] = {"adapter": "launchd-agent", "command": None,
+                                          "config": {}}
+        code, payload, _ = self.resolve(self.make_root(contract))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual(error["repair_id"], "contract.deploy.adapter_unwatchable")
+        self.assertEqual([v["pointer"] for v in error["violations"]], ["/bindings/deploy/adapter"])
+
+
+class HostLocalReleaseTest(ResolverTestCase):
+    """Issue 547 AC1: a host-local activation profile resolves through the real registry."""
+
+    STUBS = ("gh", "git", "just", "codex-companion", "claude-bash-lifecycle-guard",
+             "codesign", "security", "launchctl")
+
+    def contract(self):
+        # The publication-free profile supplies the `github_repository` target the guard rows need.
+        contract = source_contract()
+        contract["release"] = {"profiles": {
+            "argus": json.loads((RELEASE_FIXTURES / "argus-shaped-profile.json").read_text("utf-8")),
+            "forge-target": publication_free_profile()}}
+        return contract
+
+    def snapshot(self, stubs):
+        code, out, err = run_with_path(str(make_stub_bin(stubs)), "resolve", "--repo-root",
+                                       str(self.make_root(self.contract())), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        return json.loads(out)
+
+    def test_the_argus_shaped_contract_resolves_available(self):
+        snap = self.snapshot(self.STUBS)
+        self.assertEqual(snap["capabilities"]["release"],
+                         {"state": "available", "reason_code": None, "repair_id": None})
+        self.assertEqual(
+            [(t["profile"], t["adapter"], t["target"], t["operations"])
+             for t in snap["release"]["targets"]],
+            [("argus", "launchd-agent",
+              {"handle": "daemon", "kind": "launchd_gui_agent", "label": "dev.argus.daemon"},
+              ["activate"]),
+             ("argus", "codesigned-artifact",
+              {"handle": "notifier", "kind": "installed_bundle",
+               "path": "~/Library/Application Support/Argus/Argus.app"}, ["install"]),
+             ("forge-target", "github-forge",
+              {"handle": "repository", "kind": "github_repository",
+               "repository": "fagenorn/nix-config", "branch": "main"}, [])])
+
+    def test_a_missing_launchctl_blocks_the_capability(self):
+        snap = self.snapshot(self.STUBS[:-1])
+        self.assertEqual(snap["capabilities"]["release"], {
+            "state": "blocked", "reason_code": "release_adapter_unavailable",
+            "repair_id": "capability.release.release_adapter_unavailable"})
+
 
 class ContradictionTest(ResolverTestCase):
     def refuse(self, contract: dict) -> dict:
