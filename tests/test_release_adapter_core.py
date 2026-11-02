@@ -1,11 +1,14 @@
 """Outcomes are observed after invocation (#124 AC8). Run: just agent-workflow-tests"""
+import plistlib
 import unittest
 from pathlib import Path
 
 from agent_tools import (actions_health_adapter, codesigned_artifact_adapter, forge_adapter,
                          launchd_agent_adapter, release_adapter, release_profile)
+from agent_tools.transaction_storage import InvocationRefused
 from . import release_test_support as support
 from .forge_world import ForgeWorld
+from .host_world import IDENTITY, HostWorld
 from .test_forge_adapter import ROWS
 from .test_transaction_custody import CustodyCase
 
@@ -101,6 +104,116 @@ class RegistryTest(unittest.TestCase):
                          "sha256:4be9656c19dce516d183fb3c581fbf3be8026ea490497ff15d8292fc79f06573")
         self.assertEqual(release_profile.profile_digest(support.publication_free_profile()),
                          "sha256:f98d60dd0f7484bfee7fd017d4edd4b6c23007db767b0a2f2a504a9c4b6cddab")
+
+
+class HostLocalCoreTest(CustodyCase):
+    """Issue 547 D16: the real core settles the Argus-shaped profile over the host world."""
+
+    def setUp(self):
+        super().setUp()
+        self.world = HostWorld(self)
+        self.world.environ(ARGUS_CODESIGN_IDENTITY=None)
+        self.world.identities(IDENTITY)
+        self.world.bundle("daemon/notifyd/Argus.app", identifier="dev.argus.pings")
+        self.world.program("devenv")
+        self.compiled = release_profile.compile_profile("argus", support.argus_shaped_profile(),
+                                                        support.base_contract())
+        self.bindings = {alias: release_adapter.core_binding(
+            release_adapter.REGISTRY[identity["adapter"]], self.compiled, alias)
+            for alias, identity in self.compiled["adapters"].items()}
+        self.alias = {node["id"]: node["adapter"]
+                      for node in (*self.compiled["publication"], *self.compiled["activation"])}
+
+    def advance(self, tid, custody, *states):
+        for state in states:
+            self.store.advance(tid, state, reason="r", custody=custody)
+
+    def begin(self, key, version):
+        candidate = {"version": version, "commit": self.world.head(), "title": version, "notes": ""}
+        inputs = release_profile.bind_candidate(self.compiled, candidate)
+        tid = self.store.create(key, inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
+                                proof=inputs["proof"], recovery=inputs["recovery"],
+                                authority_class="test").transaction_id
+        custody = self.acquire(tid)
+        self.advance(tid, custody, "awaiting_verification", "ready", "publishing")
+        return tid, custody, {unit["name"]: unit["parameters"] for unit in inputs["proof"]["units"]}
+
+    def act(self, custody, name, parameters, invoke=True):
+        effect = self.bindings[self.alias[name]]
+        after = self.store.inspect_action(custody, name=name, parameters=parameters, effect=effect)
+        if invoke:
+            after = self.store.invoke_action(custody, name=name, parameters=parameters, effect=effect)
+        return [e["outcome"] for e in after.events if e["type"] == "action_inspected"][-1]
+
+    def release(self, key, version):
+        tid, custody, units = self.begin(key, version)
+        self.assertEqual(self.act(custody, "notifier", units["notifier"]), "satisfied")
+        self.advance(tid, custody, "published", "activating")
+        self.assertEqual(self.act(custody, "daemon", units["daemon"]), "satisfied")
+        self.advance(tid, custody, "proving")
+        plan = self.store.load(tid).proof_plan
+        collector = {entry["obligation_id"]: entry["collector"] for entry in plan["obligations"]}
+        for identity in collector:
+            self.store.collect_obligation(custody, obligation_id=identity,
+                                          observer=self.bindings[collector[identity]])
+        self.store.start_cohort(custody)
+        for identity in plan["cohort"]["members"]:
+            self.store.collect_obligation(custody, obligation_id=identity,
+                                          observer=self.bindings[collector[identity]])
+        return self.store.settle_proof(custody)
+
+    def stamp_and_plist(self):
+        bundle = self.world.home / "Library/Application Support/Argus/Argus.app/Contents/Info.plist"
+        with open(bundle, "rb") as handle:
+            info = plistlib.load(handle)
+        with open(self.world.plist_path("dev.argus.daemon"), "rb") as handle:
+            agent = plistlib.load(handle)
+        return (info["AgentReleaseVersion"], info["AgentReleaseCommit"]), agent
+
+    def verbs(self):
+        return [call["argv"][0] for call in self.world.calls("launchctl")]
+
+    def test_a_bound_candidate_settles_succeeded(self):
+        settled = self.release("release-1", "v1.0.0")
+        self.assertEqual(settled.state, "succeeded")
+        stamp, agent = self.stamp_and_plist()
+        self.assertEqual(stamp, ("v1.0.0", self.world.head()))
+        self.assertEqual(agent["EnvironmentVariables"], {"AGENT_RELEASE_VERSION": "v1.0.0",
+                                                         "AGENT_RELEASE_COMMIT": self.world.head()})
+        self.assertEqual(agent["ProgramArguments"],
+                         [str(self.world.bin / "devenv"), "shell", "--", "daemon", "run"])
+        self.assertEqual(agent["WorkingDirectory"], str(self.world.checkout))
+        self.assertNotIn("bootout", self.verbs())
+
+    def test_a_second_release_replaces_both_units(self):
+        self.assertEqual(self.release("release-1", "v1.0.0").state, "succeeded")
+        first = len(self.world.calls("launchctl"))
+        head = self.world.commit()
+        self.assertEqual(self.release("release-2", "v1.0.1").state, "succeeded")
+        stamp, agent = self.stamp_and_plist()
+        self.assertEqual(stamp, ("v1.0.1", head))
+        self.assertEqual(agent["EnvironmentVariables"], {"AGENT_RELEASE_VERSION": "v1.0.1",
+                                                         "AGENT_RELEASE_COMMIT": head})
+        later = [call["argv"][0] for call in self.world.calls("launchctl")[first:]]
+        self.assertEqual([verb for verb in later if verb != "print"], ["bootout", "bootstrap"])
+        self.assertEqual(sorted(path.name for path in
+                                (self.world.home / "Library/Application Support/Argus").iterdir()),
+                         ["Argus.app"])
+
+    def test_a_job_from_a_foreign_plist_parks_the_daemon_without_mutation(self):
+        self.world.load_job("dev.argus.daemon",
+                            path=str(self.world.home / "Library/LaunchAgents/other.plist"))
+        seed = len(self.world.calls("launchctl"))
+        tid, custody, units = self.begin("release-1", "v1.0.0")
+        self.assertEqual(self.act(custody, "notifier", units["notifier"]), "satisfied")
+        self.advance(tid, custody, "published", "activating")
+        self.assertEqual(self.act(custody, "daemon", units["daemon"], invoke=False), "diverged")
+        with self.assertRaises(InvocationRefused) as refused:
+            self.store.invoke_action(custody, name="daemon", parameters=units["daemon"],
+                                     effect=self.bindings["launchd"])
+        self.assertEqual(refused.exception.reason, "not_absent")
+        self.assertEqual({call["argv"][0] for call in self.world.calls("launchctl")[seed:]}, {"print"})
+        self.assertFalse(self.world.plist_path("dev.argus.daemon").exists())
 
 
 if __name__ == "__main__":
