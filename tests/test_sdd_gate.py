@@ -541,6 +541,17 @@ class RecordTest(ForecastCase):
         step, steps = "ledger", []
         refused()                                                     # recorded head differs from HEAD's chain
 
+    def test_record_refuses_to_discard_an_uncommitted_plan_edit(self):
+        self.start_task(1, "src/app.py", "value = 2\n")
+        member = self.repo / "plan.tasks/task-1.md"
+        edited = member.read_bytes() + b"\nReview note: keep this.\n"
+        member.write_bytes(edited)
+        out = self.assert_gate_refused(self.record(1), command="record", step="record", gate=None,
+                                       steps=["ledger", "worktree"])
+        self.assertIn("plan.tasks/task-1.md", out["detail"])
+        self.assertEqual(member.read_bytes(), edited)
+        self.assertFalse(any(line.startswith("Task 1: recorded") for line in self.ledger_lines()))
+
 
 NEXT_STEPS = ["ledger", "mark-progress", "review-package", "validate-report", "budget-check",
               "metrics-match", "projection", "task-brief", "prepare-brief", "register-worker"]

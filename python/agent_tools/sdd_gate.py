@@ -26,8 +26,8 @@ complete, N is dispatched and not complete, and an earlier recorded head for N
 is HEAD or the commit recording it), `worktree` (no tracked change
 but the plan root and task N's member, and the task's base is a proper ancestor
 of its head with the forecast's evidence head behind the base) and `record`
-(the task's commits left every forecast block alone; the two files take the
-computed bytes; the ledger gains `Task N: recorded (head H)` once). The ready
+(the task's commits left every forecast block alone; each file holds its HEAD
+or computed bytes and takes the computed ones; the ledger gains `Task N: recorded (head H)` once). The ready
 object is `command`, `outcome`, `task`, `head_sha`, `paths` (root, member) and
 `changed`, false when the files already hold the computed bytes. Refusals carry
 gate `null`.
@@ -839,8 +839,8 @@ def record(args: argparse.Namespace, done: list[str]) -> dict:
     `ledger` (this plan's ledger holds tasks 1..N-1 complete and N dispatched, not complete),
     `worktree` (no tracked change but the plan root and the task's member, and the task's commits
     are a range over the forecast's evidence head) and `record` (the task's commits left every
-    forecast block alone; the two files take the computed bytes and the ledger the `recorded`
-    line). Nothing is committed.
+    forecast block alone; each file holds its `HEAD` or computed bytes, never an edit of its own;
+    the two files take the computed bytes and the ledger the `recorded` line). Nothing is committed.
     """
     plan = Path(os.path.abspath(args.plan_file))
     task = args.task
@@ -866,6 +866,10 @@ def record(args: argparse.Namespace, done: list[str]) -> dict:
     done.append("worktree")
 
     stale = [(path, data) for path, data in zip(files, computed) if _read(path) != data]
+    for path, _ in stale:
+        relative = PurePosixPath(path.relative_to(ledger.top).as_posix())
+        if _read(path) != _committed(relative, "HEAD"):
+            raise Refusal("record", f"{relative} holds an uncommitted edit the record would discard")
     try:
         for path, data in stale:
             write_atomic(path, data)
