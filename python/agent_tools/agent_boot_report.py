@@ -7,10 +7,10 @@ harness and prompt from the transcript's request records (a fixed 2.44 character
 token), and every later call's growth by the character share of what the call added.
 collect_host reads one transcript root through agent_owner_report.collect; build_document
 projects the hosts as the `agent-boot-report` document and print_document prints it.
-agent_tools.agent_boot_rollup builds the group rows. agent_costs.main runs the report for
-`--report boot`, collecting each root once per arm and window: once for the event window, or
-for each of the `--baseline` and event windows (issue 504). python/README.md (agent-costs)
-holds the contract.
+agent_tools.agent_boot_rollup builds the group rows and the reweighted rows. agent_costs.main
+runs the report for `--report boot`, collecting each root once (one arm), or once for each of
+the `--baseline` and event windows (issue 504). python/README.md (agent-costs) holds the
+contract.
 """
 
 import json
@@ -57,6 +57,7 @@ _VARIABLE = re.compile(r"\$(?:(\w+)|\{(\w+)\})")
 _FILE_LIKE = re.compile(r"\.[A-Za-z0-9]+$")
 _WHOLE = "whole"
 _STDOUT_TO_FILE = frozenset({">", ">>", ">|", "&>", "&>>", "1>", "1>>", "1>|"})
+_STDOUT_DUPLICATE = frozenset({">&", "1>&"})
 _CUTS = ("|", "|&", "(", ")", "`")
 _MARKERS = ('"type":"api-request', '"isMeta":true')
 
@@ -114,16 +115,25 @@ def _simple_commands(tokens):
     their targets dropped, and whether the command's standard output reaches the tool result,
     that is, it is outside every `(`...`)` and backtick pair, is not cut short by a `(`, `)` or
     backtick, is not followed by `|` or `|&`, and has no `>`, `>>`, `>|`, `&>` or `&>>`
-    redirection, with or without a leading `1` (issue 504 D5, D12).
+    redirection, with or without a leading `1` (issue 504 D5, D12), and no `>&` or `1>&`
+    redirection whose target word is neither all digits nor `-` (issue 504 D14).
+
+    The words after a `)` that closes an open `(`, or after a closing backtick, up to the next
+    separator other than `(`, `)` or a backtick, continue the enclosing command: they are no
+    command of their own and are not returned (issue 504 D14).
     """
-    commands, words, skip, to_file = [], [], False, False
-    depth, in_backtick = 0, False
+    commands, words, skip, to_file, duplicate = [], [], False, False, False
+    depth, in_backtick, suffix = 0, False, False
     for token in tokens:
         if token.kind == "op" and token.value in SEPARATORS:
-            shown = (depth == 0 and not in_backtick and not to_file
-                     and token.value not in _CUTS)
-            commands.append((words, shown))
-            words, skip, to_file = [], False, False
+            closes = ((token.value == ")" and depth > 0)
+                      or (token.value == "`" and in_backtick))
+            if not suffix:
+                shown = (depth == 0 and not in_backtick and not to_file
+                         and token.value not in _CUTS)
+                commands.append((words, shown))
+            words, skip, to_file, duplicate = [], False, False, False
+            suffix = closes
             if token.value == "(":
                 depth += 1
             elif token.value == ")":
@@ -133,11 +143,16 @@ def _simple_commands(tokens):
         elif token.kind == "op":
             skip = True
             to_file = to_file or token.value in _STDOUT_TO_FILE
+            duplicate = token.value in _STDOUT_DUPLICATE
         elif skip:
             skip = False
+            to_file = to_file or (duplicate and not token.value.isdigit()
+                                  and token.value != "-")
+            duplicate = False
         else:
             words.append(token.value)
-    commands.append((words, depth == 0 and not in_backtick and not to_file))
+    if not suffix:
+        commands.append((words, depth == 0 and not in_backtick and not to_file))
     return commands
 
 

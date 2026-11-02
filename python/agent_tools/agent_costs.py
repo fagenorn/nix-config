@@ -1761,7 +1761,8 @@ def _window_label(args, cutoff, event_start, event_end):
 
 def _boot_report(ap, args, cutoff, event_start, event_end, executor_factory):
     """Run `--report boot`: split each fresh owner's boot into buckets, print text or JSON."""
-    from agent_tools import agent_boot_report, agent_owner_report  # only for the boot report (issue 448)
+    # only for the boot report (issue 448); agent_owner_report for its arms and windows (issue 504)
+    from agent_tools import agent_boot_report, agent_owner_report
 
     try:
         roots = agent_boot_report.parse_roots(

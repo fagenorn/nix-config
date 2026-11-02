@@ -303,6 +303,13 @@ class BootReportTest(unittest.TestCase):
             (bash(f"cat {src} > /tmp/a.txt"), read(src), False),
             (bash(f"cat {src} 1>>/tmp/a.txt"), read(src), False),
             (bash(f"cat {src} $(true) | head -n 5"), read(src), False),
+            (bash(f"echo $(cat /dev/null) cat {src}"), read(src), False),
+            (bash(f"echo `cat /dev/null` cat {src}"), read(src), False),
+            (bash(f"cat {src} >&/dev/null"), read(src), False),
+            (bash(f"cat {src} >& /tmp/a.txt"), read(src), False),
+            (bash(f"cat {src} 1>&/dev/null"), read(src), False),
+            (bash(f"cat {src} >&2"), read(src), True),
+            (bash(f"cat {src} 2>&1"), read(src), True),
         )
         for index, (first, second, reread) in enumerate(cases):
             with self.subTest(first=first, second=second):
