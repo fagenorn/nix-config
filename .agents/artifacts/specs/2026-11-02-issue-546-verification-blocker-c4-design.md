@@ -35,7 +35,7 @@ The user needs:
   park on a shared blocker, and to keep its repair route when the adapter refuses;
 - every orchestration step to observe each awaited blocker once, after at most one fetch, and
   to send what it observed, so a changed selected path resumes the attempt in place;
-- an observation that fails to be reported, never sent and never mistaken for a change;
+- a failed observation to be reported as a refusal, never sent and never read as a change;
 - a direct re-entry to answer the helper's `verification` requirement and to stop truthfully
   on `suspended`;
 - the docs and ceilings to state what the landed code does, including how a run upgraded by a
@@ -161,7 +161,9 @@ added, because the only batch caller imports the function.
   lists is observed. A requirement whose issue is outside the session is observed too: the
   blocker map belongs to the run, and control accepts any open record of it (issue 545 D4).
 - **Unchanged.** The step input, the request's other members, the control interface (4) and
-  the `orchestrate-issues` adapter's duties.
+  the `orchestrate-issues` adapter's duties. `start` makes no control call, so it never
+  gathers. The ready object carries no version member, and its readers take members by name,
+  so the new member moves no version. A `detail` is output only and is never persisted (D15).
 
 ### Writes and their docs (D4)
 
@@ -209,8 +211,10 @@ EOF
 - **A refusal.** The failure is not a shared blocker, and the repair runs as written. The
   adapter's guard judges whether the attempt changed its own input (issue 543 D7), so the
   owner does not retry with other facts until one is accepted.
-- **When.** The classification runs once, before the repair. A failure after the repair keeps
-  today's Residuals route.
+- **When.** The classification runs once, before the repair, and only when every failing
+  command qualifies. It then declares the first failing command in run order. A mix that holds
+  any change-caused failure takes the repair as written, and a failure after the repair keeps
+  today's Residuals route (D14).
 
 The adapter runs before the suspension procedure because that procedure's reap kills the
 launch's processes and deletes its scratch root. A refusal after a reap would leave the repair
@@ -242,8 +246,8 @@ In acquire-direct:
 - **`kind: observe`.** A `verification` requirement is answered by running its
   `expects.build`, with `<ledger_repo_root>` filled, on the requirement less `expects`,
   through a quoted heredoc. The printed observation is appended to `verification`. The
-  existing sentence that fails loudly on a builder refusal (exit 2, empty stdout, report the
-  stderr line) covers the adapter too. The retain-and-resend rule is unchanged, and so is the
+  existing builder-refusal sentence (exit 2, empty stdout: fail loudly, report the stderr
+  line) is widened to name the adapter's refusal too. The retain-and-resend rule is unchanged, and so is the
   resent observation's validity: a resolution commits only with the resume (issue 545 D7).
 - **Item 5, `kind: suspended`.** It requires exactly `interface_version`, `kind`, `run_id`,
   `issue`, `custody`, `blocked_on` and `reentry`. It prints `Suspended
@@ -313,7 +317,7 @@ It then states the known limitations:
   worktree's `HEAD` differs from `origin`, so the owner repairs instead of parking again.
 - **A changed repository strands the step.** A contract whose `project.id` or integration
   branch changed while a record is open makes every observation of that record refused by
-  control. The step then refuses at `control` (D12).
+  control. Every later step then refuses at `control` (D12).
 
 ### Source helper until activation (D10)
 
@@ -345,9 +349,10 @@ came from the wrong place.
   concurrent `suspend` may join it or reopen another record, ordered by the run lock (issue 545
   D15), and control compares against the stored facts at that moment.
 - **A refused observation.** Control refuses the whole request (issue 545 D4), so the step
-  refuses at `control`, naming the observation. This happens only when the contract's
-  repository changed under an open record, and it fails loud rather than being retried
-  without the observation.
+  refuses at `control`, naming the observation. Two causes reach it. The contract's repository
+  changed under an open record. Or two adapters stepped one run at once, so the first resolved
+  a record the second still sends, which the serial-step contract excludes (D15). Either way
+  it fails loud rather than being retried without the observation.
 
 ## Test seams
 
@@ -427,11 +432,13 @@ persisted ledgers, and the argv of logged external effects, as the world already
 | D3 | Gathering runs inside the `bootstrap` step on every step: every bootstrap requirement, the first call only, `[]` on the chained second. `verification_refusals: [{blocker_id, detail}]` follows bootstrap order, with `detail` collapsed and cut to 300 characters. A malformed list refuses at `bootstrap`; an unobservable requirement never refuses. | Issue body; issue 545 D6 (the bootstrap is the one read before control; resolution commits in the first call's write); parent D10, D22; The Bar "Truthful terminal states", "Defense in depth". | A ninth step name, which moves every `completed_steps` pin for a step that never refuses. Gathering from control summaries, which needs a second round that a dispatching reply skips. Filtering by session issues, which strands a run-level record. Resending on the second call, which names a resolved record and is refused. |
 | D4 | `orchestrate-control`'s only new write is the fetch's update of `refs/remotes/origin/<branch>` and its objects, made only when the bootstrap lists a requirement. The docstring, `python/README.md` (both sections) and the `default.nix` allow-list comment say so. No allow entry, guard or command-table change. | Issue 546 (default.nix comment); issue 543 D6, D9 (the adapter's only write; `git fetch` already allowed); The Bar: re-point living docs. | A new permission entry for an in-process fetch, which the allow list never sees. Leaving "writes no file" and "only ledger writes" text, which the fetch makes false. |
 | D5 | sdd's Final verification classifies before its repair, under a lifecycle identity. It runs `verification-observe failure` before any release or reap: exit 0 goes to from-issue's suspension procedure with `blocked_on=verification`, a refusal repairs, and a product, test or build failure never qualifies. The procedure gains the cause and a second literal `suspend … --verification-input -` heredoc template, and the lifecycle rule lists that flag. | Parent D13; issue 543 D7 (the adapter's guard decides an attempt's own input change); `launch-scope reap` deletes the scratch root; issue 432 (gate and suspension are literal templates); sdd's `blocked_on=deadline` routing precedent; The Bar token economy (reliably emitted forms). | The adapter call inside the suspension procedure (parent Task 7), which runs after the reap and loads into the Phase 0–5 controller that never verifies. A prose instruction to splice the flag into the first template, which saves bytes but is easier to emit wrongly. |
-| D6 | acquire-direct answers `verification` by running `expects.build` (`<ledger_repo_root>` filled) on the requirement less `expects` and appending the output. The builder-refusal sentence covers the adapter. Item 5 checks `suspended`'s seven members and prints `Suspended (blocked_on=<blocked_on>). Resume: <reentry>`, then stops. The clearing rule names `suspended`. | Issue 545 D7, D10 (`expects.build` and its catalogue); issue 544 D7 (the envelope); `_wire.py`'s `suspended` members; parent D9, D21. | A literal `verification-observe observe` line, a second copy of the catalogue constant. Hard-coding `blocked_on=verification`, which is false for any other cause the validator admits. |
+| D6 | acquire-direct answers `verification` by running `expects.build` (`<ledger_repo_root>` filled) on the requirement less `expects` and appending the output. The builder-refusal sentence is widened to the adapter. Item 5 checks `suspended`'s seven members and prints `Suspended (blocked_on=<blocked_on>). Resume: <reentry>`, then stops. The clearing rule names `suspended`. | Issue 545 D7, D10 (`expects.build` and its catalogue); issue 544 D7 (the envelope); `_wire.py`'s `suspended` members; parent D9, D21. | A literal `verification-observe observe` line, a second copy of the catalogue constant. Hard-coding `blocked_on=verification`, which is false for any other cause the validator admits. |
 | D7 | `orchestrate-issues` (both trees), acquire-durable, AUTO.md, `rollover.md`, `delegated-owner.md` and sdd `SKILL.md` do not change. | Parent D10 (adapter duties unchanged), D16; issue 545 D11; orchestrate-issues §5 already reports a parked issue as paused; the generic `Suspended (…)` relays. | A §5 duty for `verification_refusals`, which grows a Claude-only hot document outside the issue's list for a diagnostic the transcript already holds. |
-| D8 | Text grows only in from-issue `SKILL.md`, `acquire-direct.md` and sdd `final-review.md`. Every breached hot ceiling (`from-issue-controller` and `implementation-owner` on both hosts, `orchestrated-issue-owner` if breached) and the corpus ceiling rise to exactly their final-head measure, with a note sentence per raised profile naming #228 (issue 546). The user applies the label. | Measured `instruction_load report` and `measure_corpus` at the base (94, 140, 588 and 5 bytes of headroom); CLAUDE.md (only the user labels a raise); issue 546 ("only this child raises instruction ceilings"); the `#155 D10` note precedent. | Trimming unrelated text to fit, outside scope. Moving procedure into unmeasured docs, which owners never read. A loose ceiling, which the gate refuses as not tight. |
+| D8 | Text grows only in from-issue `SKILL.md`, `acquire-direct.md` and sdd `final-review.md`. Every breached hot ceiling (`from-issue-controller` and `implementation-owner` on both hosts, `orchestrated-issue-owner` if breached) and the corpus ceiling rise to exactly their final-head measure, with a note sentence per raised profile naming #228 (issue 546). The user applies the label. | Measured `instruction_load report` and `measure_corpus` at the base (94, 140, 588 and 5 bytes of headroom); CLAUDE.md (only the user labels a raise); issue 546 ("only this child raises instruction ceilings"); the `#155 D10` note precedent. | Trimming unrelated text to fit, outside scope. Moving procedure into unmeasured docs, which owners never read. A ceiling above its measure, which the issue rules out ("exactly") and the gate refuses past 5%. |
 | D9 | The existing `### Verification blockers` README subsection is extended. Its c3 known-limitation sentence becomes the caller protocol, then four known limitations: paths only (an outage keeps `transport`), observed per step (`finalize` when only parked work remains), no sync on resume, and a changed repository strands the step. | The Bar DRY (one home per contract) and "known limitations belong in docs"; issue 545 D11 left that sentence for c4; parent's out-of-scope sync. | A new `### Shared verification blockers` sibling (parent Task 7), which splits one protocol across two subsections. Leaving the limitations unstated. |
 | D10 | AC1's source-helper rule is documented in that subsection. Until `just switch`, a run migrated by a reviewed source helper is driven only from that checkout: the source `workflow-state` with its shim first on `PATH`, and the `agent_tools` commands that run it by name from the same `python/`. No ledger marker. AC1's evidence is that rule, c2's older-helper refusal tests and the gathering tests, which drive source `orchestrate-control` with the source `workflow-state` shim first on `PATH`. | Parent AC4 and D12; issue 544 D9 (`unknown_schema`, nothing written); `launch_commit`, `launch_scope`, `sdd_gate` and `orchestrate_control` run `workflow-state` by name. | A writer marker in the ledger, new state the version refusal already covers (parent D12). An automated check of operator behaviour, which no test can observe. |
 | D11 | Test seams: `observe_all` by import in `test_verification_observe` with the environment patched in. Gathering through `orchestrate-control step` in `test_orchestrate_control`, over `OrchestrateWorld` plus a local `origin`, a publisher and a fetch-logging `git` shim that only those tests install. Behavioural skill-contract pins: the two templates' argv, the cause order, item 5's key set validated by the wire, and the declaration through `normalize_declaration`. `verification-observe` joins the shell vocabulary. | Agent-helpers rules 5–6; The Bar "Tests that can fail"; the world's `gh` and `workflow-state` effect logs; issue 543 D16's delegating `git` shim; issue 544 D16's in-process validator pin; parent D18 (adapter examples vetted, not argv-pinned). | Parent Task 6's `ObserveWorld` (it does not exist). A new test module for one class. Pinning `verification-observe` argv in skill contracts, which rule 6 does not admit. English-phrase pins. |
 | D12 | Concurrency: a fetch lost to Git's ref lock is a refusal, retried next step, and a lost owner `failure` repairs. A record listed `open` at `bootstrap` stays `open` until this run's `control`, because one adapter calls `step` serially and direct runs are separate. A refused observation refuses the step at `control`, which happens only under a changed contract repository, and is never retried without it. | Triage `concurrency_or_persistence`; issue 545 D4, D15; issue 543 D6, D12; `orchestrate-control`'s serial-step contract; The Bar "Root causes". | Retrying `control` without observations after a refusal, which parses stderr prose and hides a contract change. Reading the tracking ref after a failed fetch (issue 543 D6). |
 | D13 | Re-grounding against main: there is no `observe_all` (D2) and no `ObserveWorld` (D11); objects carry `mode` (issue 543 D17); the README subsection exists (D9); the adapter call moved out of the suspension procedure (D5); parent Task 7's `verification-observe` argv pin is replaced by vocabulary vetting (D11); `control_request` already sends interface 4 with `verification` (issue 545 D11). | Live `verification_observe.py`, `orchestrate_control.py`, `tests/orchestrate_world.py`, README § Lifecycle helpers and `test_shell_example_contracts.py` at the base. | Following parent Tasks 6–7 verbatim, which calls missing helpers and pins text rule 6 forbids. |
+| D14 | Grill: sdd declares a blocker only when every failing declared command qualifies, and then the first failing command in run order. A mix holding any change-caused failure takes today's repair, whose second failure is Residuals. A resumed attempt that fails on another command parks on that failure's own identity. | Parent D13 (a change's failure is never relabelled); one `suspend` names one failure; issue 544 D3 (one record per identity); the stall bound counts every park (issue 544 D6). | Parking on the qualifying failure while a change-caused one is pending, which defers a repair the attempt must make anyway and spends the stall bound. Classifying again after the repair, more hot text for a rare case (YAGNI). |
+| D15 | Grill: `start` never gathers, because it makes no control call. `verification_refusals` is additive to an unversioned output that its readers take by member name, and its `detail` is output only, never persisted. D12's refused-observation case also covers two adapters stepping one run at once, which the serial-step contract excludes. | `start` runs `init-run` only; no validator pins the ready key set (orchestrate-issues and the tests read named members); python/README "one adapter process calls `step` serially per run". | Versioning the ready object for an additive member, which every reader would have to thread. Gathering at `start`, which has no request to carry the observations. |
