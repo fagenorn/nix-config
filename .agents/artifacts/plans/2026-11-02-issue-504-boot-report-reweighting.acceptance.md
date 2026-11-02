@@ -1,0 +1,5 @@
+# Acceptance record — issue #504
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] On fixture transcripts with two projects in different proportions across two windows, the reweighted mean matches a hand-computed value. Medians and the reading/work split are printed. A Bash `cat` followed by a Read of the same file counts as a reread. Measured by: unit tests in `tests/test_agent_boot_report.py`. | code | `tests/test_agent_boot_report.py`: `WindowsTest::test_the_candidate_is_reweighted_to_the_baseline_project_mix`, `::test_strata_in_one_window_drop_out_and_a_scope_with_none_in_common_is_null`, `::test_reweighted_strata_keep_hosts_and_cohorts_apart`, `BootReportTest::test_group_rows_carry_medians_and_both_sub_totals`, `::test_text_output_prints_medians_beside_means_and_the_sub_total_rows`, `::test_a_whole_read_covers_every_later_read_of_its_file`, run by `just agent-workflow-tests` | in final verification | 59488e00 | `just agent-workflow-tests` on the final branch tip | met |

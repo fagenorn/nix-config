@@ -7,8 +7,10 @@ harness and prompt from the transcript's request records (a fixed 2.44 character
 token), and every later call's growth by the character share of what the call added.
 collect_host reads one transcript root through agent_owner_report.collect; build_document
 projects the hosts as the `agent-boot-report` document and print_document prints it.
-agent_costs.main runs the report for `--report boot`. python/README.md (agent-costs) holds
-the contract.
+agent_tools.agent_boot_rollup builds the group rows and the reweighted rows. agent_costs.main
+runs the report for `--report boot`, collecting each root once (one arm), or once for each of
+the `--baseline` and event windows (issue 504). python/README.md (agent-costs) holds the
+contract.
 """
 
 import json
@@ -23,24 +25,27 @@ from agent_tools.agent_costs import DISCLAIMER, ROOT_LABEL, human, print_table, 
 from agent_tools.agent_owner_report import (
     _SAVED_TO,
     _TASK_FILE,
+    BASELINE_ARM,
+    CANDIDATE_ARM,
+    LIVE_ARM,
     _print_capped,
     boot_facts,
     boot_slice,
     collect,
 )
+from agent_tools.agent_boot_rollup import ALL, group_rows, median, reweighted_rows
 from agent_tools.context_meter_commands import SEPARATORS, lex
 from agent_tools.transcript_calls import read_transcript
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPORT_KIND = "agent-boot-report"
 CHARS_PER_TOKEN = 2.44
 RATIO_MIN_CHARS = 2_000
-ALL = "all"
 BUCKETS = ("tool_schemas", "harness", "prompt", "skill_bodies", "skill_files", "plan_reads",
            "resume_reads", "rereads", "other_reads", "commands", "assistant", "unexplained")
-READERS = ("cat", "sed", "head", "tail", "nl", "awk", "jq", "less")
-COHORTS = ("fresh", "spawned")
-PHASE_GROUPS = ("0-5", "6-7", ALL)
+BOOT_READING = ("skill_bodies", "skill_files", "plan_reads", "resume_reads", "rereads")
+FIRST_UNIT_WORK = ("commands", "assistant", "other_reads")
+READERS = ("cat", "sed", "head", "tail", "nl", "awk", "jq", "less", "skill-sections")
 
 _SYSTEM_REMINDER = "<system-reminder>"
 _RESUME_PACK = re.compile(r'"kind"\s*:\s*"resume_pack"')
@@ -50,6 +55,10 @@ _HEREDOC = re.compile(r"""(?<!<)<<-?(?!<)\s*(['"]?)([A-Za-z_]\w*)\1""")
 _ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 _VARIABLE = re.compile(r"\$(?:(\w+)|\{(\w+)\})")
 _FILE_LIKE = re.compile(r"\.[A-Za-z0-9]+$")
+_WHOLE = "whole"
+_STDOUT_TO_FILE = frozenset({">", ">>", ">|", "&>", "&>>", "1>", "1>>", "1>|"})
+_STDOUT_DUPLICATE = frozenset({">&", "1>&"})
+_CUTS = ("|", "|&", "(", ")", "`")
 _MARKERS = ('"type":"api-request', '"isMeta":true')
 
 
@@ -102,19 +111,48 @@ def _command_text(command):
 
 
 def _simple_commands(tokens):
-    """The word lists of the simple commands of `tokens`, redirections and their targets dropped."""
-    commands, words, skip = [], [], False
+    """The simple commands of `tokens` as `(words, shown)`: the words with redirections and
+    their targets dropped, and whether the command's standard output reaches the tool result,
+    that is, it is outside every `(`...`)` and backtick pair, is not cut short by a `(`, `)` or
+    backtick, is not followed by `|` or `|&`, and has no `>`, `>>`, `>|`, `&>` or `&>>`
+    redirection, with or without a leading `1` (issue 504 D5, D12), and no `>&` or `1>&`
+    redirection whose target word is neither all digits nor `-` (issue 504 D14).
+
+    The words after a `)` that closes an open `(`, or after a closing backtick, up to the next
+    separator other than `(`, `)` or a backtick, continue the enclosing command: they are no
+    command of their own and are not returned (issue 504 D14).
+    """
+    commands, words, skip, to_file, duplicate = [], [], False, False, False
+    depth, in_backtick, suffix = 0, False, False
     for token in tokens:
         if token.kind == "op" and token.value in SEPARATORS:
-            commands.append(words)
-            words, skip = [], False
+            closes = ((token.value == ")" and depth > 0)
+                      or (token.value == "`" and in_backtick))
+            if not suffix:
+                shown = (depth == 0 and not in_backtick and not to_file
+                         and token.value not in _CUTS)
+                commands.append((words, shown))
+            words, skip, to_file, duplicate = [], False, False, False
+            suffix = closes
+            if token.value == "(":
+                depth += 1
+            elif token.value == ")":
+                depth = max(depth - 1, 0)
+            elif token.value == "`":
+                in_backtick = not in_backtick
         elif token.kind == "op":
             skip = True
+            to_file = to_file or token.value in _STDOUT_TO_FILE
+            duplicate = token.value in _STDOUT_DUPLICATE
         elif skip:
             skip = False
+            to_file = to_file or (duplicate and not token.value.isdigit()
+                                  and token.value != "-")
+            duplicate = False
         else:
             words.append(token.value)
-    commands.append(words)
+    if not suffix:
+        commands.append((words, depth == 0 and not in_backtick and not to_file))
     return commands
 
 
@@ -125,9 +163,15 @@ def _join(cwd, operand):
 
 
 def _reader_operands(words, env, cwd):
-    """The expanded, cwd-joined file operands of a reader's words after its program word."""
+    """The expanded, cwd-joined file operands of a reader's words after its program word.
+
+    `skill-sections` has one file operand, its first word other than an option; the words
+    after it are section names, never paths (issue 504 D15).
+    """
     operands, consume, program_text = [], False, False
     needs_program = posixpath.basename(words[0]) in ("sed", "awk", "jq")
+    if posixpath.basename(words[0]) == "skill-sections":
+        words = words[:1] + [word for word in words[1:] if not word.startswith("-")][:1]
     for word in words[1:]:
         if consume:
             consume = False
@@ -148,7 +192,7 @@ def _bash_keys(command):
     if tokens is None:
         return []
     keys, env, cwd = [], {}, ""
-    for words in _simple_commands(tokens):
+    for words, shown in _simple_commands(tokens):
         while words and _ASSIGNMENT.match(words[0]):
             name, _, value = words[0].partition("=")
             env[name] = _expand(value, env)
@@ -158,14 +202,17 @@ def _bash_keys(command):
         if words[0] == "cd" and len(words) > 1:
             cwd = _join(cwd, _expand(words[1], env))
         elif posixpath.basename(words[0]) in READERS:
-            keys.extend((path, tuple(words)) for path in _reader_operands(words, env, cwd))
+            extent = _WHOLE if shown and posixpath.basename(words[0]) == "cat" else tuple(words)
+            keys.extend((path, extent) for path in _reader_operands(words, env, cwd))
     return keys
 
 
 def read_keys(name, tool_input):
-    """The (path, ...) keys a tool call reads; empty for every tool but Read and Bash."""
+    """The `(path, extent)` keys a tool call reads (issue 504 D5); empty for every tool but Read
+    and Bash."""
     if name == "Read" and isinstance(tool_input.get("file_path"), str):
-        return [(tool_input["file_path"], tool_input.get("offset"), tool_input.get("limit"))]
+        extent = tuple(tool_input.get(field) for field in ("offset", "limit", "pages"))
+        return [(tool_input["file_path"], _WHOLE if extent == (None, None, None) else extent)]
     if name == "Bash" and isinstance(tool_input.get("command"), str):
         return _bash_keys(tool_input["command"])
     return []
@@ -197,12 +244,17 @@ def _skill_name(tool_input):
     return name if isinstance(name, str) and name else "(unnamed)"
 
 
+def _covered(key, seen):
+    """Whether an earlier read covers `key`: the same extent, or the same path read whole."""
+    return key in seen or (key[0], _WHOLE) in seen
+
+
 def _classify(name, tool_input, text, keys, seen, saved):
     """The (bucket, sub key) of a tool result by the first rule that holds (D2, D17)."""
     paths = [key[0] for key in keys]
     if name == "Read" and tool_input.get("file_path") in saved:
         verdict = saved[tool_input["file_path"]]
-    elif keys and all(key in seen for key in keys):
+    elif keys and all(_covered(key, seen) for key in keys):
         verdict = ("rereads", None)
     elif _RESUME_PACK.search(text) or (_OWNER_KIND.search(text) and _OWNER_VERSION.search(text)):
         verdict = ("resume_reads", None)
@@ -467,8 +519,8 @@ def _cohort(lineage, launch):
     return "fresh" if fresh else "spawned"
 
 
-def collect_host(label, root, *, cutoff, since, before, executor_factory):
-    """The boot rows of the transcripts under `root`, labelled `label`."""
+def collect_host(label, root, *, arm, cutoff, since, before, executor_factory):
+    """The boot rows of the transcripts under `root`, labelled `label`, in arm `arm`."""
     lineages, _ = collect(root, cutoff=cutoff, since=since, before=before, eval_rows=None,
                           executor_factory=executor_factory)
     pending = []
@@ -478,8 +530,9 @@ def collect_host(label, root, *, cutoff, since, before, executor_factory):
             if facts is None:
                 continue
             pending.append((launch.transcript, len(boot_slice(launch)), {
-                "host": label, "transcript": launch.transcript, "run_id": lineage.run_id,
-                "issue": lineage.issue, "cohort": _cohort(lineage, launch),
+                "arm": arm, "host": label, "transcript": launch.transcript,
+                "run_id": lineage.run_id, "issue": lineage.issue,
+                "project": lineage.facts["project"], "cohort": _cohort(lineage, launch),
                 "phase_group": facts[0]}))
     results = scan_paths([(transcript, calls) for transcript, calls, _ in pending],
                          executor_factory, scanner=attribute)
@@ -493,6 +546,8 @@ def collect_host(label, root, *, cutoff, since, before, executor_factory):
         host["ratio_tokens"] += result["ratio_tokens"]
         host["boots"].append({
             **identity, "calls": calls, "start": result["start"], "b": result["b"],
+            "boot_reading": sum(result["buckets"][name] for name in BOOT_READING),
+            "first_unit_work": sum(result["buckets"][name] for name in FIRST_UNIT_WORK),
             "buckets": result["buckets"], "skills": result["skills"],
             "skill_files": result["skill_files"]})
     return host
@@ -501,50 +556,54 @@ def collect_host(label, root, *, cutoff, since, before, executor_factory):
 # ---- the document ----------------------------------------------------------------
 
 
-def _group_rows(label, boots):
-    rows = []
-    for cohort in COHORTS:
-        for group in PHASE_GROUPS:
-            members = [boot for boot in boots if boot["cohort"] == cohort
-                       and group in (ALL, boot["phase_group"])]
-            if not members:
-                continue
-            rows.append({
-                "host": label, "cohort": cohort, "phase_group": group, "count": len(members),
-                "b_mean": statistics.fmean(boot["b"] for boot in members),
-                "b_without_schemas_mean": statistics.fmean(
-                    boot["b"] - boot["buckets"]["tool_schemas"] for boot in members),
-                "buckets": {name: statistics.fmean(boot["buckets"][name] for boot in members)
-                            for name in BUCKETS}})
-    return rows
-
-
-def build_document(hosts, *, window):
-    """The `agent-boot-report` document of the collected `hosts`."""
-    boots = [boot for host in hosts for boot in host["boots"]]
-    ratio_chars = sum(host["ratio_chars"] for host in hosts)
-    ratio_tokens = sum(host["ratio_tokens"] for host in hosts)
-    groups = [row for host in hosts for row in _group_rows(host["label"], host["boots"])]
-    groups += _group_rows(ALL, boots)
+def build_document(collected, *, window):
+    """The `agent-boot-report` document of `collected`: `(arm, hosts)` pairs in arm order, each
+    `hosts` being collect_host's results in argument order."""
+    boots, groups, unsplit = [], [], {}
+    for arm, hosts in collected:
+        arm_boots = [boot for host in hosts for boot in host["boots"]]
+        for host in hosts:
+            groups += group_rows(arm, host["label"], host["boots"], BUCKETS)
+        groups += group_rows(arm, ALL, arm_boots, BUCKETS)
+        boots += arm_boots
+        unsplit[arm] = {host["label"]: host["unsplit"] for host in hosts}
+    reweighted = None
+    if [arm for arm, _ in collected] == [BASELINE_ARM, CANDIDATE_ARM]:
+        by_arm = {arm: [boot for boot in boots if boot["arm"] == arm] for arm in (
+            BASELINE_ARM, CANDIDATE_ARM)}
+        reweighted = reweighted_rows([group for group in groups if group["arm"] == CANDIDATE_ARM],
+                                     by_arm[BASELINE_ARM], by_arm[CANDIDATE_ARM])
+    every_host = [host for _, hosts in collected for host in hosts]
+    ratio_chars = sum(host["ratio_chars"] for host in every_host)
+    ratio_tokens = sum(host["ratio_tokens"] for host in every_host)
     return {
         "kind": REPORT_KIND, "schema_version": SCHEMA_VERSION, "window": window,
-        "hosts": [{"label": host["label"], "root": host["root"]} for host in hosts],
+        "hosts": [{"label": host["label"], "root": host["root"]} for host in collected[0][1]],
         "chars_per_token": CHARS_PER_TOKEN,
         "observed_chars_per_token": round(ratio_chars / ratio_tokens, 2) if ratio_tokens else None,
-        "unsplit": {host["label"]: host["unsplit"] for host in hosts},
-        "boots": boots, "groups": groups,
+        "unsplit": unsplit, "boots": boots, "groups": groups, "reweighted": reweighted,
     }
 
 
+def _tokens(value):
+    return "-" if value is None else human(round(value))
+
+
 def _mean_table(groups):
-    names = [f"{group['cohort']} {group['phase_group']}" for group in groups]
-    rows = [["boots", *(f"{group['count']:,}" for group in groups)]]
-    rows += [[name, *(human(round(group["buckets"][name])) for group in groups)]
-             for name in BUCKETS]
-    rows.append(["B", *(human(round(group["b_mean"])) for group in groups)])
-    rows.append(["B without tool schemas",
-                 *(human(round(group["b_without_schemas_mean"])) for group in groups)])
-    print_table(rows, ["", *names], ["l"] + ["r"] * len(groups))
+    headers = [""]
+    for group in groups:
+        headers += [f"{group['cohort']} {group['phase_group']}", "median"]
+    rows = [["boots"]]
+    for group in groups:
+        rows[0] += [f"{group['count']:,}", ""]
+    rows += [[name] + [cell for group in groups for cell in (
+        _tokens(group["buckets"][name]), _tokens(group["bucket_medians"][name]))]
+        for name in BUCKETS]
+    for label, field in (("boot reading", "boot_reading"), ("first-unit work", "first_unit_work"),
+                         ("B", "b"), ("B without tool schemas", "b_without_schemas")):
+        rows.append([label] + [cell for group in groups for cell in (
+            _tokens(group[f"{field}_mean"]), _tokens(group[f"{field}_median"]))])
+    print_table(rows, headers, ["l"] + ["r"] * (2 * len(groups)))
 
 
 def _top_skills(boots, top):
@@ -552,37 +611,65 @@ def _top_skills(boots, top):
     rows = []
     for kind, field in (("skill", "skills"), ("file", "skill_files")):
         keys = {key for boot in fresh for key in boot[field]}
-        rows += [(statistics.fmean(boot[field].get(key, 0) for boot in fresh), kind, key)
-                 for key in keys]
+        for key in keys:
+            values = [boot[field].get(key, 0) for boot in fresh]
+            rows.append((statistics.fmean(values), kind, key, median(values)))
     rows.sort(key=lambda row: (-row[0], row[1], row[2]))
-    return [[kind, key, human(round(mean))] for mean, kind, key in rows[:top]]
+    return [[kind, key, _tokens(mean), _tokens(middle)] for mean, kind, key, middle in rows[:top]]
 
 
 def print_document(doc, *, top):
-    """Print the boot report's tables for `doc` (build_document's result)."""
-    boots = doc["boots"]
-    fresh = sum(boot["cohort"] == "fresh" for boot in boots)
+    """Print the boot report's tables for `doc` (build_document's result), one section per arm."""
+    arms = list(doc["unsplit"])
+    prefixes = {arm: "" if arms == [LIVE_ARM] else f"{arm} " for arm in arms}
+    tags = {arm: "" if arms == [LIVE_ARM] else f", {arm}" for arm in arms}
+    arm_boots = {arm: [boot for boot in doc["boots"] if boot["arm"] == arm] for arm in arms}
     hosts = ", ".join(f"{host['label']} {host['root']}" for host in doc["hosts"])
-    print(f"Boot composition ({doc['window']}; hosts: {hosts}; {len(boots):,} boots: "
-          f"{fresh:,} fresh, {len(boots) - fresh:,} spawned; call 0 at "
+    counts = "; ".join(
+        f"{prefixes[arm]}{len(boots):,} boots: "
+        f"{sum(boot['cohort'] == 'fresh' for boot in boots):,} fresh, "
+        f"{sum(boot['cohort'] != 'fresh' for boot in boots):,} spawned"
+        for arm, boots in arm_boots.items())
+    print(f"Boot composition ({doc['window']}; hosts: {hosts}; {counts}; call 0 at "
           f"{doc['chars_per_token']} characters per token)")
-    for label in [host["label"] for host in doc["hosts"]] + [ALL]:
-        title = "all hosts" if label == ALL else f"host {label}"
-        print(f"\nMean boot buckets, {title} (tokens per boot):\n")
-        _mean_table([group for group in doc["groups"] if group["host"] == label])
-    print("\nTop skill bodies and skill files (mean tokens per fresh boot, all hosts):\n")
-    print_table(_top_skills(boots, top), ["kind", "key", "mean"], ["l", "l", "r"])
-    print("\nBoots by B (host, issue, cohort, phase, calls, start, B, then each bucket):\n")
-    ordered = sorted(boots, key=lambda boot: (-boot["b"], boot["transcript"]))
-    _print_capped(
-        [[boot["host"], str(boot["issue"]), boot["cohort"], boot["phase_group"],
-          f"{boot['calls']:,}", human(boot["start"]), human(boot["b"]),
-          *(human(boot["buckets"][name]) for name in BUCKETS)] for boot in ordered],
-        top, ["host", "issue", "cohort", "phase", "calls", "start", "B", *BUCKETS],
-        ["l", "r", "l", "l", "r", "r", "r"] + ["r"] * len(BUCKETS))
+    for arm in arms:
+        for label in [host["label"] for host in doc["hosts"]] + [ALL]:
+            title = "all hosts" if label == ALL else f"host {label}"
+            print(f"\nMean boot buckets{tags[arm]}, {title} (tokens per boot):\n")
+            _mean_table([group for group in doc["groups"]
+                         if group["arm"] == arm and group["host"] == label])
+        print(f"\nTop skill bodies and skill files{tags[arm]} "
+              "(mean and median tokens per fresh boot, all hosts):\n")
+        print_table(_top_skills(arm_boots[arm], top), ["kind", "key", "mean", "median"],
+                    ["l", "l", "r", "r"])
+        print(f"\nBoots by B{tags[arm]} (host, issue, project, cohort, phase, calls, start, B, "
+              "boot reading, first-unit work, then each bucket):\n")
+        ordered = sorted(arm_boots[arm], key=lambda boot: (-boot["b"], boot["transcript"]))
+        _print_capped(
+            [[boot["host"], str(boot["issue"]), boot["project"], boot["cohort"],
+              boot["phase_group"], f"{boot['calls']:,}", human(boot["start"]), human(boot["b"]),
+              human(boot["boot_reading"]), human(boot["first_unit_work"]),
+              *(human(boot["buckets"][name]) for name in BUCKETS)] for boot in ordered],
+            top, ["host", "issue", "project", "cohort", "phase", "calls", "start", "B",
+                  "boot reading", "first-unit work", *BUCKETS],
+            ["l", "r", "l", "l", "l", "r", "r", "r", "r", "r"] + ["r"] * len(BUCKETS))
+    if doc["reweighted"] is not None:
+        print("\nReweighted to the baseline's host × phase group × project mix "
+              "(tokens per boot):\n")
+        print_table(
+            [[row["host"], row["cohort"], row["phase_group"], f"{row['common_strata']:,}",
+              f"{row['baseline']['count']:,}", f"{row['candidate']['count']:,}",
+              *(_tokens(row[side][f"{field}_{statistic}"])
+                for field in ("b", "b_without_schemas") for side in ("baseline", "candidate")
+                for statistic in ("mean", "median"))] for row in doc["reweighted"]],
+            ["host", "cohort", "phase", "common strata", "baseline n", "candidate n",
+             "baseline B", "median", "candidate B", "median", "baseline B w/o schemas", "median",
+             "candidate B w/o schemas", "median"],
+            ["l", "l", "l"] + ["r"] * 11)
     observed = doc["observed_chars_per_token"]
     print(f"\nObserved characters per token (boot calls adding more than "
           f"{RATIO_MIN_CHARS:,} characters): {'none' if observed is None else f'{observed:.2f}'}")
     print("Unsplit boots (no request records, left out): "
-          + ", ".join(f"{label} {count:,}" for label, count in doc["unsplit"].items()))
+          + "; ".join(prefixes[arm] + ", ".join(f"{label} {count:,}" for label, count in by_host.items())
+                      for arm, by_host in doc["unsplit"].items()))
     print(f"NOTE: {DISCLAIMER}")
