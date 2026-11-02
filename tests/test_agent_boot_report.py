@@ -26,6 +26,11 @@ WINDOW_BOOTS = (  # (seconds after T0, issue, project, phase, start, end): four 
     (3_700, 21, "alpha", 6, 20_000, 30_000), (3_800, 22, "alpha", 6, 21_000, 32_000),
     (3_900, 23, "alpha", 6, 22_000, 34_000), (4_000, 24, "beta", 6, 26_000, 50_000),
     (7_300, 31, "alpha", 6, 20_000, 99_000))
+COVERAGE_BOOTS = (  # baseline: alpha and delta in 6-7; event window: alpha and gamma in 6-7, alpha in 0-5
+    (100, 11, "alpha", 6, 24_000, 40_000), (200, 12, "delta", 6, 28_000, 60_000),
+    (3_700, 21, "alpha", 6, 20_000, 30_000), (3_800, 22, "gamma", 6, 22_000, 44_000),
+    (3_900, 23, "alpha", 3, 21_000, 35_000))
+SIDE_KEYS = ["count", "b_mean", "b_median", "b_without_schemas_mean", "b_without_schemas_median"]
 TOP_KEYS = ["kind", "schema_version", "window", "hosts", "chars_per_token",
             "observed_chars_per_token", "unsplit", "boots", "groups", "reweighted"]
 BOOT_KEYS = ["arm", "host", "transcript", "run_id", "issue", "project", "cohort", "phase_group",
@@ -505,13 +510,14 @@ class WindowsTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def write_boots(self, boots):
-        """One session holding a fresh owner (launch 2) per `(seconds, issue, project, phase,
-        start, end)`, registering with `--repo-root /Users/me/<project>`."""
-        session = Session(self.root)
-        for seconds, issue, project, phase, start, end in boots:
-            two_call_boot(session, f"o{issue}", seconds, issue=issue, launch=2, phase=phase,
-                          start=start, end=end, repo_root=f"/Users/me/{project}")
+    def write_boots(self, boots, root=None):
+        """One session under `root` (default `self.root`) holding an owner per `(seconds, issue,
+        project, phase, start, end[, launch])`, launch 2 by default, registering with
+        `--repo-root /Users/me/<project>`."""
+        session = Session(root or self.root)
+        for seconds, issue, project, phase, start, end, *launch in boots:
+            two_call_boot(session, f"o{issue}", seconds, issue=issue, launch=(launch or [2])[0],
+                          phase=phase, start=start, end=end, repo_root=f"/Users/me/{project}")
         session.write()
 
     def test_without_a_baseline_every_row_is_live_and_reweighted_is_null(self):
@@ -596,6 +602,86 @@ class WindowsTest(unittest.TestCase):
             "NOTE: ")]
         self.assertNotIn(-1, positions)
         self.assertEqual(positions, sorted(positions))
+
+    def test_the_candidate_is_reweighted_to_the_baseline_project_mix(self):
+        """AC: baseline alpha x1 and beta x3, candidate alpha x3 and beta x1; one host, fresh, 6-7."""
+        self.write_boots(WINDOW_BOOTS)
+        document = report(self.root, extra=(*EVENTS, "--baseline", BASELINE))
+        rows = document["reweighted"]
+        self.assertEqual([(row["host"], row["cohort"], row["phase_group"]) for row in rows],
+                         [(HOST, "fresh", "6-7"), (HOST, "fresh", "all"), ("all", "fresh", "6-7"),
+                          ("all", "fresh", "all")])
+        # Candidate weights n0/n1: 1/3 for each alpha boot, 3 for the beta boot (total 4).
+        # B: alpha 30,000 32,000 34,000, beta 50,000. The mean is 1/4 x 32,000 + 3/4 x 50,000 =
+        # 45,500. The weighted median is 50,000: cumulative 1/3, 2/3, 1, 4 first reaches 2 there,
+        # while the plain median is 33,000. Without schemas (end - start + 200): alpha 10,200
+        # 11,200 12,200, beta 24,200, so 1/4 x 11,200 + 3/4 x 24,200 = 20,950, median 24,200.
+        candidate = {"count": 4, "b_mean": 45_500, "b_median": 50_000,
+                     "b_without_schemas_mean": 20_950, "b_without_schemas_median": 24_200}
+        # Every baseline stratum is common, so the baseline side is the baseline group row:
+        # B 40,000 52,000 54,000 56,000; without schemas 16,200 24,200 26,200 28,200.
+        baseline = {"count": 4, "b_mean": 50_500, "b_median": 53_000,
+                    "b_without_schemas_mean": 23_700, "b_without_schemas_median": 25_200}
+        for row in rows:
+            with self.subTest(host=row["host"], phase_group=row["phase_group"]):
+                self.assertEqual(list(row), ["host", "cohort", "phase_group", "common_strata",
+                                             "baseline", "candidate"])
+                self.assertEqual((list(row["baseline"]), list(row["candidate"])),
+                                 (SIDE_KEYS, SIDE_KEYS))
+                self.assertEqual((row["common_strata"], row["baseline"], row["candidate"]),
+                                 (2, baseline, candidate))
+                group = {g["arm"]: g for g in document["groups"] if (g["host"], g["cohort"],
+                         g["phase_group"]) == (row["host"], row["cohort"], row["phase_group"])}
+                self.assertEqual({key: group["baseline"][key] for key in SIDE_KEYS}, baseline)
+                self.assertEqual((group["candidate"]["b_mean"], group["candidate"]["b_median"]),
+                                 (36_500, 33_000))
+
+    def test_strata_in_one_window_drop_out_and_a_scope_with_none_in_common_is_null(self):
+        self.write_boots(COVERAGE_BOOTS)
+        document = report(self.root, extra=(*EVENTS, "--baseline", BASELINE))
+        empty = dict.fromkeys(SIDE_KEYS, None) | {"count": 0}
+        alpha_baseline = {"count": 1, "b_mean": 40_000, "b_median": 40_000,
+                          "b_without_schemas_mean": 16_200, "b_without_schemas_median": 16_200}
+        alpha_candidate = {"count": 1, "b_mean": 30_000, "b_median": 30_000,
+                           "b_without_schemas_mean": 10_200, "b_without_schemas_median": 10_200}
+        self.assertEqual(
+            [(row["host"], row["cohort"], row["phase_group"], row["common_strata"],
+              row["baseline"], row["candidate"]) for row in document["reweighted"]],
+            [(host, "fresh", group, *sides) for host in (HOST, "all") for group, sides in (
+                ("0-5", (0, empty, empty)), ("6-7", (1, alpha_baseline, alpha_candidate)),
+                ("all", (1, alpha_baseline, alpha_candidate)))])
+
+    def test_reweighted_strata_keep_hosts_and_cohorts_apart(self):
+        """WINDOW_BOOTS with beta's boots on host b, every boot project alpha, plus a spawned
+        candidate boot on a: pooling hosts (common 1, mean 36,500) or cohorts fails (D13)."""
+        roots = {label: self.root / label for label in ("a", "b")}
+        for label, project in (("a", "alpha"), ("b", "beta")):
+            spawned = [(4_100, 25, "alpha", 6, 20_000, 90_000, 1)] if label == "a" else []
+            self.write_boots([(*boot[:2], "alpha", *boot[3:]) for boot in WINDOW_BOOTS
+                              if boot[2] == project] + spawned, root=roots[label])
+        document = report(*(f"{label}={root}" for label, root in roots.items()),
+                          extra=(*EVENTS, "--baseline", BASELINE))
+        rows = {(r["host"], r["cohort"], r["phase_group"]): (r["common_strata"], *(
+            r["candidate"][key] for key in ("count", "b_mean", "b_median")))
+            for r in document["reweighted"]}
+        self.assertEqual((rows[("all", "fresh", "all")], rows[("a", "fresh", "6-7")],
+                          rows[("all", "spawned", "all")]),
+                         ((2, 4, 45_500, 50_000), (1, 3, 32_000, 32_000), (0, 0, None, None)))
+
+    def test_text_output_prints_the_reweighted_table_after_both_arms(self):
+        self.write_boots(COVERAGE_BOOTS)
+        completed = costs("--projects-dir", str(self.root), *EVENTS, "--baseline", BASELINE)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        out = completed.stdout
+        positions = [out.find(heading) for heading in (
+            "Boots by B, candidate",
+            "Reweighted to the baseline's host × phase group × project mix",
+            "Observed characters per token")]
+        self.assertNotIn(-1, positions)
+        self.assertEqual(positions, sorted(positions))
+        self.assertRegex(out, rf"(?m)^{re.escape(HOST)} +fresh +0-5 +0 +0 +0( +-){{8}}$")
+        live = costs("--projects-dir", str(self.root), *EVENTS)
+        self.assertNotIn("Reweighted to", live.stdout)
 
 
 if __name__ == "__main__":

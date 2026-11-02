@@ -25,13 +25,15 @@ from agent_tools.agent_costs import DISCLAIMER, ROOT_LABEL, human, print_table, 
 from agent_tools.agent_owner_report import (
     _SAVED_TO,
     _TASK_FILE,
+    BASELINE_ARM,
+    CANDIDATE_ARM,
     LIVE_ARM,
     _print_capped,
     boot_facts,
     boot_slice,
     collect,
 )
-from agent_tools.agent_boot_rollup import ALL, group_rows, median
+from agent_tools.agent_boot_rollup import ALL, group_rows, median, reweighted_rows
 from agent_tools.context_meter_commands import SEPARATORS, lex
 from agent_tools.transcript_calls import read_transcript
 
@@ -544,6 +546,12 @@ def build_document(collected, *, window):
         groups += group_rows(arm, ALL, arm_boots, BUCKETS)
         boots += arm_boots
         unsplit[arm] = {host["label"]: host["unsplit"] for host in hosts}
+    reweighted = None
+    if [arm for arm, _ in collected] == [BASELINE_ARM, CANDIDATE_ARM]:
+        by_arm = {arm: [boot for boot in boots if boot["arm"] == arm] for arm in (
+            BASELINE_ARM, CANDIDATE_ARM)}
+        reweighted = reweighted_rows([group for group in groups if group["arm"] == CANDIDATE_ARM],
+                                     by_arm[BASELINE_ARM], by_arm[CANDIDATE_ARM])
     every_host = [host for _, hosts in collected for host in hosts]
     ratio_chars = sum(host["ratio_chars"] for host in every_host)
     ratio_tokens = sum(host["ratio_tokens"] for host in every_host)
@@ -552,7 +560,7 @@ def build_document(collected, *, window):
         "hosts": [{"label": host["label"], "root": host["root"]} for host in collected[0][1]],
         "chars_per_token": CHARS_PER_TOKEN,
         "observed_chars_per_token": round(ratio_chars / ratio_tokens, 2) if ratio_tokens else None,
-        "unsplit": unsplit, "boots": boots, "groups": groups, "reweighted": None,
+        "unsplit": unsplit, "boots": boots, "groups": groups, "reweighted": reweighted,
     }
 
 
@@ -624,6 +632,19 @@ def print_document(doc, *, top):
             top, ["host", "issue", "project", "cohort", "phase", "calls", "start", "B",
                   "boot reading", "first-unit work", *BUCKETS],
             ["l", "r", "l", "l", "l", "r", "r", "r", "r", "r"] + ["r"] * len(BUCKETS))
+    if doc["reweighted"] is not None:
+        print("\nReweighted to the baseline's host × phase group × project mix "
+              "(tokens per boot):\n")
+        print_table(
+            [[row["host"], row["cohort"], row["phase_group"], f"{row['common_strata']:,}",
+              f"{row['baseline']['count']:,}", f"{row['candidate']['count']:,}",
+              *(_tokens(row[side][f"{field}_{statistic}"])
+                for field in ("b", "b_without_schemas") for side in ("baseline", "candidate")
+                for statistic in ("mean", "median"))] for row in doc["reweighted"]],
+            ["host", "cohort", "phase", "common strata", "baseline n", "candidate n",
+             "baseline B", "median", "candidate B", "median", "baseline B w/o schemas", "median",
+             "candidate B w/o schemas", "median"],
+            ["l", "l", "l"] + ["r"] * 11)
     observed = doc["observed_chars_per_token"]
     print(f"\nObserved characters per token (boot calls adding more than "
           f"{RATIO_MIN_CHARS:,} characters): {'none' if observed is None else f'{observed:.2f}'}")

@@ -1,11 +1,14 @@
-"""The boot report's group rows, built from boot rows (issues 448, 504).
+"""The boot report's group rows and reweighted rows, built from boot rows (issues 448, 504).
 
 Pure statistics over the boot rows agent_tools.agent_boot_report collects: per host, cohort
-and phase group, the count and the mean and median per boot. python/README.md (agent-costs)
-holds the contract.
+and phase group, the count and the mean and median per boot, and with a baseline the
+candidate's B reweighted to the baseline's host x phase group x project mix. python/README.md
+(agent-costs) holds the contract.
 """
 
 import statistics
+from collections import defaultdict
+from fractions import Fraction
 
 ALL = "all"
 COHORTS = ("fresh", "spawned")
@@ -67,4 +70,57 @@ def group_rows(arm, host, boots, buckets):
                             for name in buckets},
                 "bucket_medians": {name: median(boot["buckets"][name] for boot in members)
                                    for name in buckets}})
+    return rows
+
+
+def _mean(values, weights):
+    """The weighted mean of `values`, computed exactly and rounded to a float once, or None
+    when the weights sum to 0."""
+    total = sum(weights, Fraction(0))
+    if not total:
+        return None
+    return float(sum((Fraction(value) * weight for value, weight in zip(values, weights)),
+                     Fraction(0)) / total)
+
+
+def _side(boots, weights):
+    """The count and the weighted mean and median of B and of B without tool schemas over
+    `boots`, each with its weight in `weights`."""
+    b = [boot["b"] for boot in boots]
+    b_without_schemas = [boot["b"] - boot["buckets"]["tool_schemas"] for boot in boots]
+    return {"count": len(boots),
+            "b_mean": _mean(b, weights), "b_median": median(b, weights),
+            "b_without_schemas_mean": _mean(b_without_schemas, weights),
+            "b_without_schemas_median": median(b_without_schemas, weights)}
+
+
+def _strata(boots, group):
+    """The boots the group row `group` pools, by stratum (host, phase group, project)."""
+    strata = defaultdict(list)
+    for boot in boots:
+        if (boot["cohort"] == group["cohort"] and group["host"] in (ALL, boot["host"])
+                and group["phase_group"] in (ALL, boot["phase_group"])):
+            strata[(boot["host"], boot["phase_group"], boot["project"])].append(boot)
+    return strata
+
+
+def reweighted_rows(groups, baseline, candidate):
+    """One row per row of `groups` (the candidate arm's group rows, in order): B and B without
+    tool schemas over the strata (host, phase group, project) the row pools that both arms hold.
+    The candidate's boots are weighted n0(s)/n1(s), which is the candidate's stratum means at
+    the baseline's mix, and the baseline's figures are plain (issue 504 D3, D10).
+    """
+    rows = []
+    for group in groups:
+        before, after = _strata(baseline, group), _strata(candidate, group)
+        common = [stratum for stratum in before if stratum in after]
+        base_boots = [boot for stratum in common for boot in before[stratum]]
+        new_boots = [boot for stratum in common for boot in after[stratum]]
+        new_weights = [Fraction(len(before[stratum]), len(after[stratum]))
+                       for stratum in common for _ in after[stratum]]
+        rows.append({
+            "host": group["host"], "cohort": group["cohort"], "phase_group": group["phase_group"],
+            "common_strata": len(common),
+            "baseline": _side(base_boots, [1] * len(base_boots)),
+            "candidate": _side(new_boots, new_weights)})
     return rows
