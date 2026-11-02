@@ -28,7 +28,7 @@ Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entr
 
 ## Authorization
 
-Invoking this skill authorizes the reversible, predeclared steps: reading, notes, version proposal, preview. Each irreversible action (for nix-config, `tag` and `github-release`) needs its own confirmation token. The preview is the one stop: collect every confirmation there, in one turn. Only an explicit yes to all of them lets the run pass the tokens; silence or any other reply passes none. A reply that changes the version is a new target and needs a new preview.
+Invoking this skill authorizes the reversible, predeclared steps: reading, notes, version proposal, preview. Each irreversible action (for nix-config, `tag` and `github-release`) needs its own confirmation token. The preview is the one stop: collect every confirmation there, in one turn. Only an explicit yes to all of them lets the run pass those tokens, and only tokens the user saw in that turn: tokens rotate on every resume, so a confirmation is never carried across one; silence or any other reply passes none. A reply that changes the version is a new target and needs a new preview.
 
 ## Doc-grounded escalations
 
@@ -38,7 +38,7 @@ Before forming any user-facing question, invoke `doc-grounded-questions`, using 
 
 1. Main checkout, not a worktree: `git rev-parse --git-common-dir` ends in `.git`. Otherwise switch to the main checkout or surface.
 2. Clean tree: `git status --porcelain` is empty. Surface changes; do not stash.
-3. `git fetch origin --prune --tags`, then local `<integration>` in sync with `origin/<integration>`: equal or absent continues; behind offers `git merge --ff-only origin/<integration>`; ahead or diverged is surfaced for the user, never resolved.
+3. `git fetch origin --prune --tags`, then local `<integration>` in sync with `origin/<integration>`: equal or absent continues; behind offers `git checkout <integration>` and, only if that succeeded, `git merge --ff-only origin/<integration>`; ahead or diverged is surfaced for the user, never resolved.
 4. Read the core's state:
 
 ```text
@@ -78,7 +78,7 @@ When `runnable`, present the version with its evidence, the title, the commit, e
 
 ## Phase 4 — Run
 
-After the user's yes, run with the preview's arguments and one `--confirm` per listed token (resume form: the tokens of the resume preview, which list the same actions, version and commit the user confirmed):
+After the user's yes, run with the preview's arguments and one `--confirm` per token the user confirmed (resume form: the tokens of the resume preview the user answered):
 
 ```text
 release transaction run --repo-root <main-checkout> --commit <commit> --version <version> --title "<title>" --notes-file <notes-path> --confirm <token> --confirm <token>
@@ -88,8 +88,8 @@ release transaction run --repo-root <main-checkout> --confirm <token>
 Run from inside the main checkout. The result's `next`:
 
 - `done`: go to Phase 5.
-- `wait`: the world has not caught up. Pause briefly, then `preview` in resume form and re-run with its tokens.
-- `confirm`: a token was not honoured. Re-preview, show the new confirmations, stop for the user.
+- `wait`: the world has not caught up. Pause briefly, then `preview` in resume form. No irreversible confirmation listed: run the resume form with no `--confirm`. Any listed: present them exactly as under `confirm` and stop; tokens from an earlier yes are never reused.
+- `confirm`: an action still needs a confirmation. Re-preview, present the listed confirmations as in Phase 3, and end the turn (a delegated owner returns the preview JSON). Pass only tokens the user confirms in the next turn.
 - `attention`: the release parked. Go to Phase 5; do not retry.
 
 A `confirmation_stale` or `confirmation_required` refusal is likewise a re-preview. `release_busy` means another session holds the release: report it.

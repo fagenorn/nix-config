@@ -169,6 +169,15 @@ class ShipReleaseContractsTest(unittest.TestCase):
         self.assertLess(phase0.index("release transaction status"),
                         phase0.index("git describe --tags --abbrev=0"))
 
+    def test_resume_never_reuses_a_confirmation_and_sync_checks_out_first(self):
+        """D30 and D17: tokens rotate on every custody acquisition, so only tokens the user saw
+        in that turn are passed; a fast-forward of the local integration branch is preceded by
+        its checkout, or in a two-branch project it would move the default branch."""
+        self.assertIn("tokens from an earlier yes are never reused", self.skill)
+        self.assertIn("a confirmation is never carried across one", self.skill)
+        self.assertIn("`git checkout <integration>` and, only if that succeeded, "
+                      "`git merge --ff-only origin/<integration>`", self.skill)
+
     def test_ownership_keeps_the_dispatch_marker_and_one_resolver_call(self):
         marker = ("<!-- agent-dispatch: id=ship-release-owner role=ship-owner model=opus "
                   "effort=high -->")
