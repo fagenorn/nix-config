@@ -242,6 +242,15 @@ class DeclarationTest(unittest.TestCase):
             vb.normalize_declaration(edited(declaration(), ("failure_class",), KeyError))
         self.assertEqual(str(refused.exception), "failure_class: unclassified")
 
+    def test_a_worktree_that_does_not_encode_as_utf8_is_refused(self):
+        loaded = vb.strict_load(b'{"command_id": "nix-build", "failure_class": "dependency", '
+                                b'"worktree": "/w/\\ud800", '
+                                b'"facts": [{"name": "flake-lock", "paths": ["flake.lock"]}]}')
+        self.assertEqual(loaded, declaration(worktree="/w/\ud800"))
+        with self.assertRaises(vb.BlockerRefused) as refused:
+            vb.normalize_declaration(loaded)
+        self.assertEqual(str(refused.exception), "worktree: must encode as UTF-8")
+
 
 class IdentityTest(unittest.TestCase):
     def test_the_identity_is_the_content(self):

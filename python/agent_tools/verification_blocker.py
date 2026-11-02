@@ -295,6 +295,10 @@ def normalize_declaration(value: object) -> dict:
     worktree = _text(value["worktree"], "worktree")
     if not worktree.startswith("/") or _has_control(worktree):
         raise _refuse("worktree", "must be an absolute path with no control character")
+    try:
+        worktree.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _refuse("worktree", "must encode as UTF-8") from None
     return {"command_id": value["command_id"], "failure_class": value["failure_class"],
             "worktree": worktree, "facts": _sources(value["facts"], "facts", normalize=True)}
 

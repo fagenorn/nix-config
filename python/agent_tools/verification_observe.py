@@ -19,8 +19,9 @@ Both fetch `origin`'s integration branch into its remote-tracking ref, the
 only write, and read each selected path's entry at the fetched commit with
 `git ls-tree`: its object id, or `null` when the path is absent. No declared
 command runs. `failure` also checks that the attempt's worktree belongs to the
-`--repo-root` repository, holds the same command entry, sits on the fetched
-commit's entries for every selected path and has no change to them.
+`--repo-root` repository, is the top level of its checkout, holds the same
+command entry, sits on the fetched commit's entries for every selected path and
+has no change to them, a submodule's included.
 """
 
 import argparse
@@ -154,13 +155,17 @@ def observe(repo_root: str, requirement: object) -> dict:
 
 
 def _guard_checkout(snapshot: dict, declaration: dict) -> None:
-    """Refuse a worktree of another repository or one holding a different command entry."""
+    """Refuse a worktree of another repository, one below its checkout's top level, or one
+    holding a different command entry (issue 543 D7)."""
     worktree, command_id = declaration["worktree"], declaration["command_id"]
     common = [Path(_git(directory, "rev-parse", "--path-format=absolute",
                         "--git-common-dir").decode("utf-8").strip()).resolve()
               for directory in (worktree, snapshot["project"]["root"])]
     if common[0] != common[1]:
         raise ObserveRefused("guard: the worktree is not a checkout of --repo-root's repository")
+    top = Path(_git(worktree, "rev-parse", "--show-toplevel").decode("utf-8").strip())
+    if top.resolve() != Path(worktree).resolve():
+        raise ObserveRefused("guard: the worktree is not the top level of its checkout")
     if _command_copy(_resolve(worktree), command_id) != _command_copy(snapshot, command_id):
         raise ObserveRefused(f"guard: the worktree's {command_id} entry differs from "
                              "--repo-root's")
@@ -176,7 +181,8 @@ def _guard_attempt(snapshot: dict, declaration: dict, facts: list[dict]) -> None
     for entry in selected:
         if _read_entry(worktree, head, entry["path"]) != entry["object"]:
             raise ObserveRefused(f"guard: {entry['path']} at HEAD differs from origin/{branch}")
-    changed = _git(worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--",
+    changed = _git(worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                   "--ignore-submodules=none", "--",
                    *[entry["path"] for entry in selected])
     if changed:
         raise ObserveRefused("guard: a selected path has a staged, unstaged or untracked change")

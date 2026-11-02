@@ -172,7 +172,8 @@ class FailureTest(ObserveCase):
                  ({"failure_class": "flaky"}, "unclassified"),
                  ({"command_id": "lint"}, "lint is not a verification command"),
                  ({"note": "x"}, "unknown"),
-                 ({"worktree": "wt"}, "worktree"))
+                 ({"worktree": "wt"}, "worktree"),
+                 ({"worktree": "/w/\ud800"}, "worktree: must encode as UTF-8"))
         for change, fragment in cases:
             with self.subTest(change=change):
                 self.refused(self.call("failure", {**self.declaration, **change}), fragment)
@@ -210,6 +211,37 @@ class FailureTest(ObserveCase):
         self.git(None, "clone", "-q", str(self.origin), str(foreign))
         self.refused(self.call("failure", {**self.declaration, "worktree": str(foreign)}),
                      "guard: the worktree is not a checkout")
+
+    def test_a_subdirectory_of_the_attempt_is_refused_before_the_fetch(self):
+        """`pkgs` holds a copy of the project, so it resolves to the same `suite` entry."""
+        self.publish({"other.txt": "unrelated\n"})
+        before = self.tracking()
+        (self.worktree / "flake.lock").write_text("edited\n", encoding="utf-8")
+        for name in (".agents", ".claude", "AGENTS.md", "CLAUDE.md", "docs", "tinytask"):
+            source, target = self.worktree / name, self.worktree / "pkgs" / name
+            (shutil.copytree if source.is_dir() else shutil.copy)(source, target)
+        subdirectory = {**self.declaration, "worktree": str(self.worktree / "pkgs")}
+        self.refused(self.call("failure", subdirectory),
+                     "guard: the worktree is not the top level of its checkout")
+        self.assertEqual(self.tracking(), before)
+
+    def test_a_changed_submodule_set_to_be_ignored_is_still_a_change(self):
+        library = self.scratch / "library"
+        self.git(None, "init", "-q", "-b", "main", str(library))
+        self.git(library, "commit", "-q", "--allow-empty", "-m", "one")
+        allow = ("-c", "protocol.file.allow=always")
+        self.git(self.publisher, *allow, "submodule", "add", "-q", str(library), "vendor/lib")
+        self.publish()
+        self.git(self.root, "fetch", "-q", "origin")
+        self.git(self.worktree, "merge", "-q", "--ff-only", "origin/main")
+        self.git(self.worktree, *allow, "submodule", "update", "-q", "--init")
+        declaration = {**self.declaration,
+                       "facts": [{"name": "vendored", "paths": ["vendor/lib"]}]}
+        self.ok(self.call("failure", declaration))
+        self.git(self.worktree, "config", "submodule.vendor/lib.ignore", "all")
+        self.git(self.worktree / "vendor" / "lib", "commit", "-q", "--allow-empty", "-m", "two")
+        self.refused(self.call("failure", declaration),
+                     "guard: a selected path has a staged, unstaged or untracked change")
 
 
 class ObserveTest(ObserveCase):
