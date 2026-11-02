@@ -410,6 +410,22 @@ class WorktreeTest(unittest.TestCase):
         self.assertEqual(request["worktrees"], [{"issue": 14, "recorded": None, "candidate": {
             "path": world.candidate(14, "-2"), "state": "absent"}}])
 
+    def test_a_world_never_sees_another_worlds_git_changes(self):
+        """Issue 500 D5, D6: each world's project is its own copy of the fixture commit."""
+        first = OrchestrateWorld(self)
+        (first.root / "first-only.txt").write_text("first world\n", "utf-8")
+        first.git("add", "first-only.txt")
+        first.git("commit", "--quiet", "-m", "first world only")
+        first.git("branch", "first-only")
+        first.git("config", "fixture.owner", "first")
+        second = OrchestrateWorld(self)
+        self.assertNotEqual(second.root, first.root)
+        self.assertEqual(second.git("log", "--format=%s").splitlines(), ["fixture"])
+        self.assertFalse((second.root / "first-only.txt").exists())
+        self.assertEqual(second.git("branch", "--list", "first-only"), "")
+        self.assertNotIn("fixture.owner", second.git("config", "--local", "--list"))
+        self.assertEqual(second.git("status", "--porcelain"), "")
+
 
 class StepInputTest(unittest.TestCase):
     def test_a_malformed_input_is_an_invalid_invocation(self):
