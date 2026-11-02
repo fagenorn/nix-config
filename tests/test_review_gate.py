@@ -1,10 +1,12 @@
 """`review-feasibility gate` and `confirm` from source (issue 227, D3, D4, D10)."""
 import copy
 import json
+import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import tests.test_review_feasibility as source_cases
 from agent_tools.review_budget import describe
@@ -93,19 +95,23 @@ class GateTest(GateFixture, unittest.TestCase):
 
     def test_capture_refuses_output_no_real_producer_emits(self):
         good = self.project(0).stdout
-        authority = describe('review-package')
-        over = json.loads(good); over['metrics']['root_bytes'] += 1
-        cases = {
-            'noncanonical': (good + b' ', 0), 'exit disagrees': (good, 3), 'unknown exit': (good, 1),
-            'oversized': (b'x' * (authority.report_wire_max_bytes + 1), 0),
-            'duplicate key': (b'{"a":1,"a":1}\n', 0), 'one metric drift': (canonical_bytes(over), 0)}
-        for label, (raw, code) in cases.items():
-            script = f'import sys; sys.stdout.buffer.write({raw!r}); sys.exit({code})'
-            with self.subTest(label), self.assertRaises(GateError):
+        with patch.dict(os.environ, self.env, clear=True):
+            authority = describe('review-package')
+            script = f'import sys; sys.stdout.buffer.write({good!r}); sys.exit(0)'
+            accepted = capture([sys.executable, '-c', script], cwd=self.repo, authority=authority)
+            self.assertEqual((accepted.exit, accepted.raw), (0, good))
+            over = json.loads(good); over['metrics']['root_bytes'] += 1
+            cases = {
+                'noncanonical': (good + b' ', 0), 'exit disagrees': (good, 3), 'unknown exit': (good, 1),
+                'oversized': (b'x' * (authority.report_wire_max_bytes + 1), 0),
+                'duplicate key': (b'{"a":1,"a":1}\n', 0), 'one metric drift': (canonical_bytes(over), 0)}
+            for label, (raw, code) in cases.items():
+                script = f'import sys; sys.stdout.buffer.write({raw!r}); sys.exit({code})'
+                with self.subTest(label), self.assertRaises(GateError):
+                    capture([sys.executable, '-c', script], cwd=self.repo, authority=authority)
+            script = 'import sys; sys.stderr.write("review-feasibility: boom\\n"); sys.exit(2)'
+            with self.assertRaisesRegex(GateError, '^boom$'):
                 capture([sys.executable, '-c', script], cwd=self.repo, authority=authority)
-        script = 'import sys; sys.stderr.write("review-feasibility: boom\\n"); sys.exit(2)'
-        with self.assertRaisesRegex(GateError, '^boom$'):
-            capture([sys.executable, '-c', script], cwd=self.repo, authority=authority)
 
     def test_every_gate_summary_validates_at_both_boundaries(self):
         for build in (lambda: None, self.bare_overflow, self.oversize):
