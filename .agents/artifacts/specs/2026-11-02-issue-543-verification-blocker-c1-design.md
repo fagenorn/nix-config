@@ -60,7 +60,8 @@ A failed fetch or read prints nothing on stdout and exits 2. It never yields a v
 - the Claude permission allow list entries, with the list's comment, the allow-surface
   count in the Claude Code README, `EXPECTED_ALLOW` and one heredoc case in the guard
   suite's lifecycle-call table;
-- a `python/README.md` section;
+- a `python/README.md` section that states the contract and its known limitations: the
+  class is caller-declared, and repository paths are the only fact kind;
 - its two test modules in `just agent-workflow-tests`.
 
 The lifecycle guard's source is unchanged (D9).
@@ -139,8 +140,9 @@ Rules:
   - `cwd` is made relative to `project.root` (`.` for the root), so no absolute path
     appears.
   The module checks shape only, because `resolve-project` already validated the entry:
-  `argv` is a non-empty list of non-empty strings, `cwd` is `.` or a canonical relative
-  path, and `env` is a list of unique variable names, so a `NAME=value` word is refused.
+  `id` is a non-empty string, `argv` is a non-empty list of non-empty strings, `cwd` is
+  `.` or a canonical relative path, and `env` is a list of unique variable names, so a
+  `NAME=value` word is refused.
 - **`failure_class`.** One of `command_input`, `dependency`, `environment` and
   `external_service`. Anything else, absence included, is unclassified and refused.
 - **`facts`.** 1–4 facts, sorted by `name` and unique. `name` matches
@@ -148,7 +150,8 @@ Rules:
   selector list.
 - **`source.paths`.** 1–8 sorted, unique repository-relative paths per fact, and no path
   appears in two facts. A path is refused when it:
-  - is empty or longer than 255 UTF-8 bytes;
+  - is empty, is longer than 255 UTF-8 bytes, or does not encode as UTF-8 (a lone
+    surrogate);
   - starts or ends with `/`, or holds a backslash;
   - has an empty, `.` or `..` segment;
   - has a component equal to `.git`, compared case-insensitively;
@@ -186,7 +189,8 @@ value. The rule matches every path that adoption's `is_secret_path` matches, and
 
 ### Normalization and identity (D3, D5)
 
-**Normalization.** A declaration (the `failure` input) is a selection in any order:
+**Normalization.** A declaration (the `failure` input) carries a selection, `facts:
+[{name, paths}]`, which has the shape of a requirement's `sources`, in any order:
 
 - its facts are sorted by `name`, and each fact's paths are sorted;
 - a repeated name, a path repeated within a fact or across facts, and a path spelled
@@ -196,7 +200,8 @@ The wire objects are the normalized form. A failure, observation or requirement 
 not already sorted is refused.
 
 **Identity.** The blocker id is `agent_tools.canonical.telemetry_digest` over the closed
-object `{repository, command, failure_class, facts}` of a validated failure. So
+object `{repository, command, failure_class, facts}` of a validated failure. The identity
+function validates its argument first, so an invalid failure never gets an id.
 `kind`, `schema_version`, time, host, attempt and worktree are not part of it. Equal
 normalized failures therefore get the same id in every run and on every host, and a
 change to any member changes the id. The id names a failure; it is never evidence that
@@ -209,6 +214,11 @@ verification-observe failure --repo-root <absolute> --input -
 verification-observe observe --repo-root <absolute> --input -
 ```
 
+**Terms.** A *typed observation* is either object the adapter prints. A
+`verification-observation` is only the answer to a requirement. A *probe* (AC2) is one
+adapter call's fetch and reads. The parent's *declared probe*, which runs a declared
+command, is a rejected fact kind (D6).
+
 **Inputs.** Stdin is loaded strictly: duplicate keys and non-finite literals are refused.
 
 - `failure` reads the closed `{"command_id", "failure_class", "worktree", "facts":
@@ -220,13 +230,16 @@ verification-observe observe --repo-root <absolute> --input -
 
 1. Validate and normalize the input with the pure module. A malformed, unclassified or
    secret-shaped input is refused here, before any process starts.
-2. Resolve the project at `--repo-root` in process with `verification` required. A
-   resolver refusal is `resolve-project refused: <code> <repair_id>`.
+2. Resolve the project at `--repo-root` in process. `failure` requires the
+   `verification` capability. `observe` requires none and reads only `project.id` and
+   `bindings.vcs`, so a host `PATH` change never blocks a probe (D11). A resolver refusal
+   is `resolve-project refused: <code> <repair_id>`.
 3. `failure` only: `command_id` must be in `bindings.workflow.verification`.
 4. Fetch only the integration branch from `origin` into
    `refs/remotes/origin/<integration_branch>`, with no tags, no `FETCH_HEAD`, no
    submodules and no automatic maintenance.
-5. Read each selected path's exact entry at that ref. A nested directory yields its own
+5. Read the ref once as a commit id. Then read each selected path's exact entry at that
+   commit, so one object never mixes two commits (D12). A nested directory yields its own
    tree id, not its members' entries. A missing entry is `null`.
 
 **Failure guard (D7).** Before printing, `failure` also requires:
@@ -234,13 +247,20 @@ verification-observe observe --repo-root <absolute> --input -
 - the worktree's Git common directory to be the same as that of `--repo-root`;
 - the project resolved at the worktree to hold the same `command_id` entry (`argv`,
   `env`, project-relative `cwd`) as `--repo-root`;
-- the worktree's `HEAD` to hold, for every selected path, the same entry as the fetched
-  ref (both absent counts as equal);
+- the worktree's `HEAD` to hold, for every selected path, the same entry as that commit
+  (both absent counts as equal);
 - no staged, unstaged or untracked change at a selected path.
 
 The command entry and `repository` come from `--repo-root`, so every attempt of a run
-names one command. The failure class remains the caller's declaration. The guard proves
-only that the attempt did not change a selected input or the command itself.
+names one command. The guard refuses in two further cases:
+
+- the integration branch has already changed a selected path, so the attempt does not
+  hold the branch's current input;
+- a root checkout that lags the branch has a different command entry from the worktree,
+  so the run's attempts would not name one command.
+
+The failure class remains the caller's declaration. The guard proves only that the
+attempt did not change a selected input or the command itself.
 
 **Git children.** Every child runs with:
 
@@ -255,8 +275,12 @@ only that the attempt did not change a selected input or the command itself.
 
 - **Exit 0** prints the object's canonical bytes (sorted keys, compact, ASCII) and one
   newline. The pure module validates the object before it is printed.
+- **`--help`** prints argparse's usage, starting `usage: verification-observe `, and
+  exits 0, as the installed-layout check expects of every launcher (D13).
 - **Exit 2** prints nothing on stdout and one line `verification-observe: <reason>` on
-  stderr. A Git failure names its subcommand and Git's last stderr line. Exit 2 covers:
+  stderr. Any other invalid command line is the line `verification-observe: invalid
+  invocation`. A Git failure names its subcommand and Git's last stderr line. Exit 2
+  covers:
   - an invalid invocation or input;
   - a resolver refusal;
   - a command that is not a verification command;
@@ -305,6 +329,9 @@ never read helper call counts (D10).
   - guard refusals: dirty, untracked, committed own edit, a diverged command entry, a
     foreign repository;
   - an unreachable `origin` and a missing integration branch printing nothing, exit 2;
+  - a verification command whose program is not on `PATH`: `observe` still answers,
+    and `failure` refuses at resolution;
+  - `--help` exit 0, and a malformed command line as the one invalid-invocation line;
   - the only ref that changes is `refs/remotes/origin/<integration_branch>`, with no
     `FETCH_HEAD` and the working tree unchanged.
 - **Guard suite**, `tests/test_claude_permission_guard.py`, against the built settings:
@@ -342,3 +369,6 @@ never read helper call counts (D10).
 | D8 | Two stdin-only modes with an absolute `--repo-root`. The order is input validation, then resolution, then Git. Every Git child runs with no prompt, without the repository-routing variables, with literal pathspecs and a 60 s timeout. Exit 0 prints one validated canonical line. Exit 2 prints no stdout and one stderr line naming Git's last stderr line. The importable `build_failure` and `observe` take one input each. | agent-helpers rule 2; `verified-tree` (stderr line, exit 2) and adoption's `fetch_pinned` (no prompt, timeout, one ref) precedents; The Bar "the log stream is the debugger". | A JSON refusal object on stdout, which no caller reads yet. A batch `observe_all`: c4's step owns batching and its one-fetch bound. Inheriting `GIT_DIR`, which could observe another repository. |
 | D9 | Wiring: one command-table row; `Bash(verification-observe:*)` and `Bash(~/.agents/bin/verification-observe:*)` after the `orchestrate-control` pair, with the allow list's comment naming the adapter's one write; the README's allow surface goes from 26 to 28 entries; the guard suite's `EXPECTED_ALLOW` and lifecycle-call table. `lifecycle_guard.py` and skill text are untouched. | Issue: "Wire it as a command in `lib/agent-tools.nix`, the Claude Code permission guard and its adversarial table"; `git fetch` is already allowed; agent-helpers rule 1. | Leaving it to the auto classifier until c4, which the issue rules out. Adding skill examples or `test_shell_example_contracts` sanctions now, which belong to c4's procedures. |
 | D10 | Test seams: pure tables by import; the adapter from source over a `test_verified_tree`-style harness (eval fixture project, temporary `HOME` manifest, hermetic Git) plus a local bare `origin` and a publishing clone; the guard suite against the build. | agent-helpers rule 5; The Bar "Tests that can fail"; the `test_verified_tree` precedent (Git reads plus in-process resolution). | `OrchestrateWorld` (parent): its `workflow-state` and `gh` shims serve control rounds the adapter never makes. |
+| D11 | Refines D8: `failure` resolves with the `verification` capability required, as `verified-tree` does. `observe` requires no capability and reads only `project.id` and `bindings.vcs`. | `resolve_project` blocks `verification` when a verification command's program is not on `PATH` (`commands_resolve`); observing paths never runs that command. | Requiring `verification` in both modes: a host `PATH` change would turn every probe of a parked blocker into a failure until it is fixed. |
+| D12 | Refines D6: after the fetch the adapter reads the ref once as a commit id. Every selected entry, and `failure`'s `HEAD` comparison, use that commit. | Concurrent owners fetch the same tracking ref; AC2 needs each printed object to state one integration state. | Reading by ref name path by path, which can mix two commits in one object. |
+| D13 | Refines D8: `--help` prints argparse's usage and exits 0. Any other malformed command line is the one stderr line `verification-observe: invalid invocation`, exit 2. | `test_agent_tools_launchers` runs every launcher with `--help` and expects `usage: <name> `; the `orchestrate-control` invalid-invocation precedent; D8's one-line refusal. | argparse's default multi-line usage error, which breaks the one-line refusal contract. |
