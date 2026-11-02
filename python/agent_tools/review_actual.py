@@ -147,9 +147,7 @@ def actual_inputs_from_trees(repo: Path, base_tree: str, head_tree: str, *,
     for number, choice in enumerate(_packing_choices()):
         context = None if number == 0 else choice["context_lines"]
         raw = git_diff(repo, base_tree, head_tree, "--binary", f"-U{choice['context_lines']}")
-        chunks = _split_diff(raw)
-        if len(chunks) != len(paths):
-            raise GenerationError("diff coverage does not match paths")
+        chunks = _chunks_by_path(_split_diff(raw), operations)
         records = []
         for path, operation, chunk in zip(paths, operations, chunks):
             evidence = None
@@ -314,6 +312,19 @@ def _split_diff(raw: bytes) -> list[bytes]:
     if not starts or starts[0] != 0:
         raise GenerationError("diff is not split at file boundaries")
     return [raw[start:end] for start, end in zip(starts, starts[1:] + [len(raw)])]
+
+
+def _chunks_by_path(chunks: list[bytes], operations: tuple[str, ...]) -> list[bytes]:
+    """One chunk per path: a type change is one path but two `diff --git` sections."""
+    grouped: list[bytes] = []
+    position = 0
+    for operation in operations:
+        width = 2 if operation == "T" else 1
+        grouped.append(b"".join(chunks[position : position + width]))
+        position += width
+    if position != len(chunks):
+        raise GenerationError("diff coverage does not match paths")
+    return grouped
 
 
 def _changed_paths(raw: bytes) -> list[str]:

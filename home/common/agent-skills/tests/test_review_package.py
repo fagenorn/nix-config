@@ -139,6 +139,24 @@ class ReviewPackageCliTest(unittest.TestCase):
                 snapshots.append((output.read_bytes(), shards, report["artifact"]["metrics"]))
             self.assertTrue(all(snapshot == snapshots[0] for snapshot in snapshots))
 
+    def test_file_to_symlink_type_change_is_one_covered_record(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env = self.setup_repo(repo)
+            (repo / "link.txt").write_text("regular file\n", encoding="utf-8")
+            base = self.commit(repo, "base", env)
+            (repo / "link.txt").unlink()
+            (repo / "link.txt").symlink_to("target.txt")
+            head = self.commit(repo, "file becomes symlink", env)
+            out = repo / "review.json"
+            result = self.invoke(repo, plan, base, head, out, env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["coverage"], {"complete": True, "file_diff_count": 1})
+            rebuilt = b"".join((out.parent / item["path"]).read_bytes() for item in manifest["shards"])
+            self.assertIn(b"deleted file mode 100644\n", rebuilt)
+            self.assertIn(b"new file mode 120000\n", rebuilt)
+
     def run_git(self, repo: Path, *args: str, text: bool = True):
         return subprocess.run(["git", "-C", str(repo), *args], check=True,
                               capture_output=True, text=text).stdout
