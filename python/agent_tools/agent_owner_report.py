@@ -51,6 +51,8 @@ MEASURED_PREFIX = MEASURED_NOTE.partition("{tokens}")[0]
 DISPATCH_TOOLS = ("Agent", "Task")
 BOOT_GROUPS = ("0-5", "6-7")
 LIVE_ARM = "live"
+BASELINE_ARM = "baseline"
+CANDIDATE_ARM = "candidate"
 DEFAULT_SETTLE_DAYS = 4
 NONE_YET = "(none: pass --policy or --sweep)"
 BIAS_NOTE = ("The shift model keeps observed increments after a hand-off and cannot see a fresh "
@@ -919,7 +921,8 @@ def _boot_rows(lineages):
 
 
 def build_document(lineages, footer, *, window: str, arms=None, sweep=False) -> dict:
-    """The `agent-owner-report` document; `arms` (replay Arms) and `sweep` fill the replay."""
+    """The `agent-owner-report` document; `arms` (replay Arms) and `sweep` fill the replay. Two
+    start windows make a comparison of the baseline and candidate arms (issue 503 D4)."""
     rows = [lineage.facts for lineage in lineages]
     simulated, calibration = [], None
     if arms or sweep:
@@ -929,13 +932,18 @@ def build_document(lineages, footer, *, window: str, arms=None, sweep=False) -> 
         if sweep:
             simulated += agent_owner_replay.sweep(lineages, model)
         calibration = agent_owner_replay.calibration(lineages, model)
-    arm_rows = agent_owner_rollup.arm_rows(rows)
+    grouping = footer["start_grouping"]
+    compared = grouping is not None and len(grouping["windows"]) == 2
+    arm_rows = agent_owner_rollup.arm_rows(
+        rows, required=[BASELINE_ARM, CANDIDATE_ARM] if compared else ())
+    project_rows = agent_owner_rollup.project_rows(rows, [arm["arm"] for arm in arm_rows])
     return {
         "kind": REPORT_KIND, "schema_version": SCHEMA_VERSION, "window": window,
-        "start_grouping": footer["start_grouping"], "pricing": footer["pricing"],
-        "lineages": rows, "arms": arm_rows,
-        "projects": agent_owner_rollup.project_rows(rows, [arm["arm"] for arm in arm_rows]),
+        "start_grouping": grouping, "pricing": footer["pricing"],
+        "lineages": rows, "arms": arm_rows, "projects": project_rows,
         "boots": _boot_rows(lineages), "simulated": simulated, "calibration": calibration,
+        "comparison": (agent_owner_rollup.comparison(arm_rows, project_rows, BASELINE_ARM,
+                                                     CANDIDATE_ARM) if compared else None),
         "unattributed": footer["unattributed"], "interrupted": footer["interrupted"],
         "unmatched": footer["unmatched"],
     }

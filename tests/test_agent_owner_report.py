@@ -514,3 +514,118 @@ class OwnerReportTest(unittest.TestCase):
             "claude_exit": 0}) + "\n", encoding="utf-8")
         [row] = report(self.root, "--eval-results", str(results), "--eval", "from-issue:8")["lineages"]
         self.assertEqual((row["project"], row["started"]), ("repo", "2026-10-25T09:00:30Z"))
+
+    def two_windows(self):
+        """Baseline (2026-10-25): issue 7 (repo, delivered) and issue 8 (other, through an
+        unexpanded "$R"); candidate (2026-10-26 from 15:00Z): issue 9 (repo, delivered by its
+        keeper k9) and issue 10 (repo)."""
+        s7 = Session(self.root, session="s7")
+        g = s7.call(None, 0, context=20_000, write=20_000, ttl="1h", bash=progress(3))
+        s7.result(None, 5, g, gate_reply("continue"))
+        f = s7.call(None, 60, context=21_000, write=1_000, ttl="1h", bash=FINISH)
+        s7.result(None, 65, f, finish_reply(7))
+        s7.write()
+        s8 = Session(self.root, project="-Users-me-other--worktrees-worktree-issue-8", session="s8",
+                     cwd="/Users/me/other/.worktrees/worktree-issue-8")
+        g = s8.call(None, HOUR, context=30_000, write=30_000, ttl="1h",
+                    bash=progress(3, action_id="8:1:1", repo_root='"$R"'))
+        s8.result(None, HOUR + 5, g, gate_reply("continue", issue=8))
+        s8.write()
+        s9 = Session(self.root, session="s9")
+        g = s9.call(None, 30 * HOUR, context=40_000, write=40_000, ttl="1h",
+                    bash=progress(3, action_id="9:1:1"))
+        s9.result(None, 30 * HOUR + 5, g, gate_reply("continue", issue=9))
+        keeper = s9.call(None, 30 * HOUR + 10, context=41_000, write=1_000, ttl="1h", agent_tool=True)
+        s9.child("k9", tool_use_id=keeper)
+        f = s9.call("k9", 30 * HOUR + 20, context=15_000, write=15_000, bash=FINISH)
+        s9.result("k9", 30 * HOUR + 25, f, finish_reply(9))
+        s9.write()
+        s10 = Session(self.root, session="s10")
+        g = s10.call(None, 31 * HOUR, context=50_000, write=50_000, ttl="1h",
+                     bash=progress(3, action_id="10:1:1"))
+        s10.result(None, 31 * HOUR + 5, g, gate_reply("continue", issue=10))
+        s10.write()
+        return {7: cost(20_000, 20_000, write_price=8.0) + cost(21_000, 1_000, write_price=8.0),
+                8: cost(30_000, 30_000, write_price=8.0),
+                9: cost(40_000, 40_000, write_price=8.0) + cost(41_000, 1_000, write_price=8.0),
+                "k9": cost(15_000, 15_000), 10: cost(50_000, 50_000, write_price=8.0)}
+
+    def test_a_two_window_comparison_by_arm_and_project(self):
+        c = self.two_windows()
+        doc = report(self.root, "--baseline", "2026-10-25..2026-10-26",
+                     "--started", "2026-10-26..2026-10-28", "--settle-days", "0")
+        self.assertEqual([(row["issue"], row["arm"], row["project"]) for row in doc["lineages"]],
+                         [(7, "baseline", "repo"), (8, "baseline", "other"),
+                          (9, "candidate", "repo"), (10, "candidate", "repo")])
+        self.assertEqual(doc["window"], "baseline 2026-10-25T00:00:00Z → 2026-10-26T00:00:00Z; "
+                                        "candidate 2026-10-26T00:00:00Z → 2026-10-28T00:00:00Z")
+        self.assertEqual([window["arm"] for window in doc["start_grouping"]["windows"]],
+                         ["baseline", "candidate"])
+        base_owner, cand_owner = (c[7] + c[8]) / 2, (c[9] + c[10]) / 2
+        cand_spend = c[9] + c["k9"] + c[10]
+        self.assert_rows(doc["arms"], [
+            {"arm": "baseline", "n": 2, "delivered": 1, "delivery_rate": 0.5,
+             "dollars_per_delivered": c[7] + c[8], "owner_dollars_per_lineage": base_owner,
+             "sd": None, "undelivered_dollars": c[8], "ping_dollars": 0.0, "peak_p50": 21_000,
+             "peak_p90": 30_000},
+            {"arm": "candidate", "n": 2, "delivered": 1, "delivery_rate": 0.5,
+             "dollars_per_delivered": cand_spend, "owner_dollars_per_lineage": cand_owner,
+             "sd": None, "undelivered_dollars": c[10], "ping_dollars": 0.0, "peak_p50": 41_000,
+             "peak_p90": 50_000}])
+        self.assert_rows(doc["projects"], [
+            {"arm": "baseline", "project": "other", "n": 1, "delivered": 0, "delivery_rate": 0.0,
+             "dollars_per_delivered": None, "owner_dollars_per_lineage": c[8],
+             "owner_dollars": c[8], "owner_ping_dollars": 0.0, "total_dollars": c[8],
+             "ping_dollars": 0.0},
+            {"arm": "baseline", "project": "repo", "n": 1, "delivered": 1, "delivery_rate": 1.0,
+             "dollars_per_delivered": c[7], "owner_dollars_per_lineage": c[7],
+             "owner_dollars": c[7], "owner_ping_dollars": 0.0, "total_dollars": c[7],
+             "ping_dollars": 0.0},
+            {"arm": "candidate", "project": "repo", "n": 2, "delivered": 1, "delivery_rate": 0.5,
+             "dollars_per_delivered": cand_spend, "owner_dollars_per_lineage": cand_owner,
+             "owner_dollars": c[9] + c[10], "owner_ping_dollars": 0.0, "total_dollars": cand_spend,
+             "ping_dollars": 0.0}])
+        comparison = doc["comparison"]
+        self.assertEqual(list(comparison),
+                         ["owner_dollars_per_lineage_ratio", "dollars_per_delivered_ratio", "projects"])
+        self.assertAlmostEqual(comparison["owner_dollars_per_lineage_ratio"], cand_owner / base_owner,
+                               places=9)
+        self.assertAlmostEqual(comparison["dollars_per_delivered_ratio"], cand_spend / (c[7] + c[8]),
+                               places=9)
+        self.assert_rows(comparison["projects"], [
+            {"project": "other", "owner_dollars_per_lineage_ratio": None, "delivery_rate_change": None},
+            {"project": "repo", "owner_dollars_per_lineage_ratio": cand_owner / c[7],
+             "delivery_rate_change": -0.5}])
+
+    def test_a_window_with_no_lineage_keeps_an_arm_row_with_n_0(self):
+        self.two_windows()
+        doc = report(self.root, "--baseline", "2026-10-25..2026-10-26",
+                     "--started", "2026-11-01..2026-11-02", "--settle-days", "0")
+        self.assertEqual([arm["arm"] for arm in doc["arms"]], ["baseline", "candidate"])
+        self.assert_rows(doc["arms"][1:], [{
+            "arm": "candidate", "n": 0, "delivered": 0, "delivery_rate": None,
+            "dollars_per_delivered": None, "owner_dollars_per_lineage": None, "sd": None,
+            "undelivered_dollars": 0.0, "ping_dollars": 0.0, "peak_p50": 0, "peak_p90": 0}])
+        self.assertEqual([(row["arm"], row["project"]) for row in doc["projects"]],
+                         [("baseline", "other"), ("baseline", "repo")])
+        comparison = doc["comparison"]
+        self.assertEqual((comparison["owner_dollars_per_lineage_ratio"],
+                          comparison["dollars_per_delivered_ratio"]), (None, None))
+
+    def test_the_replay_runs_over_one_start_window(self):
+        self.two_windows()
+        doc = report(self.root, "--started", "2026-10-25..2026-10-28", "--settle-days", "0",
+                     "--policy", "slim=boot=slim")
+        self.assertEqual((len(doc["lineages"]), doc["comparison"]), (4, None))
+        self.assertTrue(doc["calibration"]["identity_matches"])
+
+    def test_comparison_usage_errors(self):
+        started = ["--report", "owners", "--started", "2026-10-26..2026-10-28"]
+        self.assert_usage_errors(
+            ["--report", "boot", "--baseline", "2026-10-25..2026-10-26"],
+            ["--report", "owners", "--baseline", "2026-10-25..2026-10-26"],
+            started + ["--baseline", "2026-10-27..2026-10-29"],
+            started + ["--baseline", "2026-10-26..2026-10-28"],
+            started + ["--baseline", "2026-10-25"],
+            started + ["--baseline", "2026-10-25..2026-10-26", "--policy", "slim=boot=slim"],
+            started + ["--baseline", "2026-10-25..2026-10-26", "--sweep"])

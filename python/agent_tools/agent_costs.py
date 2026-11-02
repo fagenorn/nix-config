@@ -46,7 +46,8 @@ instead of live issues. `--policy NAME=SPEC` (repeatable) and `--sweep` replay t
 under hand-off policies (agent_tools.agent_owner_replay) and fill the simulated-arms and
 calibration tables. `--started SINCE..BEFORE` instead selects the lineages that started in that
 window and counts each one's whole spend once it has settled `--settle-days` (default 4) before
-the report end.
+the report end. `--baseline SINCE..BEFORE` adds a second window and compares its lineages, the
+baseline arm, with those of `--started`, the candidate arm.
 """
 
 import argparse
@@ -1810,7 +1811,18 @@ def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
             since, before = agent_owner_report.parse_range(args.started)
         except ValueError as error:
             ap.error(f"--started: {error}")
-        windows = (agent_owner_report.StartWindow(agent_owner_report.LIVE_ARM, since, before),)
+        if args.baseline is None:
+            windows = (agent_owner_report.StartWindow(agent_owner_report.LIVE_ARM, since, before),)
+        else:
+            try:
+                base_since, base_before = agent_owner_report.parse_range(args.baseline)
+            except ValueError as error:
+                ap.error(f"--baseline: {error}")
+            if base_since < before and since < base_before:
+                ap.error("--baseline must not overlap --started")
+            windows = (
+                agent_owner_report.StartWindow(agent_owner_report.BASELINE_ARM, base_since, base_before),
+                agent_owner_report.StartWindow(agent_owner_report.CANDIDATE_ARM, since, before))
         settle_days = (agent_owner_report.DEFAULT_SETTLE_DAYS if args.settle_days is None
                        else args.settle_days)
     lineages, footer = agent_owner_report.collect(
@@ -1877,6 +1889,10 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap.add_argument("--started", metavar="SINCE..BEFORE",
                     help="select the lineages that started in [SINCE, BEFORE) (YYYY-MM-DD or "
                          "RFC3339 bounds) and count their whole spend; --report owners only")
+    ap.add_argument("--baseline", metavar="SINCE..BEFORE",
+                    help="a second start window, not overlapping --started, whose lineages form "
+                         "the baseline arm against the candidate arm of --started; --report "
+                         "owners only")
     ap.add_argument("--settle-days", type=_non_negative_int, default=None, metavar="DAYS",
                     help="count a lineage only when it started at least DAYS days before the "
                          "report end (default 4, 0 = off); needs --started")
@@ -1918,6 +1934,12 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         ap.error("--started and --settle-days are available only with --report owners")
     if args.settle_days is not None and args.started is None:
         ap.error("--settle-days needs --started")
+    if args.baseline is not None and not owners_report:
+        ap.error("--baseline is available only with --report owners")
+    if args.baseline is not None and args.started is None:
+        ap.error("--baseline needs --started")
+    if args.baseline is not None and (args.policy or args.sweep):
+        ap.error("--baseline does not take --policy/--sweep")
     if args.started is not None and (args.events_since or args.events_before):
         ap.error("--started does not take --events-since/--events-before")
     if args.started is not None and args.eval_results is not None:

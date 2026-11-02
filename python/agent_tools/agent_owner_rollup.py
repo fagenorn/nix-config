@@ -42,15 +42,17 @@ def aggregate(rows: list[dict]) -> dict:
     }
 
 
-def arm_rows(rows: list[dict]) -> list[dict]:
-    """One row per arm, by arm name: the aggregate's quotients plus the delivered spend's sd
-    (None below two), the undelivered rows' spend and the rows' peak-context p50 and p90."""
+def arm_rows(rows: list[dict], required=()) -> list[dict]:
+    """One row per arm: the `required` arms first, in their order and each with a row even when
+    it has no lineage, then any other arm, by name. A row holds the aggregate's quotients plus the
+    delivered spend's sd (None below two), the undelivered rows' spend and the rows' peak-context
+    p50 and p90."""
     arms = defaultdict(list)
     for row in rows:
         arms[row["arm"]].append(row)
     result = []
-    for arm in sorted(arms):
-        members = arms[arm]
+    for arm in [*required, *sorted(set(arms) - set(required))]:
+        members = arms.get(arm, [])
         total = aggregate(members)
         delivered = [spend(row) for row in members if row["delivered"]]
         peaks = [row["peak_context"] for row in members]
@@ -79,3 +81,34 @@ def project_rows(rows: list[dict], arms: list[str]) -> list[dict]:
         result.extend({"arm": arm, "project": project, **aggregate(projects[project])}
                       for project in sorted(projects))
     return result
+
+
+def _ratio(candidate, baseline):
+    return None if candidate is None or baseline is None or baseline == 0 else candidate / baseline
+
+
+def comparison(arms: list[dict], projects: list[dict], baseline: str, candidate: str) -> dict:
+    """The candidate arm over the baseline arm: the two arm ratios and, per project of either
+    arm, the owner-spend ratio and the delivery-rate change (candidate minus baseline, a fraction;
+    None unless both arms have the project). A ratio is None when a side is None or the baseline is 0."""
+    by_arm = {row["arm"]: row for row in arms}
+    base, cand = by_arm[baseline], by_arm[candidate]
+    rows = {(row["arm"], row["project"]): row for row in projects}
+    names = sorted({project for arm, project in rows if arm in (baseline, candidate)})
+    entries = []
+    for name in names:
+        before, after = rows.get((baseline, name)), rows.get((candidate, name))
+        both = before is not None and after is not None
+        entries.append({
+            "project": name,
+            "owner_dollars_per_lineage_ratio": _ratio(
+                after["owner_dollars_per_lineage"], before["owner_dollars_per_lineage"]) if both else None,
+            "delivery_rate_change": after["delivery_rate"] - before["delivery_rate"] if both else None,
+        })
+    return {
+        "owner_dollars_per_lineage_ratio": _ratio(cand["owner_dollars_per_lineage"],
+                                                  base["owner_dollars_per_lineage"]),
+        "dollars_per_delivered_ratio": _ratio(cand["dollars_per_delivered"],
+                                              base["dollars_per_delivered"]),
+        "projects": entries,
+    }
