@@ -3,6 +3,8 @@ import ast
 import inspect as introspect
 import json
 import os
+import plistlib
+import stat
 import unittest
 from unittest import mock
 
@@ -70,17 +72,171 @@ class Case(unittest.TestCase):
 
 
 class DescribeTest(Case):
-    def test_descriptor_is_exact_valid_fresh_and_unregistered(self):
+    def test_descriptor_is_exact_valid_fresh_and_registered(self):
         self.assertEqual(adapter.describe(), DESCRIPTOR)
         self.assertEqual(release_adapter.descriptor_problems(adapter.describe()), [])
         adapter.describe()["operations"].clear()
         self.assertEqual(adapter.describe(), DESCRIPTOR)
-        self.assertNotIn("launchd-agent", release_adapter.REGISTRY)
+        self.assertIs(release_adapter.REGISTRY["launchd-agent"], adapter)
         for node in ast.walk(ast.parse(introspect.getsource(adapter))):
             if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("agent_tools"):
                 self.assertEqual(node.module, "agent_tools.canonical")
             if isinstance(node, ast.Import):
                 self.assertFalse([a.name for a in node.names if a.name.startswith("agent_tools")])
+
+
+class InvokeTest(Case):
+    def invoke(self, parameters=None):
+        return adapter.invoke({"kind": "effect", "operation": "activate",
+                               "parameters": parameters or self.parameters()})
+
+    def rendered(self, **overrides):
+        root = str(self.world.checkout)
+        plist = {"Label": LABEL, "ProgramArguments": [str(self.world.bin / "notifierd"), "serve", "--quiet"],
+                 "WorkingDirectory": root, "RunAtLoad": True, "KeepAlive": True,
+                 "ProcessType": "Background",
+                 "EnvironmentVariables": {"AGENT_RELEASE_VERSION": "v1.2.3",
+                                          "AGENT_RELEASE_COMMIT": self.candidate["commit"]},
+                 "StandardOutPath": os.path.join(root, "logs/out.log"),
+                 "StandardErrorPath": os.path.join(root, "logs/err.log")}
+        plist.update(overrides)
+        return {key: value for key, value in plist.items() if value is not None}
+
+    def written(self):
+        with open(self.world.plist_path(LABEL), "rb") as handle:
+            return plistlib.load(handle)
+
+    def test_bootstraps_a_rendered_plist_then_inspects_satisfied(self):
+        service, path = f"gui/{os.getuid()}/{LABEL}", self.world.plist_path(LABEL)
+        self.assertEqual(self.invoke(), {"result": "accepted", "error_class": None, "reference": service})
+        self.assertEqual(self.written(), self.rendered())
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+        self.assertEqual([c["argv"] for c in self.world.calls("launchctl")],
+                         [["print", service], ["bootstrap", f"gui/{os.getuid()}", str(path)]])
+        self.assertEqual(self.world.calls("claude-bash-lifecycle-guard"), [])
+        observed = self.effect()
+        self.assertEqual((observed["outcome"], observed["reason"]), ("satisfied", "running"))
+
+    def test_a_loaded_older_release_is_booted_out_and_back_in(self):
+        self.managed(stamp=("v1.2.2", "f" * 40))
+        self.assertEqual(self.invoke()["result"], "accepted")
+        self.assertEqual([c["argv"][0] for c in self.world.calls("launchctl")],
+                         ["print", "bootout", "bootstrap"])
+        job = self.world.job(LABEL)
+        self.assertEqual(job["runs"], 1)
+        self.assertNotEqual(job["pid"], 4000)
+        self.assertEqual(job["environment"], {"AGENT_RELEASE_VERSION": "v1.2.3",
+                                              "AGENT_RELEASE_COMMIT": self.candidate["commit"]})
+
+    def test_optional_members_are_omitted(self):
+        program = str(self.world.bin / "notifierd")
+        none = dict(ProgramArguments=[program], KeepAlive=False, ProcessType=None,
+                    StandardOutPath=None, StandardErrorPath=None)
+        parameters = self.parameters()
+        parameters["config"] = {"program": "notifierd", "keep_alive": False}
+        self.assertEqual(self.invoke(parameters)["result"], "accepted")
+        self.assertEqual(self.written(), self.rendered(**none))
+        self.setUp()
+        parameters = self.parameters(background=False)
+        self.assertEqual(self.invoke(parameters)["result"], "accepted")
+        self.assertEqual(self.written(), self.rendered(ProcessType=None))
+
+    def test_each_refusal(self):
+        stale = ("v1.2.2", "f" * 40)
+        plist = lambda: self.world.plist_path(LABEL)
+        verbs = lambda: [c["argv"][0] for c in self.world.calls("launchctl")]
+
+        def symlink():
+            plist().parent.mkdir(parents=True)
+            plist().symlink_to(self.world.checkout)
+
+        def replace_fails():
+            return mock.patch.object(adapter.os, "replace", side_effect=OSError("disk full"))
+
+        def loaded_with(*knobs):
+            def arrange():
+                self.managed(stamp=stale)
+                for verb, kwargs in knobs:
+                    self.world.fail("launchctl", verb, **kwargs)
+            return arrange
+
+        def set_label(parameters):
+            parameters["target"]["label"] = "-x"
+
+        def set_commit(parameters):
+            parameters["candidate"]["commit"] = "f" * 40
+
+        def set_program(parameters):
+            parameters["config"]["program"] = "missingd"
+
+        def knob(verb, **kwargs):
+            return lambda: self.world.fail("launchctl", verb, **kwargs)
+
+        def foreign():
+            self.world.load_job(LABEL, path="/Library/LaunchAgents/x.plist")
+        # name, operation, edit, arrange, patch, (result, class, step), launchctl verbs, plist written
+        rows = (
+            ("label -x", "activate", set_label, None, None,
+             ("rejected", "invalid_input", "shape"), [], False),
+            ("operation install", "install", None, None, None,
+             ("rejected", "unsupported_operation", "shape"), [], False),
+            ("uid 0", "activate", None, None, lambda: mock.patch.object(adapter.os, "getuid", return_value=0),
+             ("rejected", "authorization_denied", "authority"), [], False),
+            ("commit moved", "activate", set_commit, None, None,
+             ("rejected", "precondition_failed", "checkout"), [], False),
+            ("dirty", "activate", None, lambda: self.world.dirty(), None,
+             ("rejected", "precondition_failed", "checkout"), [], False),
+            ("program missing", "activate", set_program, None, None,
+             ("rejected", "precondition_failed", "program"), [], False),
+            ("plist symlink", "activate", None, symlink, None,
+             ("rejected", "precondition_failed", "plist path"), [], False),
+            ("foreign job", "activate", None, foreign, None,
+             ("rejected", "precondition_failed", "print"), ["print"], False),
+            ("print exit 5", "activate", None, knob("print", exit=5), None,
+             ("rejected", "provider_unavailable", "print"), ["print"], False),
+            ("bootout exit 1", "activate", None, loaded_with(("bootout", {"exit": 1})), None,
+             ("rejected", "transient_transport", "bootout"), ["print", "bootout"], False),
+            ("bootout timeout", "activate", None, loaded_with(("bootout", {"exit": 0, "sleep": 3})),
+             lambda: mock.patch.object(adapter, "INVOKE_BUDGET_SECONDS", 1),
+             ("unknown", "transient_transport", "bootout"), ["print", "bootout"], False),
+            ("bootstrap exit 5", "activate", None, knob("bootstrap", exit=5), None,
+             ("unknown", "transient_transport", "bootstrap"), ["print", "bootstrap"], True),
+            ("write fails, nothing loaded", "activate", None, None, replace_fails,
+             ("rejected", "provider_unavailable", "plist write"), ["print"], False),
+            ("write fails after bootout", "activate", None, loaded_with(), replace_fails,
+             ("unknown", "transient_transport", "plist write"), ["print", "bootout"], False))
+        for name, operation, edit, arrange, patch, (result, error_class, step), expected, wrote in rows:
+            with self.subTest(row=name):
+                self.setUp()
+                if arrange:
+                    arrange()
+                parameters = self.parameters()
+                if edit:
+                    edit(parameters)
+                before = self.world.tree()
+                with patch() if patch else mock.MagicMock():
+                    answer = adapter.invoke({"kind": "effect", "operation": operation,
+                                             "parameters": parameters})
+                self.assertEqual((answer["result"], answer["error_class"]), (result, error_class))
+                self.assertTrue(answer["reference"].startswith(f"{step}: "), answer["reference"])
+                self.assertLessEqual(len(answer["reference"]), 240)
+                self.assertEqual(release_adapter.invoke_result_problems(answer), [])
+                self.assertEqual(verbs(), expected)
+                self.assertEqual(plist().is_file() and not plist().is_symlink(), wrote)
+                if step in ("shape", "authority"):
+                    self.assertEqual(self.world.calls(), [])
+                if step == "plist write":
+                    self.assertEqual(os.listdir(plist().parent), [])
+                elif not wrote:
+                    self.assertEqual(self.world.tree(), before)
+                if name == "foreign job":
+                    self.assertEqual(self.world.job(LABEL)["path"], "/Library/LaunchAgents/x.plist")
+                if name == "plist symlink":
+                    self.assertTrue(plist().is_symlink())
+                if name == "bootout exit 1":
+                    self.assertIsNotNone(self.world.job(LABEL))
+                if name == "write fails after bootout":
+                    self.assertIsNone(self.world.job(LABEL))
 
 
 class ClassificationTest(Case):

@@ -1,4 +1,4 @@
-"""The launchd-agent adapter, read half (issue 547 D1, D4-D8, D13, D17, D19, D21): `describe`, `inspect`.
+"""The launchd-agent adapter (issue 547 D1, D4-D8, D12, D13, D15, D17-D19, D21): `describe`, `inspect`, `invoke`.
 
 `describe()` returns a fresh descriptor with one operation, `activate`: `local_apply` mode,
 `in_place` mutability, `supported` for `inspect`. `agent_running` and `running_subject_identity`
@@ -39,16 +39,54 @@ directory with `git --no-optional-locks` (`rev-parse HEAD` and `status --porcela
 `running_subject_identity` maps each row by that table's last column, and `agent_running` follows
 its § Liveness table with `print` alone. Every child runs by name on `PATH` with the caller's
 environment unchanged, under one `INSPECT_BUDGET_SECONDS` deadline per call.
+
+`invoke(request)` never raises and returns a closed `InvokeResult`. Each step below refuses with
+`<step>: <detail>` (at most 240 characters) and stops there, under one `INVOKE_BUDGET_SECONDS`
+deadline for every child; a child started with no budget left is a timeout. It runs only `git`
+and `launchctl`, by name, and never the lifecycle guard or `kickstart` (issue 547 D2, D12):
+
+1. `shape`: the request is exactly an `activate` effect whose parameters pass the shape check of
+   `inspect` (`invalid_input`; an undeclared operation is `unsupported_operation`).
+2. `authority`: uid 0 is `authorization_denied`.
+3. `checkout` (#124 D23): HEAD of the working directory's repository is the candidate commit and
+   no tracked file is modified, else `precondition_failed`. A read that times out is
+   `transient_transport` and one that fails otherwise is `provider_unavailable`.
+4. `program`: `shutil.which` resolves the bare program name, else `precondition_failed`.
+5. `plist path`: an existing plist path must be a regular file, not a symlink.
+6. `print`: not loaded (exit 113) continues; loaded must come from the managed plist, else
+   `precondition_failed`; any other outcome is `provider_unavailable`, a timeout
+   `transient_transport`.
+
+Steps 1 to 6 are `rejected`: nothing was written. The first host write is the `bootout` of a
+loaded agent, or the plist write when nothing was loaded (issue 547 D15), so from there a failure
+is `unknown`/`transient_transport` unless it provably left the host as it was:
+
+7. `bootout`: a non-zero exit left the agent loaded (`rejected`), a timeout is `unknown`.
+8. `plist write`: the rendered plist goes to a temporary file in `~/Library/LaunchAgents`,
+   mode 0644, then `os.replace`s the plist path. A failure removes the temporary file and is
+   `rejected`/`provider_unavailable` when nothing was booted out, else `unknown`.
+9. `bootstrap`: exit 0 is `accepted` with the reference `gui/<uid>/<label>`; anything else is
+   `unknown`.
+
+The plist (issue 547 D8, D18) holds `Label`, `ProgramArguments` (the resolved program path and
+`arguments`, with no `/bin/wait4path` wrapper), `WorkingDirectory` (the checkout root),
+`RunAtLoad`, `KeepAlive`, `EnvironmentVariables` (exactly the two stamp variables),
+`ProcessType` `Background` only when `background` is true, and the two log paths joined to the
+checkout root only when configured.
 """
 
 import os
+import plistlib
 import re
+import shutil
 import stat
 import subprocess
+import tempfile
 import time
 from typing import Any
 
 INSPECT_BUDGET_SECONDS = 30
+INVOKE_BUDGET_SECONDS = 60
 DETAIL_LIMIT = 240
 NOT_LOADED_EXIT = 113
 STAMP_VERSION = "AGENT_RELEASE_VERSION"
@@ -398,3 +436,179 @@ def inspect(request: Any) -> dict[str, Any]:
         return _observation("unknown", "parameters_invalid", detail=problem)
     return _observation("unknown", "parameters_invalid",
                         detail="request is not a closed effect or predicate request")
+
+
+class _Refusal(Exception):
+    """An `invoke` that ends here: the closed `InvokeResult` to return."""
+
+    def __init__(self, result: str, error_class: str, step: str, detail: str) -> None:
+        reference = f"{step}: {detail}"[:DETAIL_LIMIT]
+        super().__init__(reference)
+        self.answer = {"result": result, "error_class": error_class, "reference": reference}
+
+
+def _rejected(error_class: str, step: str, detail: str) -> _Refusal:
+    return _Refusal("rejected", error_class, step, detail)
+
+
+def _unread(error: _Unreadable, step: str) -> _Refusal:
+    """A read before any host write that did not answer: always `rejected` (issue 547 D15)."""
+    if error.reason == "lookup_timeout":
+        return _rejected("transient_transport", step, "timed out")
+    return _rejected("provider_unavailable", step, error.detail or error.reason)
+
+
+def _read(argv: list[str], step: str, deadline: float) -> str:
+    try:
+        done = _run(argv, deadline)
+    except _Unreadable as error:
+        raise _unread(error, step) from error
+    if done.returncode != 0:
+        raise _rejected("provider_unavailable", step, done.stderr.strip() or f"exit {done.returncode}")
+    return done.stdout
+
+
+def _invoke_shape(request: Any) -> dict[str, Any]:
+    """The parameters of a request that is a declared, valid `activate` effect."""
+    if not (isinstance(request, dict) and set(request) == EFFECT_SHAPE
+            and request["kind"] == "effect" and isinstance(request["operation"], str)):
+        raise _rejected("invalid_input", "shape", "request is not a closed effect request")
+    operation = request["operation"]
+    if operation not in describe()["operations"]:
+        raise _rejected("unsupported_operation", "shape", f"{operation}: unknown_operation")
+    problem = _parameters_problem(operation, request["parameters"], candidate_required=True)
+    if problem is not None:
+        raise _rejected("invalid_input", "shape", problem)
+    return request["parameters"]
+
+
+def _checkout_root(commit: str, deadline: float) -> str:
+    """The working checkout's root, when HEAD is `commit` and no tracked file is modified (#124 D23)."""
+    root = _read(["git", "rev-parse", "--show-toplevel"], "checkout", deadline).strip()
+    if not os.path.isabs(root):
+        raise _rejected("provider_unavailable", "checkout", "rev-parse did not return a directory")
+    head = _read(["git", "-C", root, "rev-parse", "HEAD"], "checkout", deadline).strip()
+    if head != commit:
+        raise _rejected("precondition_failed", "checkout", f"HEAD is {head}, not {commit}")
+    modified = _read(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"],
+                     "checkout", deadline)
+    if modified.strip():
+        raise _rejected("precondition_failed", "checkout", "a tracked file is modified")
+    return root
+
+
+def _check_plist_path(plist: str) -> None:
+    try:
+        mode = os.lstat(plist).st_mode
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise _rejected("provider_unavailable", "plist path", str(error)) from error
+    if not stat.S_ISREG(mode):
+        raise _rejected("precondition_failed", "plist path", f"{plist} is not a regular file")
+
+
+def _loaded(label: str, plist: str, deadline: float) -> bool:
+    """Whether the agent is loaded, which it may only be from the managed plist."""
+    try:
+        job = _load(label, deadline)
+    except _Unreadable as error:
+        raise _unread(error, "print") from error
+    if job is not None and job["path"] != plist:
+        raise _rejected("precondition_failed", "print", f"loaded from {job['path']}, not {plist}")
+    return job is not None
+
+
+def _render(label: str, program: str, root: str, config: dict[str, Any],
+            candidate: dict[str, str]) -> dict[str, Any]:
+    """The plist dictionary of one activation (issue 547 D8, D18)."""
+    plist: dict[str, Any] = {
+        "Label": label, "ProgramArguments": [program, *config.get("arguments", [])],
+        "WorkingDirectory": root, "RunAtLoad": True, "KeepAlive": config["keep_alive"],
+        "EnvironmentVariables": {STAMP_VERSION: candidate["version"], STAMP_COMMIT: candidate["commit"]}}
+    if config.get("background"):
+        plist["ProcessType"] = "Background"
+    for key, member in (("StandardOutPath", "stdout_path"), ("StandardErrorPath", "stderr_path")):
+        if member in config:
+            plist[key] = os.path.join(root, config[member])
+    return plist
+
+
+def _write_plist(path: str, definition: dict[str, Any]) -> None:
+    """Replace `path` with `definition`, mode 0644, through a temporary file beside it."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".release-", suffix=".plist", dir=directory)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            plistlib.dump(definition, handle, fmt=plistlib.FMT_XML, sort_keys=True)
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _bootout(service: str, deadline: float) -> None:
+    """Boot the agent out. A command that failed or never started left it loaded; a timeout may not."""
+    try:
+        done = _run(["launchctl", "bootout", service], deadline)
+    except _Unreadable as error:
+        if error.reason == "lookup_timeout":
+            raise _Refusal("unknown", "transient_transport", "bootout", "timed out") from error
+        raise _rejected("provider_unavailable", "bootout", error.detail or error.reason) from error
+    if done.returncode != 0:
+        raise _rejected("transient_transport", "bootout",
+                        done.stderr.strip() or f"exit {done.returncode}")
+
+
+def _bootstrap(plist: str, deadline: float) -> None:
+    """Bootstrap the agent from `plist`; after the first host write every failure is `unknown`."""
+    try:
+        done = _run(["launchctl", "bootstrap", _domain(), plist], deadline)
+    except _Unreadable as error:
+        raise _Refusal("unknown", "transient_transport", "bootstrap",
+                       error.detail or error.reason) from error
+    if done.returncode != 0:
+        raise _Refusal("unknown", "transient_transport", "bootstrap",
+                       done.stderr.strip() or f"exit {done.returncode}")
+
+
+def _invoke(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
+    if os.getuid() == 0:
+        raise _rejected("authorization_denied", "authority", "refusing to activate as uid 0")
+    candidate, config = parameters["candidate"], parameters["config"]
+    label = parameters["target"]["label"]
+    root = _checkout_root(candidate["commit"], deadline)
+    program = shutil.which(config["program"])
+    if program is None:
+        raise _rejected("precondition_failed", "program", f"{config['program']} is not on PATH")
+    plist, service = _plist_path(label), f"{_domain()}/{label}"
+    _check_plist_path(plist)
+    loaded = _loaded(label, plist, deadline)
+    if loaded:
+        _bootout(service, deadline)
+    try:
+        _write_plist(plist, _render(label, program, root, config, candidate))
+    except (OSError, ValueError, TypeError, OverflowError) as error:
+        if loaded:
+            raise _Refusal("unknown", "transient_transport", "plist write", str(error)) from error
+        raise _rejected("provider_unavailable", "plist write", str(error)) from error
+    _bootstrap(plist, deadline)
+    return {"result": "accepted", "error_class": None, "reference": service}
+
+
+def invoke(request: Any) -> dict[str, Any]:
+    """The `InvokeResult` of one `activate` request: `{result, error_class, reference}`.
+
+    Never raises. A refusal before the bootout, or before the plist write when nothing was
+    loaded, leaves the host as it was (issue 547 D15).
+    """
+    deadline = time.monotonic() + INVOKE_BUDGET_SECONDS
+    try:
+        return _invoke(_invoke_shape(request), deadline)
+    except _Refusal as refusal:
+        return refusal.answer

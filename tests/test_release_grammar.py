@@ -16,7 +16,7 @@ class DescriptorTest(unittest.TestCase):
         self.assertEqual(release_adapter.descriptor_problems(support.FIXTURE_STORE), [])
 
     def test_registry_is_closed(self):
-        names = ["codesigned-artifact", "github-actions-health", "github-forge"]
+        names = ["codesigned-artifact", "github-actions-health", "github-forge", "launchd-agent"]
         self.assertEqual(sorted(release_adapter.REGISTRY), names)
         self.assertEqual(sorted(release_adapter.DESCRIPTORS), names)
 

@@ -1,12 +1,15 @@
 """Outcomes are observed after invocation (#124 AC8). Run: just agent-workflow-tests"""
 import unittest
+from pathlib import Path
 
 from agent_tools import (actions_health_adapter, codesigned_artifact_adapter, forge_adapter,
-                         release_adapter, release_profile)
+                         launchd_agent_adapter, release_adapter, release_profile)
 from . import release_test_support as support
 from .forge_world import ForgeWorld
 from .test_forge_adapter import ROWS
 from .test_transaction_custody import CustodyCase
+
+REPO = Path(__file__).resolve().parents[1]
 
 class PostInvocationObservationTest(CustodyCase):
     def setUp(self):
@@ -70,6 +73,22 @@ class RegistryTest(unittest.TestCase):
         descriptor = release_adapter.DESCRIPTORS["codesigned-artifact"]
         self.assertEqual(descriptor, codesigned_artifact_adapter.describe())
         self.assertIsNone(release_adapter.watch_operation(descriptor))
+
+    def test_the_registry_holds_four_adapters_and_one_deploy_watch(self):
+        self.assertIs(release_adapter.REGISTRY["launchd-agent"], launchd_agent_adapter)
+        self.assertEqual(release_adapter.DESCRIPTORS["launchd-agent"], launchd_agent_adapter.describe())
+        self.assertEqual({name: release_adapter.watch_operation(descriptor)
+                          for name, descriptor in release_adapter.DESCRIPTORS.items()},
+                         {"codesigned-artifact": None, "github-actions-health": "deploy",
+                          "github-forge": None, "launchd-agent": None})
+
+    def test_no_agent_tools_module_names_argus(self):
+        """AC2: the vocabulary is neutral."""
+        modules = sorted((REPO / "python/agent_tools").glob("*.py"))
+        self.assertGreater(len(modules), 50)
+        for path in modules:
+            with self.subTest(module=path.name):
+                self.assertNotIn("argus", path.read_text("utf-8").lower())
 
     def test_prior_descriptors_and_forge_profiles_keep_their_base_digests(self):
         """Issue 547 D22: values measured at base 328f08da."""
