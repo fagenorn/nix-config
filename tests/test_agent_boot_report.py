@@ -15,6 +15,26 @@ PLANS = "/r/.agents/artifacts/plans"
 TOOLS = [{"name": "Read", "description": "Read a file.", "input_schema": {"type": "object"}}]
 BUCKETS = ("tool_schemas", "harness", "prompt", "skill_bodies", "skill_files", "plan_reads",
            "resume_reads", "rereads", "other_reads", "commands", "assistant", "unexplained")
+BASELINE = "2026-10-25T09:00:00Z..2026-10-25T10:00:00Z"
+BASELINE_EVENTS = ("--events-since", "2026-10-25T09:00:00Z",
+                   "--events-before", "2026-10-25T10:00:00Z")
+EVENTS = ("--events-since", "2026-10-25T10:00:00Z", "--events-before", "2026-10-25T11:00:00Z")
+WINDOW_BOOTS = (  # (seconds after T0, issue, project, phase, start, end): four boots in the
+                  # baseline window, four in the event window and one after both
+    (100, 11, "alpha", 6, 24_000, 40_000), (200, 12, "beta", 6, 28_000, 52_000),
+    (300, 13, "beta", 6, 28_000, 54_000), (400, 14, "beta", 6, 28_000, 56_000),
+    (3_700, 21, "alpha", 6, 20_000, 30_000), (3_800, 22, "alpha", 6, 21_000, 32_000),
+    (3_900, 23, "alpha", 6, 22_000, 34_000), (4_000, 24, "beta", 6, 26_000, 50_000),
+    (7_300, 31, "alpha", 6, 20_000, 99_000))
+TOP_KEYS = ["kind", "schema_version", "window", "hosts", "chars_per_token",
+            "observed_chars_per_token", "unsplit", "boots", "groups", "reweighted"]
+BOOT_KEYS = ["arm", "host", "transcript", "run_id", "issue", "project", "cohort", "phase_group",
+             "calls", "start", "b", "boot_reading", "first_unit_work", "buckets", "skills",
+             "skill_files"]
+GROUP_KEYS = ["arm", "host", "cohort", "phase_group", "count", "b_mean", "b_median",
+              "b_without_schemas_mean", "b_without_schemas_median", "boot_reading_mean",
+              "boot_reading_median", "first_unit_work_mean", "first_unit_work_median", "buckets",
+              "bucket_medians"]
 
 
 def costs(*args):
@@ -48,14 +68,16 @@ def dispatch(session, seconds):
     return session.call(None, seconds, context=10_000, write=10_000, ttl="1h", agent_tool=True)
 
 
-def two_call_boot(session, agent, seconds, *, issue, launch, phase, start, end, requests=True):
+def two_call_boot(session, agent, seconds, *, issue, launch, phase, start, end, requests=True,
+                  repo_root="/Users/me/repo"):
     """A child owner booting from `start` to `end` in two calls, registering at the second."""
     session.child(agent, tool_use_id=dispatch(session, seconds))
     if requests:
         opening(session, agent)
     session.call(agent, seconds + 10, context=start, write=start)
     gate = session.call(agent, seconds + 20, context=end, write=end - start,
-                        bash=progress(phase, action_id=f"{issue}:1:{launch}"))
+                        bash=progress(phase, action_id=f"{issue}:1:{launch}",
+                                          repo_root=repo_root))
     session.result(agent, seconds + 21, gate, gate_reply("continue", issue=issue, launch=launch))
 
 
@@ -208,7 +230,7 @@ class BootReportTest(unittest.TestCase):
         self.assertEqual(row["issue"], 7)
         self.assertEqual(row["buckets"], buckets(tool_schemas=29_800, harness=100, prompt=100,
                                                  assistant=40, unexplained=960))
-        self.assertEqual(document["unsplit"], {HOST: 1})
+        self.assertEqual(document["unsplit"], {"live": {HOST: 1}})
         self.assertIsNone(document["observed_chars_per_token"])
 
     def gated_boot(self, session, seconds, context):
@@ -309,7 +331,7 @@ class BootReportTest(unittest.TestCase):
         self.assertEqual((pooled["b_mean"], pooled["b_without_schemas_mean"],
                           pooled["buckets"]["tool_schemas"]), (36_500, 1_700, 34_800))
         self.assertEqual([host["label"] for host in document["hosts"]], [HOST])
-        self.assertEqual(document["unsplit"], {HOST: 0})
+        self.assertEqual(document["unsplit"], {"live": {HOST: 0}})
 
     def test_foreign_flags_are_usage_errors(self):
         for extra in (["--project", "x"], ["--artifacts", "docs"], ["--strata", "codex"],
@@ -443,7 +465,7 @@ class HostsTest(unittest.TestCase):
         self.assertEqual(pooled["b_without_schemas_mean"], 2_200)
         self.assertEqual(pooled["buckets"], buckets(
             tool_schemas=97_400 / 3, harness=100, prompt=100, assistant=40, unexplained=1_960))
-        self.assertEqual(document["unsplit"], {"alpha": 0, "beta": 0})
+        self.assertEqual(document["unsplit"], {"live": {"alpha": 0, "beta": 0}})
 
     def test_an_unlabelled_root_takes_the_short_hostname(self):
         self.write_hosts()
@@ -473,6 +495,107 @@ class HostsTest(unittest.TestCase):
         for heading in ("Mean boot buckets, host alpha", "Mean boot buckets, host beta",
                         "Mean boot buckets, all hosts"):
             self.assertIn(heading, completed.stdout)
+
+
+class WindowsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_boots(self, boots):
+        """One session holding a fresh owner (launch 2) per `(seconds, issue, project, phase,
+        start, end)`, registering with `--repo-root /Users/me/<project>`."""
+        session = Session(self.root)
+        for seconds, issue, project, phase, start, end in boots:
+            two_call_boot(session, f"o{issue}", seconds, issue=issue, launch=2, phase=phase,
+                          start=start, end=end, repo_root=f"/Users/me/{project}")
+        session.write()
+
+    def test_without_a_baseline_every_row_is_live_and_reweighted_is_null(self):
+        self.write_boots(WINDOW_BOOTS)
+        document = report(self.root, extra=EVENTS)
+        self.assertEqual(list(document), TOP_KEYS)
+        self.assertEqual(document["window"], "events 2026-10-25T10:00:00Z → 2026-10-25T11:00:00Z")
+        self.assertEqual(
+            [(row["arm"], row["issue"], row["project"]) for row in document["boots"]],
+            [("live", 21, "alpha"), ("live", 22, "alpha"), ("live", 23, "alpha"),
+             ("live", 24, "beta")])
+        for row in document["boots"]:
+            self.assertEqual(list(row), BOOT_KEYS)
+        for row in document["groups"]:
+            self.assertEqual((list(row), row["arm"]), (GROUP_KEYS, "live"))
+        self.assertEqual((document["unsplit"], document["reweighted"]), ({"live": {HOST: 0}}, None))
+
+    def test_a_baseline_collects_each_window_as_its_lone_run_does(self):
+        self.write_boots(WINDOW_BOOTS)
+        document = report(self.root, extra=(*EVENTS, "--baseline", BASELINE))
+        self.assertEqual(list(document), TOP_KEYS)
+        self.assertEqual(document["window"],
+                         "baseline 2026-10-25T09:00:00Z → 2026-10-25T10:00:00Z; "
+                         "candidate 2026-10-25T10:00:00Z → 2026-10-25T11:00:00Z")
+        self.assertEqual(
+            [(row["arm"], row["issue"], row["project"]) for row in document["boots"]],
+            [("baseline", 11, "alpha"), ("baseline", 12, "beta"), ("baseline", 13, "beta"),
+             ("baseline", 14, "beta"), ("candidate", 21, "alpha"), ("candidate", 22, "alpha"),
+             ("candidate", 23, "alpha"), ("candidate", 24, "beta")])
+        self.assertEqual([row["arm"] for row in document["groups"]],
+                         ["baseline"] * 4 + ["candidate"] * 4)
+        self.assertEqual(document["unsplit"], {"baseline": {HOST: 0}, "candidate": {HOST: 0}})
+
+        def without_arm(rows, arm):
+            return [{key: value for key, value in row.items() if key != "arm"}
+                    for row in rows if row["arm"] == arm]
+
+        for arm, window in (("baseline", BASELINE_EVENTS), ("candidate", EVENTS)):
+            with self.subTest(arm=arm):
+                alone = report(self.root, extra=window)
+                self.assertEqual(without_arm(document["boots"], arm),
+                                 without_arm(alone["boots"], "live"))
+                self.assertEqual(without_arm(document["groups"], arm),
+                                 without_arm(alone["groups"], "live"))
+
+    def test_baseline_usage_errors_come_before_any_root_is_read(self):
+        missing = str(self.root / "missing")
+        for extra in (["--baseline", BASELINE],
+                      [*EVENTS, "--baseline", "2026-10-25T09:00:00Z"],
+                      [*EVENTS, "--baseline", "2026-10-25T10:00:00Z..2026-10-25T09:00:00Z"],
+                      [*EVENTS, "--baseline", "2026-10-25T09:30:00Z..2026-10-25T10:30:00Z"]):
+            with self.subTest(extra=extra):
+                completed = costs("--format", "json", "--projects-dir", missing, *extra)
+                self.assertEqual((completed.returncode, completed.stdout), (2, ""))
+        for name in ("issues", "cache"):
+            with self.subTest(report=name):
+                completed = subprocess.run(
+                    [sys.executable, "-m", "agent_tools.agent_costs", "--report", name,
+                     "--projects-dir", missing, "--baseline", BASELINE],
+                    capture_output=True, text=True, check=False)
+                self.assertEqual((completed.returncode, completed.stdout), (2, ""))
+        touching = costs("--format", "json", "--projects-dir", missing, *EVENTS,
+                         "--baseline", "2026-10-25..2026-10-25T10:00:00Z")
+        self.assertEqual(touching.returncode, 1, touching.stderr)   # parsed; the root is missing
+
+    def test_text_output_with_a_baseline_prints_each_arm_in_turn(self):
+        self.write_boots(WINDOW_BOOTS)
+        completed = costs("--projects-dir", str(self.root), *EVENTS, "--baseline", BASELINE)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        out = completed.stdout
+        self.assertIn("; baseline 4 boots: 4 fresh, 0 spawned; "
+                      "candidate 4 boots: 4 fresh, 0 spawned;", out)
+        self.assertRegex(out, r"\bissue +project +cohort\b")
+        positions = [out.find(heading) for heading in (
+            "Boot composition (", f"Mean boot buckets, baseline, host {HOST} ",
+            "Mean boot buckets, baseline, all hosts", "Top skill bodies and skill files, baseline",
+            "Boots by B, baseline", f"Mean boot buckets, candidate, host {HOST} ",
+            "Mean boot buckets, candidate, all hosts",
+            "Top skill bodies and skill files, candidate", "Boots by B, candidate",
+            "Observed characters per token",
+            f"Unsplit boots (no request records, left out): baseline {HOST} 0; candidate {HOST} 0\n",
+            "NOTE: ")]
+        self.assertNotIn(-1, positions)
+        self.assertEqual(positions, sorted(positions))
 
 
 if __name__ == "__main__":

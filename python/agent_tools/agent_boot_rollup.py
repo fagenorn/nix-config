@@ -35,8 +35,9 @@ def median(values, weights=None):
             return float(value)
 
 
-def group_rows(host, boots, buckets):
-    """The group rows of one host's `boots` (`host` is a label or ALL).
+def group_rows(arm, host, boots, buckets):
+    """The group rows of one arm's one host's `boots` (`arm` is the arm they all belong to and
+    `host` a label or ALL).
 
     There is one row per cohort and phase group (ALL pools both) that has a boot, in
     COHORTS x PHASE_GROUPS order. A row holds the count and the per-boot mean and median of B,
@@ -54,7 +55,7 @@ def group_rows(host, boots, buckets):
             boot_reading = [boot["boot_reading"] for boot in members]
             first_unit_work = [boot["first_unit_work"] for boot in members]
             rows.append({
-                "host": host, "cohort": cohort, "phase_group": group, "count": len(members),
+                "arm": arm, "host": host, "cohort": cohort, "phase_group": group, "count": len(members),
                 "b_mean": statistics.fmean(b), "b_median": median(b),
                 "b_without_schemas_mean": statistics.fmean(b_without_schemas),
                 "b_without_schemas_median": median(b_without_schemas),

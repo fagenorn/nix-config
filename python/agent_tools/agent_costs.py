@@ -49,6 +49,10 @@ window and counts each one's whole spend once it has settled `--settle-days` (de
 the report end. `--baseline SINCE..BEFORE` adds a second window and compares its lineages, the
 baseline arm, with those of `--started`, the candidate arm. `--proxy-log PATH` adds the
 keepalive ping spend of one cache-proxy log.
+
+`--report boot` prints the boot report (issue 448, agent_tools.agent_boot_report);
+`--baseline SINCE..BEFORE` beside `--events-since/--events-before` splits its boots into a
+baseline and a candidate arm (issue 504).
 """
 
 import argparse
@@ -1757,7 +1761,7 @@ def _window_label(args, cutoff, event_start, event_end):
 
 def _boot_report(ap, args, cutoff, event_start, event_end, executor_factory):
     """Run `--report boot`: split each fresh owner's boot into buckets, print text or JSON."""
-    from agent_tools import agent_boot_report  # only for the boot report (issue 448)
+    from agent_tools import agent_boot_report, agent_owner_report  # only for the boot report (issue 448)
 
     try:
         roots = agent_boot_report.parse_roots(
@@ -1765,16 +1769,29 @@ def _boot_report(ap, args, cutoff, event_start, event_end, executor_factory):
             hostname=agent_boot_report.short_hostname())
     except ValueError as error:
         ap.error(str(error))
+    windows = [(agent_owner_report.LIVE_ARM, event_start, event_end)]
+    window = _window_label(args, cutoff, event_start, event_end)
+    if args.baseline is not None:
+        try:
+            since, before = agent_owner_report.parse_range(args.baseline)
+        except ValueError as error:
+            ap.error(f"--baseline: {error}")
+        if since < event_end and event_start < before:
+            ap.error("--baseline must not overlap --events-since/--events-before")
+        windows = (agent_owner_report.StartWindow(agent_owner_report.BASELINE_ARM, since, before),
+                   agent_owner_report.StartWindow(agent_owner_report.CANDIDATE_ARM,
+                                                  event_start, event_end))
+        window = agent_owner_report.start_window_label(windows)
     for _, root in roots:
         if not root.is_dir():
             sys.exit(f"no transcript root at {root}")
-    hosts = [
-        agent_boot_report.collect_host(
-            label, root, cutoff=event_start.timestamp() if event_start else cutoff,
-            since=event_start, before=event_end, executor_factory=executor_factory)
-        for label, root in roots]
-    document = agent_boot_report.build_document(
-        hosts, window=_window_label(args, cutoff, event_start, event_end))
+    collected = [
+        (arm, [agent_boot_report.collect_host(
+            label, root, arm=arm, cutoff=since.timestamp() if since else cutoff,
+            since=since, before=before, executor_factory=executor_factory)
+            for label, root in roots])
+        for arm, since, before in windows]
+    document = agent_boot_report.build_document(collected, window=window)
     if args.format == "json":
         json.dump(document, sys.stdout, separators=(",", ":"))
         print()
@@ -1898,9 +1915,10 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                     help="select the lineages that started in [SINCE, BEFORE) (YYYY-MM-DD or "
                          "RFC3339 bounds) and count their whole spend; --report owners only")
     ap.add_argument("--baseline", metavar="SINCE..BEFORE",
-                    help="a second start window, not overlapping --started, whose lineages form "
-                         "the baseline arm against the candidate arm of --started; --report "
-                         "owners only")
+                    help="a second, non-overlapping window whose lineages (--report owners, "
+                         "beside --started) or boots (--report boot, beside "
+                         "--events-since/--events-before) form the baseline arm against the "
+                         "candidate arm")
     ap.add_argument("--proxy-log", metavar="PATH",
                     help="a cache-proxy log whose ping lines add keepalive spend (darwin: "
                          "~/Library/Logs/claude-cache-proxy.log); --report owners only")
@@ -1949,10 +1967,12 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         ap.error("--proxy-log is available only with --report owners")
     if args.proxy_log is not None and args.eval_results is not None:
         ap.error("--proxy-log does not take --eval-results/--eval")
-    if args.baseline is not None and not owners_report:
-        ap.error("--baseline is available only with --report owners")
-    if args.baseline is not None and args.started is None:
+    if args.baseline is not None and not (owners_report or boot_report):
+        ap.error("--baseline is available only with --report owners or boot")
+    if args.baseline is not None and owners_report and args.started is None:
         ap.error("--baseline needs --started")
+    if args.baseline is not None and boot_report and not args.events_since:
+        ap.error("--report boot --baseline needs --events-since/--events-before")
     if args.baseline is not None and (args.policy or args.sweep):
         ap.error("--baseline does not take --policy/--sweep")
     if args.started is not None and (args.events_since or args.events_before):

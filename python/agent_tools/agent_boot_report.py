@@ -8,8 +8,9 @@ token), and every later call's growth by the character share of what the call ad
 collect_host reads one transcript root through agent_owner_report.collect; build_document
 projects the hosts as the `agent-boot-report` document and print_document prints it.
 agent_tools.agent_boot_rollup builds the group rows. agent_costs.main runs the report for
-`--report boot`. python/README.md (agent-costs) holds
-the contract.
+`--report boot`, collecting each root once per arm and window: once for the event window, or
+for each of the `--baseline` and event windows (issue 504). python/README.md (agent-costs)
+holds the contract.
 """
 
 import json
@@ -24,6 +25,7 @@ from agent_tools.agent_costs import DISCLAIMER, ROOT_LABEL, human, print_table, 
 from agent_tools.agent_owner_report import (
     _SAVED_TO,
     _TASK_FILE,
+    LIVE_ARM,
     _print_capped,
     boot_facts,
     boot_slice,
@@ -494,8 +496,8 @@ def _cohort(lineage, launch):
     return "fresh" if fresh else "spawned"
 
 
-def collect_host(label, root, *, cutoff, since, before, executor_factory):
-    """The boot rows of the transcripts under `root`, labelled `label`."""
+def collect_host(label, root, *, arm, cutoff, since, before, executor_factory):
+    """The boot rows of the transcripts under `root`, labelled `label`, in arm `arm`."""
     lineages, _ = collect(root, cutoff=cutoff, since=since, before=before, eval_rows=None,
                           executor_factory=executor_factory)
     pending = []
@@ -505,8 +507,9 @@ def collect_host(label, root, *, cutoff, since, before, executor_factory):
             if facts is None:
                 continue
             pending.append((launch.transcript, len(boot_slice(launch)), {
-                "host": label, "transcript": launch.transcript, "run_id": lineage.run_id,
-                "issue": lineage.issue, "cohort": _cohort(lineage, launch),
+                "arm": arm, "host": label, "transcript": launch.transcript,
+                "run_id": lineage.run_id, "issue": lineage.issue,
+                "project": lineage.facts["project"], "cohort": _cohort(lineage, launch),
                 "phase_group": facts[0]}))
     results = scan_paths([(transcript, calls) for transcript, calls, _ in pending],
                          executor_factory, scanner=attribute)
@@ -530,20 +533,26 @@ def collect_host(label, root, *, cutoff, since, before, executor_factory):
 # ---- the document ----------------------------------------------------------------
 
 
-def build_document(hosts, *, window):
-    """The `agent-boot-report` document of the collected `hosts`."""
-    boots = [boot for host in hosts for boot in host["boots"]]
-    ratio_chars = sum(host["ratio_chars"] for host in hosts)
-    ratio_tokens = sum(host["ratio_tokens"] for host in hosts)
-    groups = [row for host in hosts for row in group_rows(host["label"], host["boots"], BUCKETS)]
-    groups += group_rows(ALL, boots, BUCKETS)
+def build_document(collected, *, window):
+    """The `agent-boot-report` document of `collected`: `(arm, hosts)` pairs in arm order, each
+    `hosts` being collect_host's results in argument order."""
+    boots, groups, unsplit = [], [], {}
+    for arm, hosts in collected:
+        arm_boots = [boot for host in hosts for boot in host["boots"]]
+        for host in hosts:
+            groups += group_rows(arm, host["label"], host["boots"], BUCKETS)
+        groups += group_rows(arm, ALL, arm_boots, BUCKETS)
+        boots += arm_boots
+        unsplit[arm] = {host["label"]: host["unsplit"] for host in hosts}
+    every_host = [host for _, hosts in collected for host in hosts]
+    ratio_chars = sum(host["ratio_chars"] for host in every_host)
+    ratio_tokens = sum(host["ratio_tokens"] for host in every_host)
     return {
         "kind": REPORT_KIND, "schema_version": SCHEMA_VERSION, "window": window,
-        "hosts": [{"label": host["label"], "root": host["root"]} for host in hosts],
+        "hosts": [{"label": host["label"], "root": host["root"]} for host in collected[0][1]],
         "chars_per_token": CHARS_PER_TOKEN,
         "observed_chars_per_token": round(ratio_chars / ratio_tokens, 2) if ratio_tokens else None,
-        "unsplit": {host["label"]: host["unsplit"] for host in hosts},
-        "boots": boots, "groups": groups,
+        "unsplit": unsplit, "boots": boots, "groups": groups, "reweighted": None,
     }
 
 
@@ -581,34 +590,44 @@ def _top_skills(boots, top):
 
 
 def print_document(doc, *, top):
-    """Print the boot report's tables for `doc` (build_document's result)."""
-    boots = doc["boots"]
-    fresh = sum(boot["cohort"] == "fresh" for boot in boots)
+    """Print the boot report's tables for `doc` (build_document's result), one section per arm."""
+    arms = list(doc["unsplit"])
+    prefixes = {arm: "" if arms == [LIVE_ARM] else f"{arm} " for arm in arms}
+    tags = {arm: "" if arms == [LIVE_ARM] else f", {arm}" for arm in arms}
+    arm_boots = {arm: [boot for boot in doc["boots"] if boot["arm"] == arm] for arm in arms}
     hosts = ", ".join(f"{host['label']} {host['root']}" for host in doc["hosts"])
-    print(f"Boot composition ({doc['window']}; hosts: {hosts}; {len(boots):,} boots: "
-          f"{fresh:,} fresh, {len(boots) - fresh:,} spawned; call 0 at "
+    counts = "; ".join(
+        f"{prefixes[arm]}{len(boots):,} boots: "
+        f"{sum(boot['cohort'] == 'fresh' for boot in boots):,} fresh, "
+        f"{sum(boot['cohort'] != 'fresh' for boot in boots):,} spawned"
+        for arm, boots in arm_boots.items())
+    print(f"Boot composition ({doc['window']}; hosts: {hosts}; {counts}; call 0 at "
           f"{doc['chars_per_token']} characters per token)")
-    for label in [host["label"] for host in doc["hosts"]] + [ALL]:
-        title = "all hosts" if label == ALL else f"host {label}"
-        print(f"\nMean boot buckets, {title} (tokens per boot):\n")
-        _mean_table([group for group in doc["groups"] if group["host"] == label])
-    print("\nTop skill bodies and skill files (mean and median tokens per fresh boot, all hosts):\n")
-    print_table(_top_skills(boots, top), ["kind", "key", "mean", "median"],
-                ["l", "l", "r", "r"])
-    print("\nBoots by B (host, issue, cohort, phase, calls, start, B, boot reading, "
-          "first-unit work, then each bucket):\n")
-    ordered = sorted(boots, key=lambda boot: (-boot["b"], boot["transcript"]))
-    _print_capped(
-        [[boot["host"], str(boot["issue"]), boot["cohort"], boot["phase_group"],
-          f"{boot['calls']:,}", human(boot["start"]), human(boot["b"]),
-          human(boot["boot_reading"]), human(boot["first_unit_work"]),
-          *(human(boot["buckets"][name]) for name in BUCKETS)] for boot in ordered],
-        top, ["host", "issue", "cohort", "phase", "calls", "start", "B",
-                     "boot reading", "first-unit work", *BUCKETS],
-        ["l", "r", "l", "l", "r", "r", "r", "r", "r"] + ["r"] * len(BUCKETS))
+    for arm in arms:
+        for label in [host["label"] for host in doc["hosts"]] + [ALL]:
+            title = "all hosts" if label == ALL else f"host {label}"
+            print(f"\nMean boot buckets{tags[arm]}, {title} (tokens per boot):\n")
+            _mean_table([group for group in doc["groups"]
+                         if group["arm"] == arm and group["host"] == label])
+        print(f"\nTop skill bodies and skill files{tags[arm]} "
+              "(mean and median tokens per fresh boot, all hosts):\n")
+        print_table(_top_skills(arm_boots[arm], top), ["kind", "key", "mean", "median"],
+                    ["l", "l", "r", "r"])
+        print(f"\nBoots by B{tags[arm]} (host, issue, project, cohort, phase, calls, start, B, "
+              "boot reading, first-unit work, then each bucket):\n")
+        ordered = sorted(arm_boots[arm], key=lambda boot: (-boot["b"], boot["transcript"]))
+        _print_capped(
+            [[boot["host"], str(boot["issue"]), boot["project"], boot["cohort"],
+              boot["phase_group"], f"{boot['calls']:,}", human(boot["start"]), human(boot["b"]),
+              human(boot["boot_reading"]), human(boot["first_unit_work"]),
+              *(human(boot["buckets"][name]) for name in BUCKETS)] for boot in ordered],
+            top, ["host", "issue", "project", "cohort", "phase", "calls", "start", "B",
+                  "boot reading", "first-unit work", *BUCKETS],
+            ["l", "r", "l", "l", "l", "r", "r", "r", "r", "r"] + ["r"] * len(BUCKETS))
     observed = doc["observed_chars_per_token"]
     print(f"\nObserved characters per token (boot calls adding more than "
           f"{RATIO_MIN_CHARS:,} characters): {'none' if observed is None else f'{observed:.2f}'}")
     print("Unsplit boots (no request records, left out): "
-          + ", ".join(f"{label} {count:,}" for label, count in doc["unsplit"].items()))
+          + "; ".join(prefixes[arm] + ", ".join(f"{label} {count:,}" for label, count in by_host.items())
+                      for arm, by_host in doc["unsplit"].items()))
     print(f"NOTE: {DISCLAIMER}")
