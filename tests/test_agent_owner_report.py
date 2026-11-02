@@ -269,6 +269,27 @@ class OwnerReportTest(unittest.TestCase):
         self.assertEqual(doc["start_grouping"]["windows"][0]["unsettled"],
                          {"lineages": 0, "dollars": 0.0})
 
+    def issueless_owner(self):
+        """One owner whose action ID names no issue, with one call at T0 (2026-10-25T09:00Z)."""
+        session = Session(self.root, session="s1")
+        session.call(None, 0, context=20_000, write=20_000, ttl="1h",
+                     bash=progress(3, action_id="x:1:1"))
+        session.write()
+
+    def test_an_event_window_still_counts_an_owner_without_an_issue_whose_calls_are_outside_it(self):
+        self.issueless_owner()
+        for extra in ([], ["--events-since", at(3600), "--events-before", at(7200)]):
+            with self.subTest(extra=extra):
+                self.assertEqual(report(self.root, *extra)["unattributed"]["unresolved_owners"], 1)
+
+    def test_start_mode_counts_an_owner_without_an_issue_only_for_calls_inside_the_window(self):
+        self.issueless_owner()
+        for window, expected in (("2026-10-25..2026-10-26", (1, 1)),
+                                 ("2026-10-26..2026-10-27", (0, 0))):
+            with self.subTest(window=window):
+                lost = report(self.root, "--started", window, "--settle-days", "0")["unattributed"]
+                self.assertEqual((lost["unresolved_owners"], lost["transcripts"]), expected)
+
     def test_start_mode_usage_errors(self):
         window = "2026-10-25..2026-10-28"
         self.assert_usage_errors(

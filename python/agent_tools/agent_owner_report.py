@@ -704,7 +704,8 @@ def _lineages(scans, homes, *, start_mode=False):
             members[(owner_scan["owner"]["run_id"], owner_scan["owner"]["issue"])].append(
                 (scan, owner_scan))
         else:
-            unattributed["unresolved_owners"] += owner_scan is scan and bool(scan[calls_name])
+            unattributed["unresolved_owners"] += owner_scan is scan and (
+                not start_mode or bool(scan["window_calls"]))
             lose(scan)
     lineages = []
     for (run_id, issue), group in sorted(members.items()):
