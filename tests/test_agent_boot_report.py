@@ -321,6 +321,21 @@ class BootReportTest(unittest.TestCase):
                 self.assertEqual((row["buckets"]["other_reads"], row["buckets"]["rereads"]),
                                  (1_000, 2_000) if reread else (3_000, 0))
 
+    def test_skill_sections_output_is_a_read_of_its_skill_file(self):
+        skill = "/h/.claude/skills/from-issue/SKILL.md"
+        opening_call = bash(f"skill-sections --opening {skill} 'Files beside this one'")
+        session = Session(self.root)
+        stepped_boot(session, "o1", 0, [
+            (opening_call, 1_000),
+            (bash(f"skill-sections {skill} 'Phase 6' 'Terminal return'"), 2_000),
+            (opening_call, 500),
+        ])
+        session.write()
+        [row] = report(self.root)["boots"]
+        self.assertEqual((row["buckets"]["skill_files"], row["buckets"]["rereads"],
+                          row["buckets"]["commands"]), (3_000, 500, 0))
+        self.assertEqual(row["skill_files"], {"from-issue/SKILL.md": 3_000})
+
     def test_cohorts_follow_lineage_position_and_launch_ordinal_and_groups_pool_them(self):
         session = Session(self.root)
         g1 = session.call(None, 0, context=40_000, write=40_000, ttl="1h", bash=progress(1))

@@ -45,7 +45,7 @@ BUCKETS = ("tool_schemas", "harness", "prompt", "skill_bodies", "skill_files", "
            "resume_reads", "rereads", "other_reads", "commands", "assistant", "unexplained")
 BOOT_READING = ("skill_bodies", "skill_files", "plan_reads", "resume_reads", "rereads")
 FIRST_UNIT_WORK = ("commands", "assistant", "other_reads")
-READERS = ("cat", "sed", "head", "tail", "nl", "awk", "jq", "less")
+READERS = ("cat", "sed", "head", "tail", "nl", "awk", "jq", "less", "skill-sections")
 
 _SYSTEM_REMINDER = "<system-reminder>"
 _RESUME_PACK = re.compile(r'"kind"\s*:\s*"resume_pack"')
