@@ -17,7 +17,8 @@ standard error and nothing to standard output. An invalid invocation writes
 
 Both fetch `origin`'s integration branch into its remote-tracking ref, the
 only write, and read each selected path's entry at the fetched commit with
-`git ls-tree`: its object id, or `null` when the path is absent. No declared
+`git ls-tree`: its mode and object id, or `null` for both when the path is
+absent. No declared
 command runs. `failure` also checks that the attempt's worktree belongs to the
 `--repo-root` repository, is the top level of its checkout, holds the same
 command entry, sits on the fetched commit's entries for every selected path and
@@ -50,7 +51,7 @@ PROG = "verification-observe"
 GIT_TIMEOUT_SECONDS = 60
 _INHERITED_GIT_STATE = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
                         "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
-_TREE_RECORD = re.compile(rb"[0-7]{6} [a-z]+ ([0-9a-f]{40}|[0-9a-f]{64})\t")
+_TREE_RECORD = re.compile(rb"([0-7]{6}) [a-z]+ ([0-9a-f]{40}|[0-9a-f]{64})\t")
 
 
 class ObserveRefused(Exception):
@@ -107,6 +108,10 @@ def _fetch(snapshot: dict) -> str:
     """Fetch `origin`'s integration branch; the commit id every read of the call uses."""
     root = snapshot["project"]["root"]
     branch = snapshot["bindings"]["vcs"]["integration_branch"]
+    try:  # a refspec takes `*` and other pattern syntax; only one literal branch may be fetched
+        _git(root, "check-ref-format", f"refs/heads/{branch}")
+    except ObserveRefused:
+        raise ObserveRefused(f"integration branch {branch!r} is not a valid branch name") from None
     tracking = f"refs/remotes/origin/{branch}"
     _git(root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
          "--no-auto-maintenance", "--no-recurse-submodules", "--refmap=",
@@ -115,22 +120,24 @@ def _fetch(snapshot: dict) -> str:
                 f"{tracking}^{{commit}}").decode("ascii", "replace").strip()
 
 
-def _read_entry(directory: str | Path, commit: str, path: str) -> str | None:
-    """The object id `commit` holds at `path`, or `None` when it holds nothing there."""
+def _read_entry(directory: str | Path, commit: str, path: str) -> dict:
+    """The `{path, mode, object}` entry `commit` holds at `path`; `mode` and `object` are
+    `None` when it holds nothing there. The mode is kept so that a change of the executable
+    bit alone, which keeps the object id, is still a change."""
     out = _git(directory, "ls-tree", "-z", "--full-tree", commit, "--", path)
     if not out:
-        return None
+        return {"path": path, "mode": None, "object": None}
     record = _TREE_RECORD.match(out)
     if (record is None or not out.endswith(b"\0")
             or out[record.end():-1] != path.encode("utf-8")):
         raise ObserveRefused(f"git ls-tree: unexpected output for {path}")
-    return record.group(1).decode("ascii")
+    return {"path": path, "mode": record.group(1).decode("ascii"),
+            "object": record.group(2).decode("ascii")}
 
 
 def _read_facts(root: str, commit: str, selection: list[dict]) -> list[dict]:
     return [{"name": item["name"], "source": {"paths": item["paths"]},
-             "value": {"objects": [{"path": path, "object": _read_entry(root, commit, path)}
-                                   for path in item["paths"]]}}
+             "value": {"objects": [_read_entry(root, commit, path) for path in item["paths"]]}}
             for item in selection]
 
 
@@ -179,7 +186,7 @@ def _guard_attempt(snapshot: dict, declaration: dict, facts: list[dict]) -> None
                 "HEAD^{commit}").decode("ascii", "replace").strip()
     selected = [entry for fact in facts for entry in fact["value"]["objects"]]
     for entry in selected:
-        if _read_entry(worktree, head, entry["path"]) != entry["object"]:
+        if _read_entry(worktree, head, entry["path"]) != entry:
             raise ObserveRefused(f"guard: {entry['path']} at HEAD differs from origin/{branch}")
     changed = _git(worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all",
                    "--ignore-submodules=none", "--",

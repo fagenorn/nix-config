@@ -95,8 +95,13 @@ class ObserveCase(unittest.TestCase):
         self.git(self.publisher, "push", "-q", "origin", "main")
 
     def entry(self, path):
-        """The id origin's main holds at `path`."""
-        return self.git(self.origin, "rev-parse", f"main:{path}")
+        """The `{path, mode, object}` entry origin's main holds at `path`, read independently
+        of the tool; `mode` and `object` are `None` when it holds nothing there."""
+        listed = self.git(self.origin, "ls-tree", "--full-tree", "main", "--", path)
+        if not listed:
+            return {"path": path, "mode": None, "object": None}
+        mode, _, rest = listed.partition(" ")
+        return {"path": path, "mode": mode, "object": rest.split("\t")[0].split(" ")[1]}
 
     def run_tool(self, *argv, stdin=""):
         return subprocess.run([*COMMAND, *argv], input=stdin, capture_output=True, text=True,
@@ -135,12 +140,9 @@ class FailureTest(ObserveCase):
 
     def expected_facts(self):
         return [{"name": "flake-lock", "source": {"paths": ["README.md", "flake.lock"]},
-                 "value": {"objects": [{"path": "README.md", "object": self.entry("README.md")},
-                                       {"path": "flake.lock",
-                                        "object": self.entry("flake.lock")}]}},
+                 "value": {"objects": [self.entry("README.md"), self.entry("flake.lock")]}},
                 {"name": "packages", "source": {"paths": ["pkgs/nested"]},
-                 "value": {"objects": [{"path": "pkgs/nested",
-                                        "object": self.entry("pkgs/nested")}]}}]
+                 "value": {"objects": [self.entry("pkgs/nested")]}}]
 
     def test_a_clean_failure_names_the_resolved_command_and_no_path_of_the_host(self):
         done = self.call("failure", self.declaration)
@@ -149,6 +151,8 @@ class FailureTest(ObserveCase):
                                  "repository": REPOSITORY, "command": SUITE,
                                  "failure_class": "dependency",
                                  "facts": self.expected_facts()})
+        self.assertEqual([entry["mode"] for fact in value["facts"]
+                          for entry in fact["value"]["objects"]], ["100644", "100644", "040000"])
         self.assertNotIn(str(self.scratch), done.stdout)
 
     def test_declaration_order_changes_no_byte_and_observe_reads_the_same_values(self):
@@ -193,6 +197,11 @@ class FailureTest(ObserveCase):
         self.refused(self.call("failure", self.declaration), "guard: a selected path")
         extra.unlink()
         self.ok(self.call("failure", self.declaration))
+        lock.chmod(0o755)
+        self.git(self.worktree, "commit", "-q", "-am", "own mode change")
+        self.assertEqual(self.git(self.worktree, "status", "--porcelain"), "")
+        self.refused(self.call("failure", self.declaration), "guard: flake.lock at HEAD differs")
+        self.git(self.worktree, "reset", "-q", "--hard", "HEAD~1")
         lock.write_text("committed\n", encoding="utf-8")
         self.git(self.worktree, "commit", "-q", "-am", "own edit")
         self.refused(self.call("failure", self.declaration), "guard: flake.lock at HEAD differs")
@@ -249,37 +258,50 @@ class ObserveTest(ObserveCase):
                    "sources": [{"name": "flake-lock", "paths": ["flake.lock"]},
                                {"name": "packages", "paths": ["pkgs/nested"]}]}
 
-    def expected(self, lock, nested):
+    def expected(self):
+        """The observation of origin's main as it stands, read independently of the tool."""
         return {"kind": "verification-observation", "schema_version": 1,
                 "blocker_id": self.REQUIREMENT["blocker_id"], "repository": REPOSITORY,
                 "facts": [{"name": "flake-lock", "source": {"paths": ["flake.lock"]},
-                           "value": {"objects": [{"path": "flake.lock", "object": lock}]}},
+                           "value": {"objects": [self.entry("flake.lock")]}},
                           {"name": "packages", "source": {"paths": ["pkgs/nested"]},
-                           "value": {"objects": [{"path": "pkgs/nested", "object": nested}]}}]}
+                           "value": {"objects": [self.entry("pkgs/nested")]}}]}
 
     def observe(self):
         return self.call("observe", self.REQUIREMENT)
 
     def test_an_unrelated_commit_is_equal_and_a_selected_change_is_not(self):
         first = self.observe()
-        self.assertEqual(self.ok(first), self.expected(self.entry("flake.lock"),
-                                                       self.entry("pkgs/nested")))
+        self.assertEqual(self.ok(first), self.expected())
         self.publish({"README.md": "readme 2\n"})
         self.assertEqual(self.observe().stdout, first.stdout)
         self.publish({"flake.lock": "lock 2\n", "pkgs/nested/deeper/extra.nix": "{ }\n"})
         changed = self.ok(self.observe())
-        self.assertEqual(changed, self.expected(self.entry("flake.lock"),
-                                                self.entry("pkgs/nested")))
+        self.assertEqual(changed, self.expected())
         self.assertNotEqual(changed, json.loads(first.stdout))
         self.publish(removed=("flake.lock",))
-        self.assertEqual(self.ok(self.observe()), self.expected(None, self.entry("pkgs/nested")))
+        absent = self.ok(self.observe())
+        self.assertEqual(absent, self.expected())
+        self.assertEqual(absent["facts"][0]["value"]["objects"],
+                         [{"path": "flake.lock", "mode": None, "object": None}])
+
+    def test_a_mode_change_alone_is_a_change(self):
+        """`chmod +x` keeps the blob, so only the mode tells the two states apart."""
+        first = self.ok(self.observe())
+        (self.publisher / "flake.lock").chmod(0o755)
+        self.publish()
+        changed = self.ok(self.observe())
+        self.assertEqual(changed, self.expected())
+        before, after = (value["facts"][0]["value"]["objects"][0] for value in (first, changed))
+        self.assertEqual((before["object"], before["mode"], after["mode"]),
+                         (after["object"], "100644", "100755"))
 
     def test_nested_selected_paths_are_each_read_as_their_own_entry(self):
         paths = ["pkgs", "pkgs/nested", "pkgs/nested/default.nix"]
         requirement = {**self.REQUIREMENT, "sources": [{"name": "packages", "paths": paths}]}
         value = self.ok(self.call("observe", requirement))
         self.assertEqual(value["facts"][0]["value"]["objects"],
-                         [{"path": path, "object": self.entry(path)} for path in paths])
+                         [self.entry(path) for path in paths])
 
     def test_the_only_write_is_the_integration_tracking_ref(self):
         self.publish({"flake.lock": "lock 2\n"})
@@ -294,6 +316,18 @@ class ObserveTest(ObserveCase):
         self.assertEqual(self.git(self.root, "status", "--porcelain", "--untracked-files=all"),
                          status)
         self.assertFalse((self.root / ".git" / "FETCH_HEAD").exists())
+
+    def test_an_integration_branch_that_is_not_one_branch_name_is_refused_before_a_fetch(self):
+        """A refspec would expand `*` to every matching branch; `a..b` is no ref name."""
+        self.git(self.publisher, "push", "-q", "origin", "HEAD:refs/heads/mainline")
+        refs = ("for-each-ref", "--format=%(refname) %(objectname)")
+        before = self.git(self.root, *refs)
+        for branch in ("ma*", "a..b"):
+            with self.subTest(branch=branch):
+                self.rewrite(self.root, lambda b: b["vcs"].update(integration_branch=branch))
+                self.refused(self.observe(),
+                             f"integration branch {branch!r} is not a valid branch name")
+                self.assertEqual(self.git(self.root, *refs), before)
 
     def test_a_failed_fetch_prints_nothing_and_moves_nothing(self):
         before = self.tracking()

@@ -6,7 +6,7 @@ from agent_tools import verification_blocker as vb
 from agent_tools.adopt_inspection import SECRET_MARKERS, is_secret_path
 
 A, B = "a" * 40, "b" * 64
-PINNED_ID = "sha256:2d494bb295c987db9c15f1b652122d180aed8f64dcd3e76b46eaa13852a91cfa"
+PINNED_ID = "sha256:f5a6f65defd6a92c5ffe9c65ddb04c2ff6ac1f91c858eff167fd4d18cb065829"
 REPOSITORY = {"project_id": "fagenorn/nix-config", "integration_branch": "main"}
 COMMAND = {"id": "nix-build", "argv": ["just", "build"], "cwd": ".", "env": []}
 ZERO_ID = "sha256:" + "0" * 64
@@ -15,7 +15,8 @@ ZERO_ID = "sha256:" + "0" * 64
 def fact(name="flake-lock", paths=("flake.lock",), objects=None):
     objects = [A] * len(paths) if objects is None else list(objects)
     return {"name": name, "source": {"paths": list(paths)},
-            "value": {"objects": [{"path": p, "object": o} for p, o in zip(paths, objects)]}}
+            "value": {"objects": [{"path": p, "mode": None if o is None else "100644", "object": o}
+                                  for p, o in zip(paths, objects)]}}
 
 
 def failure(**changes):
@@ -63,7 +64,7 @@ def edited(value, path, member):
 def sized(name):
     """A failure of one fact and eight padded paths: 2,048 canonical bytes for
     `flake-lock`, one byte more for `flake-lockx`."""
-    paths = [f"p{m}" + "x" * (77 if m == 7 else 73) for m in range(8)]
+    paths = [f"p{m}" + "x" * (69 if m == 7 else 65) for m in range(8)]
     return failure(facts=[fact(name=name, paths=paths)])
 
 
@@ -109,11 +110,20 @@ class ShapeTest(unittest.TestCase):
                                               fact(name="b", paths=("x",))]),
             "object order": edited(failure(facts=[fact(paths=("a", "b"))]),
                                    ("facts", 0, "value", "objects"),
-                                   [{"path": "b", "object": A}, {"path": "a", "object": A}]),
+                                   [{"path": "b", "mode": "100644", "object": A},
+                                    {"path": "a", "mode": "100644", "object": A}]),
             "upper object": edited(failure(), ("facts", 0, "value", "objects", 0, "object"),
                                    "A" * 40),
             "short object": edited(failure(), ("facts", 0, "value", "objects", 0, "object"),
                                    "a" * 39),
+            "no mode": edited(failure(), ("facts", 0, "value", "objects", 0, "mode"), KeyError),
+            "null mode": edited(failure(), ("facts", 0, "value", "objects", 0, "mode"), None),
+            "unknown mode": edited(failure(), ("facts", 0, "value", "objects", 0, "mode"),
+                                   "100664"),
+            "integer mode": edited(failure(), ("facts", 0, "value", "objects", 0, "mode"),
+                                   100644),
+            "mode without object": edited(failure(),
+                                          ("facts", 0, "value", "objects", 0, "object"), None),
             "oversized": sized("flake-lockx"),
         }
         for label, value in cases.items():
@@ -266,7 +276,9 @@ class IdentityTest(unittest.TestCase):
                    (("command", "env"), ["HOME"]),
                    (("failure_class",), "environment"),
                    (("facts", 0, "name"), "lock"),
-                   (("facts", 0, "value", "objects", 0, "object"), None))
+                   (("facts", 0, "value", "objects", 0, "mode"), "100755"),
+                   (("facts", 0, "value", "objects", 0), {"path": "flake.lock", "mode": None,
+                                                          "object": None}))
         seen = {PINNED_ID}
         for path, member in changes:
             with self.subTest(path=path):

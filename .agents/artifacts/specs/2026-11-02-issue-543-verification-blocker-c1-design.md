@@ -107,7 +107,8 @@ to it:
  "command": {"id": "nix-build", "argv": ["just", "build"], "cwd": ".", "env": []},
  "failure_class": "dependency",
  "facts": [{"name": "flake-lock", "source": {"paths": ["flake.lock"]},
-            "value": {"objects": [{"path": "flake.lock", "object": "<40 or 64 hex>"}]}}]}
+            "value": {"objects": [{"path": "flake.lock", "mode": "100644",
+                                   "object": "<40 or 64 hex>"}]}}]}
 ```
 
 ```json
@@ -115,7 +116,7 @@ to it:
  "blocker_id": "sha256:<64 hex>",
  "repository": {"project_id": "fagenorn/nix-config", "integration_branch": "main"},
  "facts": [{"name": "flake-lock", "source": {"paths": ["flake.lock"]},
-            "value": {"objects": [{"path": "flake.lock", "object": null}]}}]}
+            "value": {"objects": [{"path": "flake.lock", "mode": null, "object": null}]}}]}
 ```
 
 ```json
@@ -159,7 +160,8 @@ Rules:
   - is secret-shaped (D4).
 - **`value.objects`.** The fact's paths in the same order. Each `object` is the 40- or
   64-hex lowercase id of that path's entry at the integration branch, or `null` when the
-  branch has no entry there (D6).
+  branch has no entry there (D6). Each `mode` is that entry's mode, one of `040000`,
+  `100644`, `100755`, `120000` and `160000`, and is `null` exactly when `object` is (D17).
 - **Requirement.** The selection without values: `sources` holds `{name, paths}` under the
   same rules, and `blocker_id` is `sha256:` plus 64 lowercase hex characters.
 - **Size.** A failure's canonical bytes are at most 2,048. Only the failure carries a byte
@@ -235,12 +237,15 @@ command, is a rejected fact kind (D6).
    `bindings.vcs`, so a host `PATH` change never blocks a probe (D11). A resolver refusal
    is `resolve-project refused: <code> <repair_id>`.
 3. `failure` only: `command_id` must be in `bindings.workflow.verification`.
-4. Fetch only the integration branch from `origin` into
+4. Refuse an integration branch that `git check-ref-format refs/heads/<branch>` rejects,
+   such as `ma*`, with `integration branch '<branch>' is not a valid branch name` (D18).
+   Then fetch only the integration branch from `origin` into
    `refs/remotes/origin/<integration_branch>`, with no tags, no `FETCH_HEAD`, no
    submodules and no automatic maintenance.
 5. Read the ref once as a commit id. Then read each selected path's exact entry at that
    commit, so one object never mixes two commits (D12). A nested directory yields its own
-   tree id, not its members' entries. A missing entry is `null`.
+   tree id, not its members' entries. Each entry is its mode and id; a missing entry has
+   `null` for both (D17).
 
 **Failure guard (D7).** Before printing, `failure` also requires:
 
@@ -375,3 +380,5 @@ never read helper call counts (D10).
 | D14 | Refines D6 and D12 (plan): each selected path is read by its own `git ls-tree -z --full-tree <commit> -- <path>` child. The one record whose path equals the selection gives the id, empty output gives `null`, and any other output refuses (exit 2). Every Git child also runs with `GIT_OPTIONAL_LOCKS=0`, so the guard's `git status` never refreshes an index. | Planning probe on git 2.51: one literal pathspec lists the entry itself, a nested directory included, but one call over `a/b` and `a/b/c` lists `a/b`'s members instead of its entry; D6's one write. | One batched `ls-tree` per fact, which reads a nested selection as `null`. `rev-parse <commit>:<path>`, whose non-zero exits do not separate a missing path from a failed read. |
 | D15 | Refines D7 and D8 (plan): `failure` runs the guard checks that need no fetched commit (the shared common directory, then the worktree's command entry, resolved with no capability required) before the fetch, and the `HEAD` comparison and change check after the reads. The 2,048-byte bound is checked on the built failure, after the fetch, since ids may be 40 or 64 hex. The pure module imports only `agent_tools.canonical` and the standard library. | D6 ("the only write"): a refusal that needs no ref should not move it; the root already required `verification` (D11); c2-c4 import the pure module without the resolver. | Every guard check after the fetch, which moves the tracking ref for a foreign or diverged worktree. Bounding the declaration before the fetch with 64-hex placeholders, which refuses 40-hex failures that fit. |
 | D16 | Test seam (standards review): a post-fetch read failure and a malformed `ls-tree` record are exercised through a `git` shim first on the adapter's `PATH`, which fails or garbles only `ls-tree` and delegates everything else to the real Git. Both must refuse (exit 2, empty stdout, one `git ls-tree: ` line), never print `null`. | Codex plan review PR543-S1; Refusals ("there is no `null` for a read that failed"); D10's public-behaviour seam. | Corrupting the fixture's object store, which also breaks the fetch and cannot target the read; an in-process monkeypatch, which bypasses D10's subprocess seam. |
+| D17 | Refines D2, D6 and D14 (ship review): each object entry is `{path, mode, object}`, with the mode `ls-tree` prints. The identity, the observation and the failure guard's `HEAD` comparison all include it. | Codex ship review COR-543-01: `chmod +x` keeps the blob id, so an id alone hides an upstream permission fix and passes an attempt whose committed mode differs. | Comparing the mode only in the guard, which leaves an upstream mode change unobserved. Folding the mode into `object` as one string, which breaks the plain-id rule. |
+| D18 | Refines D6 (ship review): before any fetch the integration branch must pass `git check-ref-format refs/heads/<branch>`; otherwise the call is refused and no ref moves. | Codex ship review COR-543-02: the branch is spliced into a refspec, where `*` would fetch and update every matching tracking branch; `resolve-project` checks only that the value is non-empty. | Tightening `resolve-project`'s branch rule, which changes every caller outside this scope. |

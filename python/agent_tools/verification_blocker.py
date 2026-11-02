@@ -36,6 +36,9 @@ MAX_FACTS = 4
 MAX_PATHS = 8
 MAX_PATH_BYTES = 255
 MAX_FAILURE_BYTES = 2048
+# The tree-entry modes Git writes (a tree, a file, an executable file, a symlink, a
+# submodule commit); `git ls-tree` prints them canonicalized, so no other mode occurs.
+ENTRY_MODES = ("040000", "100644", "100755", "120000", "160000")
 
 _FACT_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -193,13 +196,18 @@ def _valued_facts(value: object, label: str) -> None:
             raise _refuse(f"{at}.value.objects", "must hold one entry per path")
         for place, (path, entry) in enumerate(zip(paths, objects)):
             where = f"{at}.value.objects[{place}]"
-            _closed(entry, where, {"path", "object"})
+            _closed(entry, where, {"path", "mode", "object"})
             if entry["path"] != path:
                 raise _refuse(f"{where}.path", "must equal the source path")
             if entry["object"] is not None and (
                     not isinstance(entry["object"], str)
                     or not _OBJECT_ID.fullmatch(entry["object"])):
                 raise _refuse(f"{where}.object", "must be null or 40 or 64 lowercase hex")
+            if entry["object"] is None:
+                if entry["mode"] is not None:
+                    raise _refuse(f"{where}.mode", "must be null when the object is null")
+            elif not isinstance(entry["mode"], str) or entry["mode"] not in ENTRY_MODES:
+                raise _refuse(f"{where}.mode", "must be one of " + ", ".join(ENTRY_MODES))
         selection.append((fact["name"], paths))
     _selection(selection, label)
 
