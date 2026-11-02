@@ -112,7 +112,7 @@ def reconstruct_owned(repo: Path, prerequisite_commit: str,
                        for path in paths):
                     raise ReconstructionUnavailable("whole_path_postimage_unproved", commit)
             included.add(commit)
-            subject = _run_git(repo, "show", "-s", "--format=%s", commit, binary=True)
+            subject = _run_git(repo, "show", "-s", "--no-show-signature", "--format=%s", commit, binary=True)
             commits.append({"sha": commit, "subject": subject.removesuffix(b"\n").decode("utf-8")})
         result_tree = _run_git(target, "write-tree").strip()
         # Producer manifest order is its reachable-range order, not replay traversal.

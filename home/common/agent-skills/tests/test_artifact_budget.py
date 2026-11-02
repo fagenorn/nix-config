@@ -5,6 +5,7 @@ import errno
 import json
 import hashlib
 import importlib.util
+import io
 import os
 import re
 from copy import deepcopy
@@ -791,6 +792,100 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 self.assertEqual(result.stdout, expected)
             else:
                 self.assert_refusal(result, "invalid report")
+
+    def summary(self, state="complete", **changes):
+        identity = "sha256:" + hashlib.sha256(POLICY.read_bytes()).hexdigest()
+        over = state == "decompose_required"
+        value = {"schema_version": 1, "kind": "review-feasibility-summary", "state": state,
+                 "plan": "artifacts/implementation-plan.json", "base": "a" * 40, "head": "b" * 40,
+                 "completed_through": 0, "plan_package_sha256": "sha256:" + "1" * 64,
+                 "forecast_sha256": "sha256:" + "2" * 64, "packing_policy_sha256": "sha256:" + "3" * 64,
+                 "artifact_policy_sha256": identity,
+                 "metrics": {"root_bytes": 17000 if over else 1000, "total_bytes": 19000 if over else 3000,
+                             "file_count": 2, "largest_member_bytes": 2000},
+                 "violations": ["root_bytes"] if over else [],
+                 "recommended_boundary": {"id": "c1", "tasks": [1, 2], "prerequisite_commit": "c" * 40,
+                     "metrics": {"root_bytes": 900, "total_bytes": 2900, "file_count": 2,
+                                 "largest_member_bytes": 2000}} if over else None}
+        value.update(changes)
+        return value
+
+    def plan_report(self, state, projection, over=False):
+        value = {"state": state, "artifact": self.full("implementation-plan", over), "notes": "n"}
+        if projection is not None:
+            value["projection"] = projection
+        return value
+
+    def sdd_stop(self, stop, **changes):
+        value = {"state": "decompose_required", "review_state": "unknown", "conformance_verdict": "not_run",
+                 "correctness_verdict": "not_run", "verification_state": "not_run", "base_sha": "a" * 40,
+                 "head_sha": "b" * 40, "acceptance_state": "not_applicable", "detail_state": "none",
+                 "report_path": None, "notes": "projected overflow at bbbbbbb through 0", "stop": stop}
+        value.update(changes)
+        return value
+
+    def test_projection_rows_at_the_producer_boundary(self):
+        over = self.summary("decompose_required")
+        rows = [
+            (self.plan_report("complete", self.summary()), True),
+            (self.plan_report("decompose_required", over), True),
+            (self.plan_report("decompose_required", {**over, "recommended_boundary": None}), True),  # D18
+            (self.plan_report("decompose_required", None, over=True), True),
+            (self.plan_report("complete", None), False),
+            (self.plan_report("complete", over), False),
+            (self.plan_report("decompose_required", self.summary()), False),
+            (self.plan_report("decompose_required", over, over=True), False),
+            (self.plan_report("complete", self.summary(completed_through=1)), False),
+            (self.plan_report("complete", self.summary(plan="other.md")), False),
+            (self.plan_report("complete", self.summary(artifact_policy_sha256="sha256:" + "0" * 64)), False),
+            (self.plan_report("complete", self.summary(violations=["root_bytes"])), False),
+            (self.plan_report("decompose_required", {**over, "violations": []}), False),
+            (self.plan_report("complete", {**self.summary(), "extra": 1}), False),
+            (self.plan_report("complete", self.summary(schema_version=True)), False),
+            ({"state": "failed", "artifact": None, "notes": "n", "projection": self.summary()}, False),
+            ({"state": "complete", "artifact": self.full("design-spec"), "notes": "n",
+              "projection": self.summary(plan="artifacts/design-spec.json")}, False),
+        ]
+        bad_recommendations = [{"tasks": [2]}, {"tasks": [1, 1]}, {"prerequisite_commit": "c" * 39},
+                               {"metrics": over["metrics"]}, {"id": "../x"}]
+        for change in bad_recommendations:
+            rows.append((self.plan_report("decompose_required", {**over, "recommended_boundary":
+                         {**over["recommended_boundary"], **change}}), False))
+        for number, (payload, valid) in enumerate(rows):
+            with self.subTest(number=number):
+                result = self.run_validate("producer", payload, number % 2 == 0)
+                self.assertEqual(result.returncode, 0 if valid else 2, result.stderr)
+                if not valid:
+                    self.assert_refusal(result, "invalid report")
+
+    def test_decompose_required_rows_at_the_sdd_boundary(self):
+        over = self.summary("decompose_required", head="b" * 40)
+        artifact = self.full("review-package", True)
+        rows = [
+            (self.sdd_stop({"kind": "projected_overflow", "projection": over}), True),
+            (self.sdd_stop({"kind": "projected_overflow", "projection": {**over, "recommended_boundary": None}}),
+             True),                                                                     # D18
+            (self.sdd_stop({"kind": "actual_overage", "artifact": artifact}), True),
+            (self.sdd_stop({"kind": "projected_overflow", "projection": self.summary()}), False),
+            (self.sdd_stop({"kind": "projected_overflow", "projection": {**over, "head": "d" * 40}}), False),
+            (self.sdd_stop({"kind": "actual_overage", "artifact": self.full("review-package")}), False),
+            (self.sdd_stop({"kind": "actual_overage", "artifact": self.full("design-spec", True)}), False),
+            (self.sdd_stop({"kind": "other", "projection": over}), False),
+            (self.sdd_stop({"kind": []}), False),
+            (self.sdd_stop({"kind": {"projected_overflow": 1}, "projection": over}), False),
+            (self.sdd_stop({"kind": "projected_overflow", "projection": over}, review_state="clean"), False),
+            (self.sdd_stop({"kind": "projected_overflow", "projection": over}, report_path="x"), False),
+            (self.sdd_stop({"kind": "projected_overflow", "projection": over}, verification_state="passed"), False),
+        ]
+        failed = {"state": "failed", "review_state": "unknown", "conformance_verdict": "not_run",
+                  "correctness_verdict": "not_run", "verification_state": "not_run", "base_sha": None,
+                  "head_sha": None, "acceptance_state": "not_applicable", "detail_state": "none",
+                  "report_path": None, "notes": "n"}
+        rows += [(failed, True), ({**failed, "stop": {"kind": "actual_overage", "artifact": artifact}}, False)]
+        for number, (payload, valid) in enumerate(rows):
+            with self.subTest(number=number):
+                result = self.run_validate("sdd", payload, number % 2 == 0)
+                self.assertEqual(result.returncode, 0 if valid else 2, result.stderr)
 
     def test_a_producer_refusal_names_its_member_or_bound(self):
         """Issue 472 AC1, D2, D3: the notes bound and the key set are named; the notes text never is."""
@@ -1733,6 +1828,90 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 path.write_text(json.dumps(policy), encoding="utf-8")
                 result = self.run_check("handoff", root, path)
                 self.assertEqual((result.returncode, result.stdout), (2, ""))
+
+
+class InvokeParityTest(unittest.TestCase):
+    """Issue 498 D3, D5: `invoke` returns exactly what one CLI run of the source
+    script produces, and touches no process stream."""
+
+    PRODUCER = ("validate-report", "--boundary", "producer", "--input", "-")
+
+    def rows(self, directory: Path):
+        """(name, argv without `--policy`, stdin, exit code, refusal label or None):
+        one row per exit code and refusal label `invoke` can return."""
+        wire = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["wire_max_bytes"]
+        within, over = directory / "within.md", directory / "over.md"
+        within.write_bytes(b"h" * 8_192)
+        over.write_bytes(b"h" * 8_193)
+        merged = {"issue": 14, "state": "merged",
+                  "pr_url": "https://github.com/fagenorn/nix-config/pull/15",
+                  "merge_sha": "abc123abc123abc123abc123abc123abc123abcd",
+                  "issue_closed": True, "discussion_items": [], "detail_state": "none",
+                  "report_path": None, "notes": ""}
+        return (
+            ("accepted producer report", self.PRODUCER,
+             b'{"state":"failed","artifact":null,"notes":"x"}', 0, None),
+            ("accepted ship-summary report",
+             ("validate-report", "--boundary", "ship-summary", "--input", "-"),
+             json.dumps(merged).encode("utf-8"), 0, None),
+            ("schema-refused report", self.PRODUCER,
+             b'{"state":"failed","artifact":null,"decisions":[]}', 2, "invalid report"),
+            ("report over the wire bound", self.PRODUCER, b" " * (wire + 1), 2,
+             "invalid report"),
+            ("unreadable detail input",
+             ("validate-detail-input", "--input", str(directory / "missing.json")), b"", 2,
+             "cannot read detail input"),
+            ("argparse refusal",
+             ("validate-report", "--boundary", "no-such-boundary", "--input", "-"), b"", 2,
+             "invalid input"),
+            ("check within budget",
+             ("check", "--kind", "handoff", "--root", str(within), "--format", "json"), b"", 0,
+             None),
+            ("check over budget",
+             ("check", "--kind", "handoff", "--root", str(over), "--format", "json"), b"", 3,
+             None),
+        )
+
+    def test_invoke_returns_exactly_what_the_cli_process_produces(self):
+        with tempfile.TemporaryDirectory() as raw:
+            for name, argv, stdin, code, label in self.rows(Path(raw)):
+                with self.subTest(name):
+                    argv = [*argv, "--policy", str(POLICY)]
+                    outcome = artifact_budget.invoke(argv, io.BytesIO(stdin).read)
+                    process = subprocess.run([sys.executable, str(SCRIPT), *argv], input=stdin,
+                                             capture_output=True, check=False)
+                    self.assertEqual(
+                        (outcome.exit_code, outcome.stdout, outcome.stderr),
+                        (process.returncode, process.stdout, process.stderr.decode("utf-8")))
+                    self.assertEqual(outcome.exit_code, code, outcome.stderr)
+                    if label is None:
+                        self.assertEqual(outcome.stderr, "")
+                        self.assertTrue(outcome.stdout.endswith(b"\n"), outcome.stdout)
+                    else:
+                        self.assertEqual(outcome.stdout, b"")
+                        self.assertTrue(outcome.stderr.startswith(f"artifact-budget: {label}: "),
+                                        outcome.stderr)
+
+    def test_invoke_touches_no_process_stream(self):
+        """`workflow-state` prints its own reply after a validation, so `invoke`
+        writes to neither process stream and reads stdin only through its reader,
+        which a command without `--input -` never calls."""
+        def no_stdin(size):
+            raise AssertionError(f"stdin read ({size} bytes) by a command without --input -")
+
+        stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        stderr = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(sys, "stdin", None), \
+                mock.patch.object(sys, "stdout", stdout), mock.patch.object(sys, "stderr", stderr):
+            rows = self.rows(Path(raw))
+            codes = [artifact_budget.invoke(
+                         [*argv, "--policy", str(POLICY)],
+                         io.BytesIO(stdin).read if "-" in argv else no_stdin).exit_code
+                     for _, argv, stdin, _, _ in rows]
+        self.assertEqual(codes, [code for *_, code, _ in rows])
+        for stream in (stdout, stderr):
+            stream.flush()
+            self.assertEqual(stream.buffer.getvalue(), b"")
 
 
 class SkillNamedReplyTest(DeliveredCustody, unittest.TestCase):

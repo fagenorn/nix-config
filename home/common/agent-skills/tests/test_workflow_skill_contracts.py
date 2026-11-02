@@ -3295,5 +3295,75 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
         self.assertIn(self.END_THE_TURN, normalized(text[start:end]))
 
 
+# Machine-consumed text only (agent-helpers rule 6, D22): helper argv, the block headings
+# and kinds the forecast loader reads, and report JSON the validators read. No English phrase.
+PROJECTION_MACHINE_TEXT = {
+    WRITING_PLANS: (
+        "## Review feasibility delivery", "## Review feasibility task", "git-range-ownership/v1",
+        "authored-cumulative/v1", "git merge-base HEAD origin/<integration-branch>",
+        "review-feasibility gate --plan <root> --base <base> --head <HEAD> --completed-through 0",
+        '--save-dir "$(sdd-workspace <root>)"', "`projection`"),
+    FROM_ISSUE_DIR / "AUTO.md": (
+        '"budget_status":"within_budget"},"projection":',
+        '{"state":"decompose_required","artifact":{"kind":"implementation-plan"'),
+    FROM_ISSUE_DIR / "standards-review.md": (
+        "review-feasibility confirm --plan <root> --base <base> --input -",
+        "git merge-base HEAD origin/<integration-branch>"),
+    FROM_ISSUE_DIR / "SKILL.md": ("review-feasibility confirm --plan <root> --base <base> --input -",),
+}
+PROJECTION_MACHINE_TEXT[SDD] = (
+    "sdd-gate record PLAN_FILE --task N", "sdd-gate next --completed N",
+    "review-feasibility confirm --plan PLAN_FILE --base DELIVERY_BASE --input -",
+    '"kind":"projected_overflow"', '"kind":"actual_overage"',
+    "artifact-budget check --kind review-package")
+PROJECTION_MACHINE_TEXT[FROM_ISSUE_DIR / "delegated-owner.md"] = ("decompose_required",)
+BUDGET_BASE = "8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc"
+
+
+def assert_no_larger_than_base(test, paths):
+    for path in paths:
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        shown = subprocess.run(["git", "-C", str(REPO_ROOT), "cat-file", "-s", f"{BUDGET_BASE}:{relative}"],
+                               capture_output=True, text=True)
+        if shown.returncode:
+            test.skipTest("delivery base not in this clone")
+        with test.subTest(path=relative):
+            test.assertLessEqual(path.stat().st_size, int(shown.stdout))
+
+
+class ProjectionCallerContractsTest(unittest.TestCase):
+    def test_projection_callers_carry_their_machine_text(self):
+        for path, items in PROJECTION_MACHINE_TEXT.items():
+            text = normalized(path.read_text(encoding="utf-8"))
+            for item in items:
+                with self.subTest(path=path.name, item=item):
+                    self.assertIn(item, text)
+
+    def test_the_planning_confirmation_precedes_reviewer_dispatch(self):
+        gate = (FROM_ISSUE_DIR / "standards-review.md").read_text(encoding="utf-8")
+        gate = normalized(gate.split("## Caller input gate", 1)[1].split("## Dispositioning findings", 1)[0])
+        self.assertLess(gate.index("artifact-budget check --kind implementation-plan --root"),
+                        gate.index("review-feasibility confirm"))
+        self.assertLess(gate.index("review-feasibility confirm"), gate.index("capabilities.review.plan"))
+
+    def test_edited_planning_documents_do_not_grow(self):
+        assert_no_larger_than_base(self, (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md",
+                                          FROM_ISSUE_DIR / "standards-review.md", PHASE_5_REVIEW_CONTRACT,
+                                          FROM_ISSUE_DIR / "SKILL.md"))
+
+
+class ExecutionCallerContractsTest(unittest.TestCase):
+    def test_record_precedes_next_and_phase_6_confirms(self):
+        sdd = normalized(SDD.read_text(encoding="utf-8"))
+        self.assertLess(sdd.index("sdd-gate record PLAN_FILE --task N"), sdd.index("sdd-gate next --completed N"))
+        phase6 = normalized((FROM_ISSUE_DIR / "SKILL.md").read_text(encoding="utf-8")
+                            .split("## Phase 6", 1)[1].split("## Phase 7", 1)[0])
+        self.assertIn("review-feasibility confirm --plan <root> --base <base> --input -", phase6)
+
+    def test_edited_execution_documents_do_not_grow(self):
+        assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "SKILL.md",
+                                          FROM_ISSUE_DIR / "delegated-owner.md"))
+
+
 if __name__ == "__main__":
     unittest.main()

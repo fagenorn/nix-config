@@ -1,5 +1,5 @@
 import unittest
-from agent_tools.review_forecast import ForecastError, validate_boundaries
+from agent_tools.review_forecast import ForecastError, tree_entry, validate_boundaries
 
 class BoundaryTreeTest(unittest.TestCase):
     def row(self, name, parent, tasks, deps=()):
@@ -547,6 +547,18 @@ class NonAsciiPlanTest(SourceProjectionFixture, unittest.TestCase):
         result = self.project()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['metrics'], self.actual()[0])
+
+
+class TreeEntryTest(SourceProjectionFixture, unittest.TestCase):
+    def test_colon_prefixed_path_is_a_literal_name_not_a_pathspec(self):
+        self.write(':(top)literal.txt', 'literal\n')
+        self.write('other.txt', 'other\n')
+        tree = self.git('rev-parse', self.commit('colon names') + '^{tree}')
+        entry = tree_entry(self.repo, tree, ':(top)literal.txt')
+        self.assertIsNotNone(entry, 'a file literally named like pathspec syntax is a tree entry')
+        self.assertEqual((entry['mode'], entry['kind']), ('100644', 'blob'))
+        self.assertIsNone(tree_entry(self.repo, tree, ':(top)other.txt'),
+                          'pathspec magic must not resolve to a different path')
 
 
 class GraphRefusalTest(BoundaryTreeTest):

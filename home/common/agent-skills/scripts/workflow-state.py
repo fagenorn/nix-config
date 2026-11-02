@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import fcntl
 from functools import partial
 import importlib.util
+import io
 import json
 import math
 import os
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import traceback
 from typing import Any, Callable, Iterator, NamedTuple
 
 from agent_tools import attempt_observations, attempt_store, phase_budget
@@ -530,16 +532,17 @@ def validate_result(value: Any, *, expected_issue: int | None = None) -> dict[st
     return {field: copy.deepcopy(value[field]) for field in RESULT_FIELDS}
 
 
-def artifact_budget_paths() -> tuple[list[str], Path | None]:
-    """Resolve the Task-1 CLI and its repository/installed policy.
+def artifact_budget_paths() -> tuple[Path, Path | None]:
+    """The artifact-budget module file and the resolved policy (#337 D38; issue 498 D2).
 
     In the source layout (`artifact_budget.py` beside the resolved script, the
-    policy in its parent directory) that module runs under this interpreter.
-    Otherwise the CLI is `artifact-budget` beside the script, else
-    `~/.agents/bin/artifact-budget`, and the policy is
+    policy in its parent directory) they are those two files. Otherwise the
+    module is `~/.agents/lib/python/artifact_budget.py`, the file the installed
+    `artifact-budget` wrapper runs, and the policy is
     `<script dir>/../share/artifact-budget-policy.json`, else
     `~/.agents/share/artifact-budget-policy.json` (None when neither exists):
-    the store copy `workflow-state` runs from has neither beside it (#337 D38).
+    the store copy `workflow-state` runs from has neither beside it. The module
+    file is not checked here; `_artifact_budget` refuses one it cannot load.
     """
 
     def trusted_policy(path: Path) -> Path | None:
@@ -558,16 +561,65 @@ def artifact_budget_paths() -> tuple[list[str], Path | None]:
     source_module = script_dir / "artifact_budget.py"
     source_policy = script_dir.parent / "artifact-budget-policy.json"
     if source_module.is_file() and source_policy.is_file():
-        return [sys.executable, str(source_module)], trusted_policy(source_policy)
-    installed_cli = Path(__file__).parent / "artifact-budget"
+        return source_module, trusted_policy(source_policy)
     installed_policy = Path(__file__).parent.parent / "share/artifact-budget-policy.json"
-    if not installed_cli.is_file():
-        installed_cli = Path.home() / ".agents/bin/artifact-budget"
     if not installed_policy.is_file():
         installed_policy = Path.home() / ".agents/share/artifact-budget-policy.json"
-    return [str(installed_cli)], (
+    return Path.home() / ".agents/lib/python/artifact_budget.py", (
         trusted_policy(installed_policy) if installed_policy.is_file() else None
     )
+
+
+_ARTIFACT_BUDGET = None
+
+
+def _artifact_budget():
+    """The artifact-budget module, loaded on first use and kept for the process
+    (issue 498 D2, D7).
+
+    It is loaded from the resolved target of `artifact_budget_paths()`'s module
+    file. Every Nix store file has mtime 1, so bytecode cached beside a
+    home-manager link would be checked by size alone and could outlive a
+    same-size edit; a store file's name changes with its content. The module is
+    registered in `sys.modules` before it executes, as its dataclasses require,
+    and unregistered if loading fails. Any failure is a `WorkflowError`.
+    """
+    global _ARTIFACT_BUDGET
+    if _ARTIFACT_BUDGET is not None:
+        return _ARTIFACT_BUDGET
+    name = "_workflow_state_artifact_budget"
+    try:
+        entry = artifact_budget_paths()[0].resolve(strict=True)
+        spec = importlib.util.spec_from_file_location(name, entry)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"cannot load {entry}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(name, None)
+        raise WorkflowError(f"artifact-budget module: {exc}") from exc
+    _ARTIFACT_BUDGET = module
+    return module
+
+
+def artifact_budget_invoke(argv: list[str], input_bytes: bytes = b"") -> Any:
+    """Run one artifact-budget command in this process and return its `Outcome`
+    (issue 498 D1, D4).
+
+    `argv` is the command line without the program name; `--policy` is appended
+    when a policy resolved. `input_bytes` is what `--input -` reads. An exception
+    that escapes the validator becomes exit 1 with empty stdout and its traceback
+    as stderr, as a crashed child process left it.
+    """
+    module = _artifact_budget()
+    _, policy = artifact_budget_paths()
+    if policy is not None:
+        argv = [*argv, "--policy", str(policy)]
+    try:
+        return module.invoke(argv, io.BytesIO(input_bytes).read)
+    except Exception:
+        return module.Outcome(1, b"", traceback.format_exc())
 
 
 def artifact_budget_validate(
@@ -579,19 +631,16 @@ def artifact_budget_validate(
 ) -> dict[str, Any]:
     if (input_path is None) == (input_bytes is None):
         raise WorkflowError("artifact-budget validation requires exactly one input")
-    argv, policy = artifact_budget_paths()
-    argv.append(command)
+    argv = [command]
     if boundary is not None:
         argv.extend(("--boundary", boundary))
     argv.extend(("--input", "-" if input_bytes is not None else str(input_path)))
-    if policy is not None:
-        argv.extend(("--policy", str(policy)))
-    completed = subprocess.run(argv, input=input_bytes, capture_output=True, check=False)
-    if completed.returncode != 0 or not completed.stdout:
+    outcome = artifact_budget_invoke(argv, b"" if input_bytes is None else input_bytes)
+    if outcome.exit_code != 0 or not outcome.stdout:
         subject = "detail input" if boundary is None else f"{boundary} boundary"
         raise WorkflowError(f"artifact-budget {command} rejected the {subject}")
     try:
-        canonical = json.loads(completed.stdout)
+        canonical = json.loads(outcome.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise WorkflowError(f"artifact-budget {command} returned invalid canonical JSON") from error
     if not isinstance(canonical, dict):
@@ -4156,18 +4205,13 @@ def validate_durable_detail(repo_root: str, report_path: str) -> None:
         resolved_parent.relative_to(root)
     except (OSError, ValueError) as error:
         raise WorkflowError("durable detail is not beneath the repository root") from error
-    argv, policy = artifact_budget_paths()
-    argv.extend((
-        "check", "--kind", "review-package", "--root", str(candidate),
-        "--format", "json",
-    ))
-    if policy is not None:
-        argv.extend(("--policy", str(policy)))
-    completed = subprocess.run(argv, capture_output=True, check=False)
-    if completed.returncode != 0:
+    outcome = artifact_budget_invoke([
+        "check", "--kind", "review-package", "--root", str(candidate), "--format", "json",
+    ])
+    if outcome.exit_code != 0:
         raise WorkflowError("durable detail is not a checker-valid review package")
     try:
-        canonical = json.loads(completed.stdout)
+        canonical = json.loads(outcome.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise WorkflowError("artifact-budget check returned invalid canonical JSON") from error
     if (not isinstance(canonical, dict)
