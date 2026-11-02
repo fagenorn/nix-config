@@ -11,12 +11,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Sequence
+from typing import BinaryIO, Mapping, Sequence
 
 PREFIX = "suite-runner:"
 DEFAULT_JOBS = 4
 INTERRUPTED = f"{PREFIX} interrupted, waiting for running members"
 INTERRUPT_EXIT = 130
+# Appended to every member's GIT_CONFIG_PARAMETERS, in the form `git -c` exports
+# (issue 496).
+SUITE_GIT_CONFIG = "'maintenance.auto'='false' 'gc.auto'='0'"
 
 
 class UsageError(ValueError):
@@ -43,6 +46,26 @@ def member_command(member: str) -> list[str]:
     if suffix == ".sh":
         return ["bash", member]
     raise UsageError(f"{member}: a member must be a .py or a .sh file")
+
+
+def member_environment(parent: Mapping[str, str]) -> dict[str, str]:
+    """A copy of `parent` whose `GIT_CONFIG_PARAMETERS` ends with
+    `SUITE_GIT_CONFIG`, so every git command run with it reads
+    `maintenance.auto=false` and `gc.auto=0` (issue 496).
+
+    The entries are appended as `git -c` appends its own: after one space when
+    the inherited value is non-empty, standing alone otherwise. Coming last,
+    they win over an inherited entry for the same key, and a test's own
+    `GIT_CONFIG_COUNT` entries still apply beside them. The inherited value is
+    passed on unparsed: one git cannot parse already fails every git call with
+    exit 128. `parent` is not modified, and every other variable is copied
+    unchanged.
+    """
+    environment = dict(parent)
+    inherited = environment.get("GIT_CONFIG_PARAMETERS", "")
+    environment["GIT_CONFIG_PARAMETERS"] = (
+        f"{inherited} {SUITE_GIT_CONFIG}" if inherited else SUITE_GIT_CONFIG)
+    return environment
 
 
 def validate_members(members: Sequence[str], cwd: Path) -> None:
@@ -155,7 +178,8 @@ def _reap(index: int, member: str, process: subprocess.Popen | None,
                         cpu_seconds)
 
 
-def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
+def _run_serial(members: Sequence[str], environment: Mapping[str, str],
+                out: _Output) -> list[MemberResult]:
     results = []
     for index, member in enumerate(members):
         out.write(_line(f"{PREFIX} start {member}") + _line(f"{PREFIX} begin {member}"))
@@ -166,7 +190,7 @@ def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
         hold = _HeldSigint()
         try:
             try:
-                process = subprocess.Popen(member_command(member))
+                process = subprocess.Popen(member_command(member), env=environment)
             except OSError as error:
                 out.write(_line(str(error)))
             finally:
@@ -201,7 +225,7 @@ def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
     return results
 
 
-def _run_parallel(members: Sequence[str], jobs: int,
+def _run_parallel(members: Sequence[str], jobs: int, environment: Mapping[str, str],
                   out: _Output) -> list[MemberResult | None]:
     results: list[MemberResult | None] = [None] * len(members)
     stop = threading.Event()
@@ -224,7 +248,7 @@ def _run_parallel(members: Sequence[str], jobs: int,
                 started = time.monotonic()
                 try:
                     process = subprocess.Popen(
-                        member_command(member), stdin=subprocess.DEVNULL,
+                        member_command(member), env=environment, stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 except OSError as error:
                     process, output = None, _line(str(error))
@@ -286,13 +310,15 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO) -> int:
     A KeyboardInterrupt propagates after the running members have finished and
     written their blocks. Must be called from the main thread: the runner holds
     SIGINT while it launches or reaps a serial member or starts its parallel workers.
+    Every member runs with `member_environment(os.environ)`, computed once.
     """
     output = _Output(out)
+    environment = member_environment(os.environ)
     started = time.monotonic()
     if jobs == 1:
-        results = _run_serial(members, output)
+        results = _run_serial(members, environment, output)
     else:
-        results = _run_parallel(members, jobs, output)
+        results = _run_parallel(members, jobs, environment, output)
     missing = [member for member, result in zip(members, results) if result is None]
     if missing:
         raise RuntimeError(f"members left without a result: {', '.join(missing)}")
