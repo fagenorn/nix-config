@@ -36,6 +36,7 @@ from agent_tools.review_task7 import DIGEST_PLACEHOLDER, TASK7_PINS, EstimateErr
 from agent_tools.review_witness import (ANCHOR_MAX_BYTES, ANCHOR_NAME, WitnessError, authenticate, build_anchor,
                                         build_witness, validate_bundle)
 
+from .hostile_git_test_support import hostile_git_env
 from .retained_evidence_test_support import ANCHOR_SHA256, BUNDLE, TOOL_COMMIT
 from .retained_review_test_support import SOURCE, git, rehash_edges, source_budget_env, ssh_signer
 
@@ -74,7 +75,7 @@ TRUSTED_SITES = (
 # RP7 layer 2: every component member the pins determine and the payload members that the pins, the estimate
 # table or the payload's own tables determine, under the error that refuses it. Each site exists whatever
 # the proof produced: `aggregate.actual` (outcome 0) and `tasks-7-8` (outcome 4) are measured in every
-# bundle. `tool.commit`, `tool.files`, `archive.shards`, a record's bytes or digest, an entry id and a
+# bundle. `tool.commit`, `tool.files_sha256`, `archive.shards`, a record's bytes or digest, an entry id and a
 # candidate's live entry are not determined without Git (RP7, CP17), so they are not here.
 GIT_FREE_SITES = {
     WitnessError: (
@@ -443,6 +444,28 @@ class RetainedFullTest(unittest.TestCase):
         self.assertEqual(json.loads(done.stdout)["anchor_sha256"], ANCHOR_SHA256)
         self.assertEqual({path.name: path.read_bytes() for path in out.iterdir()},
                          {path.name: path.read_bytes() for path in BUNDLE.iterdir()})
+
+    def test_hostile_record_sources_reproduce_the_clean_bundle(self):
+        """Issue 255 (D2, D8): a derivation from a disposable clone carrying every hostile record source a test
+        can own writes the class bundle's five files. Its payload members, which carry no tool identity, equal
+        the committed bundle's, so the clean-run bytes are unchanged on the real objects."""
+        clone = self.disposable_clone()
+        pair = ("diff", "--binary", "-U10", COMMITS[0], COMMITS[1])
+        clean = subprocess.run(["git", "-C", str(clone), *pair], check=True, capture_output=True,
+                               env=dict(self.env, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")).stdout
+        env = hostile_git_env(Path(tempfile.mkdtemp(dir=self.tmp, prefix="hostile-")), self.env, [clone])
+        hostile = subprocess.run(["git", "-C", str(clone), *pair], env=env, check=True, capture_output=True).stdout
+        self.assertNotEqual(clean, hostile, "the hostile sources never bit")
+        out = self.tmp / "hostile-bundle"
+        done = subprocess.run([sys.executable, "-m", "agent_tools." + DERIVE.replace("-", "_"),
+                               *derive_argv(self.root, self.tool_commit, issue_121_repo=clone,
+                                            issue_100_repo=clone, output_dir=out)],
+                              env=env, cwd=self.tmp, capture_output=True)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, self.summary, b""))
+        files = {path.name: path.read_bytes() for path in out.iterdir()}
+        self.assertEqual(files, {path.name: path.read_bytes() for path in self.bundle.iterdir()})
+        for name in (ISSUE_100, ISSUE_121, ESTIMATE):
+            self.assertEqual(files[name], (BUNDLE / name).read_bytes(), name)
 
     def test_bundle_files_fit_the_whole_record_caps(self):
         sizes = {path.name: path.stat().st_size for path in self.bundle.iterdir()}
