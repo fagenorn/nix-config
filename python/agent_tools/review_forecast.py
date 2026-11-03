@@ -309,11 +309,6 @@ def _block(raw: bytes, heading: str) -> dict:
     return value
 
 
-def forecast_block(raw: bytes, heading: str) -> dict:
-    """The one canonical JSON block under `heading` in `raw`; raises `ForecastError` otherwise."""
-    return _block(raw, heading)
-
-
 def edge_facts(repo: Path, parent: str, commit: str, ordinal: int) -> dict:
     """Bind all original parent edges to independently read tree and record facts."""
     try:

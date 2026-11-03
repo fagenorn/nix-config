@@ -81,11 +81,13 @@ from pathlib import Path, PurePosixPath
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.review_budget import BudgetAuthority, BudgetError, describe
-from agent_tools.review_forecast import ForecastError, forecast_block, history_commit, process_paths
+from agent_tools.review_forecast import (
+    ForecastError, ancestor, canonical_bytes, history_commit, process_paths,
+)
 from agent_tools.review_gate import (
     GateError, capture, plan_relative, project_argv, save_result, summarize,
 )
-from agent_tools.review_record import RangeError, RecordError, paths, recorded
+from agent_tools.review_record import RangeError, RecordError, _blocks, paths, recorded
 from agent_tools.sdd_brief import (
     IMPLEMENTER_TEMPLATE, IMPLEMENTER_TOKENS, REVIEWER_TEMPLATE, REVIEWER_TOKENS, BriefError,
     plan_section, render, select_standards, standards_value, task_row, worker_block,
@@ -707,10 +709,6 @@ def _verify_recording(ledger: Ledger, plan: Path, target: tuple[int, str, str], 
         raise RecordError(str(error)) from None
 
 
-DELIVERY_HEADING = "## Review feasibility delivery"
-TASK_HEADING = "## Review feasibility task"
-
-
 def _recording_commit(ledger: Ledger, target: tuple[int, str, str], head: str) -> tuple[str, list[str]]:
     """The candidate recording commit for the target task and the metadata tail over it.
 
@@ -719,11 +717,9 @@ def _recording_commit(ledger: Ledger, target: tuple[int, str, str], head: str) -
     recorded head is not a proper ancestor of `head` or the walk meets a merge or a root.
     """
     task, _, recorded_head = target
-    refused = RecordError(f"{head[:7]} is not the one commit recording task {task} over "
+    if head == recorded_head or not ancestor(ledger.top, recorded_head, head):
+        raise RecordError(f"{head[:7]} is not the one commit recording task {task} over "
                           f"{recorded_head[:7]}, nor a metadata tail over it")
-    if head == recorded_head or _run(["git", "merge-base", "--is-ancestor", recorded_head,
-                                      head]).returncode != 0:
-        raise refused
     tail: list[str] = []
     commit = head
     while True:
@@ -737,44 +733,38 @@ def _recording_commit(ledger: Ledger, target: tuple[int, str, str], head: str) -
         commit = parents[0]
 
 
-def _forecast_blocks(ledger: Ledger, plan: Path, commit: str) -> tuple[set[str], dict[str, dict]]:
-    """The proposed boundary's process paths at `commit` and each path's forecast block."""
+def _forecast_bytes(ledger: Ledger, plan: Path, commit: str) -> tuple[dict, tuple[bytes, ...]]:
+    """The delivery block at `commit` and the canonical bytes of every forecast block there."""
     root, _ = paths(ledger.top, plan, 1)
-    raw = _committed(root, commit)
-    if raw is None:
-        raise RecordError(f"{root} is not committed at {commit[:7]}")
-    delivery = forecast_block(raw, DELIVERY_HEADING)
-    try:
-        proposed = [boundary for boundary in delivery["boundaries"]
-                    if boundary["id"] == delivery["proposed_boundary"]]
-        package = proposed[0]["process_package"] if len(proposed) == 1 else None
-        allowed = set(process_paths(package)) if isinstance(package, dict) else None
-        spec = package["spec"] if allowed is not None else None
-    except (KeyError, TypeError):
-        allowed = spec = None
-    if allowed is None or str(root) not in allowed:
-        raise RecordError(f"{root} at {commit[:7]} declares no proposed process package")
-    blocks = {}
-    for path in sorted(allowed - {spec}):
-        data = _committed(PurePosixPath(path), commit)
-        if data is None:
-            raise RecordError(f"{path} is not committed at {commit[:7]}")
-        blocks[path] = forecast_block(data, DELIVERY_HEADING if path == str(root) else TASK_HEADING)
-    return allowed, blocks
+    _, delivery, members = _blocks(ledger.top, commit, root)
+    return delivery, (canonical_bytes(delivery), *(canonical_bytes(block) for _, block in members))
+
+
+def _process_package(delivery: dict, where: str) -> set[str]:
+    """The proposed boundary's process package paths in `delivery`; refuses a malformed one."""
+    proposed = [boundary for boundary in delivery.get("boundaries") or []
+                if isinstance(boundary, dict) and boundary.get("id") == delivery.get("proposed_boundary")]
+    package = proposed[0].get("process_package") if len(proposed) == 1 else None
+    if (not isinstance(package, dict) or not isinstance(package.get("spec"), str)
+            or not isinstance(package.get("plan"), str) or not isinstance(package.get("tasks"), list)
+            or not all(isinstance(path, str) for path in package["tasks"])):
+        raise RecordError(f"the plan at {where} declares no well-formed proposed process package")
+    return set(process_paths(package))
 
 
 def _verify_tail(ledger: Ledger, plan: Path, task: int, recording: str, tail: Sequence[str]) -> None:
-    """Raise `RecordError` unless each tail commit touches only process paths and leaves every
-    forecast block as the recording commit holds it."""
-    allowed, blocks = _forecast_blocks(ledger, plan, recording)
+    """Raise `RecordError` unless each tail commit leaves every forecast block byte-identical to the
+    recording commit and touches only the proposed boundary's process package."""
+    delivery, blocks = _forecast_bytes(ledger, plan, recording)
+    allowed = _process_package(delivery, recording[:7])
     previous = recording
     for commit in tail:
+        if _forecast_bytes(ledger, plan, commit)[1] != blocks:
+            raise RecordError(f"{commit[:7]} over task {task}'s recording changes a forecast block")
         stray = sorted(set(_touched(previous, commit)) - allowed)
         if stray:
             raise RecordError(f"{commit[:7]} over task {task}'s recording changes {stray[0]}, "
                               "outside the process package")
-        if _forecast_blocks(ledger, plan, commit) != (allowed, blocks):
-            raise RecordError(f"{commit[:7]} over task {task}'s recording changes a forecast block")
         previous = commit
 
 
@@ -786,9 +776,7 @@ def _check_evidence(ledger: Ledger, plan: Path, target: tuple[int, str, str], he
         _verify_recording(ledger, plan, target, recording)
         if tail:
             _verify_tail(ledger, plan, target[0], recording, tail)
-    except (BriefError, ForecastError) as error:
-        raise Refusal("evidence", str(error), gate="failed") from None
-    except RecordError as error:
+    except (BriefError, ForecastError, RecordError) as error:
         raise Refusal("evidence", str(error), gate="failed") from None
 
 
