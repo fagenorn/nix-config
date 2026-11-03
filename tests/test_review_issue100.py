@@ -5,9 +5,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import RECORD_POLICY_SHA256
+from agent_tools.review_actual import RECORD_POLICY_V1_SHA256
 from agent_tools.review_budget import describe
-from agent_tools.review_forecast import ForecastError
+from agent_tools.review_forecast import ForecastError, edge_facts
 from agent_tools.review_git import HistoryError
 from agent_tools.review_issue100 import (ISSUE_100_PINS, Issue100Error, compact_100, derive_100, fresh_records,
                                          historical_records, model_100, validate_100, verify_archive)
@@ -272,6 +272,25 @@ class Issue100Test(unittest.TestCase):
                     validated(self.rebuilt(payload, changed), self.pins)
                 self.assertEqual(caught.exception.code, "invalid_payload")
 
+    def test_edited_move_measures_as_a_v1_delete_and_add(self):
+        """Issue 569: the fresh domain and the raw edges measure under the frozen `review-git-records/v1`, so an
+        edited move is a deletion and an addition; the historical recipe and the living policy pair it."""
+        tmp = Path(tempfile.mkdtemp(dir=self.tmp))
+        repo, live, archive, pins = issue100_fixture(tmp, edited_move=True)
+        payload = model_100(repo, live, archive, pins, self.limits)
+        self.assertEqual(validated(payload, pins), payload)
+        fresh = [record["path"] for record in fresh_records(repo, pins, self.limits)]
+        self.assertLessEqual({"src/move.txt", "src/moved.txt"}, set(fresh))
+        self.assertEqual((pins.historical.records, pins.fresh.records), (len(fresh) - 1, len(fresh)))
+        mover = git(repo, "rev-list", "-1", "main", "--", "src/moved.txt")
+        edge = next(e for e in payload["edges"]
+                    if e["commit"] == mover and any(r["path"] == "src/moved.txt" for r in e["records"]))
+        self.assertEqual([(r["operation"], r["path"]) for r in edge["records"] if "move" in r["path"]],
+                         [("D", "src/move.txt"), ("A", "src/moved.txt")])
+        living = edge_facts(repo, edge["parent"], mover, 1)
+        self.assertEqual([(r["operation"], r["old_path"]) for r in living["records"] if r["path"] == "src/moved.txt"],
+                         [("R097", "src/move.txt")])
+
     def test_summary_disagreeing_with_tables_is_invalid(self):
         payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         summary = {**payload["summary"], "integrated": payload["summary"]["integrated"] + 1}
@@ -370,7 +389,7 @@ class Issue100Test(unittest.TestCase):
         self.assertEqual((pins.historical.name, pins.historical.bytes, pins.historical.records),
                          ("retained-git-records/v1", 1005707, 115))
         self.assertEqual((pins.fresh.name, pins.fresh.policy_sha256, pins.fresh.bytes, pins.fresh.records),
-                         ("review-git-records/v1", RECORD_POLICY_SHA256, 1012913, 115))
+                         ("review-git-records/v1", RECORD_POLICY_V1_SHA256, 1012913, 115))
         self.assertEqual(pins.expected_counts, {
             "commits": 82, "parent_edges": 91, "merge_edges": 9, "edge_records": 543, "contributions": 115,
             "historical_process": 8, "integrated": 38, "candidate": 69, "candidate_ordinary": 65,

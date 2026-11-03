@@ -32,6 +32,14 @@ os.execv(sys.executable, [sys.executable, REAL_MODULE_PATH, *sys.argv[1:]])
 """
 
 
+# The review record argv, written out independently of `RECORD_POLICY` (issue 569: renames pair at 50%).
+EXPECTED_DIFF = ("-c", "diff.renames=true", "-c", "diff.renameLimit=0", "-c", "core.quotePath=true", "diff",
+                 "--find-renames=50%", "--no-ext-diff", "--no-textconv", "--full-index", "--no-relative",
+                 "--src-prefix=a/", "--dst-prefix=b/", "--diff-algorithm=myers", "--no-indent-heuristic",
+                 "--inter-hunk-context=0", "--no-color", "--line-prefix=", "--output-indicator-new=+",
+                 "--output-indicator-old=-", "--output-indicator-context= ")
+
+
 # Issue 439: a ~81 KB, 1,000-line text file whose last line has no LF.
 PAGE = "landing/src/app/app/page.tsx"
 
@@ -83,12 +91,7 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual(rebuilt, candidates)
             for item in candidates:
                 context = 10 if item.context_lines is None else item.context_lines
-                expected = subprocess.run(["git", "-C", str(repo), "-c", "diff.renames=true",
-                    "-c", "diff.renameLimit=0", "-c", "core.quotePath=true", "diff", "--find-renames=100%",
-                    "--no-ext-diff", "--no-textconv", "--full-index", "--no-relative", "--src-prefix=a/",
-                    "--dst-prefix=b/", "--diff-algorithm=myers", "--no-indent-heuristic",
-                    "--inter-hunk-context=0", "--no-color", "--line-prefix=", "--output-indicator-new=+",
-                    "--output-indicator-old=-", "--output-indicator-context= ", "--binary", f"-U{context}",
+                expected = subprocess.run(["git", "-C", str(repo), *EXPECTED_DIFF, "--binary", f"-U{context}",
                     base, head], capture_output=True, check=True).stdout
                 self.assertEqual(b"".join(r.payload for r in item.records), expected)
                 self.assertEqual(item.stat, {"files_changed": 2, "insertions": 1, "deletions": 1})
@@ -292,11 +295,7 @@ class ReviewPackageCliTest(unittest.TestCase):
             rebuilt = b"".join((out.parent / item["path"]).read_bytes()
                                for item in manifest["shards"])
             expected = subprocess.run(
-                ["git", "-C", str(repo), "-c", "diff.renames=true", "-c", "diff.renameLimit=0", "-c", "core.quotePath=true",
-                 "diff", "--find-renames=100%", "--no-ext-diff", "--no-textconv", "--full-index",
-                 "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--diff-algorithm=myers",
-                 "--no-indent-heuristic", "--inter-hunk-context=0", "--no-color", "--line-prefix=",
-                 "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ", "--binary", "-U10",
+                ["git", "-C", str(repo), *EXPECTED_DIFF, "--binary", "-U10",
                  f"{base}..{head}"], check=True, capture_output=True).stdout
             self.assertEqual(rebuilt, expected)
             self.assertEqual(manifest["total_diff_bytes"], len(expected))
@@ -366,11 +365,7 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertTrue(all(item["bytes"] <= 65_536
                                 for item in manifest["shards"]))
             expected = subprocess.run(
-                ["git", "-C", str(repo), "-c", "diff.renames=true", "-c", "diff.renameLimit=0", "-c", "core.quotePath=true",
-                 "diff", "--find-renames=100%", "--no-ext-diff", "--no-textconv", "--full-index",
-                 "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--diff-algorithm=myers",
-                 "--no-indent-heuristic", "--inter-hunk-context=0", "--no-color", "--line-prefix=",
-                 "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ", "--binary", "-U7",
+                ["git", "-C", str(repo), *EXPECTED_DIFF, "--binary", "-U7",
                  f"{base}..{head}"], check=True, capture_output=True,
             ).stdout
             self.assertEqual(manifest["source_diff_bytes"], len(expected))
@@ -560,15 +555,52 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual(manifest["interface_version"], 1)
             self.assertNotIn("generated_evidence", manifest)
 
-    def test_oversized_rename_with_edit_still_stops(self):
+    def test_edited_move_is_one_rename_record_keyed_by_its_new_path(self):
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
             plan, env, page, base = self.page_repo(repo)
             page.unlink()
-            page.with_name("page-old.tsx").write_text(
-                page_text().replace("issue-439-distinctive-line", "issue-439-moved-line"),
+            moved = page.with_name("page-old.tsx")
+            moved.write_text(page_text().replace("row0100", "moved0100").replace(
+                "issue-439-distinctive-line", "issue-439-moved-line").replace("row0900", "moved0900"),
                 encoding="utf-8")
             head = self.commit(repo, "move and edit page", env)
+            out = repo / "review.json"
+
+            result = self.invoke(repo, plan, base, head, out, env)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["coverage"], {"complete": True, "file_diff_count": 1})
+            numstat = self.run_git(repo, *EXPECTED_DIFF, "--numstat", base, head)
+            self.assertEqual(numstat, "3\t3\tlanding/src/app/app/{page.tsx => page-old.tsx}\n")
+            self.assertEqual(manifest["stat"], {"files_changed": 1, "insertions": 3, "deletions": 3})
+            packaged = self.shard_bytes(out, manifest)
+            expected = subprocess.run(["git", "-C", str(repo), *EXPECTED_DIFF, "--binary", "-U10", base, head],
+                                      capture_output=True, check=True).stdout
+            self.assertEqual(packaged, expected)
+            new = moved.relative_to(repo).as_posix()
+            self.assertTrue(packaged.startswith(
+                f"diff --git a/{PAGE} b/{new}\nsimilarity index 99%\nrename from {PAGE}\nrename to {new}\nindex "
+                .encode()))
+            lines = packaged.splitlines()
+            body = lines[lines.index(f"+++ b/{new}".encode()) + 1:]
+            self.assertEqual(sum(line.startswith(b"@@ ") for line in body), 3)
+            self.assertEqual(sum(line.startswith(b"+") for line in body), 3)
+            self.assertEqual(sum(line.startswith(b"-") for line in body), 3)
+            self.assertNotIn(b"deleted file mode", packaged)
+            self.assertNotIn(b"new file mode", packaged)
+
+    def test_oversized_rename_record_stays_whole_and_stops(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env, page, base = self.page_repo(repo)
+            page.unlink()
+            page.with_name("page-old.tsx").write_text("\n".join(
+                line.replace("export const", "export let") if number % 3 == 0 else line
+                for number, line in enumerate(page_text().split("\n"))), encoding="utf-8")
+            head = self.commit(repo, "move and rewrite a third of page", env)
+            self.assertEqual(self.run_git(repo, *EXPECTED_DIFF, "--name-status", base, head).split("\t")[0], "R066")
             out = repo / "review.json"
 
             result = self.invoke(repo, plan, base, head, out, env)
@@ -578,15 +610,139 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual(report["state"], "decompose_required")
             self.assertIn("member_bytes", report["artifact"]["violations"])
             manifest = json.loads(out.read_text(encoding="utf-8"))
-            self.assertEqual(manifest["coverage"], {
-                "complete": True,
-                "file_diff_count": 2,
-                "byte_complete_file_count": 1,
-                "generated_evidence_file_count": 1,
-            })
+            self.assertEqual(manifest["interface_version"], 1)
+            self.assertNotIn("generated_evidence", manifest)
+            self.assertEqual(manifest["coverage"], {"complete": True, "file_diff_count": 1})
+            packaged = self.shard_bytes(out, manifest)
+            self.assertIn(f"rename from {PAGE}\n".encode(), packaged)
+            self.assertGreater(len(packaged), 65_536)
+
+    def test_oversized_ef_designer_rename_keeps_its_rename_section(self):
+        # The EF designer contract holds at the new path, so only the rename guard keeps evidence out (issue 569).
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env = self.setup_repo(repo)
+            old = repo / "src/App/Migrations/20260826010101_AddWidgets.Designer.cs"
+            old.parent.mkdir(parents=True)
+            old.write_text(EF_DESIGNER_TEXT, encoding="utf-8")
+            base = self.commit(repo, "base", env)
+            old.unlink()
+            new = old.with_name("20260826010101_AddGadgets.Designer.cs")
+            new.write_text("\n".join(
+                line.replace('"widgets"', '"gadgets"') if number % 3 == 0 else line
+                for number, line in enumerate(EF_DESIGNER_TEXT.split("\n"))), encoding="utf-8")
+            head = self.commit(repo, "move and edit generated designer", env)
+            self.assertTrue(self.run_git(repo, *EXPECTED_DIFF, "--name-status", base, head).startswith("R"))
+            out = repo / "review.json"
+
+            result = self.invoke(repo, plan, base, head, out, env)
+
+            self.assertEqual(result.returncode, 3, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["state"], "decompose_required")
+            self.assertIn("member_bytes", report["artifact"]["violations"])
+            manifest = json.loads(out.read_text(encoding="utf-8"))
+            self.assertNotIn("generated_evidence", manifest)
+            self.assertEqual(manifest["coverage"], {"complete": True, "file_diff_count": 1})
+            packaged = self.shard_bytes(out, manifest)
+            source, moved = (path.relative_to(repo).as_posix() for path in (old, new))
+            self.assertTrue(packaged.startswith(f"diff --git a/{source} b/{moved}\n".encode()))
+            self.assertIn(f"rename from {source}\nrename to {moved}\n".encode(), packaged)
+            self.assertNotIn(b"review-package-generated-evidence", packaged)
+            self.assertGreater(len(packaged), 65_536)
+
+    def test_move_below_the_threshold_is_a_delete_and_an_add(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env, page, base = self.page_repo(repo)
+            page.unlink()
+            page.with_name("page-old.tsx").write_text(
+                page_text().replace("export const", "export let"), encoding="utf-8")
+            head = self.commit(repo, "move and rewrite every line of page", env)
+            out = repo / "review.json"
+
+            result = self.invoke(repo, plan, base, head, out, env)
+
+            self.assertEqual(result.returncode, 3, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["state"], "decompose_required")
+            self.assertIn("member_bytes", report["artifact"]["violations"])
+            manifest = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["coverage"], {"complete": True, "file_diff_count": 2,
+                                                    "byte_complete_file_count": 1, "generated_evidence_file_count": 1})
             self.assertEqual([(item["path"], item["kind"]) for item in manifest["generated_evidence"]],
                              [(PAGE, "whole-file-deletion")])
             self.assertGreater(max(item["bytes"] for item in manifest["shards"]), 65_536)
+
+    def test_ambiguous_pairing_is_deterministic(self):
+        body = "".join(f"shared line {n}\n" for n in range(30))
+        moved = page_text().replace("issue-439-distinctive-line", "issue-439-moved-line")
+        cases = (
+            # One source, two equally similar destinations: the first destination path pairs.
+            ({"a.txt": body}, {"a.txt": None, "b.txt": body + "b extra\n", "c.txt": body + "c extra\n"},
+             [("b.txt", b"diff --git a/a.txt b/b.txt\nsimilarity index "),
+              ("c.txt", b"diff --git a/c.txt b/c.txt\nnew file mode ")], 0),
+            # Two identical oversized sources, one destination: the first source path pairs, and the unpaired
+            # source keeps its whole-file deletion evidence.
+            ({"p1.tsx": page_text(), "p2.tsx": page_text()}, {"p1.tsx": None, "p2.tsx": None, "q.tsx": moved},
+             [("p2.tsx", b'{"review-package-generated-evidence":'),
+              ("q.tsx", b"diff --git a/p1.tsx b/q.tsx\nsimilarity index 99%\n")], 1),
+        )
+        limits = ReviewLimits(16384, 65536, 8, 524288)
+        for before, after, expected, generated in cases:
+            with self.subTest(paths=sorted(after)), tempfile.TemporaryDirectory() as raw:
+                repo = Path(raw)
+                plan, env = self.setup_repo(repo)
+                for name, text in before.items():
+                    (repo / name).write_text(text, encoding="utf-8")
+                base = self.commit(repo, "base", env)
+                for name, text in after.items():
+                    if text is None:
+                        (repo / name).unlink()
+                    else:
+                        (repo / name).write_text(text, encoding="utf-8")
+                head = self.commit(repo, "ambiguous move", env)
+                runs = []
+                for number in range(3):
+                    destination = repo / f"output-{number}"
+                    destination.mkdir()
+                    out = destination / "review.json"
+                    result = self.invoke(repo, plan, base, head, out, env)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    runs.append((out.read_bytes(), self.shard_bytes(out, json.loads(out.read_bytes()))))
+                self.assertTrue(all(run == runs[0] for run in runs))
+                manifest = json.loads(runs[0][0])
+                self.assertEqual((manifest["coverage"]["complete"], manifest["coverage"]["file_diff_count"]),
+                                 (True, 2))
+                self.assertEqual(len(manifest.get("generated_evidence", [])), generated)
+                trees = [self.run_git(repo, "rev-parse", f"{sha}^{{tree}}").strip() for sha in (base, head)]
+                initial = next(actual_inputs_from_trees(repo, *trees, base=base, head=head, commits=(),
+                                                        package_name="review.json", limits=limits))
+                self.assertEqual([record.path for record in initial.records], [path for path, _ in expected])
+                for record, (_, prefix) in zip(initial.records, expected):
+                    self.assertTrue(record.payload.startswith(prefix), record.payload[:80])
+
+    def test_exact_rename_with_a_mode_change_stays_header_only(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env = self.setup_repo(repo)
+            script = repo / "x.sh"
+            script.write_text("#!/bin/sh\necho moved\n" * 5, encoding="utf-8")
+            script.chmod(0o755)
+            base = self.commit(repo, "base", env)
+            script.rename(repo / "y.sh")
+            (repo / "y.sh").chmod(0o644)
+            head = self.commit(repo, "move and drop the executable bit", env)
+            out = repo / "review.json"
+
+            result = self.invoke(repo, plan, base, head, out, env)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["stat"], {"files_changed": 1, "insertions": 0, "deletions": 0})
+            self.assertEqual(self.shard_bytes(out, manifest),
+                             b"diff --git a/x.sh b/y.sh\nold mode 100755\nnew mode 100644\n"
+                             b"similarity index 100%\nrename from x.sh\nrename to y.sh\n")
 
     def test_exact_rename_of_an_oversized_file_keeps_its_rename_record(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -605,6 +761,7 @@ class ReviewPackageCliTest(unittest.TestCase):
             packaged = self.shard_bytes(out, manifest)
             self.assertIn(b"rename from landing/src/app/app/page.tsx\n", packaged)
             self.assertIn(b"rename to landing/src/app/app/page-old.tsx\n", packaged)
+            self.assertNotIn(b"\n@@ ", packaged)
 
     def test_oversized_binary_deletion_uses_bounded_evidence(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -697,11 +854,7 @@ class ReviewPackageCliTest(unittest.TestCase):
             rebuilt = b"".join((out.parent / item["path"]).read_bytes()
                                for item in manifest["shards"])
             expected = subprocess.run(
-                ["git", "-C", str(repo), "-c", "diff.renames=true", "-c", "diff.renameLimit=0", "-c", "core.quotePath=true",
-                 "diff", "--find-renames=100%", "--no-ext-diff", "--no-textconv", "--full-index",
-                 "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--diff-algorithm=myers",
-                 "--no-indent-heuristic", "--inter-hunk-context=0", "--no-color", "--line-prefix=",
-                 "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ", "--binary", "-U10",
+                ["git", "-C", str(repo), *EXPECTED_DIFF, "--binary", "-U10",
                  f"{base}..{head}"], check=True, capture_output=True).stdout
             self.assertEqual(rebuilt, expected)
 

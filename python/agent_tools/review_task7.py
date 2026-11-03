@@ -27,8 +27,8 @@ import subprocess
 import tempfile
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import (PACKING_POLICY, PACKING_POLICY_SHA256, RECORD_POLICY,
-                                       GenerationError, actual_inputs_from_trees, git_diff)
+from agent_tools.review_actual import (PACKING_POLICY_V1, PACKING_POLICY_V1_SHA256, RECORD_POLICY_V1,
+                                       RECORD_POLICY_V1_SHA256, GenerationError, actual_inputs_from_trees, git_diff)
 from agent_tools.review_forecast import ForecastError, history_commit
 
 MODEL_VERSION = "task7-operation-model/v1"
@@ -144,8 +144,8 @@ def _write_allowance(source, output):
     longest = _hunk_header_max(len(str(max(source["lines"], output["lines"]) + 1)))
     first = len("@@ -1, +1, @@\n") + len(str(source["lines"])) + len(str(output["lines"]))
     lines = min(source["lines"], output["lines"])
-    contexts = (PACKING_POLICY["initial"]["context_lines"],
-                *(choice["context_lines"] for choice in PACKING_POLICY["adaptive"]))
+    contexts = (PACKING_POLICY_V1["initial"]["context_lines"],
+                *(choice["context_lines"] for choice in PACKING_POLICY_V1["adaptive"]))
     return (longest - first) + max((lines // (2 * c + 1)) * max(0, longest - 2 * (2 * c + 1))
                                    for c in contexts)
 
@@ -265,8 +265,8 @@ def _assemble(pins, moves, inputs):
     return {
         "schema_version": 1, "kind": "task7-estimate",
         "identities": {
-            "record_policy_sha256": telemetry_digest(RECORD_POLICY), "rules": dict(RULES),
-            "packing_policy_sha256": PACKING_POLICY_SHA256, "model_version": pins.model_version,
+            "record_policy_sha256": RECORD_POLICY_V1_SHA256, "rules": dict(RULES),
+            "packing_policy_sha256": PACKING_POLICY_V1_SHA256, "model_version": pins.model_version,
             "prerequisite_commit": pins.prerequisite_commit, "prerequisite_tree": pins.prerequisite_tree,
             "plan_root_blob": pins.plan_root_blob, "task7_blob": pins.task7_blob, "tool_closure": closure,
             "move_roots": [list(root) for root in pins.move_roots], "renderers": renderers,
@@ -416,7 +416,8 @@ def validate_task7(table: dict, pins: Task7Pins) -> None:
 
 def _numstat(scratch, base_tree, tree):
     """Each changed path's added and deleted lines; a binary (`-`) count is 0."""
-    fields, counts = git_diff(scratch, base_tree, tree, "--numstat", "-z").split(b"\0"), {}
+    fields, counts = git_diff(scratch, base_tree, tree, "--numstat", "-z",
+                             record_policy=RECORD_POLICY_V1).split(b"\0"), {}
     if fields.pop() != b"":
         raise EstimateError("unsupported_composition")
     fields = iter(fields)
@@ -434,7 +435,8 @@ def _numstat(scratch, base_tree, tree):
 def _measure(scratch, base_tree, tree, limits):
     """Each record's size, with its line counts from numstat over the same trees."""
     item = next(actual_inputs_from_trees(scratch, base_tree, tree, base=base_tree, head=tree,
-                                         commits=(), package_name="review.json", limits=limits))
+                                         commits=(), package_name="review.json", limits=limits,
+                                         record_policy=RECORD_POLICY_V1))
     counts, measured = _numstat(scratch, base_tree, tree), {}
     for record in item.records:
         if record.path not in counts:
@@ -492,7 +494,8 @@ def compose(repo: Path, table: dict, pins: Task7Pins, *, base_tree: str, final_t
         with tempfile.TemporaryDirectory(prefix="review-task7-") as raw:
             scratch = Path(raw) / "repo"
             composed, removed = _composed_trees(repo, scratch, table, pins, base_tree, final_tree)
-            status = git_diff(scratch, base_tree, composed, "--name-status", "-z").split(b"\0")[:-1]
+            status = git_diff(scratch, base_tree, composed, "--name-status", "-z",
+                              record_policy=RECORD_POLICY_V1).split(b"\0")[:-1]
             records = _measure(scratch, base_tree, composed, limits)
             removals = _measure(scratch, base_tree, removed, limits)
     except (GenerationError, OSError, UnicodeError) as exc:
