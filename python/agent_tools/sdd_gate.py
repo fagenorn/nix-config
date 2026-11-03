@@ -37,8 +37,11 @@ and stops at the first that fails (a ledger that cannot be read or appended to
 refuses at the step that needs it, and the delivery gate line's write refuses
 at `metrics-match` with gate `failed`, not listed as passed): `ledger`,
 `evidence` (the recording commit of the completed task, or of task M-1 for a
-fresh `--task M`, is HEAD's one commit over the recorded head and commits the
-computed bytes; refuses `failed`), `ledger-complete` (with `--completed`),
+fresh `--task M`, is the one commit over the recorded head and commits the
+computed bytes, and it is HEAD or HEAD's first-parent ancestor through a
+metadata tail: single-parent commits touching only the proposed boundary's
+process package and leaving every forecast block byte-identical, as
+`review_forecast` accepts; refuses `failed`), `ledger-complete` (with `--completed`),
 `mark-progress` (under an identity), `review-package`, `validate-report`,
 `budget-check`, `metrics-match` (the cumulative delivery package, delivery
 base to HEAD), then, with a fresh `--task M`, `projection` (project the
@@ -78,7 +81,7 @@ from pathlib import Path, PurePosixPath
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.review_budget import BudgetAuthority, BudgetError, describe
-from agent_tools.review_forecast import ForecastError, history_commit
+from agent_tools.review_forecast import ForecastError, forecast_block, history_commit, process_paths
 from agent_tools.review_gate import (
     GateError, capture, plan_relative, project_argv, save_result, summarize,
 )
@@ -704,10 +707,87 @@ def _verify_recording(ledger: Ledger, plan: Path, target: tuple[int, str, str], 
         raise RecordError(str(error)) from None
 
 
-def _check_evidence(ledger: Ledger, plan: Path, target: tuple[int, str, str], head: str) -> None:
-    """Step `evidence`: `head` is the commit that records the target task."""
+DELIVERY_HEADING = "## Review feasibility delivery"
+TASK_HEADING = "## Review feasibility task"
+
+
+def _recording_commit(ledger: Ledger, target: tuple[int, str, str], head: str) -> tuple[str, list[str]]:
+    """The candidate recording commit for the target task and the metadata tail over it.
+
+    Walks `head` back along single-parent commits to the first whose one parent is the recorded
+    head. The tail is every commit walked past, oldest first. Raises `RecordError` when the
+    recorded head is not a proper ancestor of `head` or the walk meets a merge or a root.
+    """
+    task, _, recorded_head = target
+    refused = RecordError(f"{head[:7]} is not the one commit recording task {task} over "
+                          f"{recorded_head[:7]}, nor a metadata tail over it")
+    if head == recorded_head or _run(["git", "merge-base", "--is-ancestor", recorded_head,
+                                      head]).returncode != 0:
+        raise refused
+    tail: list[str] = []
+    commit = head
+    while True:
+        parents = history_commit(ledger.top, commit).parents
+        if parents == (recorded_head,):
+            return commit, tail[::-1]
+        if len(parents) != 1:
+            raise RecordError(f"{commit[:7]} in the metadata tail over task {task}'s recording "
+                              "is not a single-parent commit")
+        tail.append(commit)
+        commit = parents[0]
+
+
+def _forecast_blocks(ledger: Ledger, plan: Path, commit: str) -> tuple[set[str], dict[str, dict]]:
+    """The proposed boundary's process paths at `commit` and each path's forecast block."""
+    root, _ = paths(ledger.top, plan, 1)
+    raw = _committed(root, commit)
+    if raw is None:
+        raise RecordError(f"{root} is not committed at {commit[:7]}")
+    delivery = forecast_block(raw, DELIVERY_HEADING)
     try:
-        _verify_recording(ledger, plan, target, head)
+        proposed = [boundary for boundary in delivery["boundaries"]
+                    if boundary["id"] == delivery["proposed_boundary"]]
+        package = proposed[0]["process_package"] if len(proposed) == 1 else None
+        allowed = set(process_paths(package)) if isinstance(package, dict) else None
+        spec = package["spec"] if allowed is not None else None
+    except (KeyError, TypeError):
+        allowed = spec = None
+    if allowed is None or str(root) not in allowed:
+        raise RecordError(f"{root} at {commit[:7]} declares no proposed process package")
+    blocks = {}
+    for path in sorted(allowed - {spec}):
+        data = _committed(PurePosixPath(path), commit)
+        if data is None:
+            raise RecordError(f"{path} is not committed at {commit[:7]}")
+        blocks[path] = forecast_block(data, DELIVERY_HEADING if path == str(root) else TASK_HEADING)
+    return allowed, blocks
+
+
+def _verify_tail(ledger: Ledger, plan: Path, task: int, recording: str, tail: Sequence[str]) -> None:
+    """Raise `RecordError` unless each tail commit touches only process paths and leaves every
+    forecast block as the recording commit holds it."""
+    allowed, blocks = _forecast_blocks(ledger, plan, recording)
+    previous = recording
+    for commit in tail:
+        stray = sorted(set(_touched(previous, commit)) - allowed)
+        if stray:
+            raise RecordError(f"{commit[:7]} over task {task}'s recording changes {stray[0]}, "
+                              "outside the process package")
+        if _forecast_blocks(ledger, plan, commit) != (allowed, blocks):
+            raise RecordError(f"{commit[:7]} over task {task}'s recording changes a forecast block")
+        previous = commit
+
+
+def _check_evidence(ledger: Ledger, plan: Path, target: tuple[int, str, str], head: str) -> None:
+    """Step `evidence`: `head` is the commit that records the target task, or a metadata tail
+    over it (#565)."""
+    try:
+        recording, tail = _recording_commit(ledger, target, head)
+        _verify_recording(ledger, plan, target, recording)
+        if tail:
+            _verify_tail(ledger, plan, target[0], recording, tail)
+    except (BriefError, ForecastError) as error:
+        raise Refusal("evidence", str(error), gate="failed") from None
     except RecordError as error:
         raise Refusal("evidence", str(error), gate="failed") from None
 

@@ -925,6 +925,56 @@ class NextProjectionTest(ForecastCase):
         self.assertEqual(len(self.lines_matching("Projection gate:")), 1)
         self.assertEqual(self.lines_matching("Task 2: dispatched"), [])
 
+    def trim_plan_root(self):
+        """A process-only trim: the plan root's prose changes, its forecast block does not (#565)."""
+        text = (self.repo / "plan.md").read_text(encoding="utf-8")
+        heading = "\n## Review feasibility delivery\n"
+        self.assertEqual(text.count(heading), 1)
+        self.write("plan.md", text.replace(heading, "\nResume note: trimmed.\n" + heading))
+
+    def test_a_metadata_tail_over_the_recording_passes_evidence(self):
+        self.ready(self.first())
+        base = self.repo_git("rev-parse", "HEAD")
+        task_head, recording = self.complete(1, "src/app.py", "value = 2\n")
+        self.trim_plan_root(); self.repo_commit("plan: trim the plan root")
+        self.write("spec.md", "# Fixture spec\n\nResume decision.\n")
+        tail = self.repo_commit("spec: log the resume decision")
+        out = self.ready(self.next("--completed", 1, "--task", 2))
+        self.assertEqual(out["projection"]["head_sha"], tail)
+        self.assertIn(f"Task 1: complete (commits {base[:7]}..{task_head[:7]}, review clean)",
+                      self.ledger_lines())
+        self.assertNotEqual(recording, tail)
+
+    def test_a_metadata_tail_outside_the_process_package_is_refused(self):
+        self.ready(self.first())
+        self.complete(1, "src/app.py", "value = 2\n")
+        self.trim_plan_root(); self.repo_commit("plan: trim the plan root")
+        self.write("src/app.py", "value = 3\n"); self.repo_commit("smuggled source change")
+        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
+                                 gate="failed", steps=["ledger"])
+        self.assertEqual(self.lines_matching("Task 1: complete"), [])
+
+    def test_a_metadata_tail_changing_the_delivery_block_is_refused(self):
+        self.ready(self.first())
+        self.complete(1, "src/app.py", "value = 2\n")
+        text = (self.repo / "plan.md").read_text(encoding="utf-8")
+        self.write("plan.md", text.replace('"acceptance":"Fixture delivery"', '"acceptance":"Rewritten"'))
+        self.assertNotEqual((self.repo / "plan.md").read_text(encoding="utf-8"), text)
+        self.repo_commit("plan: rewrite the delivery block")
+        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
+                                 gate="failed", steps=["ledger"])
+
+    def test_a_merge_in_the_metadata_tail_is_refused(self):
+        self.ready(self.first())
+        _, recording = self.complete(1, "src/app.py", "value = 2\n")
+        self.repo_git("checkout", "-q", "-b", "side")
+        self.write("spec.md", "# Fixture spec\n\nSide note.\n"); self.repo_commit("spec: side note")
+        self.repo_git("checkout", "-q", "-")
+        self.trim_plan_root(); self.repo_commit("plan: trim the plan root")
+        self.repo_git("merge", "-q", "--no-ff", "--no-edit", "side")
+        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
+                                 gate="failed", steps=["ledger"])
+
     def test_an_actual_overflow_refuses_before_any_projection(self):
         self.ready(self.first())
         self.complete(1, "src/app.py", "".join(f"value_{n} = {n}\n" for n in range(8000)))
