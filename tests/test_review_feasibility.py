@@ -462,15 +462,24 @@ class SourceProjectionTest(SourceProjectionFixture, unittest.TestCase):
                      lambda d: d['process_records'][0].update(owner=True),
                      lambda d: d['process_records'][0].update(change='rename'),
                      lambda d: d['process_records'][0].update(change='fileless'),
-                     lambda d: d['process_records'][0].update(old_path='elsewhere.md'),
-                     lambda d: d['process_records'][0].update(change='rename', old_path=d['process_records'][0]['path']),
-                     lambda d: d['process_records'][0].update(change='rename', old_path='../escape'),
                      lambda d: d['process_records'][0]['bounds'][0].update(record_bytes=True),
                      lambda d: d['process_records'][0]['bounds'][0].update(added_lines=float('inf'))]
         for mutate in mutations:
             self.delivery = copy.deepcopy(original); mutate(self.delivery)
             self.emit(); self.commit('invalid shape')
             self.assert_refused(self.project())
+        # Issue 569: each `old_path` refusal is pinned to its own reason, so the path guard cannot vanish unseen.
+        for mutate, reason in (
+                (lambda d: d['process_records'][0].update(old_path='elsewhere.md'), b'invalid contribution fields'),
+                (lambda d: d['process_records'][0].update(change='rename', old_path=d['process_records'][0]['path']),
+                 b'rename must change its path'),
+                (lambda d: d['process_records'][0].update(change='rename', old_path='../escape'), b'unsafe path')):
+            with self.subTest(reason=reason):
+                self.delivery = copy.deepcopy(original); mutate(self.delivery)
+                self.emit(); self.commit('invalid old_path')
+                refused = self.project()
+                self.assert_refused(refused)
+                self.assertIn(reason, refused.stderr)
 
     def test_duplicate_json_and_ambiguous_sections(self):
         original = (self.repo / 'all.md').read_bytes()
