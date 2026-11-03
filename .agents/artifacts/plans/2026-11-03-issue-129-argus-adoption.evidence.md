@@ -183,3 +183,47 @@ Doctor report 1 (`conformance run --purpose doctor`, 2026-11-03T09:48:07Z, proje
 Repairs listed: `lifecycle.ignore.repair` (module conformance, safety_class worktree) and `projection.regenerate` (`resolve-project write-projections`, safety_class worktree). No host check failed; no repair was applied.
 
 Known limitation (D23): on mbp under the default per-user TMPDIR the contract's `unit-tests` command fails `tests/extensions/email/review-render.test.ts` at the assertion on line 100 (receipt 504 > 500 chars; the receipt embeds an `os.tmpdir()` path). It passes with `TMPDIR=/tmp` and on Linux CI. The contract cannot express an env value, so any host run of the declared verification on mbp (Task 4's apply, later Argus workflows) needs `TMPDIR=/tmp` until Argus fixes the test. No Argus issue exists yet; the follow-up (an Argus issue for the host-path-dependent cap) is for the owner and is surfaced in Task 8's acceptance record.
+
+## Task 4 — Adoption plan, apply and inspection
+
+Plan id: sha256:e37b7e24779f1f713b53f9542e88bf832fd67961d3fe6e84d14b8cc898b2893f
+Adoption branch: adopt-e37b7e24779f
+Adoption commit: 553b2c59e1192f5bfad06073f00ca1dde2e127da
+Pushed: 2026-11-03T09:59:23Z
+
+Step 1 passed without a rebuild: the clone `$SCR/argus-129` (`SCR` = `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/launch-scope-6fr9cnfx`, worker w9) was on `project-contract` at `K` = `738a251bafefe9c3679cf7338cb45cd14ecc4932`, clean, with `origin/main` at `B`. No `Contract commit (rebuilt)`.
+
+Plan (`adopt-project plan`, 2026-11-03T09:55:09Z to 09:55:10Z, run once with the default TMPDIR; no ready gate runs a verification command): state `ready`, outcome `reconcile`, `base_revision` = `K`, blockers `[]`, all eight ready gates `passed` (`contract-valid-after-amendment`, `no-needs-decision`, `no-open-decisions`, `no-untracked-overlap`, `no-existing-destination`, `move-sources-tracked`, `no-secret-path-in-moves`, `no-unrewritable-link`), open decisions `[]`, so no `Answered questions` table. Operations: `git-mv` 188, `write-file` 76, `regenerate-projection` 1; no `delete-file`. No evidence row is `needs-decision`.
+
+Plan evidence rows for the three paths Task 4 names:
+
+| Path | Class | Action | Count | Target |
+|---|---|---|---|---|
+| `.claude/skills` | legacy-native-store | retain-product | 3 | none |
+| `AGENTS.md` | native-projection | generate-projection | 1 | `AGENTS.md` |
+| `CLAUDE.md` | native-projection | generate-projection | 1 | `CLAUDE.md` |
+
+The other rows: `.agents/project.json` move-canonical (1), `.claude/plans` to `.agents/artifacts/plans` move-canonical (117), `.claude/specs` to `.agents/artifacts/specs` move-canonical (71), `.github` retain-product (1).
+
+Finding to operation (D10), doctor report 1:
+
+| Finding | Repairing operation in the plan |
+|---|---|
+| `repository.projection.fresh` / `invalid_projection` / `projection.regenerate` | `regenerate-projection`: source `AGENTS.md`, target `CLAUDE.md` (before `sha256:f80bf3b7…`) |
+| `repository.ignore.runtime_sentinel` / `runtime_ignore_missing` / `lifecycle.ignore.repair` | `write-file` creating `.agents/runtime/.gitignore` (the committed sentinel; `after` `sha256:cdbcae15…`) |
+
+Deviation from the brief's expected pair: the plan holds no root `.gitignore` amendment and needs none. `check_ignore_runtime_sentinel` passes when either a root rule or the committed sentinel covers `.agents/runtime/`, and the base's root `.gitignore` has no `.agents` rule, so the sentinel write alone repairs the finding. Both findings have a repairing operation, so the stage did not stop.
+
+Apply (2026-11-03T09:55:55Z to 09:58:55Z): `launch-scope exec … -- env TMPDIR=/tmp adopt-project apply --plan-id <plan id>`, exit 0, once, no `--acknowledge-deletions`. It ran with `TMPDIR=/tmp` per D23 (TMPDIR on that one command only). Output: branch `adopt-e37b7e24779f`, commit `553b2c59e1192f5bfad06073f00ca1dde2e127da`, the plan id above, evidence record `.agents/artifacts/evidence/e37b7e24779f1f713b53f9542e88bf832fd67961d3fe6e84d14b8cc898b2893f.json`, migration map `.agents/knowledge/archive/path-migrations/e37b7e24779f1f713b53f9542e88bf832fd67961d3fe6e84d14b8cc898b2893f.json`. Commit subject `chore(adopt): adopt fagenorn/argus at plan e37b7e24779f`.
+
+Commit gates (plan file in `~/.agents/state/adopt/plans/`), all seven `passed`: `worktree-status-matches-operations`, `projections-in-sync`, `no-unclassified-agent-path`, `no-new-broken-link`, `cold-clone-resolves`, `resolve-capabilities-available`, `workflow-verification-commands`.
+
+Inspection of the branch in the clone (clone status clean):
+- `git log origin/main..HEAD`: exactly two commits, `553b2c59e1192f5bfad06073f00ca1dde2e127da` (parent `738a251bafefe9c3679cf7338cb45cd14ecc4932`, `chore(adopt): adopt fagenorn/argus at plan e37b7e24779f`) then `738a251bafefe9c3679cf7338cb45cd14ecc4932` (parent `dc7564b3c8bbd6a5633dfcff78f80291175047fd` = `B`, `chore: add the project contract`).
+- `git diff --name-status origin/main...HEAD` by first letter: 4 A (`.agents/project.json`, `.agents/runtime/.gitignore`, the evidence record, the migration map), 44 M (`CLAUDE.md`, `docs/README.md`, `docs/guides/architecture.md` and 41 ADRs under `docs/areas/*/adr/`), 188 R (158 R100, 14 R099, 9 R098, 5 R097, 1 R096, 1 R091). No D.
+- `resolve-project resolve`: `capabilities.release` is `{"reason_code":null,"repair_id":null,"state":"available"}`; targets `forge-main/github-forge/repository/[]`, `local-host/launchd-agent/daemon/["activate"]`, `local-host/codesigned-artifact/notifier/["install"]`.
+- `release profile inspect` for `local-host` and `forge-main`: exit 0 for both; `repository.release_profile.observation_deadline`, `.restore_anchor` and `.rolled_back_reachable` all `passed` (`reason_code` null), findings `[]`.
+
+Push: `git push -u origin adopt-e37b7e24779f` from the clone, run alone in its own Bash call; the guard allowed it. `git ls-remote origin refs/heads/adopt-e37b7e24779f` printed `553b2c59e1192f5bfad06073f00ca1dde2e127da` (2026-11-03T09:59:23Z), and it is the only `adopt-` ref on the remote. Nothing else was pushed, no PR was opened (D16), and no failed-apply worktree exists to retain.
+
+The four bare helpers authd, ocr-helper, wa-bridge and wkfetch are signed in place inside the checkout, gitignored, and rebuilt by Argus's devenv shell entry only when absent. They are inputs of the daemon unit, not release units. The daemon unit's identity proves the checkout at the candidate commit with no tracked change, which an untracked stale helper binary passes, so a release does not prove that the helpers were rebuilt from the candidate commit.
