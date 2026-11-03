@@ -46,7 +46,7 @@ list from the Task index.
 
 ### Cumulative delivery gate
 
-Pin `DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD origin/<integration-branch>` (integration branch from the project bindings), never an advanced local branch. `sdd-gate next` gates every dispatch on the cumulative package, then the projection of the remaining tasks. A refusal cannot advance: preserve completed work and name an independently deliverable split.
+Pin `DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD origin/<integration-branch>` (integration branch from the project bindings), never an advanced local branch. `sdd-gate next` measures the cumulative package before every dispatch; an over-budget one is ledgered `over_budget` and does not stop the run.
 
 ### Review-package gate
 
@@ -146,12 +146,11 @@ It prints one JSON object. On `outcome: ready` the whole prompt is
 
 On `outcome: refused` dispatch nothing and route by `step` and `gate`:
 
-- step `projection`, `gate: decompose_required` → `review-feasibility confirm --plan PLAN_FILE --base DELIVERY_BASE --input -` over the refusal's `report` must exit 3 → SDD `decompose_required`, `stop: {"kind":"projected_overflow","projection":<confirm stdout>}`;
 - step `validate-report`, `gate: decompose_required` → `artifact-budget check --kind review-package --root <report artifact path>` must agree with the report on all four metrics and the violations → SDD `decompose_required`, `stop: {"kind":"actual_overage","artifact":<report artifact>}`;
-- `gate: failed`, a confirm exit other than 3 or any disagreement → SDD `failed`;
+- `gate: failed` or any disagreement → SDD `failed`;
 - step `release-worker` or `register-worker` is a lifecycle failure under `### Lifecycle workers`; any other `step` is a contract error: stop.
 
-A stop dispatches nothing more and keeps the workspace, ledger and worktree. A plan without forecast blocks fails at the first projection.
+A stop dispatches nothing more and keeps the workspace, ledger and worktree.
 
 - Record the implementer's agent identity and `worker_id`; fix rounds 1–3 resume it.
 - Never dispatch implementers in parallel.
@@ -206,7 +205,7 @@ Never fix findings yourself in the controller session.
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — runs `sdd-gate record PLAN_FILE --task N`, which writes task N's ownership evidence into the plan's forecast blocks (they change only through `record` after SDD entry). Commit exactly its `paths` as one process-only commit with subject `plan: record task <N> evidence`: under a lifecycle identity register yourself and commit through `launch-commit` as final-review.md's acceptance record does, else plain `git commit`. Then run `sdd-gate next --completed N` (step 1's call, with `--task N+1` when one remains, without it after the last task or before a headroom stop): it ledgers the task `complete` and runs the cumulative delivery gate. Move on only on `outcome: ready`; a refusal routes as in step 1. Never advance past open Critical/Important findings neither fixed nor parked.
+Clean review — or everything parked-with-ruling at the cap — runs `sdd-gate next --completed N` (step 1's call, with `--task N+1` when one remains, without it after the last task or before a headroom stop): it ledgers the task `complete` and runs the cumulative delivery gate. Move on only on `outcome: ready`; a refusal routes as in step 1. Never advance past open Critical/Important findings neither fixed nor parked.
 
 ## Final review — two axes
 
@@ -238,7 +237,7 @@ Build one exact SDD JSON object with only `state`, `review_state`,
   was no criterion source or the run failed before the conformance axis graded;
   otherwise `unmet` when any verdict is `unmet` or `unverified`; otherwise
   `human_pending` when any is `human_pending`; otherwise `met`.
-- `decompose_required` (a stop, no final review): `review_state: unknown`, both verdicts and `verification_state` `not_run`, `acceptance_state: not_applicable`, `detail_state: none`, `report_path: null`, and `base_sha`/`head_sha` the refused gate's range (the summary's for a projected overflow; `DELIVERY_BASE` and the gate head for an actual overage). Keep the workspace and worktree.
+- `decompose_required` (a stop, no final review): `review_state: unknown`, both verdicts and `verification_state` `not_run`, `acceptance_state: not_applicable`, `detail_state: none`, `report_path: null`, and `base_sha`/`head_sha` the refused gate's range (the gate's base and head). Keep the workspace and worktree.
 - A non-empty detail set is `present` with one main-root-relative durable path;
   with no findings it is `none` with a null path. Never inline transient review
   evidence.
