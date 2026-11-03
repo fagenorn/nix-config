@@ -1,4 +1,4 @@
-"""Projected review limits, end to end, on an issue-121-shaped delivery (issue 227 AC1, AC4, AC6, AC8)."""
+"""Projected review limits on an issue-121-shaped delivery (issue 227), now advisory in sdd-gate (Stage 2c)."""
 import json
 import subprocess
 import sys
@@ -88,19 +88,6 @@ class ReplayTest(sdd_cases.GateCase):
     def next(self, *args):
         return self.gate("next", self.plan, "--skill-dir", sdd_cases.SKILL, *args)
 
-    def snapshot(self):
-        """HEAD, branches, ledger bytes and every workspace file's bytes, saved results included."""
-        return (self.repo_git("rev-parse", "HEAD"), self.repo_git("branch", "--list"), self.ledger.read_bytes(),
-                {p.name: p.read_bytes() for p in sorted(self.workspace.iterdir()) if p.is_file()})
-
-    def grow_task_one(self):
-        """Task 1 lands 200 KB over four files, each under the member limit; record and commit it."""
-        for part in range(4):
-            self.write(f"src/t1{'' if part == 0 else part}.py", "".join(f"v{part}_{n} = {n}\n" for n in range(4000)))
-        task_head = self.repo_commit("task 1")
-        self.assertEqual(self.ready(self.gate("record", self.plan, "--task", 1))["head_sha"], task_head)
-        return task_head, self.repo_commit("plan: record task 1 evidence")
-
     # -- the replay ----------------------------------------------------------
     def test_an_oversized_plan_is_refused_at_planning_and_at_sdd_entry(self):
         self.root_subjects = [120] * 100
@@ -111,68 +98,19 @@ class ReplayTest(sdd_cases.GateCase):
         summary = json.loads(gated.stdout)
         self.assertEqual((summary["recommended_boundary"]["id"], summary["recommended_boundary"]["tasks"]),
                          ("first", [1, 2, 3]))
-        refused = self.next("--task", 1, "--delivery-base", self.base)
-        self.assertEqual(refused.returncode, 3, refused.stdout)
-        self.assertEqual(json.loads(refused.stdout)["report"], summary)
-        self.assertNotIn("Task 1: dispatched", self.ledger.read_text(encoding="utf-8"))
+        # Stage 2c: sdd-gate no longer projects, so the forecast no longer stops execution.
+        self.ready(self.next("--task", 1, "--delivery-base", self.base))
+        self.assertIn(f"Task 1: dispatched (base {head})", self.ledger.read_text(encoding="utf-8"))
 
-    def test_a_growing_plan_stops_before_task_2_and_only_a_fresh_child_continues(self):
-        self.launch()
-        self.write_plan()
-        self.ready(self.next("--task", 1, "--delivery-base", self.base, *self.identity()))
-        workers = json.loads(self.state_path.read_text(encoding="utf-8"))["workers"]
-        task_head, recording = self.grow_task_one()
-        refused = self.next("--completed", 1, "--task", 2, *self.identity())
-        self.assertEqual(refused.returncode, 3, refused.stdout)
-        stop = json.loads(refused.stdout)
-        self.assertEqual((stop["step"], stop["gate"]), ("projection", "decompose_required"))
-        summary = stop["report"]
-        self.assertEqual((summary["head"], summary["completed_through"]), (recording, 1))
-        self.assertEqual(summary["recommended_boundary"]["id"], "first")
-        self.assertNotIn("Task 2: dispatched", self.ledger.read_text(encoding="utf-8"))
-        self.assertFalse((self.workspace / "task-2-implementer-dispatch.md").exists())
-        self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["workers"], workers)
-        before = self.snapshot()
-        self.assertIn(f"projection-{recording[:7]}-1.json", before[3])                 # the saved result
-        confirmed = self.feasibility("confirm", "--plan", self.plan, "--base", self.base, "--input", "-",
-                                     raw=canonical(summary).encode() + b"\n")
-        self.assertEqual((confirmed.returncode, json.loads(confirmed.stdout)), (3, summary), confirmed.stderr)
-        # A fresh child: its own branch and base at the recommendation's prerequisite, recovered commits,
-        # a new process package that cites the parent summary, and an empty ledger.
-        child_root = self.root / "child"
-        prerequisite = summary["recommended_boundary"]["prerequisite_commit"]
-        self.repo_git("worktree", "add", "-q", "-b", "child-first", str(child_root), prerequisite)
-        parent = (self.repo, self.plan, self.base, self.sizes)
-        self.repo, self.plan, self.base = child_root, child_root / "plan.md", prerequisite
-        self.repo_git("cherry-pick", task_head)
-        recovered = (prerequisite, self.repo_git("rev-parse", "HEAD"))
-        self.sizes = {n: 2048 for n in range(1, 4)}
-        self.root_subjects = [64] * 4
-        child_head = self.write_plan(3, (), f"\nParent stop: {summary['forecast_sha256']} at {summary['head']}\n",
-                                     recovered)
-        self.assertIn(summary["forecast_sha256"], self.plan.read_text(encoding="utf-8"))
-        child_gate = self.feasibility("gate", "--plan", self.plan, "--base", prerequisite, "--head", child_head,
-                                      "--completed-through", 1)
-        self.assertEqual((child_gate.returncode, json.loads(child_gate.stdout)["state"]), (0, "complete"),
-                         child_gate.stderr)
-        workspace = self.run_tool("sdd-workspace", str(self.plan)).strip()
-        self.assertNotEqual(workspace, str(self.workspace))
-        self.assertFalse((sdd_cases.Path(workspace) / "progress.md").exists())
-        self.repo, self.plan, self.base, self.sizes = parent
-        # The parent is untouched and its summary still confirms.
-        self.assertEqual(self.snapshot()[0], before[0])
-        self.assertEqual(self.snapshot()[2:], before[2:])
-        again = self.feasibility("confirm", "--plan", self.plan, "--base", self.base, "--input", "-",
-                                 raw=canonical(summary).encode() + b"\n")
-        self.assertEqual((again.returncode, again.stdout), (3, confirmed.stdout), again.stderr)
-
-    def test_an_actual_overflow_is_never_hidden_by_a_fitting_projection(self):
+    def test_an_actual_overflow_is_never_hidden_by_a_fitting_forecast(self):
         self.sizes = {n: 1024 for n in range(1, 9)}
         self.write_plan()
         self.ready(self.next("--task", 1, "--delivery-base", self.base))
         self.write("src/t1.py", "".join(f"value_{n} = {n}\n" for n in range(8000)))
-        self.repo_commit("task 1")
-        self.ready(self.gate("record", self.plan, "--task", 1)); self.repo_commit("plan: record task 1 evidence")
-        refused = json.loads(self.next("--completed", 1, "--task", 2).stdout)
-        self.assertEqual((refused["step"], refused["gate"]), ("validate-report", "decompose_required"))
-        self.assertNotIn("through 1", self.ledger.read_text(encoding="utf-8"))
+        head = self.repo_commit("task 1")
+        out = self.ready(self.next("--completed", 1, "--task", 2))
+        self.assertEqual(out["delivery"]["state"], "decompose_required")
+        gate = [line for line in self.ledger.read_text(encoding="utf-8").splitlines()
+                if line.startswith(f"Delivery gate: {self.base}..{head} ")]
+        self.assertEqual(len(gate), 1)
+        self.assertTrue(gate[0].endswith(" over_budget"))
