@@ -1,4 +1,4 @@
-"""Thin source-command boundary for read-only review feasibility."""
+"""Thin source-command boundary for review feasibility: projection, gate, confirmation and forecast writing."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,7 @@ from typing import Sequence
 from agent_tools.review_actual import GenerationError, InvocationError, _run_git
 from agent_tools.review_budget import BudgetError, describe
 from agent_tools.review_forecast import ForecastError, canonical_bytes, read_regular
+from agent_tools.review_forecast_writer import HELP, write_forecast
 from agent_tools.review_gate import confirm, gate
 from agent_tools.review_pack import ReviewPackError
 from agent_tools.review_projection import project, validate_result
@@ -17,6 +18,14 @@ from agent_tools.review_projection import project, validate_result
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise ForecastError(message)
+
+
+def _read_input(value: str, bound: int) -> bytes:
+    if value == "-":
+        return sys.stdin.buffer.read(bound + 1)
+    path = Path(value).absolute()
+    # Bound before decoding, and never follow an input symlink.
+    return read_regular(path.parent, path.name, bound)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -41,6 +50,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     confirmation.add_argument("--plan", required=True, type=Path)
     confirmation.add_argument("--base", required=True)
     confirmation.add_argument("--input", required=True)
+    forecast = commands.add_parser("forecast", help="write the forecast blocks from an estimate",
+                                   description=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
+    forecast.add_argument("--plan", required=True, type=Path)
+    forecast.add_argument("--base", required=True)
+    forecast.add_argument("--spec", required=True, type=Path)
+    forecast.add_argument("--input", required=True)
     try:
         args = parser.parse_args(argv)
         if args.command == "gate":
@@ -49,12 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.buffer.write(summary_bytes)
             return code
         if args.command == "confirm":
-            authority = describe("review-package")
-            if args.input == "-":
-                raw = sys.stdin.buffer.read(authority.report_wire_max_bytes + 1)
-            else:
-                path = Path(args.input).absolute()
-                raw = read_regular(path.parent, path.name, authority.report_wire_max_bytes)
+            raw = _read_input(args.input, describe("review-package").report_wire_max_bytes)
             code, summary_bytes = confirm(args.plan, args.base, raw)
             sys.stdout.buffer.write(summary_bytes)
             return code
@@ -64,13 +74,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             value = project(repo, plan, args.base, args.head, args.completed_through, args.package_name)
             sys.stdout.buffer.write(canonical_bytes(value))
             return 0 if value["state"] == "complete" else 3
+        if args.command == "forecast":
+            authority = describe("review-package")
+            raw = _read_input(args.input, authority.report_wire_max_bytes)
+            plan = args.plan.absolute()
+            repo = Path(_run_git(plan.parent, "rev-parse", "--show-toplevel").strip())
+            written = write_forecast(repo, plan, args.base, args.spec.absolute(), raw, authority)
+            sys.stdout.buffer.write(canonical_bytes({"written": written}))
+            return 0
         authority = describe("review-package")
-        if args.input == "-":
-            raw = sys.stdin.buffer.read(authority.report_wire_max_bytes + 1)
-        else:
-            path = Path(args.input).absolute()
-            # Bound before decoding, and never follow an input symlink.
-            raw = read_regular(path.parent, path.name, authority.report_wire_max_bytes)
+        raw = _read_input(args.input, authority.report_wire_max_bytes)
         sys.stdout.buffer.write(validate_result(raw, args.producer_exit, authority))
         return 0
     except (ForecastError, GenerationError, InvocationError, BudgetError, ReviewPackError,

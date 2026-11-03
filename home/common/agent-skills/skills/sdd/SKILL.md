@@ -46,7 +46,7 @@ list from the Task index.
 
 ### Cumulative delivery gate
 
-Pin `DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD origin/<integration-branch>` (integration branch from the project bindings), never an advanced local branch. `sdd-gate next` gates every dispatch on the cumulative package, then the projection of the remaining tasks (steps and ledger lines: nix-config's `python/README.md` § `sdd-gate`). A refusal cannot advance: preserve completed work and name an independently deliverable split.
+Pin `DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD origin/<integration-branch>` (integration branch from the project bindings), never an advanced local branch. `sdd-gate next` gates every dispatch on the cumulative package, then the projection of the remaining tasks. A refusal cannot advance: preserve completed work and name an independently deliverable split.
 
 ### Review-package gate
 
@@ -72,7 +72,7 @@ Unsure: implementer.
 
 **Leaf-agent clauses.** Every prompt this skill composes for an `Agent` dispatch — here, in [fix-loop.md](fix-loop.md) or in [final-review.md](final-review.md) — carries these four clauses verbatim, as a paragraph of their own; a `*-prompt.md` template already carries them:
 
-> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see. Run each long command, every verification command included, in the foreground with an explicit timeout above its expected duration. If the host moves one to the background anyway, wait for it in the same turn: never end your turn while a command or agent you started still runs. Never loop `sleep` in the foreground or chain a check onto it: use Monitor with an until-condition, or one short bare `sleep N` call and check in the next.
+> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see. Run each long command, every verification command included, in the foreground with an explicit timeout above its expected duration. If the host moves one to the background anyway, wait for it in the same turn: never end your turn while a command or agent you started still runs. Never run `sleep` in the foreground: wait with Monitor with an until-condition or a background Bash command, or end the turn on someone else's blocker.
 
 ## The task loop
 

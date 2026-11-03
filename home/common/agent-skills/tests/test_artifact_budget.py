@@ -979,6 +979,76 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         self.assertIn("notes", str(caught.exception))
         self.assertIn(str(bound), str(caught.exception))
 
+    def test_ship_summary_refusals_name_the_member_and_rule(self):
+        """Issue 559 AC2, D6, D7: every ship-summary rule names its member and rule, on v1 and v2."""
+        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
+                                 if key == "_artifact_budget_delivery_model"
+                                 or key.startswith("_artifact_budget_delivery_model.")])
+        bound = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["notes_max_characters"]
+        model = artifact_budget._delivery_model()
+        contract, _ = contract_and_delivery(model)
+        digest = model.canonical_digest(contract)
+        durable = ".superpowers/issue-delivery/151/run-1/ship-review.json"
+        retained = ".superpowers/ship-review/151/retained-detail.json"
+        stopped = {"issue": 151, "state": "stopped", "pr_url": None, "merge_sha": None,
+                   "issue_closed": False, "discussion_items": [], "detail_state": "none",
+                   "report_path": None, "notes": "stopped"}
+        merged = {**stopped, "state": "merged", "pr_url": "https://github.com/fagenorn/nix-config/pull/187",
+                  "merge_sha": "c" * 40, "issue_closed": True, "notes": "merged"}
+
+        def wrapped(result):
+            return {"interface_version": 2, "issue": 151, "state": "terminal_failed",
+                    "custody": custody(), "historical_owner_result": result,
+                    "delivery_contract_digest": digest, "delivery_observations": [],
+                    "authority_observations": [], "reevaluation_evidence": [],
+                    "detail_state": "none", "report_path": None, "notes": "failed"}
+
+        summary, state = "invalid ship summary: ", "invalid ship summary state: "
+        rows = (
+            (stopped, {"issue": 0}, summary + "issue", "positive integer"),
+            (stopped, {"discussion_items": ["lost"]}, summary + "discussion_items", "empty list"),
+            (stopped, {"issue_closed": 0}, summary + "issue_closed", "boolean"),
+            (stopped, {"detail_state": "partial"}, summary + "detail_state", "none, present or unpublished"),
+            (stopped, {"report_path": durable}, summary + "report_path", "null when detail_state is none"),
+            (stopped, {"detail_state": "present", "report_path": retained, "notes": retained},
+             summary + "report_path", "issue-delivery/ when detail_state is present"),
+            (stopped, {"detail_state": "unpublished", "report_path": durable, "notes": durable},
+             summary + "report_path", "outside issue-delivery/ when detail_state is unpublished"),
+            (stopped, {"detail_state": "present", "report_path": durable},
+             summary + "report_path", "cited in notes when detail_state is present"),
+            (stopped, {"pr_url": ""}, summary + "pr_url", "null or a non-empty string"),
+            (merged, {"pr_url": None}, state + "pr_url", "non-empty string when state is merged"),
+            (merged, {"merge_sha": "c" * 7}, state + "merge_sha", "40-hex commit when state is merged"),
+            (merged, {"detail_state": "unpublished", "report_path": retained, "notes": retained},
+             state + "detail_state", "none or present when state is merged"),
+            (stopped, {"merge_sha": "c" * 40}, state + "merge_sha", "null when state is stopped"),
+            ({**stopped, "state": "failed"}, {"issue_closed": True}, state + "issue_closed",
+             "false when state is failed"),
+            (stopped, {"state": "closed"}, state + "state", "merged, stopped or failed"),
+            (stopped, {"notes": "n" * (bound + 1)}, "notes", str(bound)),
+        )
+        for accepted in (stopped, merged, wrapped(stopped), wrapped(merged)):
+            self.assertEqual(self.run_validate("ship-summary", accepted, True).returncode, 0)
+        for base, change, member, rule in rows:
+            for version, value in ((1, {**base, **change}), (2, wrapped({**base, **change}))):
+                with self.subTest(member=member, rule=rule, version=version):
+                    reason = self.assert_refusal(self.run_validate("ship-summary", value, version == 1),
+                                                 "invalid report")
+                    if version == 2:
+                        self.assertTrue(reason.startswith("ship-summary: "), reason)
+                    self.assertIn(member, reason)
+                    self.assertIn(rule, reason)
+                    self.assertNotIn("closed", reason.replace("issue_closed", ""))
+
+    def test_an_sdd_detail_refusal_names_report_path(self):
+        """Issue 559 D6: the shared detail check names its rule for the SDD report too."""
+        value = self.make_sdd("complete", "clean", "clean", "clean", "passed", "a" * 40, "b" * 40,
+                              "present", ".superpowers/issue-delivery/49/run-1/sdd-a.json")
+        self.assertEqual(self.run_validate("sdd", value, True).returncode, 0)
+        reason = self.assert_refusal(self.run_validate("sdd", {**value, "notes": "no durable detail"}, True),
+                                     "invalid report")
+        self.assertEqual(reason, "invalid SDD report: report_path must be cited in notes when detail_state is present")
+
     def test_a_detail_refusal_names_the_failing_finding_member(self):
         """Issue 472 AC2, D3: a detail refusal names the finding by index and its member."""
         finding = {"axis": "ship", "severity": "Minor", "status": "minor",
