@@ -374,6 +374,17 @@ class RenameForecastCases(source_cases.SourceProjectionFixture, unittest.TestCas
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout)['metrics'], measured)
 
+    def test_planned_rename_to_an_oversized_designer_keeps_its_whole_record(self):
+        # A rename record never takes generated evidence (D5), so the oversized-designer
+        # placeholder that projects a planned add or modify does not apply to a rename's new path.
+        designer = 'src/App/Migrations/20260826010101_AddWidgets.Designer.cs'
+        self.tasks[0]['task']['commit_subject_bytes'] = [120]
+        self.tasks[0]['task']['records'] = [self.rename('moved', 1, 'old.txt', designer, size=70000)]
+        self.emit(); self.commit('forecast')
+        result = self.project(0)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['violations'], ['member_bytes'])
+
     def test_future_rename_to_an_absent_path_needs_a_subject_forecast(self):
         self.tasks[0]['task']['records'] = [self.rename('moved', 1, 'old.txt', 'new.txt', size=4096)]
         self.emit(); self.commit('forecast without subject')
