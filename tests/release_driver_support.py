@@ -87,18 +87,40 @@ class StatefulForge:
     def invoke(self, request):
         result = forge_adapter.invoke(request)
         if result["result"] == "accepted":
-            self.land(request["operation"])
+            self.land(request)
         return result
 
-    def land(self, operation: str) -> None:
-        if operation == "tag":
+    def land(self, request: dict) -> None:
+        """Make the provider show what `request` created; a merge lands as a merge commit."""
+        operation, candidate = request["operation"], request["parameters"]["candidate"]
+        if operation == "pr_merge":
+            self.world.respond_json("gh", ROWS["pr_merge.view"]["argv"][1:], {
+                "state": "MERGED", "baseRefName": CANONICAL["branch"], "headRefName": "dev",
+                "headRefOid": CANONICAL["commit"], "mergeCommit": {"oid": CANONICAL["merge_commit"]},
+                "url": f"https://github.com/{CANONICAL['slug']}/pull/{CANONICAL['pr']}",
+                "statusCheckRollup": []})
+            self.world.respond_json("gh", ROWS["pr_merge.merge_commit"]["argv"][1:], {
+                "parents": [{"sha": candidate["merge"]["base_tip"]}, {"sha": candidate["commit"]}]})
+        elif operation == "tag":
+            peeled = CANONICAL["merge_commit"] if "merge" in candidate else CANONICAL["commit"]
             self.world.respond_json("gh", ROWS["tag.ref"]["argv"][1:],
                                     {"object": {"type": "tag", "sha": CANONICAL["tag_object"]}})
             self.world.respond_json("gh", ROWS["tag.object"]["argv"][1:],
-                                    {"object": {"type": "commit", "sha": CANONICAL["commit"]}})
+                                    {"object": {"type": "commit", "sha": peeled}})
         elif operation == "release":
             self.world.respond_json("gh", ROWS["release.view"]["argv"][1:],
                                     {"tag_name": CANONICAL["tag"], "draft": False, "html_url": URL})
+
+
+class LandedDespiteExit(StatefulForge):
+    """A merge that lands while `gh` exits non-zero: the provider shows it merged although the
+    invoke answered `unknown`."""
+
+    def invoke(self, request):
+        result = forge_adapter.invoke(request)
+        if result["result"] == "accepted" or request["operation"] == "pr_merge":
+            self.land(request)
+        return result
 
 
 class NeverVisible(StatefulForge):

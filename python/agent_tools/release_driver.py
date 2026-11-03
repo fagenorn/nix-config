@@ -682,14 +682,29 @@ class _Drive:
         except InvocationRefused as refused:
             return self.park(f"{name}: refused {refused.reason}")
         status = self.status(name)
-        return None if status == "satisfied" else self.stopped(name, status)
+        return None if status == "satisfied" else self.stopped(name, status, self.after_invoke(name))
 
-    def stopped(self, name: str, status: str) -> str:
-        """The ending for an action that is not satisfied and is not to be invoked now."""
+    def after_invoke(self, name: str) -> str:
+        """` after <result> <error_class>: <reference>` for the action's latest invoke when it
+        was not accepted, else empty (issue 554 D12)."""
+        action_id = _view(self.transaction, name)["action_id"]
+        returned = [event for event in self.transaction.events
+                    if event["type"] == "invocation_returned" and event["action_id"] == action_id]
+        if not returned or returned[-1]["result"] == "accepted":
+            return ""
+        last = returned[-1]
+        return f" after {last['result']} {last['error_class']}: {last['reference']}"
+
+    def stopped(self, name: str, status: str, after: str = "") -> str:
+        """The ending for an action that is not satisfied and is not to be invoked now.
+
+        An `absent` or `diverged` action parks with `<name>: <status><after>`; `after` names the
+        invoke that left it so, and is empty for a park after an inspection alone (issue 554 D12).
+        """
         if status in ("in_progress", "unknown"):
             return "wait"
         if status in ("absent", "diverged"):
-            return self.park(f"{name}: {status}")
+            return self.park(f"{name}: {status}{after}")
         raise ValueError(f"action {name!r} has status {status!r}, which the driver cannot read")
 
     def prove(self) -> str:
