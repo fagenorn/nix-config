@@ -11,6 +11,7 @@ import sys
 from typing import Any
 
 from agent_tools.attempt_custody import HUMAN_GATED_BLOCKED_ON
+from agent_tools.fresh_load import module_spec
 
 
 WORKFLOW_DELIVERY_INTERFACE_VERSION = 1
@@ -31,9 +32,7 @@ class DeliveryRuntime:
         if not entry.is_file():
             raise ValueError("delivery model is unavailable")
         name = "_workflow_delivery_model"
-        spec = importlib.util.spec_from_file_location(
-            name, entry, submodule_search_locations=[str(entry.parent)]
-        )
+        spec = module_spec(name, entry, [str(entry.parent)])
         if spec is None or spec.loader is None:
             raise ValueError("delivery model is unavailable")
         for key in tuple(sys.modules):
@@ -58,7 +57,7 @@ class DeliveryRuntime:
         if not entry.is_file():
             raise ValueError("workflow delivery projection is unavailable")
         name = "_workflow_delivery_wire"
-        spec = importlib.util.spec_from_file_location(name, entry)
+        spec = module_spec(name, entry)
         if spec is None or spec.loader is None:
             raise ValueError("workflow delivery projection is unavailable")
         module = importlib.util.module_from_spec(spec)
@@ -77,7 +76,7 @@ class DeliveryRuntime:
         if not entry.is_file():
             raise ValueError("workflow delivery builder is unavailable")
         name = "_workflow_delivery_build"
-        spec = importlib.util.spec_from_file_location(name, entry)
+        spec = module_spec(name, entry)
         if spec is None or spec.loader is None:
             raise ValueError("workflow delivery builder is unavailable")
         module = importlib.util.module_from_spec(spec)

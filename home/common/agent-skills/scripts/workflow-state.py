@@ -21,6 +21,7 @@ import tempfile
 import traceback
 from typing import Any, Callable, Iterator, NamedTuple
 
+from agent_tools.fresh_load import module_spec
 from agent_tools import attempt_observations, attempt_store, phase_budget, verification_blocker
 from agent_tools.attempt_custody import (
     BLOCKED_ON_VALUES,
@@ -325,7 +326,7 @@ def _delivery():
             runtime = _DELIVERY_RUNTIMES.get(phase_notes_maximum())
             if runtime is not None:
                 return runtime
-        spec = importlib.util.spec_from_file_location("_workflow_delivery", entry)
+        spec = module_spec("_workflow_delivery", entry)
         if spec is None or spec.loader is None:
             raise ValueError(f"cannot load {entry}")
         module = importlib.util.module_from_spec(spec)
@@ -358,7 +359,7 @@ def _host_admission():
             from agent_tools import host_admission as module
         else:
             entry = Path.home() / ".agents/lib/python/host_admission.py"
-            spec = importlib.util.spec_from_file_location("_workflow_host_admission", entry)
+            spec = module_spec("_workflow_host_admission", entry)
             if spec is None or spec.loader is None:
                 raise ValueError(f"cannot load {entry}")
             module = importlib.util.module_from_spec(spec)

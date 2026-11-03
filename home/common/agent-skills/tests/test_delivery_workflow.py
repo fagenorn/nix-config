@@ -522,6 +522,55 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(sorted(second), sorted(first))
             self.assertEqual([name for name in first if second[name] != first[name]], [])
 
+    def test_installed_module_bytecode_follows_content_not_size_and_mtime(self):
+        """Issue 567. A same-size, same-mtime edit of an installed module (every
+        store file has mtime 1) runs the edited code on the next load, while a
+        load of an unchanged module compiles nothing."""
+        script = (
+            "import sys\n"
+            "from agent_tools.fresh_load import load_module\n"
+            "print(load_module('_probe', sys.argv[1]).LIMIT)\n")
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw).resolve(); cache = base / "pycache"; cache.mkdir()
+            module = base / "probe.py"
+            env = {key: value for key, value in os.environ.items()
+                   if key != "PYTHONDONTWRITEBYTECODE"}
+            env.update(PYTHONPYCACHEPREFIX=str(cache))
+            env["PYTHONPATH"] = os.pathsep.join(
+                [str(ROOT / "python")] + env.get("PYTHONPATH", "").split(os.pathsep))
+
+            def load():
+                done = subprocess.run([sys.executable, "-c", script, str(module)],
+                    capture_output=True, text=True, env=env, check=False)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                return done.stdout.strip()
+
+            def cached():
+                return {str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+                        for path in cache.rglob("*.pyc")}
+
+            def write(text):
+                module.write_text(text); os.utime(module, (1, 1))
+
+            write("LIMIT = 30\n")
+            self.assertEqual(load(), "30")
+            first = cached()
+            self.assertTrue(first)
+            self.assertEqual(load(), "30")
+            self.assertEqual(cached(), first)
+            write("LIMIT = 60\n")
+            self.assertEqual(load(), "60")
+            # The control: the default loader keeps running the stale bytecode.
+            plain = ("import importlib.util, sys\n"
+                "s = importlib.util.spec_from_file_location('_plain', sys.argv[1])\n"
+                "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+                "print(m.LIMIT)\n")
+            def load_plain():
+                return subprocess.run([sys.executable, "-c", plain, str(module)],
+                    capture_output=True, text=True, env=env, check=False).stdout.strip()
+            write("LIMIT = 30\n"); self.assertEqual(load_plain(), "30")
+            write("LIMIT = 60\n"); self.assertEqual(load_plain(), "30")
+
     def test_direct_checkpoint_and_failure_remainder_round_trip(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
         with tempfile.TemporaryDirectory() as raw:
