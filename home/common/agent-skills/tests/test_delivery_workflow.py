@@ -4173,6 +4173,18 @@ class LibraryBytecodeClearTest(unittest.TestCase):
                     self.assertNotEqual(result.stderr, "")
             self.assertEqual(list(base.iterdir()), [])
 
+    def test_every_activation_runs_the_clear_after_link_generation(self):
+        nix = (ROOT / "home/common/agent-skills/default.nix").read_text(encoding="utf-8")
+        header = ('home.activation.clearAgentModuleBytecode = '
+                  'lib.hm.dag.entryAfter [ "linkGeneration" ] \'\'\n')
+        self.assertEqual(nix.count(header), 1)
+        body = nix.split(header, 1)[1].split("\n  '';\n", 1)[0]
+        command = ('run ${pkgs.runtimeShell} ${./scripts/clear-library-bytecode} '
+                   '"$HOME/.agents/lib/python"')
+        self.assertEqual(body.count(command), 1)
+        self.assertIn("|| errorEcho ", body.split(command, 1)[1])
+        self.assertTrue(CLEAR_BYTECODE.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
