@@ -139,17 +139,24 @@ def _included(plan: ForecastPlan, boundary: dict) -> tuple[dict, ...]:
 def _completed_effects(plan: ForecastPlan, records: tuple[dict, ...], boundary: dict,
                        completed: int, actual: CandidateInput, candidate: tuple[Path, str]) -> None:
     paths = {r.path for r in actual.records}
-    for record in records:
-        if record["last_task"] > completed:
-            continue
+    finished = [r for r in records if r["last_task"] <= completed]
+    consumed = {r["old_path"] for r in finished if r["change"] == "rename"}
+    for record in finished:
         effects = [r for edge in plan.ownership.edges
                    if plan.ownership.owners[edge["commit"]] == record["owner"]
                    and (record["owner"] or boundary["id"] in plan.ownership.process_memberships[edge["commit"]])
                    for r in edge["records"] if r["path"] == record["path"] or r["old_path"] == record["path"]]
         if not effects:
             raise ForecastError("completed contribution has no owned actual effect")
+        # A completed rename consumes its old path unless an actual record still holds it (issue 569).
+        if (record["change"] == "rename" and record["old_path"] not in paths
+                and tree_entry(*candidate, record["old_path"]) is not None):
+            raise ForecastError("completed rename did not consume its old path")
         if record["path"] not in paths:
-            if record["change"] != "delete" or not any(r["operation"] == "D" for r in effects):
+            removed = record["change"] == "delete" and any(
+                r["operation"] == "D" or (r["operation"].startswith("R") and r["old_path"] == record["path"])
+                for r in effects)
+            if not (removed or record["path"] in consumed):
                 raise ForecastError("completed contribution has no final actual effect")
             # Absence is proven in the candidate's own tree, never the full delivery head.
             if tree_entry(*candidate, record["path"]) is not None:
@@ -283,7 +290,7 @@ def project(repo: Path, plan: Path, base: str, head: str, completed_through: int
         raise ForecastError("completed-through exceeds complete task set")
     for task in forecast.tasks:
         if task["id"] > completed_through and not task["commit_subject_bytes"] and any(
-                record["change"] in {"add", "modify"}
+                record["change"] in {"add", "modify", "rename"}
                 and tree_entry(repo, head, record["path"]) is None for record in task["records"]):
             raise ForecastError("future task content lacks a commit subject forecast")
     package_name = _package_name(package_name or f"review-{base[:7]}..{head[:7]}.json")

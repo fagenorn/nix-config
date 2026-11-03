@@ -246,6 +246,7 @@ class RecordPolicyDomainTest(unittest.TestCase):
 class SourceProjectionFixture:
     """All command fixtures use actual Git objects and source subprocesses."""
     plan_stem = 'all'
+    seed = {}  # extra base files: path -> text
 
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory()
@@ -268,6 +269,8 @@ class SourceProjectionFixture:
         self.git('config', 'commit.gpgsign', 'false')
         self.write('shared.txt', 'seed\n')
         self.write('delete.txt', 'gone later\n')
+        for path, content in self.seed.items():
+            self.write(path, content)
         self.ranges = []
         self.base = self.commit('base')
         self.ranges.clear()
@@ -459,6 +462,9 @@ class SourceProjectionTest(SourceProjectionFixture, unittest.TestCase):
                      lambda d: d['process_records'][0].update(owner=True),
                      lambda d: d['process_records'][0].update(change='rename'),
                      lambda d: d['process_records'][0].update(change='fileless'),
+                     lambda d: d['process_records'][0].update(old_path='elsewhere.md'),
+                     lambda d: d['process_records'][0].update(change='rename', old_path=d['process_records'][0]['path']),
+                     lambda d: d['process_records'][0].update(change='rename', old_path='../escape'),
                      lambda d: d['process_records'][0]['bounds'][0].update(record_bytes=True),
                      lambda d: d['process_records'][0]['bounds'][0].update(added_lines=float('inf'))]
         for mutate in mutations:

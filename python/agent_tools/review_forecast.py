@@ -380,18 +380,24 @@ def _records(delivery: dict, tasks: tuple[dict, ...], boundaries: tuple[dict, ..
         if not isinstance(records, list):
             raise ForecastError("invalid contribution list")
         for record in records:
-            closed(record, "id owner path change last_task bounds", "contribution")
+            renamed = isinstance(record, dict) and record.get("change") == "rename"
+            closed(record, "id owner path old_path change last_task bounds" if renamed
+                   else "id owner path change last_task bounds", "contribution")
             record_id = name(record["id"])
             if record_id in seen or type(record["owner"]) is not int or record["owner"] != owner:
                 raise ForecastError("duplicate or incorrect contribution owner")
             seen.add(record_id)
             path_name(record["path"])
+            if renamed:
+                path_name(record["old_path"])
+                if record["old_path"] == record["path"]:
+                    raise ForecastError("rename must change its path")
             horizon = integer(record["last_task"], "contribution horizon", 1)
             if not max(owner, 1) <= horizon <= count:
                 raise ForecastError("invalid contribution horizon")
             if record["change"] not in {"add", "modify", "delete", "rename", "fileless"}:
                 raise ForecastError("unknown contribution operation")
-            if record["change"] in {"rename", "fileless"}:
+            if record["change"] == "fileless":
                 raise ForecastError("projection_unavailable: operation requires retained adapter proof")
             bounds = record["bounds"]
             if not isinstance(bounds, list) or not bounds:

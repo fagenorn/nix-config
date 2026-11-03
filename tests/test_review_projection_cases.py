@@ -324,3 +324,87 @@ class NeutralRefusalCases(source_cases.SourceProjectionFixture, unittest.TestCas
             self.assertNotIn('depends on', str(caught.exception))
         self.assertEqual(before, (self.git('rev-parse', 'HEAD'), self.git('status', '--porcelain'),
                                   self.git('write-tree'), self.git('count-objects', '-v')))
+
+
+MOVED = ''.join(f'moved line {n:02d}\n' for n in range(60))
+
+
+class RenameForecastCases(source_cases.SourceProjectionFixture, unittest.TestCase):
+    """Issue 569: a forecast `rename` names its old path and is bounded by the record measured at its new path."""
+    seed = {'old.txt': MOVED}
+
+    def rename(self, name, owner, old, new, *, size, horizon=None, covers=None):
+        row = self.record(name, owner, new, change='rename', size=size, added=2, deleted=2,
+                          horizon=horizon or owner, covers=covers)
+        row['old_path'] = old
+        return row
+
+    def move(self, old, new, owner, *, keep=False):
+        """Commit `old`'s content at `new` with two lines edited, deleting `old` unless `keep`."""
+        content = (self.repo / old).read_text().replace('moved line 10', 'edited line 10').replace(
+            'moved line 40', 'edited line 40')
+        if not keep:
+            (self.repo / old).unlink()
+        self.write(new, content)
+        return self.commit('move ' + old, owner)
+
+    def test_future_rename_projects_and_bounds_the_measured_record(self):
+        from agent_tools.review_actual import actual_inputs
+        from agent_tools.review_pack import ReviewLimits
+        self.tasks[0]['task']['commit_subject_bytes'] = [120]
+        self.tasks[0]['task']['records'] = [self.rename('moved', 1, 'old.txt', 'new.txt', size=4096)]
+        self.emit(); self.commit('forecast')
+        before = self.project(0)
+        self.assertEqual(before.returncode, 0, before.stderr)
+        before = json.loads(before.stdout)
+        self.assertEqual(before['projected_record_count'], before['actual_record_count'] + 1)
+        self.move('old.txt', 'new.txt', 1)
+        self.tasks[0]['task']['commit_subject_bytes'] = []
+        self.checkpoint()
+        measured, manifest = self.actual()
+        initial = next(actual_inputs(self.repo, self.base, self.head, 'review.json',
+                                     ReviewLimits(16384, 65536, 8, 524288)))
+        (record,) = [r for r in initial.records if r.path == 'new.txt']
+        self.assertTrue(record.payload.startswith(b'diff --git a/old.txt b/new.txt\nsimilarity index '))
+        self.assertNotIn('old.txt', [r.path for r in initial.records])
+        self.assertLessEqual(record.source_bytes, 4096)
+        self.assertEqual(manifest['coverage']['file_diff_count'], before['projected_record_count'])
+        self.assertLessEqual(measured['total_bytes'], before['metrics']['total_bytes'])
+        completed = self.project(1)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)['metrics'], measured)
+
+    def test_future_rename_to_an_absent_path_needs_a_subject_forecast(self):
+        self.tasks[0]['task']['records'] = [self.rename('moved', 1, 'old.txt', 'new.txt', size=4096)]
+        self.emit(); self.commit('forecast without subject')
+        refused = self.project(0)
+        self.assert_refused(refused)
+        self.assertIn(b'future task content lacks a commit subject forecast', refused.stderr)
+
+    def test_completed_rename_consumes_an_earlier_modify_of_its_old_path(self):
+        self.tasks[0]['task']['records'] = [self.record('touch', 1, 'old.txt', change='modify', size=2048, horizon=1)]
+        self.tasks[1]['task']['records'] = [self.rename('moved', 2, 'old.txt', 'new.txt', size=4096)]
+        self.write('old.txt', MOVED + 'appended\n'); self.commit('modify old', 1)
+        self.move('old.txt', 'new.txt', 2)
+        self.checkpoint()
+        result = self.project(2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['metrics'], self.actual()[0])
+
+    def test_forecast_delete_and_add_that_git_pairs_is_accepted(self):
+        self.tasks[0]['task']['records'] = [
+            self.record('gone', 1, 'old.txt', change='delete', size=4096, added=0, deleted=60, horizon=1),
+            self.record('new', 1, 'new.txt', change='add', size=4096, added=60, horizon=1)]
+        self.move('old.txt', 'new.txt', 1)
+        self.checkpoint()
+        result = self.project(1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['metrics'], self.actual()[0])
+
+    def test_completed_rename_whose_old_path_survives_is_refused(self):
+        self.tasks[0]['task']['records'] = [self.rename('moved', 1, 'old.txt', 'new.txt', size=4096)]
+        self.move('old.txt', 'new.txt', 1, keep=True)
+        self.checkpoint()
+        result = self.project(1)
+        self.assert_refused(result)
+        self.assertIn(b'completed rename did not consume its old path', result.stderr)
