@@ -13,7 +13,7 @@ Write for a skilled engineer with no context on this codebase, toolset or domain
 
 ## Payload discipline
 
-Move information cheaply: targeted `rg` over whole-file reads; bounded reads; test and build output cut to failing lines; long logs on disk, passed as paths; artifacts (briefs, packages, reports) handed between agents as paths, never inlined. Verification commands print little (quiet flags, tails).
+Move information cheaply: targeted `rg` over whole-file reads; bounded reads; test and build output cut to failing lines; long logs on disk, passed as paths; artifacts (briefs, packages, reports) handed between agents as paths, never inlined. Verification commands print little (quiet flags, tails). Do not build, prototype or run the change while planning; confirming each task's failing test is the only run.
 
 ## Scope and file structure
 
@@ -59,11 +59,6 @@ and copy rules, platform requirements), one line each, values verbatim.>
 
 <The spec's agreed seams, one line each. Implementers test only at these; a new
 seam is a plan bug.>
-
-## Delivery estimate and boundaries
-
-<Only the rationale for each boundary, one line each; the numbers live in the
-committed forecast blocks.>
 
 ## Task index
 
@@ -165,14 +160,6 @@ git commit -m "feat: add specific feature"
 
 Never write "TBD", "TODO", "implement later", "fill in details"; "add appropriate error handling", "add validation", "handle edge cases"; "write tests for the above" without the tests; "similar to Task N" (tasks are read alone); a step that does not pin its interface, invariants and assertions; or a type, function or method no task defines.
 
-## Review feasibility forecast
-
-Once the content is final, pin `<base>` with `git merge-base HEAD origin/<integration-branch>` and run `review-feasibility forecast --plan <root> --base <base> --spec <spec> --input -`. From an estimate on stdin, one entry per task in order listing its `Files:` paths, it writes the root's `## Review feasibility delivery` and each member's `## Review feasibility task` block; `--help` gives the shape and sizing rule:
-
-`{"tasks":[{"files":[{"path":"a.py","change":"modify","added_lines":30,"deleted_lines":10}]}]}`
-
-Rerun it after any edit that changes a task's files. A refusal names the failing field.
-
 ## Package budget
 
 Finish all content, then run `artifact-budget check --kind implementation-plan --root <root-path> --format json`; the checker discovers the members and owns the thresholds. Never pass a member list.
@@ -182,14 +169,6 @@ Finish all content, then run `artifact-budget check --kind implementation-plan -
 - First exit 3: compact repeated prose into root or spec references, keeping task-specific contracts, and recheck. Still over: split only where both halves are independently testable, update the contiguous index and links, and recheck. A persisting violation returns `decompose_required`; `complete` is forbidden.
 
 Any later writer, an accepted Phase-5 edit included, first checks every artifact it changed.
-
-**Projection gate.** After the final mutation (self-grade edits included) and a `within_budget` check, commit, then run `review-feasibility gate --plan <root> --base <base> --head <HEAD> --completed-through 0 --save-dir "$(sdd-workspace <root>)"` (`<HEAD>` is `git rev-parse HEAD`), which keeps the full validated result.
-
-- Exit 0: `complete`, the printed summary as `projection`.
-- Exit 3: `decompose_required`, its artifact still `within_budget`, plus `projection`.
-- Exit 2: one forecast correction round (fix the estimate or the plan, rerun `forecast`, commit, rerun), then `failed` with the tool's reason in notes.
-
-An artifact overage keeps the over-budget report below, without `projection`.
 
 ## Self-review
 
@@ -203,6 +182,6 @@ Reread the finished plan against the spec yourself, no dispatch, and fix inline:
 
 ## Return control
 
-Build one producer report `{state, artifact, notes}`. `complete`: `kind: "implementation-plan"`, the root `path`, the checker's four `metrics`, `budget_status: "within_budget"` and `projection`. `decompose_required`: the same with `budget_status: "over_budget"` and the checker's `violations`, or `within_budget` plus `projection`. `failed`: a null artifact, or only the known root `kind` and `path`. Notes never carry artifact contents or member paths.
+Build one producer report `{state, artifact, notes}`. `complete`: `kind: "implementation-plan"`, the root `path`, the checker's four `metrics`, `budget_status: "within_budget"`. `decompose_required`: the same with `budget_status: "over_budget"` and the checker's `violations`. `failed`: a null artifact, or only the known root `kind` and `path`. Notes never carry artifact contents or member paths.
 
 Write it to a candidate from `mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"`, run `artifact-budget validate-report --boundary producer --input <report-candidate>`, and remove the candidate in a cleanup that runs on every outcome (a `trap` on `EXIT HUP INT TERM`, or `finally`). Return only the validated stdout; validator exit 2 is `failed`, with no fallback. Offer or start no execution: the caller owns review and execution.
