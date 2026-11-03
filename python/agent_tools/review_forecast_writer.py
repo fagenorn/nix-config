@@ -105,7 +105,7 @@ class _Estimate:
         if not isinstance(entry, dict):
             raise ForecastError(f"{label} must be a JSON object")
         change = entry.get("change")
-        if change not in _KEYS:
+        if not isinstance(change, str) or change not in _KEYS:
             raise ForecastError(f"{label}.change must be add, modify or delete")
         keys = _KEYS[change]
         if set(entry) != set(keys):

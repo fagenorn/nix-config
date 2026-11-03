@@ -1066,6 +1066,7 @@ class ForecastGeneratorTest(SourceProjectionFixture, unittest.TestCase):
             (two([], [modify('src/absent.py')]), 'tasks[1].files[0].change', 'src/absent.py'),
             (two([add('src/new.py', extra=1)]), 'tasks[0].files[0] must have exactly the keys', 'extra'),
             (two([{'path': 'a.py', 'change': 'rename'}]), 'tasks[0].files[0].change', 'rename'),
+            (two([{'path': 'a.py', 'change': ['add']}]), 'tasks[0].files[0].change', None),
             (two([modify(self.SPEC)]), 'tasks[0].files[0].path', self.SPEC),
             (two([modify('all.tasks')]), 'tasks[0].files[0].path', 'all.tasks'),
             (two([add('a.py'), add('a.py')]), 'tasks[0].files[1].path', 'a.py'),
