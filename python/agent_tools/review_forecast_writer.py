@@ -42,7 +42,8 @@ entry per task member, in task order:
 An add has path, change and added_lines, a modify adds deleted_lines, and a
 delete has path and change only. Line counts are integers >= 0. A path appears
 once per task, is never the spec, the root or a member, and its change must fit
-the path's state walked task by task from the base tree.
+the path's state walked task by task from the base tree. A path absent from
+the base tree must not end deleted, as that leaves no net change.
 
 Sizing: a task record's record_bytes is {RECORD_BASE_BYTES} plus {LINE_BYTES} per added or deleted
 line, cumulative per path, and a delete of a base file is charged that file's
@@ -72,6 +73,7 @@ class _Estimate:
         self.repo, self.base, self.reserved = repo, base, reserved
         self.entries: dict[str, dict | None] = {}
         self.present: dict[str, bool] = {}
+        self.vanished: dict[str, str] = {}  # base-absent path -> label of the delete leaving it absent
 
     def base_entry(self, path: str) -> dict | None:
         if path not in self.entries:
@@ -93,7 +95,13 @@ class _Estimate:
                 raise ForecastError(f"tasks[{i}] must be a JSON object with exactly the key files")
             if not isinstance(task["files"], list):
                 raise ForecastError(f"tasks[{i}].files must be a list")
-        return [self._task(i, task["files"]) for i, task in enumerate(tasks)]
+        parsed = [self._task(i, task["files"]) for i, task in enumerate(tasks)]
+        # A base-absent path that ends absent has no net diff, so its add record could never complete.
+        for path, label in self.vanished.items():
+            if not self.present[path]:
+                raise ForecastError(f"{label}.change delete of a path an earlier task adds "
+                                    "leaves no net change")
+        return parsed
 
     def _task(self, i: int, files: list) -> list[dict]:
         seen: set[str] = set()
@@ -133,6 +141,8 @@ class _Estimate:
             raise ForecastError(f"{label}.change {change} needs a present path, "
                                 "but the path is absent after the base and earlier tasks")
         self.present[path] = change != "delete"
+        if change == "delete" and found is None:
+            self.vanished[path] = label
 
 
 def _task_blocks(repo: Path, tasks: list[list[dict]], estimate: _Estimate) -> list[dict]:

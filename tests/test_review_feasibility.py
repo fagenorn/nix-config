@@ -1072,6 +1072,8 @@ class ForecastGeneratorTest(SourceProjectionFixture, unittest.TestCase):
             (two([add('a.py'), add('a.py')]), 'tasks[0].files[1].path', 'a.py'),
             (two([add('a.py', added_lines=-1)]), 'tasks[0].files[0].added_lines', None),
             (two([add('../escape.py')]), 'tasks[0].files[0].path', 'escape'),
+            (two([add('src/tmp.py')], [{'path': 'src/tmp.py', 'change': 'delete'}]),
+             'tasks[1].files[0].change', 'src/tmp.py'),
         )
         before = self.files()
         for estimate, member, value in cases:
