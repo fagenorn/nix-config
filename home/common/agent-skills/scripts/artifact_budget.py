@@ -917,8 +917,6 @@ def validate_producer_report(value: Mapping[str, object], notes_max_characters: 
                  or _projection_binding_fault(value["projection"], state, artifact))  # type: ignore[arg-type]
         if fault is not None:
             raise ArtifactBudgetError(fault)
-    elif state == "complete" and artifact["kind"] == "implementation-plan":  # type: ignore[index]
-        raise ArtifactBudgetError("projection is required for implementation-plan")
 
 
 def _relative_path(value: object, *, durable: bool) -> bool:

@@ -43,10 +43,6 @@ document's) and the plan root's `## Acceptance map`. Each of these is **Blocking
 A `(classified)` kind you disagree with is **Should-fix**: give the kind you would
 assign and why.
 
-## Forecast check
-
-Each is **Blocking**: a `Files:` path with no record in its task's `## Review feasibility task` block; a missing process artifact or recording subject; a bound below the task's stated scope.
-
 ## Common-miss checklist
 
 Scan against these categories.
