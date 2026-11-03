@@ -303,6 +303,46 @@ class MergeProfileTest(unittest.TestCase):
         self.assertEqual([n["id"] for n in compiled["publication"]], ["merge", "tag", "github-release"])
         self.assertTrue(release_profile.binds_merge(compiled))
 
+    @staticmethod
+    def split(action_ids):
+        """`merge_profile()` with `action_ids` moved to a second `github-forge` alias."""
+        profile = support.merge_profile()
+        profile["requirements"]["adapters"]["forge-b"] = copy.deepcopy(
+            profile["requirements"]["adapters"]["forge"])
+        bindings = profile["bindings"]
+        bindings["adapters"]["forge-b"] = {"adapter": "github-forge"}
+        bindings["targets"]["repository-b"] = {**bindings["targets"]["repository"], "adapter": "forge-b"}
+        bindings["credentials"]["keyring-b"] = {"adapter": "forge-b", "class": "gh_keyring"}
+        for node in profile["publication"]["actions"]:
+            if node["id"] in action_ids:
+                node.update(adapter="forge-b", target="repository-b", credential="keyring-b")
+        return profile
+
+    def test_a_merge_profile_routes_tag_and_release_through_the_merge_alias(self):
+        """A second forge alias never sees `candidate.merge` (D15), so it would tag the head."""
+        base = "/release/profiles/two-branch/publication/actions/"
+        for moved, indexes in ((["tag"], [1]), (["github-release"], [2]),
+                               (["tag", "github-release"], [1, 2])):
+            with self.subTest(moved=moved):
+                profile = self.split(moved)
+                found = violations(support.release_of("two-branch", profile))
+                self.assertEqual([(v["pointer"], v["repair_id"]) for v in found],
+                                 [(f"{base}{i}/adapter", "contract.release.invalid") for i in indexes])
+                self.assertIn("forge", found[0]["message"])
+                with self.assertRaisesRegex(ValueError, "violates the grammar"):
+                    release_profile.compile_profile("two-branch", profile, support.base_contract(),
+                                                    support.descriptors())
+
+    def test_a_second_forge_alias_without_a_merge_node_still_compiles(self):
+        profile = self.split(["tag", "github-release"])
+        actions = profile["publication"]["actions"]
+        del actions[0], profile["recovery"]["units"]["merge"]
+        actions[0]["deps"] = []
+        bindings = profile["bindings"]
+        del profile["requirements"]["adapters"]["forge"], bindings["adapters"]["forge"]
+        del bindings["targets"]["repository"], bindings["credentials"]["forge-keyring"]
+        self.assertEqual(violations(support.release_of("two-branch", profile)), [])
+
 
 if __name__ == "__main__":
     unittest.main()

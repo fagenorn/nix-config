@@ -220,6 +220,7 @@ class _Profile:
         if "recovery" in profile:
             self.recovery(profile["recovery"])
         self.same_repository()
+        self.merge_alias()
         if "limits" in profile and profile["limits"] != {}:
             self.g.add(self.at("limits"), "limits must be {} in v1", "invalid")
 
@@ -714,6 +715,38 @@ class _Profile:
                 self.g.add(here + "/branch",
                            f"branch must equal the default branch {branch}", "same_repository")
 
+    # G18: one alias per merge binding (issue 554)
+
+    def merge_alias(self) -> None:
+        """Every node of an adapter whose operation consumes `merge` runs on a consuming alias.
+
+        `bind_candidate` binds `candidate.merge` only into the units of the consuming alias
+        (D15). A `tag` or `release` on a second alias of the same adapter would see no merge,
+        resolve the released commit as `candidate.commit` (D8) and tag the integration head
+        instead of the merge commit, so such a profile is refused here.
+        """
+        bound, consumers = [], {}
+        for checked in self.nodes:
+            node = checked["node"]
+            if not {"adapter", "operation"} <= checked["ok"]:
+                continue
+            descriptor = self.descriptor_of(node["adapter"])
+            if descriptor is None:
+                continue
+            name = descriptor["name"]
+            bound.append((checked, name))
+            operation = descriptor["operations"].get(node["operation"])
+            if isinstance(operation, dict) and MERGE_MEMBER in operation["candidate_members"]:
+                consumers.setdefault(name, {}).setdefault(node["adapter"], node.get("id"))
+        for checked, name in bound:
+            aliases = consumers.get(name, {})
+            node = checked["node"]
+            if aliases and node["adapter"] not in aliases:
+                alias, consumer = next(iter(sorted(aliases.items())))
+                self.g.add(checked["pointer"] + "/adapter",
+                           f"adapter {node['adapter']} must be {alias}: node {consumer} binds "
+                           f"candidate.merge only into {name} alias {alias}", "invalid")
+
 
 def grammar_violations(release: object, contract: object,
                        descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
@@ -1102,7 +1135,8 @@ def bind_candidate(compiled: ResolvedReleaseProfile, candidate: dict) -> dict[st
     when `binds_merge(compiled)` (issue 554 D2, D15): it is bound beside `version` and
     `commit` into the subject's `candidate` and into the `candidate` of every unit whose
     adapter alias is the alias of a node that consumes it, and the units of any other alias
-    keep `{version, commit}`."""
+    keep `{version, commit}`. The grammar's merge-alias rule keeps every node of the consuming
+    adapter on a consuming alias, so no `tag` or `release` misses the merge."""
     if not isinstance(compiled, ResolvedReleaseProfile):
         raise TypeError("bind_candidate takes a ResolvedReleaseProfile")
     if not compiled["publication"]:
