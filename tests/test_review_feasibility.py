@@ -1107,6 +1107,18 @@ class ForecastGeneratorTest(SourceProjectionFixture, unittest.TestCase):
         self.assert_refused_naming(self.forecast(), 'budget check failed: artifact-budget: invalid input: '
                                    'invalid task index row', before)
 
+    def test_a_spec_unchanged_since_the_base_is_refused_before_any_write(self):
+        # Reusing a committed spec: its process record could never gain the owned change the final
+        # gate requires, so the generator refuses rather than write blocks only the first gate accepts.
+        self.base = self.head
+        before = self.files()
+        self.assert_refused_naming(self.forecast(), self.SPEC + ': the spec is unchanged since the base', before)
+        self.write(self.SPEC, '# Spec\n\nRevised for this delivery.\n')
+        changed = self.forecast()
+        self.assertEqual((changed.returncode, changed.stderr), (0, b''))
+        spec_record = self.block(self.ROOT, '## Review feasibility delivery')['process_records'][0]
+        self.assertEqual((spec_record['path'], spec_record['change']), (self.SPEC, 'modify'))
+
     def test_help_prints_the_estimate_shape_and_the_sizing_rule(self):
         shown = self.invoke('forecast', '--help')
         self.assertEqual(shown.returncode, 0, shown.stderr)

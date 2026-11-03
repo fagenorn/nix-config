@@ -43,7 +43,9 @@ An add has path, change and added_lines, a modify adds deleted_lines, and a
 delete has path and change only. Line counts are integers >= 0. A path appears
 once per task, is never the spec, the root or a member, and its change must fit
 the path's state walked task by task from the base tree. A path absent from
-the base tree must not end deleted, as that leaves no net change.
+the base tree must not end deleted, as that leaves no net change. A spec
+present in the base tree must already differ from it, since every process
+record needs a change by the end of the delivery.
 
 Sizing: a task record's record_bytes is {RECORD_BASE_BYTES} plus {LINE_BYTES} per added or deleted
 line, cumulative per path, and a delete of a base file is charged that file's
@@ -302,7 +304,14 @@ def write_forecast(repo: Path, plan: Path, base: str, spec: Path, raw: bytes,
     root_text = _read_text(repo, root, DELIVERY_HEADING)
     member_texts = [_read_text(repo, member, TASK_HEADING) for member in members]
     spec_bytes = read_regular(repo, spec_path)
-    estimate = _Estimate(repo, base, {spec_path, root, *members})
+    # Every package member's process record needs an owned change by completion, so a spec
+    # still byte-identical to its base blob would pass the first gate and fail the last.
+    spec_base = tree_entry(repo, base, spec_path)
+    if (spec_base is not None and spec_base["kind"] == "blob"
+            and _run_git(repo, "cat-file", "blob", spec_base["oid"], binary=True) == spec_bytes):
+        raise ForecastError(f"{spec_path}: the spec is unchanged since the base, so its process record "
+                            "could never complete; the delivery must change it")
+    estimate =_Estimate(repo, base, {spec_path, root, *members})
     tasks = estimate.parse(raw, count)
     task_blocks = _task_blocks(repo, tasks, estimate)
     new_members = [_replaced(text, TASK_HEADING, block) for text, block in zip(member_texts, task_blocks)]
