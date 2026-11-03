@@ -26,10 +26,15 @@ def hostile_git_env(owned, base, repos=()) -> dict:
     repository `diff.orderFile`. The environment adds a global configuration file naming `core.attributesFile`
     and `diff.orderFile`, an `XDG_CONFIG_HOME` holding `git/attributes`, four command-line settings
     (`diff.orderFile`, `diff.suppressBlankEmpty`, `core.bigFileThreshold`, `i18n.logOutputEncoding`),
-    `GIT_DIFF_OPTS` and `GIT_CONFIG_NOSYSTEM=1`. `HOME` stays `base`'s, which the caller owns."""
+    `GIT_DIFF_OPTS` and `GIT_CONFIG_NOSYSTEM=1`. `HOME` stays `base`'s, which the caller owns.
+
+    The setup's own Git runs under `base` without any `GIT_*` variable, with `GIT_CONFIG_NOSYSTEM=1` and
+    `GIT_CONFIG_GLOBAL` set to the null device, so no inherited routing variable or host configuration can
+    point its writes at another repository."""
     owned = Path(owned)
     attributes, order = _write(owned / "attributes", NO_DIFF), _write(owned / "order", "*.md\n*\n")
     env = {k: v for k, v in base.items() if not k.startswith("GIT_") and k != "XDG_CONFIG_HOME"}
+    setup = dict(env, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
     _write(owned / "xdg/git/attributes", NO_DIFF)
     command = (("diff.orderFile", order), ("diff.suppressBlankEmpty", "true"),
                ("core.bigFileThreshold", "1k"), ("i18n.logOutputEncoding", "UTF-7"))
@@ -41,7 +46,7 @@ def hostile_git_env(owned, base, repos=()) -> dict:
         env[f"GIT_CONFIG_KEY_{n}"], env[f"GIT_CONFIG_VALUE_{n}"] = key, value
     for repo in repos:
         def git(*args):
-            return subprocess.run(["git", "-C", str(repo), *args], env=dict(os.environ, GIT_CONFIG_NOSYSTEM="1"),
+            return subprocess.run(["git", "-C", str(repo), *args], env=setup,
                                   check=True, capture_output=True, text=True).stdout.strip()
         _write(Path(git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "info/attributes", NO_DIFF)
         if git("rev-parse", "--is-bare-repository") == "false":

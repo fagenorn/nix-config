@@ -18,7 +18,7 @@ from agent_tools.review_actual import RECORD_POLICY, actual_inputs, select_candi
 from agent_tools.review_pack import ReviewLimits
 
 from .hostile_git_test_support import hostile_git_env
-from .retained_review_test_support import commit_files, git, init_repo
+from .retained_review_test_support import commit_files, git, init_repo, snapshot
 
 LIMITS = ReviewLimits(16384, 65536, 8, 524288)
 VIEWS = (("--numstat", "-z"), ("--name-only", "-z"), ("--name-status", "-z"),
@@ -179,6 +179,20 @@ class RecordViewTest(unittest.TestCase):
     def test_every_hostile_source_at_once(self):
         repo, owned = self.case("combined")
         self.assert_isolated(repo, hostile_git_env(owned, self.environment(owned), [repo]))
+
+    def test_hostile_setup_writes_only_the_named_repository(self):
+        """An inherited `GIT_DIR`, in the process and in the caller's `base`, cannot redirect the setup's
+        `info/attributes`, `.gitattributes` or `diff.orderFile` writes into another repository."""
+        repo, owned = self.case("setup-routing")
+        decoy = init_repo(owned / "decoy")
+        before = snapshot(decoy)
+        routed = {"GIT_DIR": str(decoy / ".git")}
+        with patch.dict(os.environ, routed):
+            hostile_git_env(owned, self.environment(owned, **routed), [repo])
+        self.assertEqual(snapshot(decoy), before)
+        self.assertEqual((repo / ".git/info/attributes").read_text(encoding="utf-8"), "* -diff\n")
+        self.assertEqual((repo / ".gitattributes").read_text(encoding="utf-8"), "* -diff\n")
+        self.assertEqual(git(repo, "config", "--local", "diff.orderFile"), str(owned / "order"))
 
     def test_the_view_reaches_no_configuration_or_attribute_source(self):
         """D7: under every hostile source, `record_git` sees only the view's own two `local` settings and no
