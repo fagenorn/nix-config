@@ -1,4 +1,4 @@
-"""Lint the authored skill trees against rules L1–L6, and own the skill-tree knowledge instruction_load shares."""
+"""Lint the authored skill trees against rules L1–L5, and own the skill-tree knowledge instruction_load shares."""
 
 from __future__ import annotations
 
@@ -23,8 +23,6 @@ EXCLUDED_DIRS = ("evals", "scripts")
 REFLOW_WIDTH = 100
 TRIGGERS = ("Use when", "Use for", "Use to", "Use before", "Use after", "Invoke before")
 XML = re.compile(r"<[A-Za-z/]")
-PYTHON_TREE = re.compile(r"(?<![A-Za-z0-9_.~/-])python/|agent_tools/")
-L6_TEXT = "names nix-config's python/ tree, which is not installed"
 
 Reader = Callable[[str], Optional[bytes]]
 Lister = Callable[[str], list[str]]
@@ -328,26 +326,11 @@ def _directory_violations(snapshot: Snapshot, directory: SkillDir) -> list[Viola
     return found
 
 
-def _python_tree_violations(snapshot: Snapshot) -> list[Violation]:
-    """L6: a line of any Markdown file in the three trees that names nix-config's `python/` tree."""
-    found: list[Violation] = []
-    for root in TREE_ROOTS:
-        for path in snapshot.list_files(root):
-            if not path.endswith(".md"):
-                continue
-            text = read_listed(snapshot, path).decode("utf-8", "replace")
-            for number, line in enumerate(text.splitlines(), start=1):
-                if PYTHON_TREE.search(line):
-                    found.append(Violation(f"L6 {path}:{number}", L6_TEXT))
-    return found
-
-
 def violations(snapshot: Snapshot) -> list[Violation]:
-    """Every L1-L6 violation of the three skill trees, sorted, without duplicates."""
+    """Every L1-L5 violation of the three skill trees, sorted, without duplicates."""
     found: list[Violation] = []
     for directory in skill_dirs(snapshot):
         found.extend(_directory_violations(snapshot, directory))
-    found.extend(_python_tree_violations(snapshot))
     return sorted(set(found))
 
 
