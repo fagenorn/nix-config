@@ -1586,13 +1586,16 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn(f"`{name}`", observe)
 
     def test_direct_acquisition_relays_a_suspended_reply(self):
-        """Issue 546 D6, D18: item 5 stops as item 4 does and prints the canonical line from
+        """Issue 546 D6, D18: item 5 stops before Phase 1 and installs no waiter as item 4 does,
+        but without item 4's `kind: terminal` key check, and prints the canonical line from
         members that the source workflow-response validator requires of a `suspended` reply
         (issue 544 D16), so the reply's shape is the validator's, not restated here."""
         text = normalized(ACQUIRE_DIRECT.read_text(encoding="utf-8"))
         item = text[text.index("**`kind: suspended`**"):]
         item = item[:item.index("Clear the retained")]
-        self.assertIn("as item 4", item)
+        self.assertIn("stop before Phase 1 with no waiter", item)
+        self.assertNotIn("item 4", item)
+        self.assertNotIn("require exactly", item)
         self.assertIn("`Suspended (blocked_on=<blocked_on>). Resume: <reentry>`", item)
         members = re.findall(r"<([a-z_]+)>", item)
         self.assertEqual(members, ["blocked_on", "reentry"])

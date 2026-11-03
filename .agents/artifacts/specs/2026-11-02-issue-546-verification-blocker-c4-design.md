@@ -197,11 +197,12 @@ It is a shared blocker only when:
   command's declared input (`command_input`).
 
 A product, test or build failure of the change never qualifies. For a qualifying failure it
-runs, in the foreground and before any worker release or reap:
+runs, before any release or reap (D19 drops "in the foreground" and the restated
+"worker", which sdd's run and release rules already state):
 
 ```text
 verification-observe failure --repo-root <ledger_repo_root> --input - <<'EOF'
-{"command_id": "<id>", "failure_class": "<class>", "worktree": "<absolute worktree>", "facts": [{"name": "<name>", "paths": ["<path>"]}]}
+{"command_id": "<id>", "failure_class": "<class>", "worktree": "<worktree>", "facts": [{"name": "<name>", "paths": ["<path>"]}]}
 EOF
 ```
 
@@ -239,11 +240,11 @@ In acquire-direct:
 - **`kind: observe`.** A `verification` requirement is answered by running its
   `expects.build`, with `<ledger_repo_root>` filled, on the requirement less `expects`,
   through a quoted heredoc. The printed observation is appended to `verification`. The
-  existing builder-refusal sentence (exit 2, empty stdout: fail loudly, report the stderr
-  line) is widened to name the adapter's refusal too. The retain-and-resend rule is unchanged, and so is the
+  builder-refusal sentence becomes "A refusal (exit 2, empty stdout) fails loudly; report its
+  stderr line verbatim", which covers the builder and the adapter alike (D19). The retain-and-resend rule is unchanged, and so is the
   resent observation's validity: a resolution commits only with the resume (issue 545 D7).
-- **Item 5, `kind: suspended`.** As item 4, it stops before Phase 1 and installs no waiter,
-  but prints `Suspended (blocked_on=<blocked_on>). Resume: <reentry>` as the final output;
+- **Item 5, `kind: suspended`.** It stops before Phase 1 and installs no waiter, without item
+  4's `kind: terminal` key check, and prints `Suspended (blocked_on=<blocked_on>). Resume: <reentry>` as the final output;
   the reply's key set is the wire validator's (D19). It sits after item 4 (`kind: terminal`).
 - **The clearing rule** clears on any reply but `observe` (D19).
 
@@ -276,7 +277,7 @@ was:
 
 - **What fits.** The procedure keeps one `suspend` template: from-issue adds the cause and
   lists `--verification-input -` in its lifecycle-call rule, and final-review's exit-0 route
-  names the flag. acquire-direct's item 5 stops as item 4 does and prints the canonical line;
+  names the flag. acquire-direct's item 5 prints the canonical line last and stops before Phase 1 with no waiter;
   the reply's key set is the wire validator's, which its invocation already pipes through.
 - **What pays for it.** Text that restates another home: the `--result-file` legacy note
   and the bare-or-full helper naming (from-issue's Lifecycle identity paragraph names the
@@ -442,4 +443,4 @@ persisted ledgers, and the argv of logged external effects, as the world already
 | D16 | Plan: the issue-227 growth pin (`assert_no_larger_than_base`, base `8d0bbc25`) drops `from-issue/SKILL.md` from both of its lists, because D5's second template and cause grow it about 414 bytes against 98 bytes of pinned headroom; every other pinned document keeps its pin. | Issue 227 D14 (the pin stood in for a raise that delivery could not get); #155 D10 (the ceilings are the standing growth gate, raised here under the user's label per D8); measured at the base: 30513 bytes against the pinned 30611. | Funding the growth by cutting unrelated `SKILL.md` text, which D8 rules out and many pins read. Moving the second template into `final-review.md`, which splits the `suspend` verb's one home (reverses D5). Re-pinning a byte count, a second home for one budget. |
 | D17 | Plan, refines D11: the two behavioural skill-contract pins run their source validators in a child with `PYTHONPATH=python/`: item 5's reply through the source `artifact-budget validate-report --boundary workflow-response` under a temporary `HOME` holding the source policy, the declaration through `verification_blocker.normalize_declaration`; each also shows a near miss refused. | `agent-installed-skill-tests` runs `test_workflow_skill_contracts.py` with no package on its path (issue 505 D8, its `skill_sections` helper); `test_workflow_state` and `_delivery_model_fixtures` import `agent_tools` when loaded. | An in-process import, which breaks that module's import in the installed tier. Reading `_wire.py`'s member set by AST, which pins a constant rather than the validator's verdict. |
 | D18 | Phase-5 review (Codex B1, S1): AC2 becomes `code (classified)` and is graded in the order its records exist. Its final-head clause rides the Declared verification line, which Final verification runs after the acceptance record's commit; its process clauses are cited from the SDD workspace `progress.md` (each task's `Task N: complete` and `Delivery gate:` lines, which `sdd-gate next` writes only after its projection exits 0) and the separately ledgered final verdicts, which the controller confirms before writing the `Verdict`. D5's step-4 block also names every repair case: no lifecycle identity, no failing command (a `record` exit 3 or helper exit 2 alone), a change-caused failure, or a refusal; it declares only when at least one command failed and all failing ones qualify. | final-review.md commits the acceptance record before Final verification, and an `evidence` `met` needs an existing measured row (conformance-reviewer-prompt.md, `evidence`); the `code` rule grades a Declared-verification check `in final verification`. D5's spec text excludes `record` exit 3 and helper exit 2 from classification, which the inserted block left implicit. | Keeping AC2 `evidence` with a fixer filling its row after a forced first-pass `unverified`, a fix wave by construction. Moving Final verification before the record, which changes sdd's procedure outside this child's scope. |
-| D19 | Owner decision (2026-11-03): no `instruction-budget-raise` label, so no ceiling moves; reverses D8 and D16, and narrows D5, D6 and D18. from-issue keeps one `suspend` template (the cause joins its list, the lifecycle-call rule lists `--verification-input -`) and final-review's exit-0 route feeds the printed failure to that flag. acquire-direct's item 5 stops as item 4 does and prints the canonical line, the key set left to the wire validator; its `verification` answer runs `expects.build` on the requirement less `expects`. final-review's step-4 block keeps D14's rule and ends "Otherwise" in place of D18's enumeration, which "Otherwise" covers. The growth is paid for by cutting text another home already states (spec § Instruction ceilings); `from-issue/SKILL.md` returns to the issue-227 pin. | The owner-decision comments on issue 546 and PR 562 (trim, move detail to the README homes, or drop prose that duplicates helper output; D8 withdrawn); CLAUDE.md (only the user applies the label); `just agent-instruction-budget` passes with no label. | Raising any ceiling, which the owner declined. Moving the declaration or cause list into the README, which owners never read (D8's rejection stands). Cutting unrelated procedure that has no other home. |
+| D19 | Owner decision (2026-11-03): no `instruction-budget-raise` label, so no ceiling moves; reverses D8 and D16, and narrows D5, D6 and D18. from-issue keeps one `suspend` template (the cause joins its list, the lifecycle-call rule lists `--verification-input -`) and final-review's exit-0 route feeds the printed failure to that flag. acquire-direct's item 5 prints the canonical line last and stops before Phase 1 with no waiter, the key set left to the wire validator (it names no item-4 key check); its `verification` answer runs `expects.build` on the requirement less `expects`. final-review's step-4 block keeps D14's rule and ends "Otherwise" in place of D18's enumeration, which "Otherwise" covers. The growth is paid for by cutting text another home already states (spec § Instruction ceilings); `from-issue/SKILL.md` returns to the issue-227 pin. | The owner-decision comments on issue 546 and PR 562 (trim, move detail to the README homes, or drop prose that duplicates helper output; D8 withdrawn); CLAUDE.md (only the user applies the label); `just agent-instruction-budget` passes with no label. | Raising any ceiling, which the owner declined. Moving the declaration or cause list into the README, which owners never read (D8's rejection stands). Cutting unrelated procedure that has no other home. |
