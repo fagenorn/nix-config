@@ -966,3 +966,147 @@ class AdditionalBoundaryTest(SourceProjectionFixture, unittest.TestCase):
             self.record('second', 1, 'future', horizon=1, covers=['first', 'second'])]
         self.emit(); self.commit('invalid horizon')
         self.assert_refused(self.project(0))
+
+
+class ForecastGeneratorTest(SourceProjectionFixture, unittest.TestCase):
+    """`review-feasibility forecast` from source (issue 559 AC1, D1-D5, D12, D13)."""
+    ROOT, SPEC = 'gen/plan.md', 'gen/spec.md'
+    MEMBERS = ('gen/plan.tasks/task-1.md', 'gen/plan.tasks/task-2.md')
+    ESTIMATE = {'tasks': [
+        {'files': [{'path': 'src/new.py', 'change': 'add', 'added_lines': 40},
+                   {'path': 'shared.txt', 'change': 'modify', 'added_lines': 3, 'deleted_lines': 1}]},
+        {'files': [{'path': 'src/new.py', 'change': 'modify', 'added_lines': 10, 'deleted_lines': 2},
+                   {'path': 'delete.txt', 'change': 'delete'}]}]}
+
+    def setUp(self):
+        super().setUp()
+        self.base = self.head
+        self.write(self.SPEC, '# Spec\n')
+        self.write(self.ROOT, '# Plan\n\n## Task index\n\n'
+                   'Task 1 — Add — src/new.py — full — [task-1.md](plan.tasks/task-1.md)\n'
+                   'Task 2 — Change — src/new.py — full — [task-2.md](plan.tasks/task-2.md)\n')
+        for number, member in enumerate(self.MEMBERS, 1):
+            self.write(member, f'# Task {number}\n\nBody.\n')
+        self.commit('plan')
+
+    def forecast(self, estimate=None):
+        return self.invoke('forecast', '--plan', str(self.repo / self.ROOT), '--base', self.base,
+                           '--spec', str(self.repo / self.SPEC), '--input', '-',
+                           input=json.dumps(estimate or self.ESTIMATE).encode())
+
+    def files(self):
+        return {path: (self.repo / path).read_bytes() for path in (self.ROOT, *self.MEMBERS)}
+
+    def block(self, path, heading):
+        text = (self.repo / path).read_text(encoding='utf-8')
+        return json.loads(text.split(heading + '\n\n```json\n', 1)[1].split('\n', 1)[0])
+
+    def assert_refused_naming(self, result, member, before, value=None):
+        self.assert_refused(result)
+        self.assertTrue(result.stderr.startswith(b'review-feasibility: '), result.stderr)
+        self.assertEqual(result.stderr.count(b'\n'), 1, result.stderr)
+        self.assertIn(member.encode(), result.stderr)
+        if value is not None:
+            self.assertNotIn(value.encode(), result.stderr)
+        self.assertEqual(self.files(), before)
+
+    def test_generated_blocks_pass_the_gate_and_a_rerun_writes_nothing(self):
+        first = self.forecast()
+        self.assertEqual((first.returncode, first.stderr), (0, b''))
+        self.assertEqual(json.loads(first.stdout), {'written': [self.ROOT, *self.MEMBERS]})
+        written = self.files()
+        again = self.forecast()
+        self.assertEqual((again.returncode, again.stdout), (0, b'{"written":[]}\n'))
+        self.assertEqual(self.files(), written)
+        self.commit('forecast')
+        gated = self.invoke('gate', '--plan', str(self.repo / self.ROOT), '--base', self.base,
+                            '--head', self.head, '--completed-through', '0')
+        self.assertEqual(gated.returncode, 0, gated.stderr)
+        self.assertEqual(json.loads(gated.stdout)['state'], 'complete')
+
+    def test_blocks_carry_the_estimate_rule_and_cover_each_process_file(self):
+        self.assertEqual(self.forecast().returncode, 0)
+        self.commit('forecast')
+        bound = lambda added, deleted, size, covers: [{'boundary': 'all', 'added_lines': added,
+            'deleted_lines': deleted, 'record_bytes': size,
+            'support': {'kind': 'authored-cumulative/v1', 'covers': covers}}]
+        self.assertEqual(self.block(self.MEMBERS[1], '## Review feasibility task')['task'], {
+            'id': 2, 'commit_subject_bytes': [64, 64, 64], 'actual_ranges': [], 'records': [
+                {'id': 'r2-1', 'owner': 2, 'path': 'src/new.py', 'change': 'modify', 'last_task': 2,
+                 'bounds': bound(50, 2, 2560 + 128 * 52, ['r1-1', 'r2-1'])},
+                {'id': 'r2-2', 'owner': 2, 'path': 'delete.txt', 'change': 'delete', 'last_task': 2,
+                 'bounds': bound(0, 1, 2560 + len('gone later\n') + 1, ['r2-2'])}]})
+        delivery = self.block(self.ROOT, '## Review feasibility delivery')
+        self.assertEqual((delivery['delivery_base'], delivery['proposed_boundary'], delivery['derived_from']),
+                         (self.base, 'all', None))
+        self.assertEqual(delivery['actual_evidence'], {'kind': 'git-range-ownership/v1', 'head': self.base,
+            'tree': self.git('rev-parse', self.base + '^{tree}'), 'process_ranges': []})
+        boundary, = delivery['boundaries']
+        self.assertEqual((boundary['tasks'], boundary['process_forecast_ids'],
+                          boundary['process_commit_subject_bytes']), ([1, 2], ['s', 'p', 't1', 't2'], [64] * 6))
+        self.assertEqual([r['path'] for r in delivery['process_records']], [self.SPEC, self.ROOT, *self.MEMBERS])
+        for record in delivery['process_records']:
+            raw = (self.repo / record['path']).read_bytes()
+            diff = subprocess.run(['git', '-C', str(self.repo), 'diff', '--binary', '-U10', self.base, 'HEAD',
+                                   '--', record['path']], env=self.env, check=True, capture_output=True).stdout
+            size, = record['bounds']
+            with self.subTest(path=record['path']):
+                self.assertEqual((record['change'], record['last_task']), ('add', 2))
+                self.assertGreaterEqual(size['record_bytes'], 2560 + len(raw) + raw.count(b'\n') + 4096 + 256 * 2)
+                self.assertGreaterEqual(size['record_bytes'], len(diff))
+                self.assertGreaterEqual(size['added_lines'], raw.count(b'\n') + (4096 + 256 * 2 + 63) // 64)
+
+    def test_estimate_refusals_name_the_failing_member_and_change_nothing(self):
+        add = lambda path, **extra: {'path': path, 'change': 'add', 'added_lines': 1, **extra}
+        modify = lambda path: {'path': path, 'change': 'modify', 'added_lines': 1, 'deleted_lines': 0}
+        two = lambda first, second=(): {'tasks': [{'files': list(first)}, {'files': list(second)}]}
+        cases = (
+            ({'tasks': [{'files': []}]}, 'tasks must be a list with one entry per task member', None),
+            (two([add('shared.txt')]), 'tasks[0].files[0].change', 'shared.txt'),
+            (two([], [modify('src/absent.py')]), 'tasks[1].files[0].change', 'src/absent.py'),
+            (two([add('src/new.py', extra=1)]), 'tasks[0].files[0] must have exactly the keys', 'extra'),
+            (two([{'path': 'a.py', 'change': 'rename'}]), 'tasks[0].files[0].change', 'rename'),
+            (two([modify(self.SPEC)]), 'tasks[0].files[0].path', self.SPEC),
+            (two([modify('all.tasks')]), 'tasks[0].files[0].path', 'all.tasks'),
+            (two([add('a.py'), add('a.py')]), 'tasks[0].files[1].path', 'a.py'),
+            (two([add('a.py', added_lines=-1)]), 'tasks[0].files[0].added_lines', None),
+            (two([add('../escape.py')]), 'tasks[0].files[0].path', 'escape'),
+        )
+        before = self.files()
+        for estimate, member, value in cases:
+            with self.subTest(member=member, estimate=estimate):
+                self.assert_refused_naming(self.forecast(estimate), member, before, value)
+
+    def test_file_refusals_name_the_file_and_change_nothing(self):
+        self.write(self.MEMBERS[0], '# Task 1\n\n## Review feasibility task\n\nx\n\n## Review feasibility task\n')
+        before = self.files()
+        self.assert_refused_naming(self.forecast(), self.MEMBERS[0], before)
+        self.write(self.MEMBERS[0], '# Task 1\n\nBody.\n')
+        self.assertEqual(self.forecast().returncode, 0)
+        canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+        for path, heading, mutate in (
+                (self.ROOT, '## Review feasibility delivery', lambda block: block['actual_evidence'].update(
+                    process_ranges=[{'base': self.base, 'head': self.head, 'boundaries': ['all']}])),
+                (self.MEMBERS[1], '## Review feasibility task', lambda block: block['task'].update(
+                    actual_ranges=[{'base': self.base, 'head': self.head}]))):
+            with self.subTest(path=path):
+                original = (self.repo / path).read_bytes()
+                block = self.block(path, heading)
+                old = canonical(block)
+                mutate(block)
+                self.write(path, original.replace(old.encode(), canonical(block).encode()))
+                before = self.files()
+                self.assert_refused_naming(self.forecast(), path, before)
+                self.write(path, original)
+        root = (self.repo / self.ROOT).read_bytes()
+        self.write(self.ROOT, root.replace('Task 2 — Change'.encode(), b'Task 2 Change', 1))
+        before = self.files()
+        self.assert_refused_naming(self.forecast(), 'budget check failed: artifact-budget: invalid input: '
+                                   'invalid task index row', before)
+
+    def test_help_prints_the_estimate_shape_and_the_sizing_rule(self):
+        shown = self.invoke('forecast', '--help')
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        for token in (b'"change":"modify"', b'"deleted_lines"', b'2560', b'128', b'4096', b'256', b'64'):
+            with self.subTest(token=token):
+                self.assertIn(token, shown.stdout)
