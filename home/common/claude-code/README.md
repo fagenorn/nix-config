@@ -88,7 +88,7 @@ The meter grants nothing. It prints no permission decision and never exits 2, so
 
 ## Guard/core decision
 
-The [guard/core decision](../../../.agents/artifacts/specs/2026-09-20-issue-116-permission-guard-core-design.md) preserves the required-check floor for both merge arms and records the current protection exceptions as gaps (the permanent-head deletion check is closed by the D5 repair above). Core grants cannot override the final guard, host or provider verdict; future core admission waits for the named enforcement and conformance work. The plan-gated floor (issue 552) is a native-guard exception of the kind issue 116 D6 lists as a gap, accepted by the owner for a repository whose forge cannot protect its default branch; it is not core-admission evidence.
+The [guard/core decision](../../../.agents/artifacts/specs/2026-09-20-issue-116-permission-guard-core-design.md) preserves the required-check floor for both merge arms and records the current protection exceptions as gaps (the permanent-head deletion check is closed by the D5 repair above). Core grants cannot override the final guard, host or provider verdict; the release core's forge `pr_merge` invoke is admitted under issue 554: the adapter refuses it unless protection holds strict required checks with admin enforcement, and `.agents/artifacts/evidence/release-554-native-certification.json` is its native certification. Any other core admission still waits for the named enforcement and conformance work. The plan-gated floor (issue 552) is a native-guard exception of the kind issue 116 D6 lists as a gap, accepted by the owner for a repository whose forge cannot protect its default branch; it is not core-admission evidence.
 
 ## Plugins
 

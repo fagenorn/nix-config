@@ -146,10 +146,19 @@ class ShipReleaseContractsTest(unittest.TestCase):
             self.assertNotIn(gone, self.changelog)
 
     def test_skill_names_no_legacy_state(self):
+        # issue 554 D18: the release PR call is reinstated, so "gh pr create" leaves the list.
         for gone in (".superpowers/workflows", "state.json", "headSha", "mergeSha", "prUrl",
-                     "releaseUrl", "deployState", "gh pr create", "gh pr merge",
+                     "releaseUrl", "deployState", "gh pr merge",
                      "gh release create", "git tag -a", "--auto"):
             self.assertNotIn(gone, self.skill)
+
+    def test_a_missing_release_pr_is_opened_with_the_guard_form(self):
+        """Issue 554 D1, D9: Phase 3 opens the release PR once, in the guard's pr-create form."""
+        phase3 = self.skill.split("## Phase 3", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("`release_pr_missing`", phase3)
+        self.assertIn('`gh pr create --repo <slug> --base <default> --head <integration> '
+                      '--title "<title>" --body "<version>"`', phase3)
+        self.assertIn("bindings.tracker.repo_slug", phase3)
 
     def test_release_examples_parse_and_cover_every_subcommand(self):
         from agent_tools import release

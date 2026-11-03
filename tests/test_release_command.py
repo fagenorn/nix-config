@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from . import forge_world
+from . import release_test_support as support
 from .actions_world import CONFIG, MERGE, OLDER, ActionsWorld, run
 from .forge_world import CANONICAL, ROWS, ForgeWorld
 
@@ -154,21 +156,21 @@ class AdapterInspectTest(ReleaseCommandCase):
         world = ForgeWorld(self)
         world.respond_json("gh", ROWS["pr_merge.view"]["argv"][1:], {
             "state": "OPEN", "baseRefName": CANONICAL["branch"], "headRefName": "topic",
-            "headRefOid": CANONICAL["head"], "mergeCommit": None,
+            "headRefOid": CANONICAL["commit"], "mergeCommit": None,
             "url": "https://github.com/fagenorn/nix-config/pull/336", "statusCheckRollup": []})
         world.respond_json("gh", ROWS["pr_merge.base_ref"]["argv"][1:],
                            {"object": {"sha": CANONICAL["base_tip"]}})
-        world.respond_json("gh", ROWS["pr_merge.protection"]["argv"][1:], {
-            "required_status_checks": {"contexts": ["Nix Eval"]}, "enforce_admins": {"enabled": True}})
+        world.respond_json("gh", ROWS["pr_merge.protection"]["argv"][1:], forge_world.FLOOR_PROTECTION)
         parameters = {"target": {"kind": "github_repository", "repository": CANONICAL["slug"],
                                  "branch": CANONICAL["branch"]},
-                      "pr": CANONICAL["pr"], "expected_base_tip": CANONICAL["base_tip"],
-                      "expected_head": CANONICAL["head"]}
+                      "candidate": {"version": CANONICAL["tag"], "commit": CANONICAL["commit"],
+                                    "merge": {"pr": CANONICAL["pr"], "base_tip": CANONICAL["base_tip"]}}}
         code, observation, err = self.adapter("github-forge", "pr_merge", "--parameters",
                                               json.dumps(parameters), env=world.env())
         self.assertEqual(code, 0, err)
         self.assertEqual(observation["outcome"], "absent")
         self.assertEqual(observation["facts"]["protection"]["status"], "protected")
+        self.assertIs(observation["facts"]["protection"]["strict"], True)
         self.assertTrue(world.calls())
         self.assertFalse(any(call["token_visible"] for call in world.calls()))
 
@@ -415,6 +417,35 @@ class HostLocalInspectTest(ReleaseCommandCase):
         self.assertEqual(report["bindings"]["adapters"]["bundle"]["adapter"], "codesigned-artifact")
         self.assertEqual(report["conformance"]["adapters"]["launchd"]["modes"],
                          {"activate": "supported"})
+
+
+class TwoBranchCommandTest(ReleaseCommandCase):
+    """Issue 554 row 11: the command prints the merge observation's refusal in its document."""
+
+    def setUp(self):
+        super().setUp()
+        contract = self.contract()
+        contract["bindings"]["vcs"]["integration_branch"] = "dev"
+        contract["release"]["profiles"] = {"github-release": support.merge_profile()}
+        self.write_contract(contract)
+        self.world = ForgeWorld(self)
+        self.world.verification_ready(integration="dev")
+        notes = tempfile.TemporaryDirectory()
+        self.addCleanup(notes.cleanup)
+        self.notes = Path(notes.name) / "notes.md"
+        self.notes.write_text("notes body\n", encoding="utf-8")
+
+    def test_preview_refuses_a_missing_release_pr(self):
+        self.world.merge_observation_ready(prs=[])
+        code, document, err = self.run_release(
+            "transaction", "preview", "--commit", CANONICAL["commit"], "--version", CANONICAL["tag"],
+            "--title", CANONICAL["title"], "--notes-file", str(self.notes))
+        self.assertEqual((code, document["runnable"], document["refusal"]["code"]),
+                         (3, False, "release_pr_missing"), err)
+        self.assertEqual([c["action"] for c in document["confirmations"]], ["merge", "tag", "github-release"])
+        self.assertIsNone(document["verification"])
+        self.assertFalse((self.root / ".git/agent-release").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

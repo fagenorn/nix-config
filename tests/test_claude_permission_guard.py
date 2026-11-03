@@ -1720,15 +1720,42 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         return repo
 
     def test_every_adapter_spelling_is_an_allowed_row(self):
-        """AC4, D12: one fixture drives the adapter suite and this table."""
+        """AC4, D12: one fixture drives the adapter suite and this table. Issue 554 D5: the
+        merge row is admitted only as the release arm's integration-into-default merge."""
+        commit = self.SPELLINGS["canonical"]["commit"]
         for name, slug, authorized, env in self.REPOSITORY_CLASSES:
             repo = self.tagged_repo(slug)
+            env = {**env, "FAKE_PR_JSON": json.dumps({
+                **self.RELEASE_PR, "headRefOid": commit,
+                "url": f"https://github.com/{slug}/pull/336"})}
             for row in self.SPELLINGS["rows"]:
                 raw = row["raw"].replace(self.CANONICAL_SLUG, slug)
                 with self.subTest(repository=name, row=row["id"]):
                     result = self.run_guard(raw, cwd=repo, env=env)
-                    expect_allowed = authorized or row["kind"] == "read"
+                    if row["id"] == "pr_merge.merge":
+                        expect_allowed = name == "distinct-integration"
+                    else:
+                        expect_allowed = authorized or row["kind"] == "read"
                     self.assertEqual(0 if expect_allowed else 2, result.returncode, result.stderr)
+
+    def test_the_adapter_merge_spelling_refuses_its_near_misses(self):
+        """Issue 554 D5: only the exact rendered spelling passes the release arm."""
+        commit = self.SPELLINGS["canonical"]["commit"]
+        row = next(r for r in self.SPELLINGS["rows"] if r["id"] == "pr_merge.merge")
+        good = row["raw"].replace(self.CANONICAL_SLUG, NODO)
+        repo = self.tagged_repo(NODO)
+        env = {"FAKE_PR_JSON": json.dumps({**self.RELEASE_PR, "headRefOid": commit,
+                                           "url": f"https://github.com/{NODO}/pull/336"})}
+        self.assertEqual(0, self.run_guard(good, cwd=repo, env=env).returncode)
+        for label, command in (
+                ("admin", good + " --admin"), ("auto", good.replace(" --merge", " --auto --merge")),
+                ("squash", good.replace("--merge", "--squash")), ("rebase", good.replace("--merge", "--rebase")),
+                ("delete-branch", good + " --delete-branch"),
+                ("reordered", f"gh pr merge 336 --merge --repo {NODO} --match-head-commit {commit}"),
+                ("short sha", good.replace(commit, commit[:7])),
+                ("no repo", good.replace(f" --repo {NODO}", "")), ("trailing", good + " extra")):
+            with self.subTest(label):
+                self.assertEqual(2, self.run_guard(command, cwd=repo, env=env).returncode)
 
     # Remote branch deletion (issue 458): the push verb's third form.
 
