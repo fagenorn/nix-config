@@ -85,7 +85,9 @@ Append `## Task 2 — Switch and installed/source conformance` to `E`. List the 
 Run:
 
 ```bash
+set -e
 E=.agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md
+test "$(wc -c < "$E")" -le 18432
 test "$(grep -c '^## Task 2 — Switch and installed/source conformance$' "$E")" -eq 1
 grep -Eq '^Switch commit: [0-9a-f]{40}$' "$E"
 grep -Eq '^Guard wrapper: /nix/store/[^ ]+/bin/claude-bash-lifecycle-guard$' "$E"
@@ -102,5 +104,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":2,"records":[{"bounds":[{"added_lines":205,"boundary":"all","deleted_lines":0,"record_bytes":24576,"support":{"covers":["e1","e2"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e2","last_task":8,"owner":2,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":2,"records":[{"bounds":[{"added_lines":460,"boundary":"all","deleted_lines":0,"record_bytes":19456,"support":{"covers":["e1","e2"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e2","last_task":8,"owner":2,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
 ```

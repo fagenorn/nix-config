@@ -81,7 +81,9 @@ Create `E` with the opening lines from Interfaces, then `## Task 1 — Fresh bas
 Run:
 
 ```bash
+set -e
 E=.agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md
+test "$(wc -c < "$E")" -le 14336
 test "$(grep -c '^## Task 1 — Fresh baseline$' "$E")" -eq 1
 for h in 'Workflow outcomes' 'Argus PRs since 2026-08-01' 'CI duration and bound' 'Daemon-to-child handoff' 'Host'; do grep -q "^### $h\$" "$E" || exit 1; done
 grep -q '^Bound: last ten completed non-cancelled runs' "$E"
@@ -102,5 +104,5 @@ Verify: `git status --short -- .agents/artifacts/plans` prints nothing.
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":1,"records":[{"bounds":[{"added_lines":160,"boundary":"all","deleted_lines":0,"record_bytes":18432,"support":{"covers":["e1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"e1","last_task":8,"owner":1,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":1,"records":[{"bounds":[{"added_lines":358,"boundary":"all","deleted_lines":0,"record_bytes":15360,"support":{"covers":["e1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"e1","last_task":8,"owner":1,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
 ```

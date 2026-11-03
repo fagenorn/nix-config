@@ -82,7 +82,9 @@ Append `## Task 6 — Merge, doctor report 2, verify and conformance` with the f
 Run:
 
 ```bash
+set -e
 E=.agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md
+test "$(wc -c < "$E")" -le 49152
 test "$(grep -c '^## Task 6 — Merge, doctor report 2, verify and conformance$' "$E")" -eq 1
 for k in 'Merge commit' 'Doctor 2 passed' 'Verify adopted' 'Conformance held'; do grep -Eq "^$k: [0-9a-zA-Z:-]+\$" "$E" || exit 1; done
 ```
@@ -97,5 +99,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":6,"records":[{"bounds":[{"added_lines":455,"boundary":"all","deleted_lines":0,"record_bytes":64512,"support":{"covers":["e1","e2","e3","e4","e5","e6"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e6","last_task":8,"owner":6,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":6,"records":[{"bounds":[{"added_lines":1228,"boundary":"all","deleted_lines":0,"record_bytes":51200,"support":{"covers":["e1","e2","e3","e4","e5","e6"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e6","last_task":8,"owner":6,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
 ```

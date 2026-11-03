@@ -149,7 +149,9 @@ Append `## Task 3 — Contract commit and doctor report 1` to `E` with the lines
 Run:
 
 ```bash
+set -e
 E=.agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md
+test "$(wc -c < "$E")" -le 30720
 test "$(grep -c '^## Task 3 — Contract commit and doctor report 1$' "$E")" -eq 1
 grep -Eq '^Contract commit: [0-9a-f]{40}$' "$E"
 test "$(git -C "$SCR/argus-129" rev-parse HEAD)" = "$(sed -n 's/^Contract commit: //p' "$E")"
@@ -166,5 +168,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64,64],"id":3,"records":[{"bounds":[{"added_lines":275,"boundary":"all","deleted_lines":0,"record_bytes":40960,"support":{"covers":["e1","e2","e3"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e3","last_task":8,"owner":3,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":3,"records":[{"bounds":[{"added_lines":768,"boundary":"all","deleted_lines":0,"record_bytes":31744,"support":{"covers":["e1","e2","e3"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e3","last_task":8,"owner":3,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
 ```

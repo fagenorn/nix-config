@@ -69,7 +69,9 @@ Resume: the run continues at Task 6, which confirms the merge before anything el
 Run:
 
 ```bash
+set -e
 E=.agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md
+test "$(wc -c < "$E")" -le 44032
 test "$(grep -c '^## Task 5 — Pre-registration probes and owner gate$' "$E")" -eq 1
 grep -Eq '^Owner gate: open and merge adopt-[0-9a-f]{12} at head [0-9a-f]{40}$' "$E"
 test "$(sed -n 's/^Owner gate: open and merge adopt-[0-9a-f]* at head //p' "$E")" = "$(sed -n 's/^Adoption commit: //p' "$E")"
@@ -87,5 +89,5 @@ Report `DONE`, with the line `human_gate: owner open-and-merge (E § Task 5, Own
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":5,"records":[{"bounds":[{"added_lines":395,"boundary":"all","deleted_lines":0,"record_bytes":57344,"support":{"covers":["e1","e2","e3","e4","e5"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e5","last_task":8,"owner":5,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":5,"records":[{"bounds":[{"added_lines":1100,"boundary":"all","deleted_lines":0,"record_bytes":46080,"support":{"covers":["e1","e2","e3","e4","e5"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e5","last_task":8,"owner":5,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
 ```

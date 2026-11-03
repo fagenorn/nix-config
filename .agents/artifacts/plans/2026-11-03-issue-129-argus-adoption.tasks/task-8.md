@@ -81,8 +81,11 @@ Read them with `env -u GITHUB_TOKEN -u GH_TOKEN gh issue view 129 --repo fagenor
 Run:
 
 ```bash
+set -e
 E=.agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md
 A=.agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.acceptance.md
+test "$(wc -c < "$E")" -le 57344
+test "$(wc -c < "$A")" -le 12288
 test "$(grep -c '^## Task [1-8] — ' "$E")" -ge 8
 test "$(grep -Ec '^\| AC[1-9] \|' "$A")" -eq 9
 if grep -Eq '^\| AC[1-9] \|.*\| *\|$' "$A"; then exit 1; fi
@@ -99,5 +102,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":8,"records":[{"bounds":[{"added_lines":560,"boundary":"all","deleted_lines":0,"record_bytes":77824,"support":{"covers":["e1","e2","e3","e4","e5","e6","e7","e8"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e8","last_task":8,"owner":8,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"},{"bounds":[{"added_lines":30,"boundary":"all","deleted_lines":0,"record_bytes":12288,"support":{"covers":["a8"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"a8","last_task":8,"owner":8,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.acceptance.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":8,"records":[{"bounds":[{"added_lines":1433,"boundary":"all","deleted_lines":0,"record_bytes":59392,"support":{"covers":["e1","e2","e3","e4","e5","e6","e7","e8"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e8","last_task":8,"owner":8,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"},{"bounds":[{"added_lines":300,"boundary":"all","deleted_lines":0,"record_bytes":13312,"support":{"covers":["a8"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"a8","last_task":8,"owner":8,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.acceptance.md"}]}}
 ```

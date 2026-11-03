@@ -65,7 +65,9 @@ Append `## Task 7 — Registration and derived row` with the `Registered:` and `
 Run:
 
 ```bash
+set -e
 E=.agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md
+test "$(wc -c < "$E")" -le 53248
 test "$(grep -c '^## Task 7 — Registration and derived row$' "$E")" -eq 1
 grep -qx 'Row: main main \["memory foundation (unit + forced checks)"\]' "$E"
 python3 -I - "$E" <<'EOF'
@@ -88,5 +90,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":7,"records":[{"bounds":[{"added_lines":500,"boundary":"all","deleted_lines":0,"record_bytes":70656,"support":{"covers":["e1","e2","e3","e4","e5","e6","e7"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e7","last_task":8,"owner":7,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":7,"records":[{"bounds":[{"added_lines":1331,"boundary":"all","deleted_lines":0,"record_bytes":55296,"support":{"covers":["e1","e2","e3","e4","e5","e6","e7"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e7","last_task":8,"owner":7,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
 ```
