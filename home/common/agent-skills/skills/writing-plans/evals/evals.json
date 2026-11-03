@@ -54,10 +54,10 @@
     },
     {
       "id": 3,
-      "name": "estimate-review-growth-and-delivery-boundaries",
+      "name": "plan-without-forecasting-or-running-the-change",
       "mode": "plan-only",
-      "prompt": "Plan a six-task change that is likely to touch many policy files and could exceed the cumulative review-package budget late in execution. Plan-only: show the compact plan-header section that addresses delivery size and explain how you would split it.",
-      "expected_output": "The plan header gives an explicitly labeled estimate of expected changed files and aggregate-growth risks, then names independently testable and reviewable delivery slices where needed. It does not promise byte-accurate final size for unwritten code, raise the package caps, or defer all size discovery until final review. Each boundary leaves working behavior that can be tested and delivered independently."
+      "prompt": "Plan a six-task change that is likely to touch many policy files and grow into a large review. Plan-only: say what you will measure, build or run while writing the plan, and what the plan header says about delivery size.",
+      "expected_output": "The planner does not forecast review size: no review-feasibility forecast or projection gate, no forecast blocks, no delivery-estimate header and no projection in the producer report. It does not build, prototype or run the change while planning; the only run is confirming each task's failing test. It still measures the plan package with artifact-budget check and splits the work into independently testable tasks, leaving review size to review time."
     },
     {
       "id": 4,
