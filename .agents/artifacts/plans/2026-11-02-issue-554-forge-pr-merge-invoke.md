@@ -27,20 +27,14 @@ Spec: `.agents/artifacts/specs/2026-11-02-issue-554-forge-pr-merge-invoke-design
 
 ## Test seams
 
-The spec's § Test seams; a task needing another seam is a plan bug.
-
-1. The forge adapter in process against `ForgeWorld`'s fake `gh`, `git` and guard.
-2. The driver library with registry injection over the real `TransactionStore` (128 D20); `StatefulForge` lands accepted invokes.
-3. The `release` command from source, for the preview refusals.
-4. The guard's public CLI seam over the shared spelling fixture (124 D12, D22).
-5. The certification harness against the live sandbox, plus one evidence test.
+The spec's § Test seams, unchanged; a task needing another seam is a plan bug.
 
 ## Delivery estimate and boundaries
 
 Rationale only; the numbers are in the forecast blocks.
 
-- `all` (Tasks 1–7) is the one boundary and review package. Tasks 1–3 stand alone (binding and adapter), and Tasks 4–7 add the driver path, the skill and the evidence. If ship's `diff-scope` reports the branch over the review limit, split after Task 3.
-- Bounds are padded: `python/README.md` carries about 20 KB of context per edited region, and code and test records allow one fix round.
+- `all` (Tasks 1–7) is the one boundary and review package. If ship's `diff-scope` reports the branch over the review limit, split after Task 3 (binding and adapter).
+- Bounds are padded (README context per edited region; one fix round per record).
 - Task 7 is last: it alone has external effects, so its human gate blocks nothing else.
 
 ## Task index
@@ -105,18 +99,14 @@ The issue's criteria are untagged and are classified here.
 | D1, D9, D18 (skill opens the PR; budget; contract test) | 6 |
 | D10, D11, D19, D20 (harness, sandbox, evidence, refusal classes) | 7 |
 
-Planning appended D15–D19, and the standards review D20–D21.
+Planning appended D15–D19, the standards review D20–D21, and attempt 2 D22.
 
 ## Standards review provenance
 
 Reviewer Codex (gpt-6-astra, xhigh), isolated read-only, no focus; base `e692c9685c3e4b08f55c327c5f2b8c699fc95bc4`. 6 accepted (4 blocking, 2 should-fix), 0 rejected, 0 deferred, no fallback.
 
-- PR554-01 (blocking): `StatefulForge` no longer calls `merge_ready()`; two-branch tests register it (Task 5).
-- PR554-02 (blocking): the crash resume re-confirms `merge` and inspects before any invoke (Task 5, D21).
-- PR554-03 (blocking): certification rows pass only on a classified merge-condition refusal (Task 7, D20).
-- PR554-04 (blocking): Task 2 and Task 5 commit subjects fit 64 bytes.
-- PR554-05 (should fix): Task 2's obsolete-name grep spares the old-shape rejection test.
-- PR554-06 (should fix): Task 2 updates the README's mutation-spelling count; Task 4 the `VerificationRefused` codes.
+- Blocking: PR554-01 `StatefulForge` skips `merge_ready()`, two-branch tests register it (T5); PR554-02 crash resume re-confirms `merge`, inspects first (T5, D21); PR554-03 certification passes only on a classified merge-condition refusal (T7, D20); PR554-04 T2 and T5 subjects fit 64 bytes.
+- Should fix: PR554-05 T2's obsolete-name grep spares the old-shape test; PR554-06 README spelling count (T2), `VerificationRefused` codes (T4).
 
 ---
 
