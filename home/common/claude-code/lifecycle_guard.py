@@ -187,6 +187,8 @@ FORM_TABLE = {
         "forms": (
             ("pr-create", 'gh pr create --repo <slug> --base <base> --head <branch> '
                           '--title "<title>" --body "<body>"', None),
+            ("pr-create-file", 'gh pr create --repo <slug> --base <base> --head <branch> '
+                               '--title "<title>" --body-file <path>', None),
         ),
         "whole_text_characters": False,
         "exact_spelling": False,
@@ -2232,6 +2234,45 @@ def validate_push(text, context, compiled):
     return 0
 
 
+def worktree_root(git_bin, cwd, timeout):
+    """The real path of cwd's working-tree top, or None when it cannot be read."""
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    try:
+        child = subprocess.run(
+            [git_bin, "-C", cwd, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    top = child.stdout.strip()
+    if child.returncode != 0 or not top:
+        return None
+    return os.path.realpath(top)
+
+
+def body_file_problem(path, context):
+    """Why a PR `--body-file` path fails (issue 386), or None: it is an absolute path
+    with no whitespace, shell-active character or `..` component, and it resolves
+    outside the working tree (a missing tree fails closed)."""
+    if (
+        not os.path.isabs(path)
+        or any(c in UNSAFE_BRANCH_CHARS or c.isspace() for c in path)
+        or ".." in path.split("/")
+    ):
+        return (f"--body-file {shown_value(path)} is not an absolute path without "
+                "whitespace, shell-active characters or `..`")
+    root = worktree_root(context.git_bin, context.cwd, context.timeout)
+    if root is None:
+        return "cannot resolve the working tree to check --body-file against"
+    # Case-folded: a case-insensitive volume must not let a respelled path escape.
+    real = os.path.realpath(path).casefold()
+    root = root.casefold()
+    if real == root or real.startswith(root.rstrip("/") + "/"):
+        return f"--body-file {shown_value(path)} is inside the working tree"
+    return None
+
+
 def validate_pr_create(text, context, compiled):
     problem = ownership_problem(context)
     if problem is not None:
@@ -2244,7 +2285,7 @@ def validate_pr_create(text, context, compiled):
     base = match.values["base"]
     head = match.values["branch"]
     title = match.values["title"]
-    body = match.values["body"]
+    body = match.values.get("body")
     if repository_argument != context.repository:
         return refuse(
             "pr-create",
@@ -2257,7 +2298,10 @@ def validate_pr_create(text, context, compiled):
         return refuse("pr-create", f"head {reason}")
     if reason is not None:
         return refuse("pr-create", f"head {reason}", accepted_forms(compiled, context))
-    for name, value, allow_newlines in (("title", title, False), ("body", body, True)):
+    texts = (("title", title, False), ("body", body, True))
+    for name, value, allow_newlines in texts:
+        if value is None:
+            continue
         text_problem = free_text_problem(value, allow_newlines)
         if text_problem is not None:
             return refuse("pr-create", f"{name} {text_problem}",
@@ -2267,6 +2311,10 @@ def validate_pr_create(text, context, compiled):
     allowed_bases = authorized_bases(
         context.repository, context.base_branch, context.integration_bases
     )
+    if match.form.id == "pr-create-file":
+        path_problem = body_file_problem(match.values["path"], context)
+        if path_problem is not None:
+            return refuse("pr-create", path_problem, accepted_forms(compiled, context))
     if base not in allowed_bases:
         return refuse(
             "pr-create",
