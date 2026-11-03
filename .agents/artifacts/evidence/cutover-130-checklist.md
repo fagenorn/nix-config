@@ -50,6 +50,90 @@ C1.d cat .agents/state/fleet/registry.json
 
 Item verdict: **human-pending**
 
+### C2 — Registered, compatible and adoption current
+
+> every fleet project … is registered and compatible (issue 130); per-project adoption evidence current (#71)
+
+```text
+C2.a resolve-project platform-status --fleet
+C2.b conformance run --purpose fleet --repo-root R
+C2.c adopt-project verify --repo-root R
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| mbp | host | system-309 | C2.a | 2026-11-03T16:07:05Z | 0 | platform 1.0.0; 5/5 fleet rows compatible; interval >=1.0.0 <2.0.0; every root has a row | green |
+| eleven-m5 | host | system-28 | C2.a | 2026-11-03T16:07:06Z | 0 | platform 1.0.0; 1/1 fleet rows compatible; interval >=1.0.0 <2.0.0; every root has a row | green |
+| anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+| mbp | /Users/anis/Projects/arcwave | 1f4ab4731c8b dev 0 dirty | C2.b; C2.c | 2026-11-03T16:07:22Z | 0; 0 | fleet passed; verify adopted, blockers 0 | green |
+| mbp | /Users/anis/Projects/argus | 21338cae51ea main 1 dirty | C2.b; C2.c | 2026-11-03T16:07:45Z | 0; 0 | fleet passed; verify adopted, blockers 0 | green |
+| mbp | /Users/anis/tmp/nix-config | f6a48dcf66fb main 0 dirty | C2.b; C2.c | 2026-11-03T16:07:49Z | 0; 0 | fleet passed; verify not_conformant: adoption-evidence-record, adoption-commit-derived, path-migration-map | red |
+| mbp | /Users/anis/Projects/jarbird | dd3964e3b2a7 dev 8 dirty | C2.b; C2.c | 2026-11-03T16:07:54Z | 0; 0 | fleet passed; verify adopted, blockers 0 | green |
+| mbp | /Users/anis/Projects/nodocom | ef9eb5e8d25e dev 0 dirty | C2.b; C2.c | 2026-11-03T16:08:00Z | 0; 0 | fleet failed repository.ignore.runtime_sentinel (overbroad_ignore), repair lifecycle.ignore.repair; verify adopted | red |
+| eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C2.b; C2.c | 2026-11-03T16:08:05Z | 0; 0 | fleet passed; verify adopted, blockers 0 | green |
+
+Registration is the C2.a fleet row: `verify` reports `registered` false unless it registered, and no `--register` ran. Planning's nix-config finding (D16, `adoption-evidence-record`) now reads three failed ids; Nodo's fleet failure is as planned.
+
+Item verdict: **red**
+
+### C8 — Codex ship handoff installed
+
+> the Codex ship handoff is in place so that removing the fallback ladders does not strand a Codex session at the shipping step (issue 130)
+
+```text
+C8.a ls -lL .agents/skills/ship-issue/HUMAN-GATE.md
+C8.b grep -n HUMAN-GATE.md .agents/skills/ship-issue/SKILL.md
+C8.c git log -1 --format=%H -- home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| mbp | host | system-309 | C8.a; C8.b | 2026-11-03T16:08:27Z | 0; 0 | regular file ~/.agents/skills/ship-issue/HUMAN-GATE.md; 4 SKILL.md lines (25, 47, 122, 227) | green |
+| eleven-m5 | host | system-28 | C8.a; C8.b | 2026-11-03T16:08:27Z | 0; 0 | regular file 4782 B; 4 SKILL.md lines (25, 47, 122, 226) | green |
+| anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+| mbp | home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md | 075934a7152d | C8.c | 2026-11-03T16:08:28Z | 0 | 3fe58ec0f191 (latest; added 5825027f0202 by PR 141, issue 119) | green |
+
+Item verdict: **human-pending**
+
+### C9 — Host routes answer as declared
+
+> Claude and Codex paths complete against declared host capabilities, including bounded capacity admission (issue 130 refresh)
+
+```text
+C9.a workflow-state host-route --route claude-code
+C9.b workflow-state host-route --route codex
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| mbp | host | system-309 | C9.a; C9.b | 2026-11-03T16:08:29Z | 0; 0 | claude-code supported 7; codex unsupported declared_unsupported, alternative /from-issue <issue> --auto; admission passed on 5/5 roots | green |
+| eleven-m5 | host | system-28 | C9.a; C9.b | 2026-11-03T16:08:29Z | 0; 0 | claude-code supported 7; codex unsupported declared_unsupported, alternative /from-issue <issue> --auto; admission passed on 1/1 roots | green |
+| anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+
+Codex `unsupported` is the declared answer, not a red (D10). Admission is each C10 row's `host.admission.declaration`.
+
+Item verdict: **human-pending**
+
+### C10 — Doctor clean on every adopted host
+
+> `doctor` is clean on every adopted host (issue 130)
+
+```text
+C10.a conformance run --purpose doctor --repo-root R
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| mbp | /Users/anis/Projects/arcwave | 1f4ab4731c8b dev 0 dirty | C10.a | 2026-11-03T16:07:22Z | 0 | doctor passed; no warning checks; 0 suppressed or not_run; admission passed | green |
+| mbp | /Users/anis/Projects/argus | 21338cae51ea main 1 dirty | C10.a | 2026-11-03T16:07:45Z | 0 | doctor passed; no warning checks; 0 suppressed or not_run; admission passed | green |
+| mbp | /Users/anis/tmp/nix-config | f6a48dcf66fb main 0 dirty | C10.a | 2026-11-03T16:07:49Z | 0 | doctor passed; no warning checks; 0 suppressed or not_run; admission passed | green |
+| mbp | /Users/anis/Projects/jarbird | dd3964e3b2a7 dev 8 dirty | C10.a | 2026-11-03T16:07:54Z | 0 | doctor passed; no warning checks; 0 suppressed or not_run; admission passed | green |
+| mbp | /Users/anis/Projects/nodocom | ef9eb5e8d25e dev 0 dirty | C10.a | 2026-11-03T16:08:00Z | 0 | doctor failed repository.ignore.runtime_sentinel; repair lifecycle.ignore.repair; 0 suppressed or not_run; admission passed | red |
+| eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C10.a | 2026-11-03T16:08:05Z | 0 | doctor passed; no warning checks; 0 suppressed or not_run; admission passed | green |
+| anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+
+Item verdict: **red**
+
 ### C12 — Bridge generation identified per host
 
 > The bridge generation is retained until the strict predicates are verified green on the fleet, and rollback reactivates it. (issue 130)
