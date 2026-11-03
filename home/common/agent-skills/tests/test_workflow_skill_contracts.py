@@ -3241,9 +3241,6 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
         self.assertNotIn("launch-scope", text[start:text.index("**Writing workers.**", start)])
 
 
-LANE_TRIAGE_VERDICT_KEYS = {"hits", "lane", "mode"}  # closed by tests/test_lane_triage.py
-
-
 def module_constants(path, *names):
     """The literal module-level assignments `names` in `path`, read without importing it."""
     found = {}
@@ -3283,26 +3280,28 @@ class OrchestratedReentryContractsTest(unittest.TestCase):
                 self.assertIn(f"`{marker}`", text)
 
 
-class LaneTriageRecordKeysTest(unittest.TestCase):
-    """#279 (D16): Phase 0 names the JSON keys `lane-triage evaluate` reads and prints."""
+class DirectLaneRoutingTest(unittest.TestCase):
+    """#572: eligible issues route to deliver-direct, which spells the guard-accepted forms."""
 
-    def setUp(self):
+    DELIVER_DIRECT = REPO_ROOT / "home/common/agent-skills/skills/deliver-direct/SKILL.md"
+
+    def test_phase_zero_and_orchestrate_route_to_deliver_direct(self):
         text = normalized(FROM_ISSUE.read_text(encoding="utf-8"))
         start = text.index("## Phase 0 — Investigate")
-        phase_zero = text[start:text.index("## Phase 1 — Worktree", start)]
-        spans = " ".join(re.findall(r"`([^`]+)`", phase_zero))
-        self.span_words = set(re.findall(r"[a-z_]+", spans))
+        self.assertIn("`deliver-direct`", text[start:text.index("## Phase 1 — Worktree", start)])
+        self.assertIn("`deliver-direct`", normalized(ORCHESTRATE.read_text(encoding="utf-8")))
 
-    def test_phase_zero_names_the_triage_record_keys_lane_triage_consumes(self):
-        lane = module_constants(REPO_ROOT / "python/agent_tools/lane_triage.py",
-                                "SIGNALS", "SIGNAL_MEMBERS", "TOP_MEMBERS")
-        expected = set().union(*lane.values())
-        self.assertEqual(expected - self.span_words, set())
-
-    def test_phase_zero_names_the_verdict_keys_and_every_light_lane_mode(self):
-        modes = module_constants(REPO_ROOT / "python/agent_tools/resolve_project.py",
-                                 "LIGHT_LANE_MODES")["LIGHT_LANE_MODES"]
-        self.assertEqual((LANE_TRIAGE_VERDICT_KEYS | set(modes)) - self.span_words, set())
+    def test_deliver_direct_spells_the_guard_accepted_ship_forms(self):
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        for form in (
+            "`git -C <dir> push origin direct-<n>`",
+            "`gh pr create --repo <repo> --base main --head direct-<n> --title '<title>' --body '<body>'`",
+            "`gh pr merge <pr> --repo <repo> --merge --delete-branch`",
+            "`reviewer-lite` with `lane: direct`",
+            "**Eligibility.**",
+        ):
+            with self.subTest(form=form):
+                self.assertIn(form, text)
 
 
 class HandBuiltTimeContractsTest(unittest.TestCase):
