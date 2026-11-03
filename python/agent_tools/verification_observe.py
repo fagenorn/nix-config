@@ -14,6 +14,8 @@ result plus one newline to standard output and nothing to standard error. A
 refusal exits 2 and writes one line, `verification-observe: <reason>`, to
 standard error and nothing to standard output. An invalid invocation writes
 `verification-observe: invalid invocation` and exits 2; `--help` exits 0.
+The importable `observe_all` observes a list of requirements after one fetch
+(issue 546 D2); no command mode runs it.
 
 Both fetch `origin`'s integration branch into its remote-tracking ref, the
 only write, and read each selected path's entry at the fetched commit with
@@ -146,19 +148,63 @@ def _repository(snapshot: dict) -> dict:
             "integration_branch": snapshot["bindings"]["vcs"]["integration_branch"]}
 
 
+def _reason(error: Exception) -> str:
+    """The line `main` prints after `verification-observe: `."""
+    return " ".join(str(error).split())
+
+
+def _observations(repo_root: str, requirements: list[dict]
+                  ) -> tuple[list[dict], list[tuple[str, str]]]:
+    """Observe valid requirements at one fetched commit (issue 546 D2): a resolution or
+    fetch refusal refuses every requirement, a read or build refusal only its own."""
+    if not requirements:
+        return [], []
+    try:
+        snapshot = _resolve(repo_root)
+        commit = _fetch(snapshot)
+    except ObserveRefused as error:
+        return [], [(requirement["blocker_id"], _reason(error)) for requirement in requirements]
+    observations, refused = [], []
+    for requirement in requirements:
+        try:
+            facts = _read_facts(snapshot["project"]["root"], commit, requirement["sources"])
+            observations.append(validate_observation({
+                "kind": OBSERVATION_KIND, "schema_version": SCHEMA_VERSION,
+                "blocker_id": requirement["blocker_id"], "repository": _repository(snapshot),
+                "facts": facts}))
+        except (ObserveRefused, BlockerRefused) as error:
+            refused.append((requirement["blocker_id"], _reason(error)))
+    return observations, refused
+
+
+def observe_all(repo_root: str, requirements: object) -> tuple[list[dict], list[tuple[str, str]]]:
+    """The observations of every requirement, after one resolution and at most one fetch
+    (issue 546 D2): `(observations, refused)`, each in input order, every requirement in
+    exactly one of them; a refusal is `(blocker_id, reason)`, never an observation.
+
+    A non-list, or an element that is not a valid requirement, raises `BlockerRefused`
+    naming `requirements[<i>]` before any process starts; an empty list does no I/O.
+    """
+    if not isinstance(requirements, list):
+        raise BlockerRefused("requirements: must be a list")
+    for index, requirement in enumerate(requirements):
+        try:
+            validate_requirement(requirement)
+        except BlockerRefused as refusal:
+            raise BlockerRefused(f"requirements[{index}]: {refusal}") from None
+    return _observations(repo_root, requirements)
+
+
 def observe(repo_root: str, requirement: object) -> dict:
     """The `verification-observation` of a requirement's sources at `origin`."""
     try:
         validate_requirement(requirement)
-        snapshot = _resolve(repo_root)
-        commit = _fetch(snapshot)
-        facts = _read_facts(snapshot["project"]["root"], commit, requirement["sources"])
-        return validate_observation({
-            "kind": OBSERVATION_KIND, "schema_version": SCHEMA_VERSION,
-            "blocker_id": requirement["blocker_id"], "repository": _repository(snapshot),
-            "facts": facts})
     except BlockerRefused as error:
         raise ObserveRefused(str(error)) from error
+    observations, refused = _observations(repo_root, [requirement])
+    if refused:
+        raise ObserveRefused(refused[0][1])
+    return observations[0]
 
 
 def _guard_checkout(snapshot: dict, declaration: dict) -> None:
@@ -239,7 +285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = build(args.repo_root, strict_load(sys.stdin.buffer.read()))
     except (ObserveRefused, BlockerRefused) as error:
-        sys.stderr.write(f"{PROG}: {' '.join(str(error).split())}\n")
+        sys.stderr.write(f"{PROG}: {_reason(error)}\n")
         return 2
     sys.stdout.buffer.write(canonical_bytes(result) + b"\n")
     return 0

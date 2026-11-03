@@ -38,7 +38,7 @@ Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`, 
 
 With lifecycle identity, run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> -- <argv>`, still in the foreground; a forge verb never goes through it. Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` prints.
 
-Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -` or `--input -`, with the helper named bare or as `~/.agents/bin/workflow-state`, optionally piped into or out of `artifact-budget validate-report --input -`. Pipe each `workflow-state` reply's bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding, but never `build-delivery` or `resume-pack` stdout: neither is a workflow response, and a resume pack stays untrusted until its checks pass.
+Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -`, `--verification-input -` or `--input -`, optionally piped into or out of `artifact-budget validate-report --input -`. Pipe each `workflow-state` reply's bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding, but never `build-delivery` or `resume-pack` stdout: neither is a workflow response, and a resume pack stays untrusted until its checks pass.
 
 The ledger, not tracker or intent data, selects the next delivery stage: follow the returned `owner`, `delivery_remainder`, requirement, or terminal variant without manufacturing authority, a retry, or a permission ritual. Every delivery effect runs through ship-issue's `## Delivery loop`.
 
@@ -124,7 +124,7 @@ workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary
 EOF
 ```
 
-Only after that durable write succeeds, send those canonical bytes — the validated `finish` reply — unchanged to the caller. A `delivery_remainder` reply is relayed unchanged too; the next acquisition or control sweep launches it. A new run never uses the legacy `--issue/--attempt/--result-file` transport. The direct-autonomous controller that delegated at the Phase-5 rollover does not run this procedure: its only terminal work is the validate-and-relay stop in `rollover.md`.
+Only after that durable write succeeds, send those canonical bytes — the validated `finish` reply — unchanged to the caller. A `delivery_remainder` reply is relayed unchanged too; the next acquisition or control sweep launches it. The direct-autonomous controller that delegated at the Phase-5 rollover does not run this procedure: its only terminal work is the validate-and-relay stop in `rollover.md`.
 
 A terminal replay from acquisition (`kind: terminal`) prints that envelope's `reentry` verbatim on its own line, then relays the compact response unchanged; a replay writes no `finish`.
 
@@ -133,13 +133,13 @@ Failure to persist is a failure to finish: surface it, never report the issue as
 ## Suspension procedure
 Suspend — do not finish — when an environmental interruption pauses the work: an imminent quota or session limit, a repeated transport failure, a permission prompt only a human can approve, an external wait (a blocker another session owns: end the turn, never poll), or a context that cannot launch a phase's agents. A suspension consumes no attempt and needs no authorization.
 
-Release every worker this owner registered (the helper refuses with `live workers: <ids>` while any is live) and run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, and then call:
+Release every worker this owner registered (`suspend` refuses with `live workers: <ids>` otherwise) and run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, and then call:
 
 ```text
 workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
-with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or sdd's `deadline` (the reaper alone owns `unknown`). A validated `kind: terminal` reply means the anti-zombie bound ended the attempt instead: handle it as the terminal return procedure's replay — print its `reentry`, relay it, write no `finish` — and stop. Otherwise the reply is `kind: suspended`; print the canonical line as the final output:
+with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or sdd's `deadline` or `verification` (the reaper alone owns `unknown`). A validated `kind: terminal` reply means the anti-zombie bound ended the attempt instead: handle it as the terminal return procedure's replay — print its `reentry`, relay it, write no `finish` — and stop. Otherwise the reply is `kind: suspended`; print the canonical line as the final output:
 
 ```text
 Suspended (blocked_on=<value>). Resume: <reentry from the envelope>

@@ -4,6 +4,8 @@ import shutil
 import unittest
 from pathlib import Path
 
+from agent_tools import verification_blocker as vb
+
 from .orchestrate_world import INVALID, SLUG, OrchestrateWorld
 
 
@@ -762,6 +764,140 @@ class ChainTest(unittest.TestCase):
                              "control", steps_before("control"))
         self.assertEqual(out["response"]["actions"], [
             {"id": "delivery_contract", "kind": "delivery_contract", "issues": [12, 14]}])
+
+
+READY = {"command", "outcome", "run_id", "control_calls", "response", "dispatches",
+         "contracts_due", "refused_contracts", "contract_refusals", "verification_refusals",
+         "ends_run"}
+
+
+def observed(world, record, path):
+    """The observation of `record`'s blocker as `origin` holds `path` now."""
+    return {"kind": "verification-observation", "schema_version": 1,
+            "blocker_id": vb.blocker_id(record), "repository": record["repository"],
+            "facts": world.failure(path)["facts"]}
+
+
+class GatherTest(unittest.TestCase):
+    """`step` observes every awaited blocker once, after at most one fetch (issue 546 D3)."""
+
+    def parked(self, parked=((61, "flake.lock"),), others=()):
+        """A world with `origin`, a session of the parked issues then `others`, each parked
+        issue spawned with a live worktree and suspended on its path's failure."""
+        world = OrchestrateWorld(self)
+        world.add_origin()
+        world.publish({"flake.lock": "lock 1\n", "Cargo.lock": "cargo 1\n"})
+        issues = [issue for issue, _ in parked]
+        session = world.start(*(str(n) for n in (*issues, *others)))["session"]
+        world.seed_spawn(session, issues)
+        failures = []
+        for issue, path in parked:
+            world.add_worktree(world.candidate(issue), f"worktree-issue-{issue}-orchestrated")
+            failures.append(world.failure(path))
+            world.park(session, f"{issue}:1:1", failures[-1])
+        return world, session, failures
+
+    def ready(self, done, out):
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(set(out), READY)
+        return out
+
+    def test_an_equal_observation_resumes_nothing_and_an_unrelated_commit_keeps_it_equal(self):
+        world, session, (x,) = self.parked()
+        out = self.ready(*world.step(session))
+        (fetch,) = world.calls("git")
+        self.assertEqual(fetch["argv"], [
+            "-C", str(world.root), "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+            "--no-auto-maintenance", "--no-recurse-submodules", "--refmap=", "origin",
+            "+refs/heads/main:refs/remotes/origin/main"])
+        (request,) = world.requests()
+        self.assertEqual(request["verification"], [observed(world, x, "flake.lock")])
+        self.assertEqual(request["verification"][0]["facts"], x["facts"])
+        self.assertEqual((out["dispatches"], out["verification_refusals"]), ([], []))
+        world.publish({"README.md": "readme 2\n"})
+        out = self.ready(*world.step(session))
+        self.assertEqual(len(world.calls("git")), 2)
+        self.assertEqual(world.requests()[1]["verification"][0]["facts"], x["facts"])
+        self.assertEqual((out["dispatches"], out["verification_refusals"]), ([], []))
+
+    def test_a_selected_change_resumes_the_parked_attempt(self):
+        world, session, (x,) = self.parked()
+        world.publish({"flake.lock": "lock 2\n"})
+        out = self.ready(*world.step(session))
+        (request,) = world.requests()
+        self.assertEqual(request["verification"], [observed(world, x, "flake.lock")])
+        self.assertNotEqual(request["verification"][0]["facts"], x["facts"])
+        self.assertEqual([(d["launch_kind"], d["action_id"]) for d in out["dispatches"]],
+                         [("resume", "61:1:2")])
+        self.assertEqual(out["verification_refusals"], [])
+
+    def test_an_unreachable_origin_is_reported_and_the_attempt_stays_parked(self):
+        world, session, (x,) = self.parked()
+        world.git("remote", "set-url", "origin", str(world.root.parent / "missing.git"))
+        out = self.ready(*world.step(session))
+        (request,) = world.requests()
+        self.assertEqual(request["verification"], [])
+        (refusal,) = out["verification_refusals"]
+        self.assertEqual(set(refusal), {"blocker_id", "detail"})
+        self.assertEqual(refusal["blocker_id"], vb.blocker_id(x))
+        self.assertTrue(refusal["detail"].startswith("git fetch: "), refusal["detail"])
+        self.assertLessEqual(len(refusal["detail"]), 300)
+        self.assertEqual(out["dispatches"], [])
+        (summary,) = [s for s in out["response"]["summaries"] if s["issue"] == 61]
+        self.assertEqual([r["blocker_id"] for r in summary["requirements"]
+                          if r["kind"] == "verification"], [vb.blocker_id(x)])
+
+    def test_two_blockers_are_observed_in_bootstrap_order_after_one_fetch(self):
+        world, session, (x, y) = self.parked(((61, "flake.lock"), (62, "Cargo.lock")))
+        out = self.ready(*world.step(session))
+        self.assertEqual(len(world.calls("git")), 1)
+        (request,) = world.requests()
+        self.assertEqual(request["verification"], sorted(
+            [observed(world, x, "flake.lock"), observed(world, y, "Cargo.lock")],
+            key=lambda item: item["blocker_id"]))
+        self.assertEqual(out["verification_refusals"], [])
+
+    def test_no_awaited_blocker_never_fetches(self):
+        world = OrchestrateWorld(self)
+        world.add_origin()
+        session = world.start("12", "14")["session"]
+        out = self.ready(*world.step(session, first_sweep=True))
+        self.assertEqual(out["control_calls"], 2)
+        self.assertEqual(world.calls("git"), [])
+        self.assertEqual([r["verification"] for r in world.requests()], [[], []])
+        self.assertEqual(out["verification_refusals"], [])
+
+    def test_the_chained_call_sends_no_observation(self):
+        world, session, (x,) = self.parked(others=(62,))
+        out = self.ready(*world.step(session))
+        self.assertEqual(out["control_calls"], 2)
+        first, chained = world.requests()
+        self.assertEqual((first["verification"], chained["verification"]),
+                         ([observed(world, x, "flake.lock")], []))
+        self.assertEqual(len(world.calls("git")), 1)
+
+    def test_a_malformed_bootstrap_requirement_refuses_at_bootstrap(self):
+        world = OrchestrateWorld(self)
+        world.add_origin()
+        session = world.start("12")["session"]
+        boot = json.loads(world.ws("init-run", "--repo-root", world.root,
+                                   "--run-id", session["run_id"]).stdout)
+        requirement = {"kind": "verification", "blocker_id": "sha256:" + "1" * 64,
+                       "sources": [{"name": "pinned", "paths": ["flake.lock"]}]}
+        cases = (({}, "requirements: must be a list"),
+                 ([{**requirement, "extra": 1}],
+                  "requirements[0]: requirement: missing [], unknown ['extra']"))
+        for verification, detail in cases:
+            with self.subTest(detail=detail):
+                world.clear_faults()
+                world.fault("workflow-state", "init-run",
+                            stdout=json.dumps({**boot, "verification": verification}) + "\n")
+                world.fault("artifact-budget", "validate-report",
+                            stdin_kind="workflow_bootstrap", passthrough=True)
+                out = assert_refused(self, world.step(session)[0], "step", "bootstrap",
+                                     ["bindings"])
+                self.assertEqual(out["detail"], detail)
+        self.assertEqual(world.calls("git"), [])
 
 
 class RefusalTableTest(unittest.TestCase):
