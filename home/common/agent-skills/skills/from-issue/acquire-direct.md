@@ -1,10 +1,10 @@
 # Direct autonomous acquisition
 
-With literal `--auto` and no dispatcher envelope, resolve the immutable absolute `ledger_repo_root`, the positive issue and the configured positive attempt budget. Every call sends exactly this interface_version 2 shape, with `issue` and `attempt_budget_minutes` filled from them. Populate every observation kind the helper has requested at least once during this acquisition; keep an observation kind `null` until the helper requests it, keep `authorization_intents` `[]` until a contract is sent, keep every other slot as shown, and add no keys.
+With literal `--auto` and no dispatcher envelope, resolve the immutable absolute `ledger_repo_root`, the positive issue and the configured positive attempt budget. Every call sends exactly this interface_version 3 shape, with `issue` and `attempt_budget_minutes` filled from them. Populate every observation kind the helper has requested at least once during this acquisition; keep an observation kind `null` until the helper requests it, keep `authorization_intents` `[]` until a contract is sent, keep every other slot as shown, and add no keys.
 
 ```json
 {
-  "interface_version": 2,
+  "interface_version": 3,
   "issue": 73,
   "attempt_budget_minutes": 180,
   "new_run": false,
@@ -18,6 +18,7 @@ With literal `--auto` and no dispatcher envelope, resolve the immutable absolute
   "reevaluation_evidence": [],
   "delivery_observations": [],
   "requested_scope": null,
+  "verification": [],
   "recovery": null
 }
 ```
