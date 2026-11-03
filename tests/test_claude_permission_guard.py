@@ -792,6 +792,32 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(2, result.returncode, bad)
                 self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
 
+    def test_pr_create_body_file_must_be_outside_the_working_tree(self):
+        """Issue 386: the PR is born with its notes via --body-file, from a path outside the tree."""
+        repo = self.make_repo("https://github.com/fagenorn/argus.git")
+        outside = os.path.join(tempfile.gettempdir(), "release-body-386.md")
+        form = ('gh pr create --repo fagenorn/argus --base main --head issue-7-fix '
+                '--title "fix: guard" --body-file {}')
+        ok = self.run_guard(form.format(outside), cwd=repo)
+        self.assertEqual(0, ok.returncode, ok.stderr)
+        scrubbed = self.run_guard("unset GITHUB_TOKEN && " + form.format(outside), cwd=repo)
+        self.assertEqual(0, scrubbed.returncode, scrubbed.stderr)
+        for bad, problem in (
+            (form.format(os.path.join(repo, "notes.md")), "inside the working tree"),
+            (form.format(os.path.join(repo, "sub", "..", "notes.md")), "absolute path"),
+            (form.format("notes.md"), "absolute path"),
+            (form.format("'/tmp/a;b.md'"), "absolute path"),
+            (form.format("'/tmp/a b.md'"), "absolute path"),
+            (form.format("/tmp/$HOME.md"), "absolute path"),
+            (form.format("/tmp/x/../../etc/passwd"), "absolute path"),
+            (form.format(outside) + ' --body "y"', "out of place"),
+        ):
+            with self.subTest(command=bad):
+                result = self.run_guard(bad, cwd=repo)
+                self.assertEqual(2, result.returncode, bad)
+                self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
+                self.assertIn(problem, result.stderr)
+
     def test_pr_create_outside_fagenorn_blocks(self):
         repo = self.make_repo("git@github.com:someoneelse/tool.git")
         result = self.run_guard(
@@ -1859,12 +1885,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
         recognition = {label: "xargs " + command
                        for label, command in provoking(fixture_slug).items()}
-        one_each = {"push": 3, "PR creation": 1, "merge": 1, "release creation": 1,
+        one_each = {"push": 3, "PR creation": 2, "merge": 1, "release creation": 1,
                     "branch deletion": 1}
         covered = set()
         for name, cwd, commands, counts in (
             ("fixture", fixture, provoking(fixture_slug), one_each),
-            ("nodo", nodo, provoking(NODO), {**one_each, "PR creation": 2, "merge": 2}),
+            ("nodo", nodo, provoking(NODO), {**one_each, "PR creation": 4, "merge": 2}),
             ("no context", fixture, recognition, one_each),
         ):
             for label, command in commands.items():
@@ -1905,6 +1931,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                    "[--match-head-commit <sha>] (only dev into main)")
         create = ("gh pr create --repo {slug} --base {base} --head <branch> "
                   '--title "<title>" --body "<body>"')
+        create_file = ("gh pr create --repo {slug} --base {base} --head <branch> "
+                       '--title "<title>" --body-file <path>')
         push = ("git push origin refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>; "
                 "or git push origin --delete refs/heads/<branch>")
 
@@ -1921,11 +1949,15 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              feature.format(slug=NODO) + "; or " + release.format(slug=NODO)),
             ("xargs gh pr merge 7", repo, None, feature.format(slug="<slug>")),
             ("gh pr create --repo fagenorn/nix-config --draft", repo, None,
-             create.format(slug="fagenorn/nix-config", base="main")),
+             create.format(slug="fagenorn/nix-config", base="main") + "; or "
+             + create_file.format(slug="fagenorn/nix-config", base="main")),
             (f"gh pr create --repo {NODO} --draft", nodo, None,
              create.format(slug=NODO, base="dev") + "; or "
-             + create.format(slug=NODO, base="main")),
-            ("xargs gh pr create", repo, None, create.format(slug="<slug>", base="<base>")),
+             + create.format(slug=NODO, base="main") + "; or "
+             + create_file.format(slug=NODO, base="dev") + "; or "
+             + create_file.format(slug=NODO, base="main")),
+            ("xargs gh pr create", repo, None, create.format(slug="<slug>", base="<base>")
+             + "; or " + create_file.format(slug="<slug>", base="<base>")),
             ("/usr/bin/git push origin issue-402-topic", repo, None, push),
             # After the lookup the release form on a feature PR lists the feature arm,
             (f"gh pr merge 7 --repo {NODO} --merge", nodo, pr("issue-7-topic", "dev"),
