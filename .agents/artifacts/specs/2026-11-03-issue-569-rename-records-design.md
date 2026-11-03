@@ -23,9 +23,9 @@ A delivery that moves files and edits them cannot be reviewed or planned today.
   old path plus a whole-file addition of the new one. Measured on a scratch
   clone of `3be26be2`: the ten #178 moves with a light, simulated edit
   (shebang dropped, one import line per 400 lines, one symbol renamed) pack as
-  20 records and 1,257,389 B, largest 293,839 B, over all three caps. The same
-  ten files with the same edits, paired as renames, are 10 records and
-  100,864 B, largest 22,611 B. The whole-file add half never gets generated
+  20 records totalling 1,257,389 B at 10 lines of context, largest 293,839 B,
+  over all three caps. The same ten files with the same edits, paired as
+  renames, are 10 records totalling 100,864 B, largest 22,611 B. The whole-file add half never gets generated
   evidence, so the delivery is `decompose_required` however it is cut.
 - **Forecasts.** A plan cannot describe a move. `change: rename` is refused as
   `projection_unavailable`, so #178 D20 forecast each move as a whole-file
@@ -73,6 +73,11 @@ No cap moves.
   - Two identical deleted files and one similar added file: the first source
     path pairs and the other stays `D`.
   - Three runs gave the same records.
+  - Pairing is fixed per git version. Every host runs the flake-pinned git
+    (2.51.2 here). A host whose git paired differently would make `confirm`
+    refuse rather than pass.
+  - Inexact detection now runs, and costs at most 0.4 s on the repo's
+    largest ranges (up to 1,839 adds, measured).
 
   An unpaired source stays a `D` record, and an oversized one still gets
   `whole-file-deletion` evidence (439 D1). An unpaired destination stays an `A`
@@ -166,7 +171,7 @@ No cap moves.
   its `packing_policy_sha256` differs. That refusal is correct: the policy
   changed. No committed plan block embeds a policy digest.
 
-### Forecast contract (D7, D8)
+### Forecast contract (D7, D8, D13)
 
 - A record's `change` is `add`, `modify`, `delete` or `rename`. `fileless` is
   still refused as `projection_unavailable`.
@@ -187,6 +192,12 @@ No cap moves.
   first path of a rename chain) to the final blob at `path`. So it includes any
   earlier edit to that content in the boundary. A pure move is its header-only
   record.
+- **When git will not pair (per D13).** Git pairs only a source that is gone at
+  the boundary's end, and it may prefer a closer destination. If a later task
+  re-adds `old_path` (probed: `M o.txt`, `A p.txt`), or another added path
+  matches the source better, the new path measures as a whole-file add. The
+  bound then covers that add. The forecast states the move; the bound states
+  what git will measure.
 - **Projection (per D8).** A future rename is charged like a future add of its
   new path: the larger of the bound and any current record at the new path,
   plus its unobserved lines. Any actual record of the old path stays in the
@@ -229,8 +240,8 @@ counts as such an effect. Two rules are added:
   determinism, unpaired halves, and that a rename record never takes generated
   evidence.
 - **Review feasibility forecast paragraph:** `rename` with `old_path`, the
-  rename bound under the conservative-bound rule, and consumption of the old
-  path.
+  rename bound under the conservative-bound rule (including when git will not
+  pair), and consumption of the old path.
 - **Retained review evidence section:** one sentence saying the retained
   domain measures and replays under the frozen `review-git-records/v1`.
 
@@ -336,3 +347,4 @@ Each seam is an existing public boundary, extended rather than replaced.
 | D10 | Coordinate with #559 by not touching `review_budget`/`review_feasibility` or `_records`' signature; the README conflict goes to whichever lands second; rename support in the writer is a follow-up | #559 branch diff (unmerged): edits those two modules and adds a README paragraph after the forecast paragraph | Waiting for #559 to merge: blocks #178 on work that shares no code with it |
 | D11 | Prove the retained v1 binding with an edited move in a retained unit fixture (v1 measures `D`+`A`, and the retained validators refuse v2's `R0NN`) plus literal v1 digest pins, beside the committed-bundle replay and the retained tier | Measured: the issue-121 and issue-100 ranges and edges hold no rename at any threshold, so their bytes cannot tell v1 from v2; the-bar Tests that can fail | Relying on the retained tier alone: a retained call site left on v2 would stay green |
 | D12 | Scope stops at the issue's What to build: reviewer prompts, scoped per-path reviews, `adopt_apply`, `diff_scope`, `verified-tree` and the typechange edge bug stay unchanged | Phase-0 scope boundary; agent-guidance instruction budget; the issue lists only `review_actual`, `review_forecast`, `review_projection` and the README | Teaching the prompts about renames or fixing pathspec moves now: unrequested prompt bytes and a second subsystem |
+| D13 | (grill) A rename's bound is what git will measure at its new path: a rename section only when `old_path` is gone at the boundary's end and git pairs that source with this path; otherwise the whole-file add | Probes: a re-added old path leaves `M old`, `A new`; with two equal destinations the first path pairs; the conservative-bound rule bounds what `review-package` measures | Detecting a re-add or a better match at load time: needs future trees that do not exist yet, and the measured actual already replaces the bound once the move lands |
