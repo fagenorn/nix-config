@@ -16,10 +16,10 @@ from agent_tools.review_pack import (ReviewLimits, ReviewRecord, ReviewRecordSiz
     canonical_manifest as _canonical, measure_lengths, pack_whole_records, place_record_sizes)
 
 RECORD_POLICY = {
-    "kind": "review-git-records/v1",
+    "kind": "review-git-records/v2",
     "git_config": ["-c", "diff.renames=true", "-c", "diff.renameLimit=0",
                    "-c", "core.quotePath=true"],
-    "diff_args": ["--find-renames=100%", "--no-ext-diff", "--no-textconv",
+    "diff_args": ["--find-renames=50%", "--no-ext-diff", "--no-textconv",
                   "--ignore-submodules=none", "--submodule=short",
                   "--full-index", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/",
                   "--diff-algorithm=myers", "--no-indent-heuristic", "--inter-hunk-context=0",
@@ -68,7 +68,10 @@ PACKING_POLICY_V1 = {
                              "subject_json_bytes_per_reserved_byte": 6},
 }
 PACKING_POLICY_V1_SHA256 = telemetry_digest(PACKING_POLICY_V1)
-RECORD_OPERATIONS = ("A", "M", "D", "T", "R100")
+# Names that follow each `--name-status -z` operation letter (issue 569).
+RECORD_OPERATIONS = {"A": 1, "M": 1, "D": 1, "T": 1, "R": 2}
+RENAME_FLOOR_RE = re.compile(r"--find-renames=([0-9]{1,3})%\Z")
+RENAME_SCORE_RE = re.compile(r"R[0-9]{3}\Z")
 GENERATED_EVIDENCE_KINDS = ("ef-core-migration-designer", "whole-file-deletion")
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -105,6 +108,28 @@ def _policies(record_policy: Mapping) -> Mapping:
 def _packing_choices(record_policy: Mapping = RECORD_POLICY) -> tuple[dict, ...]:
     packing = _policies(record_policy)
     return (packing["initial"], *packing["adaptive"])
+
+
+def record_operation(token: bytes, record_policy: Mapping = RECORD_POLICY) -> tuple[str, int]:
+    """`token`, one `--name-status -z` operation field, under `record_policy`, and how many names follow it.
+
+    `A`, `M`, `D` and `T` take one name. `R<score>` takes two, old then new, when its three-digit score is at
+    least the floor in the policy's `--find-renames=<N>%` argument and at most 100. Anything else is refused
+    (issue 569).
+    """
+    _policies(record_policy)
+    try:
+        operation = token.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise GenerationError("unsupported Git record operation") from exc
+    if operation in RECORD_OPERATIONS and operation != "R":
+        return operation, RECORD_OPERATIONS[operation]
+    if RENAME_SCORE_RE.match(operation):
+        floor = next(int(match.group(1)) for arg in record_policy["diff_args"]
+                     if (match := RENAME_FLOOR_RE.match(arg)))
+        if floor <= int(operation[1:]) <= 100:
+            return operation, RECORD_OPERATIONS["R"]
+    raise GenerationError("unsupported Git record operation")
 
 
 @dataclass(frozen=True)
@@ -234,7 +259,8 @@ def actual_inputs_from_trees(repo: Path, base_tree: str, head_tree: str, *,
     if len(set(paths)) != len(paths) or len(paths) != stats["files_changed"]:
         raise GenerationError("diff coverage does not match numstat")
     operations = _record_operations(
-        git_diff(repo, base_tree, head_tree, "--name-status", "-z", record_policy=record_policy), paths)
+        git_diff(repo, base_tree, head_tree, "--name-status", "-z", record_policy=record_policy), paths,
+        record_policy)
     for number, choice in enumerate(_packing_choices(record_policy)):
         context = None if number == 0 else choice["context_lines"]
         raw = git_diff(repo, base_tree, head_tree, "--binary", f"-U{choice['context_lines']}",
@@ -244,7 +270,8 @@ def actual_inputs_from_trees(repo: Path, base_tree: str, head_tree: str, *,
         for path, operation, chunk in zip(paths, operations, chunks):
             evidence = None
             payload = chunk
-            if len(chunk) > limits.member_max_bytes:
+            # A rename record keeps its whole section: generated evidence reads one path's sides (issue 569).
+            if len(chunk) > limits.member_max_bytes and not operation.startswith("R"):
                 item = _ef_designer_evidence(repo, base_tree, head_tree, path, len(chunk))
                 if item is None and operation == "D":
                     item = _whole_file_deletion_evidence(repo, base_tree, path, len(chunk))
@@ -431,7 +458,7 @@ def _changed_paths(raw: bytes) -> list[str]:
         raise GenerationError("Git path is not UTF-8") from exc
 
 
-def _record_operations(raw: bytes, paths: list[str]) -> tuple[str, ...]:
+def _record_operations(raw: bytes, paths: list[str], record_policy: Mapping) -> tuple[str, ...]:
     """Each record's `--name-status -z` operation, in the order of the name-only `paths`."""
     if not raw:
         if paths:
@@ -445,13 +472,7 @@ def _record_operations(raw: bytes, paths: list[str]) -> tuple[str, ...]:
     destinations: list[bytes] = []
     position = 0
     while position < len(items):
-        try:
-            operation = items[position].decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise GenerationError("unsupported Git record operation") from exc
-        if operation not in RECORD_OPERATIONS:
-            raise GenerationError("unsupported Git record operation")
-        names = 2 if operation == "R100" else 1
+        operation, names = record_operation(items[position], record_policy)
         listed = items[position + 1 : position + 1 + names]
         if len(listed) != names or any(not name for name in listed):
             raise GenerationError("malformed Git status list")

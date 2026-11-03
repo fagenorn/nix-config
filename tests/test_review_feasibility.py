@@ -209,6 +209,39 @@ class RecordPolicyDomainTest(unittest.TestCase):
             finally:
                 group[key] = previous
 
+    def test_living_policy_is_v1_with_a_fifty_percent_rename_threshold(self):
+        from agent_tools.review_actual import (PACKING_POLICY, PACKING_POLICY_SHA256, PACKING_POLICY_V1_SHA256,
+            RECORD_POLICY, RECORD_POLICY_SHA256, RECORD_POLICY_V1)
+        self.assertEqual(RECORD_POLICY, {**RECORD_POLICY_V1, 'kind': 'review-git-records/v2',
+                                         'diff_args': ['--find-renames=50%', *RECORD_POLICY_V1['diff_args'][1:]]})
+        self.assertEqual(RECORD_POLICY_V1['diff_args'][0], '--find-renames=100%')
+        self.assertEqual(RECORD_POLICY['git_config'], ['-c', 'diff.renames=true', '-c', 'diff.renameLimit=0',
+                                                       '-c', 'core.quotePath=true'])
+        self.assertEqual((PACKING_POLICY['kind'], PACKING_POLICY['record_policy_sha256']),
+                         ('review-packing/v1', RECORD_POLICY_SHA256))
+        self.assertNotEqual(PACKING_POLICY_SHA256, PACKING_POLICY_V1_SHA256)
+        self.assertEqual(PACKING_POLICY['adaptive_violations'], ['member_count', 'aggregate_bytes'])
+
+    def test_operation_rule_follows_each_policy_threshold(self):
+        from agent_tools.review_actual import RECORD_POLICY, RECORD_POLICY_V1, GenerationError, _record_operations
+        accepted = ((RECORD_POLICY, b'R050\0old\0new\0', ['new'], ('R050',)),
+                    (RECORD_POLICY, b'R100\0old\0new\0M\0kept\0', ['new', 'kept'], ('R100', 'M')),
+                    (RECORD_POLICY_V1, b'R100\0old\0new\0', ['new'], ('R100',)),
+                    (RECORD_POLICY_V1, b'A\0a\0D\0d\0T\0t\0', ['a', 'd', 't'], ('A', 'D', 'T')))
+        for policy, raw, paths, expected in accepted:
+            with self.subTest(raw=raw, policy=policy['kind']):
+                self.assertEqual(_record_operations(raw, paths, policy), expected)
+        refused = ((RECORD_POLICY, b'R049\0old\0new\0', ['new']),
+                   (RECORD_POLICY_V1, b'R099\0old\0new\0', ['new']),
+                   (RECORD_POLICY, b'R101\0old\0new\0', ['new']),
+                   (RECORD_POLICY, b'R50\0old\0new\0', ['new']),
+                   (RECORD_POLICY, b'C100\0old\0new\0', ['new']),
+                   (RECORD_POLICY, b'R100\0old\0new\0extra\0', ['new', 'extra']),
+                   (RECORD_POLICY, b'R100\0old\0', ['old']))
+        for policy, raw, paths in refused:
+            with self.subTest(raw=raw, policy=policy['kind']), self.assertRaises(GenerationError):
+                _record_operations(raw, paths, policy)
+
 
 class SourceProjectionFixture:
     """All command fixtures use actual Git objects and source subprocesses."""

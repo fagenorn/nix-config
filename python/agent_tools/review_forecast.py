@@ -12,7 +12,8 @@ import subprocess
 from typing import Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal, telemetry_digest
-from agent_tools.review_actual import (RECORD_POLICY, SHA_RE, _run_git, _split_diff, git_diff)
+from agent_tools.review_actual import (RECORD_POLICY, SHA_RE, GenerationError, _run_git, _split_diff, git_diff,
+                                       record_operation)
 from agent_tools.review_budget import BudgetAuthority
 from agent_tools.review_git import (HistoryError, original_commit, original_commits, original_range,
                                     original_ancestor, original_edge)
@@ -326,11 +327,14 @@ def edge_facts(repo: Path, parent: str, commit: str, ordinal: int, *,
                                   record_policy=record_policy))
     facts = []
     while status:
-        operation = status.pop(0).decode("ascii")
+        try:
+            operation, names = record_operation(status.pop(0), record_policy)
+        except GenerationError as exc:
+            raise ForecastError("unsupported Git record operation") from exc
+        if len(status) < names:
+            raise ForecastError("invalid Git status framing")
         old = path_name(status.pop(0).decode("utf-8"))
-        new = path_name(status.pop(0).decode("utf-8")) if operation == "R100" else old
-        if operation not in {"A", "M", "D", "T", "R100"}:
-            raise ForecastError("unsupported Git record operation")
+        new = path_name(status.pop(0).decode("utf-8")) if names == 2 else old
         facts.append({"operation": operation, "path": new, "old_path": old,
                       "before": tree_entry(repo, parent_tree, old), "after": tree_entry(repo, commit_tree, new)})
     if len(chunks) != len(facts):
