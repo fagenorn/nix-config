@@ -34,6 +34,7 @@ WORKFLOW = SCRIPTS / "workflow-state.py"
 MODEL = SCRIPTS / "delivery_model/__init__.py"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 ARTIFACT_BUDGET = SCRIPTS / "artifact_budget.py"
+CLEAR_BYTECODE = SCRIPTS / "clear-library-bytecode"
 NOW = "2026-09-21T00:00:00Z"
 ORCHESTRATED = attempt_identity.RunIdentity("orchestrated", None, None)
 TRANSACTION = "rel_0190f0e0-0000-7000-8000-000000000000"
@@ -521,6 +522,85 @@ class DeliveryAdmissionTest(unittest.TestCase):
             second = cached()
             self.assertEqual(sorted(second), sorted(first))
             self.assertEqual([name for name in first if second[name] != first[name]], [])
+
+    def test_a_same_size_module_edit_runs_after_the_library_cache_is_cleared(self):
+        """Issue 567 AC1 and AC2 in the installed layout (D6). Every stand-in
+        store file has modification time 1. A relink to a same-size variant of
+        the delivery module still runs its cached old code (the negative
+        control); after `clear-library-bytecode` the edited code runs, and a
+        further load compiles nothing. The children inherit no bytecode prefix,
+        so, like the production launcher, they cache in the library itself."""
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw).resolve(); home = base / "home"; store = base / "store"
+            store.mkdir()
+            for name in ("workflow-state.py", "workflow_delivery.py", "workflow_delivery_wire.py",
+                         "workflow_delivery_build.py", "artifact_budget.py", "artifact-budget"):
+                shutil.copy2(SCRIPTS / name, store / name)
+            shutil.copy2(ROOT / "python/agent_tools/host_admission.py", store / "host_admission.py")
+            shutil.copy2(POLICY, store / "artifact-budget-policy.json")
+            shutil.copytree(MODEL.parent, store / "delivery_model")
+            for path in store.rglob("*"):
+                if path.is_file():
+                    os.utime(path, (1, 1))
+            binary = home / ".agents/bin"; library = home / ".agents/lib/python"
+            share = home / ".agents/share"
+            for directory in (binary, library, share): directory.mkdir(parents=True)
+            cli = binary / "workflow-state"; cli.symlink_to(store / "workflow-state.py")
+            (binary / "artifact-budget").symlink_to(store / "artifact-budget")
+            links = ("artifact_budget.py", "workflow_delivery.py", "workflow_delivery_wire.py",
+                     "workflow_delivery_build.py", "host_admission.py")
+            for name in links:
+                (library / name).symlink_to(store / name)
+            (library / "delivery_model").symlink_to(store / "delivery_model", target_is_directory=True)
+            (share / "artifact-budget-policy.json").symlink_to(store / "artifact-budget-policy.json")
+            env = {key: value for key, value in os.environ.items()
+                   if key not in ("PYTHONPYCACHEPREFIX", "PYTHONDONTWRITEBYTECODE")}
+            env["HOME"] = str(home)
+            cache = library / "__pycache__"
+
+            def init_run(name):
+                repo = base / name; repo.mkdir()
+                return subprocess.run([sys.executable, str(cli), "init-run",
+                    "--repo-root", str(repo), "--creation-key", "bytecode", "--now", NOW],
+                    capture_output=True, text=True, env=env, check=False)
+
+            def cached():
+                return {str(path.relative_to(cache)): (path.read_bytes(), path.stat().st_mtime_ns)
+                        for path in cache.rglob("*") if path.is_file()}
+
+            with mock.patch.object(sys, "pycache_prefix", None):
+                delivery = Path(importlib.util.cache_from_source(
+                    str(library / "workflow_delivery.py")))
+            first = init_run("first")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertTrue(delivery.is_file(), delivery)
+            original = store / "workflow_delivery.py"; source = original.read_bytes()
+            old = b"WORKFLOW_DELIVERY_INTERFACE_VERSION = 1\n"
+            self.assertEqual(source.count(old), 1)
+            variant = base / "next/workflow_delivery.py"; variant.parent.mkdir()
+            variant.write_bytes(source.replace(old, b"WORKFLOW_DELIVERY_INTERFACE_VERSION = 2\n"))
+            os.utime(variant, (1, 1))
+            self.assertEqual((variant.stat().st_size, variant.stat().st_mtime),
+                             (original.stat().st_size, 1))
+            (library / "workflow_delivery.py").unlink()
+            (library / "workflow_delivery.py").symlink_to(variant)
+            stale = cached()
+            control = init_run("control")
+            self.assertEqual(control.returncode, 0, control.stderr)
+            self.assertEqual(cached(), stale)
+            cleared = subprocess.run(["bash", str(CLEAR_BYTECODE), str(library)],
+                                     capture_output=True, text=True, check=False)
+            self.assertEqual((cleared.returncode, cleared.stdout, cleared.stderr), (0, "", ""))
+            self.assertEqual(sorted(path.name for path in library.iterdir()),
+                             sorted((*links, "delivery_model")))
+            edited = init_run("edited")
+            self.assertEqual((edited.returncode, edited.stdout), (2, ""))
+            self.assertIn("workflow-state: delivery runtime: interface", edited.stderr)
+            self.assertTrue(delivery.is_file(), delivery)
+            settled = cached()
+            again = init_run("again")
+            self.assertEqual(again.returncode, 2, again.stderr)
+            self.assertEqual(cached(), settled)
 
     def test_direct_checkpoint_and_failure_remainder_round_trip(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
@@ -4007,6 +4087,91 @@ class LedgerClockTest(LifecycleHarness, unittest.TestCase):
             (2, f"workflow-state: direct owner time must not move backward: {earlier} is "
                 f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"))
         self.assertEqual(direct_state.read_bytes(), direct_before)
+
+
+class LibraryBytecodeClearTest(unittest.TestCase):
+    """Issue 567: `clear-library-bytecode` on its own (D2, D3, D7)."""
+
+    def clear(self, *args):
+        return subprocess.run(["bash", str(CLEAR_BYTECODE), *map(str, args)],
+                              capture_output=True, text=True, check=False)
+
+    @staticmethod
+    def entries(library):
+        """The library's top-level entries other than `__pycache__`, by kind and content."""
+        found = {}
+        for path in library.iterdir():
+            if path.name == "__pycache__":
+                continue
+            if path.is_symlink():
+                found[path.name] = ("link", os.readlink(path))
+            elif path.is_file():
+                found[path.name] = ("file", path.read_bytes())
+            else:
+                found[path.name] = ("directory",)
+        return found
+
+    def test_the_clear_removes_the_library_cache_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw); library = base / "lib"; package = base / "package"
+            (package / "__pycache__").mkdir(parents=True)
+            (package / "__init__.py").write_bytes(b"X = 1\n")
+            (package / "__pycache__/__init__.cpython-313.pyc").write_bytes(b"kept")
+            target = base / "module.py"; target.write_bytes(b"Y = 2\n")
+            library.mkdir()
+            (library / "module.py").symlink_to(target)
+            (library / "package").symlink_to(package, target_is_directory=True)
+            (library / "regular.py").write_bytes(b"Z = 3\n")
+            cache = library / "__pycache__"; (cache / "nested").mkdir(parents=True)
+            for name in ("module.cpython-313.pyc", "module.cpython-314.pyc", "nested/entry"):
+                (cache / name).write_bytes(b"bytecode")
+            before = self.entries(library)
+            result = self.clear(library)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+            self.assertFalse(os.path.lexists(cache))
+            self.assertEqual(sorted(path.name for path in library.iterdir()),
+                             ["module.py", "package", "regular.py"])
+            self.assertEqual(self.entries(library), before)
+            self.assertEqual((target.read_bytes(), (package / "__init__.py").read_bytes(),
+                              (package / "__pycache__/__init__.cpython-313.pyc").read_bytes()),
+                             (b"Y = 2\n", b"X = 1\n", b"kept"))
+
+    def test_the_clear_without_a_cache_or_a_library_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw); library = base / "lib"; library.mkdir()
+            (library / "module.py").symlink_to(base / "module.py")
+            for target in (library, base / "missing"):
+                with self.subTest(target=target.name):
+                    result = self.clear(target)
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+            self.assertEqual(sorted(path.name for path in base.iterdir()), ["lib"])
+            self.assertEqual(sorted(path.name for path in library.iterdir()), ["module.py"])
+
+    @unittest.skipIf(os.geteuid() == 0, "file permissions do not bind root")
+    def test_a_clear_that_cannot_write_fails_loud_and_keeps_the_cache(self):
+        with tempfile.TemporaryDirectory() as raw:
+            library = Path(raw) / "lib"; cache = library / "__pycache__"
+            cache.mkdir(parents=True)
+            (cache / "module.cpython-313.pyc").write_bytes(b"bytecode")
+            library.chmod(0o555)
+            try:
+                result = self.clear(library)
+            finally:
+                library.chmod(0o755)
+            self.assertEqual((result.returncode, result.stdout), (1, ""))
+            self.assertNotEqual(result.stderr, "")
+            self.assertEqual(sorted(path.name for path in library.iterdir()), ["__pycache__"])
+            self.assertEqual((cache / "module.cpython-313.pyc").read_bytes(), b"bytecode")
+
+    def test_the_clear_takes_exactly_one_library(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            for args in ((), (base / "one", base / "two")):
+                with self.subTest(count=len(args)):
+                    result = self.clear(*args)
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+                    self.assertNotEqual(result.stderr, "")
+            self.assertEqual(list(base.iterdir()), [])
 
 
 if __name__ == "__main__":
