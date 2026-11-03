@@ -156,5 +156,5 @@ Report each filed and cited number, with its route and the open-issue matches yo
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":5,"records":[{"bounds":[{"added_lines":350,"boundary":"all","deleted_lines":2,"record_bytes":47616,"support":{"covers":["r1-1","r2-1","r3-1","r4-1","r5-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5-1","last_task":6,"owner":5,"path":".agents/artifacts/evidence/cutover-130-checklist.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"8200934e48d1dbf1f8fb7e583880bafdf59d4eb2","head":"5151b148892eab5f2287fb59d0c39c1a6dbecca7"}],"commit_subject_bytes":[64,64,64],"id":5,"records":[{"bounds":[{"added_lines":350,"boundary":"all","deleted_lines":2,"record_bytes":47616,"support":{"covers":["r1-1","r2-1","r3-1","r4-1","r5-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r5-1","last_task":6,"owner":5,"path":".agents/artifacts/evidence/cutover-130-checklist.md"}]}}
 ```
