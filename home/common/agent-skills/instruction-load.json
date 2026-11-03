@@ -183,8 +183,8 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 17596,
-        "codex": 17596
+        "claude": 15684,
+        "codex": 15684
       },
       "conditional_ceiling_bytes": {
         "claude": 8218,

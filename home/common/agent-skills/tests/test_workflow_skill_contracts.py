@@ -2183,13 +2183,9 @@ class SlimBootContractsTest(unittest.TestCase):
         dispatch = self.section(text, "## Dispatch, phase-budget and attempt-budget rules",
                                 "## Terminal return procedure")
         producer = self.section(text, "## Producer reports", "## Phase 2 — Brainstorm")
-        for argv in ("--boundary producer", "review-feasibility confirm"):
-            with self.subTest(argv=argv):
-                self.assertNotIn(argv, dispatch)
-        for argv in ("artifact-budget validate-report --boundary producer --input -",
-                     "review-feasibility confirm --plan <root> --base <base> --input -"):
-            with self.subTest(argv=argv):
-                self.assertIn(argv, producer)
+        self.assertNotIn("--boundary producer", dispatch)
+        self.assertIn("artifact-budget validate-report --boundary producer --input -", producer)
+        self.assertNotIn("review-feasibility", producer)
 
     def test_phases_6_7_read_neither_the_stop_rules_nor_the_ship_handoff(self):
         auto = self.bullet("AUTO.md")
@@ -3410,23 +3406,17 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
         self.assertIn(self.END_THE_TURN, normalized(text[start:end]))
 
 
-# Machine-consumed text only (agent-helpers rule 6, D22): helper argv, the block headings
-# and kinds the forecast loader reads, and report JSON the validators read. No English phrase.
+# Machine-consumed text only (agent-helpers rule 6, D22): helper argv and report JSON the
+# validators read. No English phrase. Planners no longer forecast (Stage 2c, #572).
 PROJECTION_MACHINE_TEXT = {
-    WRITING_PLANS: (
-        "## Review feasibility delivery", "## Review feasibility task",
-        "review-feasibility forecast --plan <root> --base <base> --spec <spec> --input -",
-        "git merge-base HEAD origin/<integration-branch>",
-        "review-feasibility gate --plan <root> --base <base> --head <HEAD> --completed-through 0",
-        '--save-dir "$(sdd-workspace <root>)"', "`projection`"),
     FROM_ISSUE_DIR / "AUTO.md": (
-        '"budget_status":"within_budget"},"projection":',
+        '{"state":"complete","artifact":{"kind":"implementation-plan"',
+        '"largest_member_bytes":<int>},"budget_status":"within_budget"},"notes":',
         '{"state":"decompose_required","artifact":{"kind":"implementation-plan"'),
-    FROM_ISSUE_DIR / "standards-review.md": (
-        "review-feasibility confirm --plan <root> --base <base> --input -",
-        "git merge-base HEAD origin/<integration-branch>"),
     FROM_ISSUE_DIR / "SKILL.md": ("review-feasibility confirm --plan <root> --base <base> --input -",),
 }
+PLANNING_DOCUMENTS = (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md", FROM_ISSUE_DIR / "standards-review.md",
+                      PHASE_5_REVIEW_CONTRACT)
 PROJECTION_MACHINE_TEXT[SDD] = (
     "sdd-gate next --completed N", '"kind":"actual_overage"',
     "artifact-budget check --kind review-package")
@@ -3453,12 +3443,13 @@ class ProjectionCallerContractsTest(unittest.TestCase):
                 with self.subTest(path=path.name, item=item):
                     self.assertIn(item, text)
 
-    def test_the_planning_confirmation_precedes_reviewer_dispatch(self):
-        gate = (FROM_ISSUE_DIR / "standards-review.md").read_text(encoding="utf-8")
-        gate = normalized(gate.split("## Caller input gate", 1)[1].split("## Dispositioning findings", 1)[0])
-        self.assertLess(gate.index("artifact-budget check --kind implementation-plan --root"),
-                        gate.index("review-feasibility confirm"))
-        self.assertLess(gate.index("review-feasibility confirm"), gate.index("capabilities.review.plan"))
+    def test_planning_neither_forecasts_nor_runs_the_change(self):
+        for path in PLANNING_DOCUMENTS:
+            text = path.read_text(encoding="utf-8").lower()
+            for word in ("feasibility", "forecast", "projection"):
+                with self.subTest(path=path.name, word=word):
+                    self.assertNotIn(word, text)
+        self.assertIn("failing test is the only run", normalized(WRITING_PLANS.read_text(encoding="utf-8")))
 
     def test_edited_planning_documents_do_not_grow(self):
         assert_no_larger_than_base(self, (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md",
