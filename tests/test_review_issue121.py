@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_budget import describe
-from agent_tools.review_forecast import ForecastError
+from agent_tools.review_forecast import ForecastError, edge_facts
 from agent_tools.review_git import HistoryError
 from agent_tools.review_issue121 import (ContributionError, classify, compact_121, contribution_edges, derive_121,
                                          model_121, plan_anchors, reconstruct_boundary, unavailable_ids, validate_121)
@@ -46,6 +46,29 @@ class Fixture:
         with patch.dict(os.environ, source_budget_env(tmp), clear=True):
             authority = describe("review-package")
         return repo, pins, task7_pins, table, authority
+
+
+class RetainedDomainTest(Fixture, unittest.TestCase):
+    def test_edited_move_measures_as_a_v1_delete_and_add(self):
+        """Issue 569: every retained measurement runs under the frozen `review-git-records/v1`, so an edited move
+        is a deletion and an addition that the retained validators accept. The living policy pairs the same edge
+        as an inexact rename, which they refuse."""
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp)
+        repo, pins, task7_pins, table, authority = self.build(tmp, edited_move=2)
+        mover = pins.assignments[2][0]
+        model = model_121(repo, pins, task7_pins, authority)
+        self.assertEqual(validated(model, pins, table), model)
+        edge = next(e for e in model["edges"] if e["commit"] == mover)
+        self.assertEqual([(r["operation"], r["path"]) for r in edge["records"]],
+                         [("A", "src/c2.txt"), ("D", "src/move.txt"), ("A", "src/moved.txt")])
+        self.assertEqual([(o["boundary"], o["state"]) for o in outcomes(model)],
+                         [(label, "measured") for label in LABELS])
+        for scope in ("aggregate.actual", "aggregate.projected", "tasks-1-3"):
+            paths = {r["path"] for r in model["records"] if r["scope"] == scope}
+            self.assertLessEqual({"src/move.txt", "src/moved.txt"}, paths, scope)
+        living = edge_facts(repo, edge["parent"], mover, 1)
+        self.assertEqual([(r["operation"], r["old_path"], r["path"]) for r in living["records"]],
+                         [("A", "src/c2.txt", "src/c2.txt"), ("R097", "src/move.txt", "src/moved.txt")])
 
 
 class AncestryTest(Fixture, unittest.TestCase):
@@ -473,6 +496,7 @@ class PayloadTest(Fixture, unittest.TestCase):
             "modified_from_nothing": {"operation": "M"}, "deleted_into_a_file": {"operation": "D", "before": entry},
             "rename_onto_itself": {"operation": "R100", "before": entry},
             "rename_under_an_add": {"old_path": "src/elsewhere.txt"},
+            "living_policy_rename": {"operation": "R097", "old_path": "src/elsewhere.txt", "before": entry},
             "entry_not_closed": {"after": {**entry, "size": 1}}, "entry_mode": {"after": {**entry, "mode": 100644}},
             "entry_oid": {"after": {**entry, "oid": "f" * 39}}, "entry_kind": {"after": {**entry, "kind": "file"}},
         }

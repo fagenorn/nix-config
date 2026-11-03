@@ -36,7 +36,7 @@ import stat
 from typing import Mapping
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256, GenerationError, _run_git
+from agent_tools.review_actual import PACKING_POLICY_V1_SHA256, RECORD_POLICY_V1_SHA256, GenerationError, _run_git
 from agent_tools.review_expansion import MEMBER_MAX_BYTES
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, full_commit, raw_digest, read_regular,
                                          strict_json)
@@ -261,8 +261,8 @@ def _components(components: dict, table: object, task7_pins, issue121_pins, issu
                                 "record_policy_sha256"))
              and _hex(tool["commit"], 40) and _digest(tool["files_sha256"])
              and _digest(tool["artifact_policy_sha256"])
-             and tool["packing_policy_sha256"] == PACKING_POLICY_SHA256
-             and tool["record_policy_sha256"] == RECORD_POLICY_SHA256
+             and tool["packing_policy_sha256"] == PACKING_POLICY_V1_SHA256
+             and tool["record_policy_sha256"] == RECORD_POLICY_V1_SHA256
              and _closed(archive, ("producer_sha256", "manifest_sha256", "shards"))
              and archive["producer_sha256"] == issue100_pins.producer_sha256
              and archive["manifest_sha256"] == issue100_pins.manifest_sha256, "component_mismatch")

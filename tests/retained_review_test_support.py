@@ -20,7 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import RECORD_POLICY
+from agent_tools.review_actual import RECORD_POLICY_V1
 from agent_tools.review_expansion import MEMBER_MAX_BYTES
 from agent_tools.review_forecast import canonical_bytes
 from agent_tools.review_issue100 import ISSUE_100_PINS, Domain
@@ -132,6 +132,7 @@ def source_budget_env(tmp, source=SOURCE) -> dict:
 
 
 PLAN_PREFIX = ".claude/plans/fixture-adoption"
+MOVE_LINES = b"".join(b"move %d\n" % n for n in range(40))
 # The Task-7 inventory beside the plan: one file under each other move root,
 # every rewrite target (named only through `TARGETS`) and the renderer source the fixture pins name.
 _TASK7_SEED = {
@@ -140,25 +141,30 @@ _TASK7_SEED = {
     "tools/render.py": b"# fixture renderer\n"}
 
 
-def linear_fixture(tmp, owners=(1, 1, 2, 3, 3, 4, 5, 6), touches=None) -> tuple:
+def linear_fixture(tmp, owners=(1, 1, 2, 3, 3, 4, 5, 6), touches=None, edited_move=None) -> tuple:
     """A linear repository and its `Issue121Pins`.
 
     The SSH-signed first commit (the base) writes the plan root, its eight task
     members and the Task-7 seed. Commit `k` then writes `src/c<k>.txt` for owner
     `owners[k]` (owner 0 is process) and, with `touches={k: j}`, also edits
-    commit `j`'s file.
+    commit `j`'s file. With `edited_move=k`, the base also writes `src/move.txt` (`MOVE_LINES`) and commit `k`
+    moves it to `src/moved.txt` with one line edited: an inexact rename that only a pairing threshold below
+    100% joins.
     """
     key, signer = ssh_signer(tmp)
     repo = init_repo(tmp)
     plan = {f"{PLAN_PREFIX}.md": b"fixture plan root\n",
             **{f"{PLAN_PREFIX}.tasks/task-{n}.md": f"fixture task {n}\n".encode() for n in range(1, 9)}}
-    base = commit_files(repo, {**plan, **_TASK7_SEED}, "seed", sign_key=key)
+    move = {} if edited_move is None else {"src/move.txt": MOVE_LINES}
+    base = commit_files(repo, {**plan, **_TASK7_SEED, **move}, "seed", sign_key=key)
     assignments = []
     for k, owner in enumerate(owners):
         files = {f"src/c{k}.txt": f"commit {k}\n".encode()}
         if touches and k in touches:
             other = f"src/c{touches[k]}.txt"
             files[other] = (repo / other).read_bytes() + f"touched by {k}\n".encode()
+        if k == edited_move:
+            files.update({"src/move.txt": None, "src/moved.txt": MOVE_LINES.replace(b"move 20\n", b"moved 20\n")})
         assignments.append((commit_files(repo, files, f"commit {k}"), owner, None if owner else "process"))
     blobs = tuple((path, git(repo, "rev-parse", f"{base}:{path}"))
                   for path in (f"{PLAN_PREFIX}.md", f"{PLAN_PREFIX}.tasks/task-7.md"))
@@ -228,7 +234,7 @@ def _domain(pinned, raw) -> Domain:
     return Domain(pinned.name, pinned.policy_sha256, len(raw), records, hashlib.sha256(raw).hexdigest())
 
 
-def issue100_fixture(tmp) -> tuple:
+def issue100_fixture(tmp, edited_move=False) -> tuple:
     """An issue repository, a clone of it as the live repository, an archive directory and their pins.
 
     From the base, c1 adds the process path `docs/plan.md` and `tmp/scratch.txt`; c2 adds `src/a.txt`,
@@ -240,14 +246,17 @@ def issue100_fixture(tmp) -> tuple:
     the base writes head's `src/a.txt` and its own `ci.yaml`. The archive's two `shard-NNN.diff` shards,
     manifest and producer come from running the pinned recipe over the base and head trees. The pinned
     digest of the raw parent edges is taken from plain `git rev-list --parents`, apart from the module.
+    With `edited_move`, the base also writes `src/move.txt` and c2 moves it to `src/moved.txt` with one line edited.
     """
     repo = init_repo(tmp)
+    moved = b"".join(b"move %d\n" % n for n in range(40))
     base = commit_files(repo, {"README": b"fixture\n", "ci.yaml": b"ci: base\n", "justfile": b"base:\n",
-                               "legacy": b"legacy\n"}, "base")
+                               "legacy": b"legacy\n", **({"src/move.txt": moved} if edited_move else {})}, "base")
     commit_files(repo, {"docs/plan.md": b"plan\n", "tmp/scratch.txt": b"scratch\n"}, "c1")
     git(repo, "branch", "side")
-    commit_files(repo, {"src/a.txt": b"a\n", "ci.yaml": b"ci: head\n", "tmp/scratch.txt": None,
-                        "tmp": b"file\n"}, "c2")
+    commit_files(repo, {"src/a.txt": b"a\n", "ci.yaml": b"ci: head\n", "tmp/scratch.txt": None, "tmp": b"file\n",
+                        **({"src/move.txt": None, "src/moved.txt": moved.replace(b"move 20\n", b"moved 20\n")}
+                           if edited_move else {})}, "c2")
     commit_files(repo, {"justfile": b"head:\n", "legacy": None, "legacy/note.txt": b"note\n"}, "c3")
     git(repo, "checkout", "-q", "side")
     commit_files(repo, {"src/b.txt": b"b\n"}, "s1")
@@ -261,7 +270,7 @@ def issue100_fixture(tmp) -> tuple:
     git(tmp, "clone", "-q", str(repo), str(live_repo))
     trees = [git(repo, "rev-parse", f"{oid}^{{tree}}") for oid in (base, head)]
     raw = _raw(repo, *ISSUE_100_PINS.recipe, *trees)
-    fresh = _raw(repo, *RECORD_POLICY["git_config"], "diff", *RECORD_POLICY["diff_args"], "--binary", "-U10", *trees)
+    fresh = _raw(repo, *RECORD_POLICY_V1["git_config"], "diff", *RECORD_POLICY_V1["diff_args"], "--binary", "-U10", *trees)
     historical = _domain(ISSUE_100_PINS.historical, raw)
     starts = [m.start() for m in re.finditer(rb"(?m)^diff --git ", raw)]
     shards = [raw[:starts[2]], raw[starts[2]:]]
@@ -296,6 +305,9 @@ def issue100_fixture(tmp) -> tuple:
     counts = {"commits": 6, "parent_edges": 7, "merge_edges": 1, "edge_records": 20, "contributions": 8,
               "historical_process": 1, "integrated": 1, "candidate": 6, "candidate_ordinary": 4,
               "candidate_reconciliation": 2, "pending_overlaps": 2, "reconciled": 0}
+    if edited_move:
+        # c2's edge and the merge's second-parent edge each gain D and A; two more candidates
+        counts.update(edge_records=24, contributions=10, candidate=8, candidate_ordinary=6)
     # Git's own raw parents in range order: one `{parent, commit, parent_ordinal}` row per parent.
     listed = git(repo, "rev-list", "--parents", "--reverse", "--topo-order", f"{base}..{head}").splitlines()
     parent_edges = [{"parent": parent, "commit": row.split()[0], "parent_ordinal": ordinal}
