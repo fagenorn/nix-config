@@ -11,7 +11,12 @@ tables of their models, which `expand_100` and `expand_121` yield (issue 254).
 
 Every output byte is `canonical_bytes` of a value the pins, the repositories,
 the archive and the budget authority determine: no path, clock, hostname,
-locale or environment value is written, so two derivations are byte-identical.
+locale or environment value is written. Every Git call that renders a record,
+a commit subject or the issue-100 recipe runs in `review_actual.record_git`'s
+isolated view, so no attribute or configuration source of the host or of the
+repositories reaches it (issue 255, which lifts RP24's narrowing). Two
+derivations of the same pins are therefore byte-identical on any host and any
+repository configuration, for one Git version.
 The inputs are only read. Derivation takes no snapshot of them (RP6).
 """
 from __future__ import annotations

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 from typing import Callable, Iterable, Iterator, Mapping
 
 from agent_tools.canonical import telemetry_digest
@@ -115,10 +117,55 @@ def git_diff(repo: Path, base_tree: str, head_tree: str, *view: str) -> bytes:
         raise GenerationError("unsupported diff view")
     if telemetry_digest(RECORD_POLICY) != RECORD_POLICY_SHA256:
         raise GenerationError("unsupported record policy")
-    raw = _run_git(repo, *RECORD_POLICY["git_config"], "diff",
-                   *RECORD_POLICY["diff_args"], *view, base_tree, head_tree, binary=True)
-    assert isinstance(raw, bytes)
-    return raw
+    return record_git(repo, *RECORD_POLICY["git_config"], "diff",
+                      *RECORD_POLICY["diff_args"], *view, base_tree, head_tree)
+
+
+def record_git(repo: Path, *args: str) -> bytes:
+    """Run `git <args>` for a record in a fresh view of `repo`'s objects, isolated from every attribute and
+    configuration source (issue 255; D1, D7).
+
+    The view is a new bare Git directory made without `git init`, so no template applies. It holds an unborn
+    `HEAD`, an empty `refs/`, a `config` that declares only the repository format, and an absolute alternate
+    to `repo`'s object directory. Git runs there under the caller's environment without any `GIT_*` variable
+    or `XDG_CONFIG_HOME`, with `HOME` set to the view and system configuration and attributes off. No
+    working tree, index, attributes file or configuration beyond Git's defaults and the argv's own `-c`
+    reaches the output. The view is removed on every outcome.
+    """
+    found = _run_git(repo, "rev-parse", "--path-format=absolute", "--git-path", "objects",
+                     "--show-object-format")
+    lines = found.split("\n")
+    if len(lines) != 3 or lines[2] or not os.path.isabs(lines[0]) or lines[1] not in ("sha1", "sha256"):
+        raise GenerationError("git command failed")
+    objects, object_format = lines[0], lines[1]
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_") and key != "XDG_CONFIG_HOME"}
+    try:
+        with tempfile.TemporaryDirectory(prefix="record-view-") as name:
+            view = Path(name)
+            (view / "refs").mkdir()
+            (view / "objects/info").mkdir(parents=True)
+            (view / "HEAD").write_text("ref: refs/heads/record-view\n", encoding="utf-8")
+            config = ("[core]\n\trepositoryformatversion = "
+                      f"{0 if object_format == 'sha1' else 1}\n\tbare = true\n")
+            if object_format != "sha1":
+                config += f"[extensions]\n\tobjectFormat = {object_format}\n"
+            (view / "config").write_text(config, encoding="utf-8")
+            (view / "objects/info/alternates").write_text(objects + "\n", encoding="utf-8")
+            env.update(HOME=str(view), GIT_CONFIG_NOSYSTEM="1", GIT_ATTR_NOSYSTEM="1")
+            return subprocess.run(["git", f"--git-dir={view}", *args], cwd=view, env=env,
+                                  check=True, capture_output=True).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise GenerationError("git command failed") from exc
+
+
+def commit_subject(repo: Path, sha: str) -> str:
+    """`sha`'s subject line through `record_git`, strictly UTF-8, without its trailing newline (D10)."""
+    raw = record_git(repo, "show", "-s", "--no-show-signature", "--format=%s", sha).removesuffix(b"\n")
+    try:
+        return raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise GenerationError("commit metadata is not UTF-8") from exc
 
 
 def actual_inputs(repo: Path, base: str, head: str, package_name: str,
@@ -525,18 +572,9 @@ def _commits(repo: Path, base: str, head: str) -> list[dict[str, str]]:
         listed = original_range(repo, base, head, topological=False)
     except HistoryError as exc:
         raise GenerationError("invalid original history") from exc
-    try:
-        commits: list[dict[str, str]] = []
-        for sha in listed:
-            if SHA_RE.fullmatch(sha) is None:
-                raise GenerationError("malformed Git commit list")
-            subject = _run_git(repo, "show", "-s", "--no-show-signature", "--format=%s", sha, binary=True)
-            assert isinstance(subject, bytes)
-            if subject.endswith(b"\n"):
-                subject = subject[:-1]
-            commits.append(
-                {"sha": sha, "subject": subject.decode("utf-8", errors="strict")}
-            )
-        return commits
-    except UnicodeDecodeError as exc:
-        raise GenerationError("commit metadata is not UTF-8") from exc
+    commits: list[dict[str, str]] = []
+    for sha in listed:
+        if SHA_RE.fullmatch(sha) is None:
+            raise GenerationError("malformed Git commit list")
+        commits.append({"sha": sha, "subject": commit_subject(repo, sha)})
+    return commits

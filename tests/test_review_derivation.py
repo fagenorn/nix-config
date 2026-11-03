@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_tools import derive_review_feasibility_fixtures as command
+from agent_tools.review_actual import RECORD_POLICY
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256
 from agent_tools.review_budget import describe
@@ -14,6 +15,7 @@ from agent_tools.review_issue100 import Issue100Error
 from agent_tools.review_task7 import EstimateError
 from agent_tools.review_witness import ANCHOR_NAME, PAYLOAD_NAMES, WitnessError, tool_closure
 
+from .hostile_git_test_support import hostile_git_env
 from .retained_review_test_support import commit_files, git, retained_fixture, snapshot, source_budget_env, tool_fixture
 
 OPTIONS = ("--issue-121-repo", "--issue-100-repo", "--archive-dir", "--tool-repo", "--tool-commit", "--output-dir")
@@ -113,6 +115,27 @@ class DerivationTest(unittest.TestCase):
         self.assertEqual(files, {p.name: p.read_bytes() for p in b.iterdir()})
         self.assertEqual(set(files), {ANCHOR_NAME, *PAYLOAD_NAMES})
         self.assertEqual((self.state(), self.leftovers()), (before, []))
+
+    def test_hostile_record_sources_leave_the_bundle_unchanged(self):
+        """Issue 255: copies of the class repositories under every record-shaping source a test can own derive
+        the clean bundle byte for byte. The control: raw Git renders the issue-121 range differently there."""
+        owned = Path(tempfile.mkdtemp(dir=self.tmp, prefix="hostile-"))
+        i = self.inputs
+        repos = [Path(shutil.copytree(repo, owned / name, symlinks=True)) for name, repo in
+                 (("121", i.issue_121_repo), ("100", i.issue_100_repo), ("tool", i.tool_repo))]
+        (owned / "home").mkdir()
+        env = hostile_git_env(owned, dict(os.environ, HOME=str(owned / "home")), repos)
+        clean = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        policy = (*RECORD_POLICY["git_config"], "diff", *RECORD_POLICY["diff_args"], "--binary", "-U10",
+                  self.pins[1].base, "HEAD")
+        control = [subprocess.run(["git", "-C", str(repo), *policy], env=e, check=True, capture_output=True).stdout
+                   for repo, e in ((i.issue_121_repo, clean), (repos[0], env))]
+        self.assertNotEqual(control[0], control[1], "the hostile sources never bit")
+        hostile = owned / "bundle"
+        with patch.dict(os.environ, env, clear=True):
+            self.derive(hostile, replace(i, issue_121_repo=repos[0], issue_100_repo=repos[1], tool_repo=repos[2]))
+        self.assertEqual({p.name: p.read_bytes() for p in hostile.iterdir()},
+                         {p.name: p.read_bytes() for p in self.shared()[0].iterdir()})
 
     def test_failing_pin_leaves_no_output_no_scratch_and_unchanged_inputs(self):
         before = self.state()

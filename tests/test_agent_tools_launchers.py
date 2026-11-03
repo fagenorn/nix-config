@@ -22,6 +22,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from .hostile_git_test_support import hostile_git_env
 from .retained_evidence_test_support import ANCHOR_SHA256, BUNDLE
 
 INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
@@ -384,6 +385,55 @@ class AgentToolsLauncherTest(unittest.TestCase):
         for member in roots[0].with_suffix('.shards').iterdir():
             self.assertEqual(member.read_bytes(), (roots[1].with_suffix('.shards') / member.name).read_bytes())
 
+    def test_review_package_ignores_hostile_git_alike_from_source_and_built(self):
+        """Issue 255: the clean source run, and the source and built runs under every hostile record source a
+        test can own, write the same package. The control: raw Git renders the range differently there."""
+        source = Path(__file__).resolve().parents[1]
+        top = self.hostile / 'hostile-git'
+        top.mkdir()
+        repo = top / 'repo'; repo.mkdir()
+        home = top / 'home'; home.mkdir()
+        (home / '.agents').symlink_to(self.root / '.agents', target_is_directory=True)
+        env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_') and k not in
+               ('XDG_CONFIG_HOME', 'PYTHONPATH', 'NIX_PYTHONPATH', 'NIX_PYTHONPREFIX', 'NIX_PYTHONEXECUTABLE')}
+        env.update(HOME=str(home), PYTHONPATH=str(source / 'python'), PATH=self.dependency_env()['PATH'],
+                   GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+        def git(*args, run_env=env):
+            result = subprocess.run(['git', *args], cwd=repo, env=run_env, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+        git('init', '-q'); git('config', 'user.name', 'Fixture')
+        git('config', 'user.email', 'fixture@example.test'); git('config', 'commit.gpgsign', 'false')
+        (repo / 'value.md').write_text('title\n\nbefore\n')
+        git('add', '-A'); git('commit', '-qm', 'base'); base = git('rev-parse', 'HEAD').decode().strip()
+        (repo / 'value.md').write_text('title\n\nafter\n')
+        (repo / 'plan.md').write_text('# Plan\n\n## Task index\n\nTask 1 — Case — value.md — full — '
+                                    '[task-1.md](plan.tasks/task-1.md)\n')
+        (repo / 'plan.tasks').mkdir(); (repo / 'plan.tasks/task-1.md').write_text('# Task 1\n')
+        git('add', '-A'); git('commit', '-qm', 'café change'); head = git('rev-parse', 'HEAD').decode().strip()
+        source_argv = [sys.executable, '-m', 'agent_tools.review_package']
+        outcomes = {}
+        def produce(label, argv, run_env):
+            out = top / label; out.mkdir(); root = out / 'review.json'
+            produced = subprocess.run([*argv, str(repo / 'plan.md'), base, head, str(root)], cwd=repo,
+                                      env=run_env, capture_output=True, timeout=TIMEOUT_SECONDS)
+            self.assertEqual(produced.returncode, 0, produced.stderr)
+            self.assertNotIn(MARKER.encode(), produced.stdout + produced.stderr)
+            report = json.loads(produced.stdout)
+            self.assertEqual(report['artifact'].pop('path'), str(root))
+            outcomes[label] = report, {p.relative_to(out).as_posix(): p.read_bytes()
+                                       for p in sorted(out.rglob('*')) if p.is_file()}
+        clean_raw = git('diff', '--binary', '-U10', base, head)
+        produce('clean-source', source_argv, env)
+        hostile = hostile_git_env(top / 'owned', env, [repo])
+        self.assertNotEqual(git('diff', '--binary', '-U10', base, head, run_env=hostile), clean_raw,
+                            'the hostile sources never bit')
+        produce('hostile-source', source_argv, hostile)
+        produce('hostile-built', [str(self.root / '.agents/bin/review-package')],
+                dict(hostile, PYTHONPATH=str(self.hostile), NIX_PYTHONPATH=str(self.hostile)))
+        self.assertEqual(outcomes['hostile-source'], outcomes['clean-source'])
+        self.assertEqual(outcomes['hostile-built'], outcomes['clean-source'])
+
     def test_review_source_and_built_canonical_actual_parity(self):
         source = Path(__file__).resolve().parents[1]
         top = self.hostile / 'review-case'
@@ -678,6 +728,7 @@ class RetainedLauncherTest(AgentToolsLauncherTest):
 
     Run: just agent-retained-tests <root>. That recipe sets AGENT_RETAINED_ROOT beside the built tree; without
     it the class skips, which is never acceptance. The retained root is compared before and after each test.
+    The built derivation runs under every environment-only hostile record source (issue 255).
     """
 
     @classmethod
@@ -699,7 +750,13 @@ class RetainedLauncherTest(AgentToolsLauncherTest):
         derive, replay = RETAINED
         clean = self.hostile / "clean"; clean.mkdir()
         source_env = dict(self.dependency_env(), PYTHONPATH=str(Path(__file__).resolve().parents[1] / "python"))
-        runs = {"built": ([str(self.root / ".agents/bin" / derive)], self.hostile_env(), self.hostile),
+        hostile_env = hostile_git_env(self.hostile / "hostile-git", self.hostile_env())
+        pair = ("diff", "--binary", "-U10", *self.full.COMMITS[:2])
+        control = [subprocess.run(["git", "-C", str(self.retained), *pair], env=dict(e, GIT_OPTIONAL_LOCKS="0"),
+                                  check=True, capture_output=True, timeout=TIMEOUT_SECONDS).stdout
+                   for e in (dict(source_env, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"), hostile_env)]
+        self.assertNotEqual(control[0], control[1], "the hostile sources never bit")
+        runs = {"built": ([str(self.root / ".agents/bin" / derive)], hostile_env, self.hostile),
                 "source": ([sys.executable, "-m", "agent_tools." + RETAINED[derive]], source_env, clean)}
         commit, summaries, bundles = self.full.tool_commit(), {}, {}
         for label, (argv, env, cwd) in runs.items():
