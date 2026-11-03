@@ -227,3 +227,24 @@ Inspection of the branch in the clone (clone status clean):
 Push: `git push -u origin adopt-e37b7e24779f` from the clone, run alone in its own Bash call; the guard allowed it. `git ls-remote origin refs/heads/adopt-e37b7e24779f` printed `553b2c59e1192f5bfad06073f00ca1dde2e127da` (2026-11-03T09:59:23Z), and it is the only `adopt-` ref on the remote. Nothing else was pushed, no PR was opened (D16), and no failed-apply worktree exists to retain.
 
 The four bare helpers authd, ocr-helper, wa-bridge and wkfetch are signed in place inside the checkout, gitignored, and rebuilt by Argus's devenv shell entry only when absent. They are inputs of the daemon unit, not release units. The daemon unit's identity proves the checkout at the candidate commit with no tracked change, which an untracked stale helper binary passes, so a release does not prove that the helpers were rebuilt from the candidate commit.
+
+## Task 5 — Pre-registration probes and owner gate
+
+Recorded 2026-11-03T10:03Z. The guard was fed payload files only, using the wrapper that `~/.claude/settings.json` registers, which equals Task 2's `Guard wrapper`. No `gh pr create`, `gh pr merge` or `git push` ran. The probe clone `argus-129` had `origin` `git@github.com:fagenorn/argus.git` and `refs/remotes/origin/HEAD` `refs/remotes/origin/main`. It was clean, `origin` still listed `adopt-e37b7e24779f` at the adoption commit, and it was removed.
+
+| Probe | Command | cwd | Exit | Guard output | Time |
+| --- | --- | --- | --- | --- | --- |
+| pr-create | `gh pr create --repo fagenorn/argus --base main --head adopt-e37b7e24779f --title "Adopt the project contract" --body "…"` | argus clone | 0 | none (allowed by the `fagenorn` owner literal) | 2026-11-03T10:03:00Z |
+| merge-pre | `gh pr merge 115 --repo fagenorn/argus --merge --match-head-commit 0bd5fb02c8545ed0247fe85fcf90d6e2e8b7360e --delete-branch` | argus clone | 2 | `lifecycle guard: protection lookup failed: stderr=gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403); …` | 2026-11-03T10:03:10Z |
+
+Both verdicts are the expected ones. Open PRs into `main` were 115 (clean) and 108 (dirty); 115 was probed. With no registered row, the plan-gated 403 declares no check, which is the bootstrap refusal (552 D8).
+
+### Owner gate
+Owner gate: open and merge adopt-e37b7e24779f at head 553b2c59e1192f5bfad06073f00ca1dde2e127da
+1. Open the PR from any Argus checkout, or on GitHub with base main and head adopt-e37b7e24779f:
+   gh pr create --repo fagenorn/argus --base main --head adopt-e37b7e24779f --title "Adopt the project contract" --body "Adds the Argus project contract and the adopt-project adoption commit for https://github.com/fagenorn/nix-config/issues/129. Merge with a merge commit once the required check is green on the pushed head."
+2. Wait until the check memory foundation (unit + forced checks) is green on head 553b2c59e1192f5bfad06073f00ca1dde2e127da. If it is red, leave the PR open and unmerged.
+3. Merge with a merge commit, never squash or rebase, deleting the branch:
+   gh pr merge <n> --repo fagenorn/argus --merge --match-head-commit 553b2c59e1192f5bfad06073f00ca1dde2e127da --delete-branch
+   or use GitHub's Create a merge commit.
+Resume: the run continues at Task 6, which confirms the merge before anything else.
