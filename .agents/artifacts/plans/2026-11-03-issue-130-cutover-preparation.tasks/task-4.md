@@ -159,5 +159,5 @@ Verify: `git status --short -- .agents/artifacts/evidence` prints nothing.
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":4,"records":[{"bounds":[{"added_lines":320,"boundary":"all","deleted_lines":0,"record_bytes":43520,"support":{"covers":["r1-1","r2-1","r3-1","r4-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r4-1","last_task":6,"owner":4,"path":".agents/artifacts/evidence/cutover-130-checklist.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"c955ed5cbd7c79885017c5b007a71bdbb18f72e4","head":"af9942f5f5e604e12259f3839e1f40ed325cdf8e"}],"commit_subject_bytes":[64,64,64],"id":4,"records":[{"bounds":[{"added_lines":320,"boundary":"all","deleted_lines":0,"record_bytes":43520,"support":{"covers":["r1-1","r2-1","r3-1","r4-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"r4-1","last_task":6,"owner":4,"path":".agents/artifacts/evidence/cutover-130-checklist.md"}]}}
 ```
