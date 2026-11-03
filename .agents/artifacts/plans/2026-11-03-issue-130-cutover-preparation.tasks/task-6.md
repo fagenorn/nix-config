@@ -1,6 +1,6 @@
 # Task 6: Summary, gate, criteria map, after-snapshot and acceptance record
 
-This task covers spec §1 (summary, readiness, criteria map), §5 and §6, and follows D12 and D13. It closes the evidence run with the after-snapshot, completes `CL`, and writes `A` for AC1–AC10. The gate text is the owner's activation and rollback procedure, so every bound value must be one this run observed.
+This task covers spec §1 (summary, readiness, criteria map), §5 and §6, and follows D12, D13 and D19. It closes the evidence run with the after-snapshot, completes `CL`, and writes `A` for AC1–AC10. The gate text is the owner's activation and rollback procedure, so every bound value must be one this run observed.
 
 **Files:**
 - Modify: `.agents/artifacts/evidence/cutover-130-checklist.md` (`CL`)
@@ -90,8 +90,10 @@ Each verdict uses §6's rule, written with the tokens `met`, `unmet` or `human_p
 
 Create `A` with the line `# Acceptance record — issue #130`, one sentence naming host `mbp`, the evidence window and `CL`, and the table `| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |`. It has rows AC1–AC10:
 - `Criterion` is the issue's checkbox line, verbatim without the checkbox. AC1–AC5 come from `## Acceptance criteria`, and AC6–AC10 from `### Additional acceptance criteria`.
-- `Kind` and `Check or command` come from the plan's Acceptance map.
-- For an `evidence (classified)` row: `Observed` is the mapped item verdicts with their `CL` section names; `Commit` is the 40-hex commit that holds the deciding sections (Task 1's for AC6, Task 4's for AC7, and this task's parent for AC1); `Conditions` names the reachable hosts and `origin/main`'s commit.
+- `Kind` comes from the plan's Acceptance map.
+- For an `evidence (classified)` row (AC1, AC6, AC7), `Check or command` copies the commands of the map's Check cell (the `awk` verdict read, and AC6's `grep -c`) and its literal threshold verbatim. Run those commands on `CL` at this task's parent, before `CL` is edited here. `Observed` is their output, its lines joined with `; `.
+- `Commit` is the 40-hex commit holding the final observation of every deciding row (D19): the newest of `git log --format=%H fb8fd4f8..HEAD -- CL` whose `git show` changes a row or the `Item verdict` line of a mapped item. That is Task 5's commit when Step 4 there re-observed one of them, and otherwise the newest of Tasks 1–4 that wrote them (Task 1's for C1). No later commit changes those rows.
+- `Conditions` copies the map's evidence conditions, naming the hosts reachable in Task 1 and `origin/main`'s 40-hex from `CL`'s `Revisions:` line.
 - For a `human (classified)` row, the three evidence cells are `—`.
 - `Verdict` is the criteria-map verdict. sdd's final review owns it.
 
@@ -145,10 +147,14 @@ cmap = table(section("Criteria map"), "AC")
 assert [r[0] for r in cmap] == [f"AC{n}" for n in range(1, 11)] and all(r[3] in ("met", "unmet", "human_pending") for r in cmap)
 print("checklist ok")
 EOF
+for w in 'C2 C3 C5 C6 C8 C10' 'C1' 'C6 C7'; do
+  obs=$(awk -v want="$w" '/^### C[0-9]+ — /{i=$2} /^Item verdict: / && index(" " want " ", " " i " "){print i, $3}' "$CL" | paste -sd ';' - | sed 's/;/; /g')
+  grep -qF -- "| $obs" "$A"
+done
 acceptance-record reobserve --record "$A" --head "$(git rev-parse HEAD)"
 ```
 
-Expected: `checklist ok`, then `{"acceptance_state":…,"changed":[]}` with exit 0. Before Step 3 the heading test fails.
+Expected: `checklist ok`; each evidence row's Observed cell starts with its verdict read's output; then `{"acceptance_state":…,"changed":[]}` with exit 0. Before Step 3 the heading test fails.
 Then rerun Task 1's seam: `adopt-project verify --repo-root "$PWD"` names no `.md` path in any failed `detail`, and `conformance run --purpose doctor --repo-root "$PWD"` is `passed`.
 
 - [ ] **Step 9: Commit**

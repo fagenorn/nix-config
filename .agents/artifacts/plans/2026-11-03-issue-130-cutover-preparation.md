@@ -13,14 +13,14 @@ Spec: `.agents/artifacts/specs/2026-11-03-issue-130-cutover-preparation-design.m
 
 ## Global Constraints
 
-- The base is `fb8fd4f82395320581edd3160f4f93d789ce081f` (`origin/main`). The spec commits are `1f226906` and `61c6633b`, then the planning commit that appends D14–D17.
+- The base is `fb8fd4f82395320581edd3160f4f93d789ce081f` (`origin/main`). The spec commits are `1f226906` and `61c6633b`, then the planning commits that append D14–D19.
 - Only two files are written: `CL` = `.agents/artifacts/evidence/cutover-130-checklist.md` (Tasks 1–6) and `A` = `.agents/artifacts/plans/2026-11-03-issue-130-cutover-preparation.acceptance.md` (Task 6). Task 5 is the only tracker writer (D14).
 - Never run `just switch`, `just gc`, `workflow-state migrate --apply`, `adopt-project verify --register`, a `release` verb other than `transaction status`, `agent-gate-bundle`, trials, a rollback, or any worktree add, remove or prune. Never write, fetch or pull in a roster root, nix-config's clone `/Users/anis/tmp/nix-config` included (D1, D15). Every git call into a roster root is `git --no-optional-locks -C R …`.
 - `mbp` is this machine and runs commands directly. A remote host `H` runs `ssh -o BatchMode=yes -o ConnectTimeout=15 H -- <argv>`. An argv with quoted or glob arguments goes as a script on stdin: `ssh -o BatchMode=yes -o ConnectTimeout=15 H -- /bin/bash -s -- <args> < SCR/<name>.sh`. Task 1's `hostname` probe (C1.c) fixes each host's reachability. A host unreachable then is never probed again. Every one of its rows is `human-pending`, with Revision `—`, the UTC and Exit of that C1.c probe, and Observed `unreachable in Task 1 (C1.c exit <n>)`. A host that refuses later gets `human-pending` rows quoting the new ssh failure (D2, D15).
 - Run every command over 30 s in the foreground, with an explicit timeout, as `launch-scope exec --repo-root /Users/anis/tmp/nix-config --run-id <run-id> --worker-id <worker-id> -- <argv>`, using the ids your dispatch brief names. `SCR` is the directory `launch-scope scratch` (same flags) prints. Raw output stays under `SCR` and is never committed (D3). Shell state does not survive between Bash calls, so substitute `SCR` and recorded values as literals.
 - Commit from the worktree root: `launch-commit --repo-root /Users/anis/tmp/nix-config --run-id <run-id> --worker-id <worker-id> -- -m "docs(issue-130/T<n>): <summary>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`. The subject is at most 64 bytes, and the commit is signed.
 - Times are UTC (`date -u +%Y-%m-%dT%H:%M:%SZ`), taken when a row's commands run.
-- Item format in `CL` (§1, D4): the heading `### C<n> — <title>`, a `> ` line quoting the predicate and its source, a fenced `text` block with one `C<n>.<letter> <command>` line per command, the table `| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |`, and the line `Item verdict: **<worst row>**`, where red beats human-pending and human-pending beats green.
+- Item format in `CL` (§1, D4): the heading `### C<n> — <title>`, a `> ` line quoting the predicate and its source, a fenced `text` block with one `C<n>.<letter> <command>` line per command, the table `| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |`, and the line `Item verdict: **<worst row>**`, where red beats human-pending and human-pending beats green. Only C3 adds lines between them: its informational bundles, outside the table (D18).
 - Rows: there is one row per (host, subject). A row may run several labelled commands, with `Exit` listing their exits in order (`0; 1`). `Subject` is `host`, a root path or an artifact path. `Revision` depends on the subject:
   - host: `system-<N>`;
   - root: the first 12 hex of `git --no-optional-locks -C R rev-parse HEAD`, then the branch (`symbolic-ref --short -q HEAD`, else `detached`), then `<n> dirty` (`status --porcelain` lines), run with the row;
@@ -67,7 +67,7 @@ The spec's § Test seams, amended by D16; no test is added.
 ## Delivery estimate and boundaries
 
 - `all` (Tasks 1–6) is the only boundary: one branch and one docs-only PR (D13). One file's diff cannot be split across boundaries (D17).
-- Tasks run in order. Task 5 files only from rows committed by Tasks 1–4 (§6 item 5).
+- Tasks run in order. Task 5 files only from rows red as last observed (§6 item 5, D19).
 - The issue 130 gate comment links `CL` at the merged commit (D13), so ship-issue's hold step posts it, not a task.
 
 ## Task index
@@ -86,17 +86,17 @@ Task 6 — Summary, gate, criteria map, after-snapshot and acceptance record —
 
 ## Acceptance map
 
-AC1–AC5 are the issue's `## Acceptance criteria` lines, and AC6–AC10 its `### Additional acceptance criteria`, in order (§6). Task 6 writes every row of `A`, and sdd's final review owns the verdicts. A row is `met` only when all its mapped items are green, `human_pending` when the rest wait on the owner, and otherwise `unmet`.
+AC1–AC5 are the issue's `## Acceptance criteria` lines, and AC6–AC10 its `### Additional acceptance criteria`, in order (§6). Task 6 writes every row of `A`, and sdd's final review owns the verdicts. A row is `met` only when all its mapped items are green, `human_pending` when the rest wait on the owner, and otherwise `unmet`. In an evidence row, the `awk` verdict read prints `<item> **<verdict>**` per named item. The evidence conditions are: `CL` at the D19 commit, each item over every host reachable in Task 1 and its roots, and `origin/main` as in `CL`'s `Revisions:` line. Task 6 copies the commands and threshold into `A`'s `Check or command`, and the conditions into `Conditions`.
 
 | AC | Kind | Task | Check |
 |----|------|------|-------|
-| AC1 | evidence (classified) | Task 6 | `CL` item verdicts of C2, C3, C5, C6, C8 and C10, each over every roster host and root of the evidence run; threshold all six `green`; row AC1 |
+| AC1 | evidence (classified) | Task 6 | `awk -v want='C2 C3 C5 C6 C8 C10' '/^### C[0-9]+ — /{i=$2} /^Item verdict: / && index(" " want " ", " " i " "){print i, $3}' .agents/artifacts/evidence/cutover-130-checklist.md`; conditions: the evidence conditions; threshold: `met` when it prints 6 lines, all ending `**green**`; `unmet` when any ends `**red**` or fewer than 6 print; otherwise `human_pending` |
 | AC2 | human (classified) | Task 6 | P1 after activation: the owner judges F1's ladder-absence check and a closed `error.code` from `resolve-project resolve` on a contract-less scratch repository |
 | AC3 | human (classified) | Task 6 | P2: the owner runs gate step 6 once per host, then re-reads C12 |
 | AC4 | human (classified) | Task 6 | P3: the owner's Claude-driven and Codex-driven ships on the strict path (merged PR, closed issue, run outcome) |
 | AC5 | human (classified) | Task 6 | P6: the owner appends the retirement section to `CL` |
-| AC6 | evidence (classified) | Task 1 | C1 `green` on every flake host (each registry read), plus the roster's Arcwave inclusion sentence; an unreachable host makes it `human_pending`; row AC6 |
-| AC7 | evidence (classified) | Task 4 | C6 and C7 over every (H,R): `met` when both are `green`; a refused ledger, or an unmapped or refused-only worktree, is `unmet`; row AC7 |
+| AC6 | evidence (classified) | Task 1 | `awk -v want='C1' '/^### C[0-9]+ — /{i=$2} /^Item verdict: / && index(" " want " ", " " i " "){print i, $3}' .agents/artifacts/evidence/cutover-130-checklist.md` and `grep -c 'Arcwave is in' .agents/artifacts/evidence/cutover-130-checklist.md`; conditions: the evidence conditions; threshold: `met` when they print `C1 **green**` and a count of 1 or more; `human_pending` when `C1 **human-pending**` (an unreachable host) and a count of 1 or more; otherwise `unmet` |
+| AC7 | evidence (classified) | Task 4 | `awk -v want='C6 C7' '/^### C[0-9]+ — /{i=$2} /^Item verdict: / && index(" " want " ", " " i " "){print i, $3}' .agents/artifacts/evidence/cutover-130-checklist.md`; conditions: the evidence conditions; threshold: `met` when it prints 2 lines, both ending `**green**`; `unmet` when any ends `**red**` or fewer than 2 print; otherwise `human_pending` (`migrate` only, cleared by gate step 1) |
 | AC8 | human (classified) | Task 6 | P2, exercised before P6 is recorded; the owner |
 | AC9 | human (classified) | Task 6 | Task 2's C9 rows, plus P3's owner-run sessions judged against the installed declaration |
 | AC10 | human (classified) | Task 6 | P5: the owner's merge, issue close and cleanup reconciliation, before retirement |
@@ -104,8 +104,14 @@ AC1–AC5 are the issue's `## Acceptance criteria` lines, and AC6–AC10 its `##
 ## Decisions
 
 - Scope and authority: D1, D13 and D14 (every task). Format and freshness: D3, D4, D5 and D17. No tooling: D6.
-- Roster: D2 and D15 (Task 1). C2 and C10: D15 and D16; C8 and C9: D10 (Task 2). C3 and C4: D11; C11: D8 (Task 3). C5–C7: D9 and D15 (Task 4).
-- Dispositions: D7, D8, D14 and D16 (Task 5). Gate: D12; delivery: D13 (Task 6). Planning appended D14–D17.
+- Roster: D2 and D15 (Task 1). C2 and C10: D15 and D16; C8 and C9: D10 (Task 2). C3 and C4: D11 and D18; C11: D8 (Task 3). C5–C7: D9 and D15 (Task 4).
+- Dispositions: D7, D8, D14, D16 and D19 (Task 5). Gate: D12; delivery: D13; citations: D19 (Task 6). Planning appended D14–D17; plan review D18–D19.
+
+## Standards review provenance
+
+- Reviewer: Codex (gpt-6-astra, effort xhigh), via `codex-companion task --fresh --reviewer plan-review`, isolated and read-only, at base `fb8fd4f82395320581edd3160f4f93d789ce081f`; focus: none.
+- Findings: accepted 4, rejected 0, deferred 0. B1: a failed C7 worktree inventory is red, never green (Tasks 4 and 5). B2: the AC1, AC6 and AC7 map rows carry commands, conditions and thresholds. B3: D18. S1: D19.
+- Discussion D1: the reviewer could not reach api.github.com and used the supplied issue text; no fallback reviewer ran.
 
 ---
 

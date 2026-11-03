@@ -1,6 +1,6 @@
 # Task 5: Dispositions and tracker filings
 
-This task covers spec §4 and §6 items 2 and 5, and follows D7, D8, D14 and D16. Every red row committed by Tasks 1–4 gets exactly one disposition: an open issue cited, or a new issue filed in `fagenorn/nix-config`. This task is the attempt's only tracker writer. Its filings are external and cannot be withdrawn silently.
+This task covers spec §4 and §6 items 2 and 5, and follows D7, D8, D14, D16 and D19. Every row red as last observed (committed by Tasks 1–4, or re-observed in Step 4) gets exactly one disposition: an open issue cited, or a new issue filed in `fagenorn/nix-config`. This task is the attempt's only tracker writer. Its filings are external and cannot be withdrawn silently.
 
 **Files:**
 - Modify: `.agents/artifacts/evidence/cutover-130-checklist.md` (`CL`)
@@ -13,7 +13,8 @@ This task covers spec §4 and §6 items 2 and 5, and follows D7, D8, D14 and D16
 - Each red row of C1–C12 appears in exactly one Rows cell, written `<item> <host> <subject>` with the row's Subject cell verbatim, for example `C10 mbp /Users/anis/Projects/nodocom`. Entries are separated by `; `. Rows that share a repair route (a distinct owner and action) share one issue.
 - An open issue that covers a route is cited and never duplicated. A filed issue's body holds its rows' evidence in full and links #130.
 - Every issue carries `wayfinder:slice`. It also carries `agent:human-required` when its repair needs the owner or another repository. None carries `agent:ready` or `instruction-budget-raise` (D14). No route is fixed here (D14).
-- Rows keep the verdicts Tasks 1–4 committed. When a list re-read in Step 4 differs in count from its row, re-observe that row in `CL` with the new UTC and Observed, and file from the new observation.
+- Dispositions follow the rows as last observed (D19). When a Step 4 re-read differs from its row in count or content, re-observe the whole row in `CL`: Revision, UTC, Exit, Observed and Verdict, the verdict read under its item's rule. Then recompute that item's `Item verdict` line. Every other row keeps its committed bytes.
+- A re-observed row that is no longer red gets no disposition, so nothing is filed or cited from it. A row that turns red gets one. Filings use only the new observation.
 
 - [ ] **Step 1: Confirm red and list the red rows**
 
@@ -47,27 +48,43 @@ Run `gh issue list --repo fagenorn/nix-config --state open --limit 300 --json nu
 Re-run the read-only commands whose lists a filing needs, per Global Constraints, saving each output under `SCR/<H>/`:
 - F6: `workflow-state migrate --repo-root R` (no `--apply`), for each refused ledger's `ledger`, `dialect` and `reason`.
 - F3 and F4: `git --no-optional-locks -C R ls-files -- .claude/skills.config.json`, `resolve-project resolve --repo-root R` (`bindings.deploy.adapter`), and `git --no-optional-locks -C R grep -n -F -e skills.config.json -e resolve-bindings -e 'release deploy inspect' -- . ':!.agents/artifacts'` for the readers.
-- F7: for each red C7 root, the F6 dry-run JSON and this script and classifier (Task 4's, repeated). Run the script as `/bin/bash SCR/c7.sh R > SCR/<H>/<project>-c7.tsv`, or as `ssh … H -- /bin/bash -s -- R < SCR/c7.sh` remotely. It lists each linked worktree with the ledgers whose `state.json` holds its path, as listed or as its realpath, as a whole JSON string (D15).
+- F7: for each red C7 root, the F6 dry-run JSON and this script and classifier (Task 4's, repeated). Run the script as `/bin/bash SCR/c7.sh R > SCR/<H>/<project>-c7.tsv`, or as `ssh … H -- /bin/bash -s -- R < SCR/c7.sh > SCR/<H>/<project>-c7.tsv` remotely. It lists each linked worktree with the ledgers whose `state.json` holds its path, as listed or as its realpath, as a whole JSON string (D15). It exits 2 with nothing on stdout when discovery or a ledger search fails, and the classifier refuses a TSV without its `#end` count line. Either failure is a re-observation of the row as red, with the failure as Observed (D4), and no path list is filed from it.
 
 ```bash
 #!/bin/bash
-# c7.sh ROOT: one line per linked worktree: path<TAB>ledger directory names
+# c7.sh ROOT: one line per linked worktree (path<TAB>ledger names), then "#end<TAB><count>".
+# A failed discovery or search exits 2 and prints nothing on stdout.
+set -o pipefail
+shopt -s nullglob
 R=$1
-git --no-optional-locks -C "$R" worktree list --porcelain | sed -n 's/^worktree //p' | tail -n +2 |
+die() { echo "c7: $*" >&2; exit 2; }
+W=$(git --no-optional-locks -C "$R" worktree list --porcelain) || die "worktree list failed in $R"
+printf '%s\n' "$W" | grep -q '^worktree ' || die "worktree list printed no entry for $R"
+S=("$R"/.superpowers/workflows/*/state.json)
+T=""; n=0
 while IFS= read -r P; do
   RP=$(cd "$P" 2>/dev/null && pwd -P || printf '%s' "$P")
-  L=$(grep -l -F -e "\"$P\"" -e "\"$RP\"" "$R"/.superpowers/workflows/*/state.json 2>/dev/null |
-      awk -F/ '{print $(NF-1)}' | sort -u | tr '\n' ' ')
-  printf '%s\t%s\n' "$P" "$L"
-done
+  L=""
+  if [ ${#S[@]} -gt 0 ]; then
+    M=$(grep -l -F -e "\"$P\"" -e "\"$RP\"" "${S[@]}"); rc=$?
+    [ "$rc" -le 1 ] || die "grep exit $rc for $P"
+    L=$(printf '%s\n' "$M" | awk -F/ 'NF {print $(NF-1)}' | sort -u | tr '\n' ' ')
+  fi
+  T+="$P"$'\t'"$L"$'\n'; n=$((n + 1))
+done < <(printf '%s\n' "$W" | sed -n 's/^worktree //p' | tail -n +2)
+printf '%s#end\t%s\n' "$T" "$n"
 ```
 
 ```bash
 python3 -I - SCR/<H>/<project>-migrate.json SCR/<H>/<project>-c7.tsv <<'EOF'
 import json, sys
 verdict = {l["ledger"]: l["verdict"] for l in json.load(open(sys.argv[1]))["ledgers"]}
-for line in open(sys.argv[2], encoding="utf-8"):
-    path, _, names = line.rstrip("\n").partition("\t")
+lines = open(sys.argv[2], encoding="utf-8").read().splitlines()
+end = lines[-1].split("\t") if lines else []
+if end[:1] != ["#end"] or end[1:] != [str(len(lines) - 1)]:
+    sys.exit("worktree inventory incomplete: " + sys.argv[2])
+for line in lines[:-1]:
+    path, _, names = line.partition("\t")
     found = {verdict.get(n, "refused") for n in names.split()}
     c = ("unmapped" if not found else "current" if found & {"current", "migrated"}
          else "migrate" if "migrate" in found else "refused-only")
@@ -77,7 +94,7 @@ EOF
 
 The F7 body lists every `unmapped` and `refused-only` path with its ledgers.
 
-Compare each count with its row, and apply the re-observation rule under Invariants.
+Compare each count with its row, and apply the re-observation rule under Invariants. Then rebuild `SCR/red-rows.tsv` from `CL` as Step 1 did, and revise Steps 2 and 3 to that list: drop a route left with no red row, and route a row that turned red. File from that list only.
 
 - [ ] **Step 5: File**
 
@@ -105,13 +122,14 @@ text = open(sys.argv[1], encoding="utf-8").read() + "\n## "
 disp = text.split("\n## Dispositions\n", 1)[1].split("\n## ", 1)[0]
 cells = [[x.strip() for x in l.strip().strip("|").split("|")] for l in disp.splitlines()
          if l.startswith("| ") and not l.startswith("| Rows |")]
-covered = "; ".join(c[0] for c in cells)
+covered = sorted(e for c in cells for e in c[0].split("; "))
+red = []
 for m in re.finditer(r"^### (C\d+) — .*?(?=^##)", text, re.M | re.S):
     for r in m.group(0).splitlines():
         c = [x.strip() for x in re.split(r"(?<!\\)\|", r.strip())[1:-1]]
         if len(c) == 8 and c[7] == "red":
-            key = f"{m.group(1)} {c[0]} {c[1]}"
-            assert covered.count(key + ";") + covered.endswith(key) == 1, "disposition count for " + key
+            red.append(f"{m.group(1)} {c[0]} {c[1]}")
+assert covered == sorted(red), "dispositions differ from the red rows as last observed"
 for c in cells:
     assert re.fullmatch(r"#\d+ (filed|cited)", c[2]), c[2]
     print(c[2].split()[0][1:], c[2].split()[1])
@@ -123,7 +141,8 @@ done < SCR/cited.txt
 echo dispositions ok
 ```
 
-Substitute `SCR` literally. Expected: `dispositions ok`. Before Step 6 the Python fails, because the section is missing.
+Substitute `SCR` literally. Expected: `dispositions ok`: every red row, as last observed, has exactly one disposition, and no Rows entry names a row that is not red. Before Step 6 the Python fails, because the section is missing.
+When Step 4 re-observed a row, also run, in one Bash call, `export CHECK_ITEMS='<the re-observed items>'` followed by the root's row check. Expected: `rows ok`.
 
 - [ ] **Step 8: Commit**
 

@@ -55,30 +55,50 @@ C7.a git --no-optional-locks -C R worktree list --porcelain
 C7.b grep -l -F -e '"<path>"' -e '"<realpath>"' R/.superpowers/workflows/*/state.json
 ```
 
-Write `SCR/c7.sh` and run it per root: locally as `/bin/bash SCR/c7.sh R > SCR/<H>/<project>-c7.tsv`, and remotely as `ssh … H -- /bin/bash -s -- R < SCR/c7.sh` (timeout 300 s).
+C7.a and C7.b run through one script, and the row's `Exit` is the script's exit, then the classifier's.
+
+Write `SCR/c7.sh` and run it per root: locally as `/bin/bash SCR/c7.sh R > SCR/<H>/<project>-c7.tsv`, and remotely as `ssh … H -- /bin/bash -s -- R < SCR/c7.sh > SCR/<H>/<project>-c7.tsv` (timeout 300 s). Record its exit.
 
 ```bash
 #!/bin/bash
-# c7.sh ROOT: one line per linked worktree: path<TAB>ledger directory names
+# c7.sh ROOT: one line per linked worktree (path<TAB>ledger names), then "#end<TAB><count>".
+# A failed discovery or search exits 2 and prints nothing on stdout.
+set -o pipefail
+shopt -s nullglob
 R=$1
-git --no-optional-locks -C "$R" worktree list --porcelain | sed -n 's/^worktree //p' | tail -n +2 |
+die() { echo "c7: $*" >&2; exit 2; }
+W=$(git --no-optional-locks -C "$R" worktree list --porcelain) || die "worktree list failed in $R"
+printf '%s\n' "$W" | grep -q '^worktree ' || die "worktree list printed no entry for $R"
+S=("$R"/.superpowers/workflows/*/state.json)
+T=""; n=0
 while IFS= read -r P; do
   RP=$(cd "$P" 2>/dev/null && pwd -P || printf '%s' "$P")
-  L=$(grep -l -F -e "\"$P\"" -e "\"$RP\"" "$R"/.superpowers/workflows/*/state.json 2>/dev/null |
-      awk -F/ '{print $(NF-1)}' | sort -u | tr '\n' ' ')
-  printf '%s\t%s\n' "$P" "$L"
-done
+  L=""
+  if [ ${#S[@]} -gt 0 ]; then
+    M=$(grep -l -F -e "\"$P\"" -e "\"$RP\"" "${S[@]}"); rc=$?
+    [ "$rc" -le 1 ] || die "grep exit $rc for $P"
+    L=$(printf '%s\n' "$M" | awk -F/ 'NF {print $(NF-1)}' | sort -u | tr '\n' ' ')
+  fi
+  T+="$P"$'\t'"$L"$'\n'; n=$((n + 1))
+done < <(printf '%s\n' "$W" | sed -n 's/^worktree //p' | tail -n +2)
+printf '%s#end\t%s\n' "$T" "$n"
 ```
 
-The first `worktree` entry is the main checkout and is skipped. Classify each line with the C6 JSON of the same root:
+The first `worktree` entry is the main checkout and is skipped. The git output is captured before it is parsed, so a git failure is an exit, never an empty list. `grep` exit 1 means no ledger names the path; exit 2 (an unreadable ledger) fails the script. Without ledgers every path is unmapped.
+
+When the script exits non-zero, the row is red with Observed `worktree inventory failed: <its stderr line>`, and the classifier is not run (D4). Otherwise classify each line with the C6 JSON of the same root. The classifier refuses, exiting 1, unless the TSV ends with the `#end` line and its count, so an empty or truncated inventory is never graded green; that refusal also makes the row red, with its message as Observed.
 
 ```bash
 python3 -I - SCR/<H>/<project>-migrate.json SCR/<H>/<project>-c7.tsv <<'EOF'
 import json, sys
 verdict = {l["ledger"]: l["verdict"] for l in json.load(open(sys.argv[1]))["ledgers"]}
+lines = open(sys.argv[2], encoding="utf-8").read().splitlines()
+end = lines[-1].split("\t") if lines else []
+if end[:1] != ["#end"] or end[1:] != [str(len(lines) - 1)]:
+    sys.exit("worktree inventory incomplete: " + sys.argv[2])
 classes = {"current": 0, "migrate": 0, "refused-only": 0, "unmapped": 0}
-for line in open(sys.argv[2], encoding="utf-8"):
-    path, _, names = line.rstrip("\n").partition("\t")
+for line in lines[:-1]:
+    path, _, names = line.partition("\t")
     found = {verdict.get(n, "refused") for n in names.split()}
     if not found: c = "unmapped"
     elif found & {"current", "migrated"}: c = "current"
@@ -93,7 +113,7 @@ EOF
 The row is:
 - red when `refused-only` + `unmapped` > 0;
 - otherwise human-pending when `migrate` > 0;
-- otherwise green, including a root with no linked worktree.
+- otherwise green, including a root whose inventory succeeded with an `#end` count of 0 (no linked worktree).
 
 Observed is the class counts, for example `worktrees 138: current 0, migrate 12, refused-only 3, unmapped 123`. Task 5 re-runs this script and classifier to get the per-path list for its filing. The counts include the delivery worktree: this run creates no worktree (§3), and its own worktree maps to its ledger.
 

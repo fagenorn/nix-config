@@ -1,6 +1,6 @@
 # Task 3: Candidate, bundle and deprecated-path users
 
-This task covers the spec §3 rows C3, C4 and C11, and follows D8 and D11. It adds three item sections to `CL`, which feed AC1's check (C3).
+This task covers the spec §3 rows C3, C4 and C11, and follows D8, D11 and D18. It adds three item sections to `CL`, which feed AC1's check (C3).
 
 **Files:**
 - Modify: `.agents/artifacts/evidence/cutover-130-checklist.md` (`CL`)
@@ -25,7 +25,10 @@ C3.a git ls-tree --name-only origin/main -- .agents/artifacts/evidence/
 C3.b git show origin/main:<path>
 ```
 
-Run C3.a in the delivery worktree, and keep the names ending in `-bundle.json`. For each, run C3.b and read `state` and `identity.bound.commit.candidate`. Write one row per bundle: host `mbp`, subject the path, revision `origin/main`'s 12-hex, Observed `state <s>; candidate <12-hex>`. A row is green only when `state` is `approved` and the candidate is the commit C4 names as the strict candidate. Today C4 names none, so every row is red. When there is no bundle, write one red row, subject `.agents/artifacts/evidence/`, Observed `no *-bundle.json`. Planning saw `promotion-127-bundle.json` and `release-128-bundle.json`, both `unmeasured`.
+Run C3.a in the delivery worktree, and keep the names ending in `-bundle.json`. For each, run C3.b and read `state` and `identity.bound.commit.candidate`. C3 grades coverage of the candidate, not each bundle (D18):
+- Write one graded row: host `mbp`, subject `.agents/artifacts/evidence/`, revision `origin/main`'s 12-hex, commands `C3.a; C3.b`, Exit C3.a's then each C3.b's. It is green when at least one bundle has `state` `approved` and binds the commit Step 3 (C4) names as the strict candidate. It is red otherwise, and when C3.a or a C3.b fails or a bundle does not parse (D4). Observed reads like `approved and binding the candidate: 0 of 2 bundles; C4 names no candidate`, or `no *-bundle.json`.
+- Under the table, before the `Item verdict` line, write `Informational bundles (no verdict, outside the worst-row rule):` and one `- <path>: state <s>; candidate <12-hex>` line per bundle that does not bind the C4 candidate. They are not table rows.
+- Today C4 names no candidate, so the graded row is red. Planning saw `promotion-127-bundle.json` and `release-128-bundle.json`, both `unmeasured`, which are informational lines.
 
 - [ ] **Step 3: C4**
 
@@ -85,6 +88,9 @@ for cells in rows:
 for item in ("C3", "C4"):
     body = re.search(rf"^### {item} — .*?(?=^##)", text, re.M | re.S).group(0)
     assert "Item verdict: **red**" in body, item + " must be red while no candidate exists (D11)"
+c3 = re.search(r"^### C3 — .*?(?=^##)", text, re.M | re.S).group(0)
+graded = [l for l in c3.splitlines() if l.startswith("| ") and not l.startswith("| Host |")]
+assert len(graded) == 1 and "| .agents/artifacts/evidence/ |" in graded[0], "C3: one graded row (D18)"
 print("coverage ok")
 EOF
 ```
