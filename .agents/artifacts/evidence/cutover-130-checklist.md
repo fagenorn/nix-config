@@ -111,6 +111,74 @@ No candidate exists: the strict major #66 requires is `2.0.0` or above, and the 
 
 Item verdict: **red**
 
+### C5 — No legacy release in flight
+
+> no legacy release is in flight (#90)
+
+```text
+C5.a ls -la R/.superpowers/workflows/ship-release/state.json
+C5.b release transaction status --repo-root R
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+| mbp | /Users/anis/Projects/arcwave | 1f4ab4731c8b dev 0 dirty | C5.a | 2026-11-03T16:19:45Z | 2 | absent | green |
+| mbp | /Users/anis/Projects/argus | 21338cae51ea main 1 dirty | C5.a | 2026-11-03T16:19:51Z | 2 | absent | green |
+| mbp | /Users/anis/tmp/nix-config | f6a48dcf66fb main 0 dirty | C5.a | 2026-11-03T16:19:36Z | 2 | absent | green |
+| mbp | /Users/anis/Projects/jarbird | dd3964e3b2a7 dev 8 dirty | C5.a | 2026-11-03T16:19:52Z | 2 | absent | green |
+| mbp | /Users/anis/Projects/nodocom | ef9eb5e8d25e dev 0 dirty | C5.a | 2026-11-03T16:19:55Z | 2 | absent | green |
+| eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C5.a | 2026-11-03T16:20:03Z | 2 | absent | green |
+
+No root holds a legacy `ship-release/state.json`, so C5.b did not run (and `legacy.class` was never read).
+
+Item verdict: **human-pending**
+
+### C6 — Legacy ledgers have a strict-path mapping
+
+> Do not activate while any legacy attempt or worktree lacks a resumable strict-path mapping (issue 130 refresh)
+
+```text
+C6.a workflow-state migrate --repo-root R
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+| mbp | /Users/anis/Projects/arcwave | 1f4ab4731c8b dev 0 dirty | C6.a | 2026-11-03T16:19:45Z | 0 | current 0, migrate 11, migrated 0, refused 4 (unknown_dialect 4) | red |
+| mbp | /Users/anis/Projects/argus | 21338cae51ea main 1 dirty | C6.a | 2026-11-03T16:19:51Z | 0 | current 0, migrate 8, migrated 0, refused 3 (invalid_state 3) | red |
+| mbp | /Users/anis/tmp/nix-config | f6a48dcf66fb main 0 dirty | C6.a | 2026-11-03T16:19:36Z | 0 | current 15, migrate 108, migrated 0, refused 6 (invalid_state 6) | red |
+| mbp | /Users/anis/Projects/jarbird | dd3964e3b2a7 dev 8 dirty | C6.a | 2026-11-03T16:19:52Z | 0 | current 6, migrate 19, migrated 0, refused 0 | human-pending |
+| mbp | /Users/anis/Projects/nodocom | ef9eb5e8d25e dev 0 dirty | C6.a | 2026-11-03T16:19:55Z | 0 | current 5, migrate 146, migrated 0, refused 49 (invalid_state 8, unknown_dialect 41) | red |
+| eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C6.a | 2026-11-03T16:20:03Z | 0 | current 5, migrate 0, migrated 0, refused 0 | green |
+
+`workflow-state migrate` ran without `--apply` on every root. Planning's refusals reappear on nix-config, Argus, Arcwave and Nodo, with Arcwave's four `unknown_dialect`; `human-pending` rows are cleared by the owner's gate step 1.
+
+Item verdict: **red**
+
+### C7 — Retained worktrees have a strict-path mapping
+
+> Do not activate while any legacy attempt or worktree lacks a resumable strict-path mapping (issue 130 refresh)
+
+```text
+C7.a git --no-optional-locks -C R worktree list --porcelain
+C7.b grep -l -F -e '"<path>"' -e '"<realpath>"' R/.superpowers/workflows/*/state.json
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+| mbp | /Users/anis/Projects/arcwave | 1f4ab4731c8b dev 0 dirty | C7.a; C7.b | 2026-11-03T16:19:45Z | 0; 0 | worktrees 137: current 0, migrate 10, refused-only 2, unmapped 125 | red |
+| mbp | /Users/anis/Projects/argus | 21338cae51ea main 1 dirty | C7.a; C7.b | 2026-11-03T16:19:52Z | 0; 0 | worktrees 13: current 0, migrate 8, refused-only 1, unmapped 4 | red |
+| mbp | /Users/anis/tmp/nix-config | f6a48dcf66fb main 0 dirty | C7.a; C7.b | 2026-11-03T16:19:37Z | 0; 0 | worktrees 22: current 6, migrate 5, refused-only 0, unmapped 11 | red |
+| mbp | /Users/anis/Projects/jarbird | dd3964e3b2a7 dev 8 dirty | C7.a; C7.b | 2026-11-03T16:19:53Z | 0; 0 | worktrees 17: current 4, migrate 4, refused-only 0, unmapped 9 | red |
+| mbp | /Users/anis/Projects/nodocom | ef9eb5e8d25e dev 0 dirty | C7.a; C7.b | 2026-11-03T16:19:56Z | 0; 0 | worktrees 26: current 3, migrate 2, refused-only 6, unmapped 15 | red |
+| eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C7.a; C7.b | 2026-11-03T16:20:04Z | 0; 0 | worktrees 8: current 8, migrate 0, refused-only 0, unmapped 0 | green |
+
+Exit is the inventory script's, then the classifier's; both ran on every root. Counts include every linked worktree of the root, this run's included. Task 5 re-runs the script and classifier for the per-path list.
+
+Item verdict: **red**
+
 ### C8 — Codex ship handoff installed
 
 > the Codex ship handoff is in place so that removing the fallback ladders does not strand a Codex session at the shipping step (issue 130)
