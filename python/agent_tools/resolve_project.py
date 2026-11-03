@@ -1810,15 +1810,17 @@ def declared_facts(source: object) -> dict:
 def deprecated_uses(root: Path, manifest: dict) -> list[str] | None:
     """The ids of the manifest's `project_file` deprecations this root holds.
 
-    Null when the root is not a directory (nothing can be said of it);
-    otherwise the ascending ids whose subject path exists under the root. A
-    dangling symlink counts, so presence is `lexists`. It is not git
+    Null when the root is not a usable directory (nothing can be said of
+    it), including one whose parent cannot be searched: `os.path.isdir`
+    answers False for every OSError where `Path.is_dir` re-raises EACCES and
+    EIO. Otherwise the ascending ids whose subject path exists under the
+    root. A dangling symlink counts, so presence is `lexists`. It is not git
     tracking, because this operation starts no child process (R3.6). A
     `platform_behavior` entry names no path and is never listed. This is a
     warning, never a verdict: it changes neither compatibility nor the exit
     code (issue 66, D2).
     """
-    if not root.is_dir():
+    if not os.path.isdir(root):
         return None
     return sorted(
         entry["id"] for entry in manifest["deprecations"]

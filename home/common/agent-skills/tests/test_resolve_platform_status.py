@@ -558,6 +558,27 @@ class PlatformStatusDeprecationTest(ResolverTestCase):
         self.assertEqual(rows[str(clean)]["deprecated_uses"], [])
         self.assertIsNone(rows[str(gone)]["deprecated_uses"])
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root searches a 0000 directory, so the case cannot be staged")
+    def test_a_root_behind_an_unsearchable_parent_is_a_reported_row(self):
+        # `Path.is_dir()` re-raises EACCES, so a registered root whose parent
+        # cannot be searched must still yield a null, never a refusal.
+        locked = self.home / "locked"
+        locked.mkdir()
+        root = locked / "proj"
+        root.mkdir()
+        self.addCleanup(locked.chmod, 0o755)
+        locked.chmod(0o000)
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/locked", "root": str(root)}))
+        code, out, err = run("platform-status", "--fleet", home=self.home)
+        self.assertEqual(code, 0, err or out)
+        rows = json.loads(out)["fleet"]
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["deprecated_uses"])
+        self.assertFalse(rows[0]["compatible"])
+        self.assertEqual(rows[0]["reason_code"], "project_schema_unsupported")
+
 
 if __name__ == "__main__":
     unittest.main()
