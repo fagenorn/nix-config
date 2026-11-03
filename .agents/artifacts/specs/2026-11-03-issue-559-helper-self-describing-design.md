@@ -44,9 +44,9 @@ The two composite ship-summary refusals keep their class and their message as a 
 one now goes on to name the member and the rule it broke. The shared detail-field check does
 the same for its other caller, the SDD report (D6, D7).
 
-No skill file names a path under nix-config's `python/` tree. A new `skill-lint` rule, L6,
-enforces this over every Markdown file in the three skill trees (D8, D9). AC4 is post-merge
-evidence (D11).
+No skill file names a path under nix-config's `python/` tree. A live-tree test in
+`test_skill_lint.py` enforces this over every Markdown file in the three skill trees, and
+`skill_lint.py` is unchanged (D8, D9, D16). AC4 is post-merge evidence (D11).
 
 ## Decisions
 
@@ -186,7 +186,7 @@ exit 2 and empty stdout (issue 472 D1).
 - The notes bound has been named since issue 472 (`notes has N characters; the bound is M`).
   AC2's test pins it alongside the new reasons.
 
-### Skill text, the L6 rule and docs (D8, D9, D10)
+### Skill text, the python-tree check and docs (D8, D9, D10, D16)
 
 - **writing-plans § Review feasibility forecast** becomes the generator call, a one-line
   estimate example and two rules: rerun the generator after any edit that changes a task's
@@ -204,11 +204,12 @@ exit 2 and empty stdout (issue 472 D1).
   of `python/agent_tools/`.
 - **The Phase-5 documents** (`from-issue` standards-review and REVIEW-CONTRACT) stay unchanged
   (D10).
-- **skill-lint L6.** It applies to every `.md` file under the three skill trees, `evals/` and
-  `scripts/` included, because whole skill directories are installed. It reports a token
-  `python/` that does not follow a path character, which covers `python/README.md`, and every
-  `agent_tools/`. The installed `~/.agents/lib/python/…` paths therefore stay legal. The
-  live-tree-clean test makes it a check.
+- **The python-tree check** lives test-side in `test_skill_lint.py`, not as a skill-lint rule
+  (D16). It applies to every `.md` file under the three skill trees, `evals/` and `scripts/`
+  included, because whole skill directories are installed. It reports a token `python/` that
+  does not follow a path character, which covers `python/README.md`, and every
+  `agent_tools/`. The installed `~/.agents/lib/python/…` paths therefore stay legal. A
+  live-tree test makes it a check.
 - **python/README.md** § Review packaging and feasibility gains the `forecast` contract: argv,
   the estimate shape, the rule constants, writing and refusals. The forecast field-semantics
   paragraph stays as the maintainers' contract.
@@ -237,11 +238,11 @@ Each seam follows prior art in its suite.
      It includes an over-long-notes row that asserts `notes` and the policy bound, and the same
      rows on the v2 `ship-summary` boundary.
    - An SDD report detail row.
-3. **`skill_lint.lint`** over fixture snapshots
-   (`home/common/agent-skills/tests/test_skill_lint.py`).
-   - L6 reports `python/README.md` and `agent_tools/`, including in an `evals/` file, and
+3. **The python-tree check** over fixture snapshots, `PythonTreePointerTest`
+   (`home/common/agent-skills/tests/test_skill_lint.py`, D16).
+   - It reports `python/README.md` and `agent_tools/`, including in an `evals/` file, and
      leaves `~/.agents/lib/python/` alone.
-   - **AC3.** `test_the_live_tree_lints_clean` runs L6 against the live tree.
+   - **AC3.** `test_the_live_tree_names_no_python_tree_path` runs it against the live tree.
 4. **The skill contract tests** (`test_workflow_skill_contracts.py`):
    `ProjectionCallerContractsTest` with the swapped pins, and the no-growth tests for
    writing-plans and sdd. **The Instruction Budget gate**, `just agent-instruction-budget`, also
