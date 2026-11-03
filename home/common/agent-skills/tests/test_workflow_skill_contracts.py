@@ -3410,7 +3410,8 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
 # validators read. No English phrase. Planners no longer forecast (Stage 2c, #572).
 PROJECTION_MACHINE_TEXT = {
     FROM_ISSUE_DIR / "AUTO.md": (
-        '"budget_status":"within_budget"},"notes":',
+        '{"state":"complete","artifact":{"kind":"implementation-plan"',
+        '"largest_member_bytes":<int>},"budget_status":"within_budget"},"notes":',
         '{"state":"decompose_required","artifact":{"kind":"implementation-plan"'),
     FROM_ISSUE_DIR / "SKILL.md": ("review-feasibility confirm --plan <root> --base <base> --input -",),
 }
