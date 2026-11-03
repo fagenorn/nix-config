@@ -181,3 +181,5 @@ Doctor report 1 (`conformance run --purpose doctor`, 2026-11-03T09:48:07Z, proje
 | repository.projection.fresh | failed | invalid_projection | projection.regenerate |
 
 Repairs listed: `lifecycle.ignore.repair` (module conformance, safety_class worktree) and `projection.regenerate` (`resolve-project write-projections`, safety_class worktree). No host check failed; no repair was applied.
+
+Known limitation (D23): on mbp under the default per-user TMPDIR the contract's `unit-tests` command fails `tests/extensions/email/review-render.test.ts` at the assertion on line 100 (receipt 504 > 500 chars; the receipt embeds an `os.tmpdir()` path). It passes with `TMPDIR=/tmp` and on Linux CI. The contract cannot express an env value, so any host run of the declared verification on mbp (Task 4's apply, later Argus workflows) needs `TMPDIR=/tmp` until Argus fixes the test. No Argus issue exists yet; the follow-up (an Argus issue for the host-path-dependent cap) is for the owner and is surfaced in Task 8's acceptance record.
