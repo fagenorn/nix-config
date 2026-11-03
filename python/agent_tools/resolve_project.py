@@ -103,7 +103,9 @@ CONTRACT_FILENAME = ".agents/project.json"
 # project schema and of `ResolvedProject.schema_version`: those two are
 # answered by the manifest (D8) and appear inside the report's `platform`
 # block, so reusing either here would publish one fact twice under two names.
-PLATFORM_STATUS_SCHEMA_VERSION = 1
+# Version 2 adds `deprecated_uses` to the `project` block and to every fleet
+# row (issue 580 D4).
+PLATFORM_STATUS_SCHEMA_VERSION = 2
 
 # The manifest members the `platform` block republishes, in the manifest's own
 # order. The manifest's `schema_version` is not among them: it versions the
@@ -1805,6 +1807,25 @@ def declared_facts(source: object) -> dict:
     return facts
 
 
+def deprecated_uses(root: Path, manifest: dict) -> list[str] | None:
+    """The ids of the manifest's `project_file` deprecations this root holds.
+
+    Null when the root is not a directory (nothing can be said of it);
+    otherwise the ascending ids whose subject path exists under the root. A
+    dangling symlink counts, so presence is `lexists`. It is not git
+    tracking, because this operation starts no child process (R3.6). A
+    `platform_behavior` entry names no path and is never listed. This is a
+    warning, never a verdict: it changes neither compatibility nor the exit
+    code (issue 66, D2).
+    """
+    if not root.is_dir():
+        return None
+    return sorted(
+        entry["id"] for entry in manifest["deprecations"]
+        if entry["kind"] == "project_file"
+        and os.path.lexists(root / entry["subject"]))
+
+
 def evaluate_named_project(root: Path, source: dict,
                            manifest: dict) -> tuple[dict, dict]:
     """The `project` and `compatibility` members for the named repository (R3.3).
@@ -1832,6 +1853,7 @@ def evaluate_named_project(root: Path, source: dict,
         "root": str(root),
         "project_schema_version": facts["project_schema_version"],
         "platform_interval": facts["platform_interval"],
+        "deprecated_uses": deprecated_uses(root, manifest),
     }
     return project, compatibility_block(reason_code)
 
@@ -1885,6 +1907,7 @@ def fleet_row(entry: dict, manifest: dict) -> dict:
         "root": entry["root"],
         "project_schema_version": facts["project_schema_version"],
         "platform_interval": facts["platform_interval"],
+        "deprecated_uses": deprecated_uses(Path(entry["root"]), manifest),
         **compatibility_block(reason_code),
     }
 
@@ -1893,7 +1916,10 @@ def command_platform_status(args: argparse.Namespace) -> int:
     """Report the platform's facts, and whatever was asked about beside them.
 
     The five members are always present, `null` where not applicable. Both
-    flags compose and neither suppresses the other.
+    flags compose and neither suppresses the other. The `project` block and
+    every fleet row also carry `deprecated_uses`: the ids of the manifest's
+    deprecated project files the root still holds, a warning that never
+    changes the verdict.
 
     Projection drift is deliberately not checked: a stale target is `resolve`'s
     structural refusal (D10), not a fact about platform compatibility.
@@ -1961,9 +1987,10 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Report the installed platform's version facts. With --repo-root, "
             "add that project's declared interval and its compatibility "
-            "verdict; with --fleet, add one verdict row per registered "
-            "project. Without --repo-root no project is inspected and no "
-            "project root is discovered."),
+            "verdict and the deprecated paths it still holds "
+            "(deprecated_uses); with --fleet, add one verdict row per "
+            "registered project. Without --repo-root no project is "
+            "inspected and no project root is discovered."),
     )
     add_repo_root(platform_status)
     platform_status.add_argument(
