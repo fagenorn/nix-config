@@ -434,3 +434,69 @@ class FinalReviewTest(DriverCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MergePreviewTest(DriverCase):
+    """Issue 554 D3: a two-branch preview observes the release PR before the receipt."""
+
+    def setUp(self):
+        super().setUp()
+        self.world.verification_ready(integration="dev")
+        self.world.merge_observation_ready()
+
+    def two_branch(self):
+        return self.driver(rs.project(self, profiles={"two-branch": support.merge_profile()},
+                                      integration="dev"))
+
+    def test_a_two_branch_profile_passes_the_shape_gate_and_lists_three_confirmations(self):
+        """Issue 554 AC1."""
+        driver = self.two_branch()
+        self.assertIsNone(driver.shape_refusal())
+        document = driver.preview(rs.candidate())
+        self.assertEqual((document["runnable"], document["refusal"]), (True, None))
+        self.assertEqual([c["action"] for c in document["confirmations"]], ["merge", "tag", "github-release"])
+        self.assertEqual(document["candidate"]["merge"], support.MERGE)
+        self.assertFalse((driver.project.common_dir / "agent-release").exists())
+
+    def test_merge_observation_refusals_create_nothing(self):
+        """Issue 554 row 11."""
+        stale = [{"number": CANONICAL["pr"], "head": {"sha": "9" * 40}}]
+        for code, ready in (("release_pr_missing", dict(prs=[])), ("release_pr_stale", dict(prs=stale)),
+                            ("release_pr_behind", dict(compare="diverged"))):
+            with self.subTest(code=code):
+                self.world.reset()
+                self.world.verification_ready(integration="dev")
+                self.world.merge_observation_ready(**ready)
+                driver = self.two_branch()
+                document = driver.preview(rs.candidate())
+                self.assertEqual((document["runnable"], document["refusal"]["code"],
+                                  document["refusal"]["repair_id"], document["verification"],
+                                  document["candidate"]["merge"]), (False, code, None, None, None))
+                self.assertEqual(len(document["confirmations"]), 3)
+                self.assertFalse(any("check-runs" in c["argv"][-1] for c in self.world.calls()))
+                self.assertRefusal(code, driver.run, rs.candidate(),
+                                   [c["token"] for c in document["confirmations"]])
+                self.assertFalse((driver.project.common_dir / "agent-release").exists())
+
+    def test_a_moved_base_between_preview_and_run_is_stale(self):
+        """Issue 554 row 12."""
+        driver = self.two_branch()
+        tokens = [c["token"] for c in driver.preview(rs.candidate())["confirmations"]]
+        self.world.merge_observation_ready(base_tip="6" * 40)
+        self.assertRefusal("confirmation_stale", driver.run, rs.candidate(), tokens)
+        self.assertFalse((driver.project.common_dir / "agent-release").exists())
+
+    def test_a_single_branch_preview_binds_no_merge(self):
+        self.world.reset()
+        self.world.verification_ready()
+        document = self.driver().preview(rs.candidate())
+        self.assertEqual((document["runnable"], document["candidate"]["merge"]), (True, None))
+        self.assertFalse(any("/pulls?" in c["argv"][-1] for c in self.world.calls()))
+
+    def test_a_resumed_preview_reads_merge_from_the_stored_subject(self):
+        driver = self.two_branch()
+        rs.seed(driver, merge=support.MERGE)
+        self.world.reset()
+        document = driver.preview(None)
+        self.assertEqual((document["mode"], document["candidate"]["merge"]), ("resume", support.MERGE))
+        self.assertEqual(self.world.calls(), [])

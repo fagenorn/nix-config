@@ -22,6 +22,11 @@ meets the release floor, and `verification_ready` registers it for its default c
 `verification_ready(...)` registers the three `gh api` reads of `release_verification` (#128
 D12). They stay outside the spelling fixture: the fixture pins the guard's rows, and these
 reads are read-only paths the guard never adjudicates.
+
+`merge_observation_ready(...)` registers the three reads of `release_verification.observe_merge`
+(issue 554 D3): the open release pull requests, the default branch tip and the compare of that
+tip against the candidate. The tip read spells the fixture's `pr_merge.base_ref` row, so it
+agrees with `merge_ready` on the same `base_tip`.
 """
 import json
 import os
@@ -273,3 +278,18 @@ class ForgeWorld:
         self.respond_json("gh", ["api", f"repos/{slug}/commits/{commit}/check-runs?per_page=100"],
                           {"total_count": len(runs) if total_count is None else total_count,
                            "check_runs": runs})
+
+    def merge_observation_ready(self, *, prs=None, base_tip=CANONICAL["base_tip"], compare="ahead",
+                                slug=CANONICAL["slug"], integration="dev",
+                                default=CANONICAL["branch"], commit=CANONICAL["commit"]):
+        """Register observe_merge's three reads (issue 554 D3). By default one open pull request
+        from `integration` is at `commit`, and the default branch is `compare` of `base_tip`."""
+        if prs is None:
+            prs = [{"number": CANONICAL["pr"], "head": {"sha": commit, "ref": integration}}]
+        owner = slug.split("/")[0]
+        self.respond_json("gh", ["api", f"repos/{slug}/pulls?state=open&base={default}"
+                                        f"&head={owner}:{integration}&per_page=2"], prs)
+        self.respond_json("gh", ["api", f"repos/{slug}/git/ref/heads/{default}"],
+                          {"object": {"sha": base_tip, "type": "commit"}})
+        self.respond_json("gh", ["api", f"repos/{slug}/compare/{base_tip}...{commit}"],
+                          {"status": compare})

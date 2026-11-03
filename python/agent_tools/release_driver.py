@@ -4,7 +4,8 @@ and preview (#128 spec §1, §2, §4, §7; D1, D4, D6, D13, D18, D19, D25, D26).
 `Driver` compiles one release profile of a project and reads the release store under the
 main checkout's git common dir. `preview` and `status` create nothing: no directory, no
 transaction, no lock, and no adapter call. `preview` makes the three read-only GitHub reads
-of `release_verification` and no other call. A problem the caller must repair is a
+of `release_verification` and no other call, plus, for a profile that consumes `merge`, the
+three `observe_merge` reads before them (issue 554 D3). A problem the caller must repair is a
 `Refusal`; a problem that only makes a new release unrunnable is reported in the preview
 document, which still names the confirmations the operator would give (D18).
 
@@ -129,7 +130,7 @@ def _title(transaction: Transaction) -> str | None:
 def _candidate(transaction: Transaction) -> dict[str, Any]:
     stored = transaction.subject["candidate"]
     return {"version": stored["version"], "commit": stored["commit"],
-            "title": _title(transaction)}
+            "title": _title(transaction), "merge": stored.get("merge")}
 
 
 def _openings(transaction: Transaction) -> int:
@@ -263,7 +264,8 @@ class Driver:
         return {"schema_version": SCHEMA_VERSION, "mode": mode,
                 "profile": {"id": self.profile_id, "digest": self.compiled["digest"]},
                 "plan_digest": plan_digest,
-                "candidate": {key: candidate[key] for key in ("version", "commit", "title")},
+                "candidate": {**{key: candidate[key] for key in ("version", "commit", "title")},
+                              "merge": candidate.get("merge")},
                 "verification": verification, "actions": self._actions(transaction),
                 "confirmations": self._confirmations(plan_digest, candidate, transaction),
                 "runnable": refusal is None,
@@ -325,17 +327,25 @@ class Driver:
     def _new_plan(self, candidate: Mapping[str, str] | None) -> "_Plan":
         if candidate is None:
             raise Refusal("candidate_required", "a new release needs a candidate")
-        try:
-            release_profile.bind_candidate(self.compiled, dict(candidate))
-        except ValueError as error:
-            raise Refusal("candidate_invalid", str(error)) from error
+        problem = release_profile.candidate_problem(dict(candidate))
+        if problem is not None:
+            raise Refusal("candidate_invalid", problem)
         refusal: Refusal | None = None
         receipt = None
-        try:
-            receipt = self._observe(candidate)
-        except release_verification.VerificationRefused as error:
-            refusal = Refusal(error.code, error.detail)
         verification = None
+        if release_profile.binds_merge(self.compiled):
+            try:
+                candidate = {**candidate, "merge": release_verification.observe_merge(
+                    repository=self._repository(),
+                    integration_branch=self.project.integration_branch,
+                    default_branch=self.project.default_branch, commit=candidate["commit"])}
+            except release_verification.VerificationRefused as error:
+                refusal = Refusal(error.code, error.detail)
+        if refusal is None:
+            try:
+                receipt = self._observe(candidate)
+            except release_verification.VerificationRefused as error:
+                refusal = Refusal(error.code, error.detail)
         if receipt is not None:
             verification = {"result": receipt["result"],
                             "checks": [{"context": check["context"],
@@ -358,7 +368,8 @@ class Driver:
         plan_digest = telemetry_digest({
             "profile_digest": self.compiled["digest"], "ordinal": len(existing) + 1,
             "candidate": {"version": candidate["version"], "commit": candidate["commit"],
-                          "title": candidate["title"], "notes_digest": telemetry_digest(notes)},
+                          "title": candidate["title"], "notes_digest": telemetry_digest(notes),
+                          "merge": candidate.get("merge")},
             "verification": verification,
             "actions": [{key: action[key] for key in
                          ("name", "operation", "mode", "effect", "target")}

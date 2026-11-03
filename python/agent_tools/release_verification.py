@@ -22,10 +22,25 @@ is set, created by that app); the run with the largest integer `id` decides, and
 `missing`. `result` is `passed` when every check is a completed success, `failed` when some
 check completed with another conclusion, and `pending` otherwise. The receipt carries no
 detail beyond that, so its digest is the evidence id.
+
+`observe_merge` is the read side of a two-branch release (issue 554 D3), for a profile whose
+merge step consumes the candidate's `merge`. It makes three reads under a deadline of its own,
+`READ_BUDGET_SECONDS`, and a refusal stops the later ones:
+
+1. `repos/<repository>/pulls?state=open&base=<default_branch>&head=<owner>:<integration_branch>
+   &per_page=2`: exactly one open pull request, whose head is the candidate `commit`. No
+   pull request is `release_pr_missing`, a head elsewhere is `release_pr_stale`, and two
+   pull requests or an entry of another shape is `verification_unavailable`;
+2. `repos/<repository>/git/ref/heads/<default_branch>`: its tip is the `base_tip`;
+3. `repos/<repository>/compare/<base_tip>...<commit>`: the status must be `ahead`, else
+   `release_pr_behind`, since the default branch has moved past what the pull request merges.
+
+It returns `{pr, base_tip}`. Every failed read is `verification_unavailable`, as for `observe`.
 """
 
 import json
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping
@@ -40,11 +55,12 @@ PAGE_SIZE = 100
 STRIPPED = ("GITHUB_TOKEN", "GH_TOKEN")
 DETAIL_LIMIT = 240
 UNAVAILABLE = "verification_unavailable"
+SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
 class VerificationRefused(Exception):
-    """`code` is `candidate_stale` or `verification_unavailable`; `detail` is at most 240
-    characters."""
+    """`code` is `candidate_stale`, `verification_unavailable`, `release_pr_missing`,
+    `release_pr_stale` or `release_pr_behind`; `detail` is at most 240 characters."""
 
     def __init__(self, code: str, detail: str) -> None:
         super().__init__(f"{code}: {detail}")
@@ -161,6 +177,55 @@ def observe(*, project_id: str, profile_id: str, profile_digest: str, repository
             "profile_digest": profile_digest,
             "candidate": {"commit": commit, "version": version}, "required": required,
             "checks": checks, "result": _result(checks), "observed_at": format_at(clock())}
+
+
+def _release_pr(payload: Any, path: str, *, owner: str, integration_branch: str,
+                default_branch: str, commit: str) -> int:
+    if not isinstance(payload, list):
+        raise _unavailable(path, "the answer is not a list of pull requests")
+    if not payload:
+        raise VerificationRefused(
+            "release_pr_missing",
+            f"no open pull request from {owner}:{integration_branch} into {default_branch}")
+    entry = payload[0]
+    head = entry.get("head") if isinstance(entry, dict) else None
+    number = entry.get("number") if isinstance(entry, dict) else None
+    sha = head.get("sha") if isinstance(head, dict) else None
+    if (len(payload) > 1 or not isinstance(number, int) or isinstance(number, bool)
+            or number < 1 or not isinstance(sha, str) or SHA_PATTERN.fullmatch(sha) is None):
+        raise _unavailable(path, "not exactly one open pull request of {number, head.sha}")
+    if sha != commit:
+        raise VerificationRefused(
+            "release_pr_stale", f"pull request {number} is at {sha}, not the candidate {commit}")
+    return number
+
+
+def observe_merge(*, repository: str, integration_branch: str, default_branch: str,
+                  commit: str) -> dict[str, Any]:
+    """The open release pull request and the default tip it will merge onto, as
+    `{pr, base_tip}`, or `VerificationRefused` (issue 554 D3)."""
+    deadline = time.monotonic() + READ_BUDGET_SECONDS
+    owner = repository.split("/")[0]
+    pulls_path = (f"repos/{repository}/pulls?state=open&base={default_branch}"
+                  f"&head={owner}:{integration_branch}&per_page=2")
+    pr = _release_pr(_read(pulls_path, deadline), pulls_path, owner=owner,
+                     integration_branch=integration_branch, default_branch=default_branch,
+                     commit=commit)
+    tip_path = f"repos/{repository}/git/ref/heads/{default_branch}"
+    base_tip = _tip(_read(tip_path, deadline), tip_path)
+    if SHA_PATTERN.fullmatch(base_tip) is None:
+        raise _unavailable(tip_path, "object.sha is not 40 lowercase hex digits")
+    compare_path = f"repos/{repository}/compare/{base_tip}...{commit}"
+    payload = _read(compare_path, deadline)
+    status = payload.get("status") if isinstance(payload, dict) else None
+    if not isinstance(status, str):
+        raise _unavailable(compare_path, "the answer carries no status")
+    if status != "ahead":
+        raise VerificationRefused(
+            "release_pr_behind",
+            f"{integration_branch} is {status} relative to {default_branch} at {base_tip}: merge "
+            f"{default_branch} into {integration_branch}, push, wait for CI and preview again")
+    return {"pr": pr, "base_tip": base_tip}
 
 
 def canonical_text(receipt: Mapping[str, Any]) -> str:

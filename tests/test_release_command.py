@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from . import forge_world
+from . import release_test_support as support
 from .actions_world import CONFIG, MERGE, OLDER, ActionsWorld, run
 from .forge_world import CANONICAL, ROWS, ForgeWorld
 
@@ -416,6 +417,35 @@ class HostLocalInspectTest(ReleaseCommandCase):
         self.assertEqual(report["bindings"]["adapters"]["bundle"]["adapter"], "codesigned-artifact")
         self.assertEqual(report["conformance"]["adapters"]["launchd"]["modes"],
                          {"activate": "supported"})
+
+
+class TwoBranchCommandTest(ReleaseCommandCase):
+    """Issue 554 row 11: the command prints the merge observation's refusal in its document."""
+
+    def setUp(self):
+        super().setUp()
+        contract = self.contract()
+        contract["bindings"]["vcs"]["integration_branch"] = "dev"
+        contract["release"]["profiles"] = {"github-release": support.merge_profile()}
+        self.write_contract(contract)
+        self.world = ForgeWorld(self)
+        self.world.verification_ready(integration="dev")
+        notes = tempfile.TemporaryDirectory()
+        self.addCleanup(notes.cleanup)
+        self.notes = Path(notes.name) / "notes.md"
+        self.notes.write_text("notes body\n", encoding="utf-8")
+
+    def test_preview_refuses_a_missing_release_pr(self):
+        self.world.merge_observation_ready(prs=[])
+        code, document, err = self.run_release(
+            "transaction", "preview", "--commit", CANONICAL["commit"], "--version", CANONICAL["tag"],
+            "--title", CANONICAL["title"], "--notes-file", str(self.notes))
+        self.assertEqual((code, document["runnable"], document["refusal"]["code"]),
+                         (3, False, "release_pr_missing"), err)
+        self.assertEqual([c["action"] for c in document["confirmations"]], ["merge", "tag", "github-release"])
+        self.assertIsNone(document["verification"])
+        self.assertFalse((self.root / ".git/agent-release").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
