@@ -54,13 +54,20 @@ exact commands for the activation and its rollback must be ready when the items 
 4. **Dispositions** (section 4): a red row is fixed in this attempt only under a narrow rule, and is
    otherwise covered by exactly one tracker issue per distinct repair route. Before filing, the open
    issues are searched (#554 and #555 already exist).
-5. **The human gate** (section 5): the pre-activation, activation, post-activation verification,
-   rollback and retention command text, with every value known at evidence time bound and the
+5. **The human gate** (section 5): the migration, re-run, freeze, activation, verification and
+   rollback command text, with every value known at evidence time bound and the
    candidate commit as the one named parameter.
 6. **Delivery** (section 6): a docs-only PR holding the spec, the plan and the checklist. #130 stays
    open at the human gate, and its own criteria are recorded as unmet or human-pending.
 
 ## Decisions
+
+Terms used below. The **bridge generation** is a host's active pre-cutover Nix generation, which is
+the rollback anchor. The **bridge paths** are the deprecated compatibility code the candidate deletes:
+the legacy file's writer, `release_bridge`, `release deploy inspect` and `bindings.deploy`. The
+**candidate** is the strict platform build F1 produces. A **legacy ledger** is one whose
+`workflow-state migrate` dry-run verdict is not `current`, and a **legacy attempt** is an attempt
+recorded in a legacy ledger.
 
 ### 1. The checklist artifact (per D3, D4, D5)
 
@@ -76,9 +83,9 @@ One Markdown file at `.agents/artifacts/evidence/cutover-130-checklist.md`, in t
 4. **Evidence**: one subsection per item. Each holds the predicate quoted from its source, its
    commands in a fenced block, each labelled (`C10.a`), and a rows table: `Host | Subject | Revision |
    Command | UTC | Exit | Observed | Verdict`. "Subject" is the root, host or artifact the row
-   observes. "Revision" is the subject's commit (`git -C R rev-parse HEAD` and its branch) for a
-   project row, or the host's active system generation for a host row. "Observed" is a bounded
-   verbatim excerpt of the verdict-bearing fields, at most about 200 characters. A list that does not
+   observes. "Revision" is the subject's commit (`git -C R rev-parse HEAD`, its branch and the count
+   of `git -C R status --porcelain` entries) for a project row, or the host's active system
+   generation for a host row. "Observed" is a bounded verbatim excerpt of the verdict-bearing fields, at most about 200 characters. A list that does not
    fit, such as refused ledgers or unmapped worktrees, is counted in the row and listed in full in
    the filed issue.
 5. **Dispositions**: `Rows | Repair route | Disposition (fix commit or issue)`.
@@ -115,7 +122,9 @@ record, and re-running the commands is how anyone checks it.
 
 `H` is a roster host and `R` a root on it. Rows for a remote host run as `ssh H -- <argv>`. Every
 command is read-only: none carries `--apply`, `--register`, `switch`, a write or a fetch into a fleet
-root. Where a tool exits 0 on a failing answer, the verdict reads the answer, never the exit code.
+root. The evidence run creates no worktree in a roster root, so it cannot disturb C7. The verdict
+reads the command's answer, never its exit code: `adopt-project verify` exits 0 on `not_conformant`,
+and `ls` exits non-zero on a green `absent`.
 
 **Pre-activation items**
 
@@ -125,12 +134,12 @@ root. Where a tool exits 0 on a failing answer, the verdict reads the answer, ne
 | C2 | Every roster project is registered and compatible, and its adoption evidence is still current (issue; #71) | per H `resolve-project platform-status --fleet` (each row `compatible: true`) and `conformance run --purpose fleet` (outcome `passed`); per (H,R) `adopt-project verify --repo-root R` | red on any incompatible row, a fleet outcome other than `passed`, or verify result `not_conformant`. `adopted` is green. `adopted_with_blockers` is green with its blockers listed: #71 lets optional host readiness stay blocked only through that state |
 | C3 | A fresh `approved` #70 bundle covers the strict-cutover candidate as a whole (issue; #71; #128 AC5) | every `*-bundle.json` under `.agents/artifacts/evidence/` at `origin/main`, read for `state` and `identity.bound.commit.candidate` | green only for a bundle with `state: approved` that binds the commit C4 names as the candidate; otherwise red |
 | C4 | Candidate and retained-bridge fleet preflight are green for every registered project (#71) | bridge side: the C2 fleet rows, cited; candidate side: `git show origin/main:home/common/agent-skills/platform-manifest.json` and the C2 intervals | red while no candidate exists: the manifest says `1.0.0`, and every interval excludes `2.0.0`, the strict major #66 requires |
-| C5 | No legacy release is in flight (#90) | per (H,R) `ls -la R/.superpowers/workflows/ship-release/`; if `state.json` is present, `release transaction status --repo-root R` for its `legacy.class` | green when absent (`classify` is `absent` exactly when the path is missing) or `completed`; red when `in_flight` or `unreadable`, or when a file is present and the project cannot classify it because its release capability is unsupported |
-| C6 | No legacy attempt is left without a resumable strict-path mapping (issue; refresh) | per (H,R) `workflow-state migrate --repo-root R` (the dry run) | red when `counts.refused > 0`; otherwise human-pending when `counts.migrate > 0`, cleared by the owner's gate step 2; green when every ledger is `current` |
-| C7 | No retained legacy worktree is left without a resumable mapping (refresh) | per (H,R) `git -C R worktree list --porcelain`; each linked worktree's path, as listed and as its realpath, is searched as a fixed string in `R/.superpowers/workflows/*/state.json` | a worktree is mapped when its path occurs in a ledger whose C6 verdict is `current` or `migrate`; red when any linked worktree is unmapped or mapped only to refused ledgers |
+| C5 | No legacy release is in flight (#90) | per (H,R) `ls -la R/.superpowers/workflows/ship-release/state.json`; if it is present, `release transaction status --repo-root R` for its `legacy.class` | green when absent (`classify` is `absent` exactly when the path is missing) or `completed`; red when `in_flight` or `unreadable`, or when a file is present and the project cannot classify it because its release capability is unsupported |
+| C6 | No legacy attempt is left without a resumable strict-path mapping (issue; refresh) | per (H,R) `workflow-state migrate --repo-root R` (the dry run) | red when `counts.refused > 0`; otherwise human-pending when `counts.migrate > 0`, cleared by the owner's gate step 1; green when every ledger is `current` |
+| C7 | No retained legacy worktree is left without a resumable mapping (refresh) | per (H,R) `git -C R worktree list --porcelain`; each linked worktree's path, as listed and as its realpath, is searched as a fixed string in `R/.superpowers/workflows/*/state.json` | each linked worktree is classed by the ledgers its path occurs in. Red when any is unmapped (in no ledger, including one whose ledger was archived or a scratch or hand-made worktree, which the owner classifies in F7) or mapped only to refused ledgers. Otherwise human-pending when any maps only through `migrate` ledgers. Green when every one maps to a `current` ledger |
 | C8 | The Codex ship handoff is in place (issue; #119) | per H `ls -lL ~/.agents/skills/ship-issue/HUMAN-GATE.md` and `grep -n 'HUMAN-GATE.md' ~/.agents/skills/ship-issue/SKILL.md`; the source revision from `git log -1 --format=%H -- home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md` | green when the gate file is installed in the tree Codex reads and wired from the skill on every host |
 | C9 | Claude and Codex paths answer as their declared host capabilities say, including bounded admission (refresh) | per H `workflow-state host-route --route claude-code` and `--route codex`; the `host.admission.declaration` check status from the C10 rows | green when each route answers per the installed declaration: `claude-code` supported with its slots, and `codex` `declared_unsupported` with the alternative `/from-issue <issue> --auto`; red on `declaration_missing`, `declaration_invalid` or `route_undeclared` |
-| C10 | `doctor` is clean on every adopted host (issue) | per (H,R) `conformance run --purpose doctor --repo-root R` | outcome `passed` is green, with warnings listed; `failed` is red with its primary check and repair id; `incomplete` is rerun online once and stays red if it repeats |
+| C10 | `doctor` is clean on every adopted host (issue) | per (H,R) `conformance run --purpose doctor --repo-root R` | outcome `passed` is green, with warnings listed; `failed` is red with its primary check, its repair id and the count of checks it suppressed (#69 suppresses dependants, so a repair can expose more); `incomplete` is rerun online once and stays red if it repeats |
 | C11 | Deprecation notices shipped in a bridge minor, and the fleet has zero users of the deprecated paths (issue; #66) | per H `resolve-project platform-status` for `platform.deprecations`; per (H,R) `git -C R ls-files -- .claude/skills.config.json`, `resolve-project resolve --repo-root R` for `bindings.deploy.adapter`, and `git -C R grep -n -F 'release deploy inspect' -- . ':!.agents/artifacts'`. For nix-config the pathspec is `home/common/agent-skills/skills`, because its implementation and tests are what the candidate deletes | red when `deprecations` is empty, since the candidate removes the legacy file, its writer, `bindings.deploy` and `release deploy inspect` (124 and 128 specs). Red for each root with a tracked legacy file, a `bindings.deploy.adapter` other than `none`, or a hit. Point-in-time records are not users |
 | C12 | The bridge generation is identified per host and can be retained (issue; #66) | per H `hostname`, `readlink /nix/var/nix/profiles/system`, `readlink /nix/var/nix/profiles/system-N-link` and `readlink /run/current-system` | green when the current profile generation is the running system and `hostname` equals the host's flake attribute; records `N_H` |
 
@@ -169,7 +178,7 @@ issue.
 
 | Ref | Repair route | Covers |
 |-----|--------------|--------|
-| F1 | Build the strict-cutover candidate on an unmerged branch. It is platform `2.0.0`: it deletes the bridge (the legacy file's writer, `release_bridge`, `release deploy inspect`, `bindings.deploy` through a project-schema migration) and the workflow-entry residues of the fallback inventory, adds candidate-and-bridge fleet preflight, delivers the ladder-absence and trace checks, and lands each fleet project's migration commit admitting the bridge and the candidate (#66) | C3 (the candidate it binds), C4, P1, P4 |
+| F1 | Build the strict-cutover candidate on an unmerged branch. It is platform `2.0.0`: it deletes the bridge paths, retiring `bindings.deploy` through a project-schema migration, and the workflow-entry residues of the fallback inventory, adds candidate-and-bridge fleet preflight, delivers the ladder-absence and trace checks, and lands each fleet project's migration commit admitting the bridge and the candidate (#66) | C3 (the candidate it binds), C4, P1, P4 |
 | F2 | Ship a bridge minor that declares the deprecations of every path F1 removes, with successor and migration ids | C11 (deprecations) |
 | F3 | Arcwave: retire its tracked legacy `.claude/skills.config.json` and the script that reads it, and its references to the removed `resolve-bindings` | C11 (Arcwave) |
 | F4 | Nodo: move the railway deploy off `bindings.deploy` and the legacy file. This needs a railway activation unit in the release core, which no issue covers | C11 (Nodo) |
@@ -186,44 +195,46 @@ here.
 
 The checklist's gate section holds the following text. `K_H`, `N_H` and the roots are the values the
 evidence observed, filled in. `<candidate>` is the one parameter: the 40-hex commit of F1's candidate
-that C3's approved bundle binds. The section says that `N_H` must be re-read in step 1, because any
-switch before the activation moves it.
+that C3's approved bundle binds. The section says that `N_H` must be re-read in step 2, because any
+switch before the activation moves it. The steps run in order, and the owner runs every one.
 
-**1. Before activation (owner, under the retained bridge, on every host).** Re-run every
-pre-activation item's commands. Every verdict must be green. Any changed or red verdict rewinds the
-stage (#71): the candidate is regenerated, never patched around. Record `N_H` from
-`readlink /nix/var/nix/profiles/system`.
-
-**2. Migrate the ledgers (owner).** For every roster root `R` on host `H`:
+**1. Migrate the ledgers (under the bridge generation).** For every roster root `R` on host `H`:
 
 ```
 workflow-state migrate --repo-root R           # must report "refused": 0
 workflow-state migrate --repo-root R --apply
 ```
 
-Run this before the activation. The bridge's helper already reads and writes the migrated schema
-(schema 11), so a later rollback to the bridge needs no reverse migration. Then re-run C6 and C7.
+The bridge's helper already reads and writes the migrated schema (schema 11), so a later rollback to
+the bridge generation needs no reverse migration. A refused ledger stops the gate here: C6 is red.
 
-**3. Retention freeze.** From step 1 until retirement is recorded, run no `just gc`, no
-`nix-collect-garbage` and no system-generation deletion on any host.
+**2. Re-run the checklist.** On every host, re-run every pre-activation item's commands. Every verdict
+must be green. Any changed or red verdict rewinds the stage (#71): the candidate is regenerated, never
+patched around. Record `N_H` from `readlink /nix/var/nix/profiles/system`.
 
-**4. Activation (owner; every host in one session, host by host).** On each host `H`:
+**3. Freeze.** From step 2 until retirement is recorded, on every host, run no `just gc`, no
+`nix-collect-garbage`, no system-generation deletion and no `just switch` other than step 4's.
+
+**4. Activation (every host in one session, host by host).** The approved bundle must bind
+`<candidate>`. On each host `H`:
 
 ```
 git -C K_H fetch origin
 git -C K_H worktree add --detach K_H/.worktrees/cutover-130 <candidate>
 cd K_H/.worktrees/cutover-130 && just switch
+git -C K_H worktree remove K_H/.worktrees/cutover-130
 ```
 
-`just switch` is the contract's `nix-activate` command, run from the candidate checkout's root. The
-precondition is that the approved bundle binds `<candidate>`. If any host fails to activate, roll back
-every host already activated, because #71 forbids a mixed live fleet.
+`just switch` is the contract's `nix-activate` command, run from the candidate checkout's root. The new
+system generation roots the build, so the worktree is removed and leaves no residue for C7. If any
+host fails to activate, roll back every host already activated, because #71 forbids a mixed live
+fleet.
 
 **5. Post-activation verification.** On each host, run `resolve-project platform-status --fleet`
 (`platform_version` is the candidate's, every row compatible) and `conformance run --purpose fleet`.
 Per root, run `conformance run --purpose doctor --repo-root R`. Then evaluate P1–P5.
 
-**6. Rollback (owner, per host, to the bridge).**
+**6. Rollback (per host, to the bridge generation).**
 
 ```
 # darwin hosts (mbp, eleven-m5)
@@ -246,16 +257,22 @@ This attempt is accepted when:
    No red row is left without one, and no issue duplicates an open one.
 3. The gate section holds steps 1–6 with every value known at evidence time bound, and
    `<candidate>` as the only parameter.
-4. The attempt mutated nothing outside its own branch and the tracker filings: no switch, no
-   `migrate --apply`, no registry write and no commit in any fleet repository. Each fleet root's HEAD
-   and each host's registry bytes are recorded before the evidence run and checked after it.
-5. Every verdict comes from a final run of all the commands, made after the last filing and before
-   delivery.
+4. The attempt ran only the read-only commands of section 3 against fleet roots and hosts. It made no
+   switch, no `migrate --apply`, no registry write and no commit in any fleet repository. Each fleet
+   root's HEAD and each host's registry bytes are recorded before the evidence run and after it, and
+   any difference is reported with its cause. Other runs may legitimately move a root meanwhile.
+5. Every verdict comes from the attempt's last full run of the commands. The filings are made from
+   that run's red rows, so no filed issue rests on an earlier observation.
 
 Delivery is a docs-only PR holding the spec, the plan and the checklist. #130 stays open with
 `agent:human-required`. Its gate comment links the checklist's gate section at the merged commit
-and lists the filed issues. The acceptance record marks the issue's own criteria as unmet (AC1 and the
-refresh's roster criterion carry the red items) or `human_pending` (the post-activation criteria).
+and lists the filed issues. The acceptance record marks each of the issue's own criteria from its
+items: met only when every mapped item is green, `human_pending` when the remaining items wait on
+the owner or the activation, and unmet otherwise. AC1 and the refresh's legacy-attempt criterion are
+expected to be unmet.
+
+Re-entry: once the filings close, a new attempt on #130 re-runs the whole checklist (D5). It inherits
+no verdict from this one. Activation stays the owner's step 4, after an all-green step 2.
 
 ## Test seams
 
@@ -297,13 +314,13 @@ for per-row evidence tables, and the #127 and #128 bundles under `.agents/artifa
 | D1 | This attempt prepares only: it commits the checklist, files the red routes and writes the gate text. It builds no strict candidate and runs no activation, switch, `migrate --apply`, rollback, retirement or trials. #130 stays open at the human gate | Owner comment 2026-11-03 ("preparation only", activation, rollback and retirement not authorised); #71 (one explicit activation confirmed by a person) | Building the candidate here: merging it would make the next routine `just switch` the activation, and it needs migration commits in four other repositories, which is outside this attempt's authority |
 | D2 | The roster is `(host, project_id, root)` over the flake's hosts and each host's own registry. Arcwave is in by the owner's decision, JarBird by registry truth, and Nodo is `nodocom`. `branch_override` registrations count as registered. An unreachable host is human-pending, never dropped. Per-host build differences are recorded and are not red | Refresh: derive from registry truth and decide Arcwave; owner comment (Arcwave in); registries are per host (eleven-m5 lists JarBird only); #363 override design; #66 (store identities are not compatibility versions) | Freezing "all three": the refresh forbids it. Using mbp's registry alone: eleven-m5 registers its own JarBird root and receives the same activation |
 | D3 | The checklist is one Markdown file at `.agents/artifacts/evidence/cutover-130-checklist.md`, with a summary, roster, per-item evidence rows, dispositions, gate and criteria map. Raw output is not committed. Later passes rewrite it in new commits, and git history is the audit trail. `agent-workflow-tests` runs because that path is watched | #127 and #128 evidence home; the Phase-0 triage path list; `is_evidence_record_path` counts only top-level `.json` files there, so a `.md` cannot pose as adoption evidence | A plan-local `.evidence.md`: the checklist outlives this plan and is re-run at the gate. A JSON twin or schema: it has no consumer (YAGNI), and a `.json` there would be read as an adoption-evidence candidate |
-| D4 | Verdicts are `green`, `red` and `human-pending`. An item takes its worst row (red over human-pending over green). Evidence rules are fail-closed: they may over-report red and never under-report. A tool's answer, never its exit code, decides where the tool exits 0 on failure (`adopt-project verify`, `migrate`) | the-bar "Truthful terminal states"; `verify_exit_code` returns 0 for all three results; #71 (a gap rewinds) | A `n/a` or inherited-green verdict for unobservable rows: it presents missing evidence as success |
+| D4 | Verdicts are `green`, `red` and `human-pending`. An item takes its worst row (red over human-pending over green). Evidence rules are fail-closed: they may over-report red and never under-report. A command's answer decides, never its exit code: `adopt-project verify` exits 0 on `not_conformant`, and `ls` exits non-zero on a green `absent` | the-bar "Truthful terminal states"; `verify_exit_code` returns 0 for all three results; #71 (a gap rewinds) | A `n/a` or inherited-green verdict for unobservable rows: it presents missing evidence as success |
 | D5 | Freshness means every pre-activation row comes from this attempt's own read-only command run. Phase-0 notes and earlier artifacts are never evidence, only things to re-run. There is no time window: the gate re-runs everything before activation, and any changed verdict rewinds | Issue: "verified fresh, not inherited"; #71: elapsed time is never evidence; the candidate is regenerated on a gap | A freshness TTL: an arbitrary number that #71 rejects as evidence. Carrying Phase-0 counts into the checklist: inherited evidence |
 | D6 | No new tooling. Every item uses an installed command or git, `ls`, `readlink` or `ssh`. The legacy-release check stats the path, and the worktree mapping is a fixed-string search of the ledger files | Caller and the-bar YAGNI; `release transaction status` refuses where the release capability is unsupported (Nodo), so the stat is the uniform check; ledger dialects vary, while a path string does not | A `cutover-checklist` runner or `strict_predicates` module: single-use, and its own new code would need the review and tests the cutover is gated on. The post-activation trace checks belong to F1 |
 | D7 | A red row is fixed here only if the fix is in nix-config, small, observable without any activation and not part of the cutover. Otherwise it is filed: one issue per distinct repair route, after searching open issues. Owner-only actions are human-pending, not filed | Owner: "fix or file anything red"; the installed generation changes only on `just switch`, which is not authorised, so an installed-behaviour fix cannot be re-observed; one issue per route keeps rows that share a remedy together | Fixing across fleet repositories: not authorised. One issue per red row: Nodo alone would yield dozens of ledger issues with one remedy |
 | D8 | The expected filings are F1–F7, with #555 cited for JarBird. Interval widening for the candidate major is folded into F1, and the deprecation minor (F2) is separate. The execution re-derives the set from fresh evidence | #66 choreography: deprecate in a minor, migrate users, widen intervals to admit bridge and candidate, remove in the major; 124 and 128 specs list what #130 retires; open #554 and #555 | Filing interval widening separately: its schema is not known until F1 defines the candidate. Folding F2 into F1: it is a separate, earlier release with its own activation |
-| D9 | C6: a legacy attempt has a mapping when its ledger's dry-run verdict is `migrate` or `current`. Refused ledgers are red whatever the state of their attempts. C7: a worktree has a declared path when its path occurs in such a ledger. `migrate --apply` is the owner's gate step 2, run under the bridge | Refresh ("do not activate while any legacy attempt or worktree lacks a resumable strict-path mapping"); helper README: refusals leave bytes untouched, and the bridge helper writes schema 11 with no reverse migration; #69: no unclassified residue | Requiring zero non-terminal attempts: forces mass abandonment the refresh does not ask for. Running `--apply` here: it mutates other repositories' ledgers, which is not authorised |
+| D9 | C6: a legacy attempt has a mapping when its ledger's dry-run verdict is `migrate`, and it resumes on the strict path once the owner's gate step 1 applies the migration. Refused ledgers are red whatever the state of their attempts. C7 classes each linked worktree by the ledgers naming its path: `current` is green, `migrate` only is human-pending, and refused-only or unmapped is red. Unmapped covers archived runs, scratch leaks and hand-made worktrees alike, and the owner classifies them in F7. `migrate --apply` is gate step 1, run before the step-2 re-run under the bridge generation | Refresh ("do not activate while any legacy attempt or worktree lacks a resumable strict-path mapping"); helper README: refusals leave bytes untouched, and the bridge helper writes schema 11 with no reverse migration; #69: no unclassified residue | Requiring zero non-terminal attempts: forces mass abandonment the refresh does not ask for. Running `--apply` here: it mutates other repositories' ledgers, which is not authorised |
 | D10 | The Codex predicates are judged against the declaration. C8 is the #119 gate installed in the skills tree Codex reads. C9 is `host-route` answering as declared (Codex `declared_unsupported` with its alternative). Live Claude and Codex ships are P3, post-activation | Refresh: "against declared host capabilities, including bounded capacity admission"; #150 admission covers orchestration agent slots only (host-contention rejection), not the single-session ship path; #119 | Making Codex's `unsupported` red: the refresh measures against the declaration, and changing it is out of scope |
 | D11 | C3 is red until F1's candidate exists and an `approved` bundle binds it. The #128 AC5 live paired trials are owner-run against that candidate and stay on #130's gate | #70 (approved needs fresh live strata, no hand-authored records); #128 owner comment and D11; #71 (one bundle against the final candidate) | Reusing `release-128-bundle.json`: it is `unmeasured` and binds another candidate. Moving the trials into F1: the owner placed them on #130 |
-| D12 | The gate text has steps 1–6. Activation runs the contract's `nix-activate` (`just switch`) in a detached worktree at `<candidate>`, host by host in one session, and any failure rolls every activated host back. Rollback switches to the explicit bridge generation, through that generation's own `darwin-rebuild` on darwin and `nix-env --switch-generation` then `switch-to-configuration` on NixOS. `<candidate>` is the only unbound value | The resolved contract's `nix-activate` command; `darwin-rebuild --switch-generation` is its rollback action; no checkout-path symlinks exist in the config; #71 (no mixed live mode; the bridge is the rollback anchor) | Merging the candidate and switching from `main`: any routine switch would activate it host by host, giving a mixed fleet. `--rollback`: correct only if exactly one generation was added |
+| D12 | The gate runs in order: migrate, re-run every item and record `N_H`, freeze (no gc, no other switch), activate, verify, roll back. Activation runs the contract's `nix-activate` (`just switch`) in a detached worktree at `<candidate>` that is removed afterwards, host by host in one session, and any failure rolls every activated host back. Rollback switches to the explicit bridge generation, through that generation's own `darwin-rebuild` on darwin and `nix-env --switch-generation` then `switch-to-configuration` on NixOS. `<candidate>` is the only unbound value | The resolved contract's `nix-activate` command; `darwin-rebuild --switch-generation` is its rollback action; no checkout-path symlinks exist in the config; #71 (no mixed live mode; the bridge is the rollback anchor) | Merging the candidate and switching from `main`: any routine switch would activate it host by host, giving a mixed fleet. `--rollback`: correct only if exactly one generation was added |
 | D13 | Delivery is a docs-only PR. #130 stays open with `agent:human-required`. The gate comment links the checklist at the merged commit and lists the filings, so the command text lives only in the checklist. The issue's criteria are recorded as unmet or human-pending | Owner comment (stop at a human gate); DRY (one home for the command text); the 128 hold precedent | Closing #130 or checking its boxes: its criteria are post-activation or red. Quoting the commands in the comment: a second copy that can drift |
