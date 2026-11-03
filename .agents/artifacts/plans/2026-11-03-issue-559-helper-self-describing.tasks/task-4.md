@@ -50,7 +50,7 @@ In `home/common/agent-skills/tests/test_workflow_skill_contracts.py`, replace th
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run (timeout 600 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_skill_lint.py -k test_l6_reports -k test_the_live_tree_lints_clean 2>&1 | tail -4; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k test_projection_callers_carry_their_machine_text 2>&1 | tail -4'`
+Run (timeout 600 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'set -o pipefail; rc=0; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_skill_lint.py -k test_l6_reports -k test_the_live_tree_lints_clean 2>&1 | tail -4 || rc=1; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k test_projection_callers_carry_their_machine_text 2>&1 | tail -4 || rc=1; exit $rc'`
 Expected: both runs FAIL. The L6 test fails because `keys()` is empty, while the live-tree test still passes because L6 does not exist yet. The contract test fails on the `forecast` argv item.
 
 - [ ] **Step 3: Write the minimal implementation**
@@ -106,7 +106,7 @@ The file shrinks from 12682 to 12286 bytes.
 
 1. Focused tests, green (timeout 600 s): the Step 2 command.
    Expected: both runs `OK`.
-2. Both modules, which cover the no-growth tests and the rest of the lint suite (timeout 1800 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_skill_lint.py home/common/agent-skills/tests/test_workflow_skill_contracts.py 2>&1 | tail -4'`
+2. Both modules, which cover the no-growth tests and the rest of the lint suite (timeout 1800 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_skill_lint.py home/common/agent-skills/tests/test_workflow_skill_contracts.py 2>&1 | tail -4'`
    Expected: `OK`. A failure in `test_edited_planning_documents_do_not_grow` or `test_edited_execution_documents_do_not_grow` means a skill file grew past its `8d0bbc25` size.
 3. No python-tree pointer is left in any skill tree (instant): `if rg -n --pcre2 '(?<![A-Za-z0-9_.~/-])python/|agent_tools/' -g '*.md' home/common/agent-skills/skills home/common/claude-code/skills home/common/codex/skills; then exit 1; fi`
    Expected: exit 0 with no output. Exit 1 lists the remaining pointer.
@@ -119,7 +119,7 @@ The file shrinks from 12682 to 12286 bytes.
 
 ```bash
 git add python/agent_tools/skill_lint.py home/common/agent-skills/tests/test_skill_lint.py home/common/agent-skills/skills/writing-plans/SKILL.md home/common/agent-skills/skills/sdd/SKILL.md home/common/agent-skills/skills/retro/SKILL.md home/common/agent-skills/tests/test_workflow_skill_contracts.py
-launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "feat(issue-559): lint python-tree pointers and route planners to forecast" -m "<the session's Co-Authored-By trailer>"
+launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "feat(issue-559): add skill-lint L6, drop python-tree pointers" -m "<the session's Co-Authored-By trailer>"
 ```
 
 Then check the scope (instant): `test "$(git show --name-only --format= HEAD | wc -l | tr -d ' ')" = 6 && git show --name-only --format= HEAD | grep -qx home/common/agent-skills/skills/writing-plans/SKILL.md`

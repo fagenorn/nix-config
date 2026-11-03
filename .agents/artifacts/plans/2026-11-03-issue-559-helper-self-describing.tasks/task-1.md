@@ -33,7 +33,7 @@ The fixture's index row is `Task 1 — Case — shared.txt — full — [task-1.
 
 - [ ] **Step 2: Run the test and watch it fail**
 
-Run (timeout 600 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'PYTHONPATH="$PWD/python" python3 -m unittest tests.test_review_feasibility -k test_budget_check_refusal_relays_the_checker_reason 2>&1 | tail -8'`
+Run (timeout 600 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests.test_review_feasibility -k test_budget_check_refusal_relays_the_checker_reason 2>&1 | tail -8'`
 Expected: FAIL. The assertion shows `b'review-feasibility: budget check failed\n'` against the expected line, then `Ran 1 test` and `FAILED (failures=1)`.
 
 - [ ] **Step 3: Write the minimal implementation**
@@ -48,7 +48,7 @@ In `python/README.md`, append this sentence to the end of the paragraph that sta
 
 1. Focused test, green (timeout 600 s): the Step 2 command.
    Expected: `Ran 1 test` and `OK`.
-2. Regression over the fixture class and the gate suite (timeout 2400 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'PYTHONPATH="$PWD/python" python3 -m unittest tests.test_review_feasibility tests.test_review_gate 2>&1 | tail -4'`
+2. Regression over the fixture class and the gate suite (timeout 2400 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests.test_review_feasibility tests.test_review_gate 2>&1 | tail -4'`
    Expected: `OK`. A failure here means another caller depended on the bare `budget check failed` text.
 3. Static scope (instant): `grep -c 'raise BudgetError("budget check failed")' python/agent_tools/review_budget.py`
    Expected: prints `0` and exits 1. Exit 0 with `1` means the bare refusal is still raised.

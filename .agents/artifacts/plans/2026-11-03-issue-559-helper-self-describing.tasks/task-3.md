@@ -119,7 +119,7 @@ The `"closed"` check holds the "no echo" rule for the unknown-state row, the onl
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run (timeout 600 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_artifact_budget.py -k test_ship_summary_refusals_name_the_member_and_rule -k test_an_sdd_detail_refusal_names_report_path 2>&1 | tail -6'`
+Run (timeout 600 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_artifact_budget.py -k test_ship_summary_refusals_name_the_member_and_rule -k test_an_sdd_detail_refusal_names_report_path 2>&1 | tail -6'`
 Expected: FAIL, `Ran 2 tests` and `FAILED`. The reasons are still the bare `invalid ship summary`, `invalid PR URL`, `invalid ship summary state` and `invalid SDD report`, so `assertIn(member, …)` fails for every row except the `notes` row, which issue 472 already names (D7).
 
 - [ ] **Step 3: Write the minimal implementation**
@@ -133,7 +133,7 @@ In `home/common/agent-skills/scripts/artifact_budget.py`:
 
 1. Focused tests, green (timeout 600 s): the Step 2 command.
    Expected: `Ran 2 tests` and `OK`.
-2. The whole module, for the matrix and v2 tests that drive the same validators (timeout 1800 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_artifact_budget.py 2>&1 | tail -4'`
+2. The whole module, for the matrix and v2 tests that drive the same validators (timeout 1800 s): `launch-scope exec --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_artifact_budget.py 2>&1 | tail -4'`
    Expected: `OK`. A failure in `test_every_sdd_report_matrix_row`, `test_a_held_merge_row_is_an_owner_report` or `test_only_response_result_slots_accept_the_reconciliation_record` means the change altered which inputs are accepted.
 3. Static scope (instant): `if grep -nE '"invalid PR URL"|_detail_fields|raise ArtifactBudgetError\("invalid ship summary( state)?"\)' home/common/agent-skills/scripts/artifact_budget.py; then exit 1; fi`
    Expected: exit 0 with no output. Exit 1 lists a bare composite that is still raised.

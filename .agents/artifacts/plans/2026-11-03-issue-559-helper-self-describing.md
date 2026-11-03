@@ -50,11 +50,15 @@ Task 4 — skill-lint L6 and skill text without python-tree pointers — `python
 | AC1 | code | Task 2 | `tests/test_review_feasibility.py::ForecastGeneratorTest::test_generated_blocks_pass_the_gate_and_a_rerun_writes_nothing`: `forecast` on a two-task fixture (task 1 adds a file and modifies a base file, task 2 modifies task 1's file and deletes a base file), a commit, then `gate --completed-through 0` exits 0 with `state` `complete` (D4). |
 | AC2 | code | Task 3 | `home/common/agent-skills/tests/test_artifact_budget.py::ArtifactBudgetCliTest::test_ship_summary_refusals_name_the_member_and_rule`: every ship-summary rule on the v1 and v2 `ship-summary` boundaries, including the over-long `notes` row that asserts `notes` and the policy bound (D7). |
 | AC3 | code | Task 4 | `home/common/agent-skills/tests/test_skill_lint.py::LiveTreeTest::test_the_live_tree_lints_clean`, with L6 over every `.md` file of the three skill trees; `RuleTest::test_l6_reports_a_path_into_the_python_tree_in_any_markdown_file` shows L6 can fail (D8). |
-| AC4 | evidence | Task 4 | Post-merge (D11): over the next 10 orchestrated issues in any project, owner Bash calls matching `nix/store\|agent_tools\|\.agents/lib/python` are at most 1 per issue (baseline about 3.8 per owner transcript). Acceptance-record row `AC4` stays `unverified` at merge, and ship's acceptance handling holds or closes the issue. |
+| AC4 | evidence | Task 4 | Post-merge (D11): over the next 10 orchestrated issues in any project, owner Bash calls matching `nix/store\|agent_tools\|\.agents/lib/python` are at most 1 per issue (baseline about 3.8 per owner transcript). Measured per issue, read-only, summed over its owner transcripts: `jq -r 'select(.type=="assistant") \| .message.content[]? \| select(.type=="tool_use" and .name=="Bash") \| .input.command' <owner-transcript.jsonl> \| grep -cE 'nix/store\|agent_tools\|\.agents/lib/python'`. Acceptance-record row `AC4` stays `unverified` at merge, and ship's acceptance handling holds or closes the issue. |
 
 ## Decisions
 
 Per D1–D5 (the generator's input, rule, blocks and writing), D6 and D7 (refusal breadth and AC2's table), D8 and D9 (L6, no relocated document), D10 (Phase-5 documents unchanged), D11 (AC4 is post-merge) and D12 (the budget reason relay). Planning appended D13: the relay text, key-set refusals that echo no key, and the L6 key.
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, isolated read-only, no fallback), base `5dfe65ef`, plan head `7b7abbff`, no focus. Accepted 4, rejected 0, deferred 0: B1 gives AC4 a read-only measurement command; B2 shortens the Task 2 and Task 4 subjects to the 64-byte forecast; S1 keeps test exit codes through `pipefail`; S2 limits Task 2's no-change guarantee to validation refusals (D14). One discussion note recorded no defect.
 
 ---
 
