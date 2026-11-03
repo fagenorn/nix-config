@@ -1,5 +1,6 @@
 # The growth gate (#292, program #291 D5). Required on `main` beside `Nix Eval` once
-# `just protect-main` has been applied. It runs `instruction_load check`: skill lint,
+# `just protect-main` has been applied. It runs `skill_lint agnostic` (no hosting-project specifics in the global corpus) and
+# `instruction_load check`: skill lint,
 # no ceiling breached, every ceiling within 5% of measured, and, on a pull request,
 # raise control against the merge commit's first parent. The label is read from the
 # event payload, which is why the label event types are listed: without them, adding
@@ -34,6 +35,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Check the global corpus is project-agnostic
+        run: PYTHONPATH=python python3 -m agent_tools.skill_lint agnostic
       - name: Check the instruction budget
         env:
           EVENT_NAME: ${{ github.event_name }}
