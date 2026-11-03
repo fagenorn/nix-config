@@ -90,7 +90,7 @@ Or "None - can start immediately" if no blockers.
 Write each criterion as `- [ ] [code|evidence|human] <observable outcome> — measured: <where>`:
 
 - `code`: a test, the build or a CI job any reviewer reruns at the head.
-- `evidence`: a measurement outside the gating suite: the command, its conditions and a literal threshold, such as `≤ 90 s per module, serial, idle mbp`, never "faster".
+- `evidence`: a measurement outside the gating suite: the command, its conditions and a literal threshold, such as `≤ 90 s per module, serial, idle machine`, never "faster".
 - `human`: who judges, in what environment; only when no agent can observe it.
 
 Prefer `code`, then `evidence`. The `measured:` clause is the only place the body names a test, file or command.
