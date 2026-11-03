@@ -391,6 +391,35 @@ class RenameForecastCases(source_cases.SourceProjectionFixture, unittest.TestCas
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['metrics'], self.actual()[0])
 
+    def test_observed_move_consumes_old_path_while_its_destination_has_later_work(self):
+        # Task 1 edits old.txt, task 2 moves it to new.txt and task 3 edits new.txt, so the
+        # rename's horizon is 3; at completed_through 2 Git already holds the change at new.txt.
+        self.tasks.append(dict(schema_version=3, kind='review-feasibility-task', task=dict(
+            id=3, commit_subject_bytes=[], actual_ranges=[], records=[])))
+        root = source_cases.BoundaryTreeTest().row('all', None, [1, 2, 3])
+        self.delivery['boundaries'] = [root]
+        self.delivery['process_records'] = [
+            self.record(root['process_forecast_ids'][index], 0, path) for index, path in enumerate(
+                [root['process_package']['spec'], root['process_package']['plan'], *root['process_package']['tasks']])]
+        self.tasks[0]['task']['records'] = [self.record('touch', 1, 'old.txt', change='modify', size=2048, horizon=1)]
+        self.tasks[1]['task']['records'] = [self.rename('moved', 2, 'old.txt', 'new.txt', size=4096, horizon=3)]
+        self.tasks[2]['task']['records'] = [self.record('later', 3, 'new.txt', change='modify', size=4096,
+                                                        added=3, deleted=3, horizon=3, covers=['moved', 'later'])]
+        self.emit(); self.commit('three task forecast')
+        self.write('old.txt', MOVED + 'appended\n'); self.commit('modify old', 1)
+        self.move('old.txt', 'new.txt', 2)
+        self.checkpoint()
+        result = self.project(2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['projected_record_count'],
+                         json.loads(result.stdout)['actual_record_count'])
+        self.write('new.txt', (self.repo / 'new.txt').read_text().replace('moved line 20', 'later line 20'))
+        self.commit('modify new', 3)
+        self.checkpoint()
+        result = self.project(3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['metrics'], self.actual()[0])
+
     def test_forecast_delete_and_add_that_git_pairs_is_accepted(self):
         self.tasks[0]['task']['records'] = [
             self.record('gone', 1, 'old.txt', change='delete', size=4096, added=0, deleted=60, horizon=1),

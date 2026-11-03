@@ -140,12 +140,23 @@ def _completed_effects(plan: ForecastPlan, records: tuple[dict, ...], boundary: 
                        completed: int, actual: CandidateInput, candidate: tuple[Path, str]) -> None:
     paths = {r.path for r in actual.records}
     finished = [r for r in records if r["last_task"] <= completed]
-    consumed = {r["old_path"] for r in finished if r["change"] == "rename"}
+
+    def owned(record: dict) -> list[dict]:
+        return [r for edge in plan.ownership.edges
+                if plan.ownership.owners[edge["commit"]] == record["owner"]
+                and (record["owner"] or boundary["id"] in plan.ownership.process_memberships[edge["commit"]])
+                for r in edge["records"]]
+
+    # A rename consumes its old path once it completes, or earlier once its owner's move is
+    # observed and the old path has left both the package and the candidate's tree, even while
+    # later tasks still edit the destination (issue 569).
+    consumed = {r["old_path"] for r in records if r["change"] == "rename" and (
+        r["last_task"] <= completed
+        or (r["old_path"] not in paths and tree_entry(*candidate, r["old_path"]) is None
+            and any(e["operation"].startswith("R") and e["old_path"] == r["old_path"] and e["path"] == r["path"]
+                    for e in owned(r))))}
     for record in finished:
-        effects = [r for edge in plan.ownership.edges
-                   if plan.ownership.owners[edge["commit"]] == record["owner"]
-                   and (record["owner"] or boundary["id"] in plan.ownership.process_memberships[edge["commit"]])
-                   for r in edge["records"] if r["path"] == record["path"] or r["old_path"] == record["path"]]
+        effects = [r for r in owned(record) if r["path"] == record["path"] or r["old_path"] == record["path"]]
         if not effects:
             raise ForecastError("completed contribution has no owned actual effect")
         # A completed rename consumes its old path unless an actual record still holds it (issue 569).
