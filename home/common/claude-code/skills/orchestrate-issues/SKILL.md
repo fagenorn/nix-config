@@ -32,6 +32,9 @@ exact immutable value, independent of any issue worktree, and is every `--repo-r
 
 ## 1. Start the run
 
+A caller-marked direct-lane issue stays out of `start`: launch one general-purpose agent running
+`deliver-direct` for it instead of an owner.
+
 Open the run with one `start` call carrying exactly one issue selector: the caller's numbers in
 the caller's order, `--label <label>` or `--milestone <milestone>`. A run minted with a creation key
 is re-entered by adding `--run-id <run-id>`:
@@ -148,19 +151,17 @@ unknown kind; fail loudly. The response is the only source of action order, kind
 identity: never infer, reorder, omit or add an action.
 
 **Stop pass.** Before executing the first action of a report whose `dispatches` is non-empty,
-stop the superseded owners. The candidates are every owner
-handle this adapter process recorded beside an owner launch's `action_id` that has produced no final
-return. An interim notification under §2 rule (a) is not a final return. The current wait handle and
-non-owner handles are never candidates; a handle this response dispatches becomes one only once
-dispatched. For each candidate, run rule (b)'s `check-launch` call with the `action_id` recorded
-beside it. On `current: false`, stop that handle through the host's task-stop and mark it stopped;
-a missing or already exited handle counts as stopped. On `current: true`, leave it running. An
-unknown answer, like a failed stop, leaves the handle a candidate, and the next pass tries both
-again. A stop failure never blocks dispatch.
-The pass sends no observation, makes no `step` and writes nothing to the ledger, so
-a later notification from a stopped handle still falls under §2 rule (b). The pass ends by running
-`launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep` once. A sweep that
-exits non-zero never blocks dispatch: keep its exit code and, when it printed a report, its
+stop the superseded owners. Candidates are the owner handles this adapter process recorded beside
+an owner launch's `action_id` with no final return yet (an interim notification under §2 rule (a)
+is not one); the current wait handle and non-owner handles never are, and a handle this response
+dispatches becomes one only once dispatched. For each, run rule (b)'s `check-launch` call with its
+recorded `action_id`: on `current: false`, stop it through the host's task-stop and mark it
+stopped (a missing or already exited handle counts as stopped); on `current: true`, leave it
+running. An unknown answer or a failed stop leaves it a candidate, and the next pass tries both
+again; a stop failure never blocks dispatch. The pass sends no observation, makes no `step` and
+writes nothing to the ledger, so a later notification from a stopped handle still falls under §2
+rule (b). It ends by running `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep`
+once; a sweep that exits non-zero never blocks dispatch: keep its exit code and any printed
 `skipped` launches for §5.
 
 Each `spawn`, `resume`, `retry` and `delivery_remainder` action arrives as one `dispatches[]`
@@ -170,20 +171,7 @@ this adapter's `ledger_repo_root` and the `session`'s `run_id`; `<from-issue-dir
 directory beside this skill's own, as an absolute path. Put the entry's `owner_object`
 verbatim in the prompt as its canonical JSON, and, when its `resume_pack` is non-null, that text
 verbatim as the `Resume pack` paragraph; never decode either. Dispatch the owner with these values; pass the helper-issued action ID and owner token unchanged and never substitute
-a host task ID. Both object kinds use this one dispatch. The owner dispatch envelope is:
-
-```text
---repo-root <ledger_repo_root>
-ledger_repo_root=<ledger_repo_root>
-run_id=<run-id>
-issue=<issue>
-attempt=<attempt>
-owner=<owner-token>
-action_id=<action-id>
-worktree=<absolute-worktree>
-handoff_path=<exact-handoff-path>  # only when non-null
-from-issue <num> --auto
-```
+a host task ID. Both object kinds use this one dispatch.
 
 Record the host task handle beside the entry's `action_id` and the `custody` of the
 `response.actions` entry whose `custody.action_id` equals it, only for notification correlation and
@@ -256,7 +244,7 @@ one (when nothing can proceed without a human, control returns `finalize`, or `d
 when a missing contract is all that stops an issue). Never poll or repeat short sleeps.
 
 For `finalize`, first run the stop pass, then clear `current_wait_id`, then cancel the outstanding
-handle (a missing/already-exited handle is harmless), and clear `current_wait_handle`. Make no
+handle, and clear `current_wait_handle`. Make no
 further `step` to prepare the report.
 
 For `delivery_contract`, a missing delivery contract is all that stops each issue in its `issues`
@@ -268,42 +256,38 @@ one.
 
 ## 5. Final report
 
-Render a `finalize` action, or a `delivery_contract` action whose report's `ends_run` is true,
-from the bounded summaries in the same control response.
-Produce a per-issue table with issue, state, custody, PR, one-line reason, `blocked_on`, open
-delivery stages, and a re-entry line — `orchestrate-control start --repo-root <ledger_repo_root>
+Render a `finalize` action, or a `delivery_contract` action whose report's `ends_run` is true, as a
+per-issue table sourced only from that control response's bounded summaries: issue, state,
+`custody` (the attempt or delivery remainder holding it), PR and `discussion_items` (from its
+`result`), one-line reason, `blocked_on`, open delivery stages (`pending_stage_ids`), and a
+re-entry line — `orchestrate-control start --repo-root <ledger_repo_root>
 <issue> --run-id <run-id>` for an issue suspended on `human_gate`, `external` or `agent_dispatch`
-(a direct `/from-issue` is refused with it), and the orchestrate re-invocation for the whole run — every column sourced
-from those finalize summaries: `custody` names the attempt or delivery remainder that holds the
-issue, `pending_stage_ids` the open delivery stages, and the PR and `discussion_items` come from the
-summary's `result`. A null `contract_digest` means the issue ran lifecycle-only: say so, and name
-that issue's retained `contract_refusals` `detail` when there was one; a summary still carrying
-`delivery_contract_required` is an issue that never received a contract. A summary with a non-null
-`contract_digest`, an empty `pending_stage_ids`, an empty `requirements`, a null `owner` and a
-non-null `custody` is delivered with a stale `custody` control will never dispatch: report it as
-delivered, never as active or progressing. A `held`
-summary is an issue whose PR merged while ship held it open with the `needs-verification`
-label: report it as held for human verification, never as queued, progressing or closed, with
-no re-entry line; it stays open, so its dependents stay `blocked` until a human closes it.
-A summary whose `worktree_fact` requirement reads `recorded_worktree_absent` or
-`recorded_worktree_mismatch` is an issue that cannot resume: report it as unable to resume for that reason, never as progressing. Then group
-every `discussion_items` entry by issue and call out anything needing a human. File an
-issue for a finding only when it names a reproducible failure on a path real use exercises;
-Minors, speculative hardening and test pinning go in the PR body.
-List every issue in that same control response's `admission.waiting` as queued for agent slots, with its summary state.
-Below the table, under **Stop failures**, list each owner handle the final stop pass still left a
-candidate because its stop failed or its `check-launch` answer was unknown, with its `action_id` and
-the failure, and the pass's last sweep when it exited non-zero, with its exit code and, when it
-printed a report, its `skipped` launches; omit the list when there is none.
-Never re-read the ledger or reconstruct omitted history.
+(a direct `/from-issue` is refused with it), and the orchestrate re-invocation for the whole run.
 
-An `expired` delta consumes no attempt and never advances the attempt number. Usually it is a
-`resumed` on the same attempt in this same sweep, or a `suspended` summary that a later eligible
-sweep resumes (tracker neither closed nor blocked, a dispatch slot free, that attempt's recorded
-worktree observed). At the anti-zombie bound (parked too many times in a row without a phase advance
-or a newly recorded progress marker) the delta's own state reads `stopped`, the attempt is a
-`stopped(stalled)` terminal and no resume follows in any later sweep: report it as finished. A
-parked suspension arms no deadline, so once nothing else is running the sweep renders `finalize` (or
-`delivery_contract` when a missing contract is all that stops some issue) and a re-invocation starts
-the later sweep; report such an issue as paused, not progressing. Never report an expiry as
-`retried`, `retry_refused` or a spent attempt.
+- A null `contract_digest` ran lifecycle-only: say so, naming its retained `contract_refusals`
+  `detail` if any; one still carrying `delivery_contract_required` never received a contract.
+- A non-null `contract_digest` with empty `pending_stage_ids` and `requirements`, a null `owner`
+  and a non-null `custody` is delivered (a stale `custody` control never dispatches): never report
+  it as active or progressing.
+- A `held` summary's PR merged while ship held it open with the `needs-verification` label: report
+  it held for human verification, never queued, progressing or closed, with no re-entry line; its
+  dependents stay `blocked` until a human closes it.
+- A `worktree_fact` requirement of `recorded_worktree_absent` or `recorded_worktree_mismatch`
+  cannot resume: report it as unable to resume for that reason, never as progressing.
+- List every issue in that response's `admission.waiting` as queued for agent slots, with its state.
+
+Then group every `discussion_items` entry by issue and call out anything needing a human. File an
+issue for a finding only when it names a reproducible failure on a path real use exercises;
+Minors, speculative hardening and test pinning go in the PR body. Below the table, under
+**Stop failures**, list each owner handle the final stop pass left a candidate (stop failed or
+`check-launch` unknown) with its `action_id` and failure, and a last sweep that exited non-zero
+with its exit code and any printed `skipped` launches; omit the list when empty. Never re-read the
+ledger or reconstruct omitted history.
+
+An `expired` delta consumes no attempt and never advances the attempt number: usually a `resumed`
+on the same attempt in this sweep, or a `suspended` summary a later eligible sweep resumes. At the
+anti-zombie bound (parked too often without a phase advance or new progress marker) its state reads
+`stopped`, a `stopped(stalled)` terminal no later sweep resumes: report it as finished. A parked
+suspension arms no deadline, so the sweep renders `finalize` (or `delivery_contract`) and a
+re-invocation starts the later sweep: report it as paused. Never report an expiry as `retried`,
+`retry_refused` or a spent attempt.
