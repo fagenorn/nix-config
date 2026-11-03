@@ -276,6 +276,18 @@ class RuleTest(unittest.TestCase):
                 files[path] = skill("alpha", description, ALPHA_BODY)
                 self.assertEqual(self.keys(files), expected)
 
+    def test_l6_reports_a_path_into_the_python_tree_in_any_markdown_file(self):
+        self.files[f"{ALPHA}/GUIDE.md"] = (b"# Guide\nshort guide naming SKILL.md and CONTRACT.md\n"
+                                           b"Field semantics: `python/README.md`.\n")
+        self.files[f"{ALPHA}/evals/notes.md"] = b"NOT.md is mentioned here\nread python/agent_tools/x.py\n"
+        self.files[f"{ALPHA}/scripts/README.md"] = b"script docs\nsee agent_tools/\n"
+        self.files[f"{CLAUDE}/beta/SKILL.md"] = skill(
+            "beta", body="Installed at ~/.agents/lib/python/review_gate.py; cpython/ is fine.\n")
+        self.assertEqual(self.keys(), {f"L6 {ALPHA}/GUIDE.md:3", f"L6 {ALPHA}/evals/notes.md:2",
+                                       f"L6 {ALPHA}/scripts/README.md:2"})
+        self.assertIn(f"L6 {ALPHA}/GUIDE.md:3: names nix-config's python/ tree, which is not installed",
+                      skill_lint.lint(dict_snapshot(self.files)))
+
 
 class NoExemptionTest(unittest.TestCase):
     """skill-lint has no exemption mechanism: every violation is a failure line (#300)."""
