@@ -399,6 +399,22 @@ class RenameForecastCases(source_cases.SourceProjectionFixture, unittest.TestCas
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['metrics'], self.actual()[0])
 
+    def test_paired_delete_and_add_in_separate_commits_consumes_an_earlier_modify(self):
+        # Issue 569: task 2 deletes old.txt in one commit and adds new.txt in the next, so its
+        # own commits show D and A while the range's diff pairs them into one rename record.
+        self.tasks[0]['task']['records'] = [self.record('touch', 1, 'old.txt', change='modify', size=2048)]
+        self.tasks[1]['task']['records'] = [
+            self.record('gone', 2, 'old.txt', change='delete', size=2048, added=0, deleted=61, covers=['touch', 'gone']),
+            self.record('moved', 2, 'new.txt', size=4096, added=61)]
+        self.write('old.txt', MOVED + 'appended\n'); self.commit('modify old', 1)
+        content = (self.repo / 'old.txt').read_text().replace('moved line 10', 'edited line 10')
+        (self.repo / 'old.txt').unlink(); self.commit('delete old', 2)
+        self.write('new.txt', content); self.commit('add new', 2)
+        self.checkpoint()
+        result = self.project(2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['metrics'], self.actual()[0])
+
     def test_future_rename_to_an_absent_path_needs_a_subject_forecast(self):
         self.tasks[0]['task']['records'] = [self.rename('moved', 1, 'old.txt', 'new.txt', size=4096)]
         self.emit(); self.commit('forecast without subject')

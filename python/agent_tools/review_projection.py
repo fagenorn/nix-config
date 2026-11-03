@@ -157,10 +157,12 @@ def _completed_effects(plan: ForecastPlan, records: tuple[dict, ...], boundary: 
             and any(e["operation"].startswith("R") and e["old_path"] == r["old_path"] and e["path"] == r["path"]
                     for e in owned(r))))}
     # A forecast delete that Git pairs into a rename consumes its path the same way, so an earlier
-    # contribution to that path needs no record of its own (issue 569 D20).
+    # contribution to that path needs no record of its own (issue 569 D23). Its owner's commits may
+    # show the move itself or a plain deletion when the delete and the add land in separate commits.
     consumed |= {r["path"] for r in records if r["change"] == "delete" and r["path"] not in paths
                  and tree_entry(*candidate, r["path"]) is None
-                 and any(e["operation"].startswith("R") and e["old_path"] == r["path"] for e in owned(r))}
+                 and any(e["operation"] == "D" and e["path"] == r["path"]
+                         or e["operation"].startswith("R") and e["old_path"] == r["path"] for e in owned(r))}
     for record in finished:
         effects = [r for r in owned(record) if r["path"] == record["path"] or r["old_path"] == record["path"]]
         if not effects:
