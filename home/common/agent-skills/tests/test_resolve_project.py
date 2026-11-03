@@ -2188,6 +2188,73 @@ class VerificationConditionsTest(ResolverTestCase):
                          ["/bindings/workflow/verification/2"])
 
 
+class RequiredChecksTest(ResolverTestCase):
+    """Issue 552 D1: the optional `bindings.vcs.merge.required_checks` member."""
+
+    POINTER = "/bindings/vcs/merge/required_checks"
+    ABSENT = object()
+    MERGE = {"strategy": "merge", "delete_branch": True}
+
+    def contract_with(self, checks):
+        contract = source_contract()
+        merge = contract["bindings"]["vcs"]["merge"]
+        merge.pop("required_checks", None)
+        if checks is not self.ABSENT:
+            merge["required_checks"] = checks
+        return contract
+
+    def resolved_merge(self, checks):
+        code, snap, err = self.resolve(self.make_root(self.contract_with(checks)))
+        self.assertEqual(code, 0, err)
+        return snap["bindings"]["vcs"]["merge"]
+
+    def test_a_valid_list_round_trips_unchanged(self):
+        for checks in (["memory foundation (unit + forced checks)"],
+                       ["lint", "CI / build", "Nix Eval"], ["café ✓", "a\tb"]):
+            with self.subTest(checks=checks):
+                # Passed through as authored: neither sorted nor restricted (D1).
+                self.assertEqual(self.resolved_merge(checks),
+                                 {**self.MERGE, "required_checks": checks})
+
+    def test_an_absent_member_stays_absent(self):
+        self.assertEqual(self.resolved_merge(self.ABSENT), self.MERGE)
+
+    def test_null_stays_null(self):
+        self.assertEqual(self.resolved_merge(None), {**self.MERGE, "required_checks": None})
+
+    REFUSALS = (
+        # (member, pointer suffixes in order, the error's repair id); suffixes are
+        # rooted at POINTER, and the error carries the first violation's repair id.
+        ("CI", [""], "contract.vcs.not_list"),
+        ({"CI": True}, [""], "contract.vcs.not_list"),
+        ([], [""], "contract.vcs.empty_required_checks"),
+        (["CI", ""], ["/1"], "contract.vcs.not_string"),
+        (["CI", 7], ["/1"], "contract.vcs.not_string"),
+        ([None], ["/0"], "contract.vcs.not_string"),
+        (["CI", "lint", "CI"], ["/2"], "contract.vcs.duplicate_required_check"),
+        (["CI", 7, 7, "CI"], ["/1", "/2", "/3"], "contract.vcs.not_string"),
+    )
+
+    def test_each_malformed_member_is_refused_with_its_pointer(self):
+        for checks, suffixes, repair_id in self.REFUSALS:
+            with self.subTest(checks=checks):
+                code, payload, _ = self.resolve(self.make_root(self.contract_with(checks)))
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertEqual(error["repair_id"], repair_id)
+                self.assertEqual([v["pointer"] for v in error["violations"]],
+                                 [self.POINTER + suffix for suffix in suffixes])
+                self.assertTrue(all(v["message"] for v in error["violations"]))
+
+    def test_any_other_merge_member_is_still_unexpected(self):
+        contract = self.contract_with(self.ABSENT)
+        contract["bindings"]["vcs"]["merge"]["required_check"] = ["CI"]
+        code, payload, _ = self.resolve(self.make_root(contract))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual(error["repair_id"], "contract.vcs.member_unexpected")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/bindings/vcs/merge/required_check"])
+
+
 class PublicResolveTest(InProcessTestCase):
     """#279 D1: `resolve()` is `command_resolve`'s composition, importable.
 

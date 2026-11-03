@@ -56,8 +56,8 @@ from agent_tools import (adopt_inspection, adopt_verify, agent_platform, canonic
                          resolve_project)
 
 REPORT_SCHEMA_VERSION = 1
-DERIVE_REPORT_SCHEMA_VERSION = 1
-DERIVATION_SCHEMA_VERSION = 2
+DERIVE_REPORT_SCHEMA_VERSION = 2
+DERIVATION_SCHEMA_VERSION = 3
 
 BASE_MEMBERS = ("authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin")
 POLICY_MEMBERS = ("derived_repositories", "derivation")
@@ -81,7 +81,9 @@ BRANCH_UNRESOLVED_REPAIRS = ("adopt.registration.remote_default_unknown",
 # compiled policy over one row outside them, and git and the contract grammar both take
 # names it does not, such as `dev+ci`. The guard is a standalone file this
 # package cannot import, so the two are restated here and the guard suite's
-# round trip holds them to what the built guard loads.
+# round trip holds them to what the built guard loads. Its rule for a row's
+# required_checks, a list of distinct non-empty strings, is the resolver's own rule
+# for the contract member (issue 552 D4), so unsupported_name has no case for it.
 GUARD_SLUG = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 GUARD_REF_NAME = re.compile(r"[A-Za-z0-9._/-]+")
 
@@ -272,7 +274,9 @@ def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.Verification
                                           f"{source.commit}:{adopt_inspection.CONTRACT_FILENAME}")
     if code != 0:
         raise ProjectRefused("contract_unresolved", f"{source.commit} holds no contract blob")
+    required_checks = sorted(vcs["merge"].get("required_checks") or [])
     return {"default_branch": vcs["default_branch"], "integration_branch": vcs["integration_branch"],
+            "required_checks": required_checks,
             "evidence": {
                 "project_id": entry["project_id"],
                 "registry_entry_digest": canonical.telemetry_digest(entry),
