@@ -14,7 +14,7 @@ Each row becomes a `~/.agents/bin/<command>` launcher, which unsets the `NIX_PYT
 
 `review-package` and `review-feasibility` use the package command table; their source entry points are `python -m agent_tools.review_package` and `python -m agent_tools.review_feasibility`.
 
-Actual production and generic projection share packing and the external `artifact-budget` policy queried by PATH; projection binds its policy identity.
+Actual production and generic projection share packing and the external `artifact-budget` policy queried by PATH; projection binds its policy identity. When `artifact-budget check` refuses, the budget authority's error is `budget check failed: ` followed by the checker's last non-empty stderr line (whitespace collapsed, at most 200 characters), so a `project`, `gate` or `sdd-gate` refusal names the checker's own reason, such as `artifact-budget: invalid input: invalid task index row` (issue 559 D12).
 
 When one file diff is larger than the review-package member limit, actual production replaces it with a bounded generated-evidence entry if that entry fits the limit and the file is an auto-generated EF Core migration designer (`ef-core-migration-designer`) or a file the range deletes outright (`whole-file-deletion`: the base blob's identity and line count, and a null head); any other oversized file diff stays whole, and the package is `decompose_required`.
 

@@ -408,6 +408,15 @@ class SourceProjectionTest(SourceProjectionFixture, unittest.TestCase):
             self.write('all.md', raw); self.commit('invalid block')
             self.assert_refused(self.project())
 
+    def test_budget_check_refusal_relays_the_checker_reason(self):
+        plan = self.repo / 'all.md'
+        plan.write_bytes(plan.read_bytes().replace('Task 1 — Case'.encode(), b'Task 1 Case', 1))
+        self.commit('broken task index row')
+        refused = self.project()
+        self.assert_refused(refused)
+        self.assertEqual(refused.stderr, b'review-feasibility: budget check failed: '
+                                         b'artifact-budget: invalid input: invalid task index row\n')
+
     def test_ownership_overlap_missing_and_wrong_tree(self):
         import copy
         original = copy.deepcopy(self.delivery)
