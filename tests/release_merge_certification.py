@@ -130,7 +130,7 @@ class Certification:
         self.scratch = scratch
         self.clone = scratch / f"sandbox-{self.run}"
         self.rows: list[dict[str, Any]] = []
-        self.opened: list[int] = []
+        self.opened: list[int] = []  # rows b and c leave their PRs open; cleanup closes them
         self.nodes: set[str] = set()
         self.spelling: str | None = None
         self.protection: dict[str, Any] = dict.fromkeys(PROTECTION_MEMBERS)
@@ -239,7 +239,6 @@ class Certification:
                                "--head", branch, "--title", f"cert {self.run} {name}",
                                "--body", "issue 554 certification"])
         number = int(created.strip().rsplit("/", 1)[-1])
-        self.opened.append(number)
         return number, head, base_tip
 
     def commit(self, stem: str) -> str:
@@ -412,10 +411,10 @@ class Certification:
         """The base moves after binding: GitHub refuses the merge twice over."""
         number, head, base_tip = self.open_pr("b")
         row = self.new_row("b", number, head, base_tip)
+        self.opened.append(number)
         side, side_head, _ = self.open_pr("bside")
         self.wait_for_merge_state(side)
         self.mutate(self.merge_argv(side, side_head))
-        self.opened.remove(side)
         moved = self.main_tip()
         self.wait_for_merge_state(number)
         node = self.gh_json("pr", "view", str(number), "--repo", SANDBOX, "--json", "id")["id"]
@@ -429,6 +428,7 @@ class Certification:
         """The head moves after binding: `--match-head-commit` makes GitHub refuse the merge."""
         number, head, base_tip = self.open_pr("c")
         row = self.new_row("c", number, head, base_tip)
+        self.opened.append(number)
         moved = self.commit(f"{self.run}-c-moved")
         self.git("push", "origin", f"cert-{self.run}-c")
         self.status(moved)
