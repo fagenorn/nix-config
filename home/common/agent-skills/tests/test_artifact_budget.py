@@ -834,7 +834,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             (self.plan_report("decompose_required", over), True),
             (self.plan_report("decompose_required", {**over, "recommended_boundary": None}), True),  # D18
             (self.plan_report("decompose_required", None, over=True), True),
-            (self.plan_report("complete", None), False),
+            (self.plan_report("complete", None), True),  # Stage 2c: planners stop forecasting
             (self.plan_report("complete", over), False),
             (self.plan_report("decompose_required", self.summary()), False),
             (self.plan_report("decompose_required", over, over=True), False),
