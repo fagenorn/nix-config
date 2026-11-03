@@ -163,12 +163,13 @@ let
   ];
 
   # `guard-policy compile` with the base policy and the compiled path fixed, and
-  # the store git, gh and ssh first on PATH. It takes no argument; the
-  # activation step below and a repair from an authenticated shell both run it.
+  # the store git, gh and ssh first on PATH. The activation step below and a
+  # repair from an authenticated shell both run it with no argument; any argument
+  # is handed to `compile`, so `--help` prints usage and writes nothing (#470).
   claudeGuardPolicy = pkgs.writeShellScriptBin "claude-guard-policy" ''
     export PATH="${guardToolPath}:$PATH"
     exec ${agentTools.launchers.guard-policy} compile \
-      --base ${lifecycleGuardBasePolicy} --output ${lifecycleGuardPolicyPath}
+      --base ${lifecycleGuardBasePolicy} --output ${lifecycleGuardPolicyPath} "$@"
   '';
 
   # The row check the guard runs before relying on a compiled row: `guard-policy
@@ -274,8 +275,9 @@ let
     # The lifecycle helpers workflow-state, artifact-budget, ship-delivery and orchestrate-control
     # are allowed whole, bare and by their ~/.agents/bin path: their only writes are validated
     # ledger transitions under .superpowers/workflows/ (orchestrate-control's through its
-    # workflow-state children), and every lifecycle call is one heredoc-fed command, so each
-    # pipeline segment matches a rule. The verification-observe adapter is allowed the same way:
+    # workflow-state children, plus the verification-observe fetch it makes in process when a
+    # run awaits a verification blocker), and every lifecycle call is one heredoc-fed command, so
+    # each pipeline segment matches a rule. The verification-observe adapter is allowed the same way:
     # its only write is fetching the integration branch into refs/remotes/origin/<branch>.
     permissions = {
       defaultMode = "auto";
@@ -469,7 +471,8 @@ in
   # Compile the guard policy the registered hook reads, on every switch. It runs
   # after linkGeneration because the compiler loads the platform manifest from
   # ~/.agents/share, and before the settings copy. It never aborts the switch:
-  # exit 1 leaves a policy without the refused projects' rows, and any other
+  # exit 1 leaves a policy without the refused projects' rows (or, when every
+  # project was refused, keeps the previous populated policy), and any other
   # failure removes the policy file, so registered projects lose their derived
   # guard row and with it their derived integration branch: only a repository
   # that relies on a derived row for its authorization is refused until

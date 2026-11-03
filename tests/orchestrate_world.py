@@ -14,6 +14,10 @@ when any name in `TOKENS` (the contract's bound `unset_before_invocation` list) 
 it, answers `issue list` from `state/gh.json` listings and exits 64 for any call it does not
 know. `env` exports every name in `TOKENS`, so a command that does not remove the bound names
 fails loudly. Nothing contacts a network remote.
+
+`add_origin()`, which only the gathering tests call, gives the project a local bare `origin`
+cloned from it, a `publisher` clone that advances it, and a fourth shim, `git`, that logs each
+`git fetch` call's argv as tool `git` and runs the real Git (issue 546 D11).
 """
 import json
 import os
@@ -87,6 +91,19 @@ REAL_TAIL = '''done = subprocess.run([sys.executable, script, *argv], input=stdi
 sys.stdout.buffer.write(done.stdout)
 sys.stderr.buffer.write(done.stderr)
 sys.exit(done.returncode)
+'''
+
+GIT_SHIM = '''#!{python}
+import json, os, sys
+argv = sys.argv[1:]
+words = argv
+while words[:1] == ["-C"]:
+    words = words[2:]
+if words[:1] == ["fetch"]:
+    with open({log!r}, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({{"tool": "git", "argv": argv, "stdin": "", "call": 0,
+                                  "token_visible": False}}) + "\\n")
+os.execv({git!r}, [{git!r}, *argv])
 '''
 
 GH_TAIL = '''if token:
@@ -336,6 +353,59 @@ class OrchestrateWorld:
                                 full.lstat().st_mtime_ns if kind == "f" else None))
         return sorted(entries)
 
+    def add_origin(self) -> None:
+        """A bare `origin` cloned from the project, a `publisher` clone and the `git` shim."""
+        real = shutil.which("git", path=os.environ["PATH"])
+        self.origin = self.root.parent / "origin.git"
+        self.publisher = self.root.parent / "publisher"
+        self._git_in(self.root.parent, "clone", "--quiet", "--bare", str(self.root),
+                     str(self.origin))
+        self.git("remote", "add", "origin", str(self.origin))
+        self._git_in(self.root.parent, "clone", "--quiet", str(self.origin), str(self.publisher))
+        self._git_in(self.publisher, "config", "commit.gpgsign", "false")
+        shim = self.bin / "git"
+        shim.write_text(GIT_SHIM.format(python=sys.executable, git=real,
+                                        log=str(self.state / "calls.jsonl")), "utf-8")
+        shim.chmod(0o755)
+
+    def publish(self, files: dict[str, str]) -> None:
+        """One commit on `origin`'s main from the publisher, writing `files`."""
+        for name, text in files.items():
+            (self.publisher / name).write_text(text, "utf-8")
+        self._git_in(self.publisher, "add", "-A")
+        self._git_in(self.publisher, "commit", "--quiet", "-m", "publish")
+        self._git_in(self.publisher, "push", "--quiet", "origin", "HEAD:main")
+
+    def entry(self, path: str) -> dict:
+        """The `{path, mode, object}` entry `origin`'s main holds at `path`, read with Git
+        independently of the command; `mode` and `object` are None when it holds nothing."""
+        listed = self._git_in(self.origin, "ls-tree", "--full-tree", "main", "--", path).strip()
+        if not listed:
+            return {"path": path, "mode": None, "object": None}
+        mode, _, rest = listed.partition(" ")
+        return {"path": path, "mode": mode, "object": rest.split("\t")[0].split(" ")[1]}
+
+    def failure(self, path: str) -> dict:
+        """A `verification-failure` of the project's `nix-build` whose one fact selects `path`
+        as `origin` holds it now."""
+        contract = json.loads((self.root / ".agents/project.json").read_text("utf-8"))
+        return {"kind": "verification-failure", "schema_version": 1,
+                "repository": {"project_id": contract["project"]["id"],
+                               "integration_branch":
+                                   contract["bindings"]["vcs"]["integration_branch"]},
+                "command": {"id": "nix-build", "argv": ["just", "build"], "cwd": ".",
+                            "env": []},
+                "failure_class": "dependency",
+                "facts": [{"name": "pinned", "source": {"paths": [path]},
+                           "value": {"objects": [self.entry(path)]}}]}
+
+    def park(self, session: dict, action_id: str, failure: dict) -> None:
+        """Suspend `action_id` on `failure` through the source `workflow-state`, unlogged."""
+        done = self.ws("suspend", "--repo-root", self.root, "--run-id", session["run_id"],
+                       "--action-id", action_id, "--blocked-on", "verification",
+                       "--verification-input", "-", stdin=json.dumps(failure).encode())
+        self.case.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
     def requests(self) -> list[dict]:
         return [json.loads(call["stdin"]) for call in self.calls("workflow-state", "control")]
 
@@ -355,7 +425,7 @@ class OrchestrateWorld:
         every = session["issues"]
         keyed = lambda value: {str(n): value(n) for n in every}
         request = {
-            "interface_version": 3, "host_route": ROUTE, "max_parallel": len(every),
+            "interface_version": 4, "host_route": ROUTE, "max_parallel": len(every),
             "attempt_budget_minutes": 240, "human_directed": session["human_directed"],
             "issues": every,
             "tracker": [{"issue": n, "state": "open", "open_blockers": [],
@@ -370,7 +440,8 @@ class OrchestrateWorld:
             "authority_observations": keyed(lambda n: []),
             "reevaluation_evidence": keyed(lambda n: []),
             "delivery_observations": keyed(lambda n: []),
-            "requested_scopes": keyed(lambda n: None), "recoveries": keyed(lambda n: None)}
+            "requested_scopes": keyed(lambda n: None), "recoveries": keyed(lambda n: None),
+            "verification": []}
         done = self.ws("control", "--repo-root", self.root, "--run-id", session["run_id"],
                        "--request-file", "-", stdin=json.dumps(request).encode())
         self.case.assertEqual(done.returncode, 0, done.stdout + done.stderr)

@@ -14,8 +14,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from agent_tools import verification_blocker as vb
+from agent_tools import verification_observe as vo
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
@@ -393,6 +395,102 @@ class ObserveTest(ObserveCase):
                                            stdin=stdin), fragment)
         self.refused(self.call("observe", {**self.REQUIREMENT, "schema_version": 1}),
                      "unknown")
+
+
+class ObserveAllTest(ObserveCase):
+    """`observe_all` by import, under this case's HOME, Git and PATH (issue 546 D2, D11)."""
+
+    LOCK = {"kind": "verification", "blocker_id": "sha256:" + "1" * 64,
+            "sources": [{"name": "flake-lock", "paths": ["flake.lock"]}]}
+    NESTED = {"kind": "verification", "blocker_id": "sha256:" + "2" * 64,
+              "sources": [{"name": "packages", "paths": ["pkgs/nested"]}]}
+
+    def setUp(self):
+        super().setUp()
+        self.patch_environment(self.env)
+
+    def patch_environment(self, env):
+        patch = mock.patch.dict(os.environ, env, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_an_empty_list_observes_nothing_and_fetches_nothing(self):
+        self.publish({"flake.lock": "lock 2\n"})
+        before = self.tracking()
+        self.assertEqual(vo.observe_all(str(self.root), []), ([], []))
+        self.assertEqual(self.tracking(), before)
+
+    def test_each_requirement_is_observed_as_observe_prints_it_after_one_fetch(self):
+        self.publish({"flake.lock": "lock 2\n"})
+        observations, refused = vo.observe_all(str(self.root), [self.NESTED, self.LOCK])
+        self.assertEqual(refused, [])
+        self.assertEqual(observations,
+                         [self.ok(self.call("observe", requirement))
+                          for requirement in (self.NESTED, self.LOCK)])
+        self.assertEqual(self.tracking(), self.git(self.origin, "rev-parse", "main"))
+
+    def test_two_requirements_are_served_by_one_fetch_of_the_tracking_ref(self):
+        """Every observation of a batch is read at one commit (issue 546 D2)."""
+        real = shutil.which("git", path=self.env.get("PATH"))
+        shim = self.scratch / "shim"
+        shim.mkdir()
+        log = self.scratch / "git.log"
+        (shim / "git").write_text(
+            '#!/bin/sh\nprintf \'%s\\n\' "$*" >> ' + shlex.quote(str(log))
+            + '\nexec ' + shlex.quote(real) + ' "$@"\n', encoding="utf-8")
+        (shim / "git").chmod(0o755)
+        self.patch_environment({**self.env, "PATH": f"{shim}{os.pathsep}{self.env['PATH']}"})
+        self.publish({"flake.lock": "lock 2\n"})
+        observations, refused = vo.observe_all(str(self.root), [self.NESTED, self.LOCK])
+        self.assertEqual((len(observations), refused), (2, []))
+        calls = [line.split() for line in log.read_text(encoding="utf-8").splitlines()]
+        subcommands = [call[2] for call in calls]  # `git -C <directory> <subcommand> ...`
+        self.assertEqual(subcommands.count("fetch"), 1, subcommands)
+        self.assertEqual(sum(call[2] == "rev-parse" and TRACKING + "^{commit}" in call
+                             for call in calls), 1, calls)
+        self.assertEqual(subcommands.count("ls-tree"), 2, subcommands)
+
+    def test_an_unreachable_origin_refuses_every_requirement(self):
+        before = self.tracking()
+        self.git(self.root, "remote", "set-url", "origin", str(self.scratch / "missing.git"))
+        observations, refused = vo.observe_all(str(self.root), [self.LOCK, self.NESTED])
+        self.assertEqual(observations, [])
+        self.assertEqual([blocker for blocker, _ in refused],
+                         [self.LOCK["blocker_id"], self.NESTED["blocker_id"]])
+        for _, reason in refused:
+            self.assertTrue(reason.startswith("git fetch: "), reason)
+            self.assertNotIn("\n", reason)
+        self.assertEqual(refused[0][1], refused[1][1])
+        self.assertEqual(self.tracking(), before)
+
+    def test_a_failed_read_refuses_only_its_own_requirement(self):
+        real = shutil.which("git", path=self.env.get("PATH"))
+        shim = self.scratch / "shim"
+        shim.mkdir()
+        (shim / "git").write_text(
+            '#!/bin/sh\nfor a in "$@"; do [ "$a" = pkgs/nested ] && '
+            '{ echo "fatal: bad tree" >&2; exit 128; }; done\nexec '
+            + shlex.quote(real) + ' "$@"\n', encoding="utf-8")
+        (shim / "git").chmod(0o755)
+        self.patch_environment({**self.env, "PATH": f"{shim}{os.pathsep}{self.env['PATH']}"})
+        observations, refused = vo.observe_all(str(self.root), [self.NESTED, self.LOCK])
+        self.assertEqual(refused, [(self.NESTED["blocker_id"], "git ls-tree: fatal: bad tree")])
+        self.assertEqual([item["blocker_id"] for item in observations],
+                         [self.LOCK["blocker_id"]])
+
+    def test_a_malformed_list_raises_before_any_fetch(self):
+        self.publish({"flake.lock": "lock 2\n"})
+        before = self.tracking()
+        for value, fragment in (
+                ({"kind": "verification"}, "requirements: must be a list"),
+                ([self.LOCK, {**self.NESTED, "kind": "probe"}],
+                 "requirements[1]: requirement.kind: must be verification"),
+                ([{**self.LOCK, "schema_version": 1}], "requirements[0]: requirement: ")):
+            with self.subTest(value=value):
+                with self.assertRaises(vb.BlockerRefused) as caught:
+                    vo.observe_all(str(self.root), value)
+                self.assertTrue(str(caught.exception).startswith(fragment), caught.exception)
+        self.assertEqual(self.tracking(), before)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,9 @@ remote-tracking refs of the branches fetched and the fetched objects.
 Exit statuses: 0 when every entry derived (an absent registry is the empty
 fleet), 1 when the file was written but at least one project has no row, and 2
 when no policy could be compiled, in which case no file is left at `--output`.
+Exit 1 is also `kept_previous`: every registered project was refused and the file
+at `--output` already held a derived row, so it is left byte-identical rather
+than replaced by an empty policy (issue 470); the refusals are still reported.
 The report, one line of JSON on stdout, names the outcome, the derived slugs,
 each refusal and the cause of an exit 2 (`CAUSES`).
 
@@ -56,8 +59,8 @@ from agent_tools import (adopt_inspection, adopt_verify, agent_platform, canonic
                          resolve_project)
 
 REPORT_SCHEMA_VERSION = 1
-DERIVE_REPORT_SCHEMA_VERSION = 1
-DERIVATION_SCHEMA_VERSION = 2
+DERIVE_REPORT_SCHEMA_VERSION = 2
+DERIVATION_SCHEMA_VERSION = 3
 
 BASE_MEMBERS = ("authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin")
 POLICY_MEMBERS = ("derived_repositories", "derivation")
@@ -81,7 +84,9 @@ BRANCH_UNRESOLVED_REPAIRS = ("adopt.registration.remote_default_unknown",
 # compiled policy over one row outside them, and git and the contract grammar both take
 # names it does not, such as `dev+ci`. The guard is a standalone file this
 # package cannot import, so the two are restated here and the guard suite's
-# round trip holds them to what the built guard loads.
+# round trip holds them to what the built guard loads. Its rule for a row's
+# required_checks, a list of distinct non-empty strings, is the resolver's own rule
+# for the contract member (issue 552 D4), so unsupported_name has no case for it.
 GUARD_SLUG = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 GUARD_REF_NAME = re.compile(r"[A-Za-z0-9._/-]+")
 
@@ -272,7 +277,9 @@ def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.Verification
                                           f"{source.commit}:{adopt_inspection.CONTRACT_FILENAME}")
     if code != 0:
         raise ProjectRefused("contract_unresolved", f"{source.commit} holds no contract blob")
+    required_checks = sorted(vcs["merge"].get("required_checks") or [])
     return {"default_branch": vcs["default_branch"], "integration_branch": vcs["integration_branch"],
+            "required_checks": required_checks,
             "evidence": {
                 "project_id": entry["project_id"],
                 "registry_entry_digest": canonical.telemetry_digest(entry),
@@ -420,9 +427,24 @@ def _platform_refusal(cause: str, error: agent_platform.PlatformManifestError) -
     return CompileRefused(cause, f"{error.repair_id}: {first['pointer']}: {first['message']}")
 
 
+def _holds_rows(output: Path) -> bool:
+    """Whether `output` is a readable compiled policy with at least one derived row."""
+    try:
+        document = json.loads(output.read_bytes())
+    except (OSError, ValueError):
+        return False
+    rows = document.get("derived_repositories") if isinstance(document, dict) else None
+    return isinstance(rows, dict) and bool(rows)
+
+
 def _write(base: dict, entries: list[dict], platform_version: str,
            output: Path) -> tuple[int, dict]:
     rows, refusals = compile_policy(base, entries)
+    if not rows and refusals and _holds_rows(output):
+        # Issue 470: every derive failing is far likelier a shell that cannot reach the
+        # forge (sandboxed, unauthenticated, offline) than a fleet that lost every row.
+        # Keep the last populated policy; the guard re-derives a row before it trusts it.
+        return 1, _report("kept_previous", [], refusals, None)
     registry_digest = None
     if agent_platform.registry_path().exists():
         registry_digest = canonical.telemetry_digest(
@@ -532,6 +554,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         status, report = run_compile(args.base, args.output)
         _print_refusals(report)
+        if report["outcome"] == "kept_previous":
+            print(f"guard-policy: every registered project's derive failed, so the policy "
+                  f"was not rewritten: kept the previous policy at {args.output}",
+                  file=sys.stderr)
         if report["cause"] is not None:
             print(f"guard-policy: no policy was written: {report['cause']['reason_code']}: "
                   f"{report['cause']['detail']}", file=sys.stderr)

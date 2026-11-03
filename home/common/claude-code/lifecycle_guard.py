@@ -28,7 +28,9 @@ BASE_POLICY_KEYS = frozenset(
     {"authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin"}
 )
 COMPILED_POLICY_KEYS = frozenset({"derived_repositories", "derivation"})
-DERIVED_ROW_KEYS = frozenset({"default_branch", "integration_branch", "evidence"})
+DERIVED_ROW_KEYS = frozenset(
+    {"default_branch", "integration_branch", "required_checks", "evidence"}
+)
 # A policy file larger than this is refused unread. Either file is a few kilobytes,
 # so the cap only bounds the read of a file that is not what it claims to be.
 POLICY_MAX_BYTES = 1 << 20
@@ -220,6 +222,28 @@ FORM_TABLE = {
 # The value `--match-head-commit` takes: a full commit SHA (issue 402 D10), which
 # must also be the PR's head commit (issue 476 D3).
 HEAD_COMMIT = re.compile(r"[0-9a-f]{40}")
+# GitHub's answer to a branch-protection read on a plan that cannot protect the
+# branch (issue 552 D2): `gh api` exits non-zero and writes this body to stdout.
+PLAN_GATED_STATUS = "403"
+PLAN_GATED_MESSAGE = (
+    "Upgrade to GitHub Pro or make this repository public to enable this feature."
+)
+# The one home of a green check-rollup entry (issue 552 D6): the plan-gated floor
+# reads it, and the release arm's jq predicate is rendered from it.
+GREEN_CHECK_RUN_STATUS = "COMPLETED"
+GREEN_CHECK_RUN_CONCLUSIONS = ("SUCCESS", "SKIPPED", "NEUTRAL")
+GREEN_STATUS_CONTEXT_STATE = "SUCCESS"
+RELEASE_ROLLUP_PREDICATE = (
+    '(.statusCheckRollup | type) == "array" '
+    "and (.statusCheckRollup | length) > 0 "
+    "and all(.statusCheckRollup[]; "
+    f'(.__typename == "CheckRun" and .status == "{GREEN_CHECK_RUN_STATUS}" and ('
+    + " or ".join(
+        f'.conclusion == "{conclusion}"' for conclusion in GREEN_CHECK_RUN_CONCLUSIONS
+    )
+    + ")) "
+    f'or (.__typename == "StatusContext" and .state == "{GREEN_STATUS_CONTEXT_STATE}"))'
+)
 
 Literal = namedtuple("Literal", "word")
 Slot = namedtuple("Slot", "name quoted prefix")
@@ -1362,7 +1386,7 @@ def load_compiled_policy(path):
     """(rows, None) for a well-formed compiled policy at `path`, else ({}, reason).
 
     The file supplies derived rows alone: `derived_repositories` maps a repository
-    slug to its row, and the guard reads a row's two branches and leaves
+    slug to its row, and the guard reads a row's two branches and its required checks and leaves
     `evidence` and `derivation` to the compiler that wrote them. The path is read
     without blocking and only when it is a regular file of at most
     POLICY_MAX_BYTES (`_read_policy_bytes`). A file that is anything else, cannot
@@ -1388,6 +1412,16 @@ def load_compiled_policy(path):
             branch = row[key]
             if not isinstance(branch, str) or REF_NAME_PATTERN.fullmatch(branch) is None:
                 return {}, f"{path}: derived_repositories {repository} {key} must be a branch name"
+        checks = row["required_checks"]
+        if (
+            not isinstance(checks, list)
+            or not all(isinstance(check, str) and check for check in checks)
+            or len(set(checks)) != len(checks)
+        ):
+            return {}, (
+                f"{path}: derived_repositories {repository} required_checks "
+                "must be a list of distinct non-empty strings"
+            )
         if not isinstance(row["evidence"], dict):
             return {}, f"{path}: derived_repositories {repository} evidence must be an object"
     if document["derivation"] is not None and not isinstance(document["derivation"], dict):
@@ -1428,6 +1462,13 @@ class Context:
             self.derived_row["integration_branch"] != self.derived_row["default_branch"]
         ):
             self.integration_bases[self.repository] = self.derived_row["integration_branch"]
+        # A confirmed row's declared checks are the plan-gated merge floor's input
+        # (issue 552 D2); a row with a problem, a literal row and no row declare none.
+        self.required_checks = (
+            tuple(self.derived_row["required_checks"])
+            if self.derived_row is not None and self.row_problem is None
+            else ()
+        )
 
     @property
     def timeout(self):
@@ -1475,7 +1516,10 @@ class Context:
 def _report_mismatch(report, status, repository, row):
     """Why `report` (the row check's parsed stdout) does not confirm `row`, or None.
 
-    A shape failure is an unreadable report; `evidence` is never compared.
+    A shape failure, a `row.required_checks` that is not a list of strings
+    included, is an unreadable report. The branches are compared first, then the
+    required checks as lists, order included (issue 552 D5); `evidence` is never
+    compared.
     """
     unreadable = f"unreadable report (exit {status})"
     if not isinstance(report, dict) or report.get("repository") != repository:
@@ -1486,8 +1530,11 @@ def _report_mismatch(report, status, repository, row):
     if outcome == "derived":
         derived = report.get("row")
         branches = ("default_branch", "integration_branch")
-        if not isinstance(derived, dict) or not all(
-            isinstance(derived.get(key), str) for key in branches
+        if (
+            not isinstance(derived, dict)
+            or not all(isinstance(derived.get(key), str) for key in branches)
+            or not isinstance(derived.get("required_checks"), list)
+            or not all(isinstance(check, str) for check in derived["required_checks"])
         ):
             return unreadable
         if any(derived[key] != row[key] for key in branches):
@@ -1495,6 +1542,12 @@ def _report_mismatch(report, status, repository, row):
                 f"it derives {derived['default_branch']} and {derived['integration_branch']}, "
                 f"the row names {row['default_branch']} and {row['integration_branch']}"
             )
+        if derived["required_checks"] != row["required_checks"]:
+            derives, names = (
+                json.dumps(checks, separators=(",", ":"))
+                for checks in (derived["required_checks"], row["required_checks"])
+            )
+            return f"it derives required checks {derives}, the row names {names}"
         return None
     if outcome == "refused":
         refused = report.get("refused")
@@ -2412,8 +2465,10 @@ def validate_merge(text, context, compiled):
     # protection demand: it is the development-pace branch, and its CI
     # gate lives in the shipping flow's wait-for-checks (nodo's CI is
     # path-filtered, so no required check could report on every PR shape
-    # anyway). The default branch keeps the full demand — even if it is
-    # ever also declared as the integration base.
+    # anyway). The default branch keeps the protection demand — even if it is
+    # ever also declared as the integration base — and only a plan-gated
+    # protection answer, for a confirmed row that declares required checks, is
+    # judged by the merge floor instead (issue 552 D2).
     if (
         integration_base is not None
         and base == integration_base
@@ -2433,6 +2488,11 @@ def validate_merge(text, context, compiled):
     except subprocess.TimeoutExpired:
         return block("protection lookup timed out")
     if protection_lookup.returncode != 0:
+        # Issue 552 D2: only the plan-gated answer, for a row that declares checks, is
+        # judged by the floor; every other failed read keeps its refusal.
+        if context.required_checks and plan_gated_answer(protection_lookup.stdout):
+            problem = merge_floor_problem(pr_facts, base, head_commit, context.required_checks)
+            return 0 if problem is None else refuse("merge", problem)
         return block_child_failure("protection lookup failed", protection_lookup)
 
     try:
@@ -2482,6 +2542,89 @@ def mergeability_problem(pr_facts, base, head_commit):
     return None
 
 
+def plan_gated_answer(stdout):
+    """Whether a failed protection read's stdout is GitHub's plan-gated answer (issue
+    552 D2): a JSON object whose status is PLAN_GATED_STATUS and whose message is
+    PLAN_GATED_MESSAGE."""
+    try:
+        answer = json.loads(stdout)
+    except ValueError:
+        return False
+    return (
+        isinstance(answer, dict)
+        and answer.get("status") == PLAN_GATED_STATUS
+        and answer.get("message") == PLAN_GATED_MESSAGE
+    )
+
+
+def rollup_entry_name(entry):
+    """The check a rollup entry names: a CheckRun's name or a StatusContext's context
+    when it is a string, else None, which makes the rollup unreadable."""
+    if not isinstance(entry, dict):
+        return None
+    typename = entry.get("__typename")
+    key = {"CheckRun": "name", "StatusContext": "context"}.get(typename)
+    name = entry.get(key) if key is not None else None
+    return name if isinstance(name, str) else None
+
+
+def rollup_entry_green(entry):
+    """Whether a rollup entry is green by the one rule the release arm's predicate is
+    rendered from (issue 552 D6)."""
+    if entry.get("__typename") == "CheckRun":
+        return (
+            entry.get("status") == GREEN_CHECK_RUN_STATUS
+            and entry.get("conclusion") in GREEN_CHECK_RUN_CONCLUSIONS
+        )
+    return (
+        entry.get("__typename") == "StatusContext"
+        and entry.get("state") == GREEN_STATUS_CONTEXT_STATE
+    )
+
+
+def observed_state(entry):
+    """A non-green entry as a refusal shows it: CheckRun <status>/<conclusion> or
+    StatusContext <state>, each fact escaped when a string and none otherwise (issue
+    552 D12)."""
+
+    def fact(key):
+        value = entry.get(key)
+        return shown_value(value) if isinstance(value, str) else "none"
+
+    if entry.get("__typename") == "CheckRun":
+        return f"CheckRun {fact('status')}/{fact('conclusion')}"
+    return f"StatusContext {fact('state')}"
+
+
+def merge_floor_problem(pr_facts, base, head_commit, required_checks):
+    """Why the plan-gated floor refuses this feature merge, or None (issue 552 D3,
+    D11).
+
+    It runs only after the protection read of `base` gave the plan-gated answer for
+    a confirmed row declaring `required_checks`, and starts no child. It judges in
+    order the `--match-head-commit` flag (`head_commit`, None without it, which
+    `mergeability_problem` has already held to `headRefOid`), a readable rollup and
+    each declared check in row order.
+    """
+    unprotectable = f"{shown_value(base)} cannot be protected on this repository's plan"
+    if head_commit is None:
+        return (f"{unprotectable}, so the merge must carry --match-head-commit "
+                "with the reviewed PR head")
+    rollup = pr_facts.get("statusCheckRollup")
+    if not isinstance(rollup, list) or any(rollup_entry_name(entry) is None for entry in rollup):
+        return "cannot read the PR check rollup"
+    for check in required_checks:
+        naming = [entry for entry in rollup if rollup_entry_name(entry) == check]
+        if not naming:
+            return (f"{unprotectable}, and the declared required check {shown_value(check)} "
+                    "is missing from the PR's check rollup")
+        for entry in naming:
+            if not rollup_entry_green(entry):
+                return (f"{unprotectable}, and the declared required check "
+                        f"{shown_value(check)} is not green ({observed_state(entry)})")
+    return None
+
+
 def validate_release_merge(pr_facts, base, integration_base, head_commit, context, compiled):
     """The release arm: the integration branch promoted into the default branch.
 
@@ -2515,13 +2658,7 @@ def validate_release_merge(pr_facts, base, integration_base, head_commit, contex
             [
                 context.jq_bin,
                 "-e",
-                '(.statusCheckRollup | type) == "array" '
-                "and (.statusCheckRollup | length) > 0 "
-                "and all(.statusCheckRollup[]; "
-                '(.__typename == "CheckRun" and .status == "COMPLETED" '
-                'and (.conclusion == "SUCCESS" or .conclusion == "SKIPPED" '
-                'or .conclusion == "NEUTRAL")) '
-                'or (.__typename == "StatusContext" and .state == "SUCCESS"))',
+                RELEASE_ROLLUP_PREDICATE,
             ],
             input=json.dumps(pr_facts),
             capture_output=True,

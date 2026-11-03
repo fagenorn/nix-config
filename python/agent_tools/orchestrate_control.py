@@ -14,12 +14,13 @@ run that id names, which is re-entered and never created).
 `step` reads one JSON object on stdin, `{session, first_sweep, owners,
 contracts_due, refused_contracts}`, and runs eight steps in order, stopping at the
 first that refuses: `bindings`, `bootstrap` (`init-run --run-id` for the session's
-run), `tracker` (the session issues' state and open blockers, one GraphQL call per
-100 issues), `forge` (the repository's pull requests, one paginated call, matched
-to the issues by branch name), `worktrees` (each issue's recorded or candidate
-worktree, from `git worktree list` and the local branches), `contracts` (one
-`workflow-state build-delivery --kind contract` per issue that needs a pair before
-the first call: on `first_sweep` every session requirement with a null
+run, then `verification_observe.observe_all` over every `verification` requirement it lists,
+after at most one fetch; a list the adapter refuses refuses here), `tracker` (the session
+issues' state and open blockers, one GraphQL call per 100 issues), `forge` (the repository's
+pull requests, one paginated call, matched to the issues by branch name), `worktrees` (each
+issue's recorded or candidate worktree, from `git worktree list` and the local branches),
+`contracts` (one `workflow-state build-delivery --kind contract` per issue that needs a pair
+before the first call: on `first_sweep` every session requirement with a null
 `contract_digest`, and every `contracts_due` issue, never one in `refused_contracts`),
 `control` (one `workflow-state control` round over those facts, its reply validated
 and required to be this run's control response) and `project` (the reply's action
@@ -35,15 +36,18 @@ on without a pair for it. Any other builder failure refuses at `contracts`, befo
 first `control` call, or at `control` once the first reply is in hand. When the first
 reply's only action is `delivery_contract`, the issues it lists are built (those not
 already built or refused) and, when any of them has a pair, `control` is called a second
-time and last: the same facts, `owners` empty (the observations ride the first call
-only), and a pair for each issue whose first-reply summary asks for one. A reply with any
+time and last: the same facts, `owners` and `verification` empty (the observations ride the
+first call only), and a pair for each issue whose first-reply summary asks for one. A reply with any
 dispatch is never followed by a second call, and a failure in the second round refuses at
 `control` carrying the first reply.
 
 Ready (exit 0): `{"command":"step","outcome":"ready","run_id","control_calls","response",
-"dispatches","contracts_due","refused_contracts","contract_refusals","ends_run"}`:
+"dispatches","contracts_due","refused_contracts","contract_refusals",
+"verification_refusals","ends_run"}`:
 `response` is the latest reply, `contracts_due` the issues it still asks a contract for
-less the refused ones, and `ends_run` is true when its only action is `delivery_contract`
+less the refused ones, `verification_refusals` one `{blocker_id, detail}` per requirement
+`bootstrap` could not observe, in bootstrap order (left out of the request, so its attempt
+stays parked), and `ends_run` is true when its only action is `delivery_contract`
 for issues that are all refused. A refusal carries the latest validated control reply as
 `response` once `control` has answered, else null.
 
@@ -59,7 +63,9 @@ invocation` on stderr, nothing on stdout, and exits 2.
 The command resolves the project in process, runs `workflow-state`,
 `artifact-budget`, `git` and the bound tracker CLI by name on `PATH`, removes every
 name in the contract's `unset_before_invocation` from each tracker-CLI child's
-environment, and writes no file.
+environment, and writes no file of its own: besides `workflow-state`'s ledger writes, its one
+write is the fetch's update of `refs/remotes/origin/<integration_branch>` and that commit's
+objects, made only when the bootstrap lists a requirement (issue 546 D4).
 """
 
 from __future__ import annotations
@@ -76,6 +82,8 @@ from typing import Any
 
 from agent_tools import resolve_project
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.verification_blocker import BlockerRefused
+from agent_tools.verification_observe import observe_all
 
 INVALID = "orchestrate-control: invalid invocation\n"
 DETAIL_LIMIT = 300
@@ -87,7 +95,7 @@ ISSUE_NUMBER = re.compile(r"[1-9][0-9]*")
 DECISION_LABELS = frozenset({"wayfinder:research", "wayfinder:prototype", "wayfinder:grilling",
                              "wayfinder:task"})
 TRACKER_CHUNK = 100
-CONTROL_VERSION = 3
+CONTROL_VERSION = 4
 CLOSED_KINDS = ("spawn", "resume", "retry", "delivery_remainder", "delivery_contract", "wait",
                 "finalize")
 DISPATCH_KINDS = ("spawn", "resume", "retry")
@@ -566,9 +574,11 @@ def worktree_facts(repo_root: str, b: Bindings, issues: Sequence[int],
 
 
 def control_request(b: Bindings, session: dict, tracker: list, forge: dict, worktrees: list,
-                    owners: list, pairs: Mapping[int, dict], *, human_directed: bool) -> dict:
-    """The interface-3 `control` request: the facts, the bound policy, the built pairs and
-    `human_directed`, which only an explicit session's first sweep sets (issue 458 D4)."""
+                    owners: list, pairs: Mapping[int, dict], *, human_directed: bool,
+                    verification: list) -> dict:
+    """The interface-4 `control` request: the facts, the bound policy, the built pairs,
+    `human_directed`, which only an explicit session's first sweep sets (issue 458 D4), and
+    `verification`, the observations `bootstrap` gathered (issue 546 D3)."""
     issues = session["issues"]
 
     def keyed(value) -> dict:
@@ -584,7 +594,8 @@ def control_request(b: Bindings, session: dict, tracker: list, forge: dict, work
         "authority_observations": keyed(lambda n: []),
         "reevaluation_evidence": keyed(lambda n: []),
         "delivery_observations": keyed(lambda n: []),
-        "requested_scopes": keyed(lambda n: None), "recoveries": keyed(lambda n: None)}
+        "requested_scopes": keyed(lambda n: None), "recoveries": keyed(lambda n: None),
+        "verification": verification}
 
 
 def run_control(repo_root: str, run_id: str, request: dict, *,
@@ -733,13 +744,17 @@ def action_kinds(reply: dict) -> list:
 
 
 def control_rounds(args: argparse.Namespace, bindings: Bindings, request: StepInput,
-                   facts: tuple[list, dict, list], contracts: Contracts) -> tuple[dict, int]:
+                   facts: tuple[list, dict, list], contracts: Contracts,
+                   observations: list[dict]) -> tuple[dict, int]:
     """The final control reply and the number of `control` calls made: the first, and one more
-    when it only asks for delivery contracts and some of those issues now have a pair (D6, D18)."""
+    when it only asks for delivery contracts and some of those issues now have a pair (D6, D18).
+    The observations ride the first call only: it commits any resolution, so the chained call
+    sends `[]` (issue 546 D3)."""
     session, run_id = request.session, request.session["run_id"]
     directed = session["human_directed"] and request.first_sweep
     first = run_control(args.repo_root, run_id, control_request(
-        bindings, session, *facts, request.owners, contracts.pairs, human_directed=directed))
+        bindings, session, *facts, request.owners, contracts.pairs, human_directed=directed,
+        verification=observations))
     if action_kinds(first) != ["delivery_contract"]:
         return first, 1
     try:
@@ -751,7 +766,8 @@ def control_rounds(args: argparse.Namespace, bindings: Bindings, request: StepIn
     asked = {summary["issue"] for summary in first["summaries"] if asks_for_contract(summary)}
     send = {issue: pair for issue, pair in contracts.pairs.items() if issue in asked}
     return run_control(args.repo_root, run_id, control_request(
-        bindings, session, *facts, [], send, human_directed=directed), previous=first), 2
+        bindings, session, *facts, [], send, human_directed=directed, verification=[]),
+        previous=first), 2
 
 
 def step(args: argparse.Namespace, done: list[str]) -> dict:
@@ -765,6 +781,10 @@ def step(args: argparse.Namespace, done: list[str]) -> dict:
                              "--run-id", run_id)
     if boot.get("kind") != "workflow_bootstrap" or boot.get("run_id") != run_id:
         raise Refusal("bootstrap", "init-run did not answer the session's run")
+    try:  # every awaited blocker, observed once after at most one fetch (issue 546 D3)
+        observations, unobserved = observe_all(args.repo_root, boot.get("verification"))
+    except BlockerRefused as refusal:
+        raise Refusal("bootstrap", str(refusal)) from refusal
     done.append("bootstrap")
     require_github("tracker", bindings)
     tracker = tracker_facts(bindings, issues)
@@ -781,7 +801,8 @@ def step(args: argparse.Namespace, done: list[str]) -> dict:
     contracts.build("contracts", [issue for issue in issues if issue in request.contracts_due
                                   or (request.first_sweep and issue in undigested)])
     done.append("contracts")
-    reply, calls = control_rounds(args, bindings, request, (tracker, forge, worktrees), contracts)
+    reply, calls = control_rounds(args, bindings, request, (tracker, forge, worktrees), contracts,
+                                  observations)
     done.append("control")
     dispatches = project(reply, args.repo_root, run_id)
     actions = reply["actions"]
@@ -792,6 +813,9 @@ def step(args: argparse.Namespace, done: list[str]) -> dict:
                                     and summary["issue"] not in contracts.refused),
             "refused_contracts": sorted(contracts.refused),
             "contract_refusals": contracts.refusals,
+            "verification_refusals": [
+                {"blocker_id": blocker, "detail": " ".join(reason.split())[:DETAIL_LIMIT]}
+                for blocker, reason in unobserved],
             "ends_run": [a["kind"] for a in actions] == ["delivery_contract"]
             and set(actions[0]["issues"]) <= contracts.refused}
 

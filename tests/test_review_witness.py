@@ -39,8 +39,10 @@ def derived(tmp, **shape):
     table = derive_task7(repo121, task7)
     payloads = {"task7-estimate.json": table, "issue-121.json": derive_121(repo121, p121, task7, authority),
                 "issue-100-derived.json": derive_100(repo100, repo100, archive, p100, authority.limits)}
+    closure = tool_closure(*tool_fixture(tmp))
     components = {
-        "tool": {**tool_closure(*tool_fixture(tmp)), "artifact_policy_sha256": authority.policy_sha256,
+        "tool": {"commit": closure["commit"], "files_sha256": telemetry_digest(closure["files"]),
+                 "artifact_policy_sha256": authority.policy_sha256,
                  "packing_policy_sha256": PACKING_POLICY_SHA256, "record_policy_sha256": RECORD_POLICY_SHA256},
         "issue_121": {"base": p121.base, "head": p121.head, "tree": task7.prerequisite_tree,
                       "signer_sha256": raw_digest(p121.allowed_signer)},
@@ -98,6 +100,11 @@ class WitnessTest(unittest.TestCase):
 
     def kwargs(self):
         return dict(zip(("task7_pins", "issue121_pins", "issue100_pins"), self.pins))
+
+    def closure(self):
+        """`tool_closure` of the class's tool fixture commit, the rows the tool group's digest binds."""
+        repo = self.root / "repos/tool/repo"
+        return tool_closure(repo, git(repo, "rev-parse", "HEAD"))
 
     def refused(self, code, call, *args, **kwargs):
         with self.assertRaises(WitnessError) as caught:
@@ -247,9 +254,8 @@ class WitnessTest(unittest.TestCase):
     def test_component_substitutions_under_trust_injection(self):
         parts = self.components
         cases = [(group, member, flip(parts[group][member])) for group, members in PINNED.items() for member in members]
-        cases += [("tool", "commit", "HEAD"), ("tool", "files", []), ("tool", "files", parts["tool"]["files"][::-1]),
-                  ("tool", "files", [{**parts["tool"]["files"][0], "mode": "100644"}]),
-                  ("tool", "artifact_policy_sha256", "sha256:xyz"), ("issue_100", "extra", "member"),
+        cases += [("tool", "commit", "HEAD"), ("tool", "artifact_policy_sha256", "sha256:xyz"),
+                  ("issue_100", "extra", "member"),
                   ("archive", "shards", [{**parts["archive"]["shards"][0], "extra": 1}])]
         for group, member, value in cases:
             changed = {**parts, group: {**parts[group], member: value}}
@@ -261,6 +267,22 @@ class WitnessTest(unittest.TestCase):
         stale = {**parts, "estimate": {**parts["estimate"], "table_sha256": flip(parts["estimate"]["table_sha256"])}}
         raw = {**self.raw, WITNESS: canonical_bytes(build_witness(stale, models(self.payloads), self.raw))}
         self.refused("component_mismatch", validate_bundle, build_anchor(stale, raw), raw, **self.kwargs())
+
+    def test_tool_group_binds_the_closure_by_one_digest(self):
+        tool, rows = self.components["tool"], self.closure()["files"]
+        self.assertEqual(set(tool), {"commit", "files_sha256", "artifact_policy_sha256", "packing_policy_sha256",
+                                     "record_policy_sha256"})
+        self.assertEqual(tool["files_sha256"], telemetry_digest(rows))
+        undigested = {name: value for name, value in tool.items() if name != "files_sha256"}
+        for label, group in (("the rows beside the digest", {**tool, "files": rows}),
+                             ("the rows in place of the digest", {**undigested, "files": rows}),
+                             ("no digest", undigested),
+                             ("the rows as the digest", {**tool, "files_sha256": rows}),
+                             ("a bare hex digest", {**tool, "files_sha256": tool["files_sha256"][len("sha256:"):]}),
+                             ("a non-hex digest", {**tool, "files_sha256": "sha256:xyz"})):
+            with self.subTest(label):
+                self.refused("component_mismatch", validate_bundle, *bound({**self.components, "tool": group},
+                                                                           self.payloads), **self.kwargs())
 
     def test_forged_issue_121_head_tree_is_component_mismatch(self):
         tree = flip(self.components["issue_121"]["tree"])  # RP16: the pins determine the head's tree
@@ -304,7 +326,7 @@ class WitnessTest(unittest.TestCase):
         self.assertEqual(tool_closure(repo, head), {"commit": head, "files": [
             {"path": path, "blob": hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest(),
              "raw_sha256": hashlib.sha256(data).hexdigest()} for path, data in sorted(files.items())]})
-        self.assertEqual(tool_closure(repo / "python", head)["files"], self.components["tool"]["files"])
+        self.assertEqual(tool_closure(repo / "python", head), self.closure())
         self.refused("tool_closure", tool_closure, repo, head[:12])
         self.refused("tool_closure", tool_closure, self.root / "repos/100/repo", self.pins[2].head)  # no package
         linked = init_repo(self.tmp / "linked")
@@ -315,7 +337,7 @@ class WitnessTest(unittest.TestCase):
                      commit_files(linked, {"python/agent_tools/target.py": b"# target\n"}, "a committed symlink"))
 
     def test_running_closure_changed_extra_or_missing_file_fails(self):
-        closure = self.components["tool"]
+        closure = self.closure()
         files = closure["files"]
         self.assertIsNone(verify_running_closure(closure))
         for label, mutated in (("changed", [{**files[0], "raw_sha256": flip(files[0]["raw_sha256"])}, *files[1:]]),

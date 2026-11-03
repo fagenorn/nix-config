@@ -178,13 +178,14 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 result = self.run_validate("ship-handoff", payload, use_stdin=True)
                 self.assert_refusal(result, "invalid report")
 
-    def test_workflow_response_boundary_red_accepts_valid_v2_bootstrap_shape(self):
+    def test_workflow_response_boundary_red_accepts_valid_v3_bootstrap_shape(self):
         """Task 2 must add this closed raw boundary, not repair this fixture."""
         bootstrap = {
-            "interface_version": 2,
+            "interface_version": 3,
             "kind": "workflow_bootstrap",
             "run_id": "task-151-synthetic",
             "requirements": [],
+            "verification": [],
         }
         result = self.run_validate("workflow-response", bootstrap, use_stdin=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8"))
@@ -200,13 +201,14 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         self.assertGreater(response_bound, report_bound)
 
         def bootstrap(count):
-            return {"interface_version": 2, "kind": "workflow_bootstrap", "run_id": "bound",
+            return {"interface_version": 3, "kind": "workflow_bootstrap", "run_id": "bound",
                     "requirements": [{"issue": issue, "owner": f"{issue}:1",
                         "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
                                     "action_id": f"{issue}:1:1"},
                         "recorded_worktree": f"/worktrees/issue-{issue}",
                         "contract_digest": None}
-                        for issue in range(1, count + 1)]}
+                        for issue in range(1, count + 1)],
+                    "verification": []}
 
         def canonical(value):
             return json.dumps(value, sort_keys=True,
@@ -243,8 +245,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                        "recorded_worktree": "/worktree"}
         for digest, code in ((None, 0), ("sha256:" + "a" * 64, 0), ("absent", 2)):
             value = dict(requirement) if digest == "absent" else {**requirement, "contract_digest": digest}
-            bootstrap = {"interface_version": 2, "kind": "workflow_bootstrap",
-                         "run_id": "r", "requirements": [value]}
+            bootstrap = {"interface_version": 3, "kind": "workflow_bootstrap",
+                         "run_id": "r", "requirements": [value], "verification": []}
             with self.subTest(digest=digest):
                 self.assertEqual(self.run_validate("workflow-response", bootstrap,
                                                    use_stdin=True).returncode, code)
@@ -361,10 +363,10 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             refused = self.run_validate(boundary, mismatched, use_stdin=True)
             self.assertNotEqual(refused.returncode, 0)
             self.assertEqual(refused.stdout, b"")
-        for raw in (b'{"interface_version":2,"kind":"workflow_bootstrap",'
-                    b'"run_id":"x","requirements":[],"requirements":[]}',
-                    b'{"interface_version":2,"kind":"workflow_bootstrap",'
-                    b'"run_id":"x","requirements":[]}\xff'):
+        for raw in (b'{"interface_version":3,"kind":"workflow_bootstrap",'
+                    b'"run_id":"x","requirements":[],"requirements":[],"verification":[]}',
+                    b'{"interface_version":3,"kind":"workflow_bootstrap",'
+                    b'"run_id":"x","requirements":[],"verification":[]}\xff'):
             refused = subprocess.run(
                 [sys.executable, str(SCRIPT), "validate-report", "--boundary",
                  "workflow-response", "--input", "-", "--policy", str(POLICY)],
@@ -475,8 +477,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
 
     def test_workflow_response_uses_source_and_lexical_installed_package(self):
-        payload = {"interface_version": 2, "kind": "workflow_bootstrap",
-                   "run_id": "synthetic-loader", "requirements": []}
+        payload = {"interface_version": 3, "kind": "workflow_bootstrap",
+                   "run_id": "synthetic-loader", "requirements": [], "verification": []}
         source = self.run_validate("workflow-response", payload, use_stdin=True)
         self.assertEqual(source.returncode, 0, source.stderr)
         with tempfile.TemporaryDirectory() as raw:
@@ -496,7 +498,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual(installed.stdout, source.stdout)
 
     def test_workflow_response_lexical_loader_refuses_closed_failures(self):
-        payload = b'{"interface_version":2,"kind":"workflow_bootstrap","requirements":[],"run_id":"x"}'
+        payload = (b'{"interface_version":3,"kind":"workflow_bootstrap","requirements":[],'
+                   b'"run_id":"x","verification":[]}')
         for variant in ("missing_entry", "missing_private", "directory_entry", "wrong_interface"):
             with self.subTest(variant=variant), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw); store = root / "store"; home = root / "home"; store.mkdir()
@@ -975,6 +978,76 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             artifact_budget.validate_ledger_result(ledger, bound)
         self.assertIn("notes", str(caught.exception))
         self.assertIn(str(bound), str(caught.exception))
+
+    def test_ship_summary_refusals_name_the_member_and_rule(self):
+        """Issue 559 AC2, D6, D7: every ship-summary rule names its member and rule, on v1 and v2."""
+        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
+                                 if key == "_artifact_budget_delivery_model"
+                                 or key.startswith("_artifact_budget_delivery_model.")])
+        bound = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["notes_max_characters"]
+        model = artifact_budget._delivery_model()
+        contract, _ = contract_and_delivery(model)
+        digest = model.canonical_digest(contract)
+        durable = ".superpowers/issue-delivery/151/run-1/ship-review.json"
+        retained = ".superpowers/ship-review/151/retained-detail.json"
+        stopped = {"issue": 151, "state": "stopped", "pr_url": None, "merge_sha": None,
+                   "issue_closed": False, "discussion_items": [], "detail_state": "none",
+                   "report_path": None, "notes": "stopped"}
+        merged = {**stopped, "state": "merged", "pr_url": "https://github.com/fagenorn/nix-config/pull/187",
+                  "merge_sha": "c" * 40, "issue_closed": True, "notes": "merged"}
+
+        def wrapped(result):
+            return {"interface_version": 2, "issue": 151, "state": "terminal_failed",
+                    "custody": custody(), "historical_owner_result": result,
+                    "delivery_contract_digest": digest, "delivery_observations": [],
+                    "authority_observations": [], "reevaluation_evidence": [],
+                    "detail_state": "none", "report_path": None, "notes": "failed"}
+
+        summary, state = "invalid ship summary: ", "invalid ship summary state: "
+        rows = (
+            (stopped, {"issue": 0}, summary + "issue", "positive integer"),
+            (stopped, {"discussion_items": ["lost"]}, summary + "discussion_items", "empty list"),
+            (stopped, {"issue_closed": 0}, summary + "issue_closed", "boolean"),
+            (stopped, {"detail_state": "partial"}, summary + "detail_state", "none, present or unpublished"),
+            (stopped, {"report_path": durable}, summary + "report_path", "null when detail_state is none"),
+            (stopped, {"detail_state": "present", "report_path": retained, "notes": retained},
+             summary + "report_path", "issue-delivery/ when detail_state is present"),
+            (stopped, {"detail_state": "unpublished", "report_path": durable, "notes": durable},
+             summary + "report_path", "outside issue-delivery/ when detail_state is unpublished"),
+            (stopped, {"detail_state": "present", "report_path": durable},
+             summary + "report_path", "cited in notes when detail_state is present"),
+            (stopped, {"pr_url": ""}, summary + "pr_url", "null or a non-empty string"),
+            (merged, {"pr_url": None}, state + "pr_url", "non-empty string when state is merged"),
+            (merged, {"merge_sha": "c" * 7}, state + "merge_sha", "40-hex commit when state is merged"),
+            (merged, {"detail_state": "unpublished", "report_path": retained, "notes": retained},
+             state + "detail_state", "none or present when state is merged"),
+            (stopped, {"merge_sha": "c" * 40}, state + "merge_sha", "null when state is stopped"),
+            ({**stopped, "state": "failed"}, {"issue_closed": True}, state + "issue_closed",
+             "false when state is failed"),
+            (stopped, {"state": "closed"}, state + "state", "merged, stopped or failed"),
+            (stopped, {"notes": "n" * (bound + 1)}, "notes", str(bound)),
+        )
+        for accepted in (stopped, merged, wrapped(stopped), wrapped(merged)):
+            self.assertEqual(self.run_validate("ship-summary", accepted, True).returncode, 0)
+        for base, change, member, rule in rows:
+            for version, value in ((1, {**base, **change}), (2, wrapped({**base, **change}))):
+                with self.subTest(member=member, rule=rule, version=version):
+                    reason = self.assert_refusal(self.run_validate("ship-summary", value, version == 1),
+                                                 "invalid report")
+                    if version == 2:
+                        self.assertTrue(reason.startswith("ship-summary: "), reason)
+                    self.assertIn(member, reason)
+                    self.assertIn(rule, reason)
+                    self.assertNotIn("closed", reason.replace("issue_closed", ""))
+
+    def test_an_sdd_detail_refusal_names_report_path(self):
+        """Issue 559 D6: the shared detail check names its rule for the SDD report too."""
+        value = self.make_sdd("complete", "clean", "clean", "clean", "passed", "a" * 40, "b" * 40,
+                              "present", ".superpowers/issue-delivery/49/run-1/sdd-a.json")
+        self.assertEqual(self.run_validate("sdd", value, True).returncode, 0)
+        reason = self.assert_refusal(self.run_validate("sdd", {**value, "notes": "no durable detail"}, True),
+                                     "invalid report")
+        self.assertEqual(reason, "invalid SDD report: report_path must be cited in notes when detail_state is present")
 
     def test_a_detail_refusal_names_the_failing_finding_member(self):
         """Issue 472 AC2, D3: a detail refusal names the finding by index and its member."""

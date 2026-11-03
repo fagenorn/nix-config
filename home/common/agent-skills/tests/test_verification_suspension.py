@@ -136,10 +136,19 @@ class HelperGenerationTest(LedgerHarness, unittest.TestCase):
     def assert_refused_unchanged(self, generation):
         """Every ledger-reading command refuses `unknown_schema`; migrate reports it as a row."""
         control = self.root / "control-request.json"
-        control.write_text(json.dumps(self.control_request(
-            now=T(6), issues=[61], tracker=[self.tracker_fact(61)], worktrees=[])), "utf-8")
+        request = self.control_request(
+            now=T(6), issues=[61], tracker=[self.tracker_fact(61)], worktrees=[])
+        if generation == "base":
+            # The base helper reads only its own request interfaces (issue 545 D13).
+            request["interface_version"] = 3
+            del request["verification"]
+        control.write_text(json.dumps(request), "utf-8")
+        direct_request = self.direct_request(issue=61, now=T(6))
+        if generation == "base":
+            direct_request["interface_version"] = 2
+            del direct_request["verification"]
         direct = self.root / "direct-request.json"
-        direct.write_text(json.dumps(self.direct_request(issue=61, now=T(6))), "utf-8")
+        direct.write_text(json.dumps(direct_request), "utf-8")
         run = ("--repo-root", self.root, "--run-id", self.run_id)
         calls = {
             "check-launch": ("check-launch", *run, "--action-id", "61:1:1"),
@@ -183,18 +192,29 @@ class HelperGenerationTest(LedgerHarness, unittest.TestCase):
         self.assert_refused_unchanged("head")
 
 
-LOCK = "a" * 40
+LOCK, NEXT = "a" * 40, "b" * 40
 DIRECT_NOW = "2026-08-20T10:{:02d}:00Z".format
 
 
-def failure(failure_class="dependency", path="flake.lock"):
-    """A `verification-failure` as `verification-observe failure` prints it (issue 543)."""
+def failure(failure_class="dependency", path="flake.lock", value=LOCK):
+    """A `verification-failure` as `verification-observe failure` prints it (issue 543), its
+    one selected path holding the object `value`."""
     return {"kind": "verification-failure", "schema_version": 1,
             "repository": {"project_id": "fagenorn/nix-config", "integration_branch": "main"},
             "command": {"id": "nix-build", "argv": ["just", "build"], "cwd": ".", "env": []},
             "failure_class": failure_class,
             "facts": [{"name": "flake-lock", "source": {"paths": [path]},
-                       "value": {"objects": [{"path": path, "mode": "100644", "object": LOCK}]}}]}
+                       "value": {"objects": [{"path": path, "mode": "100644", "object": value}]}}]}
+
+
+def observed(blocker, value=LOCK):
+    """The `verification-observation` that `verification-observe observe` prints for the
+    blocker of the failure `blocker` when its selected path holds `value` (issue 545)."""
+    facts = copy.deepcopy(blocker["facts"])
+    facts[0]["value"]["objects"][0]["object"] = value
+    return {"kind": "verification-observation", "schema_version": 1,
+            "blocker_id": vb.blocker_id(blocker),
+            "repository": copy.deepcopy(blocker["repository"]), "facts": facts}
 
 
 def record(attempts):
@@ -232,9 +252,10 @@ class VerificationHarness(LedgerHarness):
         return [event["reason"] for event in transaction.events
                 if event["type"] == "transitioned"][-1]
 
-    def recorded(self, issue):
+    def recorded(self, *issues):
         return [self.worktree_fact(issue, recorded={"path": self.worktree(issue),
-                                                    "state": "matching_issue_branch"})]
+                                                    "state": "matching_issue_branch"})
+                for issue in issues]
 
     def suspended_reply(self, issue):
         return {"interface_version": 2, "kind": "suspended", "run_id": self.run_id,
@@ -348,7 +369,11 @@ class ParkedTest(VerificationHarness, unittest.TestCase):
         observe = direct(6, forge=None)
         self.assertEqual((observe["kind"], [item["kind"] for item in observe["requirements"]]),
                          ("observe", ["forge_pr"]))
-        self.assertEqual(direct(7), self.suspended_reply(73))
+        asked = direct(7)
+        self.assertEqual((asked["kind"], [item["kind"] for item in asked["requirements"]]),
+                         ("observe", ["verification"]))
+        self.assertEqual(direct(7, verification=[observed(failure())]),
+                         self.suspended_reply(73))
         self.assertEqual(self.tree_snapshot(), before)
         merged = {"state": "merged", "url": "https://github.com/fagenorn/nix-config/pull/73",
                   "merge_sha": "b" * 40}
