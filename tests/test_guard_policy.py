@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -140,6 +141,81 @@ class DerivationTest(WorldCase):
         self.world.provider("fagenorn/one", exit=1)
         self.refused("provider_unproven")
         self.assertEqual(sorted(self.world.policy()["derived_repositories"]), ["fagenorn/two"])
+
+
+class EmptyRebuildTest(WorldCase):
+    """Issue 470: a rebuild in which every derive fails keeps the last populated policy,
+    and asking for usage writes nothing."""
+
+    def populated(self) -> tuple[bytes, int]:
+        self.world.project("fixture/one", "fagenorn/one")
+        self.world.project("fixture/two", "fagenorn/two")
+        self.assertEqual(self.world.compile()[0], 0)
+        self.assertEqual(sorted(self.world.policy()["derived_repositories"]),
+                         ["fagenorn/one", "fagenorn/two"])
+        stat = self.world.output.stat()
+        return self.world.output.read_bytes(), stat.st_mtime_ns
+
+    def test_every_derive_failing_keeps_the_populated_policy(self):
+        before = self.populated()
+        # The 2026-10-25 shape: gh cannot reach the provider (a sandboxed or unauthenticated
+        # shell), so every project is refused provider_unproven.
+        self.world.provider("fagenorn/one", exit=1)
+        self.world.provider("fagenorn/two", exit=1)
+        code, report, err = self.world.compile()
+        self.assertEqual((code, report["outcome"], report["derived"]),
+                         (1, "kept_previous", []), report)
+        self.assertEqual(sorted(r["project_id"] for r in report["refused"]),
+                         ["fixture/one", "fixture/two"])
+        self.assertEqual(before, (self.world.output.read_bytes(),
+                                  self.world.output.stat().st_mtime_ns))
+        self.assertIn("fixture/one ", err)
+        self.assertIn("fixture/two ", err)
+        self.assertIn("kept the previous policy", err)
+
+    def test_every_derive_failing_with_no_populated_policy_still_writes(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        self.world.provider("fagenorn/one", exit=1)
+        self.refused("provider_unproven")
+        self.assertEqual(self.world.policy()["derived_repositories"], {})
+
+    def test_one_derive_failing_still_drops_that_row(self):
+        self.populated()
+        self.world.provider("fagenorn/one", exit=1)
+        self.refused("provider_unproven")
+        self.assertEqual(sorted(self.world.policy()["derived_repositories"]), ["fagenorn/two"])
+
+    def test_help_leaves_the_policy_file_untouched(self):
+        before = self.populated()
+        for flag in ("--help", "-h"):
+            with self.subTest(flag=flag):
+                done = subprocess.run(
+                    [sys.executable, "-m", "agent_tools.guard_policy",
+                     "compile", "--base", str(self.world.base),
+                     "--output", str(self.world.output), flag],
+                    capture_output=True, text=True, timeout=120, env=self.world.env,
+                    cwd=self.world.tmp)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertIn("usage:", done.stdout)
+                self.assertEqual(before, (self.world.output.read_bytes(),
+                                          self.world.output.stat().st_mtime_ns))
+
+    def test_help_creates_no_policy_file(self):
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.guard_policy", "compile",
+             "--base", str(self.world.base), "--output", str(self.world.output), "--help"],
+            capture_output=True, text=True, timeout=120, env=self.world.env, cwd=self.world.tmp)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(self.world.output.exists())
+
+    def test_the_installed_wrapper_hands_its_arguments_to_compile(self):
+        """`claude-guard-policy --help` reached `compile` with no `--help`, because the wrapper
+        dropped its arguments, so asking for usage rebuilt the policy. It forwards them now."""
+        source = (Path(__file__).resolve().parents[1]
+                  / "home/common/claude-code/default.nix").read_text("utf-8")
+        start = source.index('claudeGuardPolicy = pkgs.writeShellScriptBin "claude-guard-policy"')
+        body = source[start:source.index("'';", start)]
+        self.assertRegex(body, r'--output \$\{lifecycleGuardPolicyPath\} "\$@"\n')
 
 
 REPORT_MEMBERS = {"schema_version", "repository", "outcome", "row", "refused", "cause"}
