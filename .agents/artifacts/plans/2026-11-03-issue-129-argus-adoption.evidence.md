@@ -315,3 +315,29 @@ Fleet row: compatible (primary checkout at 21338cae51ea396f6c3f9664642e06463c25d
 Clone check (`platform-status --repo-root $SCR/argus-verify`, clone HEAD `M`): `compatibility` `{"compatible":true,"reason_code":null,"repair_id":null}`.
 
 Primary checkout `/Users/anis/Projects/argus`, before (Step 1) and after (Step 7) identical: HEAD `21338cae51ea396f6c3f9664642e06463c25d97c`, branch `main`, `status --porcelain=v1 --untracked-files=all` sha256 `2ee13c2c227faa540b6372821b0f719035ea73a923729b3979b53ebc13f1cd08`, one untracked path `home/skills/humanizer/` (predates this run, not ours).
+
+## Task 8 — Guard probes and central-literal diff
+
+Recorded 2026-11-03T10:38Z to 10:41Z on host `mbp`, nix-config HEAD `e3eb0561e0341323145ec0ec792c8fffc1fc04d1`. Each probe was a payload file fed to the installed wrapper `G` (`~/.claude/settings.json` hook, equal to Task 2's `Guard wrapper`); no probed command was executed. Probe clone: Task 6's `$SCR/argus-verify` (`SCR` = `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/launch-scope-53qt3vxx`), `origin` `git@github.com:fagenorn/argus.git`, `refs/remotes/origin/HEAD` `refs/remotes/origin/main`, HEAD `M`, clean. Red state held: this section and `A` did not exist.
+
+| Probe | Command | cwd | Exit | Guard output | Time |
+| --- | --- | --- | --- | --- | --- |
+| push | `git push -u origin issue-129-guard-probe` | argus clone | 0 | none (allowed) | 2026-11-03T10:39:36Z |
+| pr-create | `gh pr create --repo fagenorn/argus --base main --head issue-129-guard-probe --title "Guard probe" --body "A non-executing guard probe for nix-config issue 129."` | argus clone | 0 | none (allowed) | 2026-11-03T10:39:39Z |
+| merge-floor | `gh pr merge 115 --repo fagenorn/argus --merge --match-head-commit 0bd5fb02c8545ed0247fe85fcf90d6e2e8b7360e --delete-branch` | argus clone | 0 | none (allowed) | 2026-11-03T10:39:50Z |
+| merge-no-head | `gh pr merge 115 --repo fagenorn/argus --merge --delete-branch` | argus clone | 2 | `lifecycle guard: unsafe merge: main cannot be protected on this repository's plan, so the merge must carry --match-head-commit with the reviewed PR head` | 2026-11-03T10:39:54Z |
+
+All four match the brief's expected exits and the refusal text. Afterwards: `git ls-remote` shows no `issue-129-guard-probe` ref, `gh pr list --state all --head issue-129-guard-probe` returns `[]`, and PR 115 is still `OPEN`.
+
+Qualifying PR (D13): open PRs into `main` were 115 and 108 (`gh pr list`, 2026-11-03T10:39Z). 115 was viewed first: `headRefOid` `0bd5fb02c8545ed0247fe85fcf90d6e2e8b7360e`, `mergeStateStatus` `CLEAN` (not `BEHIND`), one rollup entry `memory foundation (unit + forced checks)`, `CheckRun`, `COMPLETED`, `SUCCESS` (completed 2026-09-08T23:41:37Z). 115 qualifies and is the chosen PR. 108 was viewed too: `DIRTY`, its one check entry `COMPLETED`/`FAILURE` (head `352c9eaac86e8e4cecf98df3c78167b9d39bcc44`); it does not qualify and was not probed.
+
+Central-literal diff (AC8, 2026-11-03T10:40:05Z, after `git fetch`; script exit 0):
+- `git log --no-merges --oneline ed332155…..HEAD ^origin/main -- home/common/claude-code/ python/agent_tools/ home/common/agent-skills/scripts/ lib/ hosts/` printed nothing.
+- Base policy `/nix/store/7c2f7bmp7siygvwzx1y7mdq6mn19jr24-claude-bash-lifecycle-guard-base-policy.json`, the only match in `R`'s closure: `{"authorized_owners":["fagenorn"],"integration_bases":{}}`. Its two members are the owner literal (names no Argus fact, 126 D3) and an empty `integration_bases`. `grep -qi argus` on the file matched nothing.
+
+Tracing (AC8), where each Argus fact comes from:
+- Row `main`/`main`/`["memory foundation (unit + forced checks)"]`: derived from Argus's merged contract at `M` (Task 7, `Row:` line and `derived_repositories["fagenorn/argus"]`).
+- Floor check: Task 3's contract `bindings.vcs.merge.required_checks`.
+- Release targets `repository` (forge-main/github-forge), `daemon` (local-host/launchd-agent) and `notifier` (local-host/codesigned-artifact): Task 4's `resolve-project resolve` and `release profile inspect`, both read from the contract's `release.profiles`.
+- Adapter executables (`github-forge`, `launchd-agent`, `codesigned-artifact`): named by the contract's `bindings.adapters`, resolved by Task 4's inspection.
+- Owner: `fagenorn` is the only owner literal and predates this delivery.
