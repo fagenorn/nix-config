@@ -314,9 +314,13 @@ def _delivery():
     The delivery module is imported from its file through the import system, so
     its bytecode is cached like any import's (issue 499): the `scripts` sibling
     in the source layout, `~/.agents/lib/python/workflow_delivery.py`
-    installed. Each load executes a fresh module that is registered nowhere in
-    `sys.modules`. The notes limit is read from the artifact-budget policy on
-    every call. A load that fails is not kept, so the next call loads again.
+    installed. Installed, the production launcher caches it in
+    `~/.agents/lib/python/__pycache__`, which every Home Manager activation
+    clears once the links are updated (issue 567; the agent-skills README,
+    § Installed module library). Each load executes a fresh module that is
+    registered nowhere in `sys.modules`. The notes limit is read from the
+    artifact-budget policy on every call. A load that fails is not kept, so the
+    next call loads again.
     """
     src = Path(__file__).parent
     entry = src / "workflow_delivery.py" if src.name == "scripts" else Path.home() / ".agents/lib/python/workflow_delivery.py"
@@ -589,11 +593,13 @@ def _artifact_budget():
     (issue 498 D2, D7).
 
     It is loaded from the resolved target of `artifact_budget_paths()`'s module
-    file. Every Nix store file has mtime 1, so bytecode cached beside a
-    home-manager link would be checked by size alone and could outlive a
-    same-size edit; a store file's name changes with its content. The module is
-    registered in `sys.modules` before it executes, as its dataclasses require,
-    and unregistered if loading fails. Any failure is a `WorkflowError`.
+    file; installed, that is a store file whose name changes with its content
+    (issue 498 D7). Modules loaded through a `~/.agents/lib/python` link rely
+    instead on every Home Manager activation clearing that directory's bytecode
+    cache (issue 567; the agent-skills README, § Installed module library). The
+    module is registered in `sys.modules` before it executes, as its
+    dataclasses require, and unregistered if loading fails. Any failure is a
+    `WorkflowError`.
     """
     global _ARTIFACT_BUDGET
     if _ARTIFACT_BUDGET is not None:
