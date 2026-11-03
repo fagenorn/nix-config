@@ -20,7 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import RECORD_POLICY
+from agent_tools.review_actual import RECORD_POLICY_V1
 from agent_tools.review_expansion import MEMBER_MAX_BYTES
 from agent_tools.review_forecast import canonical_bytes
 from agent_tools.review_issue100 import ISSUE_100_PINS, Domain
@@ -261,7 +261,7 @@ def issue100_fixture(tmp) -> tuple:
     git(tmp, "clone", "-q", str(repo), str(live_repo))
     trees = [git(repo, "rev-parse", f"{oid}^{{tree}}") for oid in (base, head)]
     raw = _raw(repo, *ISSUE_100_PINS.recipe, *trees)
-    fresh = _raw(repo, *RECORD_POLICY["git_config"], "diff", *RECORD_POLICY["diff_args"], "--binary", "-U10", *trees)
+    fresh = _raw(repo, *RECORD_POLICY_V1["git_config"], "diff", *RECORD_POLICY_V1["diff_args"], "--binary", "-U10", *trees)
     historical = _domain(ISSUE_100_PINS.historical, raw)
     starts = [m.start() for m in re.finditer(rb"(?m)^diff --git ", raw)]
     shards = [raw[:starts[2]], raw[starts[2]:]]

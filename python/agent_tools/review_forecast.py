@@ -12,7 +12,7 @@ import subprocess
 from typing import Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal, telemetry_digest
-from agent_tools.review_actual import (SHA_RE, _run_git, _split_diff, git_diff)
+from agent_tools.review_actual import (RECORD_POLICY, SHA_RE, _run_git, _split_diff, git_diff)
 from agent_tools.review_budget import BudgetAuthority
 from agent_tools.review_git import (HistoryError, original_commit, original_commits, original_range,
                                     original_ancestor, original_edge)
@@ -309,18 +309,21 @@ def _block(raw: bytes, heading: str) -> dict:
     return value
 
 
-def edge_facts(repo: Path, parent: str, commit: str, ordinal: int) -> dict:
+def edge_facts(repo: Path, parent: str, commit: str, ordinal: int, *,
+               record_policy: Mapping = RECORD_POLICY) -> dict:
     """Bind all original parent edges to independently read tree and record facts."""
     try:
         parent_commit, child_commit = original_edge(repo, parent, commit, ordinal)
     except HistoryError as exc:
         raise ForecastError("invalid original edge") from exc
     parent_tree, commit_tree = parent_commit.tree, child_commit.tree
-    status = git_diff(repo, parent_tree, commit_tree, "--name-status", "-z").split(b"\0")
+    status = git_diff(repo, parent_tree, commit_tree, "--name-status", "-z",
+                      record_policy=record_policy).split(b"\0")
     if status[-1] != b"":
         raise ForecastError("invalid Git status framing")
     status.pop()
-    chunks = _split_diff(git_diff(repo, parent_tree, commit_tree, "--binary", "-U10"))
+    chunks = _split_diff(git_diff(repo, parent_tree, commit_tree, "--binary", "-U10",
+                                  record_policy=record_policy))
     facts = []
     while status:
         operation = status.pop(0).decode("ascii")

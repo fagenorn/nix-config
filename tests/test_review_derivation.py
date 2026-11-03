@@ -5,9 +5,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_tools import derive_review_feasibility_fixtures as command
-from agent_tools.review_actual import RECORD_POLICY
+from agent_tools.review_actual import RECORD_POLICY_V1
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256
+from agent_tools.review_actual import PACKING_POLICY_V1_SHA256, RECORD_POLICY_V1_SHA256
 from agent_tools.review_budget import describe
 from agent_tools.review_derivation import DerivationError, DeriveInputs, derive_bundle
 from agent_tools.review_forecast import canonical_bytes
@@ -126,7 +126,7 @@ class DerivationTest(unittest.TestCase):
         (owned / "home").mkdir()
         env = hostile_git_env(owned, dict(os.environ, HOME=str(owned / "home")), repos)
         clean = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
-        policy = (*RECORD_POLICY["git_config"], "diff", *RECORD_POLICY["diff_args"], "--binary", "-U10",
+        policy = (*RECORD_POLICY_V1["git_config"], "diff", *RECORD_POLICY_V1["diff_args"], "--binary", "-U10",
                   self.pins[1].base, "HEAD")
         control = [subprocess.run(["git", "-C", str(repo), *policy], env=e, check=True, capture_output=True).stdout
                    for repo, e in ((i.issue_121_repo, clean), (repos[0], env))]
@@ -168,8 +168,8 @@ class DerivationTest(unittest.TestCase):
         rows = tool_closure(self.inputs.tool_repo, self.inputs.tool_commit)["files"]
         self.assertEqual(anchor["tool"], {"commit": self.inputs.tool_commit, "files_sha256": telemetry_digest(rows),
                                           "artifact_policy_sha256": self.authority.policy_sha256,
-                                          "packing_policy_sha256": PACKING_POLICY_SHA256,
-                                          "record_policy_sha256": RECORD_POLICY_SHA256})
+                                          "packing_policy_sha256": PACKING_POLICY_V1_SHA256,
+                                          "record_policy_sha256": RECORD_POLICY_V1_SHA256})
         self.assertEqual(witness["components"]["tool"], anchor["tool"])
 
     def test_existing_or_dangling_output_is_output_exists(self):

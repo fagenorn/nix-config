@@ -5,10 +5,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 import subprocess
 import tempfile
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import (PACKING_POLICY_SHA256, CandidateInput, FutureCommit, _run_git,
+from agent_tools.review_actual import (PACKING_POLICY_SHA256, RECORD_POLICY, CandidateInput, FutureCommit, _run_git,
     actual_inputs, actual_inputs_from_trees, commit_subject, git_diff, select_candidate)
 from agent_tools.review_budget import BudgetAuthority, describe
 from agent_tools.review_forecast import (ForecastError, ForecastPlan, ancestor, canonical_bytes,
@@ -48,7 +48,8 @@ class Reconstruction:
 
 
 def reconstruct_owned(repo: Path, prerequisite_commit: str,
-                      owned_commits: Sequence[str]) -> Reconstruction:
+                      owned_commits: Sequence[str], *,
+                      record_policy: Mapping = RECORD_POLICY) -> Reconstruction:
     """Apply verified owned edges to a private index; source objects remain read-only."""
     prerequisite = history_commit(repo, prerequisite_commit)
     requested = tuple(owned_commits)
@@ -67,7 +68,7 @@ def reconstruct_owned(repo: Path, prerequisite_commit: str,
     except HistoryError as exc:
         raise ForecastError("invalid original reconstruction history") from exc
     originals = dict(zip(ordered, history_commits(repo, ordered)))
-    facts = {commit: tuple(edge_facts(repo, parent, commit, n)
+    facts = {commit: tuple(edge_facts(repo, parent, commit, n, record_policy=record_policy)
              for n, parent in enumerate(originals[commit].parents, 1)) for commit in ordered}
     scratch = tempfile.TemporaryDirectory(prefix="review-owned-")
     target = Path(scratch.name)
@@ -101,7 +102,8 @@ def reconstruct_owned(repo: Path, prerequisite_commit: str,
                 if any(tree_entry(target, before_tree, path) != tree_entry(repo, parent_tree, path)
                        for path in paths):
                     raise ReconstructionUnavailable("whole_path_preimage_unproved", commit)
-                patch = git_diff(repo, parent_tree, originals[commit].tree, "--binary", "-U10")
+                patch = git_diff(repo, parent_tree, originals[commit].tree, "--binary", "-U10",
+                                 record_policy=record_policy)
                 if patch:
                     applied = subprocess.run(["git", "-C", str(target), "apply", "--cached",
                         "--binary", "--whitespace=nowarn", "-"], input=patch, capture_output=True)

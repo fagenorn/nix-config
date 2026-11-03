@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256
+from agent_tools.review_actual import PACKING_POLICY_V1_SHA256, RECORD_POLICY_V1_SHA256
 from agent_tools.review_budget import describe
 from agent_tools.review_forecast import _derivation, canonical_bytes, raw_digest
 from agent_tools.review_issue100 import Issue100Error, derive_100, expand_100, verify_archive
@@ -43,7 +43,7 @@ def derived(tmp, **shape):
     components = {
         "tool": {"commit": closure["commit"], "files_sha256": telemetry_digest(closure["files"]),
                  "artifact_policy_sha256": authority.policy_sha256,
-                 "packing_policy_sha256": PACKING_POLICY_SHA256, "record_policy_sha256": RECORD_POLICY_SHA256},
+                 "packing_policy_sha256": PACKING_POLICY_V1_SHA256, "record_policy_sha256": RECORD_POLICY_V1_SHA256},
         "issue_121": {"base": p121.base, "head": p121.head, "tree": task7.prerequisite_tree,
                       "signer_sha256": raw_digest(p121.allowed_signer)},
         "issue_100": {"base": p100.base, "head": p100.head, "live": p100.live,

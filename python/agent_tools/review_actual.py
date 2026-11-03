@@ -41,6 +41,33 @@ PACKING_POLICY = {
                              "subject_json_bytes_per_reserved_byte": 6},
 }
 PACKING_POLICY_SHA256 = telemetry_digest(PACKING_POLICY)
+# The retained review evidence's record domain (issue 569): frozen, never the living policy.
+RECORD_POLICY_V1 = {
+    "kind": "review-git-records/v1",
+    "git_config": ["-c", "diff.renames=true", "-c", "diff.renameLimit=0",
+                   "-c", "core.quotePath=true"],
+    "diff_args": ["--find-renames=100%", "--no-ext-diff", "--no-textconv",
+                  "--ignore-submodules=none", "--submodule=short",
+                  "--full-index", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/",
+                  "--diff-algorithm=myers", "--no-indent-heuristic", "--inter-hunk-context=0",
+                  "--no-color", "--line-prefix=", "--output-indicator-new=+",
+                  "--output-indicator-old=-", "--output-indicator-context= "],
+}
+RECORD_POLICY_V1_SHA256 = telemetry_digest(RECORD_POLICY_V1)
+PACKING_POLICY_V1 = {
+    "kind": "review-packing/v1",
+    "record_policy_sha256": RECORD_POLICY_V1_SHA256,
+    "initial": {"context_lines": 10, "strategy": "sequential"},
+    "adaptive": [{"context_lines": context, "strategy": "stable-first-fit-whole-file"}
+                 for context in (7, 5, 3, 1, 0)],
+    "adaptive_violations": ["member_count", "aggregate_bytes"],
+    "fallback": "initial",
+    "manifest_encoding": "canonical-json-utf8-lf/v1",
+    "forecast_measurement": {"kind": "whole-record-lengths/v1",
+                             "subject_encoding": "repeated-json-control-u0001/v1",
+                             "subject_json_bytes_per_reserved_byte": 6},
+}
+PACKING_POLICY_V1_SHA256 = telemetry_digest(PACKING_POLICY_V1)
 RECORD_OPERATIONS = ("A", "M", "D", "T", "R100")
 GENERATED_EVIDENCE_KINDS = ("ef-core-migration-designer", "whole-file-deletion")
 
@@ -60,11 +87,24 @@ class GenerationError(Exception):
     """The package could not be generated, measured, or published."""
 
 
-def _packing_choices() -> tuple[dict, ...]:
-    if (telemetry_digest(PACKING_POLICY) != PACKING_POLICY_SHA256
-            or telemetry_digest(RECORD_POLICY) != RECORD_POLICY_SHA256):
+def _policies(record_policy: Mapping) -> Mapping:
+    """The packing policy that binds `record_policy`; the set is closed, by object identity."""
+    if record_policy is RECORD_POLICY:
+        record_sha, packing, packing_sha = RECORD_POLICY_SHA256, PACKING_POLICY, PACKING_POLICY_SHA256
+    elif record_policy is RECORD_POLICY_V1:
+        record_sha, packing, packing_sha = RECORD_POLICY_V1_SHA256, PACKING_POLICY_V1, PACKING_POLICY_V1_SHA256
+    else:
+        raise GenerationError("unsupported record policy")
+    if telemetry_digest(record_policy) != record_sha:
+        raise GenerationError("unsupported record policy")
+    if telemetry_digest(packing) != packing_sha:
         raise GenerationError("unsupported packing policy")
-    return (PACKING_POLICY["initial"], *PACKING_POLICY["adaptive"])
+    return packing
+
+
+def _packing_choices(record_policy: Mapping = RECORD_POLICY) -> tuple[dict, ...]:
+    packing = _policies(record_policy)
+    return (packing["initial"], *packing["adaptive"])
 
 
 @dataclass(frozen=True)
@@ -110,15 +150,15 @@ class ReviewMeasurement:
     violations: tuple[str, ...]
 
 
-def git_diff(repo: Path, base_tree: str, head_tree: str, *view: str) -> bytes:
-    """Every fresh measurement view uses the same explicit record policy."""
+def git_diff(repo: Path, base_tree: str, head_tree: str, *view: str,
+             record_policy: Mapping = RECORD_POLICY) -> bytes:
+    """Every measurement view of one record domain uses that domain's explicit record policy."""
+    choices = _packing_choices(record_policy)
     if view not in (("--numstat", "-z"), ("--name-only", "-z"), ("--name-status", "-z"),
-                    *(("--binary", f"-U{choice['context_lines']}") for choice in _packing_choices())):
+                    *(("--binary", f"-U{choice['context_lines']}") for choice in choices)):
         raise GenerationError("unsupported diff view")
-    if telemetry_digest(RECORD_POLICY) != RECORD_POLICY_SHA256:
-        raise GenerationError("unsupported record policy")
-    return record_git(repo, *RECORD_POLICY["git_config"], "diff",
-                      *RECORD_POLICY["diff_args"], *view, base_tree, head_tree)
+    return record_git(repo, *record_policy["git_config"], "diff",
+                      *record_policy["diff_args"], *view, base_tree, head_tree)
 
 
 def record_git(repo: Path, *args: str) -> bytes:
@@ -169,31 +209,36 @@ def commit_subject(repo: Path, sha: str) -> str:
 
 
 def actual_inputs(repo: Path, base: str, head: str, package_name: str,
-                  limits: ReviewLimits) -> Iterator[CandidateInput]:
+                  limits: ReviewLimits, *, record_policy: Mapping = RECORD_POLICY) -> Iterator[CandidateInput]:
     try:
         base_commit, head_commit = original_commits(repo, (base, head))
         base_tree, head_tree = base_commit.tree, head_commit.tree
     except HistoryError as exc:
         raise GenerationError("invalid original history") from exc
     yield from actual_inputs_from_trees(repo, base_tree, head_tree, base=base, head=head,
-        commits=tuple(_commits(repo, base, head)), package_name=package_name, limits=limits)
+        commits=tuple(_commits(repo, base, head)), package_name=package_name, limits=limits,
+        record_policy=record_policy)
 
 
 def actual_inputs_from_trees(repo: Path, base_tree: str, head_tree: str, *,
                             base: str, head: str, commits: tuple[Mapping, ...],
-                            package_name: str, limits: ReviewLimits) -> Iterator[CandidateInput]:
+                            package_name: str, limits: ReviewLimits,
+                            record_policy: Mapping = RECORD_POLICY) -> Iterator[CandidateInput]:
     for tree in (base_tree, head_tree):
         if not isinstance(tree, str) or SHA_RE.fullmatch(tree) is None:
             raise GenerationError("invalid tree identity")
-    paths = _changed_paths(git_diff(repo, base_tree, head_tree, "--name-only", "-z"))
-    stats = _parse_numstat(git_diff(repo, base_tree, head_tree, "--numstat", "-z"))
+    paths = _changed_paths(git_diff(repo, base_tree, head_tree, "--name-only", "-z",
+                                    record_policy=record_policy))
+    stats = _parse_numstat(git_diff(repo, base_tree, head_tree, "--numstat", "-z",
+                                    record_policy=record_policy))
     if len(set(paths)) != len(paths) or len(paths) != stats["files_changed"]:
         raise GenerationError("diff coverage does not match numstat")
     operations = _record_operations(
-        git_diff(repo, base_tree, head_tree, "--name-status", "-z"), paths)
-    for number, choice in enumerate(_packing_choices()):
+        git_diff(repo, base_tree, head_tree, "--name-status", "-z", record_policy=record_policy), paths)
+    for number, choice in enumerate(_packing_choices(record_policy)):
         context = None if number == 0 else choice["context_lines"]
-        raw = git_diff(repo, base_tree, head_tree, "--binary", f"-U{choice['context_lines']}")
+        raw = git_diff(repo, base_tree, head_tree, "--binary", f"-U{choice['context_lines']}",
+                       record_policy=record_policy)
         chunks = _chunks_by_path(_split_diff(raw), operations)
         records = []
         for path, operation, chunk in zip(paths, operations, chunks):

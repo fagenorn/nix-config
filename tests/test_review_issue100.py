@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import RECORD_POLICY_SHA256
+from agent_tools.review_actual import RECORD_POLICY_V1_SHA256
 from agent_tools.review_budget import describe
 from agent_tools.review_forecast import ForecastError
 from agent_tools.review_git import HistoryError
@@ -370,7 +370,7 @@ class Issue100Test(unittest.TestCase):
         self.assertEqual((pins.historical.name, pins.historical.bytes, pins.historical.records),
                          ("retained-git-records/v1", 1005707, 115))
         self.assertEqual((pins.fresh.name, pins.fresh.policy_sha256, pins.fresh.bytes, pins.fresh.records),
-                         ("review-git-records/v1", RECORD_POLICY_SHA256, 1012913, 115))
+                         ("review-git-records/v1", RECORD_POLICY_V1_SHA256, 1012913, 115))
         self.assertEqual(pins.expected_counts, {
             "commits": 82, "parent_edges": 91, "merge_edges": 9, "edge_records": 543, "contributions": 115,
             "historical_process": 8, "integrated": 38, "candidate": 69, "candidate_ordinary": 65,

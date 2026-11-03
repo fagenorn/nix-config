@@ -177,6 +177,39 @@ class SharedPackingPolicyTest(unittest.TestCase):
                 group[key] = previous
 
 
+class RecordPolicyDomainTest(unittest.TestCase):
+    """Issue 569: the retained domain's record policy v1 is frozen beside the living policy."""
+
+    def test_frozen_v1_identities_and_the_closed_policy_set(self):
+        from agent_tools.canonical import telemetry_digest
+        from agent_tools.review_actual import (PACKING_POLICY, PACKING_POLICY_V1, PACKING_POLICY_V1_SHA256,
+            RECORD_POLICY, RECORD_POLICY_V1, RECORD_POLICY_V1_SHA256, GenerationError, git_diff)
+        self.assertEqual(RECORD_POLICY_V1_SHA256,
+                         'sha256:73cc5609e8a395d33a210b20f413a72179300475b2f6d1c55fed097c7f6ee63b')
+        self.assertEqual(PACKING_POLICY_V1_SHA256,
+                         'sha256:fbb7b821b21015c5e56a4829c0c33dd2e7233a09a5826287cc563634098b43bf')
+        self.assertEqual(telemetry_digest(RECORD_POLICY_V1), RECORD_POLICY_V1_SHA256)
+        self.assertEqual(telemetry_digest(PACKING_POLICY_V1), PACKING_POLICY_V1_SHA256)
+        self.assertEqual(PACKING_POLICY_V1['record_policy_sha256'], RECORD_POLICY_V1_SHA256)
+        self.assertEqual({k: v for k, v in PACKING_POLICY_V1.items() if k != 'record_policy_sha256'},
+                         {k: v for k, v in PACKING_POLICY.items() if k != 'record_policy_sha256'})
+        self.assertIsNot(RECORD_POLICY_V1, RECORD_POLICY)
+        empty = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'  # refused before any repository read
+        for policy in (dict(RECORD_POLICY), dict(RECORD_POLICY_V1), {}):
+            with self.subTest(policy=policy.get('kind')), \
+                    self.assertRaisesRegex(GenerationError, 'unsupported record policy'):
+                git_diff(Path('.'), empty, empty, '--name-only', '-z', record_policy=policy)
+        for group, key, label in ((RECORD_POLICY_V1, 'kind', 'unsupported record policy'),
+                                  (PACKING_POLICY_V1, 'fallback', 'unsupported packing policy')):
+            previous = group[key]
+            try:
+                group[key] = 'mutated'
+                with self.subTest(key=key), self.assertRaisesRegex(GenerationError, label):
+                    git_diff(Path('.'), empty, empty, '--name-only', '-z', record_policy=RECORD_POLICY_V1)
+            finally:
+                group[key] = previous
+
+
 class SourceProjectionFixture:
     """All command fixtures use actual Git objects and source subprocesses."""
     plan_stem = 'all'
