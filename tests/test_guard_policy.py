@@ -23,7 +23,7 @@ from .actions_world import CONFIG
 from .guard_policy_world import REAL_GIT, GuardPolicyWorld
 
 NODO = "elevenyellow/nodocom"
-ROW_MEMBERS = {"default_branch", "integration_branch", "evidence"}
+ROW_MEMBERS = {"default_branch", "integration_branch", "required_checks", "evidence"}
 EVIDENCE_MEMBERS = {"project_id", "registry_entry_digest", "source", "contract_blob",
                     "provider_full_name", "profiles"}
 
@@ -69,6 +69,7 @@ class DerivationTest(WorldCase):
         for row in rows.values():
             self.assertEqual(set(row), ROW_MEMBERS)
             self.assertEqual(set(row["evidence"]), EVIDENCE_MEMBERS)
+        self.assertEqual([row["required_checks"] for row in rows.values()], [[], []])
         self.assertEqual((rows[NODO]["default_branch"], rows[NODO]["integration_branch"]),
                          ("main", "dev"))
         self.assertEqual((rows["fagenorn/single"]["default_branch"],
@@ -90,7 +91,7 @@ class DerivationTest(WorldCase):
         derivation = policy["derivation"]
         self.assertEqual(set(derivation),
                          {"schema_version", "platform_version", "registry_digest"})
-        self.assertEqual(derivation["schema_version"], 2)
+        self.assertEqual(derivation["schema_version"], 3)
         self.assertRegex(derivation["registry_digest"], r"^sha256:[0-9a-f]{64}$")
         # D11: identity evidence only, never the contract or a resolved snapshot.
         text = self.world.output.read_text("utf-8")
@@ -151,7 +152,7 @@ class DeriveTest(WorldCase):
         code, report, err = self.world.derive(repository)
         self.assertEqual((code, set(report)), (0, REPORT_MEMBERS), (report, err))
         self.assertEqual((report["schema_version"], report["repository"], report["outcome"],
-                          report["cause"]), (1, repository, "derived", None))
+                          report["cause"]), (2, repository, "derived", None))
         return report
 
     def refused_for(self, repository: str) -> dict:
@@ -172,6 +173,26 @@ class DeriveTest(WorldCase):
         self.assertEqual(self.world.compile()[0], 0)
         self.assertEqual(report["row"], self.world.policy()["derived_repositories"][NODO])
         self.assertEqual(self.derived("fagenorn/single")["row"]["integration_branch"], "main")
+
+    def test_declared_required_checks_reach_the_row_sorted(self):
+        """Issue 552 D1, D4: the row carries the contract's checks sorted, `[]` for an
+        absent or null member, and derive reports the row compile writes."""
+        def declare(checks):
+            def mutate(contract):
+                contract["bindings"]["vcs"]["merge"]["required_checks"] = checks
+            return mutate
+
+        self.world.project("fixture/checks", "fagenorn/checks",
+                           mutate=declare(["lint", "CI / build (unit + forced)"]))
+        self.world.project("fixture/null", "fagenorn/null", mutate=declare(None))
+        self.world.project("fixture/absent", "fagenorn/absent")
+        self.assertEqual(self.world.compile()[0], 0)
+        rows = self.world.policy()["derived_repositories"]
+        self.assertEqual(rows["fagenorn/checks"]["required_checks"],
+                         ["CI / build (unit + forced)", "lint"])
+        self.assertEqual([rows[slug]["required_checks"]
+                          for slug in ("fagenorn/null", "fagenorn/absent")], [[], []])
+        self.assertEqual(self.derived("fagenorn/checks")["row"], rows["fagenorn/checks"])
 
     @staticmethod
     def jarbird_deploy(contract):

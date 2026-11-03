@@ -86,7 +86,8 @@ DELEGATED_SHIP_EVALS = (
     "delegating-owner-handles-delegated-return",
     "no-subagent-launch-ships-inline",
 )
-INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
+INPUT_FLAG_RE = re.compile(
+    r"(--request-file|--checkpoint-file|--summary-file|--verification-input|--input)\s+(\S+)")
 V3_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes",
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
     "authorization_intents", "authority_observations", "reevaluation_evidence",
@@ -1037,8 +1038,21 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.from_issue, "## Suspension procedure", "## Phase 0"))
         self.assert_ordered(
             suspension, "`human_gate`", "`external`", "`agent_dispatch`",
-            "`deadline`", "(the reaper alone owns `unknown`)",
+            "`deadline`", "`verification`", "(the reaper alone owns `unknown`)",
         )
+
+    def test_the_verification_cause_feeds_the_failure_on_stdin(self):
+        """Issue 546 D5, D18: the one `suspend` template stays; the lifecycle-call rule lists
+        `--verification-input -`, and sdd's declaration route feeds the printed failure there."""
+        suspends = [line for line in self.from_issue.splitlines()
+                    if line.startswith("workflow-state suspend ")]
+        self.assertEqual(len(suspends), 1)
+        rule = next(block for block in self.from_issue.split("\n\n")
+                    if block.startswith("Every lifecycle call is one command"))
+        self.assertIn("`--verification-input -`", rule)
+        review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
+        self.assert_ordered(review, "verification-observe failure", "Exit 0: suspend per from-issue",
+                            "`blocked_on=verification`", "`--verification-input -`")
 
     def test_sdd_states_the_deadline_suspension_order(self):
         # #281 D5, D9: the one paragraph of `### Lifecycle workers` naming
@@ -1064,6 +1078,23 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "`current: true`",
             "`blocked_on=deadline`",
         )
+
+    def test_final_verification_declares_a_blocker_the_adapter_accepts(self):
+        """Issue 546 D5: final-review's declaration, each placeholder filled with a valid
+        value, is one the source `normalize_declaration` accepts, and unclassified it is not."""
+        review = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
+        (line,) = [line.strip() for line in review.splitlines()
+                   if line.strip().startswith('{"command_id": ')]
+        for placeholder, value in (("<id>", "nix-build"), ("<class>", "dependency"),
+                                   ("<worktree>", "/tmp/wt"), ("<name>", "flake-lock"),
+                                   ("<path>", "flake.lock")):
+            line = line.replace(f'"{placeholder}"', json.dumps(value))
+        declaration = json.loads(line)
+        done = normalize_declaration(declaration)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        unclassified = {key: value for key, value in declaration.items()
+                        if key != "failure_class"}
+        self.assertIn("unclassified", normalize_declaration(unclassified).stderr)
 
     def test_auto_names_the_dispatch_gap_fallback_and_relays_closed_lines(self):
         # The delegated owner keeps the closed gap line; the earlier controller
@@ -1533,6 +1564,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "kind: owner",
             "kind: delivery_remainder",
             "kind: terminal",
+            "kind: suspended",
         )
         text = normalized(direct)
         for shape in (
@@ -1552,6 +1584,31 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                                    "EXPECTS_MEMBERS")["EXPECTS_MEMBERS"]
         for name in ("expects", *expects):
             self.assertIn(f"`{name}`", observe)
+
+    def test_direct_acquisition_relays_a_suspended_reply(self):
+        """Issue 546 D6, D18: item 5 stops before Phase 1 and installs no waiter as item 4 does,
+        but without item 4's `kind: terminal` key check, and prints the canonical line from
+        members that the source workflow-response validator requires of a `suspended` reply
+        (issue 544 D16), so the reply's shape is the validator's, not restated here."""
+        text = normalized(ACQUIRE_DIRECT.read_text(encoding="utf-8"))
+        item = text[text.index("**`kind: suspended`**"):]
+        item = item[:item.index("Clear the retained")]
+        self.assertIn("stop before Phase 1 with no waiter", item)
+        self.assertNotIn("item 4", item)
+        self.assertNotIn("require exactly", item)
+        self.assertIn("`Suspended (blocked_on=<blocked_on>). Resume: <reentry>`", item)
+        members = re.findall(r"<([a-z_]+)>", item)
+        self.assertEqual(members, ["blocked_on", "reentry"])
+        reply = {"interface_version": 2, "kind": "suspended", "run_id": "run-1", "issue": 151,
+                 "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
+                             "action_id": "151:1:1"},
+                 "blocked_on": "verification", "reentry": "/from-issue 151 --auto"}
+        done = validate_workflow_response(reply)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for name in members:
+            with self.subTest(dropped=name):
+                less = {key: value for key, value in reply.items() if key != name}
+                self.assertEqual(validate_workflow_response(less).returncode, 2)
 
     def test_adjacent_from_issue_acquisition_modes_remain_unchanged(self):
         for route in (ACQUIRE_DISPATCHER, ACQUIRE_INTERACTIVE, ACQUIRE_DURABLE):
@@ -2003,6 +2060,33 @@ class ResumePackContractsTest(unittest.TestCase):
 
     def test_auto_rollover_passes_the_pack_beside_the_continuation(self):
         self.assertIn(self.PACK, self.read(ROLLOVER))
+
+
+def validate_workflow_response(value):
+    """The source `artifact-budget validate-report --boundary workflow-response` over `value`, in
+    a child with `PYTHONPATH` set to `python/` and a temporary `HOME` holding the source policy,
+    because the installed-mode run has no package on its path (issue 505 D8, issue 546)."""
+    with tempfile.TemporaryDirectory() as home:
+        share = Path(home) / ".agents/share"
+        share.mkdir(parents=True)
+        (share / "artifact-budget-policy.json").symlink_to(
+            REPO_ROOT / "home/common/agent-skills/artifact-budget-policy.json")
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "home/common/agent-skills/scripts/artifact_budget.py"),
+             "validate-report", "--boundary", "workflow-response", "--input", "-"],
+            input=json.dumps(value), capture_output=True, text=True, timeout=60, check=False,
+            env={**os.environ, "HOME": home, "PYTHONPATH": str(REPO_ROOT / "python")})
+
+
+def normalize_declaration(declaration):
+    """The source `verification_blocker.normalize_declaration` over `declaration` in a child with
+    `PYTHONPATH` set to `python/` (issue 505 D8, issue 546): exit 0 when it accepts it."""
+    return subprocess.run(
+        [sys.executable, "-c", "import json, sys\n"
+         "from agent_tools.verification_blocker import normalize_declaration\n"
+         "normalize_declaration(json.load(sys.stdin))\n"],
+        input=json.dumps(declaration), capture_output=True, text=True, timeout=60,
+        check=False, env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")})
 
 
 def skill_sections(document, *sections):
@@ -3265,7 +3349,7 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
         "home/common/agent-skills/skills/sdd/SKILL.md",
         "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
     )
-    WAIT_FORMS = ("Monitor with an until-condition", "bare `sleep N` call")
+    WAIT_FORMS = ("Monitor with an until-condition", "a background Bash command")
     END_THE_TURN = "a blocker another session owns: end the turn, never poll"
 
     @classmethod
@@ -3297,7 +3381,7 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
             "`sleep <wait_seconds>`",
             "background `sleep <wait_seconds>`; every wait",
             "`until <check>; do sleep 2; done`",
-            "or one short bare `sleep N` call and check in the next.",
+            "Never run `sleep` in the foreground: wait with Monitor",
         ):
             with self.subTest(spare=text):
                 self.assertEqual(self.chained_waits(text), [])
@@ -3330,8 +3414,9 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
 # and kinds the forecast loader reads, and report JSON the validators read. No English phrase.
 PROJECTION_MACHINE_TEXT = {
     WRITING_PLANS: (
-        "## Review feasibility delivery", "## Review feasibility task", "git-range-ownership/v1",
-        "authored-cumulative/v1", "git merge-base HEAD origin/<integration-branch>",
+        "## Review feasibility delivery", "## Review feasibility task",
+        "review-feasibility forecast --plan <root> --base <base> --spec <spec> --input -",
+        "git merge-base HEAD origin/<integration-branch>",
         "review-feasibility gate --plan <root> --base <base> --head <HEAD> --completed-through 0",
         '--save-dir "$(sdd-workspace <root>)"', "`projection`"),
     FROM_ISSUE_DIR / "AUTO.md": (

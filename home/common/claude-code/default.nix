@@ -274,8 +274,9 @@ let
     # The lifecycle helpers workflow-state, artifact-budget, ship-delivery and orchestrate-control
     # are allowed whole, bare and by their ~/.agents/bin path: their only writes are validated
     # ledger transitions under .superpowers/workflows/ (orchestrate-control's through its
-    # workflow-state children), and every lifecycle call is one heredoc-fed command, so each
-    # pipeline segment matches a rule. The verification-observe adapter is allowed the same way:
+    # workflow-state children, plus the verification-observe fetch it makes in process when a
+    # run awaits a verification blocker), and every lifecycle call is one heredoc-fed command, so
+    # each pipeline segment matches a rule. The verification-observe adapter is allowed the same way:
     # its only write is fetching the integration branch into refs/remotes/origin/<branch>.
     permissions = {
       defaultMode = "auto";
