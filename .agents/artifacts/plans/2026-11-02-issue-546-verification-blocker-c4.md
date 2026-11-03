@@ -51,7 +51,7 @@ Task 3 — Owner procedures, ceilings and the lifecycle README — `home/common/
 
 ## Decisions
 
-The plan rests on the spec's D1–D15. Planning appends D16 (the issue-227 growth pin drops `from-issue/SKILL.md`, whose growth the labelled ceilings gate) and D17 (refines D11: the behavioural skill-contract pins run their source validators in children, because the installed tier has no package on its path). Phase-5 review appends D18 (AC2 graded in the order its records exist; every repair case named in Task 3's step-4 block).
+The plan rests on the spec's D1–D15. Planning appends D16 (the issue-227 growth pin drops `from-issue/SKILL.md`, whose growth the labelled ceilings gate) and D17 (refines D11: the behavioural skill-contract pins run their source validators in children, because the installed tier has no package on its path). Phase-5 review appends D18 (AC2 graded in the order its records exist; every repair case named in Task 3's step-4 block). After Task 3, the owner declined the raise label (2026-11-03), which appends D19: no ceiling moves, D8 and D16 are reversed, and Task 3's text is trimmed to fit, in one reviewed fix commit.
 
 ## Standards review provenance
 

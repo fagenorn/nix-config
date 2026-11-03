@@ -1041,22 +1041,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "`deadline`", "`verification`", "(the reaper alone owns `unknown`)",
         )
 
-    def test_the_verification_cause_has_its_own_suspend_template(self):
-        """Issue 546 D5: the second `suspend` template adds only the cause and its stdin flag,
-        and the lifecycle-call rule lists that flag."""
-        suspends = [line.split(" | ")[0].split() for line in self.from_issue.splitlines()
+    def test_the_verification_cause_feeds_the_failure_on_stdin(self):
+        """Issue 546 D5, D18: the one `suspend` template stays; the lifecycle-call rule lists
+        `--verification-input -`, and sdd's declaration route feeds the printed failure there."""
+        suspends = [line for line in self.from_issue.splitlines()
                     if line.startswith("workflow-state suspend ")]
-        self.assertEqual([[word for word in words if word.startswith("--")]
-                          for words in suspends],
-                         [["--repo-root", "--run-id", "--action-id", "--blocked-on"],
-                          ["--repo-root", "--run-id", "--action-id", "--blocked-on",
-                           "--verification-input"]])
-        second = suspends[1]
-        self.assertEqual(second[second.index("--blocked-on"):],
-                         ["--blocked-on", "verification", "--verification-input", "-", "<<'EOF'"])
+        self.assertEqual(len(suspends), 1)
         rule = next(block for block in self.from_issue.split("\n\n")
                     if block.startswith("Every lifecycle call is one command"))
         self.assertIn("`--verification-input -`", rule)
+        review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
+        self.assert_ordered(review, "verification-observe failure", "Exit 0: suspend per from-issue",
+                            "`blocked_on=verification`", "`--verification-input -`")
 
     def test_sdd_states_the_deadline_suspension_order(self):
         # #281 D5, D9: the one paragraph of `### Lifecycle workers` naming
@@ -1090,7 +1086,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         (line,) = [line.strip() for line in review.splitlines()
                    if line.strip().startswith('{"command_id": ')]
         for placeholder, value in (("<id>", "nix-build"), ("<class>", "dependency"),
-                                   ("<absolute worktree>", "/tmp/wt"), ("<name>", "flake-lock"),
+                                   ("<worktree>", "/tmp/wt"), ("<name>", "flake-lock"),
                                    ("<path>", "flake.lock")):
             line = line.replace(f'"{placeholder}"', json.dumps(value))
         declaration = json.loads(line)
@@ -1435,10 +1431,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("workflow-state progress", self.from_issue)
         # Issue 432: the gate and the suspension are literal templates whose identity is
         # the action id alone.
-        templates = {}
-        for line in self.from_issue.splitlines():
-            if line.startswith(("workflow-state progress ", "workflow-state suspend ")):
-                templates.setdefault(line.split()[1], line.split(" | ")[0].split())
+        templates = {line.split()[1]: line.split(" | ")[0].split()
+                     for line in self.from_issue.splitlines()
+                     if line.startswith(("workflow-state progress ", "workflow-state suspend "))}
         self.assertEqual(
             [word for word in templates["progress"] if word.startswith("--")],
             ["--repo-root", "--run-id", "--action-id", "--phase", "--next-needs-context",
@@ -1590,17 +1585,21 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for name in ("expects", *expects):
             self.assertIn(f"`{name}`", observe)
 
-    def test_direct_acquisition_relays_exactly_a_suspended_reply(self):
-        """Issue 546 D6: item 5's members are a `suspended` reply's whole key set, as the
-        source workflow-response validator admits it (issue 544 D16)."""
+    def test_direct_acquisition_relays_a_suspended_reply(self):
+        """Issue 546 D6, D18: item 5 stops as item 4 does and prints the canonical line from
+        members that the source workflow-response validator requires of a `suspended` reply
+        (issue 544 D16), so the reply's shape is the validator's, not restated here."""
         text = normalized(ACQUIRE_DIRECT.read_text(encoding="utf-8"))
         item = text[text.index("**`kind: suspended`**"):]
-        members = re.findall(r"`([a-z_]+)`", item[:item.index(";")])
-        sample = {"interface_version": 2, "kind": "suspended", "run_id": "run-1", "issue": 151,
-                  "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
-                              "action_id": "151:1:1"},
-                  "blocked_on": "verification", "reentry": "/from-issue 151 --auto"}
-        reply = {name: sample.get(name) for name in members}
+        item = item[:item.index("Clear the retained")]
+        self.assertIn("as item 4", item)
+        self.assertIn("`Suspended (blocked_on=<blocked_on>). Resume: <reentry>`", item)
+        members = re.findall(r"<([a-z_]+)>", item)
+        self.assertEqual(members, ["blocked_on", "reentry"])
+        reply = {"interface_version": 2, "kind": "suspended", "run_id": "run-1", "issue": 151,
+                 "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
+                             "action_id": "151:1:1"},
+                 "blocked_on": "verification", "reentry": "/from-issue 151 --auto"}
         done = validate_workflow_response(reply)
         self.assertEqual(done.returncode, 0, done.stderr)
         for name in members:
@@ -3431,8 +3430,6 @@ PROJECTION_MACHINE_TEXT[SDD] = (
     "artifact-budget check --kind review-package")
 PROJECTION_MACHINE_TEXT[FROM_ISSUE_DIR / "delegated-owner.md"] = ("decompose_required",)
 BUDGET_BASE = "8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc"
-# from-issue/SKILL.md left these pins when issue 546 grew it under labelled instruction
-# ceilings, the standing growth gate this base stood in for (issue 546 D16).
 
 
 def assert_no_larger_than_base(test, paths):
@@ -3463,7 +3460,8 @@ class ProjectionCallerContractsTest(unittest.TestCase):
 
     def test_edited_planning_documents_do_not_grow(self):
         assert_no_larger_than_base(self, (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md",
-                                          FROM_ISSUE_DIR / "standards-review.md", PHASE_5_REVIEW_CONTRACT))
+                                          FROM_ISSUE_DIR / "standards-review.md", PHASE_5_REVIEW_CONTRACT,
+                                          FROM_ISSUE_DIR / "SKILL.md"))
 
 
 class ExecutionCallerContractsTest(unittest.TestCase):
@@ -3475,7 +3473,8 @@ class ExecutionCallerContractsTest(unittest.TestCase):
         self.assertIn("review-feasibility confirm --plan <root> --base <base> --input -", phase6)
 
     def test_edited_execution_documents_do_not_grow(self):
-        assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "delegated-owner.md"))
+        assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "SKILL.md",
+                                          FROM_ISSUE_DIR / "delegated-owner.md"))
 
 
 if __name__ == "__main__":

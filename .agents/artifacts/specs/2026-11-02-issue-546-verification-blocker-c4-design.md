@@ -52,14 +52,14 @@ The user needs:
    `verification_refusals` (D3, D4).
 3. **Declaring.** sdd's Final verification classifies a failing declared command before its
    repair and runs `verification-observe failure`. A printed failure goes to from-issue's
-   suspension procedure, which gains the `verification` cause and its `--verification-input -`
-   template. A refusal keeps the repair (D5).
+   suspension procedure, which gains the `verification` cause; final-review feeds the failure
+   to its one template's `--verification-input -` (D19). A refusal keeps the repair (D5).
 4. **Direct re-entry.** acquire-direct answers a `verification` requirement through its
    `expects.build` and relays a `suspended` reply with the canonical line (D6).
-5. **Ceilings and docs.** The three grown skill documents' profiles and the corpus get exactly
-   their new measure. The lifecycle README's `### Verification blockers` subsection states the
+5. **Ceilings and docs.** No instruction ceiling moves: the skill text fits the ceilings at
+   the base (D19, reverses D8). The lifecycle README's `### Verification blockers` subsection states the
    caller protocol, the known limitations and the source-helper rule. `python/README.md`, the
-   module docstring and the allow-list comment state the new write (D4, D8–D10).
+   module docstring and the allow-list comment state the new write (D4, D9, D10).
 
 No ledger schema step and no interface version moves: the step's input, the control request
 and reply, the bootstrap and every direct-owner reply keep their landed shapes (issue 545 D3).
@@ -88,15 +88,14 @@ and reply, the bootstrap and every direct-owner reply keep their landed shapes (
   next` projection's exit 0 and every `Delivery gate:` line (AC2).
 - **Verification.**
   - The focused tests;
-  - `just agent-instruction-budget --raise-label`, which proves the raise is complete and
-    tight;
+  - `just agent-instruction-budget`, with no label: every ceiling holds unraised (D19);
   - `just agent-workflow-tests` and `just build` at the final head.
 
   Tests use temporary ledgers, repositories and `HOME`s. No live ledger or retained attempt
   is read or written, and `just switch` never runs. Source integration (the merge) and host
   activation (the user's `just switch`) are reported separately.
-- **The raise label.** CI's required `Instruction Budget` check stays red until the user
-  applies `instruction-budget-raise`. No agent applies it, and the merge waits for it (D8).
+- **No raise label.** The owner declined `instruction-budget-raise` (2026-11-03), so CI's
+  required `Instruction Budget` check passes on the unraised ceilings (D19).
 
 ## Decisions
 
@@ -224,16 +223,10 @@ without its log path.
 
 - **The cause list.** `verification` joins sdd's `deadline`, in order before the reaper's
   `unknown` parenthesis.
-- **The template.** A second literal template follows the first, for that cause only:
-
-  ```text
-  workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --blocked-on verification --verification-input - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
-  <the failure verification-observe printed, unchanged>
-  EOF
-  ```
-
-  The reply handling (`kind: terminal` at the stall bound, else `kind: suspended` and the
-  canonical `Suspended (blocked_on=<value>)` line) is shared and unchanged.
+- **The template.** The one template stays (D19). final-review's exit-0 route feeds the
+  printed failure to its `--verification-input -` through a quoted heredoc. The reply
+  handling (`kind: terminal` at the stall bound, else `kind: suspended` and the canonical
+  `Suspended (blocked_on=<value>)` line) is shared and unchanged.
 - **The lifecycle-call rule.** Its list of stdin flags gains `--verification-input -`.
 
 The procedure keeps the one home of the `suspend` verb, so the release, reap and reply rules
@@ -249,11 +242,10 @@ In acquire-direct:
   existing builder-refusal sentence (exit 2, empty stdout: fail loudly, report the stderr
   line) is widened to name the adapter's refusal too. The retain-and-resend rule is unchanged, and so is the
   resent observation's validity: a resolution commits only with the resume (issue 545 D7).
-- **Item 5, `kind: suspended`.** It requires exactly `interface_version`, `kind`, `run_id`,
-  `issue`, `custody`, `blocked_on` and `reentry`. It prints `Suspended
-  (blocked_on=<blocked_on>). Resume: <reentry>` as the final output and stops before Phase 1,
-  installing no waiter. It sits after item 4 (`kind: terminal`).
-- **The clearing rule** names `suspended` beside `owner`, `delivery_remainder` and `terminal`.
+- **Item 5, `kind: suspended`.** As item 4, it stops before Phase 1 and installs no waiter,
+  but prints `Suspended (blocked_on=<blocked_on>). Resume: <reentry>` as the final output;
+  the reply's key set is the wire validator's (D19). It sits after item 4 (`kind: terminal`).
+- **The clearing rule** clears on any reply but `observe` (D19).
 
 The adapter's command line is not restated, because the `expects` catalogue is its one home
 (issue 545 D10).
@@ -269,10 +261,11 @@ The adapter's command line is not restated, because the `expects` catalogue is i
   generically.
 - **sdd `SKILL.md`.** Final verification lives in `final-review.md`.
 
-### Instruction ceilings (D8)
+### Instruction ceilings (D19, reverses D8)
 
-Instruction text grows only in from-issue `SKILL.md`, `acquire-direct.md` and sdd
-`final-review.md`. These grow measurably:
+The owner declined the raise label (2026-11-03, on issue 546 and PR 562), so this child
+moves no ceiling and `instruction-load.json` stays as on the base. The headroom at the base
+was:
 
 | Profile | Hosts | Grown documents | Headroom at the base |
 |---|---|---|---|
@@ -281,15 +274,19 @@ Instruction text grows only in from-issue `SKILL.md`, `acquire-direct.md` and sd
 | `orchestrated-issue-owner` | claude | `SKILL.md`, `final-review.md` | 588 bytes |
 | corpus | — | all three | 5 bytes |
 
-- **The raise.** Each breached hot ceiling, and the corpus ceiling, is raised to exactly its
-  measure at the final head. Each raised profile's `note` gains one sentence naming #228
-  (issue 546) and what grew in it. The corpus ceiling has no note. A ceiling that is not
-  breached does not move, and the description ceiling does not move.
-- **Who applies the label.** `just agent-instruction-budget --raise-label` must pass. Applying
-  the label is the user's alone (CLAUDE.md), so the merge waits for it.
-- **What this child adds.** The added text is procedure that a model must emit reliably: two
-  literal templates, a closed cause value, a closed reply key set and one clearing word.
-  Explanation stays in the README.
+- **What fits.** The procedure keeps one `suspend` template: from-issue adds the cause and
+  lists `--verification-input -` in its lifecycle-call rule, and final-review's exit-0 route
+  names the flag. acquire-direct's item 5 stops as item 4 does and prints the canonical line;
+  the reply's key set is the wire validator's, which its invocation already pipes through.
+- **What pays for it.** Text that restates another home: the `--result-file` legacy note
+  and the bare-or-full helper naming (from-issue's Lifecycle identity paragraph names the
+  full path), acquire-direct's dispatcher-envelope routing (from-issue's route list),
+  its populate-and-never-send clauses (its retain-and-resend rule) and its `kind: owner`
+  shape check (the validator), final-review's restated register and release commands
+  (sdd's `### Lifecycle workers`), and two explanatory clauses in final-review.
+- **Net.** Against the base, from-issue `SKILL.md` shrinks and stays under the issue-227 pin
+  (D16 reverts), `acquire-direct.md` shrinks, `final-review.md` grows, and every hot ceiling
+  and the corpus ceiling hold. Explanation stays in the README.
 
 ### Lifecycle README (D9)
 
@@ -387,13 +384,13 @@ persisted ledgers, and the argv of logged external effects, as the world already
   - **Existing tests.** They keep passing without an `origin`, because a step with no
     requirement fetches nothing.
 - **Skill contracts** (agent-helpers rule 6), in `test_workflow_skill_contracts.py`:
-  - from-issue's two `suspend` templates' flags, and the second's `--blocked-on
-    verification`. The existing verb-keyed template map keeps the first line;
+  - from-issue keeps one `suspend` template, and final-review's exit-0 route feeds the
+    printed failure to `--verification-input -` (D19);
   - the cause-list order with `verification` before the reaper's parenthesis;
   - the lifecycle-call rule's `--verification-input -`;
-  - acquire-direct's item-5 key set, behaviourally: a `suspended` reply with exactly those
-    members validates through the source wire validator in process (issue 544 D16). Item 5
-    is ordered after `kind: terminal`;
+  - acquire-direct's item 5, behaviourally: the members its canonical line prints are
+    required by the source wire validator (issue 544 D16, D19). Item 5 is ordered after
+    `kind: terminal`;
   - final-review's declaration, behaviourally: its JSON, with each placeholder filled by a
     valid value, passes `normalize_declaration`.
 - **Shell examples.** `COMMAND_VOCABULARY` in `test_shell_example_contracts.py` gains
@@ -420,8 +417,8 @@ persisted ledgers, and the argv of logged external effects, as the world already
   reuse, and verification blockers on delivery remainders.
 - An abandonment route or human override for a parked attempt, and a ledger marker naming the
   helper that wrote a run.
-- Live ledgers, retained attempts, host activation (`just switch`) and applying the
-  `instruction-budget-raise` label.
+- Live ledgers, retained attempts, host activation (`just switch`) and any instruction
+  ceiling raise (D19).
 
 ## Decision ledger
 
@@ -445,3 +442,4 @@ persisted ledgers, and the argv of logged external effects, as the world already
 | D16 | Plan: the issue-227 growth pin (`assert_no_larger_than_base`, base `8d0bbc25`) drops `from-issue/SKILL.md` from both of its lists, because D5's second template and cause grow it about 414 bytes against 98 bytes of pinned headroom; every other pinned document keeps its pin. | Issue 227 D14 (the pin stood in for a raise that delivery could not get); #155 D10 (the ceilings are the standing growth gate, raised here under the user's label per D8); measured at the base: 30513 bytes against the pinned 30611. | Funding the growth by cutting unrelated `SKILL.md` text, which D8 rules out and many pins read. Moving the second template into `final-review.md`, which splits the `suspend` verb's one home (reverses D5). Re-pinning a byte count, a second home for one budget. |
 | D17 | Plan, refines D11: the two behavioural skill-contract pins run their source validators in a child with `PYTHONPATH=python/`: item 5's reply through the source `artifact-budget validate-report --boundary workflow-response` under a temporary `HOME` holding the source policy, the declaration through `verification_blocker.normalize_declaration`; each also shows a near miss refused. | `agent-installed-skill-tests` runs `test_workflow_skill_contracts.py` with no package on its path (issue 505 D8, its `skill_sections` helper); `test_workflow_state` and `_delivery_model_fixtures` import `agent_tools` when loaded. | An in-process import, which breaks that module's import in the installed tier. Reading `_wire.py`'s member set by AST, which pins a constant rather than the validator's verdict. |
 | D18 | Phase-5 review (Codex B1, S1): AC2 becomes `code (classified)` and is graded in the order its records exist. Its final-head clause rides the Declared verification line, which Final verification runs after the acceptance record's commit; its process clauses are cited from the SDD workspace `progress.md` (each task's `Task N: complete` and `Delivery gate:` lines, which `sdd-gate next` writes only after its projection exits 0) and the separately ledgered final verdicts, which the controller confirms before writing the `Verdict`. D5's step-4 block also names every repair case: no lifecycle identity, no failing command (a `record` exit 3 or helper exit 2 alone), a change-caused failure, or a refusal; it declares only when at least one command failed and all failing ones qualify. | final-review.md commits the acceptance record before Final verification, and an `evidence` `met` needs an existing measured row (conformance-reviewer-prompt.md, `evidence`); the `code` rule grades a Declared-verification check `in final verification`. D5's spec text excludes `record` exit 3 and helper exit 2 from classification, which the inserted block left implicit. | Keeping AC2 `evidence` with a fixer filling its row after a forced first-pass `unverified`, a fix wave by construction. Moving Final verification before the record, which changes sdd's procedure outside this child's scope. |
+| D19 | Owner decision (2026-11-03): no `instruction-budget-raise` label, so no ceiling moves; reverses D8 and D16, and narrows D5, D6 and D18. from-issue keeps one `suspend` template (the cause joins its list, the lifecycle-call rule lists `--verification-input -`) and final-review's exit-0 route feeds the printed failure to that flag. acquire-direct's item 5 stops as item 4 does and prints the canonical line, the key set left to the wire validator; its `verification` answer runs `expects.build` on the requirement less `expects`. final-review's step-4 block keeps D14's rule and ends "Otherwise" in place of D18's enumeration, which "Otherwise" covers. The growth is paid for by cutting text another home already states (spec § Instruction ceilings); `from-issue/SKILL.md` returns to the issue-227 pin. | The owner-decision comments on issue 546 and PR 562 (trim, move detail to the README homes, or drop prose that duplicates helper output; D8 withdrawn); CLAUDE.md (only the user applies the label); `just agent-instruction-budget` passes with no label. | Raising any ceiling, which the owner declined. Moving the declaration or cause list into the README, which owners never read (D8's rejection stands). Cutting unrelated procedure that has no other home. |
