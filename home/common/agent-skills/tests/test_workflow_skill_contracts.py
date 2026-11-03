@@ -3414,8 +3414,9 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
 # and kinds the forecast loader reads, and report JSON the validators read. No English phrase.
 PROJECTION_MACHINE_TEXT = {
     WRITING_PLANS: (
-        "## Review feasibility delivery", "## Review feasibility task", "git-range-ownership/v1",
-        "authored-cumulative/v1", "git merge-base HEAD origin/<integration-branch>",
+        "## Review feasibility delivery", "## Review feasibility task",
+        "review-feasibility forecast --plan <root> --base <base> --spec <spec> --input -",
+        "git merge-base HEAD origin/<integration-branch>",
         "review-feasibility gate --plan <root> --base <base> --head <HEAD> --completed-through 0",
         '--save-dir "$(sdd-workspace <root>)"', "`projection`"),
     FROM_ISSUE_DIR / "AUTO.md": (

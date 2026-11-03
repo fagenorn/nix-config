@@ -46,7 +46,7 @@ list from the Task index.
 
 ### Cumulative delivery gate
 
-Pin `DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD origin/<integration-branch>` (integration branch from the project bindings), never an advanced local branch. `sdd-gate next` gates every dispatch on the cumulative package, then the projection of the remaining tasks (steps and ledger lines: nix-config's `python/README.md` § `sdd-gate`). A refusal cannot advance: preserve completed work and name an independently deliverable split.
+Pin `DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD origin/<integration-branch>` (integration branch from the project bindings), never an advanced local branch. `sdd-gate next` gates every dispatch on the cumulative package, then the projection of the remaining tasks. A refusal cannot advance: preserve completed work and name an independently deliverable split.
 
 ### Review-package gate
 
