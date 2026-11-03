@@ -115,3 +115,9 @@ Argus issue 5 is OPEN, "CI: unit-test step hangs on GitHub runners (workflow has
   - `nodocom` at `/Users/anis/Projects/nodocom`, branch_override `dev` (default `main`), reason `default_contract_unresolved`
 - Compiled guard policy: derivation `{platform_version 1.0.0, registry_digest sha256:959f670a9ea7ad0890460588d1886b9926c4cda572fb580586335fef8da80739, schema_version 2}`; derived repositories `elevenyellow/jarbird`, `elevenyellow/nodocom`, `fagenorn/arcwave`, `fagenorn/nix-config` (no Argus).
 - `~/Applications/ArgusPing.app`: absent (expected per spec § 2; nothing removed).
+
+## Task 2 — Switch gate
+Switch gate: commit ed33215598521ba745f6262233e0c2c98ef1479f
+The switch needs owner presence for sudo (Touch ID). From a clean checkout of ed33215598521ba745f6262233e0c2c98ef1479f of
+/Users/anis/tmp/nix-config on mbp, run `just switch`. The run then resumes at Task 2 Step 2,
+which uses commit ed33215598521ba745f6262233e0c2c98ef1479f and skips the switch once /run/current-system is that build.
