@@ -68,7 +68,6 @@ def python_tree_pointers(snapshot):
                          if PYTHON_TREE.search(line))
     return sorted(found)
 
-
 def dict_snapshot(files):
     return skill_lint.Snapshot(
         read=files.get,
