@@ -150,5 +150,5 @@ Expected: exit 0. Then stage only the record and run `launch-commit --repo-root 
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":4,"records":[{"bounds":[{"added_lines":14,"boundary":"all","deleted_lines":0,"record_bytes":12288,"support":{"covers":["r4a"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r4a","last_task":4,"owner":4,"path":".agents/artifacts/plans/2026-11-03-issue-569-rename-records.acceptance.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"53902d5d4149c2cd987d383de630ae9229a0532a","head":"bff422fbe3c7c224f5d469a9e26001d3df779fda"}],"commit_subject_bytes":[64,64],"id":4,"records":[{"bounds":[{"added_lines":14,"boundary":"all","deleted_lines":0,"record_bytes":12288,"support":{"covers":["r4a"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r4a","last_task":4,"owner":4,"path":".agents/artifacts/plans/2026-11-03-issue-569-rename-records.acceptance.md"}]}}
 ```
