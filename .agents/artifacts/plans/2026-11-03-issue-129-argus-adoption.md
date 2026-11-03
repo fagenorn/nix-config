@@ -1,8 +1,5 @@
 # Argus Adoption Implementation Plan
 
-> **For agentic workers:** execute this plan with the `sdd` skill — one implementer
-> per task, reviewed between tasks. Steps use `- [ ]` checkboxes.
-
 **Goal:** Adopt Argus (`fagenorn/argus`) through `adopt-project plan`, `apply` and `verify --register`, with every fact declared in Argus's own contract, and prove issue 129's nine criteria on host `mbp` and the forge, changing no nix-config product file.
 
 **Architecture:** Eight operational tasks in the spec's section 4 order. Each runs installed commands against live host and forge state and appends one evidence section to `E` (D18); Task 8 writes the acceptance record. Two human gates: the Touch ID switch in Task 2 if it cannot complete, and the owner's open-and-merge of the bootstrap PR between Tasks 5 and 6 (D8, D16).
