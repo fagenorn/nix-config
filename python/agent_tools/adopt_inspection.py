@@ -943,9 +943,9 @@ def evidence_records_at(root: Path, revision: str) -> list[str]:
 def is_evidence_record_path(relative: str) -> bool:
     """Whether `relative` is one of the candidates D34 counts.
 
-    The one predicate both sides share: `verify` counts exactly these paths,
-    and a re-adoption plan supersedes exactly these, so the two can never
-    disagree about what "the committed evidence record" is.
+    The path predicate both sides share. `verify` narrows these paths to the
+    ones that parse as an adoption record (#586); a re-adoption plan still
+    supersedes every one of them.
     """
     prefix = EVIDENCE_RECORD_DIR + "/"
     return (relative.startswith(prefix) and relative.endswith(".json")
