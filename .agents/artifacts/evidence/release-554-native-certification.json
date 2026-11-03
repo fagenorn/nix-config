@@ -1,0 +1,112 @@
+{
+  "actor": "fagenorn",
+  "finished_at": "2026-11-03T15:32:34Z",
+  "guard": "recording-shim",
+  "implementation": {
+    "commit": "4fad5d3f57a2abbcbf495bf9be15ae0c1c278e7d",
+    "pr_merge_descriptor_digest": "sha256:810fe4e4cc16c9e71b28f4842a22165ae81edc21100ac0c77173aeb7e23b70f8"
+  },
+  "issue": 554,
+  "protection": {
+    "enforce_admins": true,
+    "required_contexts": [
+      "release-merge-certification"
+    ],
+    "strict": true
+  },
+  "repository": "fagenorn/release-merge-sandbox",
+  "result": "passed",
+  "rows": [
+    {
+      "after": {
+        "base_tip": "f0c3f5caa6074e91c84d476dcfb6a3a1a76edc09",
+        "merge_commit": "f0c3f5caa6074e91c84d476dcfb6a3a1a76edc09",
+        "parents": [
+          "864c18a8a539163270b2f17bf6142475c14c076c",
+          "481ad16490e87015029b93bc1fedaf86efb59531"
+        ],
+        "state": "MERGED"
+      },
+      "attempts": [
+        {
+          "class": null,
+          "detail": "https://github.com/fagenorn/release-merge-sandbox/pull/9",
+          "outcome": "accepted",
+          "via": "adapter"
+        },
+        {
+          "class": "unclassified",
+          "detail": "pr_not_open: MERGED",
+          "outcome": "refused",
+          "via": "adapter"
+        }
+      ],
+      "bound": {
+        "base_tip": "864c18a8a539163270b2f17bf6142475c14c076c",
+        "head": "481ad16490e87015029b93bc1fedaf86efb59531"
+      },
+      "id": "a",
+      "passed": true,
+      "pr": 9,
+      "verdict": "passed"
+    },
+    {
+      "after": {
+        "base_tip": "e85eaa31119fe8b94bffaf734a09401d84ab1646",
+        "merge_commit": null,
+        "parents": null,
+        "state": "OPEN"
+      },
+      "attempts": [
+        {
+          "class": "merge_condition",
+          "detail": "X Pull request fagenorn/release-merge-sandbox#10 is not mergeable: the head branch is not up to date with the base branch.",
+          "outcome": "refused",
+          "via": "argv"
+        },
+        {
+          "class": "unclassified",
+          "detail": "UNPROCESSABLE: Required status check \"release-merge-certification\" is expected.",
+          "outcome": "refused",
+          "via": "graphql"
+        }
+      ],
+      "bound": {
+        "base_tip": "f0c3f5caa6074e91c84d476dcfb6a3a1a76edc09",
+        "head": "b421faf33fe0967414d1f3bc06c5be6ecef8b229"
+      },
+      "id": "b",
+      "mergeable_state": "behind",
+      "passed": true,
+      "pr": 10,
+      "verdict": "passed"
+    },
+    {
+      "after": {
+        "base_tip": "e85eaa31119fe8b94bffaf734a09401d84ab1646",
+        "merge_commit": null,
+        "parents": null,
+        "state": "OPEN"
+      },
+      "attempts": [
+        {
+          "class": "merge_condition",
+          "detail": "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)",
+          "outcome": "refused",
+          "via": "argv"
+        }
+      ],
+      "bound": {
+        "base_tip": "e85eaa31119fe8b94bffaf734a09401d84ab1646",
+        "head": "a94f6c70cb41f324bd5b94a4b8d4ca6800df6bd1"
+      },
+      "id": "c",
+      "passed": true,
+      "pr": 12,
+      "verdict": "passed"
+    }
+  ],
+  "schema": "release-merge-certification/v1",
+  "spelling": "gh pr merge 9 --repo fagenorn/release-merge-sandbox --merge --match-head-commit 481ad16490e87015029b93bc1fedaf86efb59531",
+  "started_at": "2026-11-03T15:30:58Z"
+}
