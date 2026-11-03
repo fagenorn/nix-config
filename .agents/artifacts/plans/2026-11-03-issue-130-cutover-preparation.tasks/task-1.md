@@ -130,5 +130,5 @@ Expected: verify's `result` and sorted failed ids equal Step 1's, and no failed 
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64,64],"id":1,"records":[{"bounds":[{"added_lines":80,"boundary":"all","deleted_lines":0,"record_bytes":12800,"support":{"covers":["r1-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r1-1","last_task":6,"owner":1,"path":".agents/artifacts/evidence/cutover-130-checklist.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"cfd3ad5b7e64f999b372bae34b14e4b8a80c03d8","head":"4c44bf23cc53e0c5ae03da13c82542c39ab456dd"}],"commit_subject_bytes":[64,64,64],"id":1,"records":[{"bounds":[{"added_lines":80,"boundary":"all","deleted_lines":0,"record_bytes":12800,"support":{"covers":["r1-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"r1-1","last_task":6,"owner":1,"path":".agents/artifacts/evidence/cutover-130-checklist.md"}]}}
 ```
