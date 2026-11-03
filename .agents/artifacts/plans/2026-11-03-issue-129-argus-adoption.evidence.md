@@ -121,3 +121,21 @@ Switch gate: commit ed33215598521ba745f6262233e0c2c98ef1479f
 The switch needs owner presence for sudo (Touch ID). From a clean checkout of ed33215598521ba745f6262233e0c2c98ef1479f of
 /Users/anis/tmp/nix-config on mbp, run `just switch`. The run then resumes at Task 2 Step 2,
 which uses commit ed33215598521ba745f6262233e0c2c98ef1479f and skips the switch once /run/current-system is that build.
+
+## Task 2 — Switch and installed/source conformance
+Switch commit: 5dfe65efbae09024aaf259d5a013d5658eeec0a0
+System: /nix/store/h6d51wj2r5x9wp52my07f3rdpia9rx72-darwin-system-25.11.ebec37a
+Guard wrapper: /nix/store/6w6drg3l4z7k9ldk9hffmlm4cvnifynp-claude-bash-lifecycle-guard/bin/claude-bash-lifecycle-guard
+Platform version: 1.0.0
+Switch: already installed
+
+The owner ran `just switch` (generation 308, issue 129 comment https://github.com/fagenorn/nix-config/issues/129#issuecomment-6599895106) from `main` at `5dfe65ef`, which contains `ed332155`. Per spec ledger row D22 (refines D20), `C` is that installed commit and not the gate block's `ed332155`; `merge-base --is-ancestor ed332155 C` exits 0, and the gate block above is kept as history. The scratch build of `C` is `R`, equal to `/run/current-system`, so no switch ran here.
+
+| Check | Result | Time |
+|---|---|---|
+| clean tree at `C` (scratch checkout, HEAD = `C`) | pass | 2026-11-03T09:27:11Z |
+| `/run/current-system` = `R` | pass | 2026-11-03T09:27:11Z |
+| hook names `G` from `R`'s closure (one guard package, executable) | pass | 2026-11-03T09:27:11Z |
+| `test_installed_policy_surface_matches_source_contract` | OK (1 test) | 2026-11-03T09:27:16Z |
+
+Compiled guard policy derivation: `{"platform_version": "1.0.0", "registry_digest": "sha256:959f670a9ea7ad0890460588d1886b9926c4cda572fb580586335fef8da80739", "schema_version": 3}`
