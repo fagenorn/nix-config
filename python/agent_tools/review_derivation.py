@@ -30,7 +30,7 @@ import shutil
 import tempfile
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256, GenerationError, _run_git
+from agent_tools.review_actual import PACKING_POLICY_V1_SHA256, RECORD_POLICY_V1_SHA256, GenerationError, _run_git
 from agent_tools.review_budget import BudgetAuthority
 from agent_tools.review_forecast import canonical_bytes, raw_digest
 from agent_tools.review_issue100 import Issue100Pins, derive_100, expand_100, verify_archive
@@ -139,7 +139,7 @@ def derive_bundle(inputs: DeriveInputs, *, task7_pins: Task7Pins, issue121_pins:
     components = {
         "tool": {"commit": closure["commit"], "files_sha256": telemetry_digest(closure["files"]),
                  "artifact_policy_sha256": authority.policy_sha256,
-                 "packing_policy_sha256": PACKING_POLICY_SHA256, "record_policy_sha256": RECORD_POLICY_SHA256},
+                 "packing_policy_sha256": PACKING_POLICY_V1_SHA256, "record_policy_sha256": RECORD_POLICY_V1_SHA256},
         "issue_121": {"base": issue121_pins.base, "head": issue121_pins.head, "tree": task7_pins.prerequisite_tree,
                       "signer_sha256": raw_digest(issue121_pins.allowed_signer)},
         "issue_100": {name: getattr(issue100_pins, name) for name in ("base", "head", "live", "parent_edges_sha256")},

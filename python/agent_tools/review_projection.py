@@ -5,10 +5,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 import subprocess
 import tempfile
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import (PACKING_POLICY_SHA256, CandidateInput, FutureCommit, _run_git,
+from agent_tools.review_actual import (PACKING_POLICY_SHA256, RECORD_POLICY, CandidateInput, FutureCommit, _run_git,
     actual_inputs, actual_inputs_from_trees, commit_subject, ef_designer_evidence_bound, ef_designer_path,
     git_diff, select_candidate)
 from agent_tools.review_budget import BudgetAuthority, describe
@@ -16,7 +16,7 @@ from agent_tools.review_forecast import (ForecastError, ForecastPlan, ancestor, 
     closed, commit_range, digest, edge_facts, full_commit, identity, integer, load_plan,
     name, path_name, strict_json, tree_entry, history_commit, history_commits, _ownership)
 from agent_tools.review_git import HistoryError, original_edge, _original_walk
-from agent_tools.review_pack import ReviewEvidenceSize, ReviewRecordSize, canonical_manifest
+from agent_tools.review_pack import ReviewEvidenceSize, ReviewRecord, ReviewRecordSize, canonical_manifest
 
 
 class ReconstructionUnavailable(ForecastError):
@@ -49,7 +49,8 @@ class Reconstruction:
 
 
 def reconstruct_owned(repo: Path, prerequisite_commit: str,
-                      owned_commits: Sequence[str]) -> Reconstruction:
+                      owned_commits: Sequence[str], *,
+                      record_policy: Mapping = RECORD_POLICY) -> Reconstruction:
     """Apply verified owned edges to a private index; source objects remain read-only."""
     prerequisite = history_commit(repo, prerequisite_commit)
     requested = tuple(owned_commits)
@@ -68,7 +69,7 @@ def reconstruct_owned(repo: Path, prerequisite_commit: str,
     except HistoryError as exc:
         raise ForecastError("invalid original reconstruction history") from exc
     originals = dict(zip(ordered, history_commits(repo, ordered)))
-    facts = {commit: tuple(edge_facts(repo, parent, commit, n)
+    facts = {commit: tuple(edge_facts(repo, parent, commit, n, record_policy=record_policy)
              for n, parent in enumerate(originals[commit].parents, 1)) for commit in ordered}
     scratch = tempfile.TemporaryDirectory(prefix="review-owned-")
     target = Path(scratch.name)
@@ -102,7 +103,8 @@ def reconstruct_owned(repo: Path, prerequisite_commit: str,
                 if any(tree_entry(target, before_tree, path) != tree_entry(repo, parent_tree, path)
                        for path in paths):
                     raise ReconstructionUnavailable("whole_path_preimage_unproved", commit)
-                patch = git_diff(repo, parent_tree, originals[commit].tree, "--binary", "-U10")
+                patch = git_diff(repo, parent_tree, originals[commit].tree, "--binary", "-U10",
+                                 record_policy=record_policy)
                 if patch:
                     applied = subprocess.run(["git", "-C", str(target), "apply", "--cached",
                         "--binary", "--whitespace=nowarn", "-"], input=patch, capture_output=True)
@@ -138,30 +140,68 @@ def _included(plan: ForecastPlan, boundary: dict) -> tuple[dict, ...]:
 def _completed_effects(plan: ForecastPlan, records: tuple[dict, ...], boundary: dict,
                        completed: int, actual: CandidateInput, candidate: tuple[Path, str]) -> None:
     paths = {r.path for r in actual.records}
-    for record in records:
-        if record["last_task"] > completed:
-            continue
-        effects = [r for edge in plan.ownership.edges
-                   if plan.ownership.owners[edge["commit"]] == record["owner"]
-                   and (record["owner"] or boundary["id"] in plan.ownership.process_memberships[edge["commit"]])
-                   for r in edge["records"] if r["path"] == record["path"] or r["old_path"] == record["path"]]
+    finished = [r for r in records if r["last_task"] <= completed]
+
+    def owned(record: dict) -> list[dict]:
+        return [r for edge in plan.ownership.edges
+                if plan.ownership.owners[edge["commit"]] == record["owner"]
+                and (record["owner"] or boundary["id"] in plan.ownership.process_memberships[edge["commit"]])
+                for r in edge["records"]]
+
+    # A rename consumes its old path once it completes, or earlier once its owner's move is
+    # observed and the old path has left both the package and the candidate's tree, even while
+    # later tasks still edit the destination (issue 569).
+    consumed = {r["old_path"] for r in records if r["change"] == "rename" and (
+        r["last_task"] <= completed
+        or (r["old_path"] not in paths and tree_entry(*candidate, r["old_path"]) is None
+            and any(e["operation"].startswith("R") and e["old_path"] == r["old_path"] and e["path"] == r["path"]
+                    for e in owned(r))))}
+    # A forecast delete that Git pairs into a rename consumes its path the same way, so an earlier
+    # contribution to that path needs no record of its own (issue 569 D23). Its owner's commits may
+    # show the move itself or a plain deletion when the delete and the add land in separate commits.
+    consumed |= {r["path"] for r in records if r["change"] == "delete" and r["path"] not in paths
+                 and tree_entry(*candidate, r["path"]) is None
+                 and any(e["operation"] == "D" and e["path"] == r["path"]
+                         or e["operation"].startswith("R") and e["old_path"] == r["path"] for e in owned(r))}
+    for record in finished:
+        effects = [r for r in owned(record) if r["path"] == record["path"] or r["old_path"] == record["path"]]
         if not effects:
             raise ForecastError("completed contribution has no owned actual effect")
+        # A completed rename consumes its old path unless an actual record still holds it (issue 569).
+        if (record["change"] == "rename" and record["old_path"] not in paths
+                and tree_entry(*candidate, record["old_path"]) is not None):
+            raise ForecastError("completed rename did not consume its old path")
         if record["path"] not in paths:
-            if record["change"] != "delete" or not any(r["operation"] == "D" for r in effects):
+            removed = record["change"] == "delete" and any(
+                r["operation"] == "D" or (r["operation"].startswith("R") and r["old_path"] == record["path"])
+                for r in effects)
+            if not (removed or record["path"] in consumed):
                 raise ForecastError("completed contribution has no final actual effect")
             # Absence is proven in the candidate's own tree, never the full delivery head.
             if tree_entry(*candidate, record["path"]) is not None:
                 raise ForecastError("completed deletion is not proven absent")
 
 
+def _rename_section(record: object) -> bool:
+    """Whether an actual record is Git's rename section, which actual production never compacts (issue 569)."""
+    if not isinstance(record, ReviewRecord) or record.generated_evidence is not None:
+        return False
+    for line in record.payload.splitlines():
+        if line.startswith((b"@@", b"GIT binary patch", b"Binary files ")):
+            return False
+        if line.startswith(b"rename from "):
+            return True
+    return False
+
+
 def _planned_record(path: str, size: int, member_max_bytes: int) -> ReviewRecordSize | ReviewEvidenceSize:
-    """Project one unfinished path as the record actual production would emit for it.
+    """Project one unfinished path that is not a rename's new path as the record actual production would emit.
 
     An EF Core migration designer whose whole record exceeds the member limit is
     compacted by actual production (review_actual._ef_designer_evidence), so it is
     projected as a worst-case placeholder of that evidence, not as its whole diff.
-    Every other path, generated or not, keeps its entire ordinary record.
+    Every other path, generated or not, keeps its entire ordinary record. A rename's
+    new path never comes here: its record is never compacted (issue 569 D5).
     """
     if size > member_max_bytes and ef_designer_path(path):
         evidence = ef_designer_evidence_bound(path, size)
@@ -178,6 +218,10 @@ def _project_input(plan: ForecastPlan, boundary: dict, completed: int,
     latest = {}
     for record in records:
         latest[record["path"]] = record
+    # A rename record never takes generated evidence (issue 569 D5), so a forecast rename's new path
+    # and a path whose actual record is already Git's rename section keep their whole record.
+    renamed = ({record["path"] for record in records if record["change"] == "rename"}
+               | {record.path for record in actual.records if _rename_section(record)})
     projected = {record.path: record for record in actual.records}
     future_lines = {"insertions": 0, "deletions": 0}
     changed = False
@@ -188,13 +232,15 @@ def _project_input(plan: ForecastPlan, boundary: dict, completed: int,
         current = projected.get(path)
         size = bound["record_bytes"]
         # An unfinished effect needs its entire ordinary record, even on a generated
-        # path, except an oversized EF designer, which actual production always tries
-        # to compact; _planned_record projects that as bounded evidence. The bound
-        # holds while the designer is well formed and its final diff still exceeds the
-        # member limit; otherwise the actual gate measures the real record (README).
+        # path, except an oversized EF designer that is not a rename's new path, which
+        # actual production always tries to compact; _planned_record projects that as
+        # bounded evidence. The bound holds while the designer is well formed and its
+        # final diff still exceeds the member limit; otherwise the actual gate measures
+        # the real record (README).
         if current is None or size > len(current.payload) or current.generated_evidence is not None:
             size = max(size, current.source_bytes if current is not None else 0)
-            projected[path] = _planned_record(path, size, member_max_bytes)
+            projected[path] = (ReviewRecordSize(path, size) if path in renamed
+                               else _planned_record(path, size, member_max_bytes))
             changed = True
         observed = {"insertions": 0, "deletions": 0}
         in_hunk = False
@@ -302,7 +348,7 @@ def project(repo: Path, plan: Path, base: str, head: str, completed_through: int
         raise ForecastError("completed-through exceeds complete task set")
     for task in forecast.tasks:
         if task["id"] > completed_through and not task["commit_subject_bytes"] and any(
-                record["change"] in {"add", "modify"}
+                record["change"] in {"add", "modify", "rename"}
                 and tree_entry(repo, head, record["path"]) is None for record in task["records"]):
             raise ForecastError("future task content lacks a commit subject forecast")
     package_name = _package_name(package_name or f"review-{base[:7]}..{head[:7]}.json")

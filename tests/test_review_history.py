@@ -196,7 +196,7 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
     def test_rehashed_original_edge_mutation_is_invalid_at_prerequisite_boundary(self):
         from dataclasses import replace
         from agent_tools.canonical import telemetry_digest
-        from agent_tools.review_actual import git_diff, _split_diff
+        from agent_tools.review_actual import git_diff, record_operation, _split_diff
         from agent_tools.review_forecast import tree_entry
         from agent_tools.review_git import HistoryError
         first, second = self.seed_owned()
@@ -227,10 +227,9 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
             self.assertEqual(names.pop(), b'')
             facts = []
             while names:
-                operation = names.pop(0).decode('ascii')
+                operation, count = record_operation(names.pop(0))
                 old = names.pop(0).decode('utf-8')
-                new = names.pop(0).decode('utf-8') if operation == 'R100' else old
-                self.assertIn(operation, ('A', 'M', 'D', 'T', 'R100'))
+                new = names.pop(0).decode('utf-8') if count == 2 else old
                 facts.append(dict(operation=operation, path=new, old_path=old,
                     before=tree_entry(self.repo, self.base, old),
                     after=tree_entry(self.repo, first, new)))

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import Callable
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import (RECORD_POLICY, RECORD_POLICY_SHA256, GenerationError, _split_diff,
+from agent_tools.review_actual import (RECORD_POLICY_V1, RECORD_POLICY_V1_SHA256, GenerationError, _split_diff,
                                        actual_inputs_from_trees, record_git)
 from agent_tools.review_expansion import Budget
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, edge_facts, read_regular, strict_json,
@@ -118,7 +118,7 @@ ISSUE_100_PINS = Issue100Pins(
     (".github/workflows/ci.yaml", "CLAUDE.md", "justfile", "tests/test_branch_protection.py"), CRITERIA, RECIPE,
     Domain(HISTORICAL_DOMAIN, _historical_policy(RECIPE), 1005707, 115,
            "3869e4bf81caa1374f7a49591ec4551aa7de56cdec37468bb1e62293662492bc"),
-    Domain(RECORD_POLICY["kind"], RECORD_POLICY_SHA256, 1012913, 115,
+    Domain(RECORD_POLICY_V1["kind"], RECORD_POLICY_V1_SHA256, 1012913, 115,
            "5c6c4fbe291994ee9d08e6ebf45f6369e6a8b3db4f96908989e2a152ca3ec9d4"),
     {"commits": 82, "parent_edges": 91, "merge_edges": 9, "edge_records": 543, "contributions": 115,
      "historical_process": 8, "integrated": 38, "candidate": 69, "candidate_ordinary": 65,
@@ -201,7 +201,7 @@ def _checked(pins: Issue100Pins) -> Issue100Pins:
                      for d in domains)
              and _same([_policy(d) for d in domains], [
                  {"domain": HISTORICAL_DOMAIN, "policy_sha256": _historical_policy(p.recipe)},
-                 {"domain": RECORD_POLICY["kind"], "policy_sha256": RECORD_POLICY_SHA256}])
+                 {"domain": RECORD_POLICY_V1["kind"], "policy_sha256": RECORD_POLICY_V1_SHA256}])
              and isinstance(p.expected_counts, dict) and set(p.expected_counts) == set(ISSUE_100_PINS.expected_counts)
              and all(_count(v) for v in p.expected_counts.values())
              and _match("sha256:[0-9a-f]{64}", p.parent_edges_sha256), bad)
@@ -292,7 +292,8 @@ def fresh_records(issue_repo: Path, pins: Issue100Pins, limits) -> tuple[dict, .
     with _authenticated():
         base, head = (c.tree for c in original_commits(repo, (pins.base, pins.head)))
         initial = next(actual_inputs_from_trees(repo, base, head, base=pins.base, head=pins.head, commits=(),
-                                                package_name="issue-100.json", limits=limits))
+                                                package_name="issue-100.json", limits=limits,
+                                                record_policy=RECORD_POLICY_V1))
     records, domain = initial.records, pins.fresh
     raw = b"".join(record.payload for record in records)
     _require(all(record.generated_evidence is None for record in records)
@@ -356,7 +357,7 @@ def model_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue1
         for oid in commits:
             for ordinal, parent in enumerate(held[oid].parents, 1):
                 parent_edges.append({"parent": parent, "commit": oid, "parent_ordinal": ordinal})
-                edges.append(edge_facts(repo, parent, oid, ordinal))
+                edges.append(edge_facts(repo, parent, oid, ordinal, record_policy=RECORD_POLICY_V1))
         refs = _refs(edges)
         overlaps = []
         for path in pins.pending_paths:
