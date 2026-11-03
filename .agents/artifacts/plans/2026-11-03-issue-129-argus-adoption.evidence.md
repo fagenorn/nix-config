@@ -294,3 +294,24 @@ Installed/source conformance again (scratch worktree of `C`, removed after the t
 | `test_installed_policy_surface_matches_source_contract` | OK (1 test) | 2026-11-03T10:32:39Z |
 
 No host switch happened since Task 2. Nothing in this task wrote to Argus, the registry or the guard policy.
+
+## Task 7 — Registration and derived row
+
+Registered: 2026-11-03T10:35:38Z
+Row: main main ["memory foundation (unit + forced checks)"]
+
+Register (`adopt-project verify --register --repo-root /Users/anis/Projects/argus`, 2026-11-03T10:35:33Z to 10:35:38Z, exit 0, default TMPDIR; no declared command ran): `result` `adopted`, `registered` true, all six checks `passed` (contract-resolves, projections-in-sync, no-unclassified-agent-path, adoption-evidence-record, adoption-commit-derived, path-migration-map).
+
+Registry entry (`~/.agents/state/fleet/registry.json`): `[{"project_id": "fagenorn/argus", "root": "/Users/anis/Projects/argus"}]`, no `branch_override`.
+
+Compile (`claude-guard-policy`, exit 0): `outcome` `complete`, `derived` `["elevenyellow/jarbird","elevenyellow/nodocom","fagenorn/arcwave","fagenorn/argus","fagenorn/nix-config"]`, `refused` `[]`.
+Derivation: `{"platform_version": "1.0.0", "registry_digest": "sha256:5a5422f375ec0fbb9d3427edd29c6f97c8182165ea5764ba7f6b6e1c8f7285d6", "schema_version": 3}`.
+Row `derived_repositories["fagenorn/argus"]`: `default_branch` `main`, `integration_branch` `main`, `required_checks` `["memory foundation (unit + forced checks)"]`; evidence source `refs/remotes/origin/main` at `21338cae51ea396f6c3f9664642e06463c25d97c` (`M`), `contract_blob` `eac7403217ef6cade0aedd567dbf831057ff65f9`, profile `forge-main` v1, `registry_entry_digest` `sha256:384899339ea46d096a55079fee4a79e24ab91100399859d7717c23bb0ae1253a`.
+
+Re-derive (`guard-policy derive --repository fagenorn/argus`): `outcome` `derived`, `row` equal to the compiled row above.
+
+Fleet row (`resolve-project platform-status --fleet`, project `fagenorn/argus`): `{"compatible":true,"platform_interval":{"max_exclusive":"2.0.0","min_inclusive":"1.0.0"},"project_id":"fagenorn/argus","project_schema_version":1,"reason_code":null,"repair_id":null,"root":"/Users/anis/Projects/argus"}`.
+Fleet row: compatible (primary checkout at 21338cae51ea396f6c3f9664642e06463c25d97c, which contains M)
+Clone check (`platform-status --repo-root $SCR/argus-verify`, clone HEAD `M`): `compatibility` `{"compatible":true,"reason_code":null,"repair_id":null}`.
+
+Primary checkout `/Users/anis/Projects/argus`, before (Step 1) and after (Step 7) identical: HEAD `21338cae51ea396f6c3f9664642e06463c25d97c`, branch `main`, `status --porcelain=v1 --untracked-files=all` sha256 `2ee13c2c227faa540b6372821b0f719035ea73a923729b3979b53ebc13f1cd08`, one untracked path `home/skills/humanizer/` (predates this run, not ours).
