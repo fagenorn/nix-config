@@ -206,6 +206,7 @@ agent-workflow-tests *args:
     tests/test_claude_account_routing.py \
     tests/test_branch_protection.py \
     tests/test_suite_runner.py \
+    tests/test_retained_root_copy.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
@@ -252,7 +253,7 @@ agent-installed-skill-tests: build
       tests/test_impeccable_installed.py \
       tests/test_claude_code_installed.py
 
-# Full-shape retained tier (#249): the real retained objects and archive under `root`. Not part of agent-workflow-tests.
+# Full-shape retained tier (#249): the real retained objects and archive of `root`, run on a private copy (#573) so a commit to `root` mid-run cannot void it. Not part of agent-workflow-tests.
 agent-retained-tests root: build
   @set -- $(nix-store --query --requisites ./result \
     | grep -- '-home-manager-files$' || true); \
@@ -261,9 +262,11 @@ agent-retained-tests root: build
       exit 1; \
     fi; \
     log=$(mktemp "${TMPDIR:-/tmp}/agent-retained-XXXXXX") || exit 1; \
-    trap 'rm -f -- "$log"' EXIT; \
+    copy=$(mktemp -d "${TMPDIR:-/tmp}/agent-retained-root-XXXXXX") || exit 1; \
+    trap 'rm -rf -- "$log" "$copy"' EXIT; \
+    PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.retained_root_copy "{{root}}" "$copy/root" || exit 1; \
     status=0; \
-    AGENT_RETAINED_ROOT="{{root}}" AGENT_SKILLS_INSTALLED_HOME="$1" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" PYTHONPATH="{{agent_tools_path}}" \
+    AGENT_RETAINED_ROOT="$copy/root" AGENT_SKILLS_INSTALLED_HOME="$1" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" PYTHONPATH="{{agent_tools_path}}" \
       python3 -m unittest -v tests/test_review_retained_full.py tests/test_agent_tools_launchers.py \
       >"$log" 2>&1 || status=$?; \
     cat "$log"; \

@@ -1,0 +1,6 @@
+# Acceptance record — issue #567
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] After a same-size edit to an installed agent module and a rebuild, the next load runs the edited code. Measured by: a test added to the agent workflow test suite that swaps a module's source for a same-size, same-mtime variant and asserts the new behaviour is observed. | code | `home/common/agent-skills/tests/test_delivery_workflow.py::DeliveryAdmissionTest::test_a_same_size_module_edit_runs_after_the_library_cache_is_cleared` (`just agent-workflow-tests`) | in final verification | a87b874d76e7b7b049239a5c86bc9e15c3b6ff1c | darwin host, launcher Python 3.13 | met |
+| AC2 | [code] The bytecode cache still works: a second load of an unchanged module compiles nothing (the guarantee #499 added). | code | the same test's final unchanged-cache assertion (installed layout) and `DeliveryAdmissionTest::test_a_second_init_run_compiles_nothing_into_its_bytecode_cache` (source layout), both in `just agent-workflow-tests` | in final verification | a87b874d76e7b7b049239a5c86bc9e15c3b6ff1c | darwin host, launcher Python 3.13 | met |

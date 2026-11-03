@@ -12,7 +12,7 @@ from typing import Callable, Iterable, Iterator, Mapping
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_git import HistoryError, original_commits, original_range
-from agent_tools.review_pack import (ReviewLimits, ReviewRecord, ReviewRecordSize,
+from agent_tools.review_pack import (ReviewEvidenceSize, ReviewLimits, ReviewRecord, ReviewRecordSize,
     canonical_manifest as _canonical, measure_lengths, pack_whole_records, place_record_sizes)
 
 RECORD_POLICY = {
@@ -50,6 +50,11 @@ MIGRATION_ID_RE = re.compile(br'\[Migration\("([^"\r\n]+)"\)\]')
 PRODUCT_VERSION_RE = re.compile(
     br'\.HasAnnotation\("ProductVersion",\s*"([^"\r\n]+)"\)'
 )
+# Worst-case field widths for a planned designer's evidence (ef_designer_evidence_bound):
+# encoded bytes of the migration id and product version, and decimal digits of a count.
+EF_BOUND_MIGRATION_ID_BYTES = 255
+EF_BOUND_PRODUCT_VERSION_BYTES = 64
+EF_BOUND_COUNT_DIGITS = 16
 
 
 class InvocationError(Exception):
@@ -82,7 +87,7 @@ class FutureCommit:
 @dataclass(frozen=True)
 class CandidateInput:
     context_lines: int | None
-    records: tuple[ReviewRecord | ReviewRecordSize, ...]
+    records: tuple[ReviewRecord | ReviewRecordSize | ReviewEvidenceSize, ...]
     commits: tuple[Mapping, ...]
     stat: Mapping
     source_diff_bytes: int
@@ -233,12 +238,13 @@ def _build_candidate(item: CandidateInput, limits: ReviewLimits, *,
     if (Path(item.package_name).name != item.package_name
             or Path(item.package_name).suffix != ".json" or not Path(item.package_name).stem):
         raise GenerationError("invalid package name")
-    if (any(not isinstance(record, (ReviewRecord, ReviewRecordSize)) for record in item.records)
+    if (any(not isinstance(record, (ReviewRecord, ReviewRecordSize, ReviewEvidenceSize))
+            for record in item.records)
             or len({record.path for record in item.records}) != len(item.records)
             or any(not isinstance(commit, FutureCommit) for commit in item.future_commits)):
         raise GenerationError("invalid candidate measurement data")
-    if not measurement_only and (item.future_commits or any(isinstance(record, ReviewRecordSize)
-                                                           for record in item.records)):
+    if not measurement_only and (item.future_commits or any(
+            isinstance(record, (ReviewRecordSize, ReviewEvidenceSize)) for record in item.records)):
         raise GenerationError("symbolic measurements cannot be published as concrete candidates")
     if (type(item.source_diff_bytes) is not int
             or item.source_diff_bytes != sum(record.source_bytes for record in item.records)
@@ -308,7 +314,11 @@ def select_candidate(inputs: Iterable[CandidateInput], limits: ReviewLimits, *,
                     original.context_lines, original.base, original.head, original.package_name):
                 raise GenerationError("transformation changed candidate identity")
             authorized = {r.path: r for r in original.records if r.generated_evidence is not None}
-            if any(r.generated_evidence is not None and r != authorized.get(r.path) for r in item.records):
+            # A planned entry (ReviewEvidenceSize) is measurement-only: _build_candidate
+            # refuses it outside measurement, so it can never be published as evidence.
+            if any(r.generated_evidence is not None and r != authorized.get(r.path)
+                   and not (measurement_only and isinstance(r, ReviewEvidenceSize))
+                   for r in item.records):
                 raise GenerationError("transformation added unauthorized generated evidence")
         candidate = measure_input(item, limits) if measurement_only else pack_input(item, limits)
         if initial is None:
@@ -487,11 +497,32 @@ def _ef_designer_side(blob: tuple[str, bytes] | None) -> dict[str, object] | Non
     }
 
 
+def ef_designer_path(path: str) -> bool:
+    """The paths actual production may compact as `ef-core-migration-designer` evidence."""
+    return "Migrations" in path.split("/") and path.endswith(".Designer.cs")
+
+
+def ef_designer_evidence_bound(path: str, source_diff_bytes: int) -> dict[str, object]:
+    """A worst-case placeholder for the evidence _ef_designer_evidence builds for `path`.
+
+    Same keys and nesting, both sides present, and every variable-width field at
+    its EF_BOUND_* width, so its canonical encoding is at least as long as the real
+    entry's whenever the real fields fit those widths (see python/README.md).
+    """
+    count = int("9" * EF_BOUND_COUNT_DIGITS)
+    side = {"blob_sha": "0" * 40, "bytes": count, "content_sha256": "0" * 64,
+            "migration_id": "x" * EF_BOUND_MIGRATION_ID_BYTES,
+            "product_version": "x" * EF_BOUND_PRODUCT_VERSION_BYTES,
+            "entity_types": count, "properties": count, "indexes": count,
+            "foreign_keys": count, "tables": count}
+    return {"path": path, "kind": "ef-core-migration-designer",
+            "source_diff_bytes": source_diff_bytes, "base": dict(side), "head": dict(side)}
+
+
 def _ef_designer_evidence(
     repo: Path, base: str, head: str, path: str, source_diff_bytes: int,
 ) -> dict[str, object] | None:
-    parts = path.split("/")
-    if "Migrations" not in parts or not path.endswith(".Designer.cs"):
+    if not ef_designer_path(path):
         return None
     base_blob = _blob_at(repo, base, path)
     head_blob = _blob_at(repo, head, path)

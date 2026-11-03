@@ -5,10 +5,10 @@ Phase 5's review mechanics; `SKILL.md` Phase 5 holds the dispatch sites and the 
 ## Codex correctness route
 
 For configured code review, the correctness axis reaches Codex only through `codex-collaboration`'s
-`diff-review`, which alone owns the review binding shape, its invocation and its validation. A
+`diff-review`, which alone owns the binding shape, invocation and validation. A
 binding shape error it reports stops this review with no Codex call, no retry and no native
-fallback. `blocked` stops. On the `available` route, a capacity rejection has no retry and no native
-fallback, and a completed non-capacity runtime/output failure uses the existing single native
+fallback. `blocked` stops. On `available`, a capacity rejection has no retry and no native
+fallback; a completed non-capacity runtime/output failure uses the existing single native
 fallback and records why. A Codex call made under `unsupported` is a routing error, never a capacity
 rejection.
 
@@ -21,15 +21,15 @@ diff package: omit the ledger-triage placeholder and `[ACCEPTANCE_CRITERIA]`, an
 fetch the range per its template's fallback. Verdicts ≤400 words each, Critical/Important/Minor,
 never merged.
 
-sdd templates unavailable → still use the two isolated native dispatches in SKILL.md, never one
+sdd templates unavailable → still two isolated native dispatches per SKILL.md, never one
 combined: one briefed with a pasted one-paragraph conformance rubric (delivered-vs-promised against
 issue/spec/plan, doc conformance, stale-prose audit, message-format parity), one with a pasted
 one-paragraph correctness rubric (bugs, boundary error handling, dead branches, assertions-that-pin,
 DRY, cross-task integration); same output contract, reports kept separate.
 
-When the correctness axis came through `codex-collaboration`'s `diff-review`, it returns a scope
-alongside its verdict: `full` | `scoped: <N> of <M> product files` | `unmeasured`. Record that scope
-in the Delivery record beside the correctness verdict and Phase 5's `review range:` record.
+A `diff-review` correctness verdict carries a scope: `full` | `scoped: <N> of <M> product files` |
+`unmeasured`. Record that scope in the Delivery record beside the correctness verdict and Phase 5's
+`review range:` record.
 
 ## Delta route
 
@@ -50,11 +50,12 @@ name of the failed prerequisite.
 
 ## Severity mapping (full path)
 
-The apply/push flow below speaks Blocking / Should-fix; map per axis, never merging reports:
-Critical ≙ Blocking (apply inline via the five steps), Important ≙ Should-fix (same five steps in
-`--auto`, surfaced otherwise), Minor ≙ Discussion-grade (record; surface only when user-facing).
-Retain every Minor or Discussion finding with its axis in the delivery-detail package; the single
-durable `report_path` is the only terminal transport and `discussion_items` remains empty.
+Map each axis onto the apply/push flow's Blocking / Should-fix, never merging reports: Critical ≙
+Blocking (the five steps, inline), Important ≙ Should-fix (same steps in `--auto`, surfaced
+otherwise), Minor ≙ Discussion-grade (record; surface only when user-facing). Retain every Minor or
+Discussion finding with its axis in the delivery-detail package; the durable `report_path` is the
+only terminal transport and `discussion_items` stays empty. A finding becomes a new issue only when
+it names a reproducible failure on a path real use exercises; record the rest like a Minor.
 
 ## The five-step apply/push flow
 
@@ -80,13 +81,12 @@ doc-grounded prompt. Then continue.
 
 Before Phase 8 may remove anything, collect every Minor/Discussion item from either review path as
 the strict non-empty findings input. First, write the retained candidate at
-`.superpowers/ship-review/<issue>/retained-detail.json` in the feature worktree. That path is
-deliberately worktree-local: a publication failure re-reads it and keeps the worktree, so never
-relocate it to `$TMPDIR` or the primary checkout. Run `artifact-budget validate-detail-input` on
-that no-follow file and consume canonical stdout before invoking review-package's `delivery-detail`
-mode (`~/.agents/bin/review-package`). Supply issue/branch/run/head identity only; the producer
-derives the per-run leaf beneath the primary checkout's `.superpowers/issue-delivery/` home and
-enforces no-clobber publication.
+`.superpowers/ship-review/<issue>/retained-detail.json` in the feature worktree. Keep it
+worktree-local, never in `$TMPDIR` or the primary checkout: a publication failure re-reads it. Run
+`artifact-budget validate-detail-input` on that no-follow file and consume canonical stdout before
+invoking review-package's `delivery-detail` mode (`~/.agents/bin/review-package`). Supply
+issue/branch/run/head identity only; the producer derives the per-run leaf beneath the primary
+checkout's `.superpowers/issue-delivery/` home and enforces no-clobber publication.
 
 On success, independently check the returned review-package root, set `detail_state: "present"`, put
 its single main-root-relative path in `report_path` and notes, and return no inline items. On
