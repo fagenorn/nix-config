@@ -104,5 +104,5 @@ Verify: `git status --short -- .agents/artifacts/plans` prints nothing.
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":1,"records":[{"bounds":[{"added_lines":358,"boundary":"all","deleted_lines":0,"record_bytes":15360,"support":{"covers":["e1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"e1","last_task":8,"owner":1,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"7d8ddfa16cb420fa99a85e2ecc14c5e931f88ca3","head":"fa5e602c2c1a4c35158627664375085e41876674"}],"commit_subject_bytes":[64],"id":1,"records":[{"bounds":[{"added_lines":358,"boundary":"all","deleted_lines":0,"record_bytes":15360,"support":{"covers":["e1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"e1","last_task":8,"owner":1,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
 ```
