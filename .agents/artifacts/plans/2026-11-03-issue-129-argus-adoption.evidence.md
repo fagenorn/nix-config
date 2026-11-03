@@ -248,3 +248,49 @@ Owner gate: open and merge adopt-e37b7e24779f at head 553b2c59e1192f5bfad06073f0
    gh pr merge <n> --repo fagenorn/argus --merge --match-head-commit 553b2c59e1192f5bfad06073f00ca1dde2e127da --delete-branch
    or use GitHub's Create a merge commit.
 Resume: the run continues at Task 6, which confirms the merge before anything else.
+
+## Task 6 — Merge, doctor report 2, verify and conformance
+
+Merged PR: https://github.com/fagenorn/argus/pull/116
+Merge commit: 21338cae51ea396f6c3f9664642e06463c25d97c
+Doctor 2 passed: 2026-11-03T10:32:13Z
+Verify adopted: 2026-11-03T10:32:18Z
+Conformance held: 2026-11-03T10:32:39Z
+
+Observed on the forge at 2026-11-03T10:31Z (the owner's issue comment was not used as evidence). `gh pr list --head adopt-e37b7e24779f --state all` returned exactly one PR, number 116, state `MERGED`, `headRefOid` `553b2c59e1192f5bfad06073f00ca1dde2e127da` (equal to `H`), `mergedBy` login `fagenorn`, `mergedAt` 2026-11-03T10:28:10Z, `mergeCommit.oid` `21338cae51ea396f6c3f9664642e06463c25d97c` (`M`).
+
+Check runs on `H`: one row, `memory foundation (unit + forced checks)` `completed` / `success`, `completed_at` 2026-11-03T10:19:30Z.
+Floor before merge: 2026-11-03T10:19:30Z < 2026-11-03T10:28:10Z
+
+Parents of `M`: `["dc7564b3c8bbd6a5633dfcff78f80291175047fd","553b2c59e1192f5bfad06073f00ca1dde2e127da"]`. Two parents, the second equal to `H`, so it is a merge commit (D8).
+
+Fresh clone `$SCR/argus-verify` (`SCR` = `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/launch-scope-53qt3vxx`, worker w1): `merge-base --is-ancestor` exits 0 for `H` and for `M`. `T` = `21338cae51ea396f6c3f9664642e06463c25d97c`, equal to `M`. `/Users/anis/Projects/argus` was not read or written.
+
+Doctor report 2 (`conformance run --purpose doctor` at `T`, 2026-11-03T10:32:13Z, default TMPDIR: doctor runs no declared command), outcome `{"primary_check_id": null, "status": "passed"}`. All five `host.*` checks `passed` (`host.admission.declaration`, `host.capability.required`, `host.executor.helper_on_path`, `host.policy_path.no_follow_readable`, `host.tracker.credential`); no other check was non-`passed`.
+
+| Report-1 check | Report-2 status | Closed by |
+|---|---|---|
+| repository.ignore.runtime_sentinel (`runtime_ignore_missing`) | passed | Task 4 `write-file` creating the committed sentinel `.agents/runtime/.gitignore` |
+| repository.projection.fresh (`invalid_projection`) | passed | Task 4 `regenerate-projection` (source `AGENTS.md`, target `CLAUDE.md`) |
+
+Plain verify (`adopt-project verify --repo-root $SCR/argus-verify`, 2026-11-03T10:32:18Z, default TMPDIR: no declared command runs), `result` `adopted`, `registered` false, `adoption_commit` `H`:
+
+| Check | Status |
+|---|---|
+| contract-resolves | passed |
+| projections-in-sync | passed |
+| no-unclassified-agent-path | passed |
+| adoption-evidence-record | passed |
+| adoption-commit-derived | passed |
+| path-migration-map | passed |
+
+Installed/source conformance again (scratch worktree of `C`, removed after the test with `git worktree remove --force`):
+
+| Check | Result | Time |
+|---|---|---|
+| `/run/current-system` = `R` | pass | 2026-11-03T10:32:36Z |
+| settings hook names `G` | pass | 2026-11-03T10:32:36Z |
+| scratch worktree clean and HEAD = `C` | pass | 2026-11-03T10:32:36Z |
+| `test_installed_policy_surface_matches_source_contract` | OK (1 test) | 2026-11-03T10:32:39Z |
+
+No host switch happened since Task 2. Nothing in this task wrote to Argus, the registry or the guard policy.
