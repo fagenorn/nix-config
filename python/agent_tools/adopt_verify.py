@@ -476,6 +476,13 @@ def verify_repository(root: Path, source: VerificationSource,
 
     record_path, map_path = None, None
     candidates = evidence_records_at(root, source.commit)
+    # Other evidence files share the directory (gate bundles, trials): only a
+    # file that parses as an adoption record is a record to count. When none
+    # parses, every candidate stays in view so a lone malformed file still
+    # reports "does not parse" and several still report the ambiguity.
+    parsed = [path for path in candidates if parses_as_evidence_record(
+        blob_at(root, source.commit, path)) is not None]
+    candidates = parsed or candidates
     if not candidates:
         record("adoption-evidence-record", "failed",
                "no adoption evidence record is committed under "
