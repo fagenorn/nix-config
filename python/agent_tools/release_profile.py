@@ -95,6 +95,8 @@ VERSION_PATTERN = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 TITLE_FORBIDDEN = frozenset('"$`\\\0\r\n')
 CANDIDATE_KEYS = frozenset(("version", "commit", "title", "notes"))
+MERGE_MEMBER = "merge"
+MERGE_KEYS = frozenset(("pr", "base_tip"))
 PHASES = ("publication", "activation")
 _PHASE_MEMBER = MappingProxyType({"publication": "actions", "activation": "units"})
 PHASE_MODES = {"publication": release_adapter.PUBLICATION_MODES,
@@ -218,6 +220,7 @@ class _Profile:
         if "recovery" in profile:
             self.recovery(profile["recovery"])
         self.same_repository()
+        self.merge_alias()
         if "limits" in profile and profile["limits"] != {}:
             self.g.add(self.at("limits"), "limits must be {} in v1", "invalid")
 
@@ -712,6 +715,38 @@ class _Profile:
                 self.g.add(here + "/branch",
                            f"branch must equal the default branch {branch}", "same_repository")
 
+    # G18: one alias per merge binding (issue 554)
+
+    def merge_alias(self) -> None:
+        """Every node of an adapter whose operation consumes `merge` runs on a consuming alias.
+
+        `bind_candidate` binds `candidate.merge` only into the units of the consuming alias
+        (D15). A `tag` or `release` on a second alias of the same adapter would see no merge,
+        resolve the released commit as `candidate.commit` (D8) and tag the integration head
+        instead of the merge commit, so such a profile is refused here.
+        """
+        bound, consumers = [], {}
+        for checked in self.nodes:
+            node = checked["node"]
+            if not {"adapter", "operation"} <= checked["ok"]:
+                continue
+            descriptor = self.descriptor_of(node["adapter"])
+            if descriptor is None:
+                continue
+            name = descriptor["name"]
+            bound.append((checked, name))
+            operation = descriptor["operations"].get(node["operation"])
+            if isinstance(operation, dict) and MERGE_MEMBER in operation["candidate_members"]:
+                consumers.setdefault(name, {}).setdefault(node["adapter"], node.get("id"))
+        for checked, name in bound:
+            aliases = consumers.get(name, {})
+            node = checked["node"]
+            if aliases and node["adapter"] not in aliases:
+                alias, consumer = next(iter(sorted(aliases.items())))
+                self.g.add(checked["pointer"] + "/adapter",
+                           f"adapter {node['adapter']} must be {alias}: node {consumer} binds "
+                           f"candidate.merge only into {name} alias {alias}", "invalid")
+
 
 def grammar_violations(release: object, contract: object,
                        descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
@@ -1055,7 +1090,7 @@ def compile_profile(profile_id: str, profile: Mapping[str, Any], contract: objec
             "candidate_members"] for node in everything}}, _token=_BUILD)
 
 
-def _candidate_problem(candidate: object) -> str | None:
+def candidate_problem(candidate: object) -> str | None:
     if not isinstance(candidate, dict) or set(candidate) != CANDIDATE_KEYS:
         return f"candidate must be an object with exactly {', '.join(sorted(CANDIDATE_KEYS))}"
     version, commit, title = candidate["version"], candidate["commit"], candidate["title"]
@@ -1071,30 +1106,73 @@ def _candidate_problem(candidate: object) -> str | None:
     return None
 
 
+def _merge_problem(merge: object) -> str | None:
+    if not isinstance(merge, dict) or set(merge) != MERGE_KEYS:
+        return f"candidate merge must be an object with exactly {', '.join(sorted(MERGE_KEYS))}"
+    pr, base_tip = merge["pr"], merge["base_tip"]
+    if type(pr) is not int or pr < 1:
+        return "candidate merge pr must be a positive integer"
+    if not isinstance(base_tip, str) or COMMIT_PATTERN.fullmatch(base_tip) is None:
+        return "candidate merge base_tip must be 40 lowercase hex digits"
+    return None
+
+
+def _merge_consumers(compiled: ResolvedReleaseProfile) -> list[dict]:
+    return [node for node in (*compiled["publication"], *compiled["activation"])
+            if MERGE_MEMBER in compiled["candidate_members"][node["id"]]]
+
+
+def binds_merge(compiled: ResolvedReleaseProfile) -> bool:
+    """True when some node of the profile consumes the `merge` candidate member (issue 554 D2)."""
+    return bool(_merge_consumers(compiled))
+
+
 def bind_candidate(compiled: ResolvedReleaseProfile, candidate: dict) -> dict[str, Any]:
     """The exact `TransactionStore.create` inputs for one candidate, as plain values (D5).
 
     A compiled profile with no publication node binds no candidate: it raises `ValueError`
-    naming the profile, before the candidate is read."""
+    naming the profile, before the candidate is read. The candidate carries `merge` exactly
+    when `binds_merge(compiled)` (issue 554 D2, D15): it is bound beside `version` and
+    `commit` into the subject's `candidate` and into the `candidate` of every unit whose
+    adapter alias is the alias of a node that consumes it, and the units of any other alias
+    keep `{version, commit}`. The grammar's merge-alias rule keeps every node of the consuming
+    adapter on a consuming alias, so no `tag` or `release` misses the merge."""
     if not isinstance(compiled, ResolvedReleaseProfile):
         raise TypeError("bind_candidate takes a ResolvedReleaseProfile")
     if not compiled["publication"]:
         raise ValueError(f"profile {compiled['profile_id']!r} declares no publication, so no "
                          "release candidate can be bound to it")
-    problem = _candidate_problem(candidate)
+    consumers = _merge_consumers(compiled)
+    operator = candidate
+    if isinstance(candidate, dict):
+        operator = {key: value for key, value in candidate.items() if key != MERGE_MEMBER}
+    problem = candidate_problem(operator)
+    if problem is None and consumers and MERGE_MEMBER not in candidate:
+        problem = f"candidate must carry merge, which node {consumers[0]['id']!r} consumes"
+    if problem is None and not consumers and MERGE_MEMBER in candidate:
+        problem = "candidate carries merge, which no node of the profile consumes"
+    if problem is None and consumers:
+        problem = _merge_problem(candidate[MERGE_MEMBER])
     if problem is not None:
         raise ValueError(problem)
     identity = {"version": candidate["version"], "commit": candidate["commit"]}
+    bound = ({**identity, MERGE_MEMBER: dict(candidate[MERGE_MEMBER])} if consumers else identity)
+    merge_aliases = {node["adapter"] for node in consumers}
+    aliases = {node["id"]: node["adapter"] for node in
+               (*compiled["publication"], *compiled["activation"])}
     configs = {node["id"]: node["config"] for node in
                (*compiled["publication"], *compiled["activation"])}
     proof, recovery = thaw(compiled["proof_declaration"]), thaw(compiled["recovery_declaration"])
     for unit in (*proof["units"], *recovery["units"]):
         name = unit["name"]
-        unit["parameters"].update({"candidate": dict(identity), "config": thaw(configs[name])})
+        unit["parameters"].update({
+            "candidate": copy.deepcopy(bound if aliases[name] in merge_aliases else identity),
+            "config": thaw(configs[name])})
         for member in compiled["candidate_members"][name]:
-            unit["parameters"][member] = candidate[member]
+            if member != MERGE_MEMBER:
+                unit["parameters"][member] = candidate[member]
     return {"proof": proof, "recovery": recovery,
             "concurrency_keys": list(compiled["target"]["concurrency_keys"]),
             "subject": {"profile_id": compiled["profile_id"],
                         "profile_version": compiled["profile_version"],
-                        "profile_digest": compiled["digest"], "candidate": identity}}
+                        "profile_digest": compiled["digest"], "candidate": copy.deepcopy(bound)}}

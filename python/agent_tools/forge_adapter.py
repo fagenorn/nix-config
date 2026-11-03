@@ -4,11 +4,11 @@ These three functions are the adapter's whole public surface, one per half of th
 contract (D7): the static descriptor, the read half and the write half.
 
 `describe()` declares which operations the adapter carries, which it refuses, and what a
-profile may bind. `pr_merge` is declared but `unsupported` for `invoke`
-(`target_cas_unproven`), so a profile that names it is a grammar violation (D8), while its
-read half is implemented. `tag` and `release` are the two supported publication
-operations, both `index` mode, both irreversible and create-if-absent. The descriptor is
-built fresh on every call, so a caller may mutate what it receives.
+profile may bind. `pr_merge` is `supported` for `invoke` since issue 554 D4: a `materialize`,
+`pointer_cas` operation that binds the candidate's `merge` member, behind a protection floor.
+`tag` and `release` are the two publication operations, both `index` mode, both irreversible
+and create-if-absent. The descriptor is built fresh on every call, so a caller may mutate what
+it receives.
 
 This module imports only the standard library: the registry in `release_adapter` imports
 this module, never the reverse (D7).
@@ -27,6 +27,15 @@ repository, containment (`tag`), the local annotated tag (`tag`), the rendered c
 mutation, never retries, never reads the target (`tag.ref`, `tag.object`, `release.view`) and
 returns only `accepted`, `rejected` or `unknown`: that a mutation landed is the core's to
 observe afterwards (#85, #206). Every child runs with the token variables removed.
+
+`pr_merge` replaces the containment and tag steps with four precondition reads, each a refusal
+before the guard and the merge (issue 554 D4, D6, D13): the protection floor, the head
+branch's auto-delete setting, the pull request (open, on the target branch, at the candidate
+commit) and the base tip bound by `merge`. Any non-zero exit of its one `gh pr merge` is
+`unknown`, because the core inspects the pull request afterwards.
+
+With a merge binding, `tag` and `release` judge and tag the release PR's merge commit rather
+than `candidate.commit` (issue 554 D8).
 """
 
 import json
@@ -36,7 +45,7 @@ import shlex
 import subprocess
 import tempfile
 import time
-from typing import Any
+from typing import Any, Callable
 
 from agent_tools.github_remote import github_slug
 
@@ -54,7 +63,9 @@ TARGET_MEMBERS = frozenset(("kind", "repository", "branch", "handle"))
 TOLERATED = frozenset(("action", "operation", "config"))
 REQUIRED = {"tag": ("target", "candidate"),
             "release": ("target", "candidate", "title", "notes"),
-            "pr_merge": ("target", "pr", "expected_base_tip", "expected_head")}
+            "pr_merge": ("target", "candidate")}
+IDENTITY_MEMBERS = frozenset(("version", "commit"))
+MERGE_MEMBERS = frozenset(("pr", "base_tip"))
 PR_FIELDS = "state,baseRefName,headRefName,headRefOid,mergeCommit,url,statusCheckRollup"
 
 
@@ -72,12 +83,12 @@ def describe() -> dict[str, Any]:
         "name": "github-forge",
         "adapter_contract_version": "1.0.0",
         "operations": {
-            "pr_merge": {"mode": "materialize", "support": "unsupported", "inspect": "supported",
-                         "reason": "target_cas_unproven", "mutability": "pointer_cas",
+            "pr_merge": {"mode": "materialize", "support": "supported", "inspect": "supported",
+                         "reason": None, "mutability": "pointer_cas",
                          "config_schema_version": 1,
                          "config_schema": {"members": {}, "required": []},
                          "effects": ["irreversible"], "recovery_capable": False,
-                         "candidate_members": []},
+                         "candidate_members": ["merge"]},
             "tag": _publication_operation([]),
             "release": _publication_operation(["notes", "title"]),
         },
@@ -172,12 +183,14 @@ def _sha(value: str, where: str) -> str:
     return value
 
 
-def _tag_state(slug: str, tag: str, commit: str, deadline: float
+def _tag_state(slug: str, tag: str, released: Callable[[], str | None], deadline: float
                ) -> tuple[str, str, str | None, list[str]]:
     """`(outcome, reason, peeled commit, references)` of the tag, read from its own objects.
 
     A tag object whose target is another tag object is peeled in turn, as local
-    `refs/tags/<tag>^{commit}` peels it, up to `TAG_CHAIN_LIMIT` objects.
+    `refs/tags/<tag>^{commit}` peels it, up to `TAG_CHAIN_LIMIT` objects. `released` names the
+    commit the tag must peel to and is called only once an annotated tag has peeled, so a
+    missing or lightweight tag costs no pull request read; `None` matches no tag.
     """
     ref_path = f"repos/{slug}/git/ref/tags/{tag}"
     references = [ref_path]
@@ -200,9 +213,39 @@ def _tag_state(slug: str, tag: str, commit: str, deadline: float
     else:
         raise _Unknown("payload_invalid", f"tag chain deeper than {TAG_CHAIN_LIMIT} objects")
     peeled = sha
-    if peeled == commit:
+    if peeled == released():
         return "satisfied", "observed", peeled, references
     return "diverged", "tag_target_mismatch", peeled, references
+
+
+def _released(parameters: dict[str, Any], read: Callable[[list[str]], Any]) -> str | None:
+    """The commit `tag` and `release` publish, or None when the release PR has not landed as bound.
+
+    Without `candidate.merge` it is `candidate.commit` and nothing is read. With it, it is the
+    pull request's merge commit, and only when `_merge_outcome` is `satisfied`, so the judgment
+    here and `pr_merge`'s inspect cannot disagree (issue 554 D8). `read` takes a `gh` argv
+    without `gh` and returns the parsed JSON.
+    """
+    candidate = parameters["candidate"]
+    if "merge" not in candidate:
+        return candidate["commit"]
+    slug = parameters["target"]["repository"]
+    view = read(["pr", "view", str(candidate["merge"]["pr"]), "--repo", slug, "--json", PR_FIELDS])
+    state, base = _field(view, "state"), _field(view, "baseRefName")
+    oid, parents = None, None
+    if state == "MERGED":
+        oid = _sha(_field(view, "mergeCommit", "oid"), "mergeCommit.oid")
+        parents = _parents(read(["api", f"repos/{slug}/git/commits/{oid}"]))
+    try:
+        outcome, _ = _merge_outcome(state, base, parents, parameters)
+    except ValueError as error:
+        raise _Unknown("payload_invalid", str(error))
+    return oid if outcome == "satisfied" else None
+
+
+def _inspect_released(parameters: dict[str, Any], deadline: float
+                      ) -> Callable[[], str | None]:
+    return lambda: _released(parameters, lambda argv: _read(argv, deadline)[1])
 
 
 def _inspect_tag(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
@@ -210,7 +253,7 @@ def _inspect_tag(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
     subject = {"tag": tag, "commit": None}
     try:
         outcome, reason, peeled, references = _tag_state(
-            slug, tag, parameters["candidate"]["commit"], deadline)
+            slug, tag, _inspect_released(parameters, deadline), deadline)
     except _Unknown as error:
         return _unknown(error.reason, error.detail, subject)
     return _observation(outcome, reason, {"tag": tag, "commit": peeled}, references)
@@ -232,31 +275,85 @@ def _inspect_release(parameters: dict[str, Any], deadline: float) -> dict[str, A
         if name != tag:
             return _observation("diverged", "release_tag_mismatch", subject, references)
         outcome, reason, peeled, tag_references = _tag_state(
-            slug, tag, parameters["candidate"]["commit"], deadline)
+            slug, tag, _inspect_released(parameters, deadline), deadline)
     except _Unknown as error:
         return _unknown(error.reason, error.detail, subject)
     return _observation(outcome, reason, {"tag": tag, "commit": peeled},
                         references + tag_references)
 
 
-def _protection(slug: str, base: str, deadline: float) -> dict[str, Any]:
-    status, payload, detail = _gh(["api", f"repos/{slug}/branches/{base}/protection"], deadline)
-    if status == 404:
-        return {"status": "unprotected", "required_contexts": [], "enforce_admins": False}
-    if status == 403:
-        return {"status": "inaccessible", "required_contexts": [], "enforce_admins": False}
+def _protection_facts(status: Any, payload: Any) -> dict[str, Any]:
+    """The protection facts of one branch-protection answer (issue 554 D4).
+
+    `status` is `"ok"` with the parsed payload, or the HTTP status 404 (`unprotected`) or 403
+    (`inaccessible`). Inspect's `protection` fact and invoke's floor read both come from here.
+    """
+    if status == 404 or status == 403:
+        return {"status": "unprotected" if status == 404 else "inaccessible", "strict": False,
+                "required_contexts": [], "enforce_admins": False}
     if status != "ok":
-        raise _Unknown(status, detail)
+        raise ValueError(f"no protection facts for status {status!r}")
     checks = payload.get("required_status_checks") if isinstance(payload, dict) else None
     contexts = checks.get("contexts") if isinstance(checks, dict) else None
     admins = payload.get("enforce_admins") if isinstance(payload, dict) else None
     return {"status": "protected",
+            "strict": isinstance(checks, dict) and checks.get("strict") is True,
             "required_contexts": sorted(contexts) if isinstance(contexts, list) else [],
             "enforce_admins": isinstance(admins, dict) and admins.get("enabled") is True}
 
 
+def _floor_problem(facts: dict[str, Any]) -> str | None:
+    """The first member of the `pr_merge` protection floor that `facts` leave unmet (D4)."""
+    if facts["status"] != "protected":
+        return facts["status"]
+    for member in ("strict", "required_contexts", "enforce_admins"):
+        if not facts[member]:
+            return member
+    return None
+
+
+def _protection_path(slug: str, branch: str) -> str:
+    return f"repos/{slug}/branches/{branch}/protection"
+
+
+def _protection(slug: str, base: str, deadline: float) -> dict[str, Any]:
+    status, payload, detail = _gh(["api", _protection_path(slug, base)], deadline)
+    if status not in ("ok", 404, 403):
+        raise _Unknown(status, detail)
+    return _protection_facts(status, payload)
+
+
+def _merge_outcome(state: str, base: str, parents: list[str] | None,
+                   parameters: dict[str, Any]) -> tuple[str, str]:
+    """`(outcome, reason)` of a release pull request (issue 554 D7, spec section 4).
+
+    It is the one home of the rule: inspect reports it and the released-commit resolution
+    reads it, so the two cannot disagree.
+    """
+    candidate = parameters["candidate"]
+    if base != parameters["target"]["branch"]:
+        return "diverged", "base_mismatch"
+    if state == "OPEN":
+        return "absent", "pr_open"
+    if state == "CLOSED":
+        return "diverged", "pr_closed"
+    if state != "MERGED":
+        raise ValueError(f"unknown pull request state {state!r}")
+    if parents == [candidate["merge"]["base_tip"], candidate["commit"]]:
+        return "satisfied", "observed"
+    return "diverged", "merge_parents_mismatch"
+
+
+def _parents(commit: Any) -> list[str]:
+    """The parent commit ids of one `git/commits` answer."""
+    listed = commit.get("parents") if isinstance(commit, dict) else None
+    if not isinstance(listed, list):
+        raise _Unknown("payload_invalid", "parents is not a list")
+    return [_sha(_field(parent, "sha"), "parent") for parent in listed]
+
+
 def _inspect_pr_merge(parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
-    slug, number = parameters["target"]["repository"], parameters["pr"]
+    slug, number = parameters["target"]["repository"], parameters["candidate"]["merge"]["pr"]
     subject = {"pr": number, "merge_commit": None}
     try:
         _, view = _read(["pr", "view", str(number), "--repo", slug, "--json", PR_FIELDS], deadline)
@@ -280,25 +377,13 @@ def _inspect_pr_merge(parameters: dict[str, Any], deadline: float) -> dict[str, 
             commit_path = f"repos/{slug}/git/commits/{oid}"
             references.append(commit_path)
             _, commit = _read(["api", commit_path], deadline)
-            listed = commit.get("parents") if isinstance(commit, dict) else None
-            if not isinstance(listed, list):
-                raise _Unknown("payload_invalid", "parents is not a list")
-            parents = [_sha(_field(parent, "sha"), "parent") for parent in listed]
+            parents = _parents(commit)
         protection = _protection(slug, base, deadline)
     except _Unknown as error:
         return _unknown(error.reason, error.detail, subject)
     facts = {"state": state, "base": base, "head": head, "head_oid": head_oid,
              "base_tip": base_tip, "protection": protection}
-    if base != parameters["target"]["branch"]:
-        outcome, reason = "diverged", "base_mismatch"
-    elif state == "OPEN":
-        outcome, reason = "absent", "pr_open"
-    elif state == "CLOSED":
-        outcome, reason = "diverged", "pr_closed"
-    elif parents == [parameters["expected_base_tip"], parameters["expected_head"]]:
-        outcome, reason = "satisfied", "observed"
-    else:
-        outcome, reason = "diverged", "merge_parents_mismatch"
+    outcome, reason = _merge_outcome(state, base, parents, parameters)
     return _observation(outcome, reason, subject, references, facts)
 
 
@@ -315,6 +400,33 @@ def _target_problem(target: Any) -> str | None:
     return None
 
 
+def _merge_problem(merge: Any) -> str | None:
+    if not (isinstance(merge, dict) and set(merge) == MERGE_MEMBERS):
+        return "merge is not {pr, base_tip}"
+    if type(merge["pr"]) is not int or merge["pr"] < 1:
+        return "merge pr is not a positive integer"
+    if not isinstance(merge["base_tip"], str) or SHA.fullmatch(merge["base_tip"]) is None:
+        return "merge base_tip is not a 40-character commit id"
+    return None
+
+
+def _candidate_problem(operation: str, candidate: Any) -> str | None:
+    """Why `candidate` is not the shape `operation` takes (issue 554 D2, D4), or None.
+
+    `pr_merge` takes `{version, commit, merge}`; `tag` and `release` take `{version, commit}`,
+    or the same with `merge` when their profile binds it.
+    """
+    with_merge = IDENTITY_MEMBERS | {"merge"}
+    shapes = (with_merge,) if operation == "pr_merge" else (IDENTITY_MEMBERS, with_merge)
+    if not (isinstance(candidate, dict) and set(candidate) in shapes
+            and isinstance(candidate["version"], str) and VERSION.fullmatch(candidate["version"])
+            and isinstance(candidate["commit"], str) and SHA.fullmatch(candidate["commit"])):
+        return ("candidate is not {version vMAJOR.MINOR.PATCH, commit 40-hex, merge}"
+                if operation == "pr_merge"
+                else "candidate is not {version vMAJOR.MINOR.PATCH, commit 40-hex[, merge]}")
+    return _merge_problem(candidate["merge"]) if "merge" in candidate else None
+
+
 def _parameters_problem(operation: str, parameters: Any) -> str | None:
     """Why `parameters` are not the closed set for `operation`, or None."""
     required = REQUIRED[operation]
@@ -329,19 +441,9 @@ def _parameters_problem(operation: str, parameters: Any) -> str | None:
     problem = _target_problem(parameters["target"])
     if problem is not None:
         return problem
-    if operation == "pr_merge":
-        number = parameters["pr"]
-        if type(number) is not int or number < 1:
-            return "pr is not a positive integer"
-        for name in ("expected_base_tip", "expected_head"):
-            if not isinstance(parameters[name], str) or SHA.fullmatch(parameters[name]) is None:
-                return f"{name} is not a 40-character commit id"
-        return None
-    candidate = parameters["candidate"]
-    if not (isinstance(candidate, dict) and set(candidate) == {"version", "commit"}
-            and isinstance(candidate["version"], str) and VERSION.fullmatch(candidate["version"])
-            and isinstance(candidate["commit"], str) and SHA.fullmatch(candidate["commit"])):
-        return "candidate is not {version vMAJOR.MINOR.PATCH, commit 40-hex}"
+    problem = _candidate_problem(operation, parameters["candidate"])
+    if problem is not None:
+        return problem
     if operation == "release" and not (isinstance(parameters["title"], str)
                                        and isinstance(parameters["notes"], str)):
         return "title and notes are not strings"
@@ -484,9 +586,8 @@ def _same_repository(slug: str, checkout: str) -> None:
                            f"{what} is {found}, not {slug}")
 
 
-def _contained(parameters: dict[str, Any], checkout: str) -> None:
+def _contained(parameters: dict[str, Any], commit: str, checkout: str) -> None:
     slug, branch = parameters["target"]["repository"], parameters["target"]["branch"]
-    commit = parameters["candidate"]["commit"]
     status = _precondition_read(
         ["gh", "api", f"repos/{slug}/compare/{commit}...{branch}", "--jq", ".status"],
         checkout).strip()
@@ -522,7 +623,14 @@ def _guard(raw: str, checkout: str) -> None:
     raise _Refusal("rejected", "authorization_denied", f"guard: {detail}")
 
 
-def _mutate(argv: list[str], raw: str, checkout: str, operation: str, tag: str) -> dict[str, Any]:
+def _mutate(argv: list[str], raw: str, checkout: str, operation: str, reference: str
+            ) -> dict[str, Any]:
+    """The guarded one mutation: `reference` names what an accepted call made.
+
+    A `release` prefers the URL its `gh` printed. Only `tag` and `release` read their refusal
+    text (`already exists`, `HTTP 422`): a failed `pr_merge` is `unknown` whatever it says,
+    and the core inspects the pull request (issue 554 D6).
+    """
     _guard(raw, checkout)
     status, done, detail = _run_child(argv, checkout)
     name = " ".join(argv[:2])
@@ -535,31 +643,125 @@ def _mutate(argv: list[str], raw: str, checkout: str, operation: str, tag: str) 
                 "reference": f"{name}: {detail}"[:DETAIL_LIMIT]}
     if done.returncode == 0:
         url = done.stdout.strip().splitlines()[:1]
-        if operation == "release":
-            reference = url[0].strip() if url and url[0].startswith("http") else f"release:{tag}"
-        else:
-            reference = f"refs/tags/{tag}"
+        if operation == "release" and url and url[0].startswith("http"):
+            reference = url[0].strip()
         return {"result": "accepted", "error_class": None, "reference": reference}
-    marker = "already exists" if operation == "tag" else "HTTP 422"
-    if marker in done.stderr:
+    marker = {"tag": "already exists", "release": "HTTP 422"}.get(operation)
+    if marker is not None and marker in done.stderr:
         return {"result": "rejected", "error_class": "precondition_failed",
                 "reference": f"{name}: {marker}"}
     return {"result": "unknown", "error_class": "transient_transport",
             "reference": f"{name}: {detail or 'exit ' + str(done.returncode)}"[:DETAIL_LIMIT]}
 
 
+def _precondition_json(argv: list[str], checkout: str) -> Any:
+    """The parsed JSON of one precondition read; unparsable output is a refusal."""
+    try:
+        return json.loads(_precondition_read(argv, checkout))
+    except ValueError:
+        raise _Refusal("rejected", "provider_unavailable", f"{' '.join(argv[:2])}: output is not JSON")
+
+
+def _precondition_field(value: Any, *path: str) -> str:
+    """A string field of a precondition read; a missing or mistyped one is a refusal."""
+    try:
+        return _field(value, *path)
+    except _Unknown as error:
+        raise _Refusal("rejected", "provider_unavailable", f"{error.reason}: {error.detail}")
+
+
+def _protection_floor(slug: str, branch: str) -> None:
+    """Refuse unless the target branch's protection holds the floor (issue 554 D4, D13)."""
+    status, payload, detail = _gh(["api", _protection_path(slug, branch)],
+                                  time.monotonic() + CHILD_TIMEOUT_SECONDS)
+    if status == "lookup_timeout":
+        raise _Refusal("rejected", "transient_transport", "protection read: timed out")
+    if status not in ("ok", 404, 403):
+        raise _Refusal("rejected", "provider_unavailable",
+                       f"protection read: {status}: {detail}")
+    unmet = _floor_problem(_protection_facts(status, payload))
+    if unmet is not None:
+        raise _Refusal("rejected", "precondition_failed", f"protection_floor_unmet: {unmet}")
+
+
+def _merge_preconditions(parameters: dict[str, Any], checkout: str) -> None:
+    """The reads between the floor and the render, each a refusal on a miss (issue 554 D6)."""
+    slug, branch = parameters["target"]["repository"], parameters["target"]["branch"]
+    candidate = parameters["candidate"]
+    _protection_floor(slug, branch)
+    deletes = _precondition_read(
+        ["gh", "api", f"repos/{slug}", "--jq", ".delete_branch_on_merge"], checkout).strip()
+    if deletes != "false":
+        raise _Refusal("rejected", "precondition_failed", "head_auto_delete_on")
+    view = _precondition_json(["gh", "pr", "view", str(candidate["merge"]["pr"]), "--repo", slug,
+                               "--json", PR_FIELDS], checkout)
+    state, base = _precondition_field(view, "state"), _precondition_field(view, "baseRefName")
+    head = _precondition_field(view, "headRefOid")
+    if state != "OPEN":
+        raise _Refusal("rejected", "precondition_failed", f"pr_not_open: {state}")
+    if base != branch:
+        raise _Refusal("rejected", "precondition_failed", f"pr_base_mismatch: {base}")
+    if head != candidate["commit"]:
+        raise _Refusal("rejected", "precondition_failed", f"pr_head_mismatch: {head}")
+    tip = _precondition_field(_precondition_json(
+        ["gh", "api", f"repos/{slug}/git/ref/heads/{branch}"], checkout), "object", "sha")
+    if tip != candidate["merge"]["base_tip"]:
+        raise _Refusal("rejected", "precondition_failed", f"base_moved: {tip}")
+
+
+def _invoke_pr_merge(parameters: dict[str, Any], checkout: str) -> dict[str, Any]:
+    """Merge the release pull request once, behind its preconditions (issue 554 D4, D6, D13)."""
+    slug, commit = parameters["target"]["repository"], parameters["candidate"]["commit"]
+    number = parameters["candidate"]["merge"]["pr"]
+    _merge_preconditions(parameters, checkout)
+    argv = ["gh", "pr", "merge", str(number), "--repo", slug, "--merge",
+            "--match-head-commit", commit]
+    raw = " ".join(argv)
+    if shlex.split(raw) != argv:
+        raise _Refusal("rejected", "invalid_input", "rendered command does not match its argv")
+    return _mutate(argv, raw, checkout, "pr_merge", f"https://github.com/{slug}/pull/{number}")
+
+
+def _released_for_invoke(parameters: dict[str, Any], checkout: str) -> str:
+    """The commit `tag` publishes, or a refusal when the release PR has not landed as bound."""
+
+    def read(argv: list[str]) -> Any:
+        try:
+            return json.loads(_precondition_read(["gh", *argv], checkout))
+        except ValueError:
+            raise _Refusal("rejected", "provider_unavailable", f"gh {argv[0]}: output is not JSON")
+
+    try:
+        released = _released(parameters, read)
+    except _Unknown as error:
+        raise _Refusal("rejected", "provider_unavailable", f"{error.reason}: {error.detail}")
+    if released is None:
+        raise _Refusal("rejected", "precondition_failed", "release PR not merged as bound")
+    return released
+
+
+def _invoke_tag(parameters: dict[str, Any], checkout: str) -> dict[str, Any]:
+    """Tag and push the released commit; a merge binding also fetches the branch holding it (D8)."""
+    tag, branch = parameters["candidate"]["version"], parameters["target"]["branch"]
+    released = _released_for_invoke(parameters, checkout)
+    _contained(parameters, released, checkout)
+    if "merge" in parameters["candidate"]:
+        _precondition_read(["git", "fetch", "--no-tags", "origin", f"refs/heads/{branch}"], checkout)
+    _local_tag(tag, released, checkout)
+    argv, raw = ["git", "push", "origin", f"refs/tags/{tag}"], f"git push origin refs/tags/{tag}"
+    return _mutate(argv, raw, checkout, "tag", f"refs/tags/{tag}")
+
+
 def _invoke(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
     slug, tag = parameters["target"]["repository"], parameters["candidate"]["version"]
-    commit = parameters["candidate"]["commit"]
     toplevel = _precondition_read(["git", "rev-parse", "--show-toplevel"], None).strip()
     if not os.path.isabs(toplevel):
         raise _Refusal("rejected", "provider_unavailable", "rev-parse did not return a directory")
     _same_repository(slug, toplevel)
+    if operation == "pr_merge":
+        return _invoke_pr_merge(parameters, toplevel)
     if operation == "tag":
-        _contained(parameters, toplevel)
-        _local_tag(tag, commit, toplevel)
-        argv, raw = ["git", "push", "origin", f"refs/tags/{tag}"], f"git push origin refs/tags/{tag}"
-        return _mutate(argv, raw, toplevel, operation, tag)
+        return _invoke_tag(parameters, toplevel)
     descriptor, path = tempfile.mkstemp(prefix="forge-release-notes-", suffix=".md")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -570,7 +772,7 @@ def _invoke(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
                f'--title "{parameters["title"]}" --notes-file {shlex.quote(path)}')
         if shlex.split(raw) != argv:
             raise _Refusal("rejected", "invalid_input", "rendered command does not match its argv")
-        return _mutate(argv, raw, toplevel, operation, tag)
+        return _mutate(argv, raw, toplevel, operation, f"release:{tag}")
     finally:
         try:
             os.unlink(path)

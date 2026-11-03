@@ -43,7 +43,7 @@ CONFIG_TYPES = ("string", "integer", "boolean", "string_list")
 
 ADAPTER_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 OPERATION_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
-CANDIDATE_MEMBERS = ("notes", "title")
+CANDIDATE_MEMBERS = ("merge", "notes", "title")
 DESCRIPTOR_MEMBERS = frozenset((
     "name", "adapter_contract_version", "operations", "predicates", "collector",
     "target_kinds", "credential_classes", "executables", "host_capacity"))

@@ -112,3 +112,52 @@ class RefusalTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def observe_merge(**overrides):
+    arguments = {"repository": CANONICAL["slug"], "integration_branch": "dev",
+                 "default_branch": "main", "commit": CANONICAL["commit"]}
+    return verification.observe_merge(**{**arguments, **overrides})
+
+
+class MergeObservationTest(unittest.TestCase):
+    """Issue 554 D3: the one open release PR, the default tip and their compare."""
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def test_the_open_release_pr_and_the_default_tip_bind(self):
+        self.world.merge_observation_ready()
+        self.assertEqual(observe_merge(), {"pr": CANONICAL["pr"], "base_tip": CANONICAL["base_tip"]})
+        slug, tip, commit = CANONICAL["slug"], CANONICAL["base_tip"], CANONICAL["commit"]
+        self.assertEqual([c["argv"] for c in self.world.calls()], [
+            ["api", f"repos/{slug}/pulls?state=open&base=main&head=fagenorn:dev&per_page=2"],
+            ["api", f"repos/{slug}/git/ref/heads/main"],
+            ["api", f"repos/{slug}/compare/{tip}...{commit}"]])
+        self.assertFalse(any(c["token_visible"] for c in self.world.calls()))
+
+    def test_each_refusal_names_its_code_and_stops_the_reads(self):
+        entry = {"number": CANONICAL["pr"], "head": {"sha": CANONICAL["commit"]}}
+        cases = ((dict(prs=[]), "release_pr_missing", 1),
+                 (dict(prs=[entry, {**entry, "number": 337}]), "verification_unavailable", 1),
+                 (dict(prs=[{**entry, "head": {"sha": "9" * 40}}]), "release_pr_stale", 1),
+                 (dict(prs=[{**entry, "number": True}]), "verification_unavailable", 1),
+                 (dict(base_tip="5" * 39), "verification_unavailable", 2),
+                 (dict(compare="behind"), "release_pr_behind", 3),
+                 (dict(compare="diverged"), "release_pr_behind", 3),
+                 (dict(compare="identical"), "release_pr_behind", 3))
+        for ready, code, reads in cases:
+            with self.subTest(ready=ready):
+                self.world.reset()
+                self.world.merge_observation_ready(**ready)
+                with self.assertRaises(verification.VerificationRefused) as caught:
+                    observe_merge()
+                self.assertEqual((caught.exception.code, len(self.world.calls())), (code, reads))
+
+    def test_behind_says_how_to_repair(self):
+        self.world.merge_observation_ready(compare="diverged")
+        with self.assertRaises(verification.VerificationRefused) as caught:
+            observe_merge()
+        self.assertEqual(caught.exception.detail,
+                         f"dev is diverged relative to main at {CANONICAL['base_tip']}: merge main "
+                         "into dev, push, wait for CI and preview again")
