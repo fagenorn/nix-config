@@ -1,0 +1,121 @@
+{
+  "profile_version": 1,
+  "target": {
+    "environment": "fixture-env",
+    "concurrency_keys": [
+      "release/fixture"
+    ]
+  },
+  "requirements": {
+    "adapters": {
+      "store": {
+        "min_inclusive": "1.0.0",
+        "max_exclusive": "2.0.0"
+      }
+    }
+  },
+  "bindings": {
+    "adapters": {
+      "store": {
+        "adapter": "fixture-store"
+      }
+    },
+    "targets": {
+      "bucket": {
+        "adapter": "store",
+        "kind": "object_store",
+        "bucket_url": "s3://fixture"
+      }
+    },
+    "principals": {
+      "operator": {
+        "class": "deployer"
+      }
+    },
+    "credentials": {
+      "store-token": {
+        "adapter": "store",
+        "class": "fixture_token"
+      }
+    }
+  },
+  "publication": {
+    "actions": [
+      {
+        "id": "publish-artifact",
+        "mode": "materialize",
+        "adapter": "store",
+        "operation": "publish",
+        "target": "bucket",
+        "principal": "operator",
+        "credential": "store-token",
+        "effect": "reversible_no_incremental_spend",
+        "config_schema_version": 1,
+        "config": {
+          "bucket": "artifacts"
+        },
+        "deps": [],
+        "observation_deadline_ms": 60000
+      },
+      {
+        "id": "promote-pointer",
+        "mode": "promote",
+        "adapter": "store",
+        "operation": "promote",
+        "target": "bucket",
+        "principal": "operator",
+        "credential": "store-token",
+        "effect": "reversible_no_incremental_spend",
+        "config_schema_version": 1,
+        "config": {},
+        "deps": [
+          "publish-artifact"
+        ],
+        "observation_deadline_ms": 60000
+      }
+    ]
+  },
+  "activation": "none",
+  "proof": {
+    "convergence_window_ms": 1800000,
+    "obligations": []
+  },
+  "recovery": {
+    "units": {
+      "publish-artifact": {
+        "posture": "compensatable",
+        "anchor": null,
+        "compatibility": null,
+        "edges": [
+          {
+            "action": "compensate",
+            "operation": "retain",
+            "parameters": {},
+            "residue": "artifact retained unreferenced"
+          }
+        ]
+      },
+      "promote-pointer": {
+        "posture": "restorable",
+        "anchor": {
+          "target": "bucket",
+          "predicate": "pointer_at",
+          "parameters": {}
+        },
+        "compatibility": {
+          "predicate": "schema_compatible",
+          "parameters": {}
+        },
+        "edges": [
+          {
+            "action": "restore",
+            "operation": "repoint",
+            "parameters": {},
+            "residue": null
+          }
+        ]
+      }
+    }
+  },
+  "limits": {}
+}

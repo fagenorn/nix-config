@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 
+from agent_tools.attempt_observations import describe
+
 def seal(model, value, field="id"):
     value[field] = model.canonical_digest(value, omit_derived=field)
     return value
@@ -325,9 +327,9 @@ def workflow_responses(model):
                                    "alternative": "/from-issue <issue> --auto"},
         "current": {"action_id": "151:1:1", "current": True,
                     "current_action_id": "151:1:1", "reason": "current"},
-        "bootstrap": {"interface_version": 2, "kind": "workflow_bootstrap",
-                      "run_id": "run-1", "requirements": []},
-        "control": {"interface_version": 3, "run_id": "run-1", "now": "2026-09-21T00:00:00Z",
+        "bootstrap": {"interface_version": 3, "kind": "workflow_bootstrap",
+                      "run_id": "run-1", "requirements": [], "verification": []},
+        "control": {"interface_version": 4, "run_id": "run-1", "now": "2026-09-21T00:00:00Z",
                     "summaries": [{"issue": 151, "state": "active", "custody": active,
                         "owner": "151:1", "worktree": "/worktree", "deadline_at": "2026-09-21T01:00:00Z",
                         "blocked_on": None, "blockers": [], "result": None,
@@ -338,7 +340,7 @@ def workflow_responses(model):
                         "controller": 1, "owner": 1, "worker": 1, "reviewer": 1},
                         "available": 3, "waiting": []}},
         "observe": {"interface_version": 2, "kind": "observe", "issue": 151,
-                    "run_id": "run-1", "requirements": [{"kind": "tracker"}]},
+                    "run_id": "run-1", "requirements": [describe({"kind": "tracker"})]},
         "owner": owner,
         "phase_gate": {"interface_version": 2, "kind": "phase_gate", "run_id": "run-1",
                        "issue": 151, "custody": active, "action": "handoff",
@@ -524,8 +526,8 @@ def ship_handoff(model, contract, delivery):
             "worktree_path": "/worktree", "spec_artifact": artifact,
             "plan_artifact": {**artifact, "kind": "implementation-plan",
                               "path": ".claude/plans/sim.md"},
-            "head_sha": "a" * 40, "review_state": "clean", "auto": True,
-            "report_path": None, "notes": "simulated", "delivery_contract": contract,
+            "head_sha": "a" * 40, "review_state": "clean", "acceptance_state": "met",
+            "auto": True, "report_path": None, "notes": "simulated", "delivery_contract": contract,
             "delivery_contract_digest": model.canonical_digest(contract),
             "authorization_intents": delivery["authorization_intents"],
             "authorization_chain_digest": delivery["authorization_chain_digest"],

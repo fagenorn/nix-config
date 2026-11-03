@@ -1,10 +1,14 @@
+import ast
 import contextlib
 import copy
+from datetime import datetime, timezone
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -12,13 +16,55 @@ import tempfile
 import unittest
 from unittest import mock
 
+from agent_tools import attempt_identity, attempt_observations, attempt_store, verification_blocker
+from agent_tools.transaction_core import TransactionStore
+
+if __package__:
+    from .test_delivered_control import DELIVERED, DISPATCH, LIVE, DeliveredControlHarness
+else:
+    # tests/test_launch_commit.py loads this file from its source as a standalone
+    # module (its D14) for LifecycleHarness alone; with no parent package the #273
+    # held-control case below, which needs the package's #220 driver, is not defined.
+    DeliveredControlHarness = None
+
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
+SDD_WORKSPACE = Path(__file__).parents[1] / "skills" / "sdd" / "scripts" / "sdd-workspace"
 MODEL = Path(__file__).parents[1] / "scripts" / "delivery_model" / "__init__.py"
 MODEL_FIXTURES = Path(__file__).with_name("_delivery_model_fixtures.py")
 ARTIFACT_BUDGET = Path(__file__).parents[1] / "scripts" / "artifact_budget.py"
 BUDGET_POLICY = Path(__file__).parents[1] / "artifact-budget-policy.json"
 DEFAULT_NOW = "2026-08-13T20:00:00Z"
+ORCHESTRATED = attempt_identity.RunIdentity("orchestrated", None, None)
+
+BUILDER = Path(__file__).parents[1] / "scripts" / "workflow_delivery_build.py"
+WIRE = Path(__file__).parents[1] / "scripts" / "workflow_delivery_wire.py"
+# Each direct observe requirement kind in the bare shape the policy emits for issue 73.
+BARE_REQUIREMENTS = {
+    "tracker": {"kind": "tracker"},
+    "recorded_worktree": {"kind": "recorded_worktree",
+                          "path": "/repo/.worktrees/worktree-issue-73-example"},
+    "candidate_worktree": {"kind": "candidate_worktree"},
+    "forge_pr": {"kind": "forge_pr", "path": "issue-73-"},
+    "delivery_contract": {"kind": "delivery_contract", "subject_id": "73",
+                          "reason_code": "delivery_contract_required",
+                          "detail_pointer": None},
+    "verification": {"kind": "verification", "blocker_id": "sha256:" + "0" * 64,
+                     "sources": [{"name": "flake-lock", "paths": ["flake.lock"]}]},
+}
+OBSERVE_SLOTS = {"tracker": "tracker", "recorded_worktree": "worktree",
+                 "candidate_worktree": "worktree", "forge_pr": "forge",
+                 "delivery_contract": "delivery_contract", "verification": "verification"}
+
+
+def empty_direct_request(issue=73):
+    """acquire-direct.md's interface-3 request before any observation is sent."""
+    return {"interface_version": 3, "issue": issue, "attempt_budget_minutes": 180,
+            "new_run": False, "owner_unavailable": False, "tracker": None,
+            "worktree": None, "forge": None, "delivery_contract": None,
+            "authorization_intents": [], "authority_observations": [],
+            "reevaluation_evidence": [], "delivery_observations": [],
+            "requested_scope": None, "recovery": None, "verification": []}
 
 
 def load_source_module(path, name, *, package=False):
@@ -30,6 +76,40 @@ def load_source_module(path, name, *, package=False):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+INPROCESS_CLI = load_source_module(
+    Path(__file__).with_name("_inprocess_cli.py"), "workflow_state_test_inprocess_cli"
+)
+
+# The audit events that start a process (issue 498 D5).
+SPAWN_EVENTS = frozenset({"subprocess.Popen", "os.posix_spawn", "os.exec", "os.fork",
+                          "os.spawn", "os.system"})
+# The open recording window's events, or None while no window is open. An audit
+# hook cannot be removed, so one is added once per process and records only
+# inside a window.
+_SPAWN_WINDOW = None
+_SPAWN_HOOKED = False
+
+
+def _record_spawn(event, _arguments):
+    if _SPAWN_WINDOW is not None and event in SPAWN_EVENTS:
+        _SPAWN_WINDOW.append(event)
+
+
+@contextlib.contextmanager
+def recorded_spawns():
+    """The process-creation audit events raised inside the block, in order."""
+    global _SPAWN_WINDOW, _SPAWN_HOOKED
+    if not _SPAWN_HOOKED:
+        sys.addaudithook(_record_spawn)
+        _SPAWN_HOOKED = True
+    events = []
+    _SPAWN_WINDOW = events
+    try:
+        yield events
+    finally:
+        _SPAWN_WINDOW = None
 
 
 class LifecycleHarness:
@@ -72,9 +152,23 @@ class LifecycleHarness:
                 "selected_outputs": [], "stage_facts": [], "postconditions": {}}
 
     @staticmethod
-    def _as_legacy(state, version, *, keep_delivery=False):
+    def _as_legacy(state, version, *, keep_delivery=False, handle=None):
         state = copy.deepcopy(state)
         state["schema_version"] = version
+        if version < 11:
+            state.pop("verification_blockers", None)
+            for issue in state["issues"].values():
+                for attempt in issue["attempts"]:
+                    attempt.pop("verification_blocker", None)
+        if version < 8:
+            state.pop("transaction_id", None)
+        if handle is not None:
+            state["run_id"] = handle
+        if version < 7:
+            for issue in state["issues"].values():
+                for attempt in issue["attempts"]:
+                    for field in ("lane", "lane_budget_minutes", "lane_history"):
+                        attempt.pop(field, None)
         if version < 6:
             for issue in state["issues"].values():
                 for attempt in issue["attempts"]:
@@ -142,31 +236,78 @@ class LifecycleHarness:
     def state_path(self):
         return self.workflows_dir / self.run_id / "state.json"
 
+    @property
+    def store_root(self):
+        return self.root / ".superpowers" / "attempt-transactions"
+
+    def tree_snapshot(self):
+        """Every path under `<root>/.superpowers` mapped to its bytes, or "<dir>"."""
+        base = self.root / ".superpowers"
+        return {str(path.relative_to(base)): "<dir>" if path.is_dir() else path.read_bytes()
+                for path in sorted(base.rglob("*"))}
+
+    def install_legacy(self, state, handle, version=7):
+        """A retained legacy ledger: `state` as schema `version` under `handle`, beside its
+        empty `state.lock` and the workflows `.gitignore` a retained ledger has (D21)."""
+        run_dir = self.workflows_dir / handle
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (self.workflows_dir / ".gitignore").write_text("*\n", encoding="utf-8")
+        (run_dir / "state.lock").write_bytes(b"")
+        self.run_id = handle
+        self.release_custody()
+        self.write_state(self._as_legacy(state, min(version, 7), handle=handle))
+        if version == 8:
+            self.bind_as_schema_8()
+
+    def release_custody(self):
+        """Give up every live core custody in this root: a legacy ledger about to be
+        installed never held a lease, and lease records are never deleted (#338 D11)."""
+        for path in sorted((self.store_root / "leases").glob("*.json")):
+            holder = json.loads(path.read_text(encoding="utf-8"))["holder"]
+            if holder is None:
+                continue
+            store = TransactionStore(self.store_root, clock=lambda: holder["acquired_at"])
+            custody = store.load(holder["transaction_id"]).custody
+            if custody is not None:
+                store.release(custody)
+
+    def bind_as_schema_8(self):
+        """The stored schema-7 ledger as package 1 bound it: its run minted, schema 8."""
+        document = json.loads(self.state_path.read_text(encoding="utf-8"))
+        plan = attempt_store.plan_legacy_run(document)
+        document["transaction_id"] = attempt_store.mint_run(self.store_root, plan)
+        document["schema_version"] = 8
+        self.write_state(document)
+
+    def assert_bound(self, state):
+        """`state` is schema 11 and bound to the transaction its legacy handle's key names."""
+        self.assertEqual(state["schema_version"], 11)
+        self.assertEqual(state["transaction_id"], TransactionStore(self.store_root).lookup(
+            attempt_identity.legacy_key(state["run_id"])))
+
     def run_cli(self, *args, ok=True):
-        completed = subprocess.run(
-            [sys.executable, str(SCRIPT), *map(str, args)],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=self.cli_env,
-        )
+        completed = INPROCESS_CLI.run_script(SCRIPT, args, env=self.cli_env)
         if ok and completed.returncode != 0:
             self.fail(
                 f"command failed with {completed.returncode}: {completed.stderr}"
             )
         return completed
 
-    def init_run(self, *, now=DEFAULT_NOW):
-        completed = self.run_cli(
-            "init-run",
-            "--repo-root",
-            self.root,
-            "--run-id",
-            self.run_id,
-            "--now",
-            now,
-        )
+    def init_run(self, *, now=DEFAULT_NOW, creation_key=None):
+        """Mint the run a test names (a `run_id` set beforehand is its creation key, D12), or
+        re-bootstrap an installed legacy ledger, a locked read that persists its bind."""
+        dialect = attempt_identity.classify(self.run_id)
+        if creation_key is None and self.state_path.exists():
+            which = ("--run-id", self.run_id)
+        else:
+            if creation_key is None:
+                harness = dialect == "core" or self.run_id == "issue-14-test"
+                creation_key = "lifecycle-harness" if harness else self.run_id
+            which = ("--creation-key", creation_key)
+        completed = self.run_cli("init-run", "--repo-root", self.root, *which,
+                                 *(() if now is None else ("--now", now)))
         value = json.loads(completed.stdout)
+        self.run_id = value["run_id"]
         return {"interface_version": 1, "run_id": value["run_id"],
                 "requirements": [self._legacy_bootstrap(item)
                                  for item in value["requirements"]]}
@@ -184,6 +325,9 @@ class LifecycleHarness:
     def _legacy_direct(value):
         value = copy.deepcopy(value)
         value["interface_version"] = 1
+        if value.get("kind") == "observe":
+            for item in value["requirements"]:
+                del item["expects"]
         if value.get("kind") == "owner":
             for name in ("custody", "contract", "contract_digest",
                          "pending_stage_ids", "requirements",
@@ -212,6 +356,19 @@ class LifecycleHarness:
                     action.pop(name, None)
         return value
 
+    def launch_arguments(self, issue, attempt, action_id):
+        """`--action-id` for an owner transport: the attempt's last launch unless the test
+        names one; `False` sends the transport attempt-keyed (#338 D9)."""
+        if action_id is False:
+            return ()
+        if action_id is None:
+            try:
+                record = self.read_state()["issues"][str(issue)]["attempts"][attempt - 1]
+            except (KeyError, IndexError, TypeError, ValueError, OSError):
+                return ()
+            action_id = f"{issue}:{attempt}:{len(record['launches'])}"
+        return ("--action-id", action_id)
+
     def progress(
         self,
         *,
@@ -229,6 +386,7 @@ class LifecycleHarness:
         artifacts_sufficient=False,
         remainder_self_contained=False,
         handoff_path=None,
+        action_id=None,
         ok=True,
     ):
         args = [
@@ -245,14 +403,6 @@ class LifecycleHarness:
             phase,
             "--now",
             now,
-            "--turn-ceiling",
-            turn_ceiling,
-            "--context-ceiling",
-            context_ceiling,
-            "--turn-headroom",
-            turn_headroom,
-            "--context-headroom",
-            context_headroom,
             "--next-needs-context",
             str(next_needs_context).lower(),
             "--artifacts-sufficient",
@@ -260,12 +410,18 @@ class LifecycleHarness:
             "--remainder-self-contained",
             str(remainder_self_contained).lower(),
         ]
+        for flag, value in (("--turn-ceiling", turn_ceiling), ("--context-ceiling", context_ceiling),
+                            ("--turn-headroom", turn_headroom),
+                            ("--context-headroom", context_headroom)):
+            if value is not None:
+                args.extend((flag, value))
         if turn_count is not None:
             args.extend(("--turn-count", turn_count))
         if context_tokens is not None:
             args.extend(("--context-tokens", context_tokens))
         if handoff_path is not None:
             args.extend(("--handoff-path", handoff_path))
+        args.extend(self.launch_arguments(issue, attempt, action_id))
         completed = self.run_cli(*args, ok=ok)
         return self.validated_response(completed.stdout) if ok else completed
 
@@ -306,9 +462,21 @@ class LifecycleHarness:
         root.write_text(json.dumps(manifest), encoding="utf-8")
         return root
 
-    def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, ok=True):
+    def _legacy_finish_input(self, stored):
+        """The ledger the legacy `finish` runs on: a schema-11 ledger keeps its binding and
+        loses only its deliveries, as legacy finish refuses only a contracted issue (D25)."""
+        if stored["schema_version"] != 11:
+            return self._as_legacy(stored, 2)
+        stripped = copy.deepcopy(stored)
+        for issue_state in stripped["issues"].values():
+            issue_state["delivery"] = self.empty_delivery()
+            issue_state["delivery_remainders"] = []
+        return stripped
+
+    def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, action_id=None, ok=True):
+        launch = self.launch_arguments(issue, attempt, action_id)
         current_bytes = self.state_path.read_bytes()
-        self.write_state(self._as_legacy(json.loads(current_bytes), 2))
+        self.write_state(self._legacy_finish_input(json.loads(current_bytes)))
         result_path = self.root / f"result-{issue}-{attempt}.json"
         result_path.write_text(json.dumps(result), encoding="utf-8")
         completed = self.run_cli(
@@ -325,6 +493,7 @@ class LifecycleHarness:
             result_path,
             "--now",
             now,
+            *launch,
             ok=ok,
         )
         if ok:
@@ -384,10 +553,10 @@ class LifecycleHarness:
 
     def control_request(self, *, now, issues, tracker, worktrees, owners=None,
                         max_parallel=2, attempt_budget_minutes=30,
-                        human_directed=False, host_route="claude-code"):
+                        human_directed=False, host_route="claude-code", verification=()):
         contracts = {str(issue): self.delivery_contract(issue) for issue in issues}
         return {
-            "interface_version": 3,
+            "interface_version": 4,
             "host_route": host_route,
             "now": now,
             "max_parallel": max_parallel,
@@ -405,6 +574,7 @@ class LifecycleHarness:
             "delivery_observations": {str(issue): [] for issue in issues},
             "requested_scopes": {str(issue): None for issue in issues},
             "recoveries": {str(issue): None for issue in issues},
+            "verification": list(verification),
         }
 
     def control_raw(self, *, request=None, ok=True, legacy=True, **request_fields):
@@ -440,7 +610,7 @@ class LifecycleHarness:
         return json.loads(stdout)
 
     def control_validated(self, **request_fields):
-        """Sweep, returning interface-3 bytes the `workflow-response` boundary passes (#194)."""
+        """Sweep, returning interface-4 bytes the `workflow-response` boundary passes (#194)."""
         completed = self.control_raw(legacy=False, ok=False, **request_fields)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return self.validated_response(completed.stdout)
@@ -457,10 +627,10 @@ class LifecycleHarness:
     def direct_request(self, *, issue=73, now="2026-08-20T10:00:00Z",
                        attempt_budget_minutes=180, new_run=False,
                        owner_unavailable=False, tracker=None, worktree=None,
-                       forge=UNOBSERVED):
+                       forge=UNOBSERVED, verification=()):
         contract, first = self.delivery_contract(issue)
         return {
-            "interface_version": 2,
+            "interface_version": 3,
             "issue": issue,
             "now": now,
             "attempt_budget_minutes": attempt_budget_minutes,
@@ -476,6 +646,7 @@ class LifecycleHarness:
             "delivery_observations": [],
             "requested_scope": None,
             "recovery": None,
+            "verification": list(verification),
         }
 
     @staticmethod
@@ -510,7 +681,39 @@ class LifecycleHarness:
             "--request-file", request_path, ok=ok,
         )
 
+    def direct_run_id(self, issue, sequence):
+        """The run id the attempt transaction store names for direct run `sequence` of `issue`."""
+        run_id = None
+        if self.store_root.is_dir():
+            run_id = TransactionStore(self.store_root).lookup(
+                attempt_identity.direct_key(issue, sequence))
+        self.assertIsNotNone(run_id, f"no direct run {sequence} of issue {issue}")
+        return run_id
+
+    def run_dirs(self):
+        """The names of the run directories under `workflows`."""
+        return sorted(path.name for path in self.workflows_dir.iterdir() if path.is_dir())
+
+    def mint_direct_ledger(self, state, issue, sequence, prior_run):
+        """Mint direct run `sequence` of `issue` and install `state` as its bound ledger."""
+        run_id = attempt_store.mint_run(self.store_root, attempt_identity.minted_plan(
+            identity=attempt_identity.RunIdentity("direct", issue, sequence),
+            prior_run=prior_run, caller_key=None))
+        run_dir = self.workflows_dir / run_id
+        run_dir.mkdir()
+        (run_dir / "state.lock").write_bytes(b"")
+        (run_dir / "state.json").write_text(json.dumps(
+            {**state, "run_id": run_id, "transaction_id": run_id, "prior_run": prior_run},
+            sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        return run_dir
+
     def direct_state_path(self, run_id):
+        """A direct run's ledger; a `direct-<issue>-<seq6>` name that no directory carries
+        names the minted run of that issue and sequence, if there is one (D12)."""
+        named = re.fullmatch(r"direct-([0-9]+)-([0-9]{6})", run_id)
+        if named and not (self.workflows_dir / run_id).exists() and self.store_root.is_dir():
+            run_id = TransactionStore(self.store_root).lookup(attempt_identity.direct_key(
+                int(named[1]), int(named[2]))) or run_id
         return self.workflows_dir / run_id / "state.json"
 
     def acquire_direct(self, *, issue=73, now="2026-08-20T10:00:00Z",
@@ -526,7 +729,7 @@ class LifecycleHarness:
         selected = self.direct_owner(**common, tracker=tracker)
         self.assertEqual(selected, {
             "interface_version": 1, "kind": "observe", "issue": issue,
-            "run_id": f"direct-{issue}-000001",
+            "run_id": self.direct_run_id(issue, 1),
             "requirements": [{"kind": "candidate_worktree"}],
         })
         return self.direct_owner(
@@ -717,8 +920,10 @@ class LifecycleHarness:
                 self.assertIsInstance(action["deadline_at"], str)
             elif action["kind"] == "wait":
                 self.assertEqual(set(action), {
-                    "id", "kind", "wake_on", "deadline_at",
+                    "id", "kind", "wake_on", "deadline_at", "wait_seconds",
                 })
+                self.assertIs(type(action["wait_seconds"]), int)
+                self.assertGreaterEqual(action["wait_seconds"], 0)
                 self.assertIsInstance(action["wake_on"], list)
                 self.assertTrue(set(action["wake_on"]) <= {
                     "owner_notification", "tracker_change", "deadline",
@@ -770,7 +975,7 @@ class LifecycleHarness:
             encoding="utf-8",
         )
 
-    def suspend(self, *, issue, attempt, blocked_on, now, ok=True):
+    def suspend(self, *, issue, attempt, blocked_on, now, action_id=None, ok=True):
         completed = self.run_cli(
             "suspend",
             "--repo-root", self.root,
@@ -779,6 +984,7 @@ class LifecycleHarness:
             "--attempt", attempt,
             "--blocked-on", blocked_on,
             "--now", now,
+            *self.launch_arguments(issue, attempt, action_id),
             ok=ok,
         )
         return self.validated_response(completed.stdout) if ok else completed
@@ -821,6 +1027,13 @@ class LifecycleHarness:
         completed = self.run_cli(
             "mark-progress", "--repo-root", self.root, "--run-id", self.run_id,
             "--now", now, "--action-id", action_id, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def declare_lane(self, *, action_id, now, lane, budget_minutes, reason, ok=True):
+        completed = self.run_cli(
+            "declare-lane", "--repo-root", self.root, "--run-id", self.run_id,
+            "--now", now, "--action-id", action_id, "--lane", lane,
+            "--budget-minutes", str(budget_minutes), "--reason", reason, ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
     @staticmethod
@@ -873,9 +1086,9 @@ class LifecycleHarness:
         holding the old `stopped`/`result_source="expiry"` shape must keep
         loading and keep driving the retry ladder and the provisional-result
         override, so the tests that pin those rules seed the record directly.
-        `prior_schema` writes it under schema 2, without the admission block
-        and the delivery fields — the on-disk shape a live run carries across
-        deploy.
+        `prior_schema` installs the ledger as schema 2 via `install_legacy`
+        under `orchestrate-<issue>`, rebinding `self.run_id` — the on-disk
+        shape a live run carries across deploy.
         """
         state = self.read_state()
         issue_state = state["issues"][str(issue)]
@@ -900,12 +1113,9 @@ class LifecycleHarness:
         # re-binds and adopts (per D11, D23).
         state["admission"] = None
         if prior_schema:
-            state["schema_version"] = 2
-            state.pop("admission")
-            state.pop("workers")
-            issue_state.pop("delivery")
-            issue_state.pop("delivery_remainders")
-        self.write_state(state)
+            self.install_legacy(state, f"orchestrate-{issue}", 2)
+        else:
+            self.write_state(state)
         return result
 
     @staticmethod
@@ -924,7 +1134,7 @@ class LifecycleHarness:
 
     def concurrent_finish(self, results, *, now):
         current = self.read_state()
-        self.write_state(self._as_legacy(current, 2))
+        self.write_state(self._legacy_finish_input(current))
         wrapper = (
             "import os,sys; fd=int(sys.argv[1]); script=sys.argv[2]; "
             "args=sys.argv[3:]; os.read(fd,1); "
@@ -940,7 +1150,7 @@ class LifecycleHarness:
                 "finish", "--repo-root", str(self.root),
                 "--run-id", self.run_id, "--issue", str(issue),
                 "--attempt", str(attempt), "--result-file", str(result_path),
-                "--now", now,
+                "--now", now, *self.launch_arguments(issue, attempt, None),
             ]
             process = subprocess.Popen(
                 [sys.executable, "-c", wrapper, str(read_fd), str(SCRIPT), *args],
@@ -966,15 +1176,17 @@ class LifecycleHarness:
         run_dir = root / ".superpowers" / "workflows" / self.run_id
         run_dir.mkdir(parents=True)
         (run_dir / "state.json").write_bytes(state_bytes)
+        shutil.copytree(self.store_root, root / ".superpowers" / "attempt-transactions")
         return root
 
     def run_control_at_root(self, root, request):
         request_path = root / "copied-control.json"
         request_path.write_text(json.dumps(request), encoding="utf-8")
-        completed = subprocess.run(
-            [sys.executable, str(SCRIPT), "control", "--repo-root", str(root),
-             "--run-id", self.run_id, "--request-file", str(request_path)],
-            capture_output=True, text=True, check=False, env=self.cli_env,
+        completed = INPROCESS_CLI.run_script(
+            SCRIPT,
+            ["control", "--repo-root", root, "--run-id", self.run_id,
+             "--request-file", request_path],
+            env=self.cli_env,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         completed.stdout = json.dumps(
@@ -1066,7 +1278,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(response["actions"][-1], {
             "id": "wait:2026-08-19T15:00:00Z", "kind": "wait",
             "wake_on": ["deadline", "owner_notification", "tracker_change"],
-            "deadline_at": "2026-08-19T15:00:00Z",
+            "deadline_at": "2026-08-19T15:00:00Z", "wait_seconds": 10800,
         })
         self.assertEqual(response["next_deadline"], "2026-08-19T15:00:00Z")
         reopened = self.read_state()
@@ -2364,6 +2576,31 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             os.path.abspath(worktree),
         )
 
+    def test_owner_unavailable_after_the_deadline_is_superseded_by_expiry(self):
+        """A stalled verdict read just before the deadline still recovers (#310 D18)."""
+        self.init_run()
+        worktree = self.root / "stalled-owner"
+        self.spawn(issue=14, worktree=worktree, budget_minutes=10)
+        attempt = self.read_state()["issues"]["14"]["attempts"][-1]
+        response = self.control(
+            now="2026-08-13T20:10:00Z",
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            owners=[self.owner_fact(
+                event_id="14-owner-unavailable", issue=14,
+                attempt=attempt["attempt"], launch=len(attempt["launches"]),
+            )],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": attempt["worktree"], "state": "matching_issue_branch",
+            })],
+            max_parallel=100,
+        )
+        self.assert_control_response_shape(response)
+        self.assertEqual(
+            [(d["kind"], d["attempt"]) for d in response["deltas"]],
+            [("expired", 1), ("resumed", 1)],
+        )
+
     def test_owner_failed_retry_and_refusal_stamp_their_result_source(self):
         self.init_run()
         self.spawn(issue=14, worktree=self.root / "wt-a")
@@ -2436,7 +2673,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
         state = self.read_state()
         attempt = state["issues"]["14"]["attempts"][0]
-        self.assertEqual(state["schema_version"], 6)
+        self.assertEqual(state["schema_version"], 11)
+        self.assert_bound(state)
         self.assertIsNone(attempt["blocked_on"])
         self.assertEqual(attempt["stalled_resumes"], 0)
         self.assertEqual(attempt["state"], "merged")
@@ -2830,10 +3068,13 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "phase_inputs": expected_inputs,
                     "blocked_on": None, "suspend_phase": None,
                     "stalled_resumes": 0, "progress_marker": None,
+                    "lane": None, "lane_budget_minutes": None, "lane_history": [],
+                    "verification_blocker": None,
                 }
                 expected_state = {
-                    "schema_version": 6, "run_id": run_id, "workers": [],
-                    "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
+                    "schema_version": 11, "run_id": self.run_id, "workers": [],
+                    "verification_blockers": {},
+                    "transaction_id": self.run_id, "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
                     "prior_run": None, "admission": self.spawned_admission(14),
                     "issues": {"14": {
                         "issue": 14, "attempts": [expected_attempt],
@@ -2844,7 +3085,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 expected_bytes = (json.dumps(
                     expected_state, sort_keys=True, separators=(",", ":")
                 ) + "\n").encode()
-                self.assertEqual(result, {"interface_version": 2, "kind": "phase_gate", "run_id": run_id, "issue": 14, "custody": {"kind": "implementation", "attempt": 1, "launch": 1, "action_id": "14:1:1"}, "action": "handoff", "handoff_path": None})
+                self.assertEqual(result, {"interface_version": 2, "kind": "phase_gate", "run_id": self.run_id, "issue": 14, "custody": {"kind": "implementation", "attempt": 1, "launch": 1, "action_id": "14:1:1"}, "action": "handoff", "handoff_path": None})
                 self.assertEqual(self.state_path.read_bytes(), expected_bytes)
 
     def test_zero_sequence_direct_shaped_dispatcher_keeps_non_direct_progress_and_reopen_bytes(self):
@@ -2878,10 +3119,13 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "phase_inputs": expected_inputs,
             "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
             "progress_marker": None,
+            "lane": None, "lane_budget_minutes": None, "lane_history": [],
+            "verification_blocker": None,
         }
         expected_state = {
-            "schema_version": 6, "run_id": self.run_id, "workers": [],
-            "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
+            "schema_version": 11, "run_id": self.run_id, "workers": [],
+            "verification_blockers": {},
+            "transaction_id": self.run_id, "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
             "prior_run": None, "admission": self.spawned_admission(14),
             "issues": {"14": {
                 "issue": 14, "attempts": [expected_attempt], "outcome": None,
@@ -2891,7 +3135,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         expected_bytes = (json.dumps(
             expected_state, sort_keys=True, separators=(",", ":")
         ) + "\n").encode()
-        self.assertEqual(result, {"interface_version": 2, "kind": "phase_gate", "run_id": "direct-14-000000", "issue": 14, "custody": {"kind": "implementation", "attempt": 1, "launch": 1, "action_id": "14:1:1"}, "action": "handoff", "handoff_path": None})
+        self.assertEqual(result, {"interface_version": 2, "kind": "phase_gate", "run_id": self.run_id, "issue": 14, "custody": {"kind": "implementation", "attempt": 1, "launch": 1, "action_id": "14:1:1"}, "action": "handoff", "handoff_path": None})
         self.assertEqual(self.state_path.read_bytes(), expected_bytes)
 
         reopened = self.control_raw(
@@ -3554,8 +3798,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "init-run",
             "--repo-root",
             missing_root,
-            "--run-id",
-            self.run_id,
+            "--creation-key",
+            "escape",
             "--now",
             DEFAULT_NOW,
             ok=False,
@@ -3572,8 +3816,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "init-run",
             "--repo-root",
             symlink_root,
-            "--run-id",
-            self.run_id,
+            "--creation-key",
+            "escape",
             "--now",
             DEFAULT_NOW,
             ok=False,
@@ -3589,16 +3833,16 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
 
         for stable_name in ("state.lock", "state.json"):
             with self.subTest(stable_name=stable_name):
-                run_id = f"stable-{stable_name.replace('.', '-')}"
-                self.run_cli(
+                initialized = self.run_cli(
                     "init-run",
                     "--repo-root",
                     self.root,
-                    "--run-id",
-                    run_id,
+                    "--creation-key",
+                    f"stable-{stable_name.replace('.', '-')}",
                     "--now",
                     DEFAULT_NOW,
                 )
+                run_id = json.loads(initialized.stdout)["run_id"]
                 run_dir = self.workflows_dir / run_id
                 stable_path = run_dir / stable_name
                 external_path = outside / stable_name
@@ -3758,8 +4002,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
     def test_invalid_time_run_id_and_identity_are_rejected(self):
         invalid_init_args = (
             ("--run-id", "../escape", "--now", DEFAULT_NOW),
-            ("--run-id", self.run_id, "--now", "2026-08-13T20:00:00"),
-            ("--run-id", self.run_id, "--now", "2026-08-13T21:00:00+01:00"),
+            ("--creation-key", "invalid-time", "--now", "2026-08-13T20:00:00"),
+            ("--creation-key", "invalid-time", "--now", "2026-08-13T21:00:00+01:00"),
         )
         for args in invalid_init_args:
             with self.subTest(args=args):
@@ -3859,7 +4103,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(owner, {
             "interface_version": 1, "kind": "owner",
             "ledger_repo_root": str(self.root.resolve()),
-            "run_id": "direct-73-000001", "issue": 73, "attempt": 1,
+            "run_id": self.direct_run_id(73, 1), "issue": 73, "attempt": 1,
             "owner": "73:1", "action_id": "73:1:1", "launch_kind": "spawn",
             "worktree": worktree, "handoff_path": None,
             "deadline_at": "2026-08-20T13:00:00Z",
@@ -3922,9 +4166,11 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
 
     def test_direct_owner_rejects_an_unrepresentable_deadline_without_traceback(self):
         candidate = os.path.abspath(self.root / "worktree-issue-73")
+        # A supplied `now` may lead the clock by at most 60 s (#309 D6), so the
+        # deadline overflow is reached by a budget too long for any date, not a late `now`.
         rejected = self.direct_owner_raw(
-            now="9999-12-31T23:59:59Z",
-            attempt_budget_minutes=1,
+            now="2026-09-30T12:00:00Z",
+            attempt_budget_minutes=10**10,
             tracker=self.tracker_fact(73),
             worktree=self.worktree_fact(
                 73, candidate={"path": candidate, "state": "absent"},
@@ -3935,7 +4181,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(rejected.stdout, "")
         self.assertIn("attempt deadline is out of range", rejected.stderr)
         self.assertNotIn("Traceback", rejected.stderr)
-        self.assertFalse((self.workflows_dir / "direct-73-000001").exists())
+        self.assertFalse((self.workflows_dir / self.direct_run_id(73, 1)).exists())
 
     def test_direct_owner_requires_explicit_unavailable_authorization_to_resume_active(self):
         owner = self.acquire_direct()
@@ -3957,7 +4203,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (resumed["run_id"], resumed["attempt"], resumed["owner"],
              resumed["action_id"], resumed["launch_kind"], resumed["deadline_at"]),
-            ("direct-73-000001", 1, "73:1", "73:1:2", "resume",
+            (self.direct_run_id(73, 1), 1, "73:1", "73:1:2", "resume",
              "2026-08-20T13:00:00Z"),
         )
         persisted = json.loads(state_path.read_text())["issues"]["73"]["attempts"][0]
@@ -4213,8 +4459,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             self.assertEqual(len(attempts), 1)
             self.assertEqual(len(attempts[0]["launches"]), 2)
             self.assertEqual(attempts[0]["worktree"], str(worktree))
-            runs = sorted(path.name for path in self.workflows_dir.glob("direct-73-*"))
-            self.assertEqual(runs, [owner["run_id"]])
+            self.assertEqual(self.run_dirs(), [owner["run_id"]])
 
     def test_direct_owner_retries_owner_failure_then_replays_terminal_and_starts_new_run(self):
         owner = self.acquire_direct()
@@ -4253,7 +4498,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         next_needed = self.direct_owner(
             now="2026-08-20T10:33:00Z", new_run=True, tracker=tracker,
         )
-        self.assertEqual(next_needed["run_id"], "direct-73-000002")
+        second = self.direct_run_id(73, 2)
+        self.assertEqual(next_needed["run_id"], second)
         self.assertEqual(next_needed["requirements"], [{
             "kind": "recorded_worktree", "path": owner["worktree"],
         }])
@@ -4266,10 +4512,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (renewed["run_id"], renewed["attempt"], renewed["launch_kind"],
              renewed["worktree"]),
-            ("direct-73-000002", 1, "spawn", owner["worktree"]),
+            (second, 1, "spawn", owner["worktree"]),
         )
-        self.assertTrue(self.direct_state_path("direct-73-000001").exists())
-        self.assertTrue(self.direct_state_path("direct-73-000002").exists())
+        self.assertTrue(self.direct_state_path(owner["run_id"]).exists())
+        self.assertTrue(self.direct_state_path(second).exists())
 
     def test_direct_new_run_tracker_terminals_do_not_leak_uncreated_run_id(self):
         owner = self.acquire_direct()
@@ -4328,10 +4574,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "blockers": blockers, "result": None,
                     "reentry": "/from-issue 73 --auto",
                 })
-                self.assertFalse(any(
-                    path.name.startswith("direct-73-")
-                    for path in self.workflows_dir.iterdir()
-                ))
+                self.assertEqual(self.run_dirs(), [])
 
     def test_reserved_direct_ids_are_closed_to_init_and_control_but_open_to_owner_mutations(self):
         request_path = self.root / "control-reserved.json"
@@ -4355,14 +4598,14 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            zero_id = "direct-73-000000"
             initialized = self.run_cli(
-                "init-run", "--repo-root", root, "--run-id", zero_id,
+                "init-run", "--repo-root", root, "--creation-key", "direct-73-000000",
                 "--now", "2026-08-20T10:00:00Z",
             )
+            zero_id = json.loads(initialized.stdout)["run_id"]
             self.assertEqual(json.loads(initialized.stdout), {
-                "interface_version": 2, "kind": "workflow_bootstrap",
-                "run_id": zero_id, "requirements": [],
+                "interface_version": 3, "kind": "workflow_bootstrap",
+                "run_id": zero_id, "requirements": [], "verification": [],
             })
             zero_request = root / "control-zero.json"
             zero_request.write_text(json.dumps(self.control_request(
@@ -4374,14 +4617,14 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 "--request-file", zero_request,
             )
             controlled_value = json.loads(controlled.stdout)
-            self.assertEqual(controlled_value["interface_version"], 3)
+            self.assertEqual(controlled_value["interface_version"], 4)
             self.assertEqual(controlled_value["run_id"], zero_id)
             self.assertEqual(controlled_value["summaries"][0]["state"], "closed")
             self.assertEqual(controlled_value["actions"],
                              [{"id": "finalize", "kind": "finalize"}])
 
-        run_id = "direct-73-000001"
         owner = self.acquire_direct()
+        run_id = owner["run_id"]
         before = self.direct_state_path(run_id).read_bytes()
         existing_init = self.run_cli(
             "init-run", "--repo-root", self.root, "--run-id", run_id,
@@ -4407,15 +4650,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         owner = self.acquire_direct()
         first_dir = self.workflows_dir / owner["run_id"]
         first_state = json.loads((first_dir / "state.json").read_text())
-        second_dir = self.workflows_dir / "direct-73-000002"
-        second_dir.mkdir()
-        (second_dir / "state.lock").write_bytes(b"")
-        second_state = copy.deepcopy(first_state)
-        second_state["run_id"] = "direct-73-000002"
-        (second_dir / "state.json").write_text(
-            json.dumps(second_state, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
+        second_dir = self.mint_direct_ledger(first_state, 73, 2, owner["run_id"])
         snapshots = {
             path: path.read_bytes()
             for path in (first_dir / "state.json", second_dir / "state.json")
@@ -4423,11 +4658,13 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         ambiguous = self.direct_owner_raw(ok=False)
         self.assertIn("nonterminal", ambiguous.stderr)
         self.assertEqual({path: path.read_bytes() for path in snapshots}, snapshots)
-        malformed = self.workflows_dir / "direct-73-bad"
-        malformed.mkdir()
+        # A directory no index entry names is not read, so it changes no answer (D22).
+        stray = self.workflows_dir / "direct-73-bad"
+        stray.mkdir()
         rejected = self.direct_owner_raw(ok=False)
-        self.assertIn("malformed", rejected.stderr)
+        self.assertEqual(rejected.stderr, ambiguous.stderr)
         self.assertEqual({path: path.read_bytes() for path in snapshots}, snapshots)
+        self.assertEqual(list(stray.iterdir()), [])
 
     def test_concurrent_first_direct_calls_create_one_run_and_one_attempt(self):
         request_path = self.root / "concurrent-direct.json"
@@ -4463,54 +4700,74 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(sorted(item[2] for item in completed), [0, 2])
         successful = [json.loads(stdout) for stdout, _, code in completed if code == 0]
         self.assertEqual(len(successful), 1)
-        self.assertEqual(successful[0]["run_id"], "direct-73-000001")
-        runs = sorted(path.name for path in self.workflows_dir.iterdir()
-                      if path.name.startswith("direct-73-") and path.is_dir())
-        self.assertEqual(runs, ["direct-73-000001"])
+        self.assertEqual(successful[0]["run_id"], self.direct_run_id(73, 1))
+        runs = self.run_dirs()
+        self.assertEqual(runs, [self.direct_run_id(73, 1)])
         state = json.loads(self.direct_state_path(runs[0]).read_text())
         self.assertEqual(len(state["issues"]["73"]["attempts"]), 1)
         self.assertEqual(len(state["issues"]["73"]["attempts"][0]["launches"]), 1)
 
     def test_direct_discovery_rejects_every_unsafe_retained_entry(self):
+        """Each row damages one thing about an indexed run, so the refusal is that guard's
+        own; the unindexed and non-run rows are the two refusals the index adds (D22)."""
         owner = self.acquire_direct()
-        valid_state = self.direct_state_path(owner["run_id"]).read_bytes()
+        run = owner["run_id"]
+        valid_state = self.direct_state_path(run).read_bytes()
+        refusals = {
+            "unmigrated": "unmigrated direct run: run workflow-state migrate --apply",
+            "directory": "direct run entry must be a non-symlink directory",
+            "issue lock": "direct issue lock must be a non-symlink regular file",
+            "missing lock": "state lock does not exist",
+            "state lock": "state lock must be a non-symlink regular file",
+            "state file": "workflow state must be a non-symlink regular file",
+            "corrupt": "invalid workflow state",
+            "issue": "direct run state must contain exactly the requested issue",
+            "not a run": "direct run index entry is not a run transaction",
+        }
 
-        def materialize(root, *, directory="real", issue_lock="missing",
-                        lock="file", state="file", state_bytes=valid_state):
+        def materialize(root, *, directory="real", issue_lock="file", lock="file",
+                        state="file", state_bytes=valid_state):
+            """An indexed copy of the acquired run under `root`, damaged as named."""
+            shutil.copytree(self.root / ".superpowers", root / ".superpowers")
             workflows = root / ".superpowers" / "workflows"
-            workflows.mkdir(parents=True)
+            run_dir = workflows / run
             if issue_lock == "symlink":
                 target = root / "issue-lock-target"
                 target.write_bytes(b"external issue lock sentinel")
+                (workflows / ".direct-73.lock").unlink()
                 (workflows / ".direct-73.lock").symlink_to(target)
             elif issue_lock == "directory":
+                (workflows / ".direct-73.lock").unlink()
                 (workflows / ".direct-73.lock").mkdir()
-            run = workflows / "direct-73-000001"
             if directory == "file":
-                run.write_bytes(b"claimed namespace sentinel")
+                shutil.rmtree(run_dir)
+                run_dir.write_bytes(b"claimed namespace sentinel")
                 return
             if directory == "symlink":
+                shutil.rmtree(run_dir)
                 target = root / "run-target"
                 target.mkdir()
-                run.symlink_to(target, target_is_directory=True)
+                run_dir.symlink_to(target, target_is_directory=True)
                 return
-            run.mkdir()
-            if lock == "file":
-                (run / "state.lock").write_bytes(b"")
+            if lock == "missing":
+                (run_dir / "state.lock").unlink()
             elif lock == "symlink":
                 target = root / "lock-target"
                 target.write_bytes(b"")
-                (run / "state.lock").symlink_to(target)
-            if state == "file":
-                (run / "state.json").write_bytes(state_bytes)
-            elif state == "symlink":
+                (run_dir / "state.lock").unlink()
+                (run_dir / "state.lock").symlink_to(target)
+            if state == "symlink":
                 target = root / "state-target"
                 target.write_bytes(state_bytes)
-                (run / "state.json").symlink_to(target)
+                (run_dir / "state.json").unlink()
+                (run_dir / "state.json").symlink_to(target)
+            else:
+                (run_dir / "state.json").write_bytes(state_bytes)
 
         wrong_issue = json.loads(valid_state)
-        issue_state = wrong_issue["issues"].pop("73")
+        issue_state = copy.deepcopy(wrong_issue["issues"]["73"])
         issue_state["issue"] = 74
+        issue_state["delivery"] = self.empty_delivery()  # 73's contract names issue 73
         for attempt in issue_state["attempts"]:
             attempt["issue"] = 74
             attempt["owner"] = attempt["owner"].replace("73:", "74:")
@@ -4521,18 +4778,24 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             wrong_issue, sort_keys=True, separators=(",", ":")
         ) + "\n").encode()
         cases = {
-            "regular-file run entry": {"directory": "file"},
-            "symlink directory": {"directory": "symlink"},
-            "symlink issue lock": {"issue_lock": "symlink"},
-            "non-regular issue lock": {"issue_lock": "directory"},
-            "missing lock": {"lock": "missing"},
-            "symlink lock": {"lock": "symlink"},
-            "missing state": {"state": "missing"},
-            "symlink state": {"state": "symlink"},
-            "corrupt state": {"state_bytes": b"{not-json\n"},
-            "wrong issue": {"state_bytes": wrong_bytes},
+            "regular-file run entry": ({"directory": "file"}, "directory"),
+            "symlink directory": ({"directory": "symlink"}, "directory"),
+            "symlink issue lock": ({"issue_lock": "symlink"}, "issue lock"),
+            "non-regular issue lock": ({"issue_lock": "directory"}, "issue lock"),
+            "missing lock": ({"lock": "missing"}, "missing lock"),
+            "symlink lock": ({"lock": "symlink"}, "state lock"),
+            "symlink state": ({"state": "symlink"}, "state file"),
+            "corrupt state": ({"state_bytes": b"{not-json\n"}, "corrupt"),
+            "wrong issue": ({"state_bytes": wrong_bytes}, "issue"),
         }
-        for label, kwargs in cases.items():
+
+        def refused(root, reason):
+            rejected = self.direct_owner_at_root(root, self.direct_request(), ok=False)
+            self.assertEqual(
+                (rejected.returncode, rejected.stdout, rejected.stderr),
+                (2, "", f"workflow-state: {refusals[reason]}\n"))
+
+        for label, (kwargs, reason) in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw)
                 materialize(root, **kwargs)
@@ -4540,11 +4803,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     path: path.read_bytes()
                     for path in root.rglob("state.json") if path.is_file()
                 }
-                rejected = self.direct_owner_at_root(
-                    root, self.direct_request(), ok=False,
-                )
-                self.assertEqual(rejected.returncode, 2)
-                self.assertEqual(rejected.stdout, "")
+                refused(root, reason)
                 if label == "symlink issue lock":
                     self.assertEqual(
                         (root / "issue-lock-target").read_bytes(),
@@ -4553,6 +4812,36 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 self.assertEqual(
                     {path: path.read_bytes() for path in before}, before,
                 )
+        with self.subTest(label="state file missing"), tempfile.TemporaryDirectory() as raw:
+            # No ledger yet: the reserved id of the run the call mints (D22).
+            root = Path(raw)
+            materialize(root)
+            (root / ".superpowers/workflows" / run / "state.json").unlink()
+            reply = self.direct_owner_at_root(
+                root, self.direct_request(tracker=self.tracker_fact(73)))
+            self.assertEqual(json.loads(reply.stdout)["run_id"], run)
+        with self.subTest(label="unindexed legacy ledger"), tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            legacy = root / ".superpowers/workflows/direct-73-000001"
+            legacy.mkdir(parents=True)
+            (legacy / "state.lock").write_bytes(b"")
+            (legacy / "state.json").write_text(json.dumps(self._as_legacy(
+                json.loads(valid_state), 7, handle="direct-73-000001"),
+                sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            before = (legacy / "state.json").read_bytes()
+            refused(root, "unmigrated")
+            self.assertEqual((legacy / "state.json").read_bytes(), before)
+            self.assertFalse((root / ".superpowers/workflows/.direct-73.lock").exists())
+        with self.subTest(label="index entry that is not a run"), \
+                tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            store = attempt_store.ensure_store(attempt_store.store_root(root / ".superpowers"))
+            plan = attempt_identity.minted_plan(
+                identity=attempt_identity.RunIdentity("direct", 73, 1),
+                prior_run=None, caller_key=None)
+            TransactionStore(store).create(
+                plan.creation_key, {"bogus": True}, **attempt_identity.creation_arguments(plan))
+            refused(root, "not a run")
 
     def test_direct_discovery_adopts_an_empty_retained_run_as_nonterminal(self):
         run_id = "direct-73-000001"
@@ -4569,6 +4858,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
         first = self.direct_owner()
         self.assertEqual(first["run_id"], run_id)
         self.assertEqual(first["requirements"], [{"kind": "tracker"}])
@@ -4585,13 +4875,12 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         )
         self.assertEqual((owner["run_id"], owner["attempt"], owner["launch_kind"]),
                          (run_id, 1, "spawn"))
-        self.assertFalse((self.workflows_dir / "direct-73-000002").exists())
+        self.assertEqual(self.run_dirs(), [run_id])
 
     def test_direct_discovery_rejects_nonterminal_below_newer_terminal(self):
         owner = self.acquire_direct()
         active = json.loads(self.direct_state_path(owner["run_id"]).read_text())
         terminal = copy.deepcopy(active)
-        terminal["run_id"] = "direct-73-000002"
         terminal["updated_at"] = "2026-08-20T10:01:00Z"
         attempt = terminal["issues"]["73"]["attempts"][0]
         result = self.merged_result(73)
@@ -4600,36 +4889,28 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "finished_at": "2026-08-20T10:01:00Z", "result_source": "owner",
         })
         terminal["issues"]["73"]["outcome"] = copy.deepcopy(result)
-        second = self.workflows_dir / "direct-73-000002"
-        second.mkdir()
-        (second / "state.lock").write_bytes(b"")
-        (second / "state.json").write_text(
-            json.dumps(terminal, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
+        second = self.mint_direct_ledger(terminal, 73, 2, owner["run_id"])
         snapshots = {
             path: path.read_bytes()
-            for path in (
-                self.direct_state_path("direct-73-000001"),
-                self.direct_state_path("direct-73-000002"),
-            )
+            for path in (self.direct_state_path(owner["run_id"]), second / "state.json")
         }
         rejected = self.direct_owner_raw(ok=False)
         self.assertEqual(rejected.returncode, 2)
         self.assertIn("newer terminal", rejected.stderr)
         self.assertEqual({path: path.read_bytes() for path in snapshots}, snapshots)
 
-    def test_direct_sequence_exhaustion_fails_without_overwriting_terminal_history(self):
+    def test_a_stray_last_sequence_directory_is_not_direct_history(self):
+        """Sequence 999999 is reachable only through the index entries below it (D22), so a
+        directory with that name is not a run and `new_run` finds no history to extend."""
         owner = self.acquire_direct()
         self.run_id = owner["run_id"]
         self.finish(1, self.merged_result(73), issue=73,
                     now="2026-08-20T10:01:00Z")
         source = self.workflows_dir / owner["run_id"]
-        exhausted = self.workflows_dir / "direct-73-999999"
-        source.rename(exhausted)
-        state_path = exhausted / "state.json"
-        state = json.loads(state_path.read_text())
-        state["run_id"] = "direct-73-999999"
+        stray = self.workflows_dir / "direct-73-999999"
+        source.rename(stray)
+        state_path = stray / "state.json"
+        state = self._as_legacy(json.loads(state_path.read_text()), 7, handle="direct-73-999999")
         state_path.write_text(
             json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
@@ -4641,7 +4922,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 "path": owner["worktree"], "state": "matching_issue_branch",
             }), ok=False,
         )
-        self.assertIn("exhaust", rejected.stderr)
+        self.assertEqual(rejected.stderr, "workflow-state: new_run is not applicable\n")
         self.assertEqual(state_path.read_bytes(), before)
 
     def test_direct_authorization_flags_fail_when_not_applicable(self):
@@ -4686,7 +4967,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(refused.stdout, "")
         self.assertIn("suspended attempt is resumable", refused.stderr)
         self.assertEqual(state_path.read_bytes(), before)
-        self.assertFalse((self.workflows_dir / "direct-73-000002").exists())
+        self.assertFalse(self.direct_state_path("direct-73-000002").exists())
 
     def test_direct_owner_resumes_a_suspension_in_a_fresh_budget_window(self):
         owner = self.acquire_direct()
@@ -4824,7 +5105,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             }),
         )
         self.assertEqual(renewed["kind"], "owner")
-        self.assertEqual(renewed["run_id"], "direct-31-000002")
+        self.assertEqual(renewed["run_id"], self.direct_run_id(31, 2))
         successor = json.loads(
             self.direct_state_path(renewed["run_id"]).read_text()
         )
@@ -5053,10 +5334,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         )
         self.assertEqual(needed, {
             "interface_version": 1, "kind": "observe", "issue": 33,
-            "run_id": "direct-33-000001",
+            "run_id": self.direct_run_id(33, 1),
             "requirements": [{"kind": "forge_pr", "path": "issue-33-"}],
         })
-        self.assertFalse((self.workflows_dir / "direct-33-000001").exists())
+        self.assertFalse((self.workflows_dir / self.direct_run_id(33, 1)).exists())
         # An observed forge without a pull request continues the ladder.
         self.assertEqual(
             self.direct_owner(
@@ -5330,19 +5611,101 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertIsNone(attempt["prior_attempt"])
         self.assertFalse(self.direct_state_path("direct-73-000002").exists())
 
+    def test_deadline_suspension_parks_the_attempt_without_spending_it(self):
+        # An owner that stops cleanly at an sdd task boundary before its
+        # deadline parks the attempt like any environmental pause: it stays
+        # resumable and is not consumed (#281 D2).
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-21")
+        self.spawn(issue=21, worktree=worktree, budget_minutes=10)
+        envelope = self.suspend(
+            issue=21, attempt=1, blocked_on="deadline",
+            now="2026-08-13T20:05:00Z",
+        )
+        self.assertEqual(envelope, {
+            "interface_version": 2, "kind": "suspended", "run_id": self.run_id,
+            "issue": 21, "custody": {"kind": "implementation", "attempt": 1,
+                                     "launch": 1, "action_id": "21:1:1"},
+            "blocked_on": "deadline", "reentry": "/from-issue 21 --auto",
+        })
+        issue = self.read_state()["issues"]["21"]
+        self.assertEqual([attempt["attempt"] for attempt in issue["attempts"]], [1])
+        attempt = issue["attempts"][-1]
+        self.assertEqual(attempt["state"], "suspended")
+        self.assertEqual(attempt["blocked_on"], "deadline")
+        self.assertEqual(attempt["stalled_resumes"], 0)
+        self.assertIsNone(attempt["result"])
+        self.assertIsNone(attempt["finished_at"])
+        self.assertIsNone(attempt["result_source"])
+        self.assertIsNone(issue["outcome"])
+
+    def test_a_label_sweep_resumes_a_deadline_suspension(self):
+        # `deadline` is auto-resumable: a sweep that did not name the issue
+        # (human_directed false) resumes it on the same attempt and worktree
+        # (#281 D2).
+        self.init_run()
+        worktree = str(Path(self.root) / "wt-49")
+        self.spawn(issue=49, worktree=worktree, budget_minutes=10)
+        self.suspend(
+            issue=49, attempt=1, blocked_on="deadline",
+            now="2026-08-13T20:05:00Z",
+        )
+        observed = [self.worktree_fact(49, recorded={
+            "path": os.path.abspath(worktree), "state": "matching_issue_branch",
+        })]
+        swept = self.control(
+            now="2026-08-13T20:06:00Z", issues=[49],
+            tracker=[self.tracker_fact(49)], worktrees=observed,
+            human_directed=False,
+        )
+        self.assert_control_response_shape(swept)
+        self.assertIn(("resume", 49), [(a["kind"], a.get("issue"))
+                                       for a in swept["actions"]])
+        issue = self.read_state()["issues"]["49"]
+        self.assertEqual([a["attempt"] for a in issue["attempts"]], [1])
+        attempt = issue["attempts"][-1]
+        self.assertEqual((attempt["state"], attempt["blocked_on"]), ("active", None))
+        self.assertEqual(attempt["worktree"], os.path.abspath(worktree))
+
+    def test_direct_reentry_resumes_a_deadline_suspension_in_place(self):
+        owner = self.acquire_direct()
+        self.run_id = owner["run_id"]
+        self.suspend(
+            issue=73, attempt=1, blocked_on="deadline",
+            now="2026-08-20T10:30:00Z",
+        )
+        resumed = self.direct_owner(
+            now="2026-08-20T15:00:00Z",
+            worktree=self.worktree_fact(73, recorded={
+                "path": owner["worktree"], "state": "matching_issue_branch",
+            }),
+        )
+        self.assertEqual(resumed, {
+            **owner, "action_id": "73:1:2", "launch_kind": "resume",
+            "deadline_at": "2026-08-20T18:00:00Z",
+        })
+        issue = json.loads(
+            self.direct_state_path(owner["run_id"]).read_text()
+        )["issues"]["73"]
+        self.assertEqual([attempt["attempt"] for attempt in issue["attempts"]], [1])
+        attempt = issue["attempts"][-1]
+        self.assertEqual((attempt["state"], attempt["blocked_on"]), ("active", None))
+        self.assertIsNone(attempt["prior_attempt"])
+
     def test_prior_schema_ledger_upgrades_on_load(self):
         self.init_run()
         worktree = str(Path(self.root) / "wt-17")
         self.spawn(issue=17, worktree=worktree, budget_minutes=10)
         state = self.read_state()
         current_version = state["schema_version"]
-        self.write_state(self._as_legacy(state, current_version - 1))
+        self.install_legacy(state, "orchestrate-17", current_version - 1)
         self.suspend(
             issue=17, attempt=1, blocked_on="external",
             now="2026-08-13T20:02:00Z",
         )
         upgraded = self.read_state()
         self.assertEqual(upgraded["schema_version"], current_version)
+        self.assert_bound(upgraded)
         self.assertIsNone(upgraded["prior_run"])
         latest = upgraded["issues"]["17"]["attempts"][-1]
         self.assertEqual(latest["stalled_resumes"], 0)
@@ -5356,11 +5719,13 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         workflow = load_source_module(SCRIPT, "workflow_state_schema_four_test")
         contract, _ = self.delivery_fixtures.contract_and_delivery(self.delivery_model)
         migrated = workflow.upgrade_state(
-            schema_one, run_id=self.run_id, migration_contracts={151: contract}
+            schema_one, run_id=self.run_id, identity=ORCHESTRATED,
+            migration_contracts={151: contract}
         )
         self.assertEqual(schema_one, original)
-        self.assertEqual(migrated["schema_version"], 6)
-        self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
+        self.assertEqual(migrated["schema_version"], 7)
+        self.assertEqual(workflow.validate_state(
+            migrated, run_id=self.run_id, identity=ORCHESTRATED, schema_version=7), migrated)
         issue = migrated["issues"]["151"]
         self.assertEqual(issue["delivery_remainders"], [])
         empty = self.empty_delivery()
@@ -5372,17 +5737,17 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         workflow = load_source_module(SCRIPT, "workflow_state_atomic_migration")
         baseline = self.read_state()
         for version in (1, 2):
-            state = self._as_legacy(baseline, version)
-            self.write_state(state)
+            state = self._as_legacy(baseline, version, handle="orchestrate-151")
+            self.install_legacy(baseline, "orchestrate-151", version)
             with mock.patch.object(workflow, "atomic_write_state") as write:
                 value = workflow.transact(
                     str(self.root), self.run_id,
                     lambda current: (current, False), migration_contracts={},
                 )
-            self.assertEqual(state, self._as_legacy(baseline, version))
-            self.assertEqual(value["schema_version"], 6)
+            self.assertEqual(state, self._as_legacy(baseline, version, handle="orchestrate-151"))
+            self.assert_bound(value)
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 6)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 11)
 
     def test_locked_loader_requires_keyword_migration_context(self):
         self.init_run()
@@ -5405,25 +5770,31 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         legacy = self._as_legacy(legacy, 2)
         legacy_rows = copy.deepcopy(legacy["issues"])
         workflow = load_source_module(SCRIPT, "workflow_state_legacy_rows")
-        migrated = workflow.upgrade_state(legacy, run_id=self.run_id,
+        migrated = workflow.upgrade_state(legacy, run_id=self.run_id, identity=ORCHESTRATED,
                                           migration_contracts={})
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         for key, legacy_issue in legacy_rows.items():
             migrated_issue = migrated["issues"][key]
-            # Schema 6 adds one key to every attempt (#250 D4); every legacy
-            # field still migrates byte-exact.
+            # Schemas 6 and 7 add keys to every attempt (#250 D4, #280 D3);
+            # every legacy field still migrates byte-exact.
             attempts = copy.deepcopy(migrated_issue["attempts"])
             for attempt in attempts:
                 self.assertIsNone(attempt.pop("progress_marker"))
+                self.assertEqual(
+                    (attempt.pop("lane"), attempt.pop("lane_budget_minutes"),
+                     attempt.pop("lane_history")),
+                    (None, None, []))
             self.assertEqual(
                 {"issue": migrated_issue["issue"], "attempts": attempts,
                  "outcome": migrated_issue["outcome"]},
                 legacy_issue,
             )
-        self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
+        self.assertEqual(workflow.validate_state(
+            migrated, run_id=self.run_id, identity=ORCHESTRATED, schema_version=7), migrated)
 
     def test_malformed_legacy_current_launch_refuses_without_write(self):
         self._spawn_151()
+        self.install_legacy(self.read_state(), "orchestrate-151", 7)
         schema_three = self.read_state()
         valid = self._as_legacy(schema_three, 1)
         attempt = ("issues", "151", "attempts", 0)
@@ -5444,8 +5815,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
 
     def test_schema_one_current_launch_is_read_only_for_attempt_and_remainder(self):
         self._spawn_151()
-        state = self._as_legacy(self.read_state(), 1)
-        self.write_state(state)
+        self.install_legacy(self.read_state(), "orchestrate-151", 1)
         before = self.state_path.read_bytes()
         inventory = sorted(path.relative_to(self.root) for path in self.root.rglob("*"))
         expected = (
@@ -5472,11 +5842,13 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         workflow = load_source_module(SCRIPT, "workflow_state_schema_two_hybrid")
         baseline = self.read_state()
         for version in (1, 2):
-            state = self._as_legacy(baseline, version, keep_delivery=True)
+            self.install_legacy(baseline, "orchestrate-151", version)
+            state = self._as_legacy(baseline, version, keep_delivery=True, handle=self.run_id)
             self._assert_current_launch_refuses_unchanged(state)
-            with self.assertRaises(workflow.WorkflowError):
-                workflow.upgrade_state(state, run_id=self.run_id,
+            with self.assertRaises(attempt_store.LedgerRefused) as refused:
+                workflow.upgrade_state(state, run_id=self.run_id, identity=ORCHESTRATED,
                                        migration_contracts={})
+            self.assertEqual(refused.exception.reason, "invalid_state")
 
     def test_future_schema_ledger_is_rejected_without_changes(self):
         self.init_run()
@@ -6285,7 +6657,7 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.check_worker("14:1:1:w9")["reason"], "unknown_worker")
         self.assertEqual(self.state_path.read_bytes(), before)
         state = self.read_state()
-        self.assertEqual(state["schema_version"], 6)
+        self.assertEqual(state["schema_version"], 11)
         self.assertEqual(state["workers"][0], {
             "worker_id": "14:1:1:w1", "launch": "14:1:1", "parent": None,
             "registered_at": "2026-08-13T20:01:00Z", "released_at": None,
@@ -6394,14 +6766,14 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
         self.spawn_14()
         legacy = self._as_legacy(self.read_state(), 4)
         self.assertNotIn("workers", legacy)
-        self.write_state(legacy)
+        self.install_legacy(legacy, "orchestrate-14", 4)
         before = self.state_path.read_bytes()
         self.assertEqual(self.check_worker("14:1:1:w1")["reason"], "unknown_worker")
         self.assertEqual(self.check_launch(action_id="14:1:1")["reason"], "current")
         self.assertEqual(self.state_path.read_bytes(), before)
         self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z")
         upgraded = self.read_state()
-        self.assertEqual(upgraded["schema_version"], 6)
+        self.assert_bound(upgraded)
         self.assertEqual([w["worker_id"] for w in upgraded["workers"]], ["14:1:1:w1"])
         hybrid = self._as_legacy(upgraded, 4)
         hybrid["workers"] = []
@@ -6478,7 +6850,7 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
 
     def test_a_new_attempt_starts_with_a_null_marker_at_schema_six(self):
         self.spawn_16()
-        self.assertEqual(self.read_state()["schema_version"], 6)
+        self.assertEqual(self.read_state()["schema_version"], 11)
         self.assertIsNone(self.attempt()["progress_marker"])
 
     def test_a_schema_five_ledger_keeps_its_stall_count_and_upgrades_on_first_write(self):
@@ -6492,7 +6864,7 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
         legacy = self._as_legacy(self.read_state(), 5)
         self.assertEqual(legacy["schema_version"], 5)
         self.assertNotIn("progress_marker", legacy["issues"]["16"]["attempts"][0])
-        self.write_state(legacy)
+        self.install_legacy(legacy, "orchestrate-16", 5)
         before = self.state_path.read_bytes()
         self.assertEqual(self.check_launch(action_id="16:1:2")["reason"],
                          "inactive_attempt")
@@ -6503,10 +6875,11 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (upgraded["schema_version"], attempt["progress_marker"],
              attempt["stalled_resumes"], attempt["suspend_phase"]),
-            (6, None, 1, 0))
+            (11, None, 1, 0))
 
     def test_a_schema_five_hybrid_is_refused_without_a_write(self):
         self.spawn_16()
+        self.install_legacy(self.read_state(), "orchestrate-16", 5)
         hybrid = self._as_legacy(self.read_state(), 5)
         hybrid["issues"]["16"]["attempts"][0]["progress_marker"] = None
         self.assert_refused_unchanged(hybrid)
@@ -6534,6 +6907,313 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
         missing = copy.deepcopy(valid)
         del missing["issues"]["16"]["attempts"][0]["progress_marker"]
         self.assert_refused_unchanged(missing)
+
+
+class LaneSchemaTest(LifecycleHarness, unittest.TestCase):
+    """#280 D3, D5: schema 7 gives every attempt a lane, a lane budget and a lane history."""
+
+    LATER = "2026-08-13T20:05:00Z"
+    ESCALATIONS = ("important_finding", "second_fix_round", "light_deadline",
+                   "unpredicted_risk")
+
+    def spawn_16(self):
+        self.init_run()
+        self.worktree = str(self.root / "wt-16")
+        self.spawn(issue=16, worktree=self.worktree, budget_minutes=240)
+
+    def attempt(self):
+        return self.read_state()["issues"]["16"]["attempts"][-1]
+
+    def lane_of(self, attempt):
+        return (attempt["lane"], attempt["lane_budget_minutes"], attempt["lane_history"])
+
+    @staticmethod
+    def with_lane(state, lane, budget, history):
+        value = copy.deepcopy(state)
+        value["issues"]["16"]["attempts"][0].update(
+            lane=lane, lane_budget_minutes=budget, lane_history=history)
+        return value
+
+    def assert_refused_unchanged(self, state):
+        self.write_state(state)
+        before = self.state_path.read_bytes()
+        refused = self.check_launch_raw(action_id="16:1:1", ok=False)
+        self.assertEqual((refused.returncode, self.state_path.read_bytes()), (2, before))
+
+    def test_a_new_attempt_starts_without_a_lane_at_schema_seven(self):
+        self.spawn_16()
+        self.assertEqual(self.read_state()["schema_version"], 11)
+        self.assertEqual(self.lane_of(self.attempt()), (None, None, []))
+
+    def test_a_retry_attempt_does_not_inherit_its_predecessors_lane(self):
+        self.spawn_16()
+        # `fail_owner` routes through the legacy `finish` transport, which
+        # downgrades the ledger to schema 2 and so drops lane fields; set the
+        # predecessor's lane only after the failure has landed (Phase-5 PR280-02).
+        self.fail_owner(issue=16, attempt=1, now="2026-08-13T20:01:00Z")
+        self.write_state(self.with_lane(
+            self.read_state(), "light", 90,
+            [{"lane": "light", "reason": "triage", "at": DEFAULT_NOW}]))
+        self.assertEqual(self.lane_of(self.read_state()["issues"]["16"]["attempts"][0])[0],
+                         "light")
+        self.retry(issue=16, worktree=self.root / "wt-16b", now="2026-08-13T20:10:00Z")
+        issue = self.read_state()["issues"]["16"]
+        self.assertEqual(self.lane_of(issue["attempts"][0])[0], "light")
+        self.assertEqual(self.lane_of(issue["attempts"][1]), (None, None, []))
+
+    def test_a_schema_six_ledger_migrates_with_null_lane_fields(self):
+        self.spawn_16()
+        legacy = self._as_legacy(self.read_state(), 6)
+        self.assertEqual(legacy["schema_version"], 6)
+        for field in ("lane", "lane_budget_minutes", "lane_history"):
+            self.assertNotIn(field, legacy["issues"]["16"]["attempts"][0])
+        self.install_legacy(legacy, "orchestrate-16", 6)
+        before = self.state_path.read_bytes()
+        self.assertEqual(self.check_launch(action_id="16:1:1")["reason"], "current")
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:01:00Z")
+        upgraded = self.read_state()
+        self.assertEqual(
+            (upgraded["schema_version"],
+             self.lane_of(upgraded["issues"]["16"]["attempts"][0])),
+            (11, (None, None, [])))
+
+    def test_a_schema_six_hybrid_is_refused_without_a_write(self):
+        self.spawn_16()
+        valid = self.read_state()
+        self.install_legacy(valid, "orchestrate-16", 6)
+        for field, value in (("lane", None), ("lane_budget_minutes", None),
+                             ("lane_history", [])):
+            with self.subTest(field=field):
+                hybrid = self._as_legacy(valid, 6, handle="orchestrate-16")
+                hybrid["issues"]["16"]["attempts"][0][field] = value
+                self.assert_refused_unchanged(hybrid)
+
+    def test_the_validator_closes_the_lane_fields(self):
+        self.spawn_16()
+        valid = self.read_state()
+        light = {"lane": "light", "reason": "triage", "at": DEFAULT_NOW}
+        full = {"lane": "full", "reason": "triage", "at": DEFAULT_NOW}
+        accepted = {"light": ("light", 90, [light]), "full": ("full", 240, [full])}
+        for reason in self.ESCALATIONS:
+            accepted[f"escalated by {reason}"] = ("full", 240, [
+                light, {"lane": "full", "reason": reason, "at": self.LATER}])
+        for label, lane in accepted.items():
+            with self.subTest(accepted=label):
+                self.write_state(self.with_lane(valid, *lane))
+                self.assertEqual(self.check_launch(action_id="16:1:1")["reason"],
+                                 "current")
+        escalated = {"lane": "full", "reason": "important_finding", "at": self.LATER}
+        rejected = {
+            "lane without a budget": ("light", None, [light]),
+            "budget without a lane": (None, 90, []),
+            "lane without a history": ("light", 90, []),
+            "history without a lane": (None, None, [light]),
+            "unknown lane": ("medium", 90, [{**light, "lane": "medium"}]),
+            "last entry disagrees with the lane": ("full", 90, [light]),
+            "zero budget": ("light", 0, [light]),
+            "boolean budget": ("light", True, [light]),
+            "string budget": ("light", "90", [light]),
+            "history that is not a list": ("light", 90, {"0": light}),
+            "entry with an extra key": ("light", 90, [{**light, "note": "x"}]),
+            "entry missing its time": ("light", 90, [{"lane": "light", "reason": "triage"}]),
+            "unknown reason": ("light", 90, [{**light, "reason": "whim"}]),
+            "escalation reason on a first entry": (
+                "light", 90, [{**light, "reason": "important_finding"}]),
+            "triage on an escalation": ("full", 240, [light, {**escalated, "reason": "triage"}]),
+            "full to light": ("light", 90, [full, {**light, "at": self.LATER}]),
+            "light to light": ("light", 90, [light, {**escalated, "lane": "light"}]),
+            "full to full": ("full", 240, [full, escalated]),
+            "time moving backward": ("full", 240, [
+                {**light, "at": self.LATER}, {**escalated, "at": DEFAULT_NOW}]),
+            "entry before the attempt started": (
+                "light", 90, [{**light, "at": "2026-08-13T19:59:59Z"}]),
+            "unparseable time": ("light", 90, [{**light, "at": "yesterday"}]),
+            "list-valued reason": ("light", 90, [{**light, "reason": ["triage"]}]),
+            "null time": ("light", 90, [{**light, "at": None}]),
+            "list-valued lane": ("light", 90, [{**light, "lane": ["light"]}]),
+        }
+        for label, lane in rejected.items():
+            with self.subTest(rejected=label):
+                self.assert_refused_unchanged(self.with_lane(valid, *lane))
+        for field in ("lane", "lane_budget_minutes", "lane_history"):
+            with self.subTest(missing=field):
+                missing = copy.deepcopy(valid)
+                del missing["issues"]["16"]["attempts"][0][field]
+                self.assert_refused_unchanged(missing)
+
+
+class DeclareLaneTest(LifecycleHarness, unittest.TestCase):
+    """#280: `declare-lane` records an attempt's lane and re-bases its deadline."""
+
+    def setUp(self):
+        super().setUp()
+        self.init_run()
+        self.worktree = str(self.root / "wt-16")
+        self.spawn(issue=16, worktree=self.worktree, budget_minutes=240)
+
+    def attempt(self, issue=16):
+        return self.read_state()["issues"][str(issue)]["attempts"][-1]
+
+    def declare(self, lane, *, now, budget=None, reason="triage", action_id="16:1:1",
+                ok=True):
+        if budget is None:
+            budget = 90 if lane == "light" else 240
+        return self.declare_lane(action_id=action_id, now=now, lane=lane,
+                                 budget_minutes=budget, reason=reason, ok=ok)
+
+    def assert_refused(self, clause, lane, **declare):
+        before = self.state_path.read_bytes()
+        refused = self.declare(lane, ok=False, **declare)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, self.state_path.read_bytes()),
+            (2, "", before))
+        self.assertIn(clause, refused.stderr)
+
+    def test_light_rebases_the_deadline_from_the_launch_and_records_history(self):
+        before = self.attempt()
+        self.assertEqual(before["deadline_at"], "2026-08-14T00:00:00Z")
+        reply = self.declare("light", now="2026-08-13T20:05:00Z")
+        self.assertEqual(reply, {"action_id": "16:1:1", "lane": "light",
+                                 "budget_minutes": 90,
+                                 "deadline_at": "2026-08-13T21:30:00Z"})
+        after = self.attempt()
+        self.assertEqual(
+            (after["lane"], after["lane_budget_minutes"], after["deadline_at"],
+             after["lane_history"]),
+            ("light", 90, "2026-08-13T21:30:00Z",
+             [{"lane": "light", "reason": "triage", "at": "2026-08-13T20:05:00Z"}]))
+        self.assertEqual(self.read_state()["updated_at"], "2026-08-13T20:05:00Z")
+        untouched = ("last_progress_at", "phase", "suspend_phase", "stalled_resumes",
+                     "launches", "state", "started_at")
+        self.assertEqual({key: after[key] for key in untouched},
+                         {key: before[key] for key in untouched})
+
+    def test_light_escalates_to_full_from_the_same_launch(self):
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        reply = self.declare("full", now="2026-08-13T20:40:00Z",
+                             reason="second_fix_round")
+        self.assertEqual(reply["deadline_at"], "2026-08-14T00:00:00Z")
+        self.assertEqual(
+            [(entry["lane"], entry["reason"]) for entry in self.attempt()["lane_history"]],
+            [("light", "triage"), ("full", "second_fix_round")])
+
+    def test_full_is_declared_from_triage_with_its_own_budget(self):
+        reply = self.declare("full", now="2026-08-13T20:05:00Z", budget=200)
+        self.assertEqual((reply["lane"], reply["budget_minutes"], reply["deadline_at"]),
+                         ("full", 200, "2026-08-13T23:20:00Z"))
+
+    def test_a_live_worker_does_not_block_a_declaration(self):
+        self.register_worker(action_id="16:1:1", now="2026-08-13T20:01:00Z")
+        self.assertEqual(self.declare("light", now="2026-08-13T20:02:00Z")["lane"],
+                         "light")
+
+    def test_refuses_full_to_light_and_light_to_light(self):
+        self.spawn(issue=17, worktree=str(self.root / "wt-17"), budget_minutes=240)
+        self.declare("full", now="2026-08-13T20:05:00Z")
+        self.assert_refused("declare-lane refused: lane full cannot become light",
+                            "light", now="2026-08-13T20:06:00Z")
+        self.assert_refused("declare-lane refused: lane full cannot become full",
+                            "full", now="2026-08-13T20:06:00Z",
+                            reason="important_finding")
+        self.declare("light", now="2026-08-13T20:07:00Z", action_id="17:1:1")
+        self.assert_refused("declare-lane refused: lane light cannot become light",
+                            "light", now="2026-08-13T20:08:00Z", action_id="17:1:1")
+
+    def test_refuses_a_reason_the_transition_does_not_allow(self):
+        self.assert_refused(
+            "declare-lane refused: reason important_finding does not allow "
+            "lane none to become light",
+            "light", now="2026-08-13T20:05:00Z", reason="important_finding")
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.assert_refused(
+            "declare-lane refused: reason triage does not allow lane light to become full",
+            "full", now="2026-08-13T20:06:00Z", reason="triage")
+        self.assert_refused("invalid choice", "light", now="2026-08-13T20:06:00Z",
+                            reason="whim")
+
+    def test_refuses_a_launch_that_is_not_current(self):
+        self.assert_refused("declare-lane refused: launch 99:1:1 is unknown_issue",
+                            "light", now="2026-08-13T20:01:00Z", action_id="99:1:1")
+        self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:01:00Z")
+        self.assert_refused("declare-lane refused: launch 16:1:1 is inactive_attempt",
+                            "light", now="2026-08-13T20:02:00Z")
+        self.resume(issue=16, worktree=self.worktree, now="2026-08-13T20:03:00Z")
+        self.assert_refused("declare-lane refused: launch 16:1:1 is superseded_launch",
+                            "light", now="2026-08-13T20:04:00Z")
+        reply = self.declare("light", now="2026-08-13T20:04:00Z", action_id="16:1:2")
+        self.assertEqual(reply["deadline_at"], "2026-08-13T21:33:00Z")
+
+    def test_refuses_a_remainder_launch_a_zero_budget_and_time_moving_backward(self):
+        self.assert_refused("declare-lane refused: a remainder launch carries no lane",
+                            "light", now="2026-08-13T20:01:00Z", action_id="16:r1:1")
+        self.assert_refused("invalid --budget-minutes", "light",
+                            now="2026-08-13T20:01:00Z", budget=0)
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.assert_refused("declare-lane refused: time must not move backward",
+                            "full", now="2026-08-13T20:04:00Z",
+                            reason="important_finding")
+
+    def test_an_omitted_now_stamps_the_ledger_clock(self):
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = "2026-08-13T20:10:00Z"
+        completed = self.run_cli(
+            "declare-lane", "--repo-root", self.root, "--run-id", self.run_id,
+            "--action-id", "16:1:1", "--lane", "light", "--budget-minutes", "90",
+            "--reason", "triage")
+        self.assertEqual(json.loads(completed.stdout)["deadline_at"], "2026-08-13T21:30:00Z")
+        self.assertEqual(self.attempt()["lane_history"],
+                         [{"lane": "light", "reason": "triage", "at": "2026-08-13T20:10:00Z"}])
+        self.assertEqual(self.read_state()["updated_at"], "2026-08-13T20:10:00Z")
+
+    def test_refuses_a_rebased_deadline_that_is_not_after_now(self):
+        for now in ("2026-08-13T21:30:00Z", "2026-08-13T21:31:00Z"):
+            with self.subTest(lane="light", now=now):
+                self.assert_refused(
+                    f"declare-lane refused: deadline 2026-08-13T21:30:00Z is not after {now}",
+                    "light", now=now)
+        self.assert_refused(
+            "declare-lane refused: deadline 2026-08-13T21:00:00Z is not after "
+            "2026-08-13T21:31:00Z",
+            "full", now="2026-08-13T21:31:00Z", budget=60)
+        self.assertIsNone(self.attempt()["lane"])
+        self.assert_refused(
+            "declare-lane refused: deadline 2026-08-13T21:31:00Z is not after "
+            "2026-08-13T21:31:00Z",
+            "light", now="2026-08-13T21:31:00Z", budget=91)
+        reply = self.declare("light", now="2026-08-13T21:31:00Z", budget=92)
+        self.assertEqual(reply["deadline_at"], "2026-08-13T21:32:00Z")
+
+    def test_a_suspension_resume_uses_the_lane_budget_or_the_request_budget(self):
+        for issue in (17, 18):
+            self.spawn(issue=issue, worktree=str(self.root / f"wt-{issue}"),
+                       budget_minutes=240)
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.declare("full", now="2026-08-13T20:05:00Z", budget=200, action_id="18:1:1")
+        for issue in (16, 17, 18):
+            self.suspend(issue=issue, attempt=1, blocked_on="usage_limit",
+                         now="2026-08-13T20:10:00Z")
+        # `resume` sends the harness's default request budget of 30 minutes.
+        expected = {16: ("2026-08-13T23:00:00Z", "2026-08-14T00:30:00Z", "light"),
+                    17: ("2026-08-13T23:01:00Z", "2026-08-13T23:31:00Z", None),
+                    18: ("2026-08-13T23:02:00Z", "2026-08-14T02:22:00Z", "full")}
+        for issue, (now, deadline, lane) in expected.items():
+            with self.subTest(issue=issue):
+                self.resume(issue=issue, worktree=str(self.root / f"wt-{issue}"), now=now)
+                attempt = self.attempt(issue)
+                self.assertEqual(
+                    (attempt["state"], attempt["deadline_at"], attempt["last_progress_at"],
+                     attempt["lane"], len(attempt["launches"])),
+                    ("active", deadline, now, lane, 2))
+
+    def test_a_takeover_inside_the_window_keeps_the_declared_deadline(self):
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.resume(issue=16, worktree=self.worktree, now="2026-08-13T20:20:00Z",
+                    owner_unavailable=True)
+        attempt = self.attempt()
+        self.assertEqual((attempt["deadline_at"], attempt["lane"], len(attempt["launches"])),
+                         ("2026-08-13T21:30:00Z", "light", 2))
 
 
 class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
@@ -6769,14 +7449,14 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
         self.assert_refused("16:1:1", "git failed")  # an unborn branch: no commit
 
     def test_a_schema_five_ledger_records_a_baseline_and_upgrades(self):
-        self.write_state(self._as_legacy(self.read_state(), 5))
+        self.install_legacy(self.read_state(), "orchestrate-16", 5)
         self.assertEqual(self.mark(), {"action_id": "16:1:1", "outcome": "baseline",
                                        "marker": self.base})
         state = self.read_state()
         self.assertEqual(
             (state["schema_version"],
              state["issues"]["16"]["attempts"][0]["progress_marker"]),
-            (6, self.base))
+            (11, self.base))
 
     def race(self, module_name, interleave, *, now="2026-08-13T20:09:00Z"):
         """Run `mark-progress` in-process with `interleave()` between its probe and
@@ -6822,6 +7502,457 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
             ("suspended", self.base, 0))
 
 
+class ResumePackHarness(LifecycleHarness):
+    """Issue 16's attempt on a real git worktree, and the `resume-pack` runners."""
+
+    def setUp(self):
+        super().setUp()
+        self.seconds = 0
+        self.init_run()
+        self.make_worktree()
+        self.spawn(issue=16, worktree=str(self.worktree), budget_minutes=10)
+
+    def make_worktree(self):
+        """Set `self.worktree` and its first commit `self.base`; Task 2 overrides it."""
+        self.worktree = self.root / "wt-16"
+        self.base = self.init_worktree(self.worktree, branch="issue-16")
+
+    def tick(self):
+        self.seconds += 1
+        return f"2026-08-13T20:{self.seconds // 60:02d}:{self.seconds % 60:02d}Z"
+
+    def attempt(self):
+        return self.read_state()["issues"]["16"]["attempts"][-1]
+
+    def pack_raw(self, action_id, *, run_id=None):
+        return self.run_cli(
+            "resume-pack", "--repo-root", self.root,
+            "--run-id", self.run_id if run_id is None else run_id,
+            "--action-id", action_id, ok=False)
+
+    def pack(self, action_id):
+        completed = self.pack_raw(action_id)
+        self.assertEqual((completed.returncode, completed.stderr), (0, ""))
+        return json.loads(completed.stdout)
+
+    def assert_refused(self, action_id, clause, *, run_id=None):
+        before = self.state_path.read_bytes()
+        refused = self.pack_raw(action_id, run_id=run_id)
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertIn("workflow-state: resume-pack refused: " + clause, refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def expected_ledger(self):
+        attempt = self.attempt()
+        return {"state": attempt["state"], "phase": attempt["phase"],
+                "launch_kind": attempt["launch_kind"],
+                "launches": len(attempt["launches"]),
+                "deadline_at": attempt["deadline_at"],
+                "blocked_on": attempt["blocked_on"],
+                "handoff_path": attempt["handoff_path"],
+                "progress_marker": attempt["progress_marker"]}
+
+    def sdd_ledger(self, plan, entries, *, tasks=None):
+        """Write a plan and its SDD ledger where `sdd-workspace` puts it (#265 D5)."""
+        plan_path = Path(plan) if Path(plan).is_absolute() else self.worktree / plan
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        if tasks is not None:
+            members = plan_path.parent / f"{plan_path.stem}.tasks"
+            members.mkdir()
+            for number in range(1, tasks + 1):
+                (members / f"task-{number}.md").write_text("task\n", encoding="utf-8")
+        workspace = subprocess.run(
+            [str(SDD_WORKSPACE), plan], cwd=self.worktree, check=True,
+            capture_output=True, text=True).stdout.strip()
+        Path(workspace, "progress.md").write_text(
+            "\n".join([f"# SDD ledger — plan: {plan}", *entries]) + "\n",
+            encoding="utf-8")
+        return workspace
+
+
+class ResumePackTest(ResumePackHarness, unittest.TestCase):
+    """#265: `resume-pack` summarises one launch for its relaunched owner."""
+
+    def test_an_active_current_launch_packs_ledger_worktree_and_commits_ahead(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        first = self.commit(self.worktree, "first task")
+        second = self.commit(self.worktree, "second task")
+        self.assertEqual(self.pack("16:1:1"), {
+            "kind": "resume_pack", "version": 1, "run_id": self.run_id,
+            "issue": 16, "attempt": 1, "action_id": "16:1:1", "current": True,
+            "ledger": self.expected_ledger(),
+            "worktree": {"path": self.attempt()["worktree"], "branch": "issue-16",
+                         "head": second, "dirty_paths": 0},
+            "commits_since_marker": {
+                "base": self.base, "relation": "ahead", "count": 2,
+                "commits": [{"sha": second[:12], "subject": "second task"},
+                            {"sha": first[:12], "subject": "first task"}],
+                "truncated": False},
+            "sdd": None,
+            "next_action": {"kind": "start_phase", "phase": 0},
+        })
+        self.assertEqual(self.expected_ledger()["progress_marker"], self.base)
+
+    def test_relations_none_same_and_diverged(self):
+        empty = {"count": 0, "commits": [], "truncated": False}
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["commits_since_marker"],
+                         {"base": None, "relation": "none", **empty})
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        self.assertEqual(self.pack("16:1:1")["commits_since_marker"],
+                         {"base": self.base, "relation": "same", **empty})
+        moved = self.commit(self.worktree)
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        self.git(self.worktree, "reset", "--quiet", "--hard", self.base)
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["commits_since_marker"],
+                         {"base": moved, "relation": "diverged", **empty})
+        self.assertEqual(pack["next_action"],
+                         {"kind": "reorient", "reason": "diverged_marker"})
+
+    def test_dirty_paths_count_uncommitted_entries(self):
+        (self.worktree / "a.txt").write_text("a\n", encoding="utf-8")
+        (self.worktree / "b.txt").write_text("b\n", encoding="utf-8")
+        self.assertEqual(self.pack("16:1:1")["worktree"]["dirty_paths"], 2)
+
+    def test_a_suspended_attempt_previews_its_last_launch(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        work = self.commit(self.worktree, "task one")
+        self.suspend(issue=16, attempt=1, blocked_on="usage_limit", now=self.tick())
+        pack = self.pack("16:1:1")
+        self.assertEqual((pack["current"], pack["ledger"]),
+                         (False, self.expected_ledger()))
+        self.assertEqual((pack["ledger"]["state"], pack["ledger"]["blocked_on"]),
+                         ("suspended", "usage_limit"))
+        self.assertEqual(pack["commits_since_marker"]["commits"],
+                         [{"sha": work[:12], "subject": "task one"}])
+        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 0})
+        self.assert_refused("16:1:2", "launch 16:1:2 is superseded_launch")
+        self.resume(issue=16, worktree=str(self.worktree), now=self.tick())
+        resumed = self.pack("16:1:2")
+        self.assertEqual((resumed["current"], resumed["action_id"],
+                          resumed["ledger"]["launch_kind"], resumed["ledger"]["launches"]),
+                         (True, "16:1:2", "resume", 2))
+        self.assertEqual(resumed["commits_since_marker"], pack["commits_since_marker"])
+        self.assert_refused("16:1:1", "launch 16:1:1 is superseded_launch")
+
+    def test_a_handoff_gate_points_at_its_handoff_until_the_next_gate(self):
+        handoff = self.write_handoff(16)
+        self.progress(issue=16, phase=1, now=self.tick(), turn_count=118,
+                      handoff_path=handoff)
+        stored = self.attempt()["handoff_path"]
+        preview = self.pack("16:1:1")
+        self.assertEqual((preview["current"], preview["ledger"]["state"]),
+                         (False, "handed_off"))
+        self.assertEqual(preview["next_action"], {"kind": "read_handoff", "path": stored})
+        self.resume(issue=16, worktree=str(self.worktree), now=self.tick())
+        self.assertEqual(self.pack("16:1:2")["next_action"],
+                         {"kind": "read_handoff", "path": stored})
+        self.progress(issue=16, phase=2, now=self.tick())
+        pack = self.pack("16:1:2")
+        self.assertEqual(pack["ledger"]["handoff_path"], stored)
+        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 3})
+
+    def test_phase_0_restarts_until_its_gate_is_recorded(self):
+        # Final review C-001: a fresh attempt sits at phase 0 with no gate, so
+        # an interrupted Phase 0 is unfinished, not complete.
+        self.assertIsNone(self.attempt()["phase_action"])
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "start_phase", "phase": 0})
+        self.progress(issue=16, phase=0, now=self.tick())
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "start_phase", "phase": 1})
+
+    def test_a_completed_phase_7_reorients(self):
+        self.progress(issue=16, phase=7, now=self.tick())
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "reorient", "reason": "delivery_phases_complete"})
+
+    def test_non_current_launches_are_refused_with_empty_stdout(self):
+        self.assert_refused("16:1:2", "launch 16:1:2 is superseded_launch")
+        self.assert_refused("16:2:1", "launch 16:2:1 is unknown_attempt")
+        self.assert_refused("17:1:1", "launch 17:1:1 is unknown_issue")
+        self.assert_refused("16:r1:1", "a remainder launch has no resume pack")
+        self.assert_refused("16:1:1", "launch 16:1:1 is unknown_run",
+                            run_id="issue-99-absent")
+        malformed = self.pack_raw("16:1")
+        self.assertEqual((malformed.returncode, malformed.stdout), (2, ""))
+        self.assertIn("invalid action_id", malformed.stderr)
+        self.fail_owner(issue=16, attempt=1, now=self.tick())
+        self.assert_refused("16:1:1", "launch 16:1:1 is inactive_attempt")
+        self.retry(issue=16, worktree=str(self.worktree), now=self.tick())
+        self.assert_refused("16:1:1", "launch 16:1:1 is superseded_attempt")
+        retried = self.pack("16:2:1")
+        self.assertEqual((retried["attempt"], retried["current"]), (2, True))
+
+    def test_an_unreadable_worktree_is_refused(self):
+        self.git(self.worktree, "checkout", "--quiet", "--detach")
+        self.assert_refused("16:1:1", "its HEAD is detached")
+        shutil.rmtree(self.worktree)
+        self.assert_refused("16:1:1", "the worktree is absent")
+
+    def test_resume_pack_writes_nothing(self):
+        tracked = self.worktree / "tracked.txt"
+        tracked.write_text("one\n", encoding="utf-8")
+        self.git(self.worktree, "add", "tracked.txt")
+        self.commit(self.worktree, "tracked")
+        tracked.write_text("two\n", encoding="utf-8")
+        index = self.worktree / ".git" / "index"
+        before = (self.state_path.read_bytes(), index.read_bytes(),
+                  sorted(path.relative_to(self.root) for path in self.root.rglob("*")))
+        self.assertEqual(self.pack("16:1:1")["worktree"]["dirty_paths"], 1)
+        self.assert_refused("16:1:2", "launch 16:1:2 is superseded_launch")
+        after = (self.state_path.read_bytes(), index.read_bytes(),
+                 sorted(path.relative_to(self.root) for path in self.root.rglob("*")))
+        self.assertEqual(after, before)
+        self.assertFalse((self.worktree / ".superpowers").exists())
+
+    def signed_commit(self, subject):
+        """A commit carrying an SSH signature header, written without any key.
+
+        `log.showSignature` prints its verification result (no allowed-signers
+        file is configured, so "No signature") on stdout, even under `--format`.
+        """
+        tree = self.git(self.worktree, "rev-parse", "HEAD^{tree}")
+        parent = self.git(self.worktree, "rev-parse", "HEAD")
+        body = (f"tree {tree}\nparent {parent}\n"
+                "author Fixture <fixture@example.test> 1700000000 +0000\n"
+                "committer Fixture <fixture@example.test> 1700000000 +0000\n"
+                "gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n"
+                " -----END SSH SIGNATURE-----\n\n" + subject + "\n")
+        sha = subprocess.run(
+            ["git", "-C", str(self.worktree), "hash-object", "-t", "commit", "-w",
+             "--stdin"], input=body, check=True, capture_output=True,
+            text=True).stdout.strip()
+        self.git(self.worktree, "reset", "--quiet", "--hard", sha)
+        return sha
+
+    def test_the_commit_list_ignores_log_show_signature(self):
+        # #265 D4: no signature line `log.showSignature` adds may become a commit.
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        first = self.signed_commit("first task")
+        second = self.signed_commit("second task")
+        self.git(self.worktree, "config", "log.showSignature", "true")
+        self.assertIn("No signature", self.git(
+            self.worktree, "log", "--max-count=1", "--format=%H%x1f%s"))
+        self.assertEqual(self.pack("16:1:1")["commits_since_marker"], {
+            "base": self.base, "relation": "ahead", "count": 2,
+            "commits": [{"sha": second[:12], "subject": "second task"},
+                        {"sha": first[:12], "subject": "first task"}],
+            "truncated": False})
+
+    def test_the_commit_list_is_bounded(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        for number in range(25):
+            self.commit(self.worktree, f"{number:02d} " + "x" * 150)
+        completed = self.pack_raw("16:1:1")
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        section = json.loads(completed.stdout)["commits_since_marker"]
+        self.assertEqual((section["count"], len(section["commits"]), section["truncated"]),
+                         (25, 20, True))
+        self.assertTrue(section["commits"][0]["subject"].startswith("24 "))
+        self.assertEqual({len(commit["subject"]) for commit in section["commits"]}, {100})
+        self.assertEqual({len(commit["sha"]) for commit in section["commits"]}, {12})
+
+    def test_a_primary_checkout_reads_the_primary_bucket(self):
+        workspace = self.sdd_ledger("plans/p.md", ["Task 1: complete (review clean)"])
+        self.assertEqual(Path(workspace).parent.name, "primary")
+        self.assertEqual(self.pack("16:1:1")["sdd"]["workspace"], workspace)
+
+
+class ResumePackSddTest(ResumePackHarness, unittest.TestCase):
+    """#265: the pack reads the attempt worktree's SDD bucket by sdd-workspace's rule."""
+
+    COMPLETE = "Task {}: complete (commits aaaaaaa..bbbbbbb, review clean)"
+    FIX = "Task {}: fix round 1/5 (1 addressed, 0 open — x; commits ccccccc..ddddddd)"
+
+    def make_worktree(self):
+        self.primary = self.root / "primary"
+        self.init_worktree(self.primary, branch="main")
+        self.worktree = self.primary / ".worktrees" / "wt-16"
+        self.git(self.primary, "worktree", "add", "--quiet", "-b", "issue-16",
+                 str(self.worktree))
+        self.base = self.git(self.worktree, "rev-parse", "HEAD")
+
+    def at_phase(self, phase):
+        self.progress(issue=16, phase=phase, now=self.tick())
+
+    def test_phase_5_with_a_task_mid_fix_loop_resumes_it(self):
+        self.at_phase(5)
+        entries = [self.COMPLETE.format(1), self.FIX.format(2)]
+        workspace = self.sdd_ledger("plans/p.md", entries, tasks=3)
+        self.assertEqual(Path(workspace).parent.name, "wt-wt-16")
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["sdd"], {"workspace": workspace, "plan": "plans/p.md",
+                                       "task_count": 3, "completed": [1],
+                                       "last_entry": self.FIX.format(2),
+                                       "last_entry_truncated": False})
+        self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
+                                               "task": 2, "mid_fix_loop": True})
+
+    def test_a_task_with_no_lines_starts_fresh(self):
+        self.at_phase(5)
+        self.sdd_ledger("plans/p.md", [self.FIX.format(1), self.COMPLETE.format(1)],
+                        tasks=2)
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "resume_task", "phase": 6, "task": 2,
+                          "mid_fix_loop": False})
+
+    def test_every_task_complete_finishes_phase_6(self):
+        self.at_phase(5)
+        self.sdd_ledger("plans/p.md", [self.COMPLETE.format(2), self.COMPLETE.format(1)],
+                        tasks=2)
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["sdd"]["completed"], [1, 2])
+        self.assertEqual(pack["next_action"], {"kind": "finish_phase", "phase": 6})
+
+    def test_an_unknown_task_count_never_finishes(self):
+        self.at_phase(5)
+        self.sdd_ledger("plans/p.md", [self.COMPLETE.format(1), self.COMPLETE.format(2)])
+        pack = self.pack("16:1:1")
+        self.assertIsNone(pack["sdd"]["task_count"])
+        self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
+                                               "task": 3, "mid_fix_loop": False})
+
+    def test_an_empty_task_member_directory_is_an_unknown_count(self):
+        # Final review: zero members must never read as "every task complete".
+        self.at_phase(5)
+        self.sdd_ledger("plans/p.md", [], tasks=0)
+        pack = self.pack("16:1:1")
+        self.assertIsNone(pack["sdd"]["task_count"])
+        self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
+                                               "task": 1, "mid_fix_loop": False})
+
+    def test_an_absolute_plan_path_is_used_as_is(self):
+        self.at_phase(5)
+        plan = str(self.worktree / "plans" / "p.md")
+        self.sdd_ledger(plan, [self.COMPLETE.format(1)], tasks=1)
+        pack = self.pack("16:1:1")
+        self.assertEqual((pack["sdd"]["plan"], pack["sdd"]["task_count"]), (plan, 1))
+        self.assertEqual(pack["next_action"], {"kind": "finish_phase", "phase": 6})
+
+    def test_sdd_position_outside_phase_5_does_not_steer(self):
+        self.sdd_ledger("plans/p.md", [self.FIX.format(1)], tasks=2)
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["sdd"]["completed"], [])
+        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 0})
+
+    def test_two_plan_ledgers_are_ambiguous(self):
+        self.at_phase(5)
+        self.sdd_ledger("plans/b.md", [self.COMPLETE.format(1)])
+        self.sdd_ledger("plans/a.md", [self.COMPLETE.format(1)])
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["sdd"], {"ambiguous": ["a", "b"], "ambiguous_count": 2})
+        self.assertEqual(pack["next_action"],
+                         {"kind": "reorient", "reason": "ambiguous_sdd_workspace"})
+
+    def test_a_ledger_naming_no_plan_is_not_a_ledger(self):
+        workspace = self.sdd_ledger("plans/p.md", [self.COMPLETE.format(1)])
+        Path(workspace, "progress.md").write_text("# notes\n", encoding="utf-8")
+        self.assertIsNone(self.pack("16:1:1")["sdd"])
+
+    def test_a_symlinked_bucket_is_refused(self):
+        bucket = Path(self.sdd_ledger("plans/p.md", [])).parent
+        shutil.rmtree(bucket)
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        bucket.symlink_to(elsewhere, target_is_directory=True)
+        self.assert_refused("16:1:1", "the SDD workspace cannot be resolved")
+
+    def test_the_last_entry_is_bounded(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        for number in range(25):
+            self.commit(self.worktree, f"{number:02d} " + "x" * 150)
+        self.sdd_ledger("plans/p.md", [self.COMPLETE.format(1), "y" * 600], tasks=1)
+        completed = self.pack_raw("16:1:1")
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        sdd = json.loads(completed.stdout)["sdd"]
+        self.assertEqual((sdd["last_entry"], sdd["last_entry_truncated"]),
+                         ("y" * 400, True))
+
+    def test_unicode_ambiguous_names_shed_from_the_end(self):
+        names = [f"{number}" + "\u00e9" * 99 for number in range(9)]
+        for name in names:
+            self.sdd_ledger(f"plans/{name}.md", [self.COMPLETE.format(1)])
+        completed = self.pack_raw("16:1:1")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        pack = json.loads(completed.stdout)
+        kept = len(pack["sdd"]["ambiguous"])
+        self.assertTrue(0 < kept < 8, kept)
+        self.assertEqual(pack["sdd"], {"ambiguous": names[:kept], "ambiguous_count": 9})
+        self.assertEqual(pack["next_action"],
+                         {"kind": "reorient", "reason": "ambiguous_sdd_workspace"})
+        pack["sdd"]["ambiguous"].append(names[kept])
+        self.assertGreaterEqual(rendered_size(pack), 4096)
+
+    def test_no_ledger_reads_create_nothing(self):
+        self.assertIsNone(self.pack("16:1:1")["sdd"])
+        self.assertFalse((self.primary / ".superpowers").exists())
+
+
+def rendered_size(pack):
+    """Bytes of `render_json(pack)`: sorted keys, compact, ASCII-escaped, newline."""
+    return len(json.dumps(pack, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+class ResumePackBoundTest(ResumePackHarness, unittest.TestCase):
+    """#265 D15: the rendered pack stays under 4096 bytes whatever its text escapes to."""
+
+    DEPTH = 3
+
+    def make_worktree(self):
+        # Each component is 120 `é` (240 UTF-8 bytes, 720 escaped JSON bytes).
+        self.worktree = self.root.joinpath(*["\u00e9" * 120] * self.DEPTH)
+        self.base = self.init_worktree(self.worktree, branch="issue-16")
+
+    def test_unicode_subjects_on_a_long_path_shed_the_oldest_commits(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        commits = [self.commit(self.worktree, f"{number:02d} " + "\u00e9" * 150)
+                   for number in range(25)]
+        completed = self.pack_raw("16:1:1")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        pack = json.loads(completed.stdout)
+        section = pack["commits_since_marker"]
+        kept = len(section["commits"])
+        self.assertTrue(0 < kept < 20, kept)
+        self.assertEqual((section["count"], section["truncated"]), (25, True))
+        newest_first = [{"sha": sha[:12], "subject": f"{number:02d} " + "\u00e9" * 97}
+                        for number, sha in reversed(list(enumerate(commits)))]
+        self.assertEqual(section["commits"], newest_first[:kept])
+        section["commits"].append(newest_first[kept])
+        self.assertGreaterEqual(rendered_size(pack), 4096)
+
+    def test_paths_that_cannot_fit_are_refused(self):
+        self.sdd_ledger("plans/p.md", ["Task 1: complete (review clean)"], tasks=1)
+        self.assert_refused("16:1:1", "the pack exceeds 4096 bytes")
+
+
+class ResumePackEntryBoundTest(ResumePackHarness, unittest.TestCase):
+    """#265 D15: a Unicode last entry on a long path is cut until the pack fits."""
+
+    DEPTH = 1
+    make_worktree = ResumePackBoundTest.make_worktree
+
+    def test_a_unicode_last_entry_is_cut_to_the_byte_bound(self):
+        self.progress(issue=16, phase=5, now=self.tick())
+        entry = "\u00e9" * 400
+        self.sdd_ledger("plans/p.md", ["Task 1: complete (review clean)", entry], tasks=2)
+        completed = self.pack_raw("16:1:1")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        pack = json.loads(completed.stdout)
+        kept = pack["sdd"]["last_entry"]
+        self.assertTrue(0 < len(kept) < 400 and entry.startswith(kept), len(kept))
+        self.assertTrue(pack["sdd"]["last_entry_truncated"])
+        self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
+                                               "task": 2, "mid_fix_loop": False})
+        pack["sdd"]["last_entry"] = entry[:len(kept) + 1]
+        self.assertGreaterEqual(rendered_size(pack), 4096)
+
+
 class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
     """Owner-path writes that end a launch refuse while it has a live worker (#222)."""
 
@@ -6862,6 +7993,18 @@ class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
             self.suspend(issue=14, attempt=1, blocked_on="agent_dispatch",
                          now="2026-08-13T20:03:00Z")["kind"], "suspended")
 
+    def test_a_deadline_suspend_refuses_until_the_worker_is_released(self):
+        worker = self.spawn_with_worker()
+        before = self.state_path.read_bytes()
+        self.assert_refused(
+            self.suspend(issue=14, attempt=1, blocked_on="deadline",
+                         now="2026-08-13T20:02:00Z", ok=False), before, worker)
+        self.release_worker(worker_id=worker, event="stopped",
+                            now="2026-08-13T20:03:00Z")
+        self.assertEqual(
+            self.suspend(issue=14, attempt=1, blocked_on="deadline",
+                         now="2026-08-13T20:03:00Z")["blocked_on"], "deadline")
+
     def test_a_handoff_progress_refuses_but_plain_progress_does_not(self):
         worker = self.spawn_with_worker()
         self.progress(issue=14, phase=1, now="2026-08-13T20:02:00Z")
@@ -6894,7 +8037,8 @@ class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
         def finish(now, ok):
             return self.run_cli("finish", "--repo-root", self.root, "--run-id",
                                 self.run_id, "--issue", 14, "--attempt", 1,
-                                "--result-file", result_path, "--now", now, ok=ok)
+                                "--result-file", result_path, "--now", now,
+                                "--action-id", "14:1:1", ok=ok)
 
         before = self.state_path.read_bytes()
         self.assert_refused(finish("2026-08-13T20:02:00Z", False), before, worker)
@@ -6911,6 +8055,240 @@ class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             self.suspend(issue=14, attempt=1, blocked_on="external",
                          now="2026-08-13T20:02:00Z")["kind"], "suspended")
+
+
+class DelegatedShipLaunchTest(LifecycleHarness, unittest.TestCase):
+    """#352: a delegated owner returns after Phase 6 and its delegator ships.
+
+    The ledger records no delegation, so both owners act under one launch.
+    """
+
+    def return_from_the_delegated_owner(self):
+        self.init_run()
+        spawned = self.spawn(issue=14, worktree=str(self.root / "wt-14"))
+        self.assertEqual(spawned["id"], "14:1:1")
+        gate = self.progress(issue=14, phase=5, now="2026-08-13T20:01:00Z",
+                             remainder_self_contained=True)
+        self.assertEqual(gate["action"], "delegate")
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(attempt["phase_action"], "delegate")
+        implementer = self.register_worker(action_id="14:1:1",
+                                           now="2026-08-13T20:02:00Z")["worker_id"]
+        self.release_worker(worker_id=implementer, event="returned",
+                            now="2026-08-13T20:03:00Z")
+        self.progress(issue=14, phase=6, now="2026-08-13T20:04:00Z",
+                      remainder_self_contained=True)
+        return implementer
+
+    def finish_with_summary(self, now, ok):
+        """`finish --summary-file` of a `terminal_failed` ship-summary/v2.
+
+        The installed delivery contract stays; the summary is bound to the
+        launch's custody and to that contract's digest, as a real owner's is.
+        """
+        digest = self.read_state()["issues"]["14"]["delivery"]["contract_digest"]
+        historical = {"issue": 14, "state": "failed", "pr_url": None,
+                      "merge_sha": None, "issue_closed": False,
+                      "discussion_items": [], "detail_state": "none",
+                      "report_path": None, "notes": "owner failed"}
+        summary = {"interface_version": 2, "issue": 14, "state": "terminal_failed",
+                   "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
+                               "action_id": "14:1:1"},
+                   "historical_owner_result": historical,
+                   "delivery_contract_digest": digest, "delivery_observations": [],
+                   "authority_observations": [], "reevaluation_evidence": [],
+                   "detail_state": "none", "report_path": None,
+                   "notes": "owner failed"}
+        summary_path = self.root / "summary-14-1.json"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        return self.run_cli("finish", "--repo-root", self.root, "--run-id",
+                            self.run_id, "--summary-file", summary_path, "--now",
+                            now, ok=ok)
+
+    def test_the_delegator_registers_the_ship_owner_under_the_same_launch(self):
+        implementer = self.return_from_the_delegated_owner()
+        ship_owner = self.register_worker(action_id="14:1:1",
+                                          now="2026-08-13T20:05:00Z")
+        self.assertEqual(ship_owner, {"worker_id": "14:1:1:w2", "launch": "14:1:1",
+                                      "parent": None})
+        attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual((len(attempts), len(attempts[0]["launches"])), (1, 1))
+        self.assertEqual(
+            [w["worker_id"] for w in self.read_state()["workers"]
+             if w["released_at"] is None], ["14:1:1:w2"])
+        self.assertEqual(self.check_worker(implementer)["reason"], "released")
+        self.assertEqual(self.check_worker("14:1:1:w2"), {
+            "worker_id": "14:1:1:w2", "live": True,
+            "current_action_id": "14:1:1", "reason": "live"})
+        self.assertIs(self.check_launch(action_id="14:1:1")["current"], True)
+
+    def test_finish_waits_for_the_ship_owner_and_then_ends_the_launch(self):
+        self.return_from_the_delegated_owner()
+        ship_owner = self.register_worker(action_id="14:1:1",
+                                          now="2026-08-13T20:05:00Z")["worker_id"]
+        before = self.state_path.read_bytes()
+        refused = self.finish_with_summary("2026-08-13T20:06:00Z", False)
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertIn("live workers: " + ship_owner, refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.release_worker(worker_id=ship_owner, event="returned",
+                            now="2026-08-13T20:07:00Z")
+        finished = json.loads(
+            self.finish_with_summary("2026-08-13T20:07:00Z", True).stdout)
+        self.assertEqual(finished["kind"], "terminal_failed")
+        self.assertEqual(self.check_launch(action_id="14:1:1")["reason"],
+                         "inactive_attempt")
+        late = self.register_worker(action_id="14:1:1", now="2026-08-13T20:08:00Z",
+                                    ok=False)
+        self.assertEqual(late.returncode, 2)
+        self.assertIn("inactive_attempt", late.stderr)
+
+    def test_a_relaunch_fences_the_earlier_owners_ship_registration(self):
+        self.return_from_the_delegated_owner()
+        resumed = self.resume(issue=14, worktree=str(self.root / "wt-14"),
+                              now="2026-08-13T20:06:00Z", owner_unavailable=True)
+        self.assertEqual(resumed["id"], "14:1:2")
+        before = self.state_path.read_bytes()
+        stale = self.register_worker(action_id="14:1:1", now="2026-08-13T20:07:00Z",
+                                     ok=False)
+        self.assertEqual((stale.returncode, stale.stdout), (2, ""))
+        self.assertIn("superseded_launch", stale.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(self.check_launch(action_id="14:1:1")["reason"],
+                         "superseded_launch")
+
+
+class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
+    """Issue 424: the phase-budget defaults live in agent_tools.phase_budget alone."""
+
+    MINIMAL = ["progress", "--repo-root", "/ledger", "--run-id", "run-1", "--issue", "1",
+               "--attempt", "1", "--phase", "0", "--next-needs-context", "true",
+               "--artifacts-sufficient", "false", "--remainder-self-contained", "false"]
+    BUDGET_FLAGS = ("--turn-ceiling", "--turn-headroom", "--context-ceiling",
+                    "--context-headroom")
+
+    def test_default_ceiling_hands_off_at_200000_and_continues_at_199999(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+        defaults = dict(turn_ceiling=None, context_ceiling=None, turn_headroom=None,
+                        context_headroom=None)
+        below = self.progress(issue=14, attempt=1, phase=1, now="2026-08-13T20:05:00Z",
+                              turn_count=10, context_tokens=199999, **defaults)
+        self.assertEqual(below["action"], "continue")
+        at = self.progress(issue=14, attempt=1, phase=2, now="2026-08-13T20:10:00Z",
+                           turn_count=10, context_tokens=200000, **defaults)
+        self.assertEqual(at["action"], "handoff")
+
+    def test_the_four_flags_default_to_none_and_resolve_in_the_policy_home(self):
+        workflow = load_source_module(SCRIPT, "workflow_state_phase_budget_defaults")
+        args = workflow.build_parser().parse_args(self.MINIMAL)
+        self.assertEqual((args.turn_ceiling, args.turn_headroom, args.context_ceiling,
+                          args.context_headroom), (None, None, None, None))
+        defaults = {}
+        for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "add_argument" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in self.BUDGET_FLAGS):
+                defaults[node.args[0].value] = [
+                    ast.unparse(keyword.value) for keyword in node.keywords
+                    if keyword.arg == "default"]
+        self.assertEqual(defaults, {flag: ["None"] for flag in self.BUDGET_FLAGS})
+
+    def test_the_override_sets_the_threshold_of_the_phase_being_entered(self):
+        # The in-process CLI shares one interpreter, so the per-process cache is cleared around it.
+        from agent_tools import phase_budget
+        phase_budget.current.cache_clear()
+        self.addCleanup(phase_budget.current.cache_clear)
+        self.cli_env["AGENT_PHASE_BUDGET"] = "threshold=110000,threshold:2-2=140000"
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+        defaults = dict(turn_ceiling=None, context_ceiling=None, turn_headroom=None,
+                        context_headroom=None)
+        into_two = self.progress(issue=14, attempt=1, phase=1, now="2026-08-13T20:05:00Z",
+                                 turn_count=10, context_tokens=120000, **defaults)
+        self.assertEqual(into_two["action"], "continue")
+        recorded = self.read_state()["issues"]["14"]["attempts"][0]["phase_inputs"]
+        self.assertEqual(recorded["context_ceiling"], 150000)
+        into_three = self.progress(issue=14, attempt=1, phase=2, now="2026-08-13T20:10:00Z",
+                                   turn_count=10, context_tokens=120000, **defaults)
+        self.assertEqual(into_three["action"], "handoff")
+
+    def test_progress_reads_each_spelling_the_meter_removes_as_context_tokens(self):
+        """The context meter drops every prefix of --context-tokens from --context-t on (D15)."""
+        parser = load_source_module(
+            SCRIPT, "workflow_state_context_tokens_spellings").build_parser()
+        for spelling in ("--context-t", "--context-tok", "--context-tokens"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(parser.parse_args([*self.MINIMAL, spelling, "5"]).context_tokens, 5)
+                self.assertEqual(parser.parse_args([*self.MINIMAL, f"{spelling}=7"]).context_tokens, 7)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args([*self.MINIMAL, "--context-", "5"])
+
+
+class ActionIdIdentityTest(LifecycleHarness, unittest.TestCase):
+    """Issue 432: `progress` and `suspend` derive --issue and --attempt from --action-id."""
+
+    def gate_arguments(self, *identity, phase=1, now="2026-08-13T20:05:00Z"):
+        return ["progress", "--repo-root", self.root, "--run-id", self.run_id, *identity,
+                "--phase", phase, "--now", now, "--next-needs-context", "true",
+                "--artifacts-sufficient", "false", "--remainder-self-contained", "false"]
+
+    def suspend_arguments(self, *identity):
+        return ["suspend", "--repo-root", self.root, "--run-id", self.run_id, *identity,
+                "--blocked-on", "usage_limit", "--now", "2026-08-13T20:05:00Z"]
+
+    def started(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+
+    def test_progress_with_only_an_action_id_records_on_its_issue_and_attempt(self):
+        self.started()
+        completed = self.run_cli(*self.gate_arguments("--action-id", "14:1:1", phase=2))
+        reply = json.loads(completed.stdout)
+        self.assertEqual((reply["issue"], reply["custody"]["action_id"], reply["action"]),
+                         (14, "14:1:1", "continue"))
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["phase"], attempt["state"]), (2, "active"))
+
+    def test_a_flag_that_agrees_with_the_action_id_is_accepted(self):
+        self.started()
+        completed = self.run_cli(*self.gate_arguments(
+            "--issue", "14", "--attempt", "1", "--action-id", "14:1:1"))
+        self.assertEqual(json.loads(completed.stdout)["issue"], 14)
+
+    def test_a_flag_that_disagrees_with_the_action_id_is_refused_and_writes_nothing(self):
+        self.started()
+        before = self.state_path.read_bytes()
+        for identity in (("--issue", "15"), ("--attempt", "2"),
+                         ("--issue", "15", "--attempt", "1")):
+            with self.subTest(identity=identity):
+                for arguments in (self.gate_arguments("--action-id", "14:1:1", *identity),
+                                  self.suspend_arguments("--action-id", "14:1:1", *identity)):
+                    refused = self.run_cli(*arguments, ok=False)
+                    self.assertEqual(refused.returncode, 2)
+                    self.assertIn("--issue/--attempt disagree with --action-id", refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_a_call_with_neither_an_action_id_nor_both_flags_is_refused(self):
+        self.started()
+        for command, arguments in (
+                ("progress", self.gate_arguments("--issue", "14")),
+                ("progress", self.gate_arguments()),
+                ("suspend", self.suspend_arguments("--attempt", "1")),
+                ("suspend", self.suspend_arguments())):
+            with self.subTest(command=command, arguments=arguments[3:]):
+                refused = self.run_cli(*arguments, ok=False)
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn(f"{command} needs --action-id or --issue and --attempt",
+                              refused.stderr)
+
+    def test_suspend_with_only_an_action_id_suspends_its_issue_and_attempt(self):
+        self.started()
+        reply = json.loads(self.run_cli(*self.suspend_arguments("--action-id", "14:1:1")).stdout)
+        self.assertEqual((reply["kind"], reply["issue"], reply["blocked_on"]),
+                         ("suspended", 14, "usage_limit"))
+        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][0]["state"], "suspended")
 
 
 class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):
@@ -6956,7 +8334,7 @@ class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):
         reply = self.progress(issue=191, phase=1, now="2026-08-20T10:05:00Z",
                               remainder_self_contained=True)
         self.assertEqual(reply, {
-            "interface_version": 2, "kind": "phase_gate", "run_id": "direct-191-000001",
+            "interface_version": 2, "kind": "phase_gate", "run_id": self.direct_run_id(191, 1),
             "issue": 191, "custody": {"kind": "implementation", "attempt": 1,
                                       "launch": 1, "action_id": "191:1:1"},
             "action": "delegate", "handoff_path": None})
@@ -7204,7 +8582,8 @@ class ResolverOutcomeTest(unittest.TestCase):
 
 
 class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
-    """Cover the installed layout, where the policy is a home-manager symlink."""
+    """Cover the installed layout, where the policy and the module are home-manager
+    symlinks and no `artifact-budget` wrapper is installed (issue 498 D2, D5, D7)."""
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
     def test_installed_symlinked_policy_validates_a_terminal_result(self):
@@ -7215,16 +8594,16 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
             binaries = home / ".agents/bin"
             library = home / ".agents/lib/python"
             share = home / ".agents/share"
-            for directory in (binaries, library, share):
+            store = home / "store"
+            for directory in (binaries, library, share, store):
                 directory.mkdir(parents=True)
             installed_script = binaries / "workflow-state.py"
             installed_script.write_bytes((scripts / "workflow-state.py").read_bytes())
-            wrapper = binaries / "artifact-budget"
-            wrapper.write_bytes((scripts / "artifact-budget").read_bytes())
-            wrapper.chmod(0o755)
-            (library / "artifact_budget.py").write_bytes(
+            # home-manager links the module to its store file (issue 498 D7).
+            (store / "artifact_budget.py").write_bytes(
                 (scripts / "artifact_budget.py").read_bytes()
             )
+            (library / "artifact_budget.py").symlink_to(store / "artifact_budget.py")
             (library / "workflow_delivery.py").write_bytes(
                 (scripts / "workflow_delivery.py").read_bytes()
             )
@@ -7234,12 +8613,18 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
 
             probe = (
                 "import importlib.util, json, sys\n"
+                f"SPAWN_EVENTS = {sorted(SPAWN_EVENTS)!r}\n"
+                "spawned = []\n"
                 "spec = importlib.util.spec_from_file_location('ws', sys.argv[1])\n"
                 "module = importlib.util.module_from_spec(spec)\n"
                 "spec.loader.exec_module(module)\n"
                 "_, resolved = module.artifact_budget_paths()\n"
+                "sys.addaudithook(lambda event, _: spawned.append(event)\n"
+                "                 if event in SPAWN_EVENTS else None)\n"
                 "summary = module.terminal_result(1320, 'stopped', 'attempt deadline expired')\n"
-                "print(json.dumps({'policy': str(resolved), 'state': summary['state']}))\n"
+                "print(json.dumps({'policy': str(resolved), 'state': summary['state'],\n"
+                "                  'spawned': spawned,\n"
+                "                  'module': module._artifact_budget().__file__}))\n"
             )
             completed = subprocess.run(
                 [sys.executable, "-c", probe, str(installed_script)],
@@ -7255,6 +8640,910 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
             self.assertEqual(
                 Path(observed["policy"]).resolve(), policy.resolve()
             )
+            # Validated in this process, from the link's store target: bytecode
+            # is never cached under the link's own name (issue 498 D5, D7).
+            self.assertEqual(observed["spawned"], [])
+            self.assertEqual(Path(observed["module"]), (store / "artifact_budget.py").resolve())
+            self.assertEqual(sorted((library / "__pycache__").glob("artifact_budget.*")), [])
+
+
+class InProcessArtifactBudgetTest(LifecycleHarness, unittest.TestCase):
+    """Issue 498 AC1, D1, D5: the legacy `finish` validates its result file, a
+    `present` detail and an `unpublished` detail without starting a process, and
+    reaches the CLI's verdict on the same bytes and policy."""
+
+    def cli_exit(self, *argv, stdin=b""):
+        """The exit code of the artifact-budget CLI, run as a child process outside
+        any recording window, on `argv` and the source policy."""
+        return subprocess.run(
+            [sys.executable, str(ARTIFACT_BUDGET), *map(str, argv),
+             "--policy", str(BUDGET_POLICY.resolve())],
+            input=stdin, capture_output=True, check=False).returncode
+
+    def finish_without_spawning(self, attempt, result, *, ok):
+        with recorded_spawns() as spawned:
+            outcome = self.finish(attempt, result, ok=ok)
+        self.assertEqual(spawned, [])
+        return outcome
+
+    def assert_refused(self, completed, line):
+        self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                         (2, "", line))
+
+    def test_a_result_file_is_validated_in_process_with_the_clis_verdict(self):
+        self.init_run()
+        attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
+        accepted = self.merged_result()
+        refused = {**accepted, "discussion_items": ["not durably moved"]}
+        verdicts = [self.cli_exit("validate-report", "--boundary", "ship-summary", "--input", "-",
+                                  stdin=json.dumps(result).encode("utf-8"))
+                    for result in (refused, accepted)]
+        self.assertEqual(verdicts, [2, 0])
+        self.assert_refused(
+            self.finish_without_spawning(attempt, refused, ok=False),
+            "workflow-state: artifact-budget validate-report rejected the ship-summary boundary\n")
+        self.finish_without_spawning(attempt, accepted, ok=True)
+        self.assertEqual(self.read_state()["issues"]["14"]["outcome"], accepted)
+
+    def test_a_present_detail_is_checked_in_process_with_the_clis_verdict(self):
+        self.init_run()
+        attempt = self.spawn(issue=14, worktree=self.root / "wt-a")["attempt"]
+        paths = (".superpowers/issue-delivery/14/run-1/ship-review-refused.json",
+                 ".superpowers/issue-delivery/14/run-1/ship-review-a.json")
+        self.write_delivery_detail(paths[0]).write_text("{}", encoding="utf-8")
+        self.write_delivery_detail(paths[1])
+        refused, accepted = ({**self.merged_result(), "detail_state": "present",
+                              "report_path": path, "notes": f"details: {path}"}
+                             for path in paths)
+        verdicts = [self.cli_exit("check", "--kind", "review-package",
+                                  "--root", self.root.resolve() / path, "--format", "json")
+                    for path in paths]
+        self.assertEqual(verdicts, [2, 0])
+        self.assert_refused(
+            self.finish_without_spawning(attempt, refused, ok=False),
+            "workflow-state: durable detail is not a checker-valid review package\n")
+        self.finish_without_spawning(attempt, accepted, ok=True)
+        self.assertEqual(self.read_state()["issues"]["14"]["outcome"], accepted)
+
+    def test_an_unpublished_detail_is_validated_in_process_with_the_clis_verdict(self):
+        self.init_run()
+        worktree = self.root / "wt-a"
+        attempt = self.spawn(issue=14, worktree=worktree)["attempt"]
+        relative = ".superpowers/ship-review/14/retained-detail.json"
+        retained = worktree / relative
+        retained.parent.mkdir(parents=True)
+        refused = '{"interface_version":1,"findings":[]}'
+        accepted = ('{"interface_version":1,"findings":[{"axis":"ship","ruling":null,'
+                    '"severity":"Minor","status":"minor","text":"kept"}]}')
+        result = {**self.merged_result(), "state": "stopped", "pr_url": None,
+                  "merge_sha": None, "issue_closed": False,
+                  "detail_state": "unpublished", "report_path": relative,
+                  "notes": f"publication failed; retained: {relative}"}
+        verdicts = []
+        for payload in (refused, accepted):
+            retained.write_text(payload, encoding="utf-8")
+            verdicts.append(self.cli_exit("validate-detail-input", "--input",
+                                          worktree.resolve() / relative))
+        self.assertEqual(verdicts, [2, 0])
+        retained.write_text(refused, encoding="utf-8")
+        self.assert_refused(
+            self.finish_without_spawning(attempt, result, ok=False),
+            "workflow-state: artifact-budget validate-detail-input rejected the detail input\n")
+        retained.write_text(accepted, encoding="utf-8")
+        self.finish_without_spawning(attempt, result, ok=True)
+        outcome = self.read_state()["issues"]["14"]["outcome"]
+        self.assertEqual((outcome["state"], outcome["detail_state"], outcome["report_path"]),
+                         ("stopped", "unpublished", relative))
+
+    def test_an_exception_escaping_the_validator_is_refused_as_a_crashed_child_was(self):
+        # A CLI child that crashed exited 1 with empty stdout, which the base mapped to
+        # the boundary's refusal. No wire-bounded input crashes the validator on the
+        # supported interpreters, so the seam is the loaded module's `invoke`
+        # (issue 498 D4, D8).
+        workflow = load_source_module(SCRIPT, "workflow_state_issue_498_crash")
+        module = workflow._artifact_budget()
+        wire = json.dumps(self.merged_result()).encode("utf-8")
+        argv = ["validate-report", "--boundary", "ship-summary", "--input", "-"]
+        with recorded_spawns() as spawned, \
+                mock.patch.object(module, "invoke", side_effect=RecursionError("deep")):
+            outcome = workflow.artifact_budget_invoke(argv, wire)
+            with self.assertRaises(workflow.WorkflowError) as caught:
+                workflow.artifact_budget_validate(
+                    "validate-report", boundary="ship-summary", input_bytes=wire)
+        self.assertEqual(spawned, [])
+        self.assertEqual((outcome.exit_code, outcome.stdout), (1, b""))
+        self.assertIn("RecursionError: deep", outcome.stderr)
+        self.assertEqual(str(caught.exception),
+                         "artifact-budget validate-report rejected the ship-summary boundary")
+
+
+if DeliveredControlHarness is not None:
+    class HeldControlTest(DeliveredControlHarness, unittest.TestCase):
+        """#273 AC2: a held delivery holds no custody, reads `held`, and is never relaunched."""
+
+        def summaries(self, response):
+            return {item["issue"]: item for item in response["summaries"]}
+
+        def test_a_held_delivery_is_never_relaunched_and_reads_held(self):
+            self.deliver_through_remainder(held=True)
+            before = self.records(DELIVERED)
+            # Minute 275 is past r1's deadline (274); 209 depends on held 207.
+            response = self.control(275, recorded={DELIVERED: "absent", LIVE: None},
+                                    contracts=True, blockers={LIVE: [DELIVERED]})
+            self.assertEqual([a for a in response["actions"] if a.get("issue") == DELIVERED], [])
+            self.assertEqual([d for d in response["deltas"] if d["issue"] == DELIVERED], [])
+            self.assertEqual([a for a in response["actions"] if a["kind"] in DISPATCH], [])
+            self.assertNotIn(DELIVERED, response["admission"]["waiting"])
+            held = self.summaries(response)[DELIVERED]
+            # Summary custody keeps #220 D4's diagnostic projection unchanged (it may
+            # name a stale nonterminal record); "no current custody" is proven by the
+            # empty dispatch actions above and the null owner below (PR273-1).
+            self.assertEqual((held["state"], held["owner"],
+                              held["pending_stage_ids"], held["requirements"]),
+                             ("held", None, [], []))
+            self.assertIsNotNone(held["contract_digest"])
+            dependent = self.summaries(response)[LIVE]
+            self.assertEqual(dependent["state"], "blocked")
+            self.assertEqual(dependent["blockers"],
+                             [{"kind": "issue", "issue": DELIVERED, "url": None}])
+            self.assertEqual(self.records(DELIVERED), before)
+
+        def test_a_held_issue_a_human_closed_reads_closed(self):
+            self.deliver_through_remainder(held=True)
+            response = self.control(275, recorded={DELIVERED: "absent"}, contracts=True,
+                                    closed={DELIVERED})
+            self.assertEqual(self.summaries(response)[DELIVERED]["state"], "closed")
+
+        def test_only_a_held_observation_projects_held(self):
+            # D15, D18: a tracker_closed delivery whose tracker reads open is not held.
+            self.deliver_through_remainder(held=False)
+            response = self.control(275, recorded={DELIVERED: "absent"}, contracts=True)
+            self.assertEqual(self.summaries(response)[DELIVERED]["state"], "queued")
+
+
+class LedgerClockSeamTest(LifecycleHarness, unittest.TestCase):
+    """#309 D1, D2, D11: one clock seam, and an override that can only pin the present or past."""
+
+    CLOCK_CALLS = frozenset({("datetime", "now"), ("datetime", "utcnow"), ("datetime", "today"),
+                             ("date", "today"), ("time", "time"), ("time", "time_ns")})
+
+    def setUp(self):
+        super().setUp()
+        self.cli_env.pop("WORKFLOW_STATE_TEST_CLOCK", None)
+
+    def init_without_time(self, key="clock-seam"):
+        completed = self.run_cli("init-run", "--repo-root", self.root, "--creation-key", key,
+                                 ok=False)
+        if completed.returncode == 0:
+            self.run_id = json.loads(completed.stdout)["run_id"]
+        return completed
+
+    def test_an_override_later_than_the_clock_is_refused(self):
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = "2999-01-01T00:00:00Z"
+        refused = self.init_without_time()
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertRegex(refused.stderr,
+                         r"^workflow-state: invalid WORKFLOW_STATE_TEST_CLOCK: "
+                         r"2999-01-01T00:00:00Z is later than the clock "
+                         r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$")
+        self.assertEqual(list(self.workflows_dir.glob("*/state.json")), [])
+
+    def test_a_malformed_override_is_refused(self):
+        for value in ("yesterday", "2026-08-13T20:00:00"):
+            with self.subTest(value=value):
+                self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = value
+                refused = self.init_without_time()
+                self.assertEqual(
+                    (refused.returncode, refused.stdout, refused.stderr),
+                    (2, "", "workflow-state: invalid WORKFLOW_STATE_TEST_CLOCK: "
+                            "expected an RFC3339 UTC timestamp\n"))
+                self.assertEqual(list(self.workflows_dir.glob("*/state.json")), [])
+
+    def test_the_override_pins_the_stamp_and_an_empty_one_is_the_clock(self):
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = "2026-09-30T12:00:00Z"
+        self.assertEqual(self.init_without_time().returncode, 0)
+        self.assertEqual(self.read_state()["updated_at"], "2026-09-30T12:00:00Z")
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = ""
+        self.assertEqual(self.init_without_time("empty-override").returncode, 0)
+        stamp = datetime.fromisoformat(self.read_state()["updated_at"].replace("Z", "+00:00"))
+        self.assertLessEqual(abs((datetime.now(timezone.utc) - stamp).total_seconds()), 5)
+
+    def sites(self, path):
+        """(kind, innermost enclosing function name) for each clock call and override literal."""
+        found = []
+
+        def visit(node, owner):
+            for child in ast.iter_child_nodes(node):
+                inner = (child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         else owner)
+                if isinstance(child, ast.Constant) and child.value == "WORKFLOW_STATE_TEST_CLOCK":
+                    found.append(("override", owner))
+                if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                        and isinstance(child.func.value, ast.Name)
+                        and (child.func.value.id, child.func.attr) in self.CLOCK_CALLS):
+                    found.append(("clock", owner))
+                visit(child, inner)
+
+        visit(ast.parse(path.read_text(encoding="utf-8")), None)
+        return found
+
+    def test_only_ledger_clock_reads_the_clock_or_the_override(self):
+        scripts = SCRIPT.parent
+        self.assertEqual(set(self.sites(SCRIPT)),
+                         {("override", "ledger_clock"), ("clock", "ledger_clock")})
+        others = [*sorted(scripts.glob("workflow_delivery*.py")),
+                  *sorted((scripts / "delivery_model").glob("*.py"))]
+        self.assertTrue(others)
+        for path in others:
+            with self.subTest(path=path.name):
+                self.assertEqual(self.sites(path), [])
+
+
+class OwnerLivenessTest(LifecycleHarness, unittest.TestCase):
+    """#310 D2-D5, D10, D11: workflow-state owner-liveness."""
+
+    SKEW = ("workflow-state: --since {s} is {n} seconds ahead of the clock {c}; a supplied "
+            "time may lead it by at most 60 seconds — omit it to use the clock\n")
+
+    def setUp(self):
+        super().setUp()
+        self.init_run()
+        self.worktrees = {n: str(self.root / f"wt-{n}") for n in (14, 16)}
+        response = self.control(
+            now=DEFAULT_NOW, issues=[14, 16], max_parallel=2, attempt_budget_minutes=180,
+            tracker=[self.tracker_fact(n) for n in (14, 16)],
+            worktrees=[self.worktree_fact(n, candidate={"path": self.worktrees[n],
+                                                         "state": "absent"})
+                       for n in (14, 16)])
+        self.assertEqual([a["id"] for a in response["actions"] if a["kind"] == "spawn"],
+                         ["14:1:1", "16:1:1"])
+
+    def inventory(self):
+        return (self.state_path.read_bytes(),
+                sorted(p.relative_to(self.root) for p in self.root.rglob("*")))
+
+    def call(self, clock, *, action_id="14:1:1", stall="30", since=None, run_id=None):
+        # The pinned clock is scoped to this one call, so later ledger writes in
+        # the same test are skew-checked against the real clock (PR310-02).
+        previous = self.cli_env.get("WORKFLOW_STATE_TEST_CLOCK")
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = clock
+        args = ["owner-liveness", "--repo-root", self.root,
+                "--run-id", self.run_id if run_id is None else run_id,
+                "--action-id", action_id, "--stall-minutes", stall]
+        if since is not None:
+            args += ["--since", since]
+        try:
+            before = self.inventory()
+            completed = self.run_cli(*args, ok=False)
+            self.assertEqual(self.inventory(), before)
+        finally:
+            if previous is None:
+                self.cli_env.pop("WORKFLOW_STATE_TEST_CLOCK", None)
+            else:
+                self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = previous
+        return completed
+
+    def liveness(self, clock, **kwargs):
+        completed = self.call(clock, **kwargs)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return self.validated_response(completed.stdout)
+
+    def reply(self, verdict, since, progress_at, stall_at, wait, *, action_id="14:1:1",
+              reason="current"):
+        return {"interface_version": 1, "kind": "owner_liveness", "action_id": action_id,
+                "reason": reason, "verdict": verdict, "since": since,
+                "progress_at": progress_at, "stall_at": stall_at, "wait_seconds": wait}
+
+    def assert_refused(self, completed, stderr):
+        self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                         (2, "", stderr))
+
+    def test_live_names_the_seconds_left_from_the_clock(self):
+        self.assertEqual(self.liveness("2026-08-13T20:10:07Z"), self.reply(
+            "live", "2026-08-13T20:10:07Z", "2026-08-13T20:00:00Z",
+            "2026-08-13T20:40:07Z", 1800))
+        # A since ahead of the clock (within the skew) lengthens the wait past the bound.
+        self.assertEqual(
+            self.liveness("2026-08-13T20:10:07Z", since="2026-08-13T20:10:37Z"),
+            self.reply("live", "2026-08-13T20:10:37Z", "2026-08-13T20:00:00Z",
+                       "2026-08-13T20:40:37Z", 1830))
+
+    def test_stalled_exactly_at_stall_at(self):
+        since = "2026-08-13T20:10:00Z"
+        self.assertEqual(self.liveness("2026-08-13T20:39:59Z", since=since), self.reply(
+            "live", since, "2026-08-13T20:00:00Z", "2026-08-13T20:40:00Z", 1))
+        self.assertEqual(self.liveness("2026-08-13T20:40:00Z", since=since), self.reply(
+            "stalled", since, "2026-08-13T20:00:00Z", "2026-08-13T20:40:00Z", None))
+
+    def test_past_deadline_wins_over_stalled(self):
+        since = "2026-08-13T20:10:00Z"
+        self.assertEqual(self.liveness("2026-08-13T22:59:59Z", since=since)["verdict"],
+                         "stalled")
+        self.assertEqual(self.liveness("2026-08-13T23:00:00Z", since=since), self.reply(
+            "past_deadline", since, "2026-08-13T20:00:00Z", "2026-08-13T20:40:00Z", None))
+
+    def test_a_since_later_than_progress_moves_stall_at(self):
+        self.assertEqual(
+            self.liveness("2026-08-13T20:30:00Z", since="2026-08-13T20:20:00Z")["stall_at"],
+            "2026-08-13T20:50:00Z")
+        self.assertEqual(self.liveness("2026-08-13T20:30:00Z")["stall_at"],
+                         "2026-08-13T21:00:00Z")
+
+    def test_only_this_launchs_workers_move_progress(self):
+        worker = self.register_worker(action_id="14:1:1", now="2026-08-13T20:20:00Z")
+        self.assertEqual(self.liveness("2026-08-13T20:21:00Z", since=DEFAULT_NOW)
+                         ["progress_at"], "2026-08-13T20:20:00Z")
+        self.release_worker(worker_id=worker["worker_id"], event="returned",
+                            now="2026-08-13T20:25:00Z")
+        self.register_worker(action_id="16:1:1", now="2026-08-13T20:30:00Z")
+        ours = self.liveness("2026-08-13T20:31:00Z", since=DEFAULT_NOW)
+        self.assertEqual((ours["progress_at"], ours["stall_at"]),
+                         ("2026-08-13T20:25:00Z", "2026-08-13T20:55:00Z"))
+        theirs = self.liveness("2026-08-13T20:31:00Z", action_id="16:1:1", since=DEFAULT_NOW)
+        self.assertEqual(theirs["progress_at"], "2026-08-13T20:30:00Z")
+
+    def test_fractional_stored_progress_is_truncated_and_never_rewritten(self):
+        # PR310-01: a supplied fractional --now is stored as given; the reply
+        # truncates it to whole seconds and passes the boundary unchanged.
+        self.progress(issue=14, phase=1, now="2026-08-13T20:15:00.750000Z")
+        stored = self.state_path.read_bytes()
+        reply = self.liveness("2026-08-13T20:16:00Z", since=DEFAULT_NOW)
+        self.assertEqual((reply["progress_at"], reply["stall_at"], reply["wait_seconds"]),
+                         ("2026-08-13T20:15:00Z", "2026-08-13T20:45:00Z", 1740))
+        self.assertEqual(self.state_path.read_bytes(), stored)
+
+    def test_recorded_progress_moves_progress(self):
+        self.progress(issue=14, phase=1, now="2026-08-13T20:15:00Z")
+        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][-1]["last_progress_at"],
+                         "2026-08-13T20:15:00Z")
+        self.assertEqual(self.liveness("2026-08-13T20:16:00Z", since=DEFAULT_NOW)
+                         ["progress_at"], "2026-08-13T20:15:00Z")
+
+    def test_a_launch_that_is_not_current_is_not_current(self):
+        self.assertEqual(
+            self.liveness("2026-08-13T20:10:00Z", run_id="no-such-run"),
+            self.reply("not_current", "2026-08-13T20:10:00Z", None, None, None,
+                       reason="unknown_run"))
+        self.suspend(issue=14, attempt=1, blocked_on="transport", now="2026-08-13T20:05:00Z")
+        self.resume(issue=14, worktree=self.worktrees[14], now="2026-08-13T20:06:00Z")
+        self.assertEqual(self.liveness("2026-08-13T20:10:00Z")["reason"], "superseded_launch")
+        self.assertEqual(self.liveness("2026-08-13T20:10:00Z")["verdict"], "not_current")
+        resumed = self.liveness("2026-08-13T20:10:00Z", action_id="14:1:2")
+        self.assertEqual((resumed["verdict"], resumed["progress_at"]),
+                         ("live", "2026-08-13T20:06:00Z"))
+
+    def test_malformed_arguments_are_refused_without_a_write(self):
+        clock = "2026-08-13T20:10:00Z"
+        for stall in ("0", "-1", "01", "1.5", "abc", "", "1234567890"):
+            with self.subTest(stall=stall):
+                self.assert_refused(self.call(clock, stall=stall), "workflow-state: invalid "
+                                    "--stall-minutes: expected a positive integer\n")
+        for since in ("yesterday", "2026-08-13T20:10:00.5Z", "2026-08-13T20:10:00+00:00"):
+            with self.subTest(since=since):
+                self.assert_refused(self.call(clock, since=since), "workflow-state: invalid "
+                                    "--since: expected an RFC3339 UTC timestamp\n")
+        self.assert_refused(self.call(clock, action_id="14:1"),
+                            "workflow-state: invalid action_id\n")
+        self.assert_refused(self.call(clock, run_id="bad/run"),
+                            "workflow-state: invalid run_id\n")
+
+    def test_a_since_over_the_skew_bound_is_refused(self):
+        clock = "2026-08-13T20:10:00Z"
+        self.assertEqual(self.liveness(clock, since="2026-08-13T20:11:00Z")["since"],
+                         "2026-08-13T20:11:00Z")
+        self.assert_refused(self.call(clock, since="2026-08-13T20:11:01Z"), self.SKEW.format(
+            s="2026-08-13T20:11:01Z", n=61, c=clock))
+
+    def test_the_boundary_refuses_a_mutated_reply(self):
+        live = self.liveness("2026-08-13T20:10:00Z")
+        stalled = self.liveness("2026-08-13T20:40:00Z", since="2026-08-13T20:10:00Z")
+        for name, value in (("stall_at_off_minute", {**live, "stall_at": "2026-08-13T20:40:30Z"}),
+                            ("wait_on_stalled", {**stalled, "wait_seconds": 60})):
+            with self.subTest(name=name):
+                checked = subprocess.run(
+                    [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+                     "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
+                    input=json.dumps(value), capture_output=True, text=True, check=False,
+                    env=self.cli_env)
+                self.assertEqual(checked.returncode, 2)
+
+
+class ControlWaitSecondsTest(LifecycleHarness, unittest.TestCase):
+    """#310 D9: control computes the wait observer's sleep."""
+
+    def wait_action(self, response):
+        waits = [a for a in response["actions"] if a["kind"] == "wait"]
+        self.assertEqual(len(waits), 1)
+        return waits[0]
+
+    def test_the_wait_names_the_seconds_until_its_deadline(self):
+        self.init_run()
+        worktree = str(self.root / "wt-14")
+        response = self.control_validated(
+            now=DEFAULT_NOW, issues=[14], max_parallel=100, attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={"path": worktree,
+                                                          "state": "absent"})])
+        self.assertEqual(self.wait_action(response), {
+            "id": "wait:2026-08-13T20:30:00Z", "kind": "wait",
+            "wake_on": ["deadline", "owner_notification", "tracker_change"],
+            "deadline_at": "2026-08-13T20:30:00Z", "wait_seconds": 1800})
+        later = self.control_validated(
+            now="2026-08-13T20:10:07Z", issues=[14], max_parallel=100,
+            attempt_budget_minutes=30, tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": os.path.abspath(worktree), "state": "matching_issue_branch"})])
+        self.assertEqual(self.wait_action(later)["wait_seconds"], 1193)
+
+    def test_the_boundary_refuses_any_other_wait_seconds(self):
+        self.init_run()
+        response = self.control_validated(
+            now=DEFAULT_NOW, issues=[14], max_parallel=100, attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={"path": str(self.root / "wt-14"),
+                                                          "state": "absent"})])
+        for value in (1799, 1801, -1, True, None):
+            with self.subTest(wait_seconds=value):
+                mutated = json.loads(json.dumps(response))
+                self.wait_action(mutated)["wait_seconds"] = value
+                checked = subprocess.run(
+                    [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+                     "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
+                    input=json.dumps(mutated), capture_output=True, text=True, check=False,
+                    env=self.cli_env)
+                self.assertEqual(checked.returncode, 2)
+
+
+class ObservationCatalogueTest(unittest.TestCase):
+    """Issue 473 D2, D3, D10: the observation vocabulary's one home and its catalogue."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = load_source_module(SCRIPT, "workflow_state_observation_catalogue")
+        cls.builder = load_source_module(BUILDER, "workflow_state_observation_builder")
+        cls.wire = load_source_module(WIRE, "workflow_state_observation_wire")
+
+    @staticmethod
+    def expects(kind):
+        return attempt_observations.describe(BARE_REQUIREMENTS[kind])["expects"]
+
+    def test_every_kind_carries_a_closed_constant_description(self):
+        self.assertEqual(set(BARE_REQUIREMENTS), attempt_observations.OBSERVE_KINDS)
+        self.assertEqual(attempt_observations.EXPECTS_MEMBERS,
+                         ("slot", "members", "example", "build"))
+        for kind, bare in BARE_REQUIREMENTS.items():
+            with self.subTest(kind=kind):
+                described = attempt_observations.describe(bare)
+                self.assertEqual({k: v for k, v in described.items() if k != "expects"},
+                                 bare)
+                expects = described["expects"]
+                self.assertEqual(set(expects), set(attempt_observations.EXPECTS_MEMBERS))
+                self.assertEqual(expects["slot"], OBSERVE_SLOTS[kind])
+                self.assertEqual(expects["build"], {
+                    "delivery_contract": attempt_observations.CONTRACT_BUILD,
+                    "verification": attempt_observations.VERIFICATION_BUILD}.get(kind))
+                self.assertTrue(expects["members"])
+                for name, meaning in expects["members"].items():
+                    self.assertTrue(name)
+                    self.assertIsInstance(meaning, str)
+                    self.assertTrue(meaning)
+                    self.assertTrue(meaning.isascii())
+                self.assertEqual(set(expects["example"]), set(expects["members"]))
+                expects["members"].clear()
+                expects["example"].clear()
+                self.assertTrue(self.expects(kind)["members"])
+                self.assertTrue(self.expects(kind)["example"])
+
+    def test_each_observed_example_is_a_request_the_helper_accepts(self):
+        for kind in sorted(attempt_observations.OBSERVE_KINDS - {"delivery_contract"}):
+            expects = self.expects(kind)
+            request = empty_direct_request()
+            # The verification slot is a list: the caller appends each observation to it.
+            request[expects["slot"]] = ([expects["example"]] if kind == "verification"
+                                        else expects["example"])
+            with self.subTest(kind=kind):
+                self.workflow.validate_direct_owner_request(request)
+            if "issue" in expects["example"]:
+                other = empty_direct_request(74)
+                other[expects["slot"]] = expects["example"]
+                with self.subTest(kind=kind, issue=74), \
+                        self.assertRaises(self.workflow.WorkflowError):
+                    self.workflow.validate_direct_owner_request(other)
+
+    def test_the_verification_description_reads_the_blocker_vocabulary(self):
+        """Issue 545 D10: one observation, its example valid, built by the adapter."""
+        expects = self.expects("verification")
+        self.assertEqual(set(expects["members"]),
+                         {"kind", "schema_version", "blocker_id", "repository", "facts"})
+        self.assertIs(verification_blocker.validate_observation(expects["example"]),
+                      expects["example"])
+        self.assertIn(str(verification_blocker.SCHEMA_VERSION),
+                      expects["members"]["schema_version"])
+        self.assertIn("null", expects["members"]["facts"])
+        self.assertEqual(expects["build"], "verification-observe observe --repo-root "
+                                           "<ledger_repo_root> --input -")
+
+    def test_the_contract_description_restates_the_builder_input(self):
+        expects = self.expects("delivery_contract")
+        self.assertEqual(set(expects["members"]), self.builder._CONTRACT_INPUT - {"now"})
+        for source_kind in self.builder._SOURCE_KINDS:
+            self.assertIn(source_kind, expects["members"]["source_kind"])
+        self.assertIn(expects["example"]["source_kind"], self.builder._SOURCE_KINDS)
+        self.assertEqual(expects["build"], "workflow-state build-delivery --repo-root "
+                                           "<ledger_repo_root> --kind contract --input -")
+
+    def test_meanings_list_each_closed_value_set(self):
+        listed = {
+            ("tracker", "state"): attempt_observations.TRACKER_STATES,
+            ("tracker", "decision_blockers"): attempt_observations.DECISION_BLOCKER_FIELDS,
+            ("forge_pr", "state"): attempt_observations.FORGE_STATES,
+            ("recorded_worktree", "recorded"): attempt_observations.RECORDED_WORKTREE_STATES,
+            ("candidate_worktree", "candidate"):
+                attempt_observations.CANDIDATE_WORKTREE_STATES,
+            ("verification", "kind"): {verification_blocker.OBSERVATION_KIND},
+            ("verification", "facts"): frozenset(verification_blocker.ENTRY_MODES),
+        }
+        for (kind, member), values in listed.items():
+            meaning = self.expects(kind)["members"][member]
+            for value in sorted(values):
+                with self.subTest(kind=kind, member=member, value=value):
+                    self.assertRegex(meaning, rf"\b{re.escape(value)}\b")
+
+    def test_the_helper_and_wire_module_check_the_shared_vocabulary(self):
+        for module, names in (
+                (self.workflow, ("TRACKER_OBSERVATION_FIELDS", "TRACKER_STATES",
+                                 "DECISION_BLOCKER_FIELDS", "FORGE_OBSERVATION_FIELDS",
+                                 "FORGE_STATES")),
+                (self.wire, ("WORKTREE_OBSERVATION_FIELDS", "WORKTREE_ENTRY_FIELDS",
+                             "RECORDED_WORKTREE_STATES", "CANDIDATE_WORKTREE_STATES"))):
+            for name in names:
+                with self.subTest(module=module.__name__, name=name):
+                    self.assertIs(getattr(module, name), getattr(attempt_observations, name))
+
+    def test_an_undescribed_requirement_is_refused(self):
+        scope_tuple = {"kind": "scope_tuple", "subject_id": "select",
+                       "reason_code": "scope_tuple_required", "detail_pointer": None}
+        for value in (scope_tuple, {"kind": "observation"}, {"path": "issue-73-"},
+                      {"kind": ["tracker"]}, "tracker", None,
+                      attempt_observations.describe({"kind": "tracker"})):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                attempt_observations.describe(value)
+
+
+class DirectObserveExpectsTest(LifecycleHarness, unittest.TestCase):
+    """Issue 473 AC1: every requirement kind a direct-owner observe reply returns carries
+    its `expects`, attached at the envelope and accepted at the workflow-response boundary."""
+
+    def scenarios(self):
+        """One request per kind that makes `direct-owner` ask for exactly that kind."""
+        def contract_missing():
+            request = self.direct_request(
+                issue=76, tracker=self.tracker_fact(76),
+                worktree=self.worktree_fact(76, candidate={
+                    "path": os.path.abspath(self.root / "worktree-issue-76"),
+                    "state": "absent"}))
+            request["delivery_contract"] = None
+            request["authorization_intents"] = []
+            return request
+
+        def resumed():
+            self.acquire_direct(issue=73)
+            return self.direct_request(issue=73, owner_unavailable=True)
+
+        def parked():
+            self.acquire_direct(issue=75)
+            failure = self.root / "failure-75.json"
+            failure.write_text(json.dumps({
+                "kind": "verification-failure", "schema_version": 1,
+                "repository": {"project_id": "fagenorn/nix-config",
+                               "integration_branch": "main"},
+                "command": {"id": "nix-build", "argv": ["just", "build"], "cwd": ".",
+                            "env": []},
+                "failure_class": "dependency",
+                "facts": [{"name": "flake-lock", "source": {"paths": ["flake.lock"]},
+                           "value": {"objects": [{"path": "flake.lock", "mode": "100644",
+                                                  "object": "a" * 40}]}}]}), "utf-8")
+            self.run_cli("suspend", "--repo-root", self.root, "--run-id",
+                         self.direct_run_id(75, 1), "--issue", 75, "--attempt", 1,
+                         "--blocked-on", "verification", "--verification-input", failure,
+                         "--now", "2026-08-20T10:05:00Z", "--action-id", "75:1:1")
+            return self.direct_request(issue=75, now="2026-08-20T10:06:00Z")
+
+        return {
+            "tracker": lambda: self.direct_request(issue=71),
+            "forge_pr": lambda: self.direct_request(
+                issue=72, tracker=self.tracker_fact(72), forge=None),
+            "candidate_worktree": lambda: self.direct_request(
+                issue=74, tracker=self.tracker_fact(74)),
+            "delivery_contract": contract_missing,
+            "recorded_worktree": resumed,
+            "verification": parked,
+        }
+
+    def test_every_observe_kind_is_described(self):
+        scenarios = self.scenarios()
+        self.assertEqual(set(scenarios), attempt_observations.OBSERVE_KINDS)
+        for kind, request in scenarios.items():
+            with self.subTest(kind=kind):
+                completed = self.direct_owner_at_root(self.root, request())
+                reply = self.validated_response(completed.stdout)
+                self.assertEqual(reply["kind"], "observe")
+                self.assertEqual([item["kind"] for item in reply["requirements"]], [kind])
+                [item] = reply["requirements"]
+                bare = {name: value for name, value in item.items() if name != "expects"}
+                self.assertEqual(item, attempt_observations.describe(bare))
+                expects = item["expects"]
+                self.assertEqual(set(expects), set(attempt_observations.EXPECTS_MEMBERS))
+                self.assertTrue(expects["members"])
+                self.assertEqual(set(expects["example"]), set(expects["members"]))
+
+    def test_an_undescribed_requirement_refuses_the_reply(self):
+        workflow = load_source_module(SCRIPT, "workflow_state_undescribed_observe")
+        scope_tuple = {"kind": "scope_tuple", "subject_id": "select",
+                       "reason_code": "scope_tuple_required", "detail_pointer": None}
+        with self.assertRaises(workflow.WorkflowError) as refused:
+            workflow.direct_observe(73, None, [scope_tuple])
+        self.assertIn("scope_tuple", str(refused.exception))
+
+
+class DirectOwnerHelpTest(LifecycleHarness, unittest.TestCase):
+    """Issue 473 AC2: `direct-owner --help` names where an observation's shape is described."""
+
+    def test_direct_owner_help_names_expects_and_its_members(self):
+        completed = self.run_cli("direct-owner", "--help")
+        self.assertEqual(completed.returncode, 0)
+        for name in ("expects", *attempt_observations.EXPECTS_MEMBERS):
+            with self.subTest(name=name):
+                self.assertRegex(completed.stdout, rf"\b{name}\b")
+
+
+class DirectTakeoverWorkerTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 R1: an `owner_unavailable` takeover never fences a live worker inside its bound."""
+
+    def setUp(self):
+        super().setUp()
+        self.worktree = self.root / "worktree-issue-73"
+        self.init_worktree(self.worktree, branch="issue-73")
+        owner = self.acquire_direct(worktree=self.worktree)
+        self.run_id = owner["run_id"]
+        self.assertEqual((owner["action_id"], owner["deadline_at"]),
+                         ("73:1:1", "2026-08-20T13:00:00Z"))
+        self.assertEqual(self.mark_progress(action_id="73:1:1", now="2026-08-20T10:01:00Z")[
+            "outcome"], "baseline")
+        self.register_worker(action_id="73:1:1", now="2026-08-20T10:02:00Z")
+        self.register_worker(action_id="73:1:1", now="2026-08-20T10:02:00Z",
+                             parent="73:1:1:w1")
+
+    def takeover(self, now, *, ok=True):
+        return self.direct_owner_raw(
+            now=now, owner_unavailable=True, ok=ok,
+            worktree=self.worktree_fact(73, recorded={
+                "path": os.path.abspath(self.worktree), "state": "matching_issue_branch"}))
+
+    def test_a_takeover_inside_the_deadline_names_every_live_worker(self):
+        before = self.tree_snapshot()
+        refused = self.takeover("2026-08-20T11:00:00Z", ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr), (
+            2, "", "workflow-state: owner_unavailable refused: live workers: "
+                   "73:1:1:w1, 73:1:1:w2\n"))
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_a_takeover_proceeds_once_every_worker_is_released(self):
+        self.release_worker(worker_id="73:1:1:w1", event="stopped",
+                            now="2026-08-20T10:30:00Z")
+        resumed = json.loads(self.takeover("2026-08-20T11:00:00Z").stdout)
+        self.assertEqual((resumed["kind"], resumed["action_id"], resumed["launch_kind"]),
+                         ("owner", "73:1:2", "resume"))
+
+    def test_a_takeover_past_the_deadline_takes_the_expiry_path(self):
+        resumed = json.loads(self.takeover("2026-08-20T13:00:00Z").stdout)
+        self.assertEqual((resumed["kind"], resumed["action_id"], resumed["launch_kind"]),
+                         ("owner", "73:1:2", "resume"))
+        self.assertEqual(self.check_worker("73:1:1:w1")["reason"], "superseded_launch")
+
+
+class TakeoverBlockersTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 D1: the takeover predicate over attempt and remainder launches."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.workflow_state = load_source_module(SCRIPT, "workflow_state_test_takeover")
+
+    @staticmethod
+    def worker(launch, ordinal=1, released_at=None):
+        return {"worker_id": f"{launch}:w{ordinal}", "launch": launch, "parent": None,
+                "registered_at": "2026-08-20T10:00:00Z", "released_at": released_at,
+                "release_event": None if released_at is None else "stopped"}
+
+    def attempt_state(self, workers):
+        """An active attempt (deadline 12:00, two launches) and no remainder."""
+        attempt = {"issue": 73, "attempt": 1, "state": "active",
+                   "deadline_at": "2026-08-20T12:00:00Z", "launches": [{}, {}]}
+        return {"issues": {"73": {
+            "attempts": [attempt], "delivery_remainders": [],
+            "outcome": None, "delivery": self.empty_delivery()}}, "workers": workers}
+
+    def remainder_state(self, workers):
+        """A handed-off source attempt (deadline 12:00) and an active remainder with an
+        installed delivery contract and its own deadline (13:00), as `suspended_remainder`
+        shapes it."""
+        fixtures = self.delivery_fixtures
+        _, delivery = fixtures.contract_and_delivery(self.delivery_model)
+        issue_state = fixtures.suspended_remainder(delivery)
+        remainder = issue_state["delivery_remainders"][0]
+        remainder.update(state="active", deadline_at="2026-08-20T13:00:00Z",
+                         launches=remainder["launches"] * 2)
+        issue_state["attempts"] = [{
+            "issue": 151, "attempt": 1, "state": "handed_off",
+            "deadline_at": "2026-08-20T12:00:00Z", "launches": [{}]}]
+        return {"issues": {"151": issue_state}, "workers": workers}
+
+    def blockers(self, state, now):
+        module = self.workflow_state
+        return module.takeover_blockers(module._delivery(), state,
+                                        module.parse_utc(now, "now"))
+
+    def test_only_live_workers_of_the_current_attempt_launch_inside_its_deadline_block(self):
+        state = self.attempt_state([
+            self.worker("73:1:1"), self.worker("73:1:2"),
+            self.worker("73:1:2", 2, "2026-08-20T10:30:00Z")])
+        self.assertEqual(self.blockers(state, "2026-08-20T11:00:00Z"), ["73:1:2:w1"])
+        self.assertEqual(self.blockers(state, "2026-08-20T12:00:00Z"), [])
+
+    def test_a_remainder_worker_blocks_until_the_remainders_own_deadline(self):
+        state = self.remainder_state([self.worker("151:r1:2")])
+        self.assertEqual(self.blockers(state, "2026-08-20T12:30:00Z"), ["151:r1:2:w1"])
+        self.assertEqual(self.blockers(state, "2026-08-20T13:00:00Z"), [])
+
+
+class HoldPointerWriteTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 D6: a locked write of an orchestrated run gives each issue it holds a pointer."""
+
+    def test_an_orchestrated_write_points_at_its_run_and_a_direct_one_does_not(self):
+        self.init_run()
+        self.spawn(issue=73, worktree=self.root / "wt-73")
+        self.suspend(issue=73, attempt=1, blocked_on="transport", now="2026-08-13T20:05:00Z")
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [self.run_id])
+        self.acquire_direct(issue=74)
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 74)), [])
+
+
+class OrchestratedHoldTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 R2: a direct acquisition of an issue an orchestrated run holds is refused
+    with the command that re-enters that run, and writes nothing."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.workflow_state = load_source_module(SCRIPT, "workflow_state_test_orchestrated_hold")
+
+    def setUp(self):
+        super().setUp()
+        self.init_run()
+        self.spawn(issue=73, worktree=self.root / "wt-73")
+
+    def expected(self, run_id=None):
+        root = self.root.resolve()
+        run_id = self.run_id if run_id is None else run_id
+        return (f"workflow-state: issue 73 is held by orchestrated run {run_id}; resume it "
+                f"through orchestrate-issues: orchestrate-control start --repo-root {root} 73 "
+                f"--run-id {run_id}\n")
+
+    def open_second_run_holding_73(self):
+        """The first run stops holding 73 and a second orchestrated run spawns it; returns both
+        run ids, the first one's `state.json` path included."""
+        first, first_state = self.run_id, self.state_path
+        self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
+        self.init_run(creation_key="second-orchestrated-run")
+        second = self.run_id
+        self.spawn(issue=73, worktree=self.root / "wt-73-second")
+        return first, second, first_state
+
+    def test_every_direct_request_for_a_held_issue_is_refused_naming_the_resume_command(self):
+        self.suspend(issue=73, attempt=1, blocked_on="human_gate",
+                     now="2026-08-13T20:05:00Z")
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [self.run_id])
+        before = self.tree_snapshot()
+        for flags in ({}, {"owner_unavailable": True}, {"new_run": True}):
+            with self.subTest(**flags):
+                refused = self.direct_owner_raw(issue=73, ok=False, **flags)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, "", self.expected()))
+                self.assertEqual(self.tree_snapshot(), before)
+        self.assertIsNone(TransactionStore(self.store_root).lookup(
+            attempt_identity.direct_key(73, 1)))
+
+    def test_an_issue_the_run_no_longer_holds_is_acquired_directly(self):
+        self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
+        self.assertEqual(self.direct_owner(issue=73), {
+            "interface_version": 1, "kind": "observe", "issue": 73,
+            "run_id": None, "requirements": [{"kind": "tracker"}]})
+
+    def test_an_invalid_holding_ledger_fails_loudly(self):
+        self.state_path.write_text("{}\n", encoding="utf-8")
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertEqual(refused.stderr, "workflow-state: workflow state refused: unknown_schema: "
+                                         "unsupported workflow state schema version: None\n")
+        self.assertIsNone(TransactionStore(self.store_root).lookup(
+            attempt_identity.direct_key(73, 1)))
+
+    def test_the_resume_command_survives_a_repository_path_with_spaces(self):
+        command = self.workflow_state.orchestrated_resume_command(
+            "/tmp/project with spaces; $(x)", "73", "rel_x")
+        self.assertEqual(shlex.split(command), [
+            "orchestrate-control", "start", "--repo-root", "/tmp/project with spaces; $(x)",
+            "73", "--run-id", "rel_x"])
+
+    def test_a_stale_first_pointer_does_not_hide_a_later_holder(self):
+        first, second, first_state = self.open_second_run_holding_73()
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [first, second])
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected(second)))
+        self.assertEqual(self.tree_snapshot(), before)
+        first_state.unlink()
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected(second)))
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_the_first_of_two_live_holders_is_named(self):
+        first = self.run_id
+        self.suspend(issue=73, attempt=1, blocked_on="human_gate",
+                     now="2026-08-13T20:05:00Z")
+        self.init_run(creation_key="second-orchestrated-run")
+        second = self.run_id
+        self.spawn(issue=73, worktree=self.root / "wt-73-second")
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [first, second])
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected(first)))
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_a_legacy_ledger_behind_a_pointer_is_read_upgraded(self):
+        """A migration cut between `settle_holds` and the publish leaves a pointer naming a
+        ledger still stored as schema 2, which has no `delivery_remainders`: the hold is read
+        from its upgraded state and refuses as usual."""
+        held = self.read_state()
+        first = self.run_id
+        self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
+        self.install_legacy(held, "orchestrate-73", 2)
+        workflow = load_source_module(SCRIPT, "workflow_state_test_cut_migration")
+        with mock.patch.object(workflow, "atomic_write_state", side_effect=OSError("cut")):
+            with self.assertRaises(OSError):
+                workflow.transact(str(self.root), self.run_id,
+                                  lambda current: (current, False), migration_contracts={})
+        stored = self.read_state()
+        self.assertEqual(stored["schema_version"], 2)
+        self.assertNotIn("delivery_remainders", stored["issues"]["73"])
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)),
+                         [first, "orchestrate-73"])
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected("orchestrate-73")))
+        self.assertEqual(self.tree_snapshot(), before)
+
+
+if DeliveredControlHarness is not None:
+    class DeliveredHoldTest(DeliveredControlHarness, unittest.TestCase):
+        """Issue 475 R2: a delivered issue is not held, even while the remainder that delivered
+        it is still recorded `active`."""
+
+        def test_a_delivered_issue_with_an_active_remainder_is_not_refused(self):
+            self.deliver_through_remainder()
+            _, remainders = self.records(DELIVERED)
+            self.assertEqual(remainders[-1]["state"], "active")
+            store = attempt_store.store_root(self.root / ".superpowers")
+            run_id = self.ledger.parent.name
+            self.assertEqual(list(attempt_store.hold_runs(store, DELIVERED)), [run_id])
+            module = load_source_module(SCRIPT, "workflow_state_test_delivered_hold")
+            self.assertIsNone(module.refuse_orchestrated_hold(self.root, DELIVERED))
 
 
 if __name__ == "__main__":

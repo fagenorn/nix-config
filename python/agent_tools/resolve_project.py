@@ -10,6 +10,10 @@ an implied value. Readiness observes the machine but never executes anything:
 the subcommand opens no file for writing, creates no directory, and starts no
 child process.
 
+The snapshot's `release` member is derived, not authored: its `targets` list
+the targets the authored `release` member binds, with the operations each one
+runs (`release_profile.release_targets`).
+
 `check-projections` judges each declared target against its source and
 refuses on drift; `resolve` runs the same check before it builds anything, so
 a hand-edited target is a structural refusal rather than a stale snapshot
@@ -42,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -49,7 +54,7 @@ import re
 import shutil
 import sys
 
-from agent_tools import agent_platform
+from agent_tools import agent_platform, release_adapter, release_profile
 
 
 CAPABILITY_NAMES = (
@@ -65,6 +70,11 @@ CAPABILITY_NAMES = (
     "release",
     "deploy",
 )
+# D1: `capabilities.release` is derived from the `release` member, never
+# authored, so an authored contract declares these ten and the snapshot all
+# eleven.
+AUTHORED_CAPABILITY_NAMES = tuple(
+    name for name in CAPABILITY_NAMES if name != "release")
 BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow", "deploy")
 CAPABILITY_STATES = ("available", "unsupported", "blocked")
 AUTHORED_SUPPORT = ("supported", "unsupported")
@@ -81,6 +91,8 @@ REASON_CODES = (
     "vcs_worktree_unsupported",
     "knowledge_path_missing",
     "command_missing",
+    "release_profile_inadmissible",
+    "release_adapter_unavailable",
 )
 PROJECTION_KINDS = ("generated_file", "managed_import")
 PROJECTION_STATUSES = ("in_sync", "missing", "stale")
@@ -113,6 +125,7 @@ TOP_LEVEL_MEMBERS = (
     "capabilities",
     "projections",
     "platform",
+    "release",
 )
 # R2.1: the interval's exact members. The closed schema-compatibility reason
 # codes are `agent_platform.SCHEMA_REASON_CODES` — one home for that set (D7),
@@ -127,6 +140,11 @@ VCS_MEMBERS = (
     "commit",
     "merge",
 )
+MERGE_MEMBERS = ("strategy", "delete_branch")
+# Issue 552 D1: the one `vcs.merge` member an author may leave out. `null` and
+# absent both mean the project declares no required checks, and the resolver
+# never inserts it.
+MERGE_OPTIONAL_MEMBERS = ("required_checks",)
 TRACKER_MEMBERS = ("kind", "cli", "repo_slug", "credential_env")
 PATHS_LIST_MEMBERS = (
     "context",
@@ -138,7 +156,17 @@ PATHS_LIST_MEMBERS = (
 )
 PATHS_MEMBERS = ("artifacts",) + PATHS_LIST_MEMBERS
 COMMAND_MEMBERS = ("argv", "cwd", "env")
-WORKFLOW_MEMBERS = ("verification", "orchestration", "review", "release")
+WORKFLOW_MEMBERS = ("verification", "orchestration", "review")
+# The workflow members an author may leave out: `light_lane` (#279) and
+# `verification_conditions` (issue 437). For each, `null` and absent both mean
+# none (no light lane; every declared verification id runs), and the resolver
+# never inserts either member itself.
+WORKFLOW_OPTIONAL_MEMBERS = ("light_lane", "verification_conditions")
+# #310: the one orchestration member an author may leave out; never defaulted.
+ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
+LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
+VERIFICATION_CONDITION_MEMBERS = ("when_changed", "skip_reason")
+LIGHT_LANE_MODES = ("shadow", "active")
 DEPLOY_MEMBERS = ("adapter", "command", "config")
 PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
 
@@ -147,6 +175,7 @@ PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
 # predicate the authored value must satisfy; failing one is `invalid_contract`,
 # never `blocked`. Only a declared `supported` capability is walked, so an
 # `unsupported` one imposes none of its rows on the bindings.
+# The deploy command row is skipped for a registered release adapter, which is itself the deploy reader (issue 465 D3).
 CAPABILITY_BINDING_REQUIREMENTS = {
     "tracker": (
         (("tracker", "kind"), lambda value: value != "none"),
@@ -162,7 +191,6 @@ CAPABILITY_BINDING_REQUIREMENTS = {
         (("workflow", "review", "plan"), lambda value: value is not None),),
     "review.code": (
         (("workflow", "review", "code"), lambda value: value is not None),),
-    "release": ((("workflow", "release"), lambda value: value is not None),),
     "deploy": (
         (("deploy", "adapter"), lambda value: value != "none"),
         (("deploy", "command"), lambda value: value is not None),
@@ -240,6 +268,30 @@ def is_safe_relative_path(value: object) -> bool:
     return ".." not in Path(value).parts
 
 
+CANONICAL_PATH_MESSAGE = ("must be spelled canonically: '/'-separated, with no "
+                          "backslash, no empty or '.' segment and no trailing '/'")
+
+
+def is_canonical_path(path: str) -> bool:
+    """The one spelling `lane-triage` matches: '/'-separated, with no backslash,
+    no empty or `.` segment and no trailing `/` (#279 D11).
+
+    `risk_paths` globs and triage record paths both meet it, because
+    `fnmatchcase` compares the strings unchanged.
+    """
+    return "\\" not in path and all(segment not in ("", ".") for segment in path.split("/"))
+
+
+def any_path_matches(paths: list[str], globs: list[str]) -> bool:
+    """True when some path matches some glob under `fnmatch.fnmatchcase`.
+
+    Both are compared as spelled, so `*` also crosses `/` (#279 D4, issue 437
+    D3). It is the one matcher for contract path globs; `lane-triage` calls it
+    for `risk_paths` and `verified-tree` for `when_changed`.
+    """
+    return any(fnmatch.fnmatchcase(path, glob) for path in paths for glob in globs)
+
+
 def check_string(value: object, pointer: str, section: str,
                  violations: list[dict]) -> bool:
     if isinstance(value, str) and value:
@@ -282,6 +334,17 @@ def check_safe_path(value: object, pointer: str, section: str,
     return False
 
 
+def check_contract_glob(value: object, pointer: str, violations: list[dict]) -> bool:
+    """A `workflow` path glob: a safe repository-relative path, spelled canonically (#279 D4)."""
+    if not check_safe_path(value, pointer, "workflow", violations):
+        return False
+    if is_canonical_path(value):
+        return True
+    violations.append(violation(
+        pointer, CANONICAL_PATH_MESSAGE, "contract.workflow.noncanonical_path"))
+    return False
+
+
 def check_object(value: object, pointer: str, section: str,
                  violations: list[dict]) -> bool:
     if isinstance(value, dict):
@@ -301,15 +364,20 @@ def check_list(value: object, pointer: str, section: str,
 
 
 def check_exact_members(value: dict, pointer: str, expected: tuple[str, ...],
-                        section: str, violations: list[dict]) -> None:
-    """Report every absent required member and every unexpected one."""
+                        section: str, violations: list[dict], *,
+                        optional: tuple[str, ...] = ()) -> None:
+    """Report every absent required member and every unexpected one.
+
+    A name in `optional` may be present or absent: it is never reported as
+    missing and never as unexpected.
+    """
     for name in expected:
         if name not in value:
             violations.append(violation(
                 f"{pointer}/{name}", "required member is absent",
                 f"contract.{section}.member_missing"))
     for name in sorted(value):
-        if name not in expected:
+        if name not in expected and name not in optional:
             violations.append(violation(
                 f"{pointer}/{name}", "member is not part of this schema",
                 f"contract.{section}.member_unexpected"))
@@ -578,8 +646,8 @@ def validate_vcs(vcs: dict, violations: list[dict]) -> None:
             vcs["merge"], "/bindings/vcs/merge", "vcs", violations):
         merge = vcs["merge"]
         check_exact_members(
-            merge, "/bindings/vcs/merge", ("strategy", "delete_branch"),
-            "vcs", violations)
+            merge, "/bindings/vcs/merge", MERGE_MEMBERS, "vcs", violations,
+            optional=MERGE_OPTIONAL_MEMBERS)
         if "strategy" in merge:
             check_string(
                 merge["strategy"], "/bindings/vcs/merge/strategy", "vcs", violations)
@@ -587,6 +655,29 @@ def validate_vcs(vcs: dict, violations: list[dict]) -> None:
             check_boolean(
                 merge["delete_branch"], "/bindings/vcs/merge/delete_branch",
                 "vcs", violations)
+        validate_required_checks(merge, violations)
+
+
+def validate_required_checks(merge: dict, violations: list[dict]) -> None:
+    """Issue 552 D1: the optional `bindings.vcs.merge.required_checks` member."""
+    pointer = "/bindings/vcs/merge/required_checks"
+    checks = merge.get("required_checks")
+    if checks is None or not check_list(checks, pointer, "vcs", violations):
+        return
+    if not checks:
+        violations.append(violation(
+            pointer, "must be a non-empty list",
+            "contract.vcs.empty_required_checks"))
+    seen: set[str] = set()
+    for index, check in enumerate(checks):
+        entry = f"{pointer}/{index}"
+        if not check_string(check, entry, "vcs", violations):
+            continue
+        if check in seen:
+            violations.append(violation(
+                entry, "required check is declared more than once",
+                "contract.vcs.duplicate_required_check"))
+        seen.add(check)
 
 
 def validate_tracker(tracker: dict, violations: list[dict]) -> None:
@@ -682,7 +773,8 @@ def check_command_id(value: object, pointer: str, commands: dict | None,
 def validate_workflow(workflow: dict, commands: dict | None,
                       violations: list[dict]) -> None:
     check_exact_members(
-        workflow, "/bindings/workflow", WORKFLOW_MEMBERS, "workflow", violations)
+        workflow, "/bindings/workflow", WORKFLOW_MEMBERS, "workflow", violations,
+        optional=WORKFLOW_OPTIONAL_MEMBERS)
     pointer = "/bindings/workflow/verification"
     if "verification" in workflow and check_list(
             workflow["verification"], pointer, "workflow", violations):
@@ -694,11 +786,15 @@ def validate_workflow(workflow: dict, commands: dict | None,
         orchestration = workflow["orchestration"]
         check_exact_members(
             orchestration, pointer, ("max_parallel", "attempt_budget_minutes"),
-            "workflow", violations)
+            "workflow", violations, optional=ORCHESTRATION_OPTIONAL_MEMBERS)
         for name in ("max_parallel", "attempt_budget_minutes"):
             if name in orchestration:
                 check_positive_int(
                     orchestration[name], f"{pointer}/{name}", "workflow", violations)
+        if orchestration.get("stall_minutes") is not None:
+            check_positive_int(
+                orchestration["stall_minutes"], f"{pointer}/stall_minutes",
+                "workflow", violations)
     pointer = "/bindings/workflow/review"
     if "review" in workflow and check_object(
             workflow["review"], pointer, "workflow", violations):
@@ -708,23 +804,118 @@ def validate_workflow(workflow: dict, commands: dict | None,
             if name in review and review[name] is not None:
                 check_command_id(
                     review[name], f"{pointer}/{name}", commands, violations)
-    if "release" in workflow and workflow["release"] is not None:
-        check_command_id(
-            workflow["release"], "/bindings/workflow/release", commands, violations)
+    pointer = "/bindings/workflow/light_lane"
+    if "light_lane" in workflow and workflow["light_lane"] is not None and check_object(
+            workflow["light_lane"], pointer, "workflow", violations):
+        light_lane = workflow["light_lane"]
+        check_exact_members(
+            light_lane, pointer, LIGHT_LANE_MEMBERS, "workflow", violations)
+        if "mode" in light_lane and (
+                not isinstance(light_lane["mode"], str)
+                or light_lane["mode"] not in LIGHT_LANE_MODES):
+            violations.append(violation(
+                f"{pointer}/mode", "must be one of shadow, active",
+                "contract.workflow.light_lane_mode"))
+        if "budget_minutes" in light_lane:
+            check_positive_int(
+                light_lane["budget_minutes"], f"{pointer}/budget_minutes",
+                "workflow", violations)
+        if "risk_paths" in light_lane and check_list(
+                light_lane["risk_paths"], f"{pointer}/risk_paths", "workflow",
+                violations):
+            for index, entry in enumerate(light_lane["risk_paths"]):
+                check_contract_glob(entry, f"{pointer}/risk_paths/{index}", violations)
+    validate_verification_conditions(workflow, violations)
 
 
-def validate_deploy(deploy: dict, commands: dict | None,
+def validate_verification_conditions(workflow: dict, violations: list[dict]) -> None:
+    """Issue 437 D2: the optional `bindings.workflow.verification_conditions` member."""
+    pointer = "/bindings/workflow/verification_conditions"
+    conditions = workflow.get("verification_conditions")
+    if conditions is None or not check_object(conditions, pointer, "workflow", violations):
+        return
+    declared = workflow.get("verification")
+    declared = declared if isinstance(declared, list) else None
+    for verification_id, condition in conditions.items():
+        entry = f"{pointer}/{verification_id}"
+        if declared is not None and verification_id not in declared:
+            violations.append(violation(
+                entry, "names no id of bindings.workflow.verification",
+                "contract.workflow.unknown_verification_id"))
+        if not check_object(condition, entry, "workflow", violations):
+            continue
+        check_exact_members(
+            condition, entry, VERIFICATION_CONDITION_MEMBERS, "workflow", violations)
+        if "when_changed" in condition and check_list(
+                condition["when_changed"], f"{entry}/when_changed", "workflow",
+                violations):
+            if not condition["when_changed"]:
+                violations.append(violation(
+                    f"{entry}/when_changed", "must be a non-empty list",
+                    "contract.workflow.empty_path_list"))
+            for index, glob in enumerate(condition["when_changed"]):
+                check_contract_glob(glob, f"{entry}/when_changed/{index}", violations)
+        if "skip_reason" in condition:
+            check_string(condition["skip_reason"], f"{entry}/skip_reason", "workflow",
+                         violations)
+    if declared and all(isinstance(verification_id, str) and verification_id in conditions
+                        for verification_id in declared):
+        violations.append(violation(
+            pointer, "must leave at least one bindings.workflow.verification id "
+                     "unconditional", "contract.workflow.no_unconditional_verification"))
+
+
+def registered_deploy_adapter(deploy: object) -> str | None:
+    """The deploy binding's adapter when it is a `release_adapter.REGISTRY` key, else None."""
+    adapter = deploy.get("adapter") if isinstance(deploy, dict) else None
+    return adapter if isinstance(adapter, str) and adapter in release_adapter.REGISTRY else None
+
+
+def validate_deploy(deploy: dict, commands: dict | None, tracker: dict | None,
                     violations: list[dict]) -> None:
+    """Every shape violation of `bindings.deploy`, whatever the authored support.
+
+    A registered release adapter adds four rules (issue 465 D3, D15): `command` must be null,
+    the descriptor must have one watch operation, `config` must pass that operation's closed
+    schema, and the tracker must be GitHub. Any other adapter keeps a free-form `config` and
+    a `command` id checked against `commands`.
+    """
     check_exact_members(
         deploy, "/bindings/deploy", DEPLOY_MEMBERS, "deploy", violations)
     if "adapter" in deploy:
         check_string(deploy["adapter"], "/bindings/deploy/adapter", "deploy",
                      violations)
+    registered = registered_deploy_adapter(deploy)
     if "command" in deploy and deploy["command"] is not None:
-        check_command_id(
-            deploy["command"], "/bindings/deploy/command", commands, violations)
-    if "config" in deploy:
-        check_object(deploy["config"], "/bindings/deploy/config", "deploy", violations)
+        if registered is not None:
+            violations.append(violation(
+                "/bindings/deploy/command",
+                f"must be null: the registered adapter '{registered}' is the deploy reader",
+                "contract.deploy.command_conflict"))
+        else:
+            check_command_id(
+                deploy["command"], "/bindings/deploy/command", commands, violations)
+    config_ok = "config" in deploy and check_object(
+        deploy["config"], "/bindings/deploy/config", "deploy", violations)
+    if registered is None:
+        return
+    descriptor = release_adapter.DESCRIPTORS[registered]
+    operation = release_adapter.watch_operation(descriptor)
+    if operation is None:
+        violations.append(violation(
+            "/bindings/deploy/adapter",
+            f"adapter '{registered}' has no single operation a deploy watch can inspect",
+            "contract.deploy.adapter_unwatchable"))
+    elif config_ok:
+        schema = descriptor["operations"][operation]["config_schema"]
+        for problem in release_adapter.config_problems(schema, deploy["config"]):
+            violations.append(violation(
+                "/bindings/deploy/config", problem, "contract.deploy.config_invalid"))
+    if isinstance(tracker, dict) and "kind" in tracker and tracker["kind"] != "github":
+        violations.append(violation(
+            "/bindings/deploy/adapter",
+            f"adapter '{registered}' watches a GitHub repository, and the tracker is not GitHub",
+            "contract.deploy.tracker_not_github"))
 
 
 def validate_bindings(source: dict, violations: list[dict]) -> None:
@@ -753,7 +944,7 @@ def validate_bindings(source: dict, violations: list[dict]) -> None:
     if "workflow" in present:
         validate_workflow(present["workflow"], commands, violations)
     if "deploy" in present:
-        validate_deploy(present["deploy"], commands, violations)
+        validate_deploy(present["deploy"], commands, present.get("tracker"), violations)
 
 
 def validate_capabilities(source: dict, violations: list[dict]) -> None:
@@ -761,8 +952,9 @@ def validate_capabilities(source: dict, violations: list[dict]) -> None:
     if not check_object(capabilities, "/capabilities", "capabilities", violations):
         return
     check_exact_members(
-        capabilities, "/capabilities", CAPABILITY_NAMES, "capabilities", violations)
-    for name in CAPABILITY_NAMES:
+        capabilities, "/capabilities", AUTHORED_CAPABILITY_NAMES, "capabilities",
+        violations)
+    for name in AUTHORED_CAPABILITY_NAMES:
         if name not in capabilities:
             continue
         pointer = f"/capabilities/{name}"
@@ -800,12 +992,15 @@ def validate_capability_bindings(source: dict) -> list[dict]:
     bindings = source.get("bindings")
     if not isinstance(capabilities, dict) or not isinstance(bindings, dict):
         return violations
-    for name in CAPABILITY_NAMES:
+    for name in AUTHORED_CAPABILITY_NAMES:
         declaration = capabilities.get(name)
         if (not isinstance(declaration, dict)
                 or declaration.get("support") != "supported"):
             continue
         for path, is_complete in CAPABILITY_BINDING_REQUIREMENTS[name]:
+            if path == ("deploy", "command") and registered_deploy_adapter(
+                    bindings.get("deploy")) is not None:
+                continue
             found, value = find_binding(bindings, path)
             if found and not is_complete(value):
                 violations.append(violation(
@@ -875,6 +1070,30 @@ def validate_projection_entries(source: dict, violations: list[dict]) -> None:
                 "contract.projections.target_is_source"))
 
 
+def projection_paths(source: object) -> list[str]:
+    """The paths beyond the contract file that resolving `source` reads.
+
+    `validate_projections` reads each projection entry's `source` and `target`,
+    so this lists, in declaration order (an entry's `source` before its
+    `target`), every such member that `is_safe_relative_path` accepts, each path
+    once. It never raises: a `source` that is not an object, a `projections`
+    that is not a list, an entry that is not an object, and a member that is
+    absent or not a safe relative path each contribute nothing, because the
+    resolver itself refuses those shapes.
+    """
+    if not isinstance(source, dict) or not isinstance(source.get("projections"), list):
+        return []
+    paths: list[str] = []
+    for entry in source["projections"]:
+        if not isinstance(entry, dict):
+            continue
+        for name in ("source", "target"):
+            path = entry.get(name)
+            if is_safe_relative_path(path) and path not in paths:
+                paths.append(path)
+    return paths
+
+
 def validate_contract(source: dict, manifest: dict) -> list[dict]:
     """Every shape violation of the authored source, collected in one pass.
 
@@ -911,6 +1130,11 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
         validate_projection_entries(source, violations)
     if "platform" in source:
         validate_platform(source, violations)
+    if "release" in source:
+        # D2: the grammar's violations join the one ordered list; what the
+        # admissibility rules refuse is a capability state, never a violation.
+        violations.extend(
+            release_profile.grammar_violations(source["release"], source))
     violations.extend(validate_capability_bindings(source))
     return violations
 
@@ -962,7 +1186,9 @@ def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | Non
     """The first failing prerequisite's reason code, or None when all pass.
 
     Only the declared `supported` capabilities reach here, and D6 has already
-    refused an incomplete binding, so every member read below is present.
+    refused an incomplete binding, so every member read below is present. A deploy binding
+    that names a registered release adapter is ready when every executable its descriptor
+    declares resolves on `PATH`, else `release_adapter_unavailable` (issue 465 D3).
     """
     if name == "tracker":
         # The tracker CLI is not a `commands` entry, so its base is the root.
@@ -990,19 +1216,71 @@ def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | Non
         ids = [bindings["workflow"]["review"]["plan"]]
     elif name == "review.code":
         ids = [bindings["workflow"]["review"]["code"]]
-    elif name == "release":
-        ids = [bindings["workflow"]["release"]]
     elif name == "deploy":
+        adapter = registered_deploy_adapter(bindings["deploy"])
+        if adapter is not None:
+            executables = release_adapter.DESCRIPTORS[adapter]["executables"]
+            return None if all(resolves_on_path(executable, root)
+                               for executable in executables) else "release_adapter_unavailable"
         ids = [bindings["deploy"]["command"]]
     else:
         raise ValueError(f"unknown capability name: {name!r}")
     return None if commands_resolve(bindings, ids) else "command_missing"
 
 
-def compute_capabilities(bindings: dict, root: Path, declarations: dict) -> dict:
-    """Contract: eleven entries, each {"state", "reason_code", "repair_id"}."""
+def release_capability(release: object, source: dict, root: Path) -> dict:
+    """The derived `capabilities.release` entry (D1, D23).
+
+    `release` is the authored member and the grammar has already accepted it,
+    which `admissibility_findings` assumes. It is `unsupported` when authored
+    as `"unsupported"` or when no profile has a publication node, before any
+    admissibility or executable check. Otherwise profiles are read in sorted id
+    order: the first with an admissibility finding blocks as
+    `release_profile_inadmissible`; failing that, the first executable some
+    bound adapter's descriptor names that does not resolve blocks as
+    `release_adapter_unavailable`; otherwise the capability is available.
+    """
+    if release == "unsupported":
+        return {"state": "unsupported", "reason_code": None, "repair_id": None}
+    profiles = release["profiles"]
+    if not any(release_profile.phase_nodes(profile, "publication")
+               for profile in profiles.values()):
+        return {"state": "unsupported", "reason_code": None, "repair_id": None}
+    reason_code = None
+    for profile_id in sorted(profiles):
+        if release_profile.admissibility_findings(
+                profile_id, profiles[profile_id], source):
+            reason_code = "release_profile_inadmissible"
+            break
+    else:
+        for profile_id in sorted(profiles):
+            adapters = profiles[profile_id]["bindings"]["adapters"]
+            for alias in sorted(adapters):
+                descriptor = release_adapter.DESCRIPTORS[adapters[alias]["adapter"]]
+                if not all(resolves_on_path(name, root)
+                           for name in descriptor["executables"]):
+                    reason_code = "release_adapter_unavailable"
+                    break
+            if reason_code is not None:
+                break
+    if reason_code is None:
+        return {"state": "available", "reason_code": None, "repair_id": None}
+    return {"state": "blocked", "reason_code": reason_code,
+            "repair_id": f"capability.release.{reason_code}"}
+
+
+def compute_capabilities(bindings: dict, root: Path, declarations: dict,
+                         release: object, source: dict) -> dict:
+    """Contract: eleven entries, each {"state", "reason_code", "repair_id"}.
+
+    Ten are read from the authored `declarations`; `release` is derived from
+    the `release` member by `release_capability` (D1).
+    """
     resolved = {}
     for name in CAPABILITY_NAMES:
+        if name == "release":
+            resolved[name] = release_capability(release, source, root)
+            continue
         support = declarations[name]["support"]
         if support == "unsupported":
             resolved[name] = {
@@ -1041,7 +1319,8 @@ def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
         },
         "bindings": bindings,
         "capabilities": compute_capabilities(
-            bindings, root, source["capabilities"]),
+            bindings, root, source["capabilities"], source["release"], source),
+        "release": {"targets": release_profile.release_targets(source["release"])},
     }
 
 
@@ -1359,11 +1638,35 @@ def require_registry() -> list[dict]:
 # --------------------------------------------------------------------------
 
 
-def command_resolve(args: argparse.Namespace) -> int:
+RESOLVER_FAILURE_VIOLATIONS = [
+    {"pointer": "", "message": "the resolver failed unexpectedly"}]
+
+
+def resolve(repo_root: str | None, required: list[str] | None = None) -> dict:
+    """The `ResolvedProject` snapshot for `repo_root`, or `ContractError`.
+
+    Exactly the composition `resolve-project resolve` prints (#279 D1);
+    `conformance_checks` keeps its own, collecting composition. Any other
+    exception (a non-finite number, or an integer past Python's digit limit,
+    which `load_contract` does not translate) raises the same fixed
+    `resolver_failure` the command's outer handler prints, so no caller
+    evaluates, or crashes on, a project the command refuses.
+    """
+    try:
+        return compose_snapshot(repo_root, required)
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("resolver_failure", "resolver.internal",
+                            RESOLVER_FAILURE_VIOLATIONS) from None
+
+
+def compose_snapshot(repo_root: str | None, required: list[str] | None) -> dict:
+    """`resolve()`'s composition; a non-standard-JSON snapshot raises `ValueError`."""
     # Before root discovery, so a broken platform installation can never be
     # masked by `not_onboarded` or a contract error (R1.3).
     manifest, _ = require_platform_manifest()
-    root = discover_root(args.repo_root)
+    root = discover_root(repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source, manifest))
     # The range check is the inner half of the manifest gate, and it runs only
@@ -1374,8 +1677,13 @@ def command_resolve(args: argparse.Namespace) -> int:
     # before a single snapshot member exists (D10).
     validate_projections(root, source)
     snapshot = build_snapshot(root, source, manifest)
-    raise_for_unavailable(args.require, snapshot["capabilities"])
-    return emit_json(snapshot)
+    raise_for_unavailable(required, snapshot["capabilities"])
+    json.dumps(snapshot, allow_nan=False)
+    return snapshot
+
+
+def command_resolve(args: argparse.Namespace) -> int:
+    return emit_json(resolve(args.repo_root, args.require))
 
 
 def command_write_projections(args: argparse.Namespace) -> int:

@@ -1,0 +1,7 @@
+# Acceptance record — issue #465
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | The resolver accepts a JarBird-shaped project (release profile `forge-main` plus this adapter) and reports deploy watching as available. | code | `home/common/agent-skills/tests/test_resolve_project.py::DeployWatchTest::test_a_jarbird_shaped_project_watches_its_deploy` (`just agent-workflow-tests`) | in final verification | — | — | met |
+| AC2 | `ship-release` Phase 5 polls this adapter to the §5c invariant (run success at `MERGE_SHA` plus health commit match), with no prose-only fallback. | code | `home/common/agent-skills/tests/test_ship_release_contracts.py::ShipReleaseContractsTest::test_phase_five_polls_the_registered_adapter_command` and `tests/test_release_command.py::DeployInspectTest::test_satisfied_needs_a_successful_run_and_a_matching_health_commit` (`just agent-workflow-tests`) | in final verification | — | — | met |
+| AC3 | Tests cover the config schema, the success / intermediate / silent-rollback classification, and resolver acceptance. | code | `tests/test_actions_health_adapter.py::AdapterContractTest`, `::ClassificationTest`, `home/common/agent-skills/tests/test_resolve_project.py::DeployWatchTest` and `tests/test_release_grammar.py::DeployWatchGrammarTest` (`just agent-workflow-tests`) | in final verification | — | — | met |

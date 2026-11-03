@@ -71,6 +71,20 @@ def _text(value: object, name: str) -> str:
     return value
 
 
+def _hold_acceptance(value: object, name: str) -> str:
+    if not isinstance(value, str) or value not in {"unmet", "human_pending"}:
+        _refuse(f"builder input keys: {name} must be unmet or human_pending for a hold")
+    return value
+
+
+def _record_path(value: object, name: str) -> str:
+    _text(value, name)
+    if value.startswith("/") or "\\" in value or ".." in value.split("/"):
+        _refuse(f"builder input keys: {name} must be a relative POSIX path "
+                "with no '..' segment")
+    return value
+
+
 def _optional_text(value: object, name: str) -> str | None:
     return None if value is None else _text(value, name)
 
@@ -154,6 +168,16 @@ _OBSERVATIONS: dict[str, tuple[dict[str, Any], Any]] = {
                            "issue": context["issue"], "state": "closed",
                            "close_reason": facts["close_reason"],
                            "observation_identity": facts["observation_identity"]}),
+    "tracker_held": ({"comment_url": _text, "record_path": _record_path,
+                      "acceptance_state": _hold_acceptance, "observation_identity": _text},
+                     lambda context, facts: {
+                         "tracker_repository_id": context["repository_id"],
+                         "issue": context["issue"], "state": "open",
+                         "label": "needs-verification",
+                         "comment_url": facts["comment_url"],
+                         "record_path": facts["record_path"],
+                         "acceptance_state": facts["acceptance_state"],
+                         "observation_identity": facts["observation_identity"]}),
     "remote_branch_absent": ({}, _absent_branch),
     "local_branch_absent": ({}, _absent_branch),
     "worktree_absent": ({}, lambda context, facts: {
@@ -236,7 +260,7 @@ class DeliveryBuilder:
         self._model = model
         self._notes_max = notes_max_characters
         self._actions = model.STAGE_ACTIONS
-        observable = {item[2] for item in self._actions.values()} | set(_OBLIGATIONS)
+        observable = set(model.OBSERVATION_KINDS)
         if not set(_OBSERVATIONS) <= observable:
             raise ValueError("builder observation kinds exceed the model's")
         self._observations = {kind: _OBSERVATIONS[kind] for kind in sorted(observable)

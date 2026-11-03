@@ -1,23 +1,19 @@
 # Operation: `diff-review`
 
-Read this when running `diff-review` — the correctness axis of the two-axis diff
-review. It consumes SKILL.md's retained `ResolvedProject` and validated direct-command
-result; it does not resolve, read policy, infer a path, or supply a default. This
-operation uses `bindings.workflow.review.code` and validates the `Critical`,
-`Important`, and `Minor` headings. The sdd skill owns the parallel native
-conformance axis. The axis is never skipped. This operation adds the size
-pre-flight below after the operation selection.
+The correctness axis of the two-axis diff review. Uses SKILL.md's retained `ResolvedProject` and validated direct-command result, `bindings.workflow.review.code`, and the `Critical`, `Important` and `Minor` headings; it never resolves, reads policy, infers a path or supplies a default. The sdd skill owns the parallel native conformance axis, which is never skipped.
+
+## Contents
+
+- Size pre-flight
+- Packet, and its over-budget form
+- Reviewer output contract
+- Disposition
 
 ## Size pre-flight
 
-The retained `capabilities.review.code` selection runs first; this size pre-flight
-runs after it, never before. An unsupported capability never dispatches Codex,
-because the calling controller runs its own native correctness route, so
-measuring first would be wasted work.
+Runs after the `capabilities.review.code` routing, never before: an unsupported capability dispatches no Codex call, so measuring first is wasted.
 
-Measure the range in product terms before building the packet. Run it from the
-worktree root (the helper is `~/.agents/bin/diff-scope`; use the full path if the
-bare name does not resolve on PATH):
+From the worktree root, measure the range (`~/.agents/bin/diff-scope` when the bare name does not resolve):
 
 ```
 diff-scope <base-sha>..<head-sha> \
@@ -26,85 +22,40 @@ diff-scope <base-sha>..<head-sha> \
   --format json
 ```
 
-The specification and plan directories are paths passed from the caller's retained snapshot,
-without fallback locations.
+The spec and plan directories come from the caller's retained snapshot, with no fallback locations. Read exactly three fields:
 
-Read exactly three fields from the JSON:
+- `product.changed_files`: the budget comparison, and `M` in every disclosure.
+- `files[].path`: the subset, the first 20 entries in emitted order, taken verbatim with no filtering or re-ranking.
+- `files[].changed_lines`: the churn printed beside each path in item 7.
 
-- `product.changed_files` — the budget comparison, and `M` in every disclosure.
-- `files[].path` — the subset, taken as the first 20 entries in the emitted order.
-- `files[].changed_lines` — the per-file churn printed beside each path in item 7.
+Never wire `product.changed_lines` or `excluded` into this decision; they belong to the degradation gate.
 
-`product.changed_lines` and `excluded` are deliberately not read here: they are the
-degradation gate's thresholds, not this pre-flight's, and must not be wired into the
-scoping decision.
+The budget is 20 product files, compared strictly: `changed_files > 20` scopes the packet, `changed_files == 20` does not, and zero dispatches whole.
 
-The budget is 20 product files and the comparison is strict — `changed_files > 20`
-scopes the packet, `changed_files == 20` does not. A range measuring zero product
-files is under budget and dispatches whole.
+**No measurement**: an absent helper, a non-zero exit, unparseable output, or a selected path containing a newline (it has no unambiguous one-per-line form in item 7) yields no measurement, never a failure. Dispatch as an under-budget range, six items and today's verdict format, and report `unmeasured`. Never drop such a path from the subset instead.
 
-Take the subset from `files[]` verbatim: no filtering, no re-ranking. The helper
-already ranks churn descending with a raw-path-bytes tie-break, a total order, so the
-same range always yields the same 20 paths. Binary rows carry a churn of zero and
-sort after every text row, so one enters the subset only once every text product file
-is already in it.
+Scoping is not a Codex failure and adds no failure class: it never spends the one native fallback or triggers a retry, and when Codex fails on a scoped dispatch the fallback gets the same packet, item 7 and coverage sentence intact.
 
-**No measurement.** A helper that is absent, exits non-zero, emits output this
-operation cannot parse, or selects a path this operation cannot represent in item 7's
-listing (see *When the range is over budget*) yields no measurement — never a failure.
-Dispatch exactly as an under-budget range does, six items and today's verdict format,
-and report `unmeasured` to the calling controller. `diff-scope` reaches `~/.agents/bin` only
-after a rebuild, so absence is a real state on a machine that has this skill.
-
-An oversized diff is not a Codex failure and scoping adds no fourth failure class —
-SKILL.md's closed list of three stands unchanged. Scoping never spends the one-time
-native fallback and never triggers a retry. When Codex does fail on a scoped
-dispatch, that one-time native fallback receives the same packet, item 7 and coverage
-sentence intact.
-
-The value this operation hands the calling controller is the **scope**, exactly one
-of: `full` | `scoped: <N> of <M> product files` | `unmeasured`.
+The **scope** handed to the controller is exactly one of `full` | `scoped: <N> of <M> product files` | `unmeasured`.
 
 ## Packet
 
-**The `diff-review` packet replaces PLAN-REVIEW.md's packet wholesale** — it is
-not that packet plus tweaks. It contains exactly:
+This operation's packet is its own, built from scratch. It contains exactly:
 
-1. The operation name, invocation directory, worktree root, current branch, and
-   the base and head SHAs of the diff under review.
-2. Scope line: review the diff `<base-sha>..<head-sha>` in the worktree for code
-   correctness — bugs, boundary error handling, dead branches, assertions that
-   fail to pin the documented contract, DRY against existing helpers, cross-task
-   integration. Conformance to issue/spec/docs is the parallel axis's job;
-   instruct the reviewer not to grade it.
-3. The caller's correctness rubric by absolute path (sdd's
-   `correctness-reviewer-prompt.md`), with concrete values supplied for every
-   placeholder it names, including the review-package manifest and metrics.
-4. The manifest root path and all four metrics (`root_bytes`, `total_bytes`,
-   `file_count`, `largest_member_bytes`) from the caller's validated
-   producer report, plus the plan path (routing context for what the tasks
-   were). No shard list or diff contents ride in the packet.
-5. Inferred verify commands, labelled in the packet as context describing how
-   this change is verified elsewhere — explicitly not a request to execute
-   anything, because the runtime is read-only and cannot run them — plus every
-   applicable `AGENTS.md`/`CLAUDE.md`.
-6. The standards layers matching the diff's file types
-   (`~/.agents/standards/the-bar.md`, its `stacks/` shards, project
-   `docs/standards/` shards whose globs intersect).
+1. The operation name, invocation directory, worktree root, current branch, and the base and head SHAs.
+2. The scope line: review the diff `<base-sha>..<head-sha>` in the worktree for code correctness (bugs, boundary error handling, dead branches, assertions that fail to pin the documented contract, DRY against existing helpers, cross-task integration), and do not grade conformance to the issue, spec or docs, which is the parallel axis's job.
+3. The caller's correctness rubric by absolute path (sdd's `correctness-reviewer-prompt.md`), with concrete values for every placeholder it names, the review-package manifest and metrics included.
+4. The manifest root path and its four metrics (`root_bytes`, `total_bytes`, `file_count`, `largest_member_bytes`) from the caller's validated producer report, plus the plan path as routing context. No shard list or diff contents.
+5. Inferred verify commands, labelled as context on how the change is verified elsewhere, not a request to run anything (the runtime is read-only), plus every applicable `AGENTS.md`/`CLAUDE.md`.
+6. The standards layers matching the diff's file types (`~/.agents/standards/the-bar.md`, its `stacks/` shards, the project's intersecting `docs/standards/` shards).
 
-Nothing else rides along: no issue investigation, no spec, no domain docs, no
-no separate review-focus setting and no `REVIEW-CONTRACT.md`. The light packet is what keeps
-Codex inside its runtime budget; domain conformance belongs to the other axis.
+Nothing else rides along: no investigation, spec, domain docs, review-focus setting or `REVIEW-CONTRACT.md`. The light packet keeps Codex inside its runtime budget. It is a paths packet and never embeds per-file diffs.
 
-### When the range is over budget
+### Over budget
 
-Under budget — or unmeasured — the packet is exactly the six items above. Over budget
-it differs in exactly three places and nowhere else.
+An under-budget or unmeasured packet is exactly the six items above. A scoped one differs in exactly three places:
 
-**Item 2 changes subject and gains a coverage sentence.** It becomes: review the
-listed product files in the worktree, as changed across `<base-sha>..<head-sha>`, for
-the same correctness subject matter, with the same instruction not to grade
-conformance. Then, in substance:
+**Item 2** reviews the listed product files as changed across `<base-sha>..<head-sha>`, for the same subject and with the same conformance exclusion, and adds in substance:
 
 > This is a scoped review: `<N>` of `<M>` changed product files, selected as the
 > highest-churn files. Files outside the list are not under review in this pass — do
@@ -113,85 +64,25 @@ conformance. Then, in substance:
 > cited as evidence for such a finding; a defect lying wholly within an unlisted file
 > is outside this pass and is not reported.
 
-Scoping bounds what is supplied and what is graded, not what may be consulted. The
-rubric's carve-out for inspecting code outside the diff to evaluate a concrete named
-risk stands untouched — one focused check per named risk — so a cross-file finding
-that reaches into an unlisted file is legal and reportable, as long as it is anchored
-in a listed file. Silently grading an unlisted file, reporting a defect that lies
-wholly inside one, or implying it was covered, is not.
+The rubric's carve-out for inspecting code outside the diff to evaluate a concrete named risk stands, one focused check per named risk.
 
-**Item 4 changes the manifest's use, not its presence.** The scoped correctness
-packet still carries the manifest root path and all four metrics as truthful
-range-coverage evidence, but directs the reviewer: **do not read its shards**.
-The full-range shards would defeat the 20-file evidence bound. Item 3 receives
-all manifest/metric placeholders as usual and routes on the packet's explicit
-scoped statement. Do not regenerate a smaller package: the conformance axis and
-every unscoped reviewer validate that same manifest and read all shards once in
-manifest order, explicitly reporting an unreadable or mismatched shard.
+**Item 4** keeps the manifest root and metrics as truthful range-coverage evidence but tells the reviewer **not to read its shards**, which would defeat the 20-file bound. Item 3 still gets every manifest placeholder and routes on the packet's scoped statement. Never regenerate a smaller package: the conformance axis and unscoped reviewers read that same manifest.
 
-**Item 7 exists only when scoped**, and it is the reviewer's collection instruction,
-not only a disclosure: the selected paths, worktree-root-relative, one per line, in
-the helper's emitted order, each with its `files[].changed_lines` count. Direct the
-reviewer to collect the diff for exactly those paths, one bounded read per listed
-path (`git diff <base>..<head> -- ':(literal)<path>'`), and to treat that set as the
-whole of the range under review. This is one invocation per selected path. An
-unscoped packet has no item 7.
-
-Spell that invocation protocol out in item 7 rather than leaving it to the reviewer:
-**one invocation per path**, the path passed as a **single literal argument after
-`--`**, never shell-joined with the other listed paths into one command line, and
-pathspec magic disabled by the `:(literal)` prefix. `diff-scope` emits whatever bytes
-Git records, so a selected path may carry a space, a newline, a non-UTF-8 byte, or a
-leading `:`; treated as anything but one literal argument it splits or is
-reinterpreted, and the reviewer silently reads a diff that is not the one this packet
-bounded.
-
-Item 7's listing is line-delimited, which carries every one of those byte classes
-intact except one: a path whose bytes include a newline has no unambiguous one-per-line
-form, and splitting the listing on newlines would hand the reviewer two paths that are
-neither of them the selected file. That case does not scope. It takes the
-no-measurement path above — dispatch the range whole, report `unmeasured` — rather than
-list a path this packet cannot represent or quietly drop it from the subset. Dropping is
-the outcome the bound exists to prevent: a silently shorter list still discloses `<N>`
-of `<M>` and reads as covered.
-
-The packet stays a paths packet either way: it never embeds per-file diffs.
+**Item 7** exists only when scoped: the selected paths, worktree-root-relative, one per line in the helper's order, each with its `files[].changed_lines`. It directs the reviewer to collect exactly those diffs and treat them as the whole range, spelling out the protocol: one invocation per path, `git diff <base>..<head> -- ':(literal)<path>'`, each path a single literal argument after `--`, never shell-joined with others, pathspec magic disabled by `:(literal)`.
 
 ## Reviewer output contract
 
-First line is the axis verdict (`**Correctness:** Clean | Findings — 1–2
-sentences`), then exactly three top-level sections `Critical` / `Important` /
-`Minor` (must-fix-before-merge / should-fix / nice-to-have), ≤400 words total,
-every finding with a stable ID, live `path:line` evidence, confidence (`high` /
-`medium` / `low`), and unknowns (`none` when empty); `None.` under an empty
-section; unreadable artifacts reported explicitly.
+The first line is the axis verdict, `**Correctness:** Clean | Findings — 1–2 sentences`, followed by exactly three sections `Critical` / `Important` / `Minor` (must-fix-before-merge / should-fix / nice-to-have), at most 400 words, each finding with a stable ID, live `path:line` evidence, confidence (`high` / `medium` / `low`) and unknowns (`none` when empty), `None.` under an empty section, and unreadable artifacts reported.
 
-When the packet is scoped, the coverage opens that first line's assessment clause,
-after the em dash — never between the verdict word and the dash:
+A scoped review puts the coverage at the start of the assessment, after the em dash:
 
 ```
 **Correctness:** Clean — scoped to <N> of <M> product files; <1–2 sentence assessment>.
 **Correctness:** Findings — scoped to <N> of <M> product files; <1–2 sentence assessment>.
 ```
 
-`agent-evidence` `re.fullmatch`es this line, so the position is a contract rather
-than a style: `**Correctness:** Clean (scoped: 20 of 44) — …` fails validation. A
-scoped review may not use the bare `**Correctness:** Clean` form, because that form
-has nowhere to put the coverage. An unscoped or unmeasured review keeps today's
-format exactly, bare form included.
-
-The coverage disclosure is mandatory on a scoped dispatch — state it in the packet as
-a requirement, not a preference; a scoped result that omits it does not satisfy this
-operation's output contract. Nothing downstream catches that omission:
-`agent-evidence` fullmatches the shape of the first line and never sees whether
-the packet was scoped, so a bare `**Correctness:** Clean` returned from a scoped
-dispatch validates. The obligation lives in the packet and nowhere else.
+`agent-evidence` `re.fullmatch`es this line, so `**Correctness:** Clean (scoped: 20 of 44) — …` fails, and a scoped review never uses the bare `**Correctness:** Clean`. An unscoped or unmeasured review keeps today's format, bare form included. State the disclosure in the packet as a requirement: nothing downstream knows the dispatch was scoped, so a bare verdict from a scoped dispatch would validate.
 
 ## Disposition
 
-Verify-and-disposition stays with the calling controller and its own fix-flow rules:
-return the validated three-section result (or the fallback reviewer's) unmodified,
-plus the reviewer identity (`Codex` | `Claude fallback` + failure class) and the scope
-(`full` | `scoped: <N> of <M> product files` | `unmeasured`) for the caller's ledger.
-That return is the single hand-off point — the controller records what it is given and
-never re-derives the measurement.
+The calling controller keeps verify-and-disposition under its own fix-flow rules. Return the validated three-section result (or the fallback reviewer's) unmodified, with the reviewer identity (`Codex` | `Claude fallback` + failure class) and the scope (`full` | `scoped: <N> of <M> product files` | `unmeasured`). The controller records what it is given and never re-derives the measurement.

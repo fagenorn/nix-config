@@ -1,0 +1,6 @@
+# Acceptance record — issue #552
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | The guard can authorize a feature merge into `fagenorn/argus` `main` with a required-status-check floor in force, using no Argus-specific literal in this repository's central policy tables, or the owner records that option 1 was applied and protection reads back. | code | `tests/test_claude_permission_guard.py::ClaudePermissionGuardTest::test_an_argus_shaped_project_merges_under_the_plan_gated_floor` (Guard suite) | in final verification | 3ff2db45d165611bc9af856962bb337773ae8b4f | Guard suite run against the built guard after `just build` | met |
+| AC2 | Existing guard behavior for protected default branches and declared integration branches is unchanged, and `tests/test_claude_permission_guard.py` stays green. | code | The whole Guard suite `tests/test_claude_permission_guard.py`, adversarial table unchanged except the data-only `NODO_ROW` edit | in final verification | 3ff2db45d165611bc9af856962bb337773ae8b4f | Guard suite run against the built guard after `just build` | met |

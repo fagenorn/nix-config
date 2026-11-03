@@ -1,0 +1,30 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "hit",
+      "evidence": "Changes the invocation contract between codex-collaboration and a configured review binding; one named option rejects non-exec-compatible bindings up front at contract level"
+    },
+    "concurrency_or_persistence": {
+      "value": "no",
+      "evidence": "Read-only review invocation with TMPDIR transcript files; no locking or persisted state"
+    },
+    "open_design_questions": {
+      "value": "hit",
+      "evidence": "Issue leaves open whether to drive codex-companion via its prompt-file input or to require exec-compatible bindings, and whether the companion can satisfy the JSONL/model validation is unconfirmed"
+    },
+    "criteria_shape": {
+      "value": "hit",
+      "evidence": "Five acceptance criteria (over four); 'Codex thread's first prompt is the packet' needs a live Codex run, not a deterministic code check"
+    }
+  },
+  "paths": [
+    "home/common/claude-code/skills/codex-collaboration/SKILL.md",
+    "home/common/claude-code/skills/codex-collaboration/PLAN-REVIEW.md",
+    "home/common/claude-code/skills/codex-collaboration/DIFF-REVIEW.md",
+    "home/common/claude-code/skills/codex-collaboration/evals/evals.json",
+    "home/common/agent-skills/skills/sdd/final-review.md",
+    "home/common/agent-skills/skills/ship-issue/REVIEW.md",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py",
+    "python/agent_tools/resolve_project.py"
+  ]
+}

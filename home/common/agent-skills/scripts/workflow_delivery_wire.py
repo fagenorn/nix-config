@@ -10,12 +10,20 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from agent_tools import verification_blocker
+from agent_tools.attempt_observations import (
+    CANDIDATE_WORKTREE_STATES, RECORDED_WORKTREE_STATES, WORKTREE_ENTRY_FIELDS,
+    WORKTREE_OBSERVATION_FIELDS)
+
 WORKFLOW_DELIVERY_WIRE_INTERFACE_VERSION = 1
 _LIVE_STATES = {"active", "handed_off", "suspended"}
 
 
 class DeliveryProjection:
-    """Project validated workflow state into closed interface-2 values."""
+    """Project validated workflow state into closed wire values.
+
+    The bootstrap is interface 3; every other value it builds is interface 2.
+    """
 
     @staticmethod
     def historical_requested(issue_state: dict[str, Any], *, forge: object,
@@ -84,6 +92,18 @@ class DeliveryProjection:
                 and all(item["state"] in {"observed", "not_applicable"}
                         for item in delivery["postconditions"].values()))
 
+    def held(self, issue_state: dict[str, Any] | None) -> bool:
+        """A delivered issue whose tracker outcome is a tracker_held observation (#273 D7, D15)."""
+        if issue_state is None or not self.delivery_complete(issue_state):
+            return False
+        delivery = issue_state["delivery"]
+        post = delivery["postconditions"].get("tracker_closed")
+        if not isinstance(post, dict) or post.get("state") != "observed":
+            return False
+        return any(item["id"] == post["observation_id"]
+                   and item["observation_kind"] == "tracker_held"
+                   for item in delivery["delivery_observations"])
+
     def current_custody(self, issue: int, issue_state: dict[str, Any]
                         ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         if self.delivery_complete(issue_state):
@@ -106,16 +126,16 @@ class DeliveryProjection:
 
     @staticmethod
     def _worktree(value: object) -> dict[str, Any]:
-        if not isinstance(value, dict) or set(value) != {"issue", "recorded", "candidate"}:
+        if not isinstance(value, dict) or set(value) != WORKTREE_OBSERVATION_FIELDS:
             raise ValueError("invalid worktree observation")
         if type(value["issue"]) is not int or value["issue"] < 1:
             raise ValueError("invalid worktree issue")
-        for name, states in (("recorded", {"matching_issue_branch", "absent", "mismatch"}),
-                             ("candidate", {"available", "absent"})):
+        for name, states in (("recorded", RECORDED_WORKTREE_STATES),
+                             ("candidate", CANDIDATE_WORKTREE_STATES)):
             item = value[name]
             if item is None:
                 continue
-            if not isinstance(item, dict) or set(item) != {"path", "state"}:
+            if not isinstance(item, dict) or set(item) != WORKTREE_ENTRY_FIELDS:
                 raise ValueError(f"invalid {name} fields")
             if not isinstance(item["path"], str) or not item["path"].startswith("/"):
                 raise ValueError(f"invalid {name} path")
@@ -180,11 +200,21 @@ class DeliveryProjection:
                 "requested_scope": copy.deepcopy(reduction["requested_scope"])}
 
     def bootstrap(self, state: dict[str, Any]) -> dict[str, Any]:
+        """The interface-3 `workflow_bootstrap`: each unfinished issue's custody requirement,
+        and the requirement of every `open` verification blocker that an unfinished issue's
+        latest attempt is parked on, once per blocker in id order (issue 545 D6)."""
         requirements = []
+        awaited = {}
         for issue_key in sorted(state["issues"], key=int):
             issue_state = state["issues"][issue_key]
             if self.delivery_complete(issue_state):
                 continue
+            latest = issue_state["attempts"][-1] if issue_state["attempts"] else None
+            if (latest is not None and latest["state"] == "suspended"
+                    and latest["blocked_on"] == "verification"):
+                record = state["verification_blockers"][latest["verification_blocker"]]
+                if record["state"] == "open":
+                    awaited[record["id"]] = verification_blocker.requirement(record)
             records = ([("implementation", item) for item in issue_state["attempts"]]
                        + [("remainder", item) for item in issue_state["delivery_remainders"]])
             if not records:
@@ -199,8 +229,9 @@ class DeliveryProjection:
                 "custody": self.custody_for_record(int(issue_key), kind, record),
                 "recorded_worktree": record["worktree"],
                 "contract_digest": issue_state["delivery"]["contract_digest"]})
-        return {"interface_version": 2, "kind": "workflow_bootstrap",
-                "run_id": state["run_id"], "requirements": requirements}
+        return {"interface_version": 3, "kind": "workflow_bootstrap",
+                "run_id": state["run_id"], "requirements": requirements,
+                "verification": [awaited[key] for key in sorted(awaited)]}
 
     def remainder_response(self, *, ledger_repo_root: str, run_id: str,
                            issue_state: dict[str, Any], remainder: dict[str, Any],
@@ -345,7 +376,8 @@ class DeliveryProjection:
                         blockers: list[dict[str, Any]],
                         result_fields: tuple[str, ...],
                         contract_required: bool,
-                        unresumable: dict[str, str] | None) -> dict[str, Any]:
+                        unresumable: dict[str, str] | None,
+                        verification_blockers: dict[str, Any]) -> dict[str, Any]:
         latest_kind = None
         latest = None
         if issue_state is not None:
@@ -358,6 +390,7 @@ class DeliveryProjection:
                 latest_kind, latest = "implementation", issue_state["attempts"][-1]
         if latest is None:
             state_name = ("closed" if tracker["state"] == "closed" else
+                          "held" if self.held(issue_state) else
                           "fogged" if tracker["decision_blockers"] else
                           "blocked" if tracker["open_blockers"] else "queued")
         else:
@@ -381,6 +414,13 @@ class DeliveryProjection:
             requirements.append({"kind": "worktree_fact", "subject_id": unresumable["path"],
                                  "reason_code": "recorded_worktree_" + unresumable["state"],
                                  "detail_pointer": None})
+        if (latest_kind == "implementation" and latest["state"] == "suspended"
+                and latest["blocked_on"] == "verification"):
+            record = verification_blockers[latest["verification_blocker"]]
+            # An attempt parked on an open blocker asks for its observation; one whose
+            # blocker is resolved waits only to resume (issue 545 D6).
+            if record["state"] == "open":
+                requirements.append(verification_blocker.requirement(record))
         return {"issue": issue, "state": state_name, "custody": custody,
             "owner": None if latest is None else latest["owner"],
             "worktree": None if latest is None else latest["worktree"],

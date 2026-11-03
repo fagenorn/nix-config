@@ -10,6 +10,8 @@ import re
 import sys
 from typing import Any
 
+from agent_tools.attempt_custody import HUMAN_GATED_BLOCKED_ON
+
 
 WORKFLOW_DELIVERY_INTERFACE_VERSION = 1
 
@@ -243,7 +245,7 @@ class DeliveryRuntime:
         request: dict[str, Any], source_kind: str, now: str,
         dispatch_permitted: bool, remainder_deadline: str,
         owner_unavailable: bool, tracker_halted: bool,
-        recorded_worktree: dict[str, Any] | None,
+        recorded_worktree: dict[str, Any] | None, human_directed: bool,
     ) -> dict[str, Any] | None:
         try:
             recovery = self.recovery_policy(
@@ -298,7 +300,8 @@ class DeliveryRuntime:
                 dispatch_permitted=dispatch_permitted, tracker_halted=tracker_halted,
                 recorded_worktree=recorded_worktree,
                 remainder_deadline=remainder_deadline, issue=issue,
-                request=request, source_kind=source_kind)
+                request=request, source_kind=source_kind,
+                human_directed=human_directed)
         except (TypeError, ValueError) as error:
             raise ValueError("remainder policy refused") from error
 
@@ -353,8 +356,11 @@ class DeliveryRuntime:
                 issue.pop("delivery_remainders", None)
                 # A schema-2 attempt has no progress marker (#250 D4); leaving
                 # one makes `migrate` refuse this document as a hybrid.
+                # Nor does it have a lane (#280 D3), for the same reason.
                 for attempt in issue.get("attempts", []):
                     attempt.pop("progress_marker", None)
+                    for field in ("lane", "lane_budget_minutes", "lane_history"):
+                        attempt.pop(field, None)
         return candidate
 
     def validate(self, value: object, kind: str) -> dict[str, Any]:
@@ -399,9 +405,14 @@ class DeliveryRuntime:
         tracker_halted: bool, recorded_worktree: dict[str, Any] | None,
         remainder_deadline: str, preview: dict[str, Any] | None = None,
         issue: int | None = None, request: dict[str, Any] | None = None,
-        source_kind: str | None = None,
+        source_kind: str | None = None, human_directed: bool,
     ) -> dict[str, Any] | None:
-        """Resume the current delivery remainder without spending an attempt."""
+        """Resume the current delivery remainder without spending an attempt.
+
+        A remainder suspended on a cause in ``HUMAN_GATED_BLOCKED_ON`` resumes
+        only when ``human_directed``; otherwise it gets the parked verdict, the
+        no-dispatch ``terminal`` with the ledger untouched (issue 458 D3).
+        """
         if issue_state is None or not issue_state["delivery_remainders"]:
             return None
         remainder = issue_state["delivery_remainders"][-1]
@@ -439,11 +450,18 @@ class DeliveryRuntime:
             preview = self.apply_transition(
                 preview_state, issue=issue, request=candidate,
                 source_kind=source_kind, at_time=now)
-        if owner_unavailable and remainder["state"] != "active":
+        if owner_unavailable and remainder["state"] != "active" and not reaped:
+            # A reaped remainder's deadline passed after the dispatcher read the
+            # owner's liveness: the expiry supersedes the observation (#310 D18).
             raise ValueError("owner_unavailable is not applicable")
         if remainder["state"] == "active" and not owner_unavailable:
             # Live custody: control's lanes skip it, as they skip a live attempt (D2).
             return result("idle", desired="idle")
+        if (remainder["state"] == "suspended" and not human_directed
+                and remainder["blocked_on"] in HUMAN_GATED_BLOCKED_ON):
+            # Parked like the attempt lane's gated suspension: no dispatch, no
+            # slot, the ledger untouched (issue 458 D3).
+            return result("terminal", desired="terminal")
         _ = tracker_halted
         if not dispatch_permitted:
             return result("idle", changed=reaped)
@@ -908,6 +926,17 @@ class DeliveryRuntime:
         changed = issue_state["delivery"] != context["before"] or blocking is not None
         return response, changed
 
+    @staticmethod
+    def _check_tracker_outcome(delivery: dict[str, Any], historical: dict[str, Any] | None) -> None:
+        """A historical row's issue_closed names the observed tracker outcome (#273 D6, D17)."""
+        post = delivery["postconditions"]["tracker_closed"]
+        if historical is None or post["state"] != "observed":
+            return
+        kind = next(item["observation_kind"] for item in delivery["delivery_observations"]
+                    if item["id"] == post["observation_id"])
+        if historical["issue_closed"] is not (kind == "tracker_closed"):
+            raise ValueError("delivery summary issue_closed does not match the tracker outcome")
+
     def finish_outcome(
         self, issue_state: dict[str, Any], record: dict[str, Any],
         report: dict[str, Any], reduction: dict[str, Any], common: dict[str, Any],
@@ -917,6 +946,7 @@ class DeliveryRuntime:
             if reduction["completion_state"] != "delivery_complete":
                 raise ValueError("delivery summary is incomplete")
             historical = report["historical_owner_result"]
+            self._check_tracker_outcome(reduction["next_delivery"], historical)
             if historical is not None and report["custody"]["kind"] == "implementation":
                 record.update(state=historical["state"], result=copy.deepcopy(historical),
                               finished_at=now, result_source="owner")
@@ -1005,9 +1035,11 @@ class DeliveryRuntime:
 
     def control_summary(self, **values: Any) -> dict[str, Any]:
         summary = self._projection.control_summary(**values)
-        if values.get("unresumable") is not None:
-            # The projection holds no canonical form; the fact joins the
-            # requirements in the validator's canonical-bytes order (#194 D13).
+        if values.get("unresumable") is not None or any(
+                item["kind"] == "verification" for item in summary["requirements"]):
+            # The projection holds no canonical form; a worktree fact or a verification
+            # requirement it appends joins the requirements in the validator's
+            # canonical-bytes order (#194 D13, issue 545 D6).
             summary["requirements"].sort(key=self._model.canonical_bytes)
         return summary
 
@@ -1274,7 +1306,11 @@ class DeliveryRuntime:
         }
 
     def migrate(self, value: object, *, migration_contracts: dict[int, object]) -> object:
-        """Compose schema 1→2→3→4→5→6 on a detached copy without persisting."""
+        """Compose schema 1→2→3→4→5→6→7 on a detached copy without persisting.
+
+        A schema-8 document passes through as a deep copy: schema 8 is `workflow-state`'s
+        binding to a run transaction (#337), not a delivery change.
+        """
         if not isinstance(migration_contracts, dict):
             raise ValueError("invalid migration contracts")
         for issue, contract in migration_contracts.items():
@@ -1285,9 +1321,9 @@ class DeliveryRuntime:
                     raise ValueError("migration contract issue mismatch")
         candidate = copy.deepcopy(value)
         seen: set[int] = set()
-        while isinstance(candidate, dict) and candidate.get("schema_version") != 6:
+        while isinstance(candidate, dict) and candidate.get("schema_version") not in {7, 8}:
             version = candidate.get("schema_version")
-            if type(version) is not int or version in seen or version not in {1, 2, 3, 4, 5}:
+            if type(version) is not int or version in seen or version not in {1, 2, 3, 4, 5, 6}:
                 raise ValueError("unsupported workflow state schema version")
             seen.add(version)
             issues = candidate.get("issues")
@@ -1298,7 +1334,19 @@ class DeliveryRuntime:
                     or set(issue) != {"issue", "attempts", "outcome"}
                     for issue in issues.values()):
                 raise ValueError("invalid legacy issue schema")
-            if version == 5:
+            if version == 6:
+                # Schema 7 adds the attempt's lane (#280 D3); a schema-6 attempt
+                # that already carries any lane field is a hybrid.
+                for issue in issues.values():
+                    if isinstance(issue, dict) and isinstance(issue.get("attempts"), list):
+                        for attempt in issue["attempts"]:
+                            if isinstance(attempt, dict):
+                                if {"lane", "lane_budget_minutes", "lane_history"} & set(attempt):
+                                    raise ValueError("invalid schema-six lane")
+                                attempt.update(lane=None, lane_budget_minutes=None,
+                                               lane_history=[])
+                candidate["schema_version"] = 7
+            elif version == 5:
                 # Schema 6 adds the attempt's progress marker (#250 D4); a
                 # schema-5 document that already carries one is a hybrid.
                 for issue in issues.values():

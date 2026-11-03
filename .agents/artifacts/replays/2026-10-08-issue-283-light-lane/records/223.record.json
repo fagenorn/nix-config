@@ -1,0 +1,34 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "hit",
+      "evidence": "Adds a new auto-owner role to the closed model-matrix role set that agent_model_matrix.py validates (EXPECTED_ROLE_TIERS) and changes dispatch markers checked by contract tests"
+    },
+    "concurrency_or_persistence": {
+      "value": "no",
+      "evidence": "Static model/effort tier data and skill prose; no concurrency, locking or persisted state"
+    },
+    "open_design_questions": {
+      "value": "no",
+      "evidence": "Issue names the exact target tiers (Opus/xhigh auto-owner, Sonnet/medium explorer) and the comment fix"
+    },
+    "criteria_shape": {
+      "value": "doubt",
+      "evidence": "Issue carries no written acceptance criteria, only three change bullets; criteria are unclassifiable per D7"
+    }
+  },
+  "paths": [
+    "home/common/agent-skills/model-matrix.json",
+    "python/agent_tools/agent_model_matrix.py",
+    "python/agent_tools/agent_costs.py",
+    "home/common/agent-skills/skills/from-issue/AUTO.md",
+    "home/common/agent-skills/skills/design/SKILL.md",
+    "home/common/agent-skills/skills/grill-with-docs/SKILL.md",
+    "home/common/agent-skills/skills/writing-plans/SKILL.md",
+    "home/common/agent-skills/skills/doc-grounded-questions/SKILL.md",
+    "home/common/agent-skills/skills/codebase-design/DESIGN-IT-TWICE.md",
+    "home/common/claude-code/default.nix",
+    "home/common/agent-skills/tests/test_agent_model_matrix.py",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py"
+  ]
+}

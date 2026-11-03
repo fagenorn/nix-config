@@ -1,0 +1,29 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "hit",
+      "evidence": "Documents the worktree checker's command-shape contract and adds contract fixtures that every living shared-skill example must satisfy"
+    },
+    "concurrency_or_persistence": {
+      "value": "no",
+      "evidence": "Skill prose and test fixtures only; no locking or persisted state"
+    },
+    "open_design_questions": {
+      "value": "doubt",
+      "evidence": "'Same parser/checker boundary as production' does not identify the production checker in this repo, and selective recovery from the #99 branch needs judgment"
+    },
+    "criteria_shape": {
+      "value": "hit",
+      "evidence": "Five acceptance criteria (over four); provenance-preserving selective recovery is not a deterministic code check"
+    }
+  },
+  "paths": [
+    "home/common/agent-skills/skills/worktrees/SKILL.md",
+    "home/common/agent-skills/skills/from-issue/SKILL.md",
+    "home/common/agent-skills/skills/from-issue/AUTO.md",
+    "home/common/agent-skills/skills/sdd/SKILL.md",
+    "home/common/agent-skills/skills/ship-issue/SKILL.md",
+    "home/common/agent-skills/skills/ship-issue/CI-MERGE.md",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py"
+  ]
+}

@@ -23,7 +23,8 @@ def direct_policy(runtime, issue, request):
         now="2026-09-21T00:01:00Z", dispatch_permitted=True,
         remainder_deadline="2026-09-21T03:01:00Z", owner_unavailable=False,
         tracker_halted=False,
-        recorded_worktree={"path": WORKTREE, "state": "matching_issue_branch"})
+        recorded_worktree={"path": WORKTREE, "state": "matching_issue_branch"},
+        human_directed=True)
 
 
 def resolved_snapshot(root):
@@ -63,7 +64,8 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
         _, delivery = cleanup_contract_and_delivery(runtime.model)
         common = dict(
             now="2026-09-21T00:01:00Z", owner_unavailable=False,
-            dispatch_permitted=True, remainder_deadline="2026-09-21T03:01:00Z")
+            dispatch_permitted=True, remainder_deadline="2026-09-21T03:01:00Z",
+            human_directed=True)
         cases = (("close", None),
                  ("worktree", {"path": WORKTREE, "state": "absent"}))
         for stage, recorded in cases:
@@ -96,6 +98,26 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
                 recorded_worktree={"path": WORKTREE, "state": "mismatch"},
                 preview={"next_stage_id": "worktree"}, **common)
         self.assertEqual(state, before)
+
+    def test_an_unavailable_owner_past_the_remainder_deadline_yields_to_expiry(self):
+        """#310 D18: the reap supersedes the observation; a plain suspension still refuses it."""
+        runtime = self.runtime
+        _, delivery = cleanup_contract_and_delivery(runtime.model)
+        common = dict(
+            now="2026-09-21T00:01:00Z", owner_unavailable=True,
+            dispatch_permitted=True, remainder_deadline="2026-09-21T03:01:00Z",
+            tracker_halted=False, recorded_worktree=None,
+            preview={"next_stage_id": "close"}, human_directed=True)
+        state = suspended_remainder(delivery)
+        record = state["delivery_remainders"][0]
+        record.update(state="active", deadline_at="2026-09-21T00:00:30Z")
+        result = runtime.remainder_policy(state, **common)
+        self.assertEqual((result["operation"], result["expired"], record["state"]),
+                         ("resume", True, "active"))
+
+        state = suspended_remainder(delivery)
+        with self.assertRaisesRegex(ValueError, "owner_unavailable is not applicable"):
+            runtime.remainder_policy(state, **common)
 
     def test_resume_preview_never_replaces_current_custody_reduction(self):
         runtime = self.runtime
@@ -479,6 +501,101 @@ class CurrentSelectionTest(unittest.TestCase):
                     runtime.build_delivery("current-selection", {"contract": contract},
                                            policy=None, installed_delivery=delivery)
                 self.assertEqual(str(caught.exception), "current selection: " + reason)
+
+
+class TrackerHeldBuilderTest(unittest.TestCase):
+    """#273: build-delivery builds tracker_held; the contract digest does not move."""
+
+    CONTRACT_DIGEST = "sha256:223862cffef7277068ea22489161662da51773609d3ea38d46ac59267e057d66"
+    INTENT_DIGEST = "sha256:201db7c9a963061a80d43af0673d2ce1c2a3c9245cca1fe9dd675765e67be9e5"
+    RECORD = ".agents/artifacts/plans/2026-10-07-issue-273-tracker-held.acceptance.md"
+    COMMENT = "https://github.com/fagenorn/nix-config/issues/273#issuecomment-1"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.runtime = runpy.run_path(str(ENTRY))["DeliveryRuntime"](
+            notes_max_characters=10_000)
+        cls.built = cls.runtime.build_delivery("contract", {
+            "issue": 273, "worktree": "/repo/.worktrees/worktree-issue-273-held",
+            "source_kind": "explicit_user", "source_reference": "invocation:/from-issue 273",
+            "now": NOW}, policy=resolved_snapshot("/repo"))
+
+    def held(self, **changes):
+        value = {"contract": self.built["contract"], "observation_kind": "tracker_held",
+                 "source_kind": "tracker", "source_reference": "gh issue view 273",
+                 "observed_at": NOW, "evidence": "issue 273 open, labelled",
+                 "comment_url": self.COMMENT, "record_path": self.RECORD,
+                 "acceptance_state": "unmet",
+                 "observation_identity": "github:issue:273:held"}
+        value.update(changes)
+        return self.runtime.build_delivery("observation", value, policy=None)
+
+    def refusal(self, **changes):
+        with self.assertRaises(ValueError) as caught:
+            self.held(**changes)
+        return str(caught.exception)
+
+    def test_the_contract_digest_for_an_unchanged_input_is_pinned(self):
+        model = self.runtime.model
+        self.assertEqual(model.canonical_digest(self.built["contract"]), self.CONTRACT_DIGEST)
+        self.assertEqual(model.canonical_digest(self.built["initial_intent"]),
+                         self.INTENT_DIGEST)
+        self.assertEqual(self.built["contract"]["initial_authorization_intent_digest"],
+                         self.INTENT_DIGEST)
+        close = next(stage for stage in self.built["contract"]["stages"]
+                     if stage["kind"] == "close_tracker")
+        self.assertEqual((close["action"], close["effect"]), ("close_issue", "tracker_write"))
+        self.assertNotIn("tracker_held", model.canonical_bytes(self.built["contract"]).decode())
+
+    def test_the_builder_builds_a_held_observation_the_model_accepts(self):
+        for acceptance in ("unmet", "human_pending"):
+            with self.subTest(acceptance=acceptance):
+                item = self.held(acceptance_state=acceptance)
+                self.assertEqual(item["observation_kind"], "tracker_held")
+                self.assertEqual(item["subject"], {
+                    "tracker_repository_id": "fagenorn/nix-config", "issue": 273,
+                    "state": "open", "label": "needs-verification",
+                    "comment_url": self.COMMENT, "record_path": self.RECORD,
+                    "acceptance_state": acceptance,
+                    "observation_identity": "github:issue:273:held"})
+                self.assertEqual(item["source"], {"kind": "tracker",
+                                                  "reference": "gh issue view 273"})
+                self.assertEqual(item["contract_digest"], self.CONTRACT_DIGEST)
+                self.runtime.validate(item, "delivery-observation")
+        self.assertEqual(self.held(), self.held())
+
+    def test_a_closed_state_subject_is_rejected_by_the_model(self):
+        item = copy.deepcopy(self.held())
+        item["subject"]["state"] = "closed"
+        seal(self.runtime.model, item)
+        with self.assertRaises(ValueError):
+            self.runtime.validate(item, "delivery-observation")
+
+    def test_a_met_or_not_applicable_hold_is_refused(self):
+        for acceptance in ("met", "not_applicable", "pending", ["unmet"], {"unmet": 1}):
+            with self.subTest(acceptance=acceptance):
+                self.assertEqual(self.refusal(acceptance_state=acceptance),
+                    "builder input keys: acceptance_state must be unmet or "
+                    "human_pending for a hold")
+
+    def test_a_non_relative_record_path_is_refused(self):
+        for path in ("/repo/x.acceptance.md", "plans/../x.acceptance.md", "",
+                     "plans\\x.acceptance.md"):
+            with self.subTest(path=path):
+                self.assertIn(self.refusal(record_path=path), {
+                    "builder input keys: record_path must be a relative POSIX path "
+                    "with no '..' segment",
+                    "builder input keys: record_path must be a non-empty string"})
+
+    def test_the_hold_takes_exactly_its_four_facts(self):
+        reason = self.refusal(state="open")
+        self.assertTrue(reason.startswith("builder input keys: expected exactly "), reason)
+        with self.assertRaises(ValueError):
+            value = {"contract": self.built["contract"], "observation_kind": "tracker_held",
+                     "source_kind": "tracker", "source_reference": "probe",
+                     "observed_at": NOW, "evidence": "e", "comment_url": self.COMMENT,
+                     "record_path": self.RECORD, "acceptance_state": "unmet"}
+            self.runtime.build_delivery("observation", value, policy=None)
 
 
 if __name__ == "__main__":

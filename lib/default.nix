@@ -20,6 +20,7 @@ in
     mkDarwin
     scanPaths
     mergeFilesOrdered
+    hasCask
     mkNixos
     ;
 }

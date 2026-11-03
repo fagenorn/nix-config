@@ -12,7 +12,8 @@ the recovery plan; `transaction_proof` the proof's collection, cohorts and settl
 budget; `transaction_custody` the lease authority and admissibility; `transaction_receipt`
 the receipts, hazard markers and post-terminal observations; `transaction_storage` the
 durable-file primitives and the refusal classes. The store adds the locks, the clock, the
-fenced check and the writes. No command and no caller until #125.
+fenced check and the writes. Its first caller is `workflow-state`, which mints and binds
+attempt run transactions (#337).
 """
 
 import contextlib
@@ -308,6 +309,13 @@ class TransactionStore:
             "type": "transitioned", "from": source, "to": target, "reason": reason,
             "external_state": external_state}])
 
+    def lookup(self, creation_key: str) -> str | None:
+        """The id `creation_key`'s index entry names, or None; reads the index as `create`
+        does and writes, creates and locks nothing (#337 D2)."""
+        if type(creation_key) is not str or not creation_key:
+            raise StateInvalid("creation_key is not a non-empty string")
+        return _read_index(self.root, creation_key)
+
     def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
                proof: dict, recovery: dict, authority_class: str) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names.
@@ -499,7 +507,7 @@ class TransactionStore:
         self._leases.clear(fence)
         return snapshot(candidate)
 
-    def renew(self, custody: Custody) -> Transaction:
+    def renew(self, custody: Custody, *, ttl_ms: int | None = None) -> Transaction:
         """The core's renewal duty, a tick the holder's host loop calls (D13, D19, D27, D28;
         #206 D9).
 
@@ -516,8 +524,20 @@ class TransactionStore:
         `StaleCustody` with nothing written; it then extends every record by its
         recorded TTL only when the earliest remaining validity is inside the renewal
         margin, and writes nothing at all outside it.
+
+        A supplied `ttl_ms` must be an `int` of at least 1 (`True` is not one), else
+        `StateInvalid` before any lock with nothing written. The terminal refusal, the
+        fenced check and the parked-window quiesce rule run as above; the extension then
+        runs whatever the margin says: every record keeps its epoch, instance and
+        `acquired_at`, takes `ttl_ms` as its TTL, gains one term and one renewal and
+        expires `ttl_ms` after this clock reading. A span the lease lock finds lapsed at
+        that reading is `StaleCustody` with nothing written. `state.json` is not written
+        and no event is appended.
         """
         require_custody_shape(custody)
+        if ttl_ms is not None and (type(ttl_ms) is not int or ttl_ms < 1):
+            raise StateInvalid(f"{custody.transaction_id}: renew: ttl_ms {ttl_ms!r} is not an "
+                               f"integer of at least 1")
         transaction_id = custody.transaction_id
         with self._transaction_locked(transaction_id):
             prior = self._validated_document(transaction_id)
@@ -531,7 +551,9 @@ class TransactionStore:
                         and now - parked_since(prior["events"]) > PARKED_CUSTODY_WINDOW_MS
                         and not observed(fold_actions(prior["events"]))):
                     return self._released(prior, now, "quiesced")
-                if not self._leases.extend_if_due(prior["custody"]["fence"], now):
+                fence = prior["custody"]["fence"]
+                if not (self._leases.extend_if_due(fence, now) if ttl_ms is None
+                        else self._leases.extend_to(fence, now, ttl_ms)):
                     raise StaleCustody(f"{transaction_id}: renew: custody lapsed before the "
                                        f"lease lock was taken")
         return snapshot(prior)

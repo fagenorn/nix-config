@@ -1,15 +1,17 @@
-"""Contracts for the ship-release skill's release state machine.
+"""Contracts for the ship-release skill, a client of the release core.
 
-Text-anchor tests in the style of test_workflow_skill_contracts.py, plus two
-executable checks that run the skill's exact commands against throwaway local
-git repositories. Nothing here ever tags, releases, pushes, or deploys against
-a real remote: the executable tests build repos under a TemporaryDirectory and
+Checks on the machine-consumed text of the skill: the `release transaction` examples
+(each parses against the live parser), the dispatch marker and the cross-file anchors
+to CHANGELOG.md. Two executable checks run the skill's previous-tag command against
+throwaway local git repositories. Nothing here ever tags, releases, pushes, or deploys
+against a real remote: the executable tests build repos under a TemporaryDirectory and
 talk to no network.
 """
 
 import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -20,9 +22,6 @@ REPO_ROOT = Path(__file__).parents[4]
 SHIP_RELEASE = REPO_ROOT / "home/common/agent-skills/skills/ship-release/SKILL.md"
 CHANGELOG = REPO_ROOT / "home/common/agent-skills/skills/ship-release/CHANGELOG.md"
 EVALS = REPO_ROOT / "home/common/agent-skills/skills/ship-release/evals/evals.json"
-
-STATE_PATH = ".superpowers/workflows/ship-release/state.json"
-
 
 GIT_LOCATION_VARS = (
     "GIT_DIR",
@@ -90,132 +89,13 @@ class ShipReleaseContractsTest(unittest.TestCase):
         cls.changelog = CHANGELOG.read_text(encoding="utf-8")
         cls.evals = json.loads(EVALS.read_text(encoding="utf-8"))
 
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertNotEqual(next_position, -1, f"missing anchor: {anchor!r}")
-            self.assertGreater(
-                next_position, position, f"out-of-order anchor: {anchor!r}"
-            )
-            position = next_position
-
-    def section(self, text, heading, next_heading):
-        start = text.index(heading)
-        end = text.index(next_heading, start + len(heading))
-        return text[start:end]
-
-    # -- R1: single-branch path keeps the version/changelog prerequisites -----
-
-    def test_single_branch_runs_phases_zero_and_one_then_skips_two_to_four(self):
-        bindings = self.section(
-            self.skill, "## Project bindings", "## Durable release state"
-        )
-        self.assert_ordered(
-            bindings,
-            "run Phases 0 **and** 1",
-            "skip Phases 2–4",
-            "continue at Phase 4.5",
-        )
-        self.assertNotIn("skip straight to Phase 4.5", self.skill)
-        # kind == none likewise runs the prerequisites before its local merge.
-        self.assert_ordered(
-            bindings,
-            "bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}",
-            "run Phases 0–1",
-            "git merge --no-ff",
-        )
-        # CHANGELOG documents the single-branch mining range.
-        self.assertIn("Single-branch (`<integration> == <default>`)", self.changelog)
-        self.assertIn("drop `--merges`", self.changelog)
-
-    # -- R2: no-PR paths tag the local merge result, never the stale remote ---
-
-    def test_merge_sha_command_targets_local_default_not_remote(self):
-        self.assertIn("MERGE_SHA=$(git rev-parse <default>)", self.skill)
-        self.assertNotIn("git rev-parse origin/<default>)", self.skill)
-        phase_45 = self.section(self.skill, "## Phase 4.5", "## Phase 5")
-        self.assert_ordered(
-            phase_45,
-            "no-PR paths",
-            "AFTER any local merge",
-            "MERGE_SHA=$(git rev-parse <default>)",
-        )
-        self.assertIn("stale pre-merge tip", phase_45)
-
-    def test_merge_sha_command_resolves_local_merge_in_a_real_repo(self):
-        """Execute the skill's exact no-PR MERGE_SHA command after a local
-        --no-ff merge with a deliberately stale origin/<default>."""
-        match = re.search(
-            r"^MERGE_SHA=\$\(git rev-parse <default>\)$", self.skill, re.M
-        )
-        self.assertIsNotNone(match, "no-PR MERGE_SHA command missing from SKILL.md")
-        command = match.group(0).replace("<default>", "main")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp) / "repo"
-            repo.mkdir()
-            sh("git init -q -b main .", repo)
-            sh("echo base > file && git add . && git commit -qm base", repo)
-            # Freeze the remote-tracking ref at the pre-merge tip.
-            sh("git update-ref refs/remotes/origin/main HEAD", repo)
-            sh("git checkout -qb integration", repo)
-            sh("echo feature > file && git commit -qam feature", repo)
-            sh("git checkout -q main", repo)
-            sh("git merge -q --no-ff integration -m 'merge: release'", repo)
-
-            resolved = sh(f'{command} && echo "$MERGE_SHA"', repo)
-            local_tip = sh("git rev-parse main", repo)
-            stale_remote = sh("git rev-parse origin/main", repo)
-
-            self.assertEqual(resolved, local_tip)
-            self.assertNotEqual(
-                resolved,
-                stale_remote,
-                "the skill's command must not resolve the stale remote tip",
-            )
-
-    # -- R4: skip-check runs before anything is tagged or created -------------
-
-    def test_existing_release_skip_check_precedes_tag_and_release_creation(self):
-        phase_45 = self.section(self.skill, "## Phase 4.5", "## Phase 5")
-        self.assert_ordered(
-            phase_45,
-            "### 4.5a. Resolve the merge SHA",
-            "### 4.5b. Skip condition",
-            "Don't double-tag",
-            "### 4.5e. Tag the merge commit",
-            "git tag -a",
-            "gh release create",
-        )
-        # The forge-less variant of the skip-check exists too.
-        self.assertIn('git tag --points-at "$MERGE_SHA"', phase_45)
-
-    # -- R3: Phase 0 resumes from durable state and merged PRs ----------------
-
-    def test_phase_zero_consults_state_and_merged_prs_before_stopping(self):
-        phase_zero = self.section(self.skill, "## Phase 0", "## Phase 1")
-        self.assert_ordered(
-            phase_zero,
-            "Resume check",
-            STATE_PATH,
-            "--state merged",
-            "mergeCommit",
-            "nothing to release",
-        )
-        self.assertIn("resume at Phase 4.5", phase_zero)
-        self.assertIn("jump to Phase 5", phase_zero)
-        # The wakeup path re-enters through the same resume check.
-        self.assertIn("Phase 0 resume check", self.skill)
-
     # -- R5: PREV_TAG must be reachable from the released commit --------------
 
     def test_prev_tag_selection_is_reachability_restricted(self):
-        self.assertIn('--merged "$MERGE_SHA"', self.skill)
-        phase_zero = self.section(self.skill, "## Phase 0", "## Phase 1")
+        self.assertIn('--merged "$COMMIT"', self.skill)
         self.assertIn(
             "git describe --tags --abbrev=0 origin/<default>",
-            phase_zero,
+            self.skill,
             "pre-flight describe must name an explicit ref, not bare HEAD",
         )
         self.assertNotRegex(
@@ -229,7 +109,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
         match = re.search(r"^git for-each-ref --count=1 .*$", self.skill, re.M)
         self.assertIsNotNone(match, "PREV_TAG command missing from SKILL.md")
         command = match.group(0)
-        self.assertIn('--merged "$MERGE_SHA"', command)
+        self.assertIn('--merged "$COMMIT"', command)
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -245,7 +125,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
             sh("echo b >> file && git commit -qam b", repo)
             merge_sha = sh("git rev-parse main", repo)
 
-            prev = sh(command, repo, extra_env={"MERGE_SHA": merge_sha})
+            prev = sh(command, repo, extra_env={"COMMIT": merge_sha})
             self.assertEqual(prev, "v0.1.0")
 
             # Sanity: without --merged the wrong tag would have won, so the
@@ -255,63 +135,67 @@ class ShipReleaseContractsTest(unittest.TestCase):
             )
             self.assertEqual(repo_wide, "v9.9.9")
 
-    # -- R6: exactly one semver rubric ----------------------------------------
+    # -- the cross-file anchors between SKILL.md and CHANGELOG.md resolve -------
 
-    def test_semver_rubric_lives_only_in_changelog(self):
-        self.assertIn("## Version bump signals", self.changelog)
-        self.assertIn("This table is the only copy of the rubric", self.changelog)
+    def test_cross_file_anchors_resolve(self):
         self.assertIn("CHANGELOG.md#version-bump-signals", self.skill)
-        # Rubric bodies must not be duplicated back into SKILL.md.
-        for rubric_fragment in (
-            "refuses to start without",
-            "shifts down one slot",
-            "semver.org/#spec-item-4",
-        ):
-            self.assertNotIn(rubric_fragment, self.skill)
-        # The proposal template stays with the workflow.
-        self.assertIn("Proposed next version", self.skill)
-        # The CHANGELOG anchor targets a heading that actually exists.
-        self.assertIn("### 4.5d. Decide MAJOR / MINOR / PATCH", self.skill)
-        self.assertIn("#45d-decide-major--minor--patch", self.changelog)
+        self.assertIn("## Version bump signals", self.changelog)
+        self.assertIn("](./SKILL.md#phase-2--version)", self.changelog)
+        self.assertIn("\n## Phase 2 — Version\n", self.skill)
+        for gone in ("§5d", "#45d-"):
+            self.assertNotIn(gone, self.changelog)
 
-    # -- R7: durable state persisted at each transition ------------------------
+    def test_skill_names_no_legacy_state(self):
+        for gone in (".superpowers/workflows", "state.json", "headSha", "mergeSha", "prUrl",
+                     "releaseUrl", "deployState", "gh pr create", "gh pr merge",
+                     "gh release create", "git tag -a", "--auto"):
+            self.assertNotIn(gone, self.skill)
 
-    def test_durable_state_is_persisted_at_every_transition(self):
-        self.assertIn("## Durable release state", self.skill)
-        state_section = self.section(
-            self.skill, "## Durable release state", "## The flow"
-        )
-        for field in ("headSha", '"pr"', "prUrl", "mergeSha", "tag", "releaseUrl", "deployState"):
-            self.assertIn(field, state_section)
-        self.assertIn("atomically", state_section)
-        self.assert_ordered(
-            self.skill,
-            "Persist `pr` + `prUrl`",  # Phase 2
-            "persist `mergeSha`",  # Phase 4, before anything else
-            "Persist `tag`",  # 4.5e
-            "persist `releaseUrl`",  # 4.5g
-            f"Delete `{STATE_PATH}`",  # Phase 6
-        )
-        phase_four = self.section(self.skill, "## Phase 4 — Merge", "## Phase 4.5")
-        self.assert_ordered(
-            phase_four, "mergeCommit.oid", "persist `mergeSha`", "before doing anything else"
-        )
+    def test_release_examples_parse_and_cover_every_subcommand(self):
+        from agent_tools import release
+        lines = [line for line in self.skill.splitlines()
+                 if line.startswith("release transaction ")]
+        actions = set()
+        for line in lines:
+            with self.subTest(line=line):
+                args = release.build_parser().parse_args(shlex.split(line)[1:])
+                self.assertEqual(args.area, "transaction")
+                actions.add(args.action)
+        self.assertEqual(actions, {"status", "preview", "run", "abandon"})
+        self.assertEqual(len(lines), 6)
+
+    def test_status_is_read_before_nothing_to_release(self):
+        phase0 = self.skill.split("## Phase 0", 1)[1].split("\n## ", 1)[0]
+        self.assertLess(phase0.index("release transaction status"),
+                        phase0.index("git describe --tags --abbrev=0"))
+
+    def test_resume_never_reuses_a_confirmation_and_sync_checks_out_first(self):
+        """D30 and D17: tokens rotate on every custody acquisition, so only tokens the user saw
+        in that turn are passed; a fast-forward of the local integration branch is preceded by
+        its checkout, or in a two-branch project it would move the default branch."""
+        self.assertIn("tokens from an earlier yes are never reused", self.skill)
+        self.assertIn("a confirmation is never carried across one", self.skill)
+        self.assertIn("`git checkout <integration>` and, only if that succeeded, "
+                      "`git merge --ff-only origin/<integration>`", self.skill)
+
+    def test_ownership_keeps_the_dispatch_marker_and_one_resolver_call(self):
+        marker = ("<!-- agent-dispatch: id=ship-release-owner role=ship-owner model=opus "
+                  "effort=high -->")
+        self.assertEqual(self.skill.count(marker), 1)
+        self.assertEqual(self.skill.count("resolve-project resolve --repo-root <checkout>"), 1)
 
     # -- R8: evals match the fixture repo and stay non-destructive -------------
 
-    def test_evals_cover_the_fixture_shape_and_never_execute_a_release(self):
-        notes = self.evals["notes"]
-        for fragment in ("plan-only", "kind=none", "fixture-repo"):
-            self.assertIn(fragment, notes)
-
+    def test_evals_cover_the_fixture_shape_and_release_only_in_the_sandbox(self):
         evals = self.evals["evals"]
         self.assertTrue(evals)
         for case in evals:
-            self.assertNotEqual(
-                case.get("mode", "plan-only"),
-                "pipeline",
-                f"eval {case['id']} must stay plan-only (non-destructive)",
-            )
+            if case.get("mode", "plan-only") == "pipeline":
+                self.assertEqual(
+                    (case.get("setup") or {}).get("kind"), "release-ready",
+                    f"eval {case['id']} is a pipeline case outside the release-ready sandbox",
+                )
+                continue
             guard = (case["prompt"]).lower()
             self.assertTrue(
                 any(
@@ -326,22 +210,16 @@ class ShipReleaseContractsTest(unittest.TestCase):
                 ),
                 f"eval {case['id']} prompt lacks a non-execution guard",
             )
+        self.assertTrue(
+            any(case.get("mode") == "pipeline" for case in evals),
+            "no ship-release pipeline case runs inside the release-ready sandbox",
+        )
 
-        single_branch = [
-            case
-            for case in evals
-            if "kind=none" in case["prompt"] or "single-branch" in case["name"]
-        ]
-        self.assertTrue(single_branch, "no eval exercises the single-branch/kind=none path")
-        expected = single_branch[0]["expected_output"]
-        for fragment in (
-            "git rev-parse <default>",
-            "--merged",
-            STATE_PATH,
-            "Phases 0 AND 1",
-            "double-tag",
-        ):
-            self.assertIn(fragment, expected)
+        self.assertTrue(
+            any("kind=none" in case["prompt"] or "single-branch" in case["name"]
+                for case in evals),
+            "no eval exercises the single-branch/kind=none path",
+        )
 
 
 if __name__ == "__main__":

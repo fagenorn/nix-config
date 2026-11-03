@@ -75,7 +75,7 @@ TRUSTED_SITES = (
 # RP7 layer 2: every component member the pins determine and the payload members that the pins, the estimate
 # table or the payload's own tables determine, under the error that refuses it. Each site exists whatever
 # the proof produced: `aggregate.actual` (outcome 0) and `tasks-7-8` (outcome 4) are measured in every
-# bundle. `tool.commit`, `tool.files`, `archive.shards`, a record's bytes or digest, an entry id and a
+# bundle. `tool.commit`, `tool.files_sha256`, `archive.shards`, a record's bytes or digest, an entry id and a
 # candidate's live entry are not determined without Git (RP7, CP17), so they are not here.
 GIT_FREE_SITES = {
     WitnessError: (

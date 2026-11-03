@@ -27,7 +27,7 @@ class PurposeSelectionTest(unittest.TestCase):
     def test_every_purpose_is_duplicate_free_and_dependency_closed(self):
         module = load_module()
         for purpose in module.PURPOSES:
-            for required in ((), ("release",)):
+            for required in ((), ("deploy",)):
                 with self.subTest(purpose=purpose, required=required):
                     selected = module.select(purpose, required)
                     ids = [check.id for check in selected]
@@ -42,7 +42,7 @@ class PurposeSelectionTest(unittest.TestCase):
         module = load_module()
         for purpose in module.PURPOSES:
             with self.subTest(purpose=purpose):
-                ids = [c.id for c in module.select(purpose, ("release",))]
+                ids = [c.id for c in module.select(purpose, ("deploy",))]
                 self.assertIn("host.capability.required", ids)
 
     def test_an_unknown_purpose_raises(self):
@@ -64,7 +64,7 @@ class RequiredCapabilitySelectionTest(unittest.TestCase):
                 with fixture() as tmp:
                     code, out, err = run("run", "--purpose", purpose,
                                          "--repo-root", str(make_root(tmp)),
-                                         "--require", "release")
+                                         "--require", "deploy")
                     self.assertEqual(code, 0, err)
                     report = json.loads(out)
                     self.assertEqual(report["outcome"], {

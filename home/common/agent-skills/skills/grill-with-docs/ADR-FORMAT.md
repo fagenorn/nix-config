@@ -1,16 +1,12 @@
 # ADR Format
 
-This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.paths.context` and never resolve, infer, or read project policy.
+ADRs live in the area they concern, `docs/areas/<slug>/adr/`, or in `system` when a decision spans areas or belongs to none, using the ADR home passed from the retained `bindings.paths.context` selection. Create the `adr/` directory with its first record.
 
-ADRs live in the area they concern: `docs/areas/<slug>/adr/`, named `NNN-kebab-title.md`. **Each directory numbers its own records** — three digits, starting at `001`. Writing one means listing that directory and taking its next free number at merge time; what other areas have numbered is irrelevant.
-
-**Which directory.** Use the ADR home passed from the phase owner's retained `bindings.paths.context` selection. The map's Areas table is the list to choose from. Create the `adr/` directory lazily, with the first record that needs it.
-
-**The id is `ADR-<slug>-NNN`** and the header line restates it: `# ADR-<slug>-NNN — Title`, where `<slug>` equals the containing area directory's name and `NNN` equals the filename's number. Both are linted. That full id is the only citation form anywhere in the repo — never a bare number, not even from inside the record's own area.
-
-**Parallel sessions** can now only collide inside one area, and the rule is first-to-land: the branch that reaches the integration branch first keeps the number; the later branch renumbers itself — file, header, and its own citations — before merging.
-
-**A record that was migrated or moved** carries a `- **Formerly:** ADR-<old-id>` line — immediately after its `- **Status:**` line where the repo carries one, otherwise directly under the header — whether the old id is a four-digit leftover from a migration or another area's `ADR-<slug>-NNN`. That line is the grep path from any historical citation to where the record now lives; living references are re-pointed at the same time, but citations inside other accepted records stay as they were written.
+- **Numbering is per directory**: `NNN-kebab-title.md`, three digits from `001`; take the next free number in that directory at merge time.
+- **The id is `ADR-<slug>-NNN`**, the directory's slug plus the file's number, restated in the header `# ADR-<slug>-NNN — Title`. The full id is the only citation form anywhere, even inside its own area.
+- **Parallel sessions** collide only within one area: the first branch to reach the integration branch keeps the number, and the later one renumbers its file, header and own citations before merging.
+- **A migrated or moved record** takes the destination's next free number, moves through the VCS's own move, and gains a `- **Formerly:** ADR-<old-id>` line right after its `- **Status:**` line, or under the header when there is none. Living references are re-pointed in the same commit; citations inside other accepted records stay as written.
+- Nobody maintains an ADR index: `ls` of an `adr/` directory is one.
 
 ## Template
 
@@ -20,22 +16,16 @@ ADRs live in the area they concern: `docs/areas/<slug>/adr/`, named `NNN-kebab-t
 {1-3 sentences: the context, what was decided, and why.}
 ```
 
-An ADR is a paragraph. The value is recording *that* a decision was made and *why* — not filling out sections. Add `Status` (`proposed | accepted | deprecated | superseded by ADR-<slug>-NNN`) only in repos that actually revisit decisions, `Considered Options` only when a rejected alternative will otherwise be re-proposed, and `Consequences` only for downstream effects a reader would not derive.
+An ADR is a paragraph recording *that* a decision was made and *why*. Add `Status` (`proposed | accepted | deprecated | superseded by ADR-<slug>-NNN`) only in repos that revisit decisions, `Considered Options` only when a rejected alternative would otherwise be re-proposed, and `Consequences` only for effects a reader would not derive.
 
 ## The gate
 
 Write an ADR only when all three hold:
 
-1. **Hard to reverse** — changing your mind later carries real cost.
-2. **Surprising without context** — a future reader will look at the code and wonder why on earth it was done this way.
-3. **The result of a real trade-off** — there were genuine alternatives and one was picked for stated reasons.
+1. **Hard to reverse**: changing course later carries real cost.
+2. **Surprising without context**: a future reader would wonder why it was done this way.
+3. **The result of a real trade-off**: there were genuine alternatives.
 
-Miss any one and skip it. Easy to reverse: you will just reverse it. Unsurprising: nobody will wonder. No alternative: there is nothing to record beyond "we did the obvious thing." Most decisions in a session fail this gate, and an ADR log that grows with every issue has stopped being readable.
+Typical passes: architectural shape, integration patterns between areas, technology choices with real lock-in, ownership and scope boundaries (the explicit no's especially), deliberate deviations from the obvious path, constraints invisible in the code, and rejections that would otherwise be re-litigated. Typical failures: swappable library picks, naming, anything the code states plainly or the coding standards settle.
 
-Typical passes: architectural shape, integration patterns between areas, technology choices carrying real lock-in, ownership and scope boundaries (the explicit no's especially), deliberate deviations from the obvious path, constraints invisible in the code, and rejections that would otherwise be re-litigated.
-
-Typical failures: library picks you could swap in an afternoon, naming, anything the code states plainly, and anything already settled by the coding standards.
-
-## Relationship to the glossary
-
-A decision that settles what a *word* means is not an ADR — it is a definition, and it belongs in the owning area's `CONTEXT.md`. Write an ADR when the decision constrains the *design*; write a glossary entry when it constrains the *vocabulary*. When both, the ADR states the decision and the glossary entry links to it.
+A decision about what a *word* means is a glossary definition in the owning area's `CONTEXT.md`, not an ADR. When a decision constrains both design and vocabulary, the ADR states it and the glossary entry links to it.

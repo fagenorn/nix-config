@@ -550,13 +550,13 @@ class PlatformRangeTest(ResolverTestCase):
                          "contract.schema_version.unsupported")
 
     def test_a_supported_non_current_schema_resolves(self):
-        """R2.5: no refusal, no deprecation notice, still four members."""
+        """R2.5: no refusal, no deprecation notice, still five members."""
         self.set_manifest(mutated_manifest(project_schema_versions=[1, 2]))
         code, snap, err = self.resolve(self.make_root())
         self.assertEqual(code, 0, err)
         self.assertEqual(
             sorted(snap),
-            ["bindings", "capabilities", "project", "schema_version"])
+            ["bindings", "capabilities", "project", "release", "schema_version"])
         for word in ("deprecat", "removal", "migration", "notice"):
             self.assertNotIn(word, json.dumps(snap).lower())
 
@@ -600,7 +600,7 @@ class ReasonCodePositionTest(ResolverTestCase):
 
         cases.append(("capability_unavailable", self.refusal(
             "resolve", "--repo-root", str(self.make_root()),
-            "--require", "release")))
+            "--require", "deploy")))
 
         broken = self.make_root()
         self.set_manifest(None)

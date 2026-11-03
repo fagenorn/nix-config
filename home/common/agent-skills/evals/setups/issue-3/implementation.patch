@@ -1,0 +1,52 @@
+diff --git a/README.md b/README.md
+index 0735449..1312032 100644
+--- a/README.md
++++ b/README.md
+@@ -6,7 +6,7 @@ A very small backlog kept in a single JSON file. Standard library only.
+ python3 -m tinytask add "write the spec"
+ python3 -m tinytask list
+ python3 -m tinytask done 1
+-python3 -m tinytask list --all
++python3 -m tinytask list --include-done
+ ```
+ 
+ Run the tests from the repo root:
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index e8988c4..096acd5 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -34,10 +34,10 @@ class CliTest(unittest.TestCase):
+         _, lines = run("--file", self.path, "list")
+         self.assertEqual(lines, ["2\topen\twrite the plan"])
+ 
+-    def test_list_all_includes_done_tasks(self):
++    def test_list_include_done_includes_done_tasks(self):
+         self.add("write the spec")
+         run("--file", self.path, "done", "1")
+-        _, lines = run("--file", self.path, "list", "--all")
++        _, lines = run("--file", self.path, "list", "--include-done")
+         self.assertEqual(lines, ["1\tdone\twrite the spec"])
+ 
+     def test_done_on_unknown_id_exits_non_zero(self):
+diff --git a/tinytask/cli.py b/tinytask/cli.py
+index b6e37ae..ecc3e2e 100644
+--- a/tinytask/cli.py
++++ b/tinytask/cli.py
+@@ -23,7 +23,7 @@ def build_parser():
+     add.add_argument("title")
+ 
+     listing = sub.add_parser("list", help="list tasks")
+-    listing.add_argument("--all", action="store_true", help="include done tasks")
++    listing.add_argument("--include-done", action="store_true", help="include done tasks")
+ 
+     done = sub.add_parser("done", help="mark a task done")
+     done.add_argument("id", type=int)
+@@ -41,7 +41,7 @@ def main(argv=None):
+ 
+     if args.command == "list":
+         tasks = store.load()
+-        if not args.all:
++        if not args.include_done:
+             tasks = [task for task in tasks if task.state != DONE]
+         for task in tasks:
+             print(format_task(task))

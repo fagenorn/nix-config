@@ -7,16 +7,22 @@ and the source-tree budget authority. It declares no TestCase, so it is
 support rather than a suite and is not listed as one.
 """
 
+import base64
 import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
+import time
+import tracemalloc
 from dataclasses import replace
 from pathlib import Path
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import RECORD_POLICY
+from agent_tools.review_expansion import MEMBER_MAX_BYTES
+from agent_tools.review_forecast import canonical_bytes
 from agent_tools.review_issue100 import ISSUE_100_PINS, Domain
 from agent_tools.review_issue121 import Issue121Pins
 from agent_tools.review_task7 import MODEL_VERSION, TARGETS, TASK7_PINS, RendererSpec, Task7Pins, derive_task7
@@ -302,3 +308,183 @@ def issue100_fixture(tmp) -> tuple:
                    historical=historical, fresh=_domain(ISSUE_100_PINS.fresh, fresh), expected_counts=counts,
                    parent_edges_sha256=telemetry_digest(parent_edges))
     return repo, live_repo, archive, pins
+
+
+BUNDLE = SOURCE / "tests/fixtures/retained-review-evidence"
+BOUND_SECONDS, BOUND_PEAK = 5.0, 32 * 2**20  # the stated bound of a maximal forged member (issue 256 D6)
+WINDOW = (1_000_000, MEMBER_MAX_BYTES)  # a maximal forged member's canonical bytes
+LONG = "L" * 120_000  # one long path, referenced at a single charged site
+
+
+class Overtime(Exception):
+    """The interval timer of `measured` fired inside the call."""
+
+
+def _overtime(signum, frame):
+    raise Overtime()
+
+
+def measured(call, *, traced=False, seconds=BOUND_SECONDS) -> tuple:
+    """`(exception or None, elapsed seconds, traced peak bytes)` of `call()` under a `seconds` interval
+    timer, which raises `Overtime` inside the call, so a slow call fails at the bound instead of hanging.
+    The peak is `tracemalloc`'s, taken only when `traced`; time is meaningful only on an untraced call (D7)."""
+    previous = signal.signal(signal.SIGALRM, _overtime)
+    if traced:
+        tracemalloc.start()
+    error, start = None, time.perf_counter()
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        try:
+            call()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    except Exception as exc:  # the caller asserts which one
+        error = exc
+    elapsed = time.perf_counter() - start
+    peak = tracemalloc.get_traced_memory()[1] if traced else 0
+    if traced:
+        tracemalloc.stop()
+    signal.signal(signal.SIGALRM, previous)
+    return error, elapsed, peak
+
+
+def committed(name: str) -> dict:
+    """A fresh decode of the committed retained payload `name`."""
+    return json.loads((BUNDLE / name).read_bytes())
+
+
+def _repacked(text: str, extra: bytes) -> str:
+    """The base85 string `text` with the raw bytes `extra` appended to what it packs."""
+    return base64.b85encode(base64.b85decode(text) + extra).decode("ascii")
+
+
+def maximal(build) -> tuple:
+    """`(payload, canonical bytes)` of `build(n)` for the largest `n` it finds whose bytes fit `WINDOW`."""
+    low, high = 1, 1
+    while len(canonical_bytes(build(high))) < WINDOW[0]:
+        low, high = high, high * 2
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(canonical_bytes(build(middle))) <= WINDOW[1]:
+            low = middle
+        else:
+            high = middle - 1
+    payload = build(low)
+    return payload, len(canonical_bytes(payload))
+
+
+def _head_edge(payload) -> int:
+    """The index of the head commit's first-parent edge in an issue-100 payload whose last commit is the head."""
+    return sum(len(listed) for listed in payload["parents"][:-1])
+
+
+def _added_at_head(payload, path: str) -> int:
+    """Add `path` by the head's first-parent edge of an issue-100 payload; its path index."""
+    payload["paths"].append(path)
+    payload["edges"][_head_edge(payload)].append(len(payload["records"]))
+    payload["records"].append(["A", len(payload["paths"]) - 1, None, 0, 1])
+    payload["record_sha256"] = _repacked(payload["record_sha256"], bytes(32))
+    return len(payload["paths"]) - 1
+
+
+def _fresh(payload, paths: list) -> None:
+    """Append one fresh row per path index, with no live entry, to an issue-100 payload."""
+    fresh = payload["tables"]["fresh"]
+    fresh["paths"] += paths
+    fresh["bytes"] += [1] * len(paths)
+    fresh["sha256"] = _repacked(fresh["sha256"], bytes(32 * len(paths)))
+    payload["live"] += [None] * len(paths)
+
+
+def rename_chain_100(n: int) -> dict:
+    """The committed issue-100 payload plus a chain of `n` renames, `forged/0` to `forged/n`, on the head's
+    first-parent edge, and one fresh row on every path of the chain (#254's I1)."""
+    payload = committed("issue-100-derived.json")
+    start, edge = len(payload["paths"]), _head_edge(payload)
+    payload["paths"] += [f"forged/{k}" for k in range(n + 1)]
+    for k in range(n):
+        payload["edges"][edge].append(len(payload["records"]))
+        payload["records"].append(["R100", start + k + 1, None, 0, 1, start + k])
+    payload["record_sha256"] = _repacked(payload["record_sha256"], bytes(32 * n))
+    _fresh(payload, list(range(start, start + n + 1)))
+    return payload
+
+
+SITES_100 = ("parent_edge", "tree_entry", "edge_record", "historical_row", "fresh_row", "contribution", "overlap",
+             "criterion")
+
+
+def amplified_100(site: str) -> dict:
+    """The committed issue-100 payload with the rows of one charged site of `expand_100` amplified past
+    the budget. Each is well formed: before issue 256 every one expanded without refusal (D8)."""
+    payload = committed("issue-100-derived.json")
+    if site == "parent_edge":  # 150,000 more parents of the head, each with an empty edge
+        payload["parents"][-1] += [0] * 150_000
+        payload["edges"] += [[]] * 150_000
+    elif site == "tree_entry":  # 36,000 more entries, never referenced
+        payload["entries"].append(["100644", "blob", _repacked("", bytes(20 * 36_000))])
+    elif site == "edge_record":  # one record referenced 100,000 more times
+        payload["edges"][_head_edge(payload)] += [0] * 100_000
+    elif site == "historical_row":
+        old = payload["tables"]["historical"]
+        old["bytes"] += [0] * 20_000
+        old["sha256"] = _repacked(old["sha256"], bytes(32 * 20_000))
+    elif site == "fresh_row":  # twelve fresh rows on one long path
+        _fresh(payload, [_added_at_head(payload, LONG)] * 12)
+    elif site == "contribution":  # 2,000 fresh rows on a path with 100 records
+        path = _added_at_head(payload, "forged")
+        payload["edges"][_head_edge(payload)] += [len(payload["records"]) - 1] * 99
+        _fresh(payload, [path] * 2_000)
+    elif site == "overlap":  # ten overlaps on one long fresh path
+        path = _added_at_head(payload, LONG)
+        _fresh(payload, [path])
+        payload["pending_overlaps"] += [[path, None]] * 10
+        payload["overlap_sha256"] = _repacked(payload["overlap_sha256"], bytes(96 * 10))
+    elif site == "criterion":  # 20,000 more empty criteria, each built with its 64-digit text digest
+        payload["criteria"] += [{"text": ""} for _ in range(20_000)]
+    return payload
+
+
+def edges_by_rows_121(n: int) -> dict:
+    """The committed issue-121 payload plus `n` edges that each modify one path, `forged`, and `n`
+    `aggregate.actual` rows on it (#254's M1). Each value is as short as expansion reads it, so that a
+    maximal member holds about 19,000 of each and its expansion at the base outlasts the bound (D8)."""
+    payload = committed("issue-121.json")
+    path = len(payload["paths"])
+    payload["paths"].append("forged")
+    for k in range(n):
+        payload["classes"].append([f"{k:x}", 0])
+        payload["edges"].append([["M", path, None, None, 0, "", ""]])
+    payload["records"]["aggregate.actual"]["rows"] += [[path, 0, ""]] * n
+    return payload
+
+
+SITES_121 = ("class", "tree_entry", "edge_record", "anchor", "final_record", "outcome_edge_list", "lineage")
+
+
+def amplified_121(site: str) -> dict:
+    """The committed issue-121 payload with the rows of one charged site of `expand_121` amplified past
+    the budget. Each is well formed: before issue 256 every one expanded without refusal (D8)."""
+    payload = committed("issue-121.json")
+    long = len(payload["paths"])
+    payload["paths"].append(LONG)
+    if site == "class":  # 60,000 more classes, beyond the last edge
+        payload["classes"] += [["", 0]] * 60_000
+    elif site == "tree_entry":  # 50,000 more entries, never referenced
+        payload["entries"].append(["100644", "blob", [""] * 50_000])
+    elif site == "edge_record":
+        payload["edges"][0] += [["M", long, None, None, 0, "", ""]] * 10
+    elif site == "anchor":
+        payload["anchors"] += [[long, "", ""]] * 10
+    elif site == "final_record":
+        payload["records"]["aggregate.projected"]["rows"] += [[long, 0, 0, 0]] * 10
+    elif site == "outcome_edge_list":  # one failure's evidence references, 30,000 more
+        failed = next(row for row in payload["outcomes"] if "failure" in row)
+        failed["failure"]["evidence_refs"] += [0] * 30_000
+    elif site == "lineage":  # a chain of 1,500 renames, one per edge: the sets copied grow by one each
+        start = len(payload["paths"])
+        payload["paths"] += [f"forged/{k}" for k in range(1_501)]
+        for k in range(1_500):
+            payload["classes"].append([f"{k:x}", 0])
+            payload["edges"].append([["R100", start + k + 1, None, None, 0, "", "", start + k]])
+    return payload

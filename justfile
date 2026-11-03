@@ -20,6 +20,26 @@ switch target_host=hostname: (build target_host)
   @echo "switching to new config for {{target_host}}"
   sudo ./result/sw/bin/darwin-rebuild switch --flake ".#{{target_host}}"
 
+# Mint a one-hour registration token per self-hosted runner repo (see
+# hosts/common/darwin-github-runners.nix) and hand it to the runner daemon, which
+# watches the file and registers on change. Needed once, after the first switch,
+# or again after deleting /var/lib/github-runners/<name>/.runner.
+[macos]
+register-runners target_host=hostname:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  repos=$(nix eval --raw ".#darwinConfigurations.{{target_host}}.config.services.github-runners" \
+    --apply 'rs: builtins.concatStringsSep " " (map (r: builtins.baseNameOf r.url) (builtins.attrValues rs))')
+  # install refuses a pipe as its source, so stage each token in a private file.
+  umask 077
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp"' EXIT
+  for repo in $repos; do
+    echo "registering runner for fagenorn/$repo" >&2
+    gh api -X POST "repos/fagenorn/$repo/actions/runners/registration-token" -q .token | tr -d '\n' > "$tmp"
+    sudo install -m 0440 -o root -g _github-runner "$tmp" "/var/lib/github-runner-tokens/$repo.token"
+  done
+
 ### linux
 # Build the NixOS configuration without switching to it
 [linux]
@@ -57,15 +77,26 @@ evals skill id:
 
 # The source package the agent recipes run (#175 D6).
 agent_tools_path := justfile_directory() / "python"
+system_result := justfile_directory() / "result"
 
-# Verify durable workflow lifecycle and skill contracts without agent/network timing.
-agent-workflow-tests:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v \
+# Verify durable workflow lifecycle and skill contracts, 4 test files at a time (--jobs N sets the cap; --jobs 1 runs them serially with live output).
+agent-workflow-tests *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.suite_runner {{args}} \
     home/common/agent-skills/tests/test_workflow_state.py \
+    home/common/agent-skills/tests/test_attempt_migration.py \
+    home/common/agent-skills/tests/test_attempt_custody.py \
+    home/common/agent-skills/tests/test_verification_suspension.py \
+    home/common/agent-skills/tests/test_verification_control.py \
+    home/common/agent-skills/tests/test_verification_direct.py \
+    home/common/agent-skills/tests/test_control_cutover.py \
+    home/common/agent-skills/tests/test_control_decisions.py \
+    home/common/agent-skills/tests/test_delivery_sealing.py \
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
+    home/common/agent-skills/tests/test_inprocess_cli.py \
+    home/common/agent-skills/tests/test_ship_delivery.py \
     home/common/agent-skills/tests/test_delivered_control.py \
     home/common/agent-skills/tests/test_workflow_delivery.py \
     home/common/agent-skills/tests/test_task_brief.py \
@@ -73,10 +104,13 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_review_package.py \
     tests/test_review_pack.py \
     tests/test_review_feasibility.py \
+    tests/test_review_gate.py \
+    tests/test_review_limits_replay.py \
     tests/test_review_projection_cases.py \
     tests/test_review_history.py \
     tests/test_review_record_view.py \
     tests/test_review_task7.py \
+    tests/test_review_expansion.py \
     tests/test_review_issue121.py \
     tests/test_review_compact121.py \
     tests/test_review_issue100.py \
@@ -89,9 +123,11 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
+    home/common/agent-skills/tests/test_eval_cases.py \
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \
+    home/common/agent-skills/tests/test_skill_lint.py \
     home/common/agent-skills/tests/test_diff_scope.py \
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_resolve_platform.py \
@@ -103,11 +139,29 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
+    home/common/agent-skills/tests/test_adopt_links.py \
+    home/common/agent-skills/tests/test_adopt_references.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
+    tests/test_lane_triage.py \
+    tests/test_skill_sections.py \
+    tests/test_phase_budget.py \
+    tests/test_context_meter.py \
+    tests/test_sdd_brief.py \
+    tests/test_sdd_gate.py \
+    tests/test_orchestrate_control.py \
     tests/test_launch_commit.py \
+    tests/test_launch_scope.py \
+    tests/test_review_range.py \
+    tests/test_verified_tree.py \
+    tests/test_verification_blocker.py \
+    tests/test_verification_observe.py \
+    tests/test_acceptance_record.py \
     tests/test_transaction_core.py \
+    tests/test_attempt_identity.py \
+    tests/test_attempt_custody.py \
+    tests/test_attempt_delivery.py \
     tests/test_transaction_custody.py \
     tests/test_transaction_invocation.py \
     tests/test_transaction_plan.py \
@@ -118,7 +172,25 @@ agent-workflow-tests:
     tests/test_transaction_receipt.py \
     tests/test_transaction_disposition.py \
     tests/test_transaction_core_sweep.py \
+    tests/test_release_grammar.py \
+    tests/test_release_profile.py \
+    tests/test_release_bridge.py \
+    tests/test_release_command.py \
+    tests/test_release_driver.py \
+    tests/test_release_crash_matrix.py \
+    tests/test_release_cutover.py \
+    tests/test_release_evidence.py \
+    tests/test_release_verification.py \
+    tests/test_forge_adapter.py \
+    tests/test_actions_health_adapter.py \
+    tests/test_guard_policy.py \
+    tests/test_release_adapter_core.py \
+    tests/test_codesigned_artifact_adapter.py \
+    tests/test_launchd_agent_adapter.py \
     tests/test_agent_costs.py \
+    tests/test_agent_owner_report.py \
+    tests/test_agent_owner_replay.py \
+    tests/test_agent_boot_report.py \
     tests/test_agent_model_drift_schema.py \
     tests/test_agent_model_drift_routing.py \
     tests/test_agent_model_drift_scheduling.py \
@@ -129,7 +201,12 @@ agent-workflow-tests:
     tests/test_promotion_deployment.py \
     tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
-    tests/test_branch_protection.py
+    tests/test_cache_proxy.py \
+    tests/test_cache_keepalive.py \
+    tests/test_claude_account_routing.py \
+    tests/test_branch_protection.py \
+    tests/test_suite_runner.py \
+    home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
 agent-model-matrix:
@@ -140,7 +217,11 @@ agent-model-matrix:
 agent-instruction-load *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load {{args}}
 
-# Check the skill contracts and agent-tool launchers against what the Nix build installs.
+# Run the Instruction Budget gate against origin/main; pass --raise-label for a labelled raise (#292 D9).
+agent-instruction-budget *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load check --base origin/main {{args}}
+
+# Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build
   @set -- $(nix-store --query --requisites ./result \
     | grep -- '-home-manager-files$' || true); \
@@ -148,13 +229,28 @@ agent-installed-skill-tests: build
       echo "expected exactly one built home-manager-files output; found $#" >&2; \
       exit 1; \
     fi; \
-    AGENT_SKILLS_INSTALLED_HOME="$1" python3 -m unittest -v \
+    installed_home="$1"; \
+    set -- $(nix-store --query --requisites ./result \
+      | grep -- '-claude-code-settings\.json$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one generated Claude settings artifact; found $#" >&2; \
+      exit 1; \
+    fi; \
+    settings="$1"; \
+    set -- $(nix-store --query --requisites ./result \
+      | grep -- '-claude-code-with-accounts-[^/]*$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one built Claude Code package; found $#" >&2; \
+      exit 1; \
+    fi; \
+    AGENT_SKILLS_INSTALLED_HOME="$installed_home" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" CLAUDE_SETTINGS_PATH="$settings" CLAUDE_CODE_PACKAGE="$1" python3 -m unittest -v \
       home/common/agent-skills/tests/test_dispatch_contracts.py \
       home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
       tests/test_agent_tools_launchers.py \
       tests/test_promotion_installed.py \
-      tests/test_impeccable_installed.py
+      tests/test_impeccable_installed.py \
+      tests/test_claude_code_installed.py
 
 # Full-shape retained tier (#249): the real retained objects and archive under `root`. Not part of agent-workflow-tests.
 agent-retained-tests root: build
@@ -167,7 +263,7 @@ agent-retained-tests root: build
     log=$(mktemp "${TMPDIR:-/tmp}/agent-retained-XXXXXX") || exit 1; \
     trap 'rm -f -- "$log"' EXIT; \
     status=0; \
-    AGENT_RETAINED_ROOT="{{root}}" AGENT_SKILLS_INSTALLED_HOME="$1" PYTHONPATH="{{agent_tools_path}}" \
+    AGENT_RETAINED_ROOT="{{root}}" AGENT_SKILLS_INSTALLED_HOME="$1" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" PYTHONPATH="{{agent_tools_path}}" \
       python3 -m unittest -v tests/test_review_retained_full.py tests/test_agent_tools_launchers.py \
       >"$log" 2>&1 || status=$?; \
     cat "$log"; \
@@ -197,7 +293,7 @@ show-claude-settings: build
 # `just` shows only the LAST comment line of a block in `just --list`, so each recipe
 # keeps its one-line summary immediately above it.
 
-# Apply .github/branch-protection.json to `main`, making `Nix Eval` a required check.
+# Apply .github/branch-protection.json to `main`, making `Nix Eval` and `Instruction Budget` required checks.
 protect-main:
   gh api --method PUT repos/{owner}/{repo}/branches/main/protection \
     --input .github/branch-protection.json

@@ -2,39 +2,61 @@
 
 `plan` inspects a target checkout inside a bounded, read-only boundary,
 classifies every candidate it finds under one closed action set, routes the
-repository to exactly one of five closed outcomes, and emits the seven-member
+repository to exactly one of five closed outcomes, and emits the eleven-member
 adoption plan document: `schema_version`, `plan`, `evidence`, `decisions`,
-`changes`, `verification`, `handoff` (R4.3).
+`changes`, `link_rewrites`, `path_references`, `reference_policies`,
+`reference_formatting`, `verification`, `handoff` (R4.3).
 
 The document is content-addressed. `plan_id` is the SHA-256 of canonical JSON
 over exactly `{adopt_schema_version, project_id, base_revision, platform,
-evidence, decisions.answered}` (D15), so two checkouts of one revision on one
-platform produce one identifier and any change to a source byte, the base
-revision or a platform input produces another. The absolute checkout path is
-deliberately outside that source and appears only in `handoff`.
+evidence, decisions.answered, link_rewrites, path_references,
+reference_policies, reference_formatting}` (D15), so two checkouts of one
+revision on one platform produce one identifier and any change to a source
+byte, the base revision or a platform input produces another. The absolute
+checkout path is deliberately outside that source and appears only in
+`handoff`.
 
 `plan` mutates nothing: it runs `git` and the resolver as child processes,
-reads tracked object ids rather than tracked bytes, and writes only under
+reads tracked object ids, and through git, rather than the working tree's
+bytes, the base revision's Markdown blobs and its non-Markdown text blobs that
+name a moved path's first segment, and writes only under
 `~/.agents/state/` (R4.1, D14).
 
 `apply` takes a stored `ready` plan by that id, refuses on any drift, and
 carries the whole transformation out in an isolated worktree in the same user
 scope — outside the target checkout, so it cannot appear in the target's own
-`git status` (D14). Every refusal in it mutates nothing; a failed pre-commit
+`git status` (D14). After the operations and before the gates it runs the
+formatter a `reference-format` answer declared over the files the reference
+answers edited, and refuses a formatter that changed any other planned file.
+Every refusal in it mutates nothing; a failed pre-commit
 gate leaves no commit and retains the worktree with its evidence (D17); a
 green run produces exactly one commit on one new branch and removes the
 worktree only after proving that the commit changes exactly the paths the plan
-declared and that the ref carries it. It never pushes, never merges and never
-writes the fleet registry.
+declared, that no Markdown file in it has more non-resolving relative links
+than its pre-move counterpart, and that the ref carries it. It never pushes,
+never merges and never writes the fleet registry.
 
-`verify` answers the conformance question read-only against the committed
-state — the contract resolves, every projection is in sync, no agent path is
-unclassified, and exactly one adoption evidence record is discoverable at
-`HEAD` with the migration map it names (D34). All three answers are reports on
-exit 0. `--register` is the one write to the user-scope fleet registry, and
-only once the adoption commit derived from that record is an ancestor of the
-contract's declared integration branch (D19); what it stores is an identity
-and a location and nothing else (D18).
+`verify` answers the conformance question read-only against one pinned
+revision — the contract resolves, every projection is in sync, no agent path is
+unclassified, and exactly one adoption evidence record is discoverable in it
+with the migration map it names (D34). Plain `verify` reads `HEAD`: the
+resolver runs on the working tree, the inventory comes from the index, and
+records are read at the `HEAD` commit it pins (D10). All three answers are
+reports on exit 0. `--register` is the one write to the user-scope fleet
+registry, and it reads nothing from the checkout's branches or files: it lists
+`origin`, fetches the remote default branch and, when the contract there names
+another integration branch, that branch too, each into
+`refs/remotes/origin/<branch>` (the fetched objects and those remote-tracking
+refs are the only repository writes), exports the pinned commit with
+`git archive` into a temporary directory removed on every exit, and runs every
+check there. When the default branch's contract does not resolve,
+`--integration-branch NAME` (accepted once, and only with `--register`) names
+the integration branch to read instead; `adopt_verify.remote_source` states
+its conditions, and the report then carries a `branch_override` member. It
+refuses `not_integrated` when that commit carries no evidence record or the
+adoption commit derived from it is not its ancestor (D19). What it stores is
+`{project_id, root}` with the real root (#148 D18), plus the `branch_override`
+member when the operand selected the branch.
 
 The resolver is consumed **only** as a child process, never imported (D26):
 `run_resolver` runs `agent_tools.resolve_project` under this process's own
@@ -57,7 +79,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from agent_tools import adopt_apply, adopt_inspection, adopt_planning, adopt_verify, agent_platform
+from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_planning, adopt_references, adopt_verify, agent_platform
 from agent_tools.siblings import sibling_argv
 
 
@@ -167,15 +189,35 @@ class Composition:
         self.overlap = overlap
 
 
-def compose_plan(root: Path, manifest: dict) -> Composition:
+def compose_plan(root: Path, manifest: dict,
+                 answered: list[dict]) -> Composition:
     """The one derivation both `plan` and `apply` read a repository through.
 
     `apply` re-runs exactly this to recompute the input digest and regenerate
     the canonical operation list (D33), so a second, subtly different
     derivation cannot exist to disagree with it. It writes nothing.
+    `answered` is the operator's answers to open `candidate-class`,
+    `path-reference` and `reference-policy` questions and its `reference-format`
+    declarations, applied before anything else is derived, so they enter
+    `plan_id`.
     """
     inventory = inspect_repository(root)
     found = adopt_inspection.classify_inventory(root, inventory)
+    contract_source = load_contract_source(root)
+    answered, references = adopt_planning.apply_answers(
+        root, found, inventory, answered,
+        adopt_planning.reference_excluded(contract_source),
+        adopt_planning.contract_command_ids(contract_source))
+    reference_answers = adopt_planning.reference_answers(answered)
+    policies = adopt_planning.policy_answers(answered)
+    path_references = adopt_references.summary(references, reference_answers,
+                                               policies)
+    reference_policies = adopt_references.policy_summary(
+        references, reference_answers, policies)
+    reference_files = adopt_references.rewritten(references,
+                                                 reference_answers, policies)
+    reference_formatting = adopt_planning.reference_formatting(
+        reference_files, answered)
     untracked = adopt_inspection.untracked_under(
         root, adopt_inspection.overlap_targets(found))
     for path in untracked:
@@ -186,7 +228,10 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
     evidence = sorted(found.entries,
                       key=lambda entry: (entry["path"], entry["provenance"]))
 
-    contract_source = load_contract_source(root)
+    links = adopt_links.derive_link_rewrites(
+        root, inventory.base_revision, found.moves,
+        [path for path, _ in adopt_planning.evidence_record_members(found)],
+        adopt_planning.generated_targets(contract_source))
     exit_code, payload = run_resolver(root, "resolve")
     contract_resolves = exit_code == 0
     repair_id = (None if contract_resolves
@@ -219,7 +264,14 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
             contract_id = project["id"]
     project_id, recommended, open_questions = adopt_planning.derive_identity(
         root, contract_id)
-    decisions = {"recommended": recommended, "answered": [],
+    open_questions = sorted(
+        open_questions + adopt_planning.candidate_questions(found),
+        key=lambda entry: (
+            adopt_inspection.QUESTION_IDS.index(entry["id"]),
+            entry.get("subject", "")))
+    open_questions += adopt_planning.reference_questions(
+        references, reference_answers, policies)
+    decisions = {"recommended": recommended, "answered": answered,
                  "open": open_questions}
 
     platform_block = {
@@ -229,13 +281,15 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
     }
     plan_id = adopt_planning.compute_plan_id(
         project_id, inventory.base_revision, platform_block, evidence,
-        decisions["answered"])
+        decisions["answered"], links.summary, path_references,
+        reference_policies, reference_formatting)
 
     ready_gates = adopt_planning.evaluate_ready_gates(
         root, found, contract_source, contract_resolves, unfixable, untracked,
-        decisions)
+        decisions, links.summary)
     head, tail, contents = adopt_planning.build_operations(
-        root, found, manifest, contract_source, plan_id)
+        root, found, manifest, contract_source, plan_id, links,
+        reference_files)
 
     agent_surface = any(
         entry["lifecycle_class"] != "runtime-residue"
@@ -262,9 +316,12 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
         records = adopt_planning.adoption_records(plan_id)
         bookkeeping, written = adopt_planning.bookkeeping_operations(
             found, plan_id, outcome, inventory.base_revision, platform_block,
-            decisions, ready_gates)
+            decisions, ready_gates, links.summary, path_references,
+            reference_policies, reference_formatting)
         contents.update(written)
         changes = head + bookkeeping + tail
+        adopt_planning.check_markdown_writes(changes, set(links.files))
+        adopt_planning.check_reference_writes(changes, set(reference_files))
         evidence_record = records["evidence_record"]
         migration_map = records["migration_map"]
     else:
@@ -301,6 +358,10 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
         "evidence": evidence,
         "decisions": decisions,
         "changes": changes,
+        "link_rewrites": links.summary,
+        "path_references": path_references,
+        "reference_policies": reference_policies,
+        "reference_formatting": reference_formatting,
         "verification": {
             "ready_gates": ready_gates,
             "commit_gates": [adopt_inspection.gate_entry(gate, "not_run", None)
@@ -324,7 +385,9 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
 def command_plan(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
-    document = compose_plan(root, manifest).document
+    answers = [{"id": question, "subject": subject, "value": value}
+               for question, subject, value in args.answer]
+    document = compose_plan(root, manifest, answers).document
     # Before the write, never after: storing is what binds this id to this
     # checkout, and the binding a stored document already carries is never
     # re-pointed at a second one (D15, D16).
@@ -357,6 +420,13 @@ def load_contract_source(root: Path) -> dict | None:
 def emit_human(document: dict) -> int:
     """A bounded semantic view. What is stored is unchanged (R4.8)."""
     plan = document["plan"]
+    rewrites = document["link_rewrites"]
+    inbound, outbound = rewrites["inbound"], rewrites["outbound"]
+    rows = document["path_references"]
+
+    def count(answer: str | None) -> int:
+        return sum(1 for row in rows if row["answer"] == answer)
+
     lines = [
         f"outcome: {plan['outcome']}",
         f"state:   {plan['state']}",
@@ -365,11 +435,46 @@ def emit_human(document: dict) -> int:
         f"plan id: {plan['plan_id']}",
         f"evidence: {len(document['evidence'])} entries",
         f"changes:  {len(document['changes'])} operations",
+        f"links: inbound {inbound['links']} in {len(inbound['files'])} "
+        f"files, outbound {outbound['links']} in {len(outbound['files'])} "
+        f"files, unrewritable {len(rewrites['unrewritable'])}, "
+        f"already broken {rewrites['already_broken']}",
+        f"references: {len(rows)} occurrences, "
+        f"extended {count('extend')}, rewritten {count('rewrite')}, "
+        f"retained {count('retain')}, open {count(None)}",
     ]
+    for row in document["reference_policies"]:
+        lines.append(
+            f"policy {row['subject']}: {row['files']} files, "
+            f"{row['occurrences']} occurrences, rewritable "
+            f"{row['rewritable']}, rewritten {row['rewritten']}, retained "
+            f"{row['retained']}, extended {row['extended']}, open "
+            f"{row['open']}")
+    for row in document["reference_formatting"]:
+        lines.append(
+            f"format {row['class']}: {len(row['files'])} files, "
+            f"command {row['command'] or 'none'}")
     for entry in document["decisions"]["recommended"]:
         lines.append(f"recommended {entry['id']}: {entry['value']}")
+    for entry in document["decisions"]["answered"]:
+        lines.append(f"answered {entry['id']} {entry['subject']}: "
+                     f"{entry['value']}")
     for entry in document["decisions"]["open"]:
-        lines.append(f"open {entry['id']}: {entry['recommendation']}")
+        if entry["id"] == "candidate-class":
+            answer = "none" if entry["value"] is None else entry["value"]
+            lines.append(f"open {entry['id']} {entry['subject']} "
+                         f"(answer: {answer}): {entry['recommendation']}")
+        elif entry["id"] == "reference-policy":
+            answer = "none" if entry["value"] is None else entry["value"]
+            lines.append(f"open {entry['id']} {entry['subject']} (answers: "
+                         f"{'|'.join(entry['answers'])}, recommended: "
+                         f"{answer}): {entry['recommendation']}")
+        elif entry["id"] == "path-reference":
+            lines.append(f"open {entry['id']} {entry['subject']} (answers: "
+                         f"{'|'.join(entry['answers'])}): "
+                         f"{entry['recommendation']}")
+        else:
+            lines.append(f"open {entry['id']}: {entry['recommendation']}")
     for blocker in plan["blockers"]:
         lines.append(f"blocked by {blocker['id']}: {blocker['message']}")
     lines.append(f"next: {document['handoff']['next_command'] or '(none)'}")
@@ -407,6 +512,9 @@ def require_manifest() -> dict:
 # authenticates the plan's *inputs*, and re-deriving the operation list through
 # `compose_plan` authenticates the operations, which live outside the digest in
 # a mutable stored document (D33). Nothing here trusts a stored operation.
+# The operator's answers travel inside the stored plan and are re-applied here;
+# the recomputed digest is what authenticates them, so `apply` takes no answer
+# of its own.
 # --------------------------------------------------------------------------
 
 
@@ -414,6 +522,7 @@ def command_apply(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     digest = adopt_apply.plan_digest(args.plan_id)
     document = adopt_apply.load_stored_plan(digest)
+    answers = adopt_apply.stored_answers(document)
     stored_plan = document["plan"]
     if stored_plan["state"] != "ready":
         raise adopt_inspection.refuse(
@@ -445,7 +554,7 @@ def command_apply(args: argparse.Namespace) -> int:
             "a retained worktree for this plan still exists and is never "
             "deleted without an acknowledged cleanup")
 
-    composed = compose_plan(root, manifest)
+    composed = compose_plan(root, manifest, answers)
     if composed.document["plan"]["plan_id"] != stored_plan["plan_id"]:
         raise adopt_inspection.refuse(
             "plan_stale", "adopt.plan.inputs_changed", "/plan/input_digest",
@@ -486,6 +595,9 @@ def command_apply(args: argparse.Namespace) -> int:
         for operation in changes:
             adopt_apply.execute_operation(
                 worktree, operation, composed.contents, run_resolver)
+        adopt_apply.run_formatting(
+            worktree, changes, composed.document["reference_formatting"],
+            run_resolver)
     except adopt_inspection.AdoptError as error:
         adopt_apply.retain_failure(digest, document, worktree, branch, [
             adopt_inspection.gate_entry(gate, "not_run", None)
@@ -528,11 +640,12 @@ def command_apply(args: argparse.Namespace) -> int:
 
     commit = adopt_inspection.git_or_fail(
         worktree, "rev-parse", "HEAD").decode("ascii", "strict").strip()
-    # The gates judged the worktree before the commit; these two judge the
-    # commit itself. Content first — a verification command or a `pre-commit`
-    # hook can stage after the last gate passed — then the ref.
+    # The gates judged the worktree before the commit; these judge the commit
+    # itself. Content and links first — a verification command or a
+    # `pre-commit` hook can stage after the last gate passed — then the ref.
     try:
         adopt_apply.prove_commit_content(worktree, commit, changes)
+        adopt_apply.prove_commit_links(worktree, commit, changes)
     except adopt_inspection.AdoptError as error:
         adopt_apply.retain_failure(digest, document, worktree, branch, gates,
                                    error.repair_id)
@@ -554,10 +667,22 @@ def command_apply(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # `verify`
 #
-# The conformance question, answered read-only against the *committed* state,
+# The conformance question, answered read-only against one pinned revision,
 # and — only with `--register` — the one write to the user-scope fleet
-# registry. The checks, the report and the registration transaction live in
-# `adopt_verify`; what is left here is the order they run in.
+# registry. Plain `verify` reads `HEAD` (resolver on the working tree,
+# inventory from the index, records at the `HEAD` commit it pins). `--register`
+# reads nothing from the checkout's branches or files: `adopt_verify.
+# remote_source` lists `origin`, fetches the remote default branch and, when
+# the contract there names another integration branch, that branch too, each
+# into `refs/remotes/origin/<branch>` (the fetched objects and those
+# remote-tracking refs are the only repository writes), and exports the pinned
+# commit with `git archive` into a temporary directory that is removed on every
+# exit, and every check runs there. When the default branch's contract does not
+# resolve, `--integration-branch` names the branch to read instead, and the
+# report and the registry entry then carry a `branch_override` member. The
+# checks, the report and the registration transaction live in `adopt_verify`;
+# what is left here is the order they run in and the refusal of a misused
+# operand.
 #
 # Every one of the three answers is a report on exit 0 (R6.4): exit 2 and the
 # D12 error object are reserved for the closed `ADOPT_ERROR_CODES`, so
@@ -570,11 +695,28 @@ def command_verify(args: argparse.Namespace) -> int:
     # Before the target is touched, so a broken platform installation surfaces
     # as an adoption failure rather than as a non-conformant repository.
     require_manifest()
+    if len(args.integration_branch) > 1:
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.verify.integration_branch_repeated", "",
+            "`--integration-branch` may be given at most once")
+    if args.integration_branch and not args.register:
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.verify.integration_branch_without_register",
+            "", "`--integration-branch` is accepted only with `--register`")
     root = adopt_inspection.require_repository(args.repo_root)
-    verification = adopt_verify.verify_repository(root, run_resolver)
-    if args.register and adopt_verify.registration_allowed(
-            verification.report["result"]):
-        adopt_verify.register_project(root, verification)
+    if not args.register:
+        verification = adopt_verify.verify_repository(
+            root, adopt_verify.head_source(root), run_resolver)
+    else:
+        operand = args.integration_branch[0] if args.integration_branch \
+            else None
+        with adopt_verify.remote_source(
+                root, run_resolver, operand) as source:
+            verification = adopt_verify.verify_repository(
+                root, source, run_resolver)
+        adopt_verify.require_integrated(verification)
+        if adopt_verify.registration_allowed(verification.report["result"]):
+            adopt_verify.register_project(root, verification)
     emit_json(verification.report)
     return adopt_verify.verify_exit_code(verification.report["result"])
 
@@ -597,6 +739,13 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--format", choices=("json", "human"), default="json",
                       help="the view printed on stdout; the stored document "
                            "is the same either way")
+    plan.add_argument("--answer", action="append", nargs=3, default=[],
+                      metavar=("QUESTION", "SUBJECT", "VALUE"),
+                      help="settle one open candidate-class, "
+                           "path-reference or reference-policy question, or "
+                           "declare a reference-format command (a command "
+                           "id of the contract, run by apply over a class's "
+                           "reference-edited files); repeatable")
     apply_plan = subparsers.add_parser(
         "apply", help="carry out a stored ready plan in an isolated worktree")
     # Two flags and no more: naming the content-addressed id is the exact-plan
@@ -617,8 +766,17 @@ def build_parser() -> argparse.ArgumentParser:
     # implicitly (R6.3).
     verify.add_argument("--register", action="store_true",
                         help="record the project in the user-scope fleet "
-                             "registry once its adoption commit is on the "
-                             "declared integration branch")
+                             "registry; conformance and integration are "
+                             "proven against the contract's integration "
+                             "branch fetched from origin, never the local "
+                             "checkout")
+    verify.add_argument("--integration-branch", action="append", default=[],
+                        metavar="NAME",
+                        help="with --register, the integration branch on "
+                             "origin to register against when the default "
+                             "branch's contract does not resolve; origin "
+                             "must list it and its own contract must resolve "
+                             "and name it")
     return parser
 
 

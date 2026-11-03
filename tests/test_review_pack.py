@@ -101,6 +101,26 @@ class ActualSelectionTest(unittest.TestCase):
             select_candidate((item,), self.limits,
                 transform=lambda value: replace(value, records=(record,)))
 
+    def test_candidate_builder_accepts_exactly_the_generated_evidence_kinds(self):
+        limits = ReviewLimits(16384, 4096, 8, 524288)
+        evidence = {"path": "gone.txt", "kind": "whole-file-deletion", "source_diff_bytes": 5000,
+                    "base": {"blob_sha": "c" * 40, "bytes": 4900, "content_sha256": "d" * 64,
+                             "line_count": 70},
+                    "head": None}
+
+        def item(value):
+            payload = canonical_manifest({"review-package-generated-evidence": value})
+            return CandidateInput(None, (ReviewRecord("gone.txt", payload, 5000, value),), (),
+                {"files_changed": 1, "insertions": 0, "deletions": 70}, 5000,
+                "a" * 40, "b" * 40, "review.json")
+
+        candidate = pack_input(item(evidence), limits)
+        self.assertEqual(candidate.status, "within_budget")
+        self.assertEqual(candidate.manifest["interface_version"], 2)
+        self.assertEqual(candidate.manifest["generated_evidence"], [evidence])
+        with self.assertRaisesRegex(GenerationError, "invalid generated evidence record"):
+            pack_input(item({**evidence, "kind": "whole-file-removal"}), limits)
+
     def test_fresh_view_cannot_override_pinned_record_policy(self):
         with self.assertRaisesRegex(GenerationError, "unsupported diff view"):
             git_diff(Path("."), "a" * 40, "b" * 40, "--no-renames")

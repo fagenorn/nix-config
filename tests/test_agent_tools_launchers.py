@@ -1,13 +1,13 @@
 """Installed-layout seam for the agent_tools launchers (#175 D8, D11; #179 D8; #177 D9; parent D9).
 
-Run: just agent-installed-skill-tests. That recipe builds first and passes the
-built home-manager-files tree as AGENT_SKILLS_INSTALLED_HOME. Every
-`.agents/bin` entry that names the package, other than `NOT_LAUNCHERS`, must be a
-generated launcher, and
-each launcher must run its store module even with a fake `agent_tools` and a fake
-top-level `agent_platform` on the
-`PYTHONPATH`, `NIX_PYTHONPATH` (with a `.pth` file) and working-directory
-channels.
+Run: just agent-installed-skill-tests. The installed and retained recipes build
+first and pass AGENT_SKILLS_INSTALLED_HOME and AGENT_TOOLS_SYSTEM_RESULT. The
+system closure must hold one package build, with every agent-tools launcher
+execing one environment that imports that build. Every installed `.agents/bin`
+entry that names the package, other than `NOT_LAUNCHERS`, must be a generated
+launcher. Each launcher must run its store module even with a fake `agent_tools`
+and a fake top-level `agent_platform` on the `PYTHONPATH`, `NIX_PYTHONPATH` (with
+a `.pth` file) and working-directory channels.
 """
 
 import hashlib
@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -25,28 +26,38 @@ from .hostile_git_test_support import hostile_git_env
 from .retained_evidence_test_support import ANCHOR_SHA256, BUNDLE
 
 INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
+SYSTEM_RESULT_ENV = "AGENT_TOOLS_SYSTEM_RESULT"
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 PACKAGE_BYTES = b"agent_tools"
-# `writeShellScript` prepends the shebang and appends a newline to the body.
+# `launcherScript` (lib/agent-tools.nix) writes a `-p` shebang line, then the body and a newline.
 LAUNCHER = re.compile(
     rb"#![^\n]+\n"
     rb"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
     rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
     rb' -I -m agent_tools\.(?P<module>[a-z][a-z0-9_]*) "\$@"\n*'
 )
+SCRIPT_LAUNCHER = re.compile(
+    rb"#![^\n]+\n"
+    rb"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+    rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
+    rb' -I (?P<script>/nix/store/[^/\s]+-workflow-state\.py) "\$@"\n*'
+)
 MARKER = "HOSTILE agent_tools IMPORTED"
 HOSTILE_EXIT = 97
 TIMEOUT_SECONDS = 60
-# Flat installed scripts that name the package without being launchers: only
-# `workflow-state`, whose transitional lookups run `agent_tools.resolve_project`
-# and import `agent_tools.host_admission` from source (#177 D6, D13). #178
-# deletes this entry with them.
+# Flat installed scripts that name the package without being `-m` launchers: only
+# `workflow-state`, a script launcher under the same interpreter, checked by
+# `SCRIPT_LAUNCHER` (#337 D11, D16); its transitional lookups run
+# `agent_tools.resolve_project` and load `host_admission` from `~/.agents/lib/python`
+# (#177 D6, D13). #178 deletes this entry with them.
 NOT_LAUNCHERS = ("workflow-state",)
-# The commands #175, #179, #177 and #249 accepted as launchers: a floor, not the full
-# set, which the command table in lib/agent-tools.nix owns (#175 D8).
+# The commands #175, #179, #177, #249, #264, #279, #353, #403 and #424 accepted as launchers: a floor, not the
+# full set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
-                  "context-map-lint", "derive-review-feasibility-fixtures", "diff-scope",
-                  "replay-retained", "resolve-project", "review-feasibility", "review-package")
+                  "context-map-lint", "context-meter", "derive-review-feasibility-fixtures",
+                  "diff-scope", "lane-triage", "orchestrate-control", "replay-retained", "resolve-project",
+                  "review-feasibility", "review-package", "review-range", "sdd-gate",
+                  "ship-delivery")
 # The retained commands (#249) and their modules: refusal parity cases below.
 RETAINED = {"derive-review-feasibility-fixtures": "derive_review_feasibility_fixtures",
             "replay-retained": "replay_retained"}
@@ -148,6 +159,114 @@ class AgentToolsLauncherTest(unittest.TestCase):
     def run_child(self, argv, env, cwd):
         return subprocess.run(argv, env=env, cwd=cwd, capture_output=True, text=True,
                               timeout=TIMEOUT_SECONDS, check=False)
+
+    def workflow_state_launcher(self):
+        data = (self.root / ".agents/bin/workflow-state").read_bytes()
+        match = SCRIPT_LAUNCHER.fullmatch(data)
+        self.assertIsNotNone(match, data[:300])
+        return match
+
+    def system_closure(self) -> list[Path]:
+        value = os.environ.get(SYSTEM_RESULT_ENV)
+        self.assertIsNotNone(value, f"{SYSTEM_RESULT_ENV}={value!r} is unset")
+        result = Path(value)
+        self.assertTrue(result.is_absolute() and result.exists(),
+                        f"{SYSTEM_RESULT_ENV}={value!r} is not an existing absolute path")
+        done = subprocess.run(["nix-store", "--query", "--requisites", str(result)],
+                              capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
+                              check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        paths = sorted(Path(line) for line in done.stdout.splitlines() if line)
+        self.assertTrue(paths, f"{SYSTEM_RESULT_ENV}={value!r} has an empty closure")
+        return paths
+
+    def package_builds(self) -> set[Path]:
+        with (Path(__file__).resolve().parents[1] / "python/pyproject.toml").open("rb") as source:
+            project = tomllib.load(source)["project"]
+        package = re.compile(r"[0-9a-z]{32}-python[^-]+-"
+                             + re.escape(project["name"]) + "-" + re.escape(project["version"]))
+        return {path for path in self.system_closure() if package.fullmatch(path.name)}
+
+    def closure_launchers(self) -> list[tuple[Path, str]]:
+        launchers = []
+        for path in self.system_closure():
+            if not re.fullmatch(r"[0-9a-z]{32}-agent-tools-.+", path.name):
+                continue
+            self.assertTrue(path.is_file(), f"{path} is not a launcher file")
+            data = path.read_bytes()
+            match = LAUNCHER.fullmatch(data) or SCRIPT_LAUNCHER.fullmatch(data)
+            self.assertIsNotNone(match, f"{path} is not a recognized agent-tools launcher")
+            launchers.append((path, match["python"].decode()))
+        return launchers
+
+    def test_the_system_closure_holds_one_agent_tools_build(self):
+        builds = self.package_builds()
+        self.assertEqual(len(builds), 1, f"agent_tools builds: {sorted(map(str, builds))}")
+
+    def test_every_launcher_in_the_system_closure_execs_one_environment(self):
+        launchers = self.closure_launchers()
+        self.assertTrue(launchers, "the system closure has no agent-tools launchers")
+        pythons = {python for _path, python in launchers}
+        self.assertEqual(len(pythons), 1,
+                         f"launcher environments: {sorted(pythons)}; "
+                         f"launchers: {[str(path) for path, _python in launchers]}")
+        paths = {path.resolve() for path, _python in launchers}
+        for entry in sorted((self.root / ".agents/bin").iterdir()):
+            if PACKAGE_BYTES in entry.read_bytes() or entry.name == "workflow-state":
+                with self.subTest(entry=str(entry)):
+                    self.assertIn(entry.resolve(), paths,
+                                  f"{entry} -> {entry.resolve()} is outside closure launchers")
+
+    def test_each_system_closure_environment_imports_agent_tools_from_the_closure_build(self):
+        builds = self.package_builds()
+        self.assertEqual(len(builds), 1, f"agent_tools builds: {sorted(map(str, builds))}")
+        build, = builds
+        pythons = {python for _path, python in self.closure_launchers()}
+        self.assertTrue(pythons, "the system closure has no agent-tools environments")
+        clean = {key: value for key, value in os.environ.items() if key not in
+                 ("NIX_PYTHONPATH", "NIX_PYTHONPREFIX", "NIX_PYTHONEXECUTABLE")}
+        for python in sorted(pythons):
+            with self.subTest(python=python):
+                done = self.run_child(
+                    [python, "-I", "-c", "import agent_tools; print(agent_tools.__file__)"],
+                    clean, self.hostile)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                imported = Path(done.stdout.strip()).resolve()
+                self.assertIn(build, imported.parents,
+                              f"{python} imports {imported}, outside {build}")
+
+    def test_workflow_state_ignores_a_hostile_agent_tools(self):
+        completed = self.run_child(
+            [str(self.root / ".agents/bin/workflow-state"), "--help"],
+            self.hostile_env(), self.hostile)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.startswith("usage: workflow-state "))
+        self.assertNotIn(MARKER, completed.stdout + completed.stderr)
+
+    def test_installed_workflow_state_mints_a_run_against_the_store_core(self):
+        with tempfile.TemporaryDirectory() as repo:
+            completed = self.run_child(
+                [str(self.root / ".agents/bin/workflow-state"), "init-run", "--repo-root",
+                 repo, "--creation-key", "installed-check"],
+                self.hostile_env(), self.hostile)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertRegex(json.loads(completed.stdout)["run_id"], r"^rel_[0-9a-f-]{36}$")
+            self.assertNotIn(MARKER, completed.stdout + completed.stderr)
+            self.assertTrue((Path(repo) / ".superpowers/attempt-transactions").is_dir())
+
+    def test_ship_delivery_uses_the_real_validator_with_hostile_python_channels(self):
+        context = self.hostile / "bad-context.json"
+        context.write_text('{"interface_version":2}', encoding="utf-8")
+        recipe = self.hostile / "recipe.json"
+        recipe.write_text('{"observed_at":"2026-10-22T00:00:00Z","requested_stage":null}',
+                          encoding="utf-8")
+        completed = self.run_child([str(self.root / ".agents/bin/ship-delivery"),
+            "checkpoint", "--context", str(context), "--input", str(recipe)],
+            self.hostile_env(), self.hostile)
+        self.assertEqual((completed.returncode, completed.stdout), (2, ""))
+        self.assertIn("artifact-budget exited 2: artifact-budget: invalid report", completed.stderr)
+        self.assertNotIn(MARKER, completed.stdout + completed.stderr)
+        self.assertTrue((self.root / ".agents/share/ship-delivery.md").is_file())
 
     def test_the_command_table_generates_each_deployed_command(self):
         launchers = self.launchers()
@@ -402,7 +521,7 @@ class AgentToolsLauncherTest(unittest.TestCase):
             + wire(task).decode() + '```\n')
         head = commit('process package')
         before = git('status', '--porcelain'), git('rev-parse', 'HEAD^{tree}')
-        projected = {}
+        projected, summaries = {}, {}
         for label in ('source', 'built'):
             outdir = top / (label + '-out'); outdir.mkdir()
             root = outdir / 'review.json'
@@ -428,6 +547,13 @@ class AgentToolsLauncherTest(unittest.TestCase):
                              (1, 'core', 'review.json'))
             self.assertEqual((value['state'], value['budget_status'], value['violations'],
                               value['recommended_boundary']), ('complete', 'within_budget', [], None))
+            gated = command(label, 'review-feasibility', 'gate', '--plan', str(repo / 'plan.md'),
+                '--base', base, '--head', head, '--completed-through', '1')
+            confirmed = command(label, 'review-feasibility', 'confirm', '--plan', str(repo / 'plan.md'),
+                '--base', base, '--input', '-', payload=gated.stdout)
+            self.assertEqual((gated.returncode, confirmed.returncode), (0, 0), gated.stderr + confirmed.stderr)
+            self.assertEqual(confirmed.stdout, gated.stdout)
+            summaries[label] = gated.stdout
             validated = command(label, 'review-feasibility', 'validate-result', '--input', '-',
                                 '--producer-exit', '0', payload=result.stdout)
             self.assertEqual((validated.returncode, validated.stdout), (0, result.stdout), validated.stderr)
@@ -450,6 +576,7 @@ class AgentToolsLauncherTest(unittest.TestCase):
                 env=checkenv, capture_output=True)
             self.assertEqual(refused.returncode, 2, refused.stderr)
         self.assertEqual(projected['source'], projected['built'])
+        self.assertEqual(summaries['source'], summaries['built'])
         self.assertEqual((top / 'source-out/review.json').read_bytes(),
                          (top / 'built-out/review.json').read_bytes())
         for a in (top / 'source-out/review.shards').iterdir():

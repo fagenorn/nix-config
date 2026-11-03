@@ -170,7 +170,7 @@ class ClaimLedgerTest(LifecycleHarness, unittest.TestCase):
         result.write_text(json.dumps(self.merged_result(14)), encoding="utf-8")
         return self.run_cli("finish", "--repo-root", self.root, "--run-id", self.run_id,
                             "--issue", 14, "--attempt", 1, "--result-file", result,
-                            "--now", now, ok=ok)
+                            "--now", now, "--action-id", "14:1:1", ok=ok)
 
     def test_finish_releases_the_claim_in_its_own_write(self):
         self.admitted()
@@ -227,15 +227,16 @@ class ClaimLedgerTest(LifecycleHarness, unittest.TestCase):
 
     def test_schema_three_reads_migrate_to_a_null_admission(self):
         self.admitted()
-        self.write_state(self._as_legacy(self.read_state(), 3))
+        self.install_legacy(self.read_state(), "orchestrate-14", 3)
         self.assertEqual(self.check_launch(action_id="14:1:1")["reason"], "current")
         self.init_run()  # a locked read persists the migration
         state = self.read_state()
-        self.assertEqual((state["schema_version"], state["admission"]), (6, None))
+        self.assertEqual((state["schema_version"], state["admission"]), (11, None))
+        self.assert_bound(state)
 
     def test_direct_runs_carry_no_admission(self):
-        self.acquire_direct()
-        state = json.loads(self.direct_state_path("direct-73-000001").read_text())
+        owner = self.acquire_direct()
+        state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
         self.assertIsNone(state["admission"])
 
 
@@ -255,7 +256,7 @@ class AdmissionSweeps(LifecycleHarness):
     def sweep(self, now, issues=(12, 14), *, recorded=(), unobserved=(), forge=None,
               owners=None, ok=True, **fields):
         def fact(n):
-            path = str(self.root / f"wt-{n}")
+            path = str(getattr(self, "worktree_base", self.root) / f"wt-{n}")
             if n in recorded:
                 return self.worktree_fact(n, recorded={"path": path,
                                                        "state": "matching_issue_branch"})
@@ -297,6 +298,7 @@ class ControlAdmissionTest(AdmissionSweeps, unittest.TestCase):
         self.assertEqual((self.kinds(woken), woken["admission"]["waiting"]),
                          ([("wait", None)], [14]))
         self.run_id = "issue-14-seven"
+        self.worktree_base = self.root / "seven"  # a run holds its own worktrees (#338 D22)
         self.slots(7)
         self.init_run()
         both = self.sweep(T0)
@@ -336,6 +338,7 @@ class ControlAdmissionTest(AdmissionSweeps, unittest.TestCase):
                                        ("resumed", (12,), "superseded")):
             with self.subTest(label):
                 self.run_id = f"reap-{label}"
+                self.worktree_base = self.root / label  # a run holds its own worktrees (#338 D22)
                 self.slots(4)
                 self.init_run()
                 self.sweep(T0, issues=(12,))
@@ -404,7 +407,7 @@ class ControlAdmissionTest(AdmissionSweeps, unittest.TestCase):
     def test_migrated_live_custody_is_adopted_and_new_admission_waits(self):
         self.init_run()  # the harness declaration: 64 slots
         self.sweep(T0)
-        self.write_state(self._as_legacy(self.read_state(), 3))
+        self.install_legacy(self.read_state(), "orchestrate-12-14", 3)
         self.slots(4)
         response = self.sweep("2026-08-13T20:05:00Z", issues=(12, 14, 15),
                               recorded=(12, 14), max_parallel=3)

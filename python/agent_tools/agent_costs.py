@@ -18,9 +18,9 @@ Interpretation note — this is comparative telemetry, NOT billing data. The
 dominant token bucket, cache reads, measures logical context processing: every
 turn re-reads the session prefix from cache, so cache_read counts the tokens
 the model attended to, priced at the list cache-read rate. The estimated $
-figures apply public list prices per family and exist so runs can be compared
-against each other and against the 35-day baseline; they are not what anyone
-was billed.
+figures apply public list prices per model ID (agent_tools.model_pricing) and
+exist so runs can be compared against each other; they are not what anyone was
+billed.
 
 Beyond the per-issue cost table this also derives (heuristically where noted):
 issue outcome (completed/blocked/abandoned from each root session's final
@@ -30,6 +30,29 @@ model+effort mix per group, per-session peak context (max input+cache tokens of
 a single turn), stop_reason counts plus lingering agents killed at exit, and
 short user "proceed" nudges. `--artifacts DIR` adds a filesystem pass over
 spec/plan markdown: bytes, fenced-code share, and decision-section share.
+
+`--report cache` prints the cache report instead of the per-issue tables (issue
+421, agent_tools.agent_cache_report): cache deaths by agent type and cause, the
+cache-read cost of context above `--context-threshold` tokens (default 120,000)
+with peak-context percentiles, and subagent start-up overhead, over the calls
+whose start lies between `--events-since` and `--events-before` when both are
+given. python/README.md (agent-costs) holds its contract.
+
+`--report owners` prints the owner report (issue 432, agent_tools.agent_owner_report):
+dollars per delivered issue by lineage (one per run and issue, owner transcripts and
+their descendants), per arm and for fresh-owner boots, as text or `--format json`.
+With `--eval-results PATH --eval SKILL:ID` it groups the trials of a lifecycle eval
+instead of live issues. `--policy NAME=SPEC` (repeatable) and `--sweep` replay the lineages
+under hand-off policies (agent_tools.agent_owner_replay) and fill the simulated-arms and
+calibration tables. `--started SINCE..BEFORE` instead selects the lineages that started in that
+window and counts each one's whole spend once it has settled `--settle-days` (default 4) before
+the report end. `--baseline SINCE..BEFORE` adds a second window and compares its lineages, the
+baseline arm, with those of `--started`, the candidate arm. `--proxy-log PATH` adds the
+keepalive ping spend of one cache-proxy log.
+
+`--report boot` prints the boot report (issue 448, agent_tools.agent_boot_report);
+`--baseline SINCE..BEFORE` beside `--events-since/--events-before` splits its boots into a
+baseline and a candidate arm (issue 504).
 """
 
 import argparse
@@ -45,16 +68,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.canonical import telemetry_digest
+from agent_tools.model_pricing import usage_cost
 
-# List price per million tokens: (input, output, cache_write_1h, cache_write_5m, cache_read).
-# Matches the pricing model the transcript-mining report used, so numbers stay
-# comparable to its 35-day baseline. claude-fable-5 is priced as Opus-class.
-PRICING = {
-    "opus": (15.0, 75.0, 30.0, 18.75, 1.50),
-    "sonnet": (3.0, 15.0, 6.0, 3.75, 0.30),
-    "haiku": (1.0, 5.0, 2.0, 1.25, 0.10),
-}
-
+ROOT_LABEL = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)=(.+)")
 SCHEMA_VERSION = 1
 RECORD_KIND = "agent-cost-record"
 EXECUTION_TELEMETRY_SCHEMA_VERSION = 1
@@ -124,7 +140,7 @@ def model_family(model):
         return "sonnet"
     if "haiku" in m:
         return "haiku"
-    # opus, fable and anything unrecognised are priced Opus-class.
+    # opus, fable and anything unrecognised group under "opus"; pricing is per model.
     return "opus"
 
 
@@ -349,11 +365,6 @@ def scan_file(path):
             c_out = usage.get("output_tokens") or 0
             c_read = usage.get("cache_read_input_tokens") or 0
             c_create = usage.get("cache_creation_input_tokens") or 0
-            split = usage.get("cache_creation") or {}
-            cw_1h = split.get("ephemeral_1h_input_tokens") or 0
-            cw_5m = split.get("ephemeral_5m_input_tokens") or 0
-            if cw_1h + cw_5m == 0:
-                cw_5m = c_create  # no TTL breakdown recorded; assume 5m
 
             fresh += f_in
             output += c_out
@@ -364,10 +375,7 @@ def scan_file(path):
                 peak_ctx = ctx
 
             family = model_family(model)
-            p_in, p_out, p_1h, p_5m, p_read = PRICING[family]
-            message_cost = (
-                f_in * p_in + c_out * p_out + cw_1h * p_1h + cw_5m * p_5m + c_read * p_read
-            ) / 1e6
+            message_cost, _ = usage_cost(model, usage)
             cost += message_cost
             cost_by_family[family] += message_cost
 
@@ -919,7 +927,7 @@ def human(n):
 
 
 def percentile(values, p):
-    """Nearest-rank percentile; 0 for an empty list."""
+    """The sorted value at index round(p/100 * (n-1)), half-to-even and clamped; 0 for none."""
     if not values:
         return 0
     ordered = sorted(values)
@@ -1270,14 +1278,17 @@ def _declaration(value, reasons):
     role = value.get("role") if isinstance(value.get("role"), str) else None
     subagent_type = value.get("subagent_type")
     # The matrix is deliberately not read here. These are the source's known
-    # canonical role spellings; shared transport types remain ambiguous.
+    # canonical role spellings; an agent type that serves several roles
+    # (implementer, mechanic, reviewer, and since issue 447 issue-owner, which
+    # serves issue-owner, auto-owner and ship-owner) stays ambiguous without a
+    # declared role.
     canonical = {"auto-owner", "bookkeeper", "codex-transport", "conformance-reviewer", "explorer",
                  "implementer", "issue-owner", "mechanic", "researcher", "reviewer",
-                 "reviewer-lite", "ship-owner"}
+                 "reviewer-lite", "ship-owner", "task-implementer"}
     if role in canonical:
         authority = "structured-dispatch" if dispatch else "runtime-agent-type"
         return {"dispatch_id": dispatch, "role": role, "authority": authority}
-    if subagent_type in canonical - {"reviewer", "mechanic"}:
+    if subagent_type in canonical - {"implementer", "issue-owner", "mechanic", "reviewer"}:
         return {"dispatch_id": dispatch, "role": subagent_type,
                 "authority": "runtime-agent-type"}
     reasons["role_ambiguous"] += 1
@@ -1727,6 +1738,138 @@ def print_artifact_stats(per_class):
         )
 
 
+def _positive_int(text):
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{text} is not a positive integer")
+    return value
+
+
+def _non_negative_int(text):
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{text} is not a non-negative integer")
+    return value
+
+
+def _window_label(args, cutoff, event_start, event_end):
+    """The window a mtime-or-event report names: the event bounds, the day count or all time."""
+    if event_start:
+        return f"events {format_rfc3339_utc(event_start)} → {format_rfc3339_utc(event_end)}"
+    return f"last {args.days}d by file mtime" if cutoff else "all time"
+
+
+def _boot_report(ap, args, cutoff, event_start, event_end, executor_factory):
+    """Run `--report boot`: split each fresh owner's boot into buckets, print text or JSON."""
+    # only for the boot report (issue 448); agent_owner_report for its arms and windows (issue 504)
+    from agent_tools import agent_boot_report, agent_owner_report
+
+    try:
+        roots = agent_boot_report.parse_roots(
+            args.projects_dir or [os.path.expanduser("~/.claude/projects")],
+            hostname=agent_boot_report.short_hostname())
+    except ValueError as error:
+        ap.error(str(error))
+    windows = [(agent_owner_report.LIVE_ARM, event_start, event_end)]
+    window = _window_label(args, cutoff, event_start, event_end)
+    if args.baseline is not None:
+        try:
+            since, before = agent_owner_report.parse_range(args.baseline)
+        except ValueError as error:
+            ap.error(f"--baseline: {error}")
+        if since < event_end and event_start < before:
+            ap.error("--baseline must not overlap --events-since/--events-before")
+        windows = (agent_owner_report.StartWindow(agent_owner_report.BASELINE_ARM, since, before),
+                   agent_owner_report.StartWindow(agent_owner_report.CANDIDATE_ARM,
+                                                  event_start, event_end))
+        window = agent_owner_report.start_window_label(windows)
+    for _, root in roots:
+        if not root.is_dir():
+            sys.exit(f"no transcript root at {root}")
+    collected = [
+        (arm, [agent_boot_report.collect_host(
+            label, root, arm=arm, cutoff=since.timestamp() if since else cutoff,
+            since=since, before=before, executor_factory=executor_factory)
+            for label, root in roots])
+        for arm, since, before in windows]
+    document = agent_boot_report.build_document(collected, window=window)
+    if args.format == "json":
+        json.dump(document, sys.stdout, separators=(",", ":"))
+        print()
+    else:
+        agent_boot_report.print_document(document, top=args.top)
+
+
+def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
+    """Run `--report owners`: collect the lineages, print the text tables or the JSON document."""
+    from agent_tools import agent_owner_replay, agent_owner_report, keepalive_pings  # only for the owner report (issue 432)
+
+    try:
+        arms = [agent_owner_replay.parse_arm(text) for text in args.policy or ()]
+    except ValueError as error:
+        ap.error(str(error))
+    names = [arm.name for arm in arms] + [agent_owner_replay.BASELINE.name]
+    if len(set(names)) != len(names):
+        ap.error("--policy names must be distinct and not 'baseline'")
+
+    root = Path(args.projects_dir)
+    if not root.is_dir():
+        sys.exit(f"no transcript root at {root}")
+    eval_rows = None
+    if args.eval_results is not None:
+        skill, _, case = args.eval_case.partition(":")
+        if not skill or not case:
+            ap.error("--eval must be SKILL:ID")
+        try:
+            eval_rows = agent_owner_report.load_eval_rows(args.eval_results, skill, case)
+        except (OSError, ValueError) as error:
+            sys.exit(f"cannot read eval results: {error}")
+    pings = None
+    if args.proxy_log is not None:
+        try:
+            pings = keepalive_pings.read_pings(args.proxy_log)
+        except OSError as error:
+            sys.exit(f"cannot read proxy log: {error}")
+    windows, settle_days = (), 0
+    if args.started is not None:
+        try:
+            since, before = agent_owner_report.parse_range(args.started)
+        except ValueError as error:
+            ap.error(f"--started: {error}")
+        if args.baseline is None:
+            windows = (agent_owner_report.StartWindow(agent_owner_report.LIVE_ARM, since, before),)
+        else:
+            try:
+                base_since, base_before = agent_owner_report.parse_range(args.baseline)
+            except ValueError as error:
+                ap.error(f"--baseline: {error}")
+            if base_since < before and since < base_before:
+                ap.error("--baseline must not overlap --started")
+            windows = (
+                agent_owner_report.StartWindow(agent_owner_report.BASELINE_ARM, base_since, base_before),
+                agent_owner_report.StartWindow(agent_owner_report.CANDIDATE_ARM, since, before))
+        settle_days = (agent_owner_report.DEFAULT_SETTLE_DAYS if args.settle_days is None
+                       else args.settle_days)
+    lineages, footer = agent_owner_report.collect(
+        root, cutoff=event_start.timestamp() if event_start else cutoff, since=event_start,
+        before=event_end, eval_rows=eval_rows, executor_factory=executor_factory,
+        windows=windows, settle_days=settle_days, pings=pings)
+    if eval_rows is not None:
+        window = f"eval {args.eval_case}"
+    elif windows:
+        window = agent_owner_report.start_window_label(windows)
+    else:
+        window = _window_label(args, cutoff, event_start, event_end)
+    document = agent_owner_report.build_document(lineages, footer, window=window, arms=arms,
+                                                 sweep=args.sweep)
+    if args.format == "json":
+        json.dump(document, sys.stdout, separators=(",", ":"))
+        print()
+    else:
+        agent_owner_report.print_document(document, top=args.top,
+                                          eval_grouping=eval_rows is not None)
+
+
 def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap = argparse.ArgumentParser(prog="agent-costs", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=35, help="window in days by file mtime (0 = all)")
@@ -1734,8 +1877,10 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap.add_argument("--top", type=int, default=30, help="rows to print")
     ap.add_argument(
         "--projects-dir",
-        default=os.path.expanduser("~/.claude/projects"),
-        help="transcript root",
+        action="append",
+        default=None,
+        metavar="[LABEL=]PATH",
+        help="transcript root (default ~/.claude/projects); repeatable, as LABEL=PATH, only with --report boot",
     )
     ap.add_argument(
         "--artifacts",
@@ -1751,17 +1896,106 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                     help="which strata to scan; meaningful only with --format json")
     ap.add_argument("--codex-sessions", default=os.path.expanduser("~/.codex/sessions"),
                     help="Codex rollout root")
-    ap.add_argument("--events-since", help="RFC3339 event-time lower bound (JSON only)")
-    ap.add_argument("--events-before", help="RFC3339 event-time upper bound (JSON only)")
+    ap.add_argument("--events-since",
+                    help="RFC3339 event-time lower bound (JSON, --report cache, owners or boot)")
+    ap.add_argument("--events-before",
+                    help="RFC3339 event-time upper bound (JSON, --report cache, owners or boot)")
+    ap.add_argument("--report", choices=("issues", "cache", "owners", "boot"), default="issues",
+                    help="per-issue tables (default), the cache report, the owner report or the "
+                         "boot report")
+    ap.add_argument("--eval-results", metavar="PATH",
+                    help="eval results JSONL to group by trial; --report owners only")
+    ap.add_argument("--eval", metavar="SKILL:ID", dest="eval_case",
+                    help="the eval whose results rows to group; --report owners only")
+    ap.add_argument("--policy", action="append", metavar="NAME=SPEC",
+                    help="a hand-off policy arm to replay against the baseline; repeatable; "
+                         "--report owners only")
+    ap.add_argument("--sweep", action="store_true",
+                    help="replay the sweep of candidate policies; --report owners only")
+    ap.add_argument("--started", metavar="SINCE..BEFORE",
+                    help="select the lineages that started in [SINCE, BEFORE) (YYYY-MM-DD or "
+                         "RFC3339 bounds) and count their whole spend; --report owners only")
+    ap.add_argument("--baseline", metavar="SINCE..BEFORE",
+                    help="a second, non-overlapping window whose lineages (--report owners, "
+                         "beside --started) or boots (--report boot, beside "
+                         "--events-since/--events-before) form the baseline arm against the "
+                         "candidate arm")
+    ap.add_argument("--proxy-log", metavar="PATH",
+                    help="a cache-proxy log whose ping lines add keepalive spend (darwin: "
+                         "~/Library/Logs/claude-cache-proxy.log); --report owners only")
+    ap.add_argument("--settle-days", type=_non_negative_int, default=None, metavar="DAYS",
+                    help="count a lineage only when it started at least DAYS days before the "
+                         "report end (default 4, 0 = off); needs --started")
+    ap.add_argument("--context-threshold", type=_positive_int, default=None, metavar="TOKENS",
+                    help="context size above which cache reads are totalled; --report cache only "
+                         "(default 120000)")
     args = ap.parse_args(argv)
 
     json_mode = args.format == "json"
+    cache_report = args.report == "cache"
+    owners_report = args.report == "owners"
+    boot_report = args.report == "boot"
+    if owners_report:
+        if args.project:
+            ap.error("--report owners does not take --project")
+        if args.artifacts:
+            ap.error("--report owners does not take --artifacts")
+        if args.strata != "claude":
+            ap.error("--report owners reads Claude transcripts only")
+    if boot_report:
+        if args.project:
+            ap.error("--report boot does not take --project")
+        if args.artifacts:
+            ap.error("--report boot does not take --artifacts")
+        if args.strata != "claude":
+            ap.error("--report boot reads Claude transcripts only")
+    if not boot_report:
+        if args.projects_dir and (len(args.projects_dir) > 1
+                                  or ROOT_LABEL.fullmatch(args.projects_dir[0])):
+            ap.error("--projects-dir is repeatable and takes LABEL=PATH only with --report boot")
+        args.projects_dir = (args.projects_dir or [os.path.expanduser("~/.claude/projects")])[0]
+    if (args.policy or args.sweep) and not owners_report:
+        ap.error("--policy and --sweep are available only with --report owners")
+    if (args.eval_results is None) != (args.eval_case is None):
+        ap.error("--eval-results and --eval must be used together")
+    if args.eval_results is not None and not owners_report:
+        ap.error("--eval-results and --eval are available only with --report owners")
+    if (args.started is not None or args.settle_days is not None) and not owners_report:
+        ap.error("--started and --settle-days are available only with --report owners")
+    if args.settle_days is not None and args.started is None:
+        ap.error("--settle-days needs --started")
+    if args.proxy_log is not None and not owners_report:
+        ap.error("--proxy-log is available only with --report owners")
+    if args.proxy_log is not None and args.eval_results is not None:
+        ap.error("--proxy-log does not take --eval-results/--eval")
+    if args.baseline is not None and not (owners_report or boot_report):
+        ap.error("--baseline is available only with --report owners or boot")
+    if args.baseline is not None and owners_report and args.started is None:
+        ap.error("--baseline needs --started")
+    if args.baseline is not None and boot_report and not args.events_since:
+        ap.error("--report boot --baseline needs --events-since/--events-before")
+    if args.baseline is not None and (args.policy or args.sweep):
+        ap.error("--baseline does not take --policy/--sweep")
+    if args.started is not None and (args.events_since or args.events_before):
+        ap.error("--started does not take --events-since/--events-before")
+    if args.started is not None and args.eval_results is not None:
+        ap.error("--started does not take --eval-results/--eval")
+    if cache_report and json_mode:
+        ap.error("--report cache is text only; it cannot be combined with --format json")
+    if cache_report and args.project:
+        ap.error("--report cache does not take --project")
+    if cache_report and args.artifacts:
+        ap.error("--report cache does not take --artifacts")
+    if args.context_threshold is not None and not cache_report:
+        ap.error("--context-threshold is available only with --report cache")
     if not json_mode and args.strata != "claude":
         ap.error("--strata is meaningful only with --format json")
     if json_mode and args.artifacts:
         ap.error("--artifacts is not available with --format json")
-    if not json_mode and (args.events_since or args.events_before):
-        ap.error("--events-since/--events-before are available only with --format json")
+    if (not (json_mode or cache_report or owners_report or boot_report)
+            and (args.events_since or args.events_before)):
+        ap.error("--events-since/--events-before are available only with --format json "
+                 "or --report cache, owners or boot")
     if bool(args.events_since) != bool(args.events_before):
         ap.error("--events-since and --events-before must be used together")
     event_start = event_end = None
@@ -1776,6 +2010,32 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     selected = ("claude", "codex") if args.strata == "both" else (args.strata,)
 
     cutoff = time.time() - args.days * 86400 if args.days > 0 else None
+
+    if owners_report:
+        return _owners_report(ap, args, cutoff, event_start, event_end, executor_factory)
+
+    if boot_report:
+        return _boot_report(ap, args, cutoff, event_start, event_end, executor_factory)
+
+    if cache_report:
+        from agent_tools import agent_cache_report  # imported only for the cache report (issue 421 D2)
+
+        root = Path(args.projects_dir)
+        if not root.is_dir():
+            sys.exit(f"no transcript root at {root}")
+        jobs = agent_cache_report.transcript_jobs(
+            root, event_start.timestamp() if event_start else cutoff)
+        if not jobs:
+            sys.exit("no transcripts in window")
+        threshold = args.context_threshold or agent_cache_report.DEFAULT_CONTEXT_THRESHOLD
+        results = agent_cache_report.scan_jobs(
+            jobs, since=event_start, before=event_end, threshold=threshold,
+            executor_factory=executor_factory)
+        if not any(result["calls"] > 0 for result in results):
+            sys.exit("no calls in window")
+        window = _window_label(args, cutoff, event_start, event_end)
+        agent_cache_report.print_report(results, window=window, threshold=threshold, top=args.top)
+        return
 
     root = codex_root = None
     groups, retained_results, kept_sessions, kept_files = {}, [], 0, 0

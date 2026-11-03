@@ -16,13 +16,15 @@ import hashlib
 from pathlib import Path, PurePosixPath
 import re
 from types import SimpleNamespace
+from typing import Callable
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import (RECORD_POLICY, RECORD_POLICY_SHA256, GenerationError, _split_diff,
                                        actual_inputs_from_trees, record_git)
+from agent_tools.review_expansion import Budget
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, edge_facts, read_regular, strict_json,
                                          tree_entry)
-from agent_tools.review_git import HistoryError, original_commit, original_range
+from agent_tools.review_git import HistoryError, original_commit, original_commits, original_range
 
 KIND = "issue-100-retained-history"
 HISTORICAL_DOMAIN = "retained-git-records/v1"
@@ -225,7 +227,7 @@ def _recipe(repo, pins, old_tree, new_tree, *paths) -> bytes:
 def _historical(repo, pins) -> tuple[bytes, tuple]:
     """The recipe over the authenticated trees: its bytes and a `{bytes, sha256}` row per record."""
     with _authenticated():
-        base, head = (original_commit(repo, oid).tree for oid in (pins.base, pins.head))
+        base, head = (c.tree for c in original_commits(repo, (pins.base, pins.head)))
         raw = _recipe(repo, pins, base, head)
         rows = tuple({"bytes": len(chunk), "sha256": _sha(chunk)} for chunk in _split_diff(raw))
     domain = pins.historical
@@ -288,7 +290,7 @@ def fresh_records(issue_repo: Path, pins: Issue100Pins, limits) -> tuple[dict, .
     """`{path, bytes, sha256}` per initial `actual_inputs_from_trees` record."""
     pins, repo = _checked(pins), Path(issue_repo)
     with _authenticated():
-        base, head = (original_commit(repo, oid).tree for oid in (pins.base, pins.head))
+        base, head = (c.tree for c in original_commits(repo, (pins.base, pins.head)))
         initial = next(actual_inputs_from_trees(repo, base, head, base=pins.base, head=pins.head, commits=(),
                                                 package_name="issue-100.json", limits=limits))
     records, domain = initial.records, pins.fresh
@@ -298,17 +300,33 @@ def fresh_records(issue_repo: Path, pins: Issue100Pins, limits) -> tuple[dict, .
     return tuple({"path": r.path, "bytes": r.source_bytes, "sha256": _sha(r.payload)} for r in records)
 
 
-def _refs(edges, path) -> list:
-    """`[edge, record]` per record on `path` or a name it was renamed from or to."""
-    names, size = {path}, 0
-    while size != len(names):
-        size = len(names)
-        for edge in edges:
-            for record in edge["records"]:
-                if {record["path"], record["old_path"]} & names:
-                    names |= {record["path"], record["old_path"]}
-    return [[e, r] for e, edge in enumerate(edges) for r, record in enumerate(edge["records"])
-            if {record["path"], record["old_path"]} & names]
+def _refs(edges, budget=None) -> Callable[[str], list]:
+    """The lookup of `[edge, record]` per record on a path or on a name it was renamed from or to, however
+    many renames away: the path's rename-connected component, in edge and then record order, and `[]` for a
+    path no record names. One union-find pass over each record's `path` and `old_path` groups the names and
+    one more pass lists each component's pairs. Path halving without union by rank makes the cost near-linear
+    in the records. Each lookup returns a fresh copy, and with a `budget` it charges each pair as it is
+    copied."""
+    parent, groups = {}, {}
+
+    def root(name):
+        parent.setdefault(name, name)
+        while parent[name] != name:
+            parent[name] = name = parent[parent[name]]
+        return name
+    for edge in edges:
+        for record in edge["records"]:
+            a, b = root(record["path"]), root(record["old_path"])
+            if a != b:
+                parent[a] = b
+    for e, edge in enumerate(edges):
+        for r, record in enumerate(edge["records"]):
+            groups.setdefault(root(record["path"]), []).append((e, r))
+
+    def lookup(path) -> list:
+        pairs = groups[root(path)] if path in parent else ()
+        return [[e, r] if budget is None else budget.charge([e, r]) for e, r in pairs]
+    return lookup
 
 
 def _counts(payload: dict) -> dict:
@@ -332,12 +350,14 @@ def model_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue1
     with _authenticated():
         commits = original_range(repo, pins.base, pins.head)
         original_commit(live_repo, pins.live)  # the live repository holds the same commit
-        trees = {name: original_commit(repo, getattr(pins, name)).tree for name in ("base", "live", "head")}
+        trees = dict(zip(("base", "live", "head"), (c.tree for c in original_commits(repo, (pins.base, pins.live, pins.head)))))
         parent_edges, edges = [], []
+        held = dict(zip(commits, original_commits(repo, commits)))
         for oid in commits:
-            for ordinal, parent in enumerate(original_commit(repo, oid).parents, 1):
+            for ordinal, parent in enumerate(held[oid].parents, 1):
                 parent_edges.append({"parent": parent, "commit": oid, "parent_ordinal": ordinal})
                 edges.append(edge_facts(repo, parent, oid, ordinal))
+        refs = _refs(edges)
         overlaps = []
         for path in pins.pending_paths:
             entries = {f"{name}_entry": tree_entry(repo, trees[name], path) for name in ("base", "live", "head")}
@@ -352,7 +372,7 @@ def model_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue1
                            else "integrated" if head_entry == live_entry else "candidate")
             contributions.append(_identified({
                 "path": path, "record_sha256": record["sha256"], "head_entry": head_entry, "live_entry": live_entry,
-                "edge_refs": _refs(edges, path), "disposition": disposition,
+                "edge_refs": refs(path), "disposition": disposition,
                 "pending": pending.get(path) if disposition == "candidate" else None}))
     tables = {name: {"record_table_policy": _policy(domain), "records": list(records)} for name, domain, records in
               (("historical", pins.historical, historical), ("fresh", pins.fresh, fresh))}
@@ -486,18 +506,27 @@ def expand_100(payload: dict) -> dict:
     """The schema-1 model that the schema-2 `payload` encodes. Pure: it reads the payload alone and leaves
     it unchanged. Every refusal it makes of a JSON value is `invalid_payload`. That describes its checks; it
     guards no interpreter limit: a value nested about as deep as the JSON decoder allows raises
-    `RecursionError`, and nothing bounds the memory that the model of a large payload takes. Anything but
-    the closed version-2 object of this kind is refused, and so are a value of the wrong type where one is
-    read, a row or a column of the wrong length, an index that is not an in-range `int`, and a packed string
-    that is not a `str`, that `b85decode` rejects, or whose bytes are not whole items. One second spelling
-    passes that last test (see `_unpacked`): a single dangling character after the last whole token decodes
-    to no byte, so the string expands to the same items. Expansion does not refuse it; the canonical-form
-    check in `validate_100` does. So that the first-parent walk ends, the base and the commits are distinct,
-    the head is one of them, and each commit names a parent, every one the base or an earlier commit. A
-    fresh path and an overlap path have a head entry to take: the first is recorded on the walk, the second
-    is a fresh path. Edge identity, repeated records, labels, references, ids, the summary and criterion
-    digests are recomputed, never read. So is a head entry, except for a path that `head_trees` lists, a
-    directory at the head: that entry is read from its row."""
+    `RecursionError`. Each parent edge, tree entry, historical and fresh row, contribution row (its
+    `edge_refs` apart), overlap and criterion row, each edge record at every reference to it, and each
+    `edge_refs` pair is charged, as it is built, to a budget of `review_expansion.MEMBER_MAX_BYTES` canonical
+    bytes read when the call starts, and the first charge past it is `invalid_payload`. The rest is not
+    charged. The hex values a packed string decodes to, and the record facts that pair them with payload
+    record rows, come from the payload, so the member's size bounds them. The others are bounded by a charged
+    count: an edge's wrapper (one per parent edge), a contribution row before its charge and the lookups
+    keyed by fresh index or path (one per fresh row), and the head-entry map (over the edge records). So the
+    work a payload causes is bounded by its size and that budget. Anything but the closed version-2 object
+    of this kind is refused, and so are a value of the wrong type where one is read, a row or a column of the
+    wrong length, an index that is not an in-range `int`, and a packed string that is not a `str`, that
+    `b85decode` rejects, or whose bytes are not whole items. One second spelling passes that last test (see
+    `_unpacked`): a single dangling character after the last whole token decodes to no byte, so the string
+    expands to the same items. Expansion does not refuse it; the canonical-form check in `validate_100` does.
+    So that the first-parent walk ends, the base and the commits are distinct, the head is one of them, and
+    each commit names a parent, every one the base or an earlier commit. A fresh path and an overlap path
+    have a head entry to take: the first is recorded on the walk, the second is a fresh path. Edge identity,
+    repeated records, labels, references, ids, the summary and criterion digests are recomputed, never read.
+    So is a head entry, except for a path that `head_trees` lists, a directory at the head: that entry is
+    read from its row."""
+    budget = Budget(lambda: Issue100Error("invalid_payload"))
     c = _closed(payload, ("schema_version", "kind", "range", "commits", "parents", "paths", "entries", "records",
                           "record_sha256", "edges", "tables", "live", "head_trees", "process", "pending_overlaps",
                           "overlap_sha256", "criteria"))
@@ -510,10 +539,12 @@ def expand_100(payload: dict) -> dict:
              and all(isinstance(row, dict) and isinstance(row.get("text"), str) for row in criteria)
              and isinstance(span["base"], str) and len(set(nodes)) == len(nodes) and span["head"] in nodes
              and all(_rows(c["parents"])))
-    parent_edges = [{"parent": _at(nodes[:i + 1], p), "commit": commit, "parent_ordinal": n}
-                    for i, (commit, listed) in enumerate(_columns(commits, c["parents"]))
-                    for n, p in enumerate(listed, 1)]
-    entries = [{"mode": mode, "kind": kind, "oid": oid}
+    parent_edges = []
+    for i, (commit, listed) in enumerate(_columns(commits, c["parents"])):
+        for n, p in enumerate(listed, 1):
+            _require(type(p) is int and 0 <= p <= i)  # the base or an earlier commit
+            parent_edges.append(budget.charge({"parent": nodes[p], "commit": commit, "parent_ordinal": n}))
+    entries = [budget.charge({"mode": mode, "kind": kind, "oid": oid})
                for mode, kind, packed in _rows(c["entries"], 3) for oid in _unpacked(packed, 20)]
 
     def entry(index):
@@ -523,15 +554,15 @@ def expand_100(payload: dict) -> dict:
     def record(index):
         row, digest = _at(facts, index)
         old = row[5] if len(row) > 5 else row[1]
-        return {"operation": row[0], "path": _at(paths, row[1]), "old_path": _at(paths, old),
-                "before": entry(row[2]), "after": entry(row[3]), "record_bytes": row[4],
-                "record_sha256": "sha256:" + digest}
+        return budget.charge({"operation": row[0], "path": _at(paths, row[1]), "old_path": _at(paths, old),
+                              "before": entry(row[2]), "after": entry(row[3]), "record_bytes": row[4],
+                              "record_sha256": "sha256:" + digest})
     edges = [{**raw, "records": [record(i) for i in refs]} for raw, refs in _columns(parent_edges, _rows(c["edges"]))]
     old, new = (_closed(tables[name], ("record_table_policy", "bytes", "sha256", *more))
                 for name, more in (("historical", ()), ("fresh", ("paths",))))
-    historical = [{"bytes": size, "sha256": digest}
+    historical = [budget.charge({"bytes": size, "sha256": digest})
                   for size, digest in _columns(old["bytes"], _unpacked(old["sha256"], 32))]
-    fresh = [{"path": _at(paths, path), "bytes": size, "sha256": digest}
+    fresh = [budget.charge({"path": _at(paths, path), "bytes": size, "sha256": digest})
              for path, size, digest in _columns(new["paths"], new["bytes"], _unpacked(new["sha256"], 32))]
     m = {"schema_version": 1, "kind": KIND, "parent_edges": parent_edges, "edges": edges,
          "range": {**span, "commits": commits}}
@@ -539,33 +570,38 @@ def expand_100(payload: dict) -> dict:
     at_head = _at_head(m, SimpleNamespace(**span))
     slots = range(len(fresh))  # `_at(slots, i)` is `i`, checked as a fresh index
     trees = {_at(slots, i): ref for i, ref in _rows(c["head_trees"], 2)}
-    process, rows = {_at(slots, i) for i in c["process"]}, []
+    process, rows, refs = {_at(slots, i) for i in c["process"]}, [], _refs(edges, budget)
     for i, (row, live) in enumerate(_columns(fresh, c["live"])):
         path = row["path"]
         _require(path in at_head)
         head, live = entry(trees[i]) if i in trees else at_head[path], entry(live)
         label = "historical_process" if i in process else "integrated" if head == live else "candidate"
         rows.append({"path": path, "record_sha256": row["sha256"], "head_entry": head, "live_entry": live,
-                     "edge_refs": _refs(edges, path), "disposition": label, "pending": None})
+                     "edge_refs": refs(path), "disposition": label, "pending": None})
     by_path = {row["path"]: row for row in rows}
     stored, digests, overlaps = _rows(c["pending_overlaps"], 2), _unpacked(c["overlap_sha256"], 32), []
     _require(len(digests) == len(_PAIRS) * len(stored))
     for n, (path, before) in enumerate(stored):
         path = _at(paths, path)
         _require(path in by_path)
-        overlaps.append(_identified({
+        overlaps.append(budget.charge(_identified({
             "path": path, "base_entry": entry(before), "live_entry": by_path[path]["live_entry"],
             "head_entry": by_path[path]["head_entry"],
-            **{f"{a}_{b}_sha256": digests[len(_PAIRS) * n + k] for k, (a, b) in enumerate(_PAIRS)}}))
+            **{f"{a}_{b}_sha256": digests[len(_PAIRS) * n + k] for k, (a, b) in enumerate(_PAIRS)}})))
     pending = {row["path"]: row["id"] for row in overlaps}
     for row in rows:
         if row["disposition"] == "candidate":
             row["pending"] = pending.get(row["path"])
-    m.update(contributions=[_identified(row) for row in rows], pending_overlaps=overlaps,
+    contributions = []
+    for row in map(_identified, rows):  # its `edge_refs` were charged pair by pair as they were copied
+        budget.charge({**row, "edge_refs": []})
+        contributions.append(row)
+    m.update(contributions=contributions, pending_overlaps=overlaps,
              tables={"historical": {"record_table_policy": old["record_table_policy"], "records": historical},
                      "fresh": {"record_table_policy": new["record_table_policy"], "records": fresh}},
              # A lone surrogate, which JSON can spell, is hashed rather than raised on.
-             criteria=[{**row, "text_sha256": _sha(row["text"].encode("utf-8", "surrogatepass"))} for row in criteria])
+             criteria=[budget.charge({**row, "text_sha256": _sha(row["text"].encode("utf-8", "surrogatepass"))})
+                       for row in criteria])
     m["summary"] = _counts(m)
     return m
 

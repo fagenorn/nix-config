@@ -40,7 +40,7 @@
         },
         {
           "name": "design spec was committed",
-          "shell": "commits_touch \"$WT\" \"$SPEC_DIR\""
+          "shell": "commits_touch \"$WT\" \"${SPEC_DIR#\"$REPO\"/}\""
         },
         {
           "name": "source and tests stayed unchanged",
@@ -48,7 +48,7 @@
         },
         {
           "name": "no plan was created",
-          "shell": "if has_file \"$REPO/$PLAN_DIR\"/*.md \"$WT/$PLAN_DIR\"/*.md; then fail \"plan created before the scope gate\"; fi"
+          "shell": "if has_file \"$PLAN_DIR\"/*.md \"$WT/${PLAN_DIR#\"$REPO\"/}\"/*.md; then fail \"plan created before the scope gate\"; fi"
         },
         {
           "name": "domain review was reached",
@@ -81,7 +81,7 @@
         },
         {
           "name": "no spec or plan was created",
-          "shell": "if has_file \"$REPO/$SPEC_DIR\"/*.md \"$REPO/$PLAN_DIR\"/*.md; then fail \"created a spec or plan after fog routing\"; fi"
+          "shell": "if has_file \"$SPEC_DIR\"/*.md \"$PLAN_DIR\"/*.md; then fail \"created a spec or plan after fog routing\"; fi"
         },
         {
           "name": "source and tests stayed unchanged",

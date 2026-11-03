@@ -1,7 +1,10 @@
 {
   "required_status_checks": {
-    "strict": false,
-    "checks": [{"context": "Nix Eval", "app_id": 15368}]
+    "strict": true,
+    "checks": [
+      {"context": "Nix Eval", "app_id": 15368},
+      {"context": "Instruction Budget", "app_id": 15368}
+    ]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": null,

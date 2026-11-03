@@ -19,8 +19,11 @@ digest.
 `validate_bundle` is the one full semantic validation. Derivation runs it
 before it publishes and replay runs it before it classifies (RP2). It runs no
 Git, so it checks what the pins and the tables determine (RP7): `tool.commit`,
-`tool.files` and `archive.shards` are checked for their closed shape only, and
-are authentic only under the caller's anchor digest or by derivation again.
+`tool.files_sha256` and `archive.shards` are checked for their closed shape
+only, and are authentic only under the caller's anchor digest or by derivation
+again. The tool group binds the whole package by `files_sha256`, the
+`telemetry_digest` of `tool_closure`'s rows, so its size does not grow with the
+package (issue 556).
 """
 from __future__ import annotations
 
@@ -34,6 +37,7 @@ from typing import Mapping
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256, GenerationError, _run_git
+from agent_tools.review_expansion import MEMBER_MAX_BYTES
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, full_commit, raw_digest, read_regular,
                                          strict_json)
 from agent_tools.review_issue100 import expand_100, validate_100
@@ -44,7 +48,6 @@ ANCHOR_NAME = "derivation-anchor.json"
 # The four files the anchor hashes, in the order CORE's `retained-anchor/v2` loader requires.
 PAYLOAD_NAMES = ("derivation-witness.json", "issue-100-derived.json", "issue-121.json", "task7-estimate.json")
 ANCHOR_MAX_BYTES = 32768
-MEMBER_MAX_BYTES = 1048576
 
 _CODES = ("tool_closure", "anchor_unreadable", "anchor_shape", "anchor_digest", "expected_digest", "member_set",
           "member_digest", "member_noncanonical", "witness_shape", "component_mismatch", "table_mismatch",
@@ -254,20 +257,17 @@ def _components(components: dict, table: object, task7_pins, issue121_pins, issu
                      "table_sha256": telemetry_digest(table)}}
     tool, archive = components["tool"], components["archive"]
     _require(all(_same(components[group], members) for group, members in pinned.items())
-             and _closed(tool, ("commit", "files", "artifact_policy_sha256", "packing_policy_sha256",
+             and _closed(tool, ("commit", "files_sha256", "artifact_policy_sha256", "packing_policy_sha256",
                                 "record_policy_sha256"))
-             and _hex(tool["commit"], 40) and _digest(tool["artifact_policy_sha256"])
+             and _hex(tool["commit"], 40) and _digest(tool["files_sha256"])
+             and _digest(tool["artifact_policy_sha256"])
              and tool["packing_policy_sha256"] == PACKING_POLICY_SHA256
              and tool["record_policy_sha256"] == RECORD_POLICY_SHA256
              and _closed(archive, ("producer_sha256", "manifest_sha256", "shards"))
              and archive["producer_sha256"] == issue100_pins.producer_sha256
              and archive["manifest_sha256"] == issue100_pins.manifest_sha256, "component_mismatch")
-    files, shards = tool["files"], archive["shards"]
-    _require(_rows(files, ("path", "blob", "raw_sha256")) and files
-             and all(isinstance(row["path"], str) and _hex(row["blob"], 40) and _hex(row["raw_sha256"], 64)
-                     for row in files)
-             and all(before["path"] < after["path"] for before, after in zip(files, files[1:]))
-             and _rows(shards, ("path", "bytes", "sha256"))
+    shards = archive["shards"]
+    _require(_rows(shards, ("path", "bytes", "sha256"))
              and all(isinstance(row["path"], str) and _count(row["bytes"]) and _hex(row["sha256"], 64)
                      for row in shards), "component_mismatch")
 
