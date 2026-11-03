@@ -6,12 +6,13 @@ from unittest.mock import patch
 
 from agent_tools import derive_review_feasibility_fixtures as command
 from agent_tools.canonical import telemetry_digest
+from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256
 from agent_tools.review_budget import describe
 from agent_tools.review_derivation import DerivationError, DeriveInputs, derive_bundle
 from agent_tools.review_forecast import canonical_bytes
 from agent_tools.review_issue100 import Issue100Error
 from agent_tools.review_task7 import EstimateError
-from agent_tools.review_witness import ANCHOR_NAME, PAYLOAD_NAMES, WitnessError
+from agent_tools.review_witness import ANCHOR_NAME, PAYLOAD_NAMES, WitnessError, tool_closure
 
 from .retained_review_test_support import commit_files, git, retained_fixture, snapshot, source_budget_env, tool_fixture
 
@@ -137,6 +138,16 @@ class DerivationTest(unittest.TestCase):
                                    "members": members})
         for name, data in files.items():
             self.assertEqual(data, canonical_bytes(json.loads(data)), name)
+
+    def test_tool_group_binds_the_tool_commits_rows_by_digest(self):
+        out, _ = self.shared()
+        anchor, witness = (json.loads((out / name).read_bytes()) for name in (ANCHOR_NAME, PAYLOAD_NAMES[0]))
+        rows = tool_closure(self.inputs.tool_repo, self.inputs.tool_commit)["files"]
+        self.assertEqual(anchor["tool"], {"commit": self.inputs.tool_commit, "files_sha256": telemetry_digest(rows),
+                                          "artifact_policy_sha256": self.authority.policy_sha256,
+                                          "packing_policy_sha256": PACKING_POLICY_SHA256,
+                                          "record_policy_sha256": RECORD_POLICY_SHA256})
+        self.assertEqual(witness["components"]["tool"], anchor["tool"])
 
     def test_existing_or_dangling_output_is_output_exists(self):
         directory, file, link = (self.tmp / name for name in ("taken-dir", "taken-file", "taken-link"))
