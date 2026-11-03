@@ -25,6 +25,7 @@ class AgnosticTest(unittest.TestCase):
     BASE = {
         ".github/branch-protection.json": json.dumps(
             {"required_status_checks": {"checks": [{"context": "Gate One"}]}}).encode(),
+        "hosts/darwin/boxen/default.nix": b"x\n",
         "justfile": b"# c\nbuild host=x:\n    echo\n@ship:\n    echo\nvar := 1\n",
         "home/common/agent-skills/skills/a/SKILL.md": b"clean text just building\n",
         "home/common/claude-code/skills/b/SKILL.md": b"ok\n",
@@ -46,7 +47,7 @@ class AgnosticTest(unittest.TestCase):
         self.assertEqual(self.hits({}), [])
 
     def test_each_token_is_caught_in_each_corpus_root(self):
-        tokens = ["fagenorn/nix-config", "nix-config", "Gate One", "just build", "just ship",
+        tokens = ["fagenorn/nix-config", "nix-config", "Gate One", "boxen", "anis-desktop", "just build", "just ship",
                   "origin/main", "--base main", "home/common/x", "python/agent_tools/x"]
         roots = {"home/common/codex/skills/c/SKILL.md", "home/common/claude-code/skills/b/SKILL.md", "home/common/claude-code/agents/r.md",
                  "home/common/agent-skills/standards/s.md", "home/common/agent-guidance/AGENTS.md",

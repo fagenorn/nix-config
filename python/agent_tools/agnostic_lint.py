@@ -19,7 +19,7 @@ GLOBAL_CORPUS = (
 )
 # Constants no file in the hosting repo states; the check names and recipes are derived instead.
 HOSTING_LITERALS = ("fagenorn/nix-config", "nix-config", "origin/main", "--base main",
-                    "home/common/", "python/agent_tools/")
+                    "home/common/", "python/agent_tools/", "anis-desktop")
 # Every exemption is one (file, token) pair with its reason; evals and LICENSE files are skipped by name.
 AGNOSTIC_ALLOW = {
     # retro audits the global environment and legitimately names nix-config as its generator.
@@ -35,6 +35,8 @@ def hosting_tokens(snapshot):
     protection = snapshot.read(".github/branch-protection.json")
     if protection is not None:
         literals += [c["context"] for c in json.loads(protection)["required_status_checks"]["checks"]]
+    literals += sorted({path.split("/")[2] for path in snapshot.list_files("hosts/darwin")
+                        if path.count("/") >= 3})  # darwin host directories
     justfile = snapshot.read("justfile")
     recipes = sorted(set(re.findall(
         r"^@?([a-z][a-z0-9_-]*)\b[^:\n]*:(?!=)", (justfile or b"").decode(), re.M)))
