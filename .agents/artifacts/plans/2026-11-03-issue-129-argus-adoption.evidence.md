@@ -139,3 +139,45 @@ The owner ran `just switch` (generation 308, issue 129 comment https://github.co
 | `test_installed_policy_surface_matches_source_contract` | OK (1 test) | 2026-11-03T09:27:16Z |
 
 Compiled guard policy derivation: `{"platform_version": "1.0.0", "registry_digest": "sha256:959f670a9ea7ad0890460588d1886b9926c4cda572fb580586335fef8da80739", "schema_version": 3}`
+
+## Task 3 — Contract commit and doctor report 1
+
+Argus base: dc7564b3c8bbd6a5633dfcff78f80291175047fd
+Contract commit: 738a251bafefe9c3679cf7338cb45cd14ecc4932
+Contract sha256: 4b5cb7bf87c50be759d0c9e5509356150b4b683c2525ad848ae5e70596c79093
+Platform interval: 1.0.0 to 2.0.0
+
+Clone `$SCR/argus-129` on local branch `project-contract` (contract committed 2026-11-03T09:31:42Z, worker w4; resumed and re-verified by w6 at 2026-11-03T09:41Z). The commit is signed and changes only `.agents/project.json`.
+
+Resolve at `K` (2026-11-03T09:41:53Z, re-run once): `invalid_projection`, repair `projection.claude-instructions.stale`, nothing else (first taken 2026-11-03T09:31:50Z, same result).
+
+Contract as a single compact line (Task 4 rebuilds the commit from it):
+
+```json
+{"schema_version":1,"platform":{"min_inclusive":"1.0.0","max_exclusive":"2.0.0"},"project":{"id":"fagenorn/argus","name":"argus"},"bindings":{"vcs":{"kind":"git","default_branch":"main","integration_branch":"main","branch_pattern":"issue-<num>-<slug>","worktree":{"root":".worktrees","prefix":"worktree-"},"commit":{"co_authored_by":true,"signed":true},"merge":{"strategy":"merge","delete_branch":true,"required_checks":["memory foundation (unit + forced checks)"]}},"tracker":{"kind":"github","cli":"gh","repo_slug":"fagenorn/argus","credential_env":{"unset_before_invocation":["GITHUB_TOKEN","GH_TOKEN"]}},"paths":{"artifacts":{"specs":".agents/artifacts/specs","plans":".agents/artifacts/plans"},"context":["docs/CONTEXT-MAP.md"],"standards":["docs/standards/README.md"],"architecture":["docs/guides/architecture.md"],"operations":[],"hints":[],"rejections":[]},"commands":{"install":{"argv":["npm","ci"],"cwd":".","env":[]},"coverage-guard":{"argv":["node","--test","--experimental-strip-types","--experimental-sqlite","--disable-warning=ExperimentalWarning","tests/docs/ci-covers-every-test.test.ts"],"cwd":".","env":[]},"unit-tests":{"argv":["node","--test","--experimental-strip-types","--experimental-sqlite","--disable-warning=ExperimentalWarning","tests/**/*.test.ts"],"cwd":".","env":[]},"forced-checks":{"argv":["node","--experimental-strip-types","--experimental-sqlite","--disable-warning=ExperimentalWarning","eval/suites/memory/checks/forced-checks.ts"],"cwd":".","env":[]},"recall-cap-checks":{"argv":["node","--experimental-strip-types","--experimental-sqlite","--disable-warning=ExperimentalWarning","eval/suites/memory/checks/recall-cap.ts"],"cwd":".","env":[]},"build-notifier":{"argv":["bash","daemon/notifyd/build.sh"],"cwd":".","env":[]}},"workflow":{"verification":["install","coverage-guard","unit-tests","forced-checks","recall-cap-checks"],"orchestration":{"max_parallel":2,"attempt_budget_minutes":240},"review":{"plan":null,"code":null}},"deploy":{"adapter":"none","command":null,"config":{}}},"capabilities":{"tracker":{"support":"supported"},"worktrees":{"support":"supported"},"knowledge.context":{"support":"supported"},"knowledge.standards":{"support":"supported"},"knowledge.architecture":{"support":"supported"},"knowledge.hints":{"support":"unsupported"},"verification":{"support":"supported"},"review.plan":{"support":"unsupported"},"review.code":{"support":"unsupported"},"deploy":{"support":"unsupported"}},"projections":[{"id":"claude-instructions","agent":"claude","kind":"managed_import","target":"CLAUDE.md","source":"AGENTS.md"}],"release":{"profiles":{"local-host":{"profile_version":1,"target":{"environment":"local-host","concurrency_keys":["release/fagenorn/argus"]},"requirements":{"adapters":{"bundle":{"min_inclusive":"1.0.0","max_exclusive":"2.0.0"},"launchd":{"min_inclusive":"1.0.0","max_exclusive":"2.0.0"}}},"bindings":{"adapters":{"bundle":{"adapter":"codesigned-artifact"},"launchd":{"adapter":"launchd-agent"}},"targets":{"notifier":{"adapter":"bundle","kind":"installed_bundle","path":"~/Library/Application Support/Argus/Argus.app"},"daemon":{"adapter":"launchd","kind":"launchd_gui_agent","label":"dev.argus.daemon"}},"principals":{"owner":{"class":"host_user"}},"credentials":{"keychain":{"adapter":"bundle","class":"codesigning_identity"},"session":{"adapter":"launchd","class":"gui_session"}}},"publication":{"actions":[{"id":"notifier","mode":"materialize","adapter":"bundle","operation":"install","target":"notifier","principal":"owner","credential":"keychain","effect":"reversible_no_incremental_spend","config_schema_version":1,"config":{"source":"daemon/notifyd/Argus.app","identity_prefix":"Apple Development","identity_env":"ARGUS_CODESIGN_IDENTITY","adhoc_fallback":false},"deps":[],"observation_deadline_ms":120000}]},"activation":{"units":[{"id":"daemon","mode":"local_apply","adapter":"launchd","operation":"activate","target":"daemon","principal":"owner","credential":"session","effect":"irreversible","config_schema_version":1,"config":{"program":"devenv","arguments":["shell","--","daemon","run"],"keep_alive":true,"background":true,"stdout_path":"home/daemon/logs/daemon.out.log","stderr_path":"home/daemon/logs/daemon.err.log"},"deps":[],"observation_deadline_ms":300000}]},"proof":{"convergence_window_ms":1800000,"obligations":[{"id":"daemon-live","semantic":"liveness","form":"snapshot","predicate":"agent_running","collector":"launchd","required":true,"deps":["derived:running_subject_identity:daemon"],"parameters":{"parameters":{"action":"daemon","operation":"activate","target":{"handle":"daemon","kind":"launchd_gui_agent","label":"dev.argus.daemon"},"config":{"program":"devenv","arguments":["shell","--","daemon","run"],"keep_alive":true,"background":true,"stdout_path":"home/daemon/logs/daemon.out.log","stderr_path":"home/daemon/logs/daemon.err.log"}}},"freshness_ms":600000}]},"recovery":{"units":{"notifier":{"posture":"supersedable_only","anchor":null,"compatibility":null,"edges":[]},"daemon":{"posture":"supersedable_only","anchor":null,"compatibility":null,"edges":[]}}},"limits":{}},"forge-main":{"profile_version":1,"target":{"environment":"github-main","concurrency_keys":["release/fagenorn/argus"]},"requirements":{"adapters":{"forge":{"min_inclusive":"1.0.0","max_exclusive":"2.0.0"}}},"bindings":{"adapters":{"forge":{"adapter":"github-forge"}},"targets":{"repository":{"adapter":"forge","kind":"github_repository","repository":"fagenorn/argus","branch":"main"}},"principals":{},"credentials":{}},"publication":"none","activation":"none","proof":{"convergence_window_ms":1800000,"obligations":[]},"recovery":{"units":{}},"limits":{}}}}}
+```
+
+Pre-flight (D4), argv as the CI step, run as `launch-scope exec … -- env -C <clone> TMPDIR=/tmp <argv>` per spec ledger row D23 (TMPDIR set on that command only; the contract is unchanged). Clone `status --porcelain` stayed empty. Runs 2026-11-03T09:42:05Z to 09:48:03Z.
+
+| Id | Exit | Tail |
+|---|---|---|
+| install | 0 | npm audit notice only |
+| coverage-guard | 0 | fail 0, skipped 0 |
+| unit-tests | 0 | tests 3957, pass 3952, fail 0, skipped 5 (207 s) |
+| forced-checks | 0 | 11 passed, 0 failed |
+| recall-cap-checks | 0 | 10 passed, 0 failed |
+| unit-tests, default TMPDIR (earlier run, finished 2026-11-03T09:38:03Z, superseded per D23) | 1 | fail 1, skipped 5: `tests/extensions/email/review-render.test.ts:100`, receipt was 504 chars (cap 500) under the macOS per-user TMPDIR |
+
+Doctor report 1 (`conformance run --purpose doctor`, 2026-11-03T09:48:07Z, projection not yet written), outcome `failed`, primary check `repository.ignore.runtime_sentinel`.
+
+| Check | Status | reason_code | repair_id |
+|---|---|---|---|
+| host.admission.declaration | passed | | |
+| host.capability.required | suppressed (no finding, spec § 6) | | |
+| host.executor.helper_on_path | passed | | |
+| host.policy_path.no_follow_readable | passed | | |
+| host.tracker.credential | passed | | |
+| repository.ignore.runtime_sentinel | failed | runtime_ignore_missing | lifecycle.ignore.repair |
+| repository.projection.fresh | failed | invalid_projection | projection.regenerate |
+
+Repairs listed: `lifecycle.ignore.repair` (module conformance, safety_class worktree) and `projection.regenerate` (`resolve-project write-projections`, safety_class worktree). No host check failed; no repair was applied.
