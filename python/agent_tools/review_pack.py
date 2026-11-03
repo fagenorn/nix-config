@@ -66,6 +66,33 @@ class ReviewRecordSize:
         return None
 
 
+@dataclass(frozen=True)
+class ReviewEvidenceSize:
+    """A planned generated-evidence entry for measurement, never a publishable payload.
+
+    `generated_evidence` is a worst-case placeholder shaped exactly like the entry
+    actual production would build, so its canonical payload and its manifest-root
+    copy bound the real entry's bytes.
+    """
+    path: str
+    source_bytes: int
+    generated_evidence: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        _path(self.path)
+        _integer(self.source_bytes, "record source bytes")
+        if not isinstance(self.generated_evidence, Mapping):
+            raise ReviewPackError("record generated evidence is not a mapping")
+
+    @property
+    def payload(self) -> bytes:
+        return canonical_manifest({"review-package-generated-evidence": self.generated_evidence})
+
+    @property
+    def review_bytes(self) -> int:
+        return len(self.payload)
+
+
 def _integer(value: object, label: str) -> int:
     if type(value) is not int or value < 0:
         raise ReviewPackError(f"invalid {label}")

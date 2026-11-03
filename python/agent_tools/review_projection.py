@@ -9,13 +9,14 @@ from typing import Sequence
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import (PACKING_POLICY_SHA256, CandidateInput, FutureCommit, _run_git,
-    actual_inputs, actual_inputs_from_trees, commit_subject, git_diff, select_candidate)
+    actual_inputs, actual_inputs_from_trees, commit_subject, ef_designer_evidence_bound, ef_designer_path,
+    git_diff, select_candidate)
 from agent_tools.review_budget import BudgetAuthority, describe
 from agent_tools.review_forecast import (ForecastError, ForecastPlan, ancestor, canonical_bytes,
     closed, commit_range, digest, edge_facts, full_commit, identity, integer, load_plan,
     name, path_name, strict_json, tree_entry, history_commit, history_commits, _ownership)
 from agent_tools.review_git import HistoryError, original_edge, _original_walk
-from agent_tools.review_pack import ReviewRecordSize
+from agent_tools.review_pack import ReviewEvidenceSize, ReviewRecordSize, canonical_manifest
 
 
 class ReconstructionUnavailable(ForecastError):
@@ -154,8 +155,24 @@ def _completed_effects(plan: ForecastPlan, records: tuple[dict, ...], boundary: 
                 raise ForecastError("completed deletion is not proven absent")
 
 
+def _planned_record(path: str, size: int, member_max_bytes: int) -> ReviewRecordSize | ReviewEvidenceSize:
+    """Project one unfinished path as the record actual production would emit for it.
+
+    An EF Core migration designer whose whole record exceeds the member limit is
+    compacted by actual production (review_actual._ef_designer_evidence), so it is
+    projected as a worst-case placeholder of that evidence, not as its whole diff.
+    Every other path, generated or not, keeps its entire ordinary record.
+    """
+    if size > member_max_bytes and ef_designer_path(path):
+        evidence = ef_designer_evidence_bound(path, size)
+        if len(canonical_manifest({"review-package-generated-evidence": evidence})) <= member_max_bytes:
+            return ReviewEvidenceSize(path, size, evidence)
+    return ReviewRecordSize(path, size)
+
+
 def _project_input(plan: ForecastPlan, boundary: dict, completed: int,
-                   actual: CandidateInput, candidate: tuple[Path, str]) -> CandidateInput:
+                   actual: CandidateInput, candidate: tuple[Path, str],
+                   member_max_bytes: int) -> CandidateInput:
     records = _included(plan, boundary)
     _completed_effects(plan, records, boundary, completed, actual, candidate)
     latest = {}
@@ -170,11 +187,14 @@ def _project_input(plan: ForecastPlan, boundary: dict, completed: int,
         bound = next(b for b in record["bounds"] if b["boundary"] == boundary["id"])
         current = projected.get(path)
         size = bound["record_bytes"]
-        # Generated evidence is an observed-record exception only. Unfinished
-        # effects need their entire ordinary record, even on a generated path.
+        # An unfinished effect needs its entire ordinary record, even on a generated
+        # path, except an oversized EF designer, which actual production always tries
+        # to compact; _planned_record projects that as bounded evidence. The bound
+        # holds while the designer is well formed and its final diff still exceeds the
+        # member limit; otherwise the actual gate measures the real record (README).
         if current is None or size > len(current.payload) or current.generated_evidence is not None:
             size = max(size, current.source_bytes if current is not None else 0)
-            projected[path] = ReviewRecordSize(path, size)
+            projected[path] = _planned_record(path, size, member_max_bytes)
             changed = True
         observed = {"insertions": 0, "deletions": 0}
         in_hunk = False
@@ -257,7 +277,8 @@ def _recommend(plan: ForecastPlan, completed: int, package_name: str,
                 package_name=package_name, limits=authority.limits)
             candidate = select_candidate(inputs, authority.limits,
                 transform=lambda item: _project_input(plan, boundary, completed, item,
-                                                     (rebuilt.repo, rebuilt.result_tree)),
+                                                     (rebuilt.repo, rebuilt.result_tree),
+                                                     authority.limits.member_max_bytes),
                 measurement_only=True)
             if candidate.status != "within_budget":
                 continue
@@ -295,7 +316,8 @@ def project(repo: Path, plan: Path, base: str, head: str, completed_through: int
     projected_count = 0
     def transform(item: CandidateInput) -> CandidateInput:
         nonlocal actual_count, projected_count
-        projected = _project_input(forecast, boundary, completed_through, item, (forecast.repo, head))
+        projected = _project_input(forecast, boundary, completed_through, item, (forecast.repo, head),
+                                   authority.limits.member_max_bytes)
         actual_count, projected_count = len(item.records), len(projected.records)
         return projected
     candidate = select_candidate(actual_inputs(repo, base, head, package_name, authority.limits),
