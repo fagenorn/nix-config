@@ -70,8 +70,8 @@ PACKING_POLICY_V1 = {
 PACKING_POLICY_V1_SHA256 = telemetry_digest(PACKING_POLICY_V1)
 # Names that follow each `--name-status -z` operation letter (issue 569).
 RECORD_OPERATIONS = {"A": 1, "M": 1, "D": 1, "T": 1, "R": 2}
-RENAME_FLOOR_RE = re.compile(r"--find-renames=([0-9]{1,3})%\Z")
-RENAME_SCORE_RE = re.compile(r"R[0-9]{3}\Z")
+_RENAME_FLOOR_RE = re.compile(r"--find-renames=([0-9]{1,3})%\Z")
+_RENAME_SCORE_RE = re.compile(r"R[0-9]{3}\Z")
 GENERATED_EVIDENCE_KINDS = ("ef-core-migration-designer", "whole-file-deletion")
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -124,9 +124,9 @@ def record_operation(token: bytes, record_policy: Mapping = RECORD_POLICY) -> tu
         raise GenerationError("unsupported Git record operation") from exc
     if operation in RECORD_OPERATIONS and operation != "R":
         return operation, RECORD_OPERATIONS[operation]
-    if RENAME_SCORE_RE.match(operation):
+    if _RENAME_SCORE_RE.match(operation):
         floor = next(int(match.group(1)) for arg in record_policy["diff_args"]
-                     if (match := RENAME_FLOOR_RE.match(arg)))
+                     if (match := _RENAME_FLOOR_RE.match(arg)))
         if floor <= int(operation[1:]) <= 100:
             return operation, RECORD_OPERATIONS["R"]
     raise GenerationError("unsupported Git record operation")

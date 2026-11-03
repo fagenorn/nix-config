@@ -618,7 +618,7 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertGreater(len(packaged), 65_536)
 
     def test_oversized_ef_designer_rename_keeps_its_rename_section(self):
-        # The EF designer contract holds at the new path, so only the rename guard keeps evidence out (D5).
+        # The EF designer contract holds at the new path, so only the rename guard keeps evidence out (issue 569).
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
             plan, env = self.setup_repo(repo)
