@@ -11,7 +11,7 @@ The correctness axis of the two-axis diff review. Uses SKILL.md's retained `Reso
 
 ## Size pre-flight
 
-Runs after the `capabilities.review.code` routing, never before: an unsupported capability dispatches no Codex call, so measuring first is wasted.
+Runs after the `capabilities.review.code` routing, never before: an unsupported capability dispatches no Codex call.
 
 From the worktree root, measure the range (`~/.agents/bin/diff-scope` when the bare name does not resolve):
 
@@ -25,14 +25,14 @@ diff-scope <base-sha>..<head-sha> \
 The spec and plan directories come from the caller's retained snapshot, with no fallback locations. Read exactly three fields:
 
 - `product.changed_files`: the budget comparison, and `M` in every disclosure.
-- `files[].path`: the subset, the first 20 entries in emitted order, taken verbatim with no filtering or re-ranking.
+- `files[].path`: consecutive slices of 20 entries in emitted order, taken verbatim with no filtering or re-ranking.
 - `files[].changed_lines`: the churn printed beside each path in item 7.
 
 Never wire `product.changed_lines` or `excluded` into this decision; they belong to the degradation gate.
 
-The budget is 20 product files, compared strictly: `changed_files > 20` scopes the packet, `changed_files == 20` does not, and zero dispatches whole.
+The budget is 20 product files, compared strictly: `changed_files > 20` gives one scoped packet per slice, so every product file is reviewed once; `changed_files == 20` does not, and zero dispatches whole.
 
-**No measurement**: an absent helper, a non-zero exit, unparseable output, or a selected path containing a newline (it has no unambiguous one-per-line form in item 7) yields no measurement, never a failure. Dispatch as an under-budget range, six items and today's verdict format, and report `unmeasured`. Never drop such a path from the subset instead.
+**No measurement**: an absent helper, a non-zero exit, unparseable output, or a selected path containing a newline (it has no unambiguous one-per-line form in item 7) yields no measurement, never a failure. Dispatch as an under-budget range, six items and today's verdict format, and report `unmeasured`. Never drop such a path from a slice instead.
 
 Scoping is not a Codex failure and adds no failure class: it never spends the one native fallback or triggers a retry, and when Codex fails on a scoped dispatch the fallback gets the same packet, item 7 and coverage sentence intact.
 
@@ -49,7 +49,7 @@ This operation's packet is its own, built from scratch. It contains exactly:
 5. Inferred verify commands, labelled as context on how the change is verified elsewhere, not a request to run anything (the runtime is read-only), plus every applicable `AGENTS.md`/`CLAUDE.md`.
 6. The standards layers matching the diff's file types (`~/.agents/standards/the-bar.md`, its `stacks/` shards, the project's intersecting `docs/standards/` shards).
 
-Nothing else rides along: no investigation, spec, domain docs, review-focus setting or `REVIEW-CONTRACT.md`. The light packet keeps Codex inside its runtime budget. It is a paths packet and never embeds per-file diffs.
+Nothing else rides along: no investigation, spec, domain docs, review-focus setting or `REVIEW-CONTRACT.md`. It is a paths packet and never embeds per-file diffs.
 
 ### Over budget
 
@@ -57,8 +57,8 @@ An under-budget or unmeasured packet is exactly the six items above. A scoped on
 
 **Item 2** reviews the listed product files as changed across `<base-sha>..<head-sha>`, for the same subject and with the same conformance exclusion, and adds in substance:
 
-> This is a scoped review: `<N>` of `<M>` changed product files, selected as the
-> highest-churn files. Files outside the list are not under review in this pass — do
+> This is a scoped review: `<N>` of `<M>` changed product files, one slice of the
+> range. Files outside the list are not under review in this pass — do
 > not treat their absence from the list as evidence they are clean. Every finding you
 > report must be anchored in a listed file. An unlisted file may be consulted and
 > cited as evidence for such a finding; a defect lying wholly within an unlisted file
@@ -85,4 +85,4 @@ A scoped review puts the coverage at the start of the assessment, after the em d
 
 ## Disposition
 
-The calling controller keeps verify-and-disposition under its own fix-flow rules. Return the validated three-section result (or the fallback reviewer's) unmodified, with the reviewer identity (`Codex` | `Claude fallback` + failure class) and the scope (`full` | `scoped: <N> of <M> product files` | `unmeasured`). The controller records what it is given and never re-derives the measurement.
+The calling controller keeps verify-and-disposition under its own fix-flow rules. Return each validated three-section result (or the fallback reviewer's) unmodified, with the reviewer identity (`Codex` | `Claude fallback` + failure class) and the scope (`full` | `scoped: <N> of <M> product files` | `unmeasured`). The controller records what it is given and never re-derives the measurement.

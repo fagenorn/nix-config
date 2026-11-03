@@ -3417,8 +3417,7 @@ PROJECTION_MACHINE_TEXT = {
 PLANNING_DOCUMENTS = (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md", FROM_ISSUE_DIR / "standards-review.md",
                       PHASE_5_REVIEW_CONTRACT)
 PROJECTION_MACHINE_TEXT[SDD] = (
-    "sdd-gate next --completed N", '"kind":"actual_overage"',
-    "artifact-budget check --kind review-package")
+    "sdd-gate next --completed N", "artifact-budget check --kind review-package", "**Chunked review**")
 PROJECTION_MACHINE_TEXT[FROM_ISSUE_DIR / "delegated-owner.md"] = ("decompose_required",)
 BUDGET_BASE = "8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc"
 
@@ -3459,11 +3458,22 @@ class ProjectionCallerContractsTest(unittest.TestCase):
 class ExecutionCallerContractsTest(unittest.TestCase):
     def test_sdd_no_longer_records_or_projects_and_phase_6_confirms(self):
         sdd = normalized(SDD.read_text(encoding="utf-8"))
-        for retired in ("sdd-gate record", "review-feasibility", "projected_overflow", "plan: record task"):
+        for retired in ("sdd-gate record", "review-feasibility", "projected_overflow", "plan: record task",
+                        "actual_overage"):
             self.assertNotIn(retired, sdd)
         phase6 = normalized((FROM_ISSUE_DIR / "SKILL.md").read_text(encoding="utf-8")
                             .split("## Phase 6", 1)[1].split("## Phase 7", 1)[0])
         self.assertIn("review-feasibility confirm --plan <root> --base <base> --input -", phase6)
+
+    def test_an_oversized_range_is_chunked_with_its_literal_diff_protocol(self):
+        review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
+        chunked = review.split("## Chunked review", 1)[1].split("\n## ", 1)[0]
+        for item in ("git diff --name-only <base>..<head>", "git diff --stat <base>..<head>",
+                     "git diff <base>..<head> -- ':(literal)<path>'"):
+            with self.subTest(item=item):
+                self.assertIn(item, chunked)
+        diff_review = normalized(DIFF_REVIEW.read_text(encoding="utf-8"))
+        self.assertNotIn("the first 20 entries", diff_review)
 
     def test_edited_execution_documents_do_not_grow(self):
         assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "SKILL.md",
