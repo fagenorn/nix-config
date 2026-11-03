@@ -33,7 +33,7 @@ cumulative delivery package, delivery base to HEAD), then with `--task`,
 `task-brief`, `prepare-brief`, `register-worker` (under an identity) and
 `write-brief`. The delivery gate is advisory: a `decompose_required` package
 the independent check agrees with is noted in the ledger as `over_budget` and
-the call goes on, since the final review chunks an oversized range. A step
+the call goes on: the final review's package gate owns the size. A step
 that does not apply does not run. It appends the ledger's delivery base,
 completion, delivery gate and dispatch lines, each once, and writes the
 implementer brief into the plan's workspace. Lines an older `sdd-gate` wrote
