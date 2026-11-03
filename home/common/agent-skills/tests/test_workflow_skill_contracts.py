@@ -3476,6 +3476,21 @@ class ExecutionCallerContractsTest(unittest.TestCase):
         diff_review = normalized(DIFF_REVIEW.read_text(encoding="utf-8"))
         self.assertNotIn("the first 20 entries", diff_review)
 
+    def test_final_review_reuses_a_published_package_instead_of_republishing_it(self):
+        # #528: review-package refuses a range whose package exists (exit 2), and
+        # `sdd-gate next` already published DELIVERY_BASE..DELIVERY_HEAD.
+        review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
+        first = review.split("## First pass", 1)[1].split("Pass both axes", 1)[0]
+        fix = review.split("## Fix wave", 1)[1].split("## Acceptance record", 1)[0]
+        for name, text in (("first pass", first), ("fix wave", fix)):
+            with self.subTest(section=name):
+                self.assertIn("review-<base7>..<head7>.json", text)
+                self.assertIn(".report.json", text)
+                self.assertIn("reuse", text)
+        self.assertIn("review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD", first)
+        self.assertIn("review-package PLAN_FILE FIX_BASE HEAD", fix)
+        self.assertIn("once", fix.split("review-package PLAN_FILE FIX_BASE HEAD", 1)[1].split("Supply", 1)[0])
+
     def test_edited_execution_documents_do_not_grow(self):
         assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "SKILL.md",
                                           FROM_ISSUE_DIR / "delegated-owner.md"))
