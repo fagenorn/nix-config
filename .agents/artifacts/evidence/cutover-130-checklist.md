@@ -284,3 +284,19 @@ C12.d readlink /run/current-system
 The two reachable hosts run different bridge builds (distinct store paths); per D2 and #66 that is recorded and is not red.
 
 Item verdict: **human-pending**
+
+## Dispositions
+
+| Rows | Repair route | Disposition |
+|------|--------------|-------------|
+| C3 mbp .agents/artifacts/evidence/; C4 mbp home/common/agent-skills/platform-manifest.json | Build the strict-cutover candidate (platform 2.0.0, no bridge paths) | #579 filed |
+| C11 mbp host; C11 eleven-m5 host | Bridge minor declaring the deprecations | #580 filed |
+| C11 mbp /Users/anis/Projects/arcwave | Arcwave: retire the tracked legacy skills config and its reader | #581 filed |
+| C11 mbp /Users/anis/Projects/nodocom | Nodo: move the railway deploy off bindings.deploy | #582 filed |
+| C11 mbp /Users/anis/Projects/jarbird | JarBird github-actions-health deploy watch (release core) | #555 cited |
+| C2 mbp /Users/anis/Projects/nodocom; C10 mbp /Users/anis/Projects/nodocom | Nodo: repair the overbroad runtime-sentinel ignore rule | #583 filed |
+| C6 mbp /Users/anis/Projects/arcwave; C6 mbp /Users/anis/Projects/argus; C6 mbp /Users/anis/tmp/nix-config; C6 mbp /Users/anis/Projects/nodocom | Dispose of the refused legacy ledgers | #584 filed |
+| C7 mbp /Users/anis/Projects/arcwave; C7 mbp /Users/anis/Projects/argus; C7 mbp /Users/anis/tmp/nix-config; C7 mbp /Users/anis/Projects/jarbird; C7 mbp /Users/anis/Projects/nodocom | Reconcile worktrees without a resumable mapping | #585 filed |
+| C2 mbp /Users/anis/tmp/nix-config | Keep bundle and trials JSON out of the adoption-evidence candidate set (D16) | #586 filed |
+
+Owner-run, not filed: the #70 live paired Claude and Codex trials (#128 D11), on issue 130's gate once F1's candidate exists.
