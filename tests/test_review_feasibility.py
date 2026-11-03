@@ -209,7 +209,7 @@ class RecordPolicyDomainTest(unittest.TestCase):
             finally:
                 group[key] = previous
 
-    def test_living_policy_is_v1_with_a_fifty_percent_rename_threshold(self):
+    def test_living_policy_is_v2_with_a_fifty_percent_rename_threshold(self):
         from agent_tools.review_actual import (PACKING_POLICY, PACKING_POLICY_SHA256, PACKING_POLICY_V1_SHA256,
             RECORD_POLICY, RECORD_POLICY_SHA256, RECORD_POLICY_V1)
         self.assertEqual(RECORD_POLICY, {**RECORD_POLICY_V1, 'kind': 'review-git-records/v2',

@@ -258,7 +258,7 @@ The hostile `diff.renames` and `diff.renameLimit` cases then prove that the poli
 **1c. `tests/test_review_feasibility.py`.** Add to `RecordPolicyDomainTest` (Task 1):
 
 ```python
-    def test_living_policy_is_v1_with_a_fifty_percent_rename_threshold(self):
+    def test_living_policy_is_v2_with_a_fifty_percent_rename_threshold(self):
         from agent_tools.review_actual import (PACKING_POLICY, PACKING_POLICY_SHA256, PACKING_POLICY_V1_SHA256,
             RECORD_POLICY, RECORD_POLICY_SHA256, RECORD_POLICY_V1)
         self.assertEqual(RECORD_POLICY, {**RECORD_POLICY_V1, 'kind': 'review-git-records/v2',
@@ -362,7 +362,7 @@ While planning, each of two mutations made this case error: leaving `fresh_recor
 
 Run: `env PYTHONPATH=python timeout 900 python3 -m unittest -k rename -k move -k ambiguous -k threshold home/common/agent-skills/tests/test_review_package.py tests/test_review_record_view.py tests/test_review_feasibility.py tests/test_review_issue121.py tests/test_review_issue100.py 2>&1 | grep -E '^(FAIL|ERROR):' | sed 's/ (.*//' | sort -u`
 Expected, at Task 1's head:
-- `test_ambiguous_pairing_is_deterministic`, `test_edited_move_is_one_rename_record_keyed_by_its_new_path`, `test_oversized_rename_record_stays_whole_and_stops`, `test_oversized_ef_designer_rename_keeps_its_rename_section`, `test_the_inexact_rename_is_one_record_keyed_by_its_new_path` and `test_living_policy_is_v1_with_a_fifty_percent_rename_threshold` all fail.
+- `test_ambiguous_pairing_is_deterministic`, `test_edited_move_is_one_rename_record_keyed_by_its_new_path`, `test_oversized_rename_record_stays_whole_and_stops`, `test_oversized_ef_designer_rename_keeps_its_rename_section`, `test_the_inexact_rename_is_one_record_keyed_by_its_new_path` and `test_living_policy_is_v2_with_a_fifty_percent_rename_threshold` all fail.
 - Both `test_edited_move_measures_as_a_v1_delete_and_add` cases fail too: their living-policy control still reads `D`/`A`.
 - `test_operation_rule_follows_each_policy_threshold` errors on `_record_operations`' arity.
 - `test_move_below_the_threshold_is_a_delete_and_an_add` and `test_exact_rename_with_a_mode_change_stays_header_only` pass both before and after: they guard what must not change.
