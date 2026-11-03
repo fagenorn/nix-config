@@ -235,6 +235,21 @@ environment through its subprocess `env`. An in-process call gets it through
    - **Isolation:** CORE's manifest and shards are byte-identical to the clean
      run.
 
+   The table's neutral-by-argument row (`diff.algorithm`, `diff.renames`,
+   `diff.renameLimit`, `GIT_EXTERNAL_DIFF`, `diff.external`, and a
+   `diff=<driver>` attribute with a `command` or a `textconv`) cannot make a
+   control with the full policy argv bite, because that argv already
+   neutralises it. Each of those sources is still one subtest. Its control
+   renders the hostile copy and the clean fixture both with the policy argv
+   less the arguments that neutralise that source: `--diff-algorithm=myers`;
+   `-c diff.renames=true` with `--find-renames=100%`; `-c diff.renameLimit=0`
+   with `--find-renames=100%`; `--no-ext-diff`; or `--no-textconv`. The two
+   renderings differ, so the source is shown to bite raw Git. The isolation
+   assertion is unchanged: CORE, which keeps the full argv inside the view,
+   equals the clean run. For these sources the fixture also carries a file
+   pair that `myers` and `histogram` render differently, and an inexact
+   rename among two deleted files that a rename limit of 1 skips.
+
    The `.gitattributes` subtests cover the working-tree file, the
    index-and-`HEAD` file, `GIT_ATTR_SOURCE` and `attr.tree`.
 
@@ -253,24 +268,40 @@ environment through its subprocess `env`. An in-process call gets it through
    working-tree `.gitattributes` in the fixture repositories. The anchor and
    every member, `issue-121.json` among them, must equal the clean run's bytes.
 3. **Source and built launcher parity.** `tests/test_agent_tools_launchers.py`
-   runs `review-package` and `derive-review-feasibility-fixtures` from the
-   built launchers and as `python -m` from source, both under the combined
-   hostile environment. Their stdout and outputs must match the clean source
-   run byte for byte.
-4. **Full shape.** `tests/test_review_retained_full.py` gets one case. It
-   derives once clean and once hostile from disposable
-   `git clone --shared --no-checkout` clones of the root. The hostile run adds
-   `info/attributes` to its clone, plus repository configuration and a hostile
-   environment. Both runs use this checkout's package and tool commit, as the
-   tier's `test_two_derivations_are_byte_identical` does. Two assertions follow:
-   - The five files of the two runs are byte-identical. The anchors are equal
-     too, because the tool commit is the same.
+   follows D8. Its `review-package` case builds its own fixture repository
+   and runs the command three times: from source in a clean environment,
+   from source under `hostile_git_env`, and through the built launcher under
+   `hostile_git_env`. The control: raw `git diff` of the range differs under
+   the hostile setup. Both hostile runs' reports and written packages must
+   equal the clean source run's byte for byte. Derivation parity rides
+   `RetainedLauncherTest`'s existing full-shape case. Its built
+   `derive-review-feasibility-fixtures` run gets environment-only hostility
+   (`hostile_git_env` with no repository, because the retained root is never
+   written), and its clean source run stays clean. The two summaries and the
+   two sets of five bundle files must be equal. The control: raw `git diff` of
+   the first retained pair differs under that environment. The installed tier
+   derives no portable fixture, because it imports no `agent_tools` (CP18).
+4. **Full shape.** `tests/test_review_retained_full.py` gets one case, which
+   follows D8. It derives once, hostile, from a disposable
+   `git clone --shared --no-checkout` clone of the root. `hostile_git_env`
+   writes `info/attributes`, a working-tree `.gitattributes` and repository
+   configuration into the clone, and the derivation runs under the hostile
+   environment, with its issue-121 and issue-100 inputs read from the clone.
+   It uses this checkout's package and the class's tool commit, as the
+   class's clean derivation does. The control: raw `git diff` of the first
+   retained pair in the clone differs under the hostile setup. Three
+   assertions follow:
+   - The summary equals the class's clean derivation's summary.
+   - The five files equal the class's clean bundle byte for byte. The anchors
+     are equal too, because the tool commit is the same.
    - The three payload members, `issue-121.json` among them, are byte-identical
      to the committed bundle's members. Those members carry no tool identity, so
      this proves that clean-run bytes are unchanged on the real objects (D2).
 
-   The anchor cannot equal `ANCHOR_SHA256`, because that anchor binds the
-   reviewed tool commit's closure and this change edits the package.
+   The class's bundle is already a clean derivation of the same objects by the
+   same tool, so no second clean derivation from a clone runs. The anchor
+   cannot equal `ANCHOR_SHA256`, because that anchor binds the reviewed tool
+   commit's closure and this change edits the package.
    `test_committed_evidence_reproduces_with_the_reviewed_tool` keeps proving
    that committed anchor with the reviewed package. The root is compared before
    and after each run, as RP11 requires.
