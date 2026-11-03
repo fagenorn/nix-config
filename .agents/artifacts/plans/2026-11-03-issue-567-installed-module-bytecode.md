@@ -52,6 +52,10 @@ Both tasks are full lane: the script deletes a directory, and the activation run
 
 Per D1 (activation clear, no loader changes), D2 (one script that both the activation and the suite run), D3 (rename, then remove, with the residual documented), D4 (`errorEcho`, and the switch continues), D5 (the top-level cache only, docstrings re-pointed) and D6 (proof through the production loader, with a negative control). Planning added D7 (the script's location, argv and invocation).
 
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus. Base `fc13636d`, plan head `a20a46dc`. Findings: 0 blocking, 0 should-fix, 0 discussion (accepted 0, rejected 0, deferred 0). No fallback.
+
 ---
 
 ## Review feasibility delivery
