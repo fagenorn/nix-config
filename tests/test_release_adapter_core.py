@@ -94,16 +94,16 @@ class RegistryTest(unittest.TestCase):
                 self.assertNotIn("argus", path.read_text("utf-8").lower())
 
     def test_prior_descriptors_and_forge_profiles_keep_their_base_digests(self):
-        """Issue 547 D22: values measured at base 328f08da."""
+        """Issue 547 D22: values measured at base 328f08da; github-forge values re-measured for issue 554 D16."""
         digest = release_adapter.descriptor_digest
         self.assertEqual(digest(release_adapter.DESCRIPTORS["github-forge"]),
-                         "sha256:efe2899b3f41bfde870ab28366beb81a8359e5eb050a2be1534b71810473004a")
+                         "sha256:b20ecb89221b3a7c29db4409d1852e469ff7f1891378ee2ed35e22c02c73953b")
         self.assertEqual(digest(release_adapter.DESCRIPTORS["github-actions-health"]),
                          "sha256:2453a459491301250c59b62fa08b4846b13ada3970a4b0583710426b251dc55e")
         self.assertEqual(release_profile.profile_digest(support.forge_profile()),
-                         "sha256:4be9656c19dce516d183fb3c581fbf3be8026ea490497ff15d8292fc79f06573")
+                         "sha256:39be394179cf572e159af867163c48bef871c71fdad2f1e1cfccd6d270515cf4")
         self.assertEqual(release_profile.profile_digest(support.publication_free_profile()),
-                         "sha256:f98d60dd0f7484bfee7fd017d4edd4b6c23007db767b0a2f2a504a9c4b6cddab")
+                         "sha256:2767a4c3836a3a86eaffd807dd6672a2b2383ade2c39d739c0aa9036f7c2b7b3")
 
 
 class HostLocalCoreTest(CustodyCase):
