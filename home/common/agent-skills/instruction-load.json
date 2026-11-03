@@ -61,7 +61,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 20470
+        "claude": 19463
       },
       "conditional_ceiling_bytes": {
         "claude": 0

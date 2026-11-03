@@ -76,7 +76,7 @@ enter this context.
 Both prompts carry, inline (the subagent starts with no context and loads no skills beyond the
 exceptions named below):
 
-- the Phase-0 issue summary and scope boundary, with the note's **Lane triage** record and verdict verbatim,
+- the Phase-0 issue summary and scope boundary,
 - the retained fields it needs (`bindings.paths.artifacts`, `bindings.paths.context`,
   `bindings.paths.hints`, `bindings.tracker`, `bindings.vcs`, `bindings.workflow`),
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
