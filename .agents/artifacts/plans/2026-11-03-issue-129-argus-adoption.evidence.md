@@ -332,7 +332,7 @@ All four match the brief's expected exits and the refusal text. Afterwards: `git
 Qualifying PR (D13): open PRs into `main` were 115 and 108 (`gh pr list`, 2026-11-03T10:39Z). 115 was viewed first: `headRefOid` `0bd5fb02c8545ed0247fe85fcf90d6e2e8b7360e`, `mergeStateStatus` `CLEAN` (not `BEHIND`), one rollup entry `memory foundation (unit + forced checks)`, `CheckRun`, `COMPLETED`, `SUCCESS` (completed 2026-09-08T23:41:37Z). 115 qualifies and is the chosen PR. 108 was viewed too: `DIRTY`, its one check entry `COMPLETED`/`FAILURE` (head `352c9eaac86e8e4cecf98df3c78167b9d39bcc44`); it does not qualify and was not probed.
 
 Central-literal diff (AC8, 2026-11-03T10:40:05Z, after `git fetch`; script exit 0):
-- `git log --no-merges --oneline ed332155…..HEAD ^origin/main -- home/common/claude-code/ python/agent_tools/ home/common/agent-skills/scripts/ lib/ hosts/` printed nothing.
+- `git log --no-merges --oneline ed33215598521ba745f6262233e0c2c98ef1479f..HEAD ^origin/main -- home/common/claude-code/ python/agent_tools/ home/common/agent-skills/scripts/ lib/ hosts/` printed nothing.
 - Base policy `/nix/store/7c2f7bmp7siygvwzx1y7mdq6mn19jr24-claude-bash-lifecycle-guard-base-policy.json`, the only match in `R`'s closure: `{"authorized_owners":["fagenorn"],"integration_bases":{}}`. Its two members are the owner literal (names no Argus fact, 126 D3) and an empty `integration_bases`. `grep -qi argus` on the file matched nothing.
 
 Tracing (AC8), where each Argus fact comes from:
