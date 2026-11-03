@@ -408,6 +408,7 @@ def normalized(text):
 
 
 SHARED_POLICY_ENTRIES = {
+    "deliver-direct/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.verification"),
     "design/SKILL.md": ("bindings.paths.artifacts.specs",),
     "doc-grounded-questions/SKILL.md": ("bindings.paths.context", "bindings.paths.standards", "bindings.paths.architecture", "bindings.paths.hints"),
     "from-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
@@ -3294,9 +3295,9 @@ class DirectLaneRoutingTest(unittest.TestCase):
     def test_deliver_direct_spells_the_guard_accepted_ship_forms(self):
         text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
         for form in (
-            "`git -C <dir> push origin direct-<n>`",
-            "`gh pr create --repo <repo> --base main --head direct-<n> --title '<title>' --body '<body>'`",
-            "`gh pr merge <pr> --repo <repo> --merge --delete-branch`",
+            "`git -C <dir> push origin <branch>`",
+            "`gh pr create --repo <slug> --base <int> --head <branch> --title '<title>' --body '<body>'`",
+            "`gh pr merge <pr> --repo <slug> --<vcs.merge.strategy>`",
             "`reviewer-lite` with `lane: direct`",
             "**Eligibility.**",
         ):
