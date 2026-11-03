@@ -3468,7 +3468,7 @@ class ExecutionCallerContractsTest(unittest.TestCase):
     def test_an_oversized_range_is_chunked_with_its_literal_diff_protocol(self):
         review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
         chunked = review.split("## Chunked review", 1)[1].split("\n## ", 1)[0]
-        for item in ("git diff --name-only <base>..<head>", "git diff --stat <base>..<head>",
+        for item in ("git diff --no-renames --name-only <base>..<head>", "git diff --stat <base>..<head>",
                      "git diff <base>..<head> -- ':(literal)<path>'"):
             with self.subTest(item=item):
                 self.assertIn(item, chunked)

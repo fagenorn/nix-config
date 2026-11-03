@@ -92,30 +92,32 @@ One that survives the fix wave is load-bearing: it sets
 ## Chunked review
 
 Any range whose package gate takes generator exit 3 (first pass, fix range or
-task) is reviewed in chunks, never stopped and never truncated:
+task) is reviewed in chunks, never stopped or truncated:
 
-1. **Cut.** Split at task boundaries: each `Task <N>: dispatched (base <sha>)`
-   inside the range, plus its head. Merge neighbouring tasks greedily into the
-   longest run whose `review-package` passes the gate; that ordinary package is
-   the chunk. A single task still over budget, or a range with no task
-   boundary, is one unpackaged chunk: its reviewers get their rubric by path, base, head,
-   `git diff --stat <base>..<head>` and its paths, and read each path's
-   diff in slices with `git diff <base>..<head> -- ':(literal)<path>'`.
-2. **Own.** Give each path of `git diff --name-only <base>..<head>` over the
-   whole range to the last chunk that changes it; that chunk reviews the
-   path's whole-range diff, and other chunks treat it as context. The owned
-   lists must jointly equal that list with no path twice; ledger
-   `Review chunk <i>/<n>: <base7>..<head7>, <k> paths` before dispatch.
-3. **Review.** Each chunk gets fresh reviewers, never reused across chunks,
-   with the range's usual reviewer set (both axes for the first pass), routed
-   and dispositioned as for one package. An unpackaged chunk's correctness axis
-   takes rung 3. Chunk conformance dispatches carry no `[ACCEPTANCE_CRITERIA]`.
-4. **Integrate.** With two or more first-pass chunks, one more conformance
-   dispatch (same tier) gets every chunk verdict, the whole range's
-   `git diff --stat <base>..<head>` and path list and `[ACCEPTANCE_CRITERIA]`,
-   may read the head tree, checks the interfaces between chunks and returns the
-   `### Acceptance` table for every `ACn`. Its findings join the fix wave as
-   conformance findings.
+1. **Cut.** Split at each `Task <N>: dispatched (base <sha>)` inside the range;
+   merge neighbouring tasks greedily into the longest run whose `review-package`
+   passes the gate: that ordinary package is the chunk. A task still over
+   budget, or a range with no task boundary, is one unpackaged chunk: its
+   reviewers get their rubric by path (a task's also `task-<N>-brief.md` and
+   `task-<N>-report.md`), base, head, `git diff --stat <base>..<head>` and its
+   paths, read in slices with `git diff <base>..<head> -- ':(literal)<path>'`.
+2. **Own.** Each path of `git diff --no-renames --name-only <base>..<head>` over
+   the range belongs to the last chunk changing it; others treat it as context.
+   Owned lists must jointly equal that list with no path twice; ledger
+   `Review chunk <i>/<n>: <base7>..<head7>, <k> paths` before dispatch. An owned
+   path an earlier chunk also changes is read from the range base, as above,
+   not from shards.
+3. **Review.** Each chunk gets fresh reviewers, never reused across chunks, the
+   range's usual set (both axes on the first pass), its tasks and owned paths
+   named; they grade only those, and none carries `[ACCEPTANCE_CRITERIA]`. A
+   chunk read outside its package takes correctness rung 3. An axis is
+   `findings` when any of its chunk, slice or integration verdicts is.
+4. **Integrate.** After a chunked first pass, one more conformance dispatch
+   (same tier) gets every chunk verdict, the range's stat and path list and
+   `[ACCEPTANCE_CRITERIA]`, reads no package or whole-range diff, may read the
+   head tree, checks the interfaces between chunks and every `ACn`, and returns
+   the `### Acceptance` table. Its findings are conformance findings; the fix
+   wave's FIX_BASE is then `DELIVERY_HEAD`.
 
 ## Fix wave
 

@@ -30,7 +30,7 @@ The spec and plan directories come from the caller's retained snapshot, with no 
 
 Never wire `product.changed_lines` or `excluded` into this decision; they belong to the degradation gate.
 
-The budget is 20 product files, compared strictly: `changed_files > 20` gives one scoped packet per slice, so every product file is reviewed once; `changed_files == 20` does not, and zero dispatches whole.
+The budget is 20 product files, compared strictly: `changed_files > 20` gives each slice its own scoped dispatch and fallback, so every product file is reviewed once; `changed_files == 20` does not, and zero dispatches whole.
 
 **No measurement**: an absent helper, a non-zero exit, unparseable output, or a selected path containing a newline (it has no unambiguous one-per-line form in item 7) yields no measurement, never a failure. Dispatch as an under-budget range, six items and today's verdict format, and report `unmeasured`. Never drop such a path from a slice instead.
 
