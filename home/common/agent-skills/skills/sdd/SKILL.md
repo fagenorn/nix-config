@@ -13,7 +13,7 @@ takes only its documented route. Only `available` dereferences
 
 Execute a plan with a fresh implementer per task, a lane-scoped review after each, and a final two-axis branch review (conformance ∥ correctness).
 
-**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that prevents progress, all tasks complete, a decomposition stop, or the deadline headroom rule. Narrate at most one short line between tool calls.
+**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that prevents progress, all tasks complete, or the deadline headroom rule. Narrate at most one short line between tool calls.
 
 ## Setup
 
@@ -53,7 +53,7 @@ Pin `DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD origin/
 `sdd-gate review` and `next` run this for task and cumulative ranges; fix-round and final-review ranges pass it by hand before any reviewer dispatch: record the full base and head SHAs, run `review-package PLAN_FILE <base> <head>`, pipe its stdout unchanged through `artifact-budget validate-report --boundary producer --input -`, and run `artifact-budget check --kind review-package` on the report's root, agreeing on all four metrics. A reused package must carry the same full `range.base` and `range.head`. Take one of three exits:
 
 - Generator exit 0, validator exit 0, a strict `complete` report and agreement permit dispatch.
-- Generator exit 3 must validate as `decompose_required`: record it, dispatch no reviewer, and report it as `actual_overage` per **Finish**.
+- Generator exit 3 must validate as `decompose_required`, and the check must agree on all four metrics and the violations: dispatch no reviewer on it and review the range per final-review.md's **Chunked review**.
 - Generator or validator exit 2, malformed or unknown output, or any report/checker disagreement (including `complete` with `over_budget`) is `failed`: record and return it before dispatch as the failed SDD candidate (`detail_state: "none"`, `report_path: null`), validated by `artifact-budget validate-report --boundary sdd`, returning only canonical stdout.
 
 ## Agent tiers
@@ -146,7 +146,7 @@ It prints one JSON object. On `outcome: ready` the whole prompt is
 
 On `outcome: refused` dispatch nothing and route by `step` and `gate`:
 
-- step `validate-report`, `gate: decompose_required` → `artifact-budget check --kind review-package --root <report artifact path>` must agree with the report on all four metrics and the violations → SDD `decompose_required`, `stop: {"kind":"actual_overage","artifact":<report artifact>}`;
+- step `validate-report`, `gate: decompose_required` → the package gate's exit 3 above;
 - `gate: failed` or any disagreement → SDD `failed`;
 - step `release-worker` or `register-worker` is a lifecycle failure under `### Lifecycle workers`; any other `step` is a contract error: stop.
 
@@ -213,7 +213,7 @@ Mandatory for **every** risk lane; lanes narrow per-task review, never this gate
 
 ## Finish
 
-Before any workspace can disappear (a `decompose_required` stop skips this), collect every parked or residual finding as
+Before any workspace can disappear, collect every parked or residual finding as
 the strict non-empty detail input and write the retained candidate to
 `<workspace>/retained-detail.json`. Invoke review-package in `delivery-detail`
 mode with issue/branch/run/head identity; the producer alone derives the
@@ -223,8 +223,7 @@ root and compare its metrics with the producer report.
 
 Build one exact SDD JSON object with only `state`, `review_state`,
 `conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`,
-`head_sha`, `acceptance_state`, `detail_state`, `report_path`, and `notes`
-(plus `stop` for `decompose_required` only), then run
+`head_sha`, `acceptance_state`, `detail_state`, `report_path`, and `notes`, then run
 `artifact-budget validate-report --boundary sdd` and transport only canonical stdout.
 
 - `base_sha` and `head_sha` are the `DELIVERY_BASE` and `DELIVERY_HEAD` the final
@@ -237,7 +236,6 @@ Build one exact SDD JSON object with only `state`, `review_state`,
   was no criterion source or the run failed before the conformance axis graded;
   otherwise `unmet` when any verdict is `unmet` or `unverified`; otherwise
   `human_pending` when any is `human_pending`; otherwise `met`.
-- `decompose_required` (a stop, no final review): `review_state: unknown`, both verdicts and `verification_state` `not_run`, `acceptance_state: not_applicable`, `detail_state: none`, `report_path: null`, and `base_sha`/`head_sha` the refused gate's range (the gate's base and head). Keep the workspace and worktree.
 - A non-empty detail set is `present` with one main-root-relative durable path;
   with no findings it is `none` with a null path. Never inline transient review
   evidence.
@@ -264,4 +262,4 @@ Terminal states:
   transport.
 
 Report only the validated SDD JSON above to the calling workflow; `review_state`
-is `clean | residuals` (`unknown` only for a stop or `failed`). Do not ship, merge or open PRs: the caller owns delivery.
+is `clean | residuals` (`unknown` only for `failed`). Do not ship, merge or open PRs: the caller owns delivery.
