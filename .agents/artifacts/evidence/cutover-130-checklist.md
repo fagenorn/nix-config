@@ -76,6 +76,41 @@ Registration is the C2.a fleet row: `verify` reports `registered` false unless i
 
 Item verdict: **red**
 
+### C3 — Approved bundle binds the candidate
+
+> a fresh `approved` evidence bundle from the token-gate instrument covers the strict-cutover candidate as a whole (issue 130; #71)
+
+```text
+C3.a git ls-tree --name-only origin/main -- .agents/artifacts/evidence/
+C3.b git show origin/main:<path>
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| mbp | .agents/artifacts/evidence/ | eb5bdd256bcc | C3.a; C3.b | 2026-11-03T16:13:31Z | 0; 0; 0 | approved and binding the candidate: 0 of 2 bundles; C4 names no candidate | red |
+
+Informational bundles (no verdict, outside the worst-row rule):
+- .agents/artifacts/evidence/promotion-127-bundle.json: state unmeasured; candidate 66ccba5844ea
+- .agents/artifacts/evidence/release-128-bundle.json: state unmeasured; candidate 33149faddfc0
+
+Item verdict: **red**
+
+### C4 — Candidate and bridge fleet preflight
+
+> candidate and retained-bridge fleet preflight green for every registered project (#71)
+
+```text
+C4.a git show origin/main:home/common/agent-skills/platform-manifest.json
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| mbp | home/common/agent-skills/platform-manifest.json | eb5bdd256bcc | C4.a | 2026-11-03T16:13:31Z | 0 | platform_version 1.0.0; 0 deprecations, 0 removals; every C2.a interval [1.0.0,2.0.0) | red |
+
+No candidate exists: the strict major #66 requires is `2.0.0` or above, and the C2.a intervals on `mbp` and `eleven-m5` both exclude it (D1, D11).
+
+Item verdict: **red**
+
 ### C8 — Codex ship handoff installed
 
 > the Codex ship handoff is in place so that removing the fallback ladders does not strand a Codex session at the shipping step (issue 130)
@@ -131,6 +166,33 @@ C10.a conformance run --purpose doctor --repo-root R
 | mbp | /Users/anis/Projects/nodocom | ef9eb5e8d25e dev 0 dirty | C10.a | 2026-11-03T16:08:00Z | 0 | doctor failed repository.ignore.runtime_sentinel; repair lifecycle.ignore.repair; 0 suppressed or not_run; admission passed | red |
 | eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C10.a | 2026-11-03T16:08:05Z | 0 | doctor passed; no warning checks; 0 suppressed or not_run; admission passed | green |
 | anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+
+Item verdict: **red**
+
+### C11 — Deprecations shipped, zero users
+
+> Deprecation notices shipped in the bridge minor; removal happens only here, in the major, and only after zero fleet users of the deprecated paths. (issue 130 refresh)
+
+```text
+C11.a resolve-project platform-status
+C11.b git --no-optional-locks -C R ls-files -- .claude/skills.config.json
+C11.c resolve-project resolve --repo-root R
+C11.d git --no-optional-locks -C R grep -n -F 'release deploy inspect' -- . ':!.agents/artifacts'
+```
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| mbp | host | system-309 | C11.a | 2026-11-03T16:13:36Z | 0 | platform.deprecations empty (0 entries) | red |
+| eleven-m5 | host | system-28 | C11.a | 2026-11-03T16:13:37Z | 0 | platform.deprecations empty (0 entries) | red |
+| anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+| mbp | /Users/anis/Projects/arcwave | 1f4ab4731c8b dev 0 dirty | C11.b; C11.c; C11.d | 2026-11-03T16:13:49Z | 0; 0; 1 | legacy file tracked; deploy.adapter none; 0 hits | red |
+| mbp | /Users/anis/Projects/argus | 21338cae51ea main 1 dirty | C11.b; C11.c; C11.d | 2026-11-03T16:13:50Z | 0; 0; 1 | legacy file not tracked; deploy.adapter none; 0 hits | green |
+| mbp | /Users/anis/tmp/nix-config | f6a48dcf66fb main 0 dirty | C11.b; C11.c; C11.d | 2026-11-03T16:13:50Z | 0; 0; 1 | legacy file not tracked; deploy.adapter none; 0 hits (skills) | green |
+| mbp | /Users/anis/Projects/jarbird | dd3964e3b2a7 dev 8 dirty | C11.b; C11.c; C11.d | 2026-11-03T16:13:51Z | 0; 0; 1 | legacy file not tracked; deploy.adapter github-actions-health; 0 hits | red |
+| mbp | /Users/anis/Projects/nodocom | ef9eb5e8d25e dev 0 dirty | C11.b; C11.c; C11.d | 2026-11-03T16:13:51Z | 0; 0; 1 | legacy file tracked; deploy.adapter railway; 0 hits | red |
+| eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C11.b; C11.c; C11.d | 2026-11-03T16:13:53Z | 0; 0; 1 | legacy file not tracked; deploy.adapter none; 0 hits | green |
+
+C11.d exits 1 (no hit) on every root; for `fagenorn/nix-config` its pathspec is `home/common/agent-skills/skills`. Point-in-time records under `.agents/artifacts` are not users. The `jarbird` root resolves `github-actions-health` on `mbp` (branch dev) and `none` on `eleven-m5` (branch main).
 
 Item verdict: **red**
 
