@@ -178,6 +178,16 @@ in
     unset skillRoot skillName target foreign entry
   '';
 
+  # Installed agent modules are links into the store, where every file has
+  # modification time 1, so bytecode cached beside a link could outlive a
+  # same-size edit. Once the links are updated, every activation removes the
+  # library's bytecode cache; a failure is reported and the switch goes on
+  # (issue 567; README § Installed module library).
+  home.activation.clearAgentModuleBytecode = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
+    run ${pkgs.runtimeShell} ${./scripts/clear-library-bytecode} "$HOME/.agents/lib/python" \
+      || errorEcho "Clearing $HOME/.agents/lib/python/__pycache__ failed (see the error above). While it remains, an installed agent module may run stale bytecode: remove it and any .pycache-clear.* directory beside it by hand."
+  '';
+
   # The workflow skills invoke these helpers by bare name (`workflow-state`,
   # `agent-evidence`), so ~/.agents/bin must be on PATH or every spawned agent
   # shell gets exit 127 — the failure codex-companion hit before it was wrapped
