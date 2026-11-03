@@ -43,6 +43,14 @@ MANIFEST_MEMBERS = (
 # D36: a `migrations` entry is closed on exactly these three members.
 MIGRATION_MEMBERS = ("id", "from_schema", "to_schema")
 
+# Issue 580 D1: a `deprecations` entry is closed on exactly these six members,
+# and its `kind` is one of two. A `project_file` subject is a path a project
+# may hold, so a warning can look for it; a `platform_behavior` subject is
+# free text naming shipped behaviour.
+DEPRECATION_MEMBERS = ("id", "kind", "subject", "since", "successor",
+                       "migration")
+DEPRECATION_KINDS = ("project_file", "platform_behavior")
+
 # The fleet registry's members, and D18's closed entry: a stable identity and
 # a location, plus one optional record of how a registration reached its
 # branch (`branch_override`, issue 363 D3). No version stamp and no cached
@@ -303,6 +311,72 @@ def _validate_migrations(source: dict, violations: list[dict]) -> None:
             "platform.manifest.migrations.not_ascending"))
 
 
+def _validate_deprecation_entry(entry: object, pointer: str,
+                                violations: list[dict]) -> object:
+    """Validate one closed deprecation record (issue 580 D1).
+
+    Returns the entry's `id` when it is a non-empty string, else None, so the
+    caller can check uniqueness only over well-typed ids.
+    """
+    if not isinstance(entry, dict):
+        violations.append(_violation(
+            pointer, "must be an object",
+            "platform.manifest.deprecations.not_object"))
+        return None
+    _check_exact_members(entry, pointer, DEPRECATION_MEMBERS, "deprecations",
+                         violations)
+    for name in ("id", "subject", "successor", "migration"):
+        if name in entry and not (isinstance(entry[name], str) and entry[name]):
+            violations.append(_violation(
+                f"{pointer}/{name}", "must be a non-empty string",
+                "platform.manifest.deprecations.not_string"))
+    kind = entry.get("kind")
+    if "kind" in entry and not (isinstance(kind, str)
+                                and kind in DEPRECATION_KINDS):
+        violations.append(_violation(
+            f"{pointer}/kind",
+            "must be one of: " + ", ".join(DEPRECATION_KINDS),
+            "platform.manifest.deprecations.kind_unknown"))
+    if "since" in entry:
+        parsed = parse_semver(entry["since"])
+        if parsed is None or parsed[2] != 0 or parsed[1] < 1:
+            violations.append(_violation(
+                f"{pointer}/since",
+                "must be a minor release: MAJOR.MINOR.0 with MINOR at least 1",
+                "platform.manifest.deprecations.since_not_minor"))
+    subject = entry.get("subject")
+    if kind == "project_file" and isinstance(subject, str) and subject:
+        if (subject.startswith("/") or "\\" in subject or "\0" in subject
+                or any(segment in ("", ".", "..")
+                       for segment in subject.split("/"))):
+            violations.append(_violation(
+                f"{pointer}/subject",
+                "must be a repository-relative POSIX path without empty, "
+                "'.' or '..' segments",
+                "platform.manifest.deprecations.subject_not_relative_path"))
+    identifier = entry.get("id")
+    return identifier if isinstance(identifier, str) and identifier else None
+
+
+def _validate_deprecations(source: dict, violations: list[dict]) -> None:
+    if "deprecations" not in source:
+        return
+    entries = source["deprecations"]
+    if not _check_list(entries, "/deprecations", "deprecations", violations):
+        return
+    identifiers: list[object] = []
+    for index, entry in enumerate(entries):
+        identifier = _validate_deprecation_entry(
+            entry, f"/deprecations/{index}", violations)
+        if identifier is not None:
+            identifiers.append(identifier)
+    if (len(identifiers) == len(entries)
+            and len(set(identifiers)) != len(identifiers)):
+        violations.append(_violation(
+            "/deprecations", "each entry must carry a distinct id",
+            "platform.manifest.deprecations.duplicate_id"))
+
+
 def validate_manifest(source: object) -> list[dict]:
     """Every violation in `source`, collected in one pass, never just the first."""
     if not isinstance(source, dict):
@@ -325,13 +399,12 @@ def validate_manifest(source: object) -> list[dict]:
                             "/resolved_schema_version",
                             "resolved_schema_version", violations)
     _validate_migrations(source, violations)
-    # `deprecations` and `removals` are opaque at v1 (R1.2, D36): they are
-    # validated as arrays and never read. Do not invent an entry shape for
-    # them here — the manifest that declares one will declare it in the spec
-    # first.
-    for name in ("deprecations", "removals"):
-        if name in source:
-            _check_list(source[name], f"/{name}", name, violations)
+    _validate_deprecations(source, violations)
+    # `deprecations` is closed (issue 580 D1). `removals` stays opaque until a
+    # major declares one (issue 580 D7): it is validated as an array and never
+    # read. Do not invent an entry shape for it here.
+    if "removals" in source:
+        _check_list(source["removals"], "/removals", "removals", violations)
     return violations
 
 

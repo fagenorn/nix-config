@@ -52,11 +52,11 @@ OVERFLOWING_NUMBERS = ("1e999", "-1e999")
 
 def non_finite_manifest(token: str) -> str:
     """The committed manifest's text with one non-finite `token` (a bare
-    token or an overflowing number) placed in an otherwise valid position: the one element of `deprecations`, an
+    token or an overflowing number) placed in an otherwise valid position: the one element of `removals`, an
     array whose elements the validator does not type."""
     text = json.dumps(committed_manifest())
-    marked = text.replace('"deprecations": []', f'"deprecations": [{token}]')
-    assert marked != text, "the committed manifest's deprecations moved"
+    marked = text.replace('"removals": []', f'"removals": [{token}]')
+    assert marked != text, "the committed manifest's removals moved"
     return marked
 
 
@@ -149,7 +149,7 @@ class ManifestGateTest(ResolverTestCase):
                                       "platform.manifest.parse")
 
     def test_platform_status_on_a_non_finite_manifest_prints_one_error_object(self):
-        """`platform-status` republishes `deprecations` verbatim, so a
+        """`platform-status` republishes `removals` verbatim, so a
         non-finite value that got past the loader streamed part of the
         response before the emit guard raised, leaving a second object
         appended to the first. Stdout has to be exactly one parseable
@@ -282,8 +282,9 @@ class ManifestGateTest(ResolverTestCase):
 
 
 class ManifestLifecycleArrayTest(ResolverTestCase):
-    """D36: `migrations` is validated strictly; `deprecations` and `removals`
-    are validated as arrays and never read."""
+    """D36: `migrations` is validated strictly; `deprecations` entries are
+    closed (issue 580 D1); `removals` are validated as an array and never
+    read."""
 
     def assert_pointer(self, changes: dict, expected: str) -> None:
         self.set_manifest(mutated_manifest(**changes))
@@ -378,13 +379,110 @@ class ManifestLifecycleArrayTest(ResolverTestCase):
                 with self.subTest(member=name, value=value):
                     self.assert_pointer({name: value}, f"/{name}")
 
-    def test_opaque_array_entries_are_never_read(self):
-        """Neither array has a declared entry shape at v1, so any entry passes."""
+    def test_removals_entries_are_never_read(self):
+        """`removals` has no declared entry shape at v1, so any entry passes."""
         self.set_manifest(mutated_manifest(
-            deprecations=[{"anything": [1, 2]}], removals=["whatever"]))
+            removals=["whatever", {"anything": [1, 2]}]))
         code, out, err = run("resolve", "--repo-root", str(self.make_root()),
                              home=self.home)
         self.assertEqual(code, 0, err or out)
+
+VALID_DEPRECATION = {
+    "id": "legacy-file",
+    "kind": "project_file",
+    "subject": ".claude/skills.config.json",
+    "since": "1.1.0",
+    "successor": "resolve-project resolve",
+    "migration": "legacy-file.retire",
+}
+
+
+def deprecation(**changes: object) -> dict:
+    entry = dict(VALID_DEPRECATION)
+    for name, value in changes.items():
+        if value is None:
+            entry.pop(name)
+        else:
+            entry[name] = value
+    return entry
+
+
+class ManifestDeprecationEntryTest(ResolverTestCase):
+    """Issue 580 D1: a `deprecations` entry is closed on six members."""
+
+    def refuse(self, entries: object) -> dict:
+        self.set_manifest(mutated_manifest(deprecations=entries))
+        code, out, _ = run("resolve", "--repo-root", str(self.make_root()),
+                           home=self.home)
+        self.assertEqual(code, 2, out)
+        error = json.loads(out)["error"]
+        self.assertEqual(error["code"], "resolver_failure")
+        return error
+
+    def assert_refused(self, entries: object, pointer: str,
+                       repair_id: str) -> None:
+        error = self.refuse(entries)
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         [pointer])
+        self.assertEqual(error["repair_id"],
+                         f"platform.manifest.deprecations.{repair_id}")
+
+    def test_valid_entries_of_both_kinds_load(self):
+        entries = [VALID_DEPRECATION,
+                   deprecation(id="writer", kind="platform_behavior",
+                               subject="adopt-project ../ rewrite")]
+        self.set_manifest(mutated_manifest(deprecations=entries))
+        code, out, err = run("resolve", "--repo-root", str(self.make_root()),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+
+    def test_an_entry_must_be_an_object(self):
+        self.assert_refused(["x"], "/deprecations/0", "not_object")
+
+    def test_every_member_is_required(self):
+        for name in VALID_DEPRECATION:
+            with self.subTest(member=name):
+                self.assert_refused([deprecation(**{name: None})],
+                                    f"/deprecations/0/{name}",
+                                    "member_missing")
+
+    def test_an_unexpected_member_is_refused(self):
+        self.assert_refused([deprecation(note="x")],
+                            "/deprecations/0/note", "member_unexpected")
+
+    def test_string_members_must_be_non_empty_strings(self):
+        for name in ("id", "subject", "successor", "migration"):
+            for value in ("", 1, ["a"]):
+                with self.subTest(member=name, value=value):
+                    self.assert_refused([deprecation(**{name: value})],
+                                        f"/deprecations/0/{name}",
+                                        "not_string")
+
+    def test_an_unknown_kind_is_refused(self):
+        for value in ("file", "", 1):
+            with self.subTest(kind=value):
+                self.assert_refused([deprecation(kind=value)],
+                                    "/deprecations/0/kind", "kind_unknown")
+
+    def test_since_must_be_a_minor_release(self):
+        for value in ("1.1", "v1.1.0", "1.1.1", "2.0.0", "1.0.0", 1):
+            with self.subTest(since=value):
+                self.assert_refused([deprecation(since=value)],
+                                    "/deprecations/0/since",
+                                    "since_not_minor")
+
+    def test_a_project_file_subject_must_be_a_relative_path(self):
+        for value in ("/abs/file", "../x", "a/../b", "./a", "a//b", "a/",
+                      "a\\b"):
+            with self.subTest(subject=value):
+                self.assert_refused([deprecation(subject=value)],
+                                    "/deprecations/0/subject",
+                                    "subject_not_relative_path")
+
+    def test_ids_must_be_distinct(self):
+        self.assert_refused(
+            [VALID_DEPRECATION, deprecation(subject="other/file")],
+            "/deprecations", "duplicate_id")
 
 
 class SemverBoundaryTest(ResolverTestCase):
