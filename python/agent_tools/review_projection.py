@@ -16,7 +16,7 @@ from agent_tools.review_forecast import (ForecastError, ForecastPlan, ancestor, 
     closed, commit_range, digest, edge_facts, full_commit, identity, integer, load_plan,
     name, path_name, strict_json, tree_entry, history_commit, history_commits, _ownership)
 from agent_tools.review_git import HistoryError, original_edge, _original_walk
-from agent_tools.review_pack import ReviewEvidenceSize, ReviewRecordSize, canonical_manifest
+from agent_tools.review_pack import ReviewEvidenceSize, ReviewRecord, ReviewRecordSize, canonical_manifest
 
 
 class ReconstructionUnavailable(ForecastError):
@@ -156,6 +156,11 @@ def _completed_effects(plan: ForecastPlan, records: tuple[dict, ...], boundary: 
         or (r["old_path"] not in paths and tree_entry(*candidate, r["old_path"]) is None
             and any(e["operation"].startswith("R") and e["old_path"] == r["old_path"] and e["path"] == r["path"]
                     for e in owned(r))))}
+    # A forecast delete that Git pairs into a rename consumes its path the same way, so an earlier
+    # contribution to that path needs no record of its own (issue 569 D20).
+    consumed |= {r["path"] for r in records if r["change"] == "delete" and r["path"] not in paths
+                 and tree_entry(*candidate, r["path"]) is None
+                 and any(e["operation"].startswith("R") and e["old_path"] == r["path"] for e in owned(r))}
     for record in finished:
         effects = [r for r in owned(record) if r["path"] == record["path"] or r["old_path"] == record["path"]]
         if not effects:
@@ -175,13 +180,26 @@ def _completed_effects(plan: ForecastPlan, records: tuple[dict, ...], boundary: 
                 raise ForecastError("completed deletion is not proven absent")
 
 
+def _rename_section(record: object) -> bool:
+    """Whether an actual record is Git's rename section, which actual production never compacts (issue 569)."""
+    if not isinstance(record, ReviewRecord) or record.generated_evidence is not None:
+        return False
+    for line in record.payload.splitlines():
+        if line.startswith((b"@@", b"GIT binary patch", b"Binary files ")):
+            return False
+        if line.startswith(b"rename from "):
+            return True
+    return False
+
+
 def _planned_record(path: str, size: int, member_max_bytes: int) -> ReviewRecordSize | ReviewEvidenceSize:
-    """Project one unfinished path as the record actual production would emit for it.
+    """Project one unfinished path that is not a rename's new path as the record actual production would emit.
 
     An EF Core migration designer whose whole record exceeds the member limit is
     compacted by actual production (review_actual._ef_designer_evidence), so it is
     projected as a worst-case placeholder of that evidence, not as its whole diff.
-    Every other path, generated or not, keeps its entire ordinary record.
+    Every other path, generated or not, keeps its entire ordinary record. A rename's
+    new path never comes here: its record is never compacted (issue 569 D5).
     """
     if size > member_max_bytes and ef_designer_path(path):
         evidence = ef_designer_evidence_bound(path, size)
@@ -198,8 +216,10 @@ def _project_input(plan: ForecastPlan, boundary: dict, completed: int,
     latest = {}
     for record in records:
         latest[record["path"]] = record
-    # A rename record never takes generated evidence (issue 569 D5), so its path keeps its whole record.
-    renamed = {record["path"] for record in records if record["change"] == "rename"}
+    # A rename record never takes generated evidence (issue 569 D5), so a forecast rename's new path
+    # and a path whose actual record is already Git's rename section keep their whole record.
+    renamed = ({record["path"] for record in records if record["change"] == "rename"}
+               | {record.path for record in actual.records if _rename_section(record)})
     projected = {record.path: record for record in actual.records}
     future_lines = {"insertions": 0, "deletions": 0}
     changed = False

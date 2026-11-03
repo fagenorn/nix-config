@@ -375,7 +375,7 @@ class RenameForecastCases(source_cases.SourceProjectionFixture, unittest.TestCas
         self.assertEqual(json.loads(completed.stdout)['metrics'], measured)
 
     def test_planned_rename_to_an_oversized_designer_keeps_its_whole_record(self):
-        # A rename record never takes generated evidence (D5), so the oversized-designer
+        # A rename record never takes generated evidence (issue 569 D5), so the oversized-designer
         # placeholder that projects a planned add or modify does not apply to a rename's new path.
         designer = 'src/App/Migrations/20260826010101_AddWidgets.Designer.cs'
         self.tasks[0]['task']['commit_subject_bytes'] = [120]
@@ -384,6 +384,20 @@ class RenameForecastCases(source_cases.SourceProjectionFixture, unittest.TestCas
         result = self.project(0)
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertEqual(json.loads(result.stdout)['violations'], ['member_bytes'])
+
+    def test_paired_delete_and_add_consumes_an_earlier_modify_of_the_old_path(self):
+        # Issue 569: Git pairs a forecast delete plus add into one rename record, which leaves
+        # no record at the old path for task 1's earlier edit; the paired move consumes it.
+        self.tasks[0]['task']['records'] = [self.record('touch', 1, 'old.txt', change='modify', size=2048)]
+        self.tasks[1]['task']['records'] = [
+            self.record('gone', 2, 'old.txt', change='delete', size=2048, added=0, deleted=61, covers=['touch', 'gone']),
+            self.record('moved', 2, 'new.txt', size=4096, added=61)]
+        self.write('old.txt', MOVED + 'appended\n'); self.commit('modify old', 1)
+        self.move('old.txt', 'new.txt', 2)
+        self.checkpoint()
+        result = self.project(2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['metrics'], self.actual()[0])
 
     def test_future_rename_to_an_absent_path_needs_a_subject_forecast(self):
         self.tasks[0]['task']['records'] = [self.rename('moved', 1, 'old.txt', 'new.txt', size=4096)]
@@ -448,3 +462,32 @@ class RenameForecastCases(source_cases.SourceProjectionFixture, unittest.TestCas
         result = self.project(1)
         self.assert_refused(result)
         self.assertIn(b'completed rename did not consume its old path', result.stderr)
+
+
+class ObservedDesignerRenameCases(source_cases.SourceProjectionFixture, unittest.TestCase):
+    """Issue 569: a delete plus add that Git pairs into an oversized designer rename keeps its whole record."""
+    DESIGNER = 'src/App/Migrations/20260826010101_AddWidgets.Designer.cs'
+    LINES = [f'designer model line {n:05d} with padding to forty bytes\n' for n in range(3000)]
+    seed = {'old.Designer.cs': ''.join(LINES)}
+
+    def test_observed_rename_with_later_work_is_not_projected_as_designer_evidence(self):
+        self.tasks[1]['task']['commit_subject_bytes'] = [64]
+        self.tasks[0]['task']['records'] = [
+            self.record('gone', 1, 'old.Designer.cs', change='delete', size=200000, added=0, deleted=3000, horizon=1),
+            self.record('moved', 1, self.DESIGNER, size=400000, added=1000, deleted=1000)]
+        self.tasks[1]['task']['records'] = [
+            self.record('tail', 2, self.DESIGNER, change='modify', size=400000, added=1001, deleted=1000,
+                        covers=['moved', 'tail'])]
+        self.emit(); self.commit('forecast')
+        (self.repo / 'old.Designer.cs').unlink()
+        self.write(self.DESIGNER, ''.join(line.replace('model', 'MODEL') if n % 3 == 0 else line
+                                          for n, line in enumerate(self.LINES)))
+        self.commit('move designer', 1); self.checkpoint()
+        # Git pairs the move, and actual production keeps the oversized rename section whole.
+        status = self.git('diff', '--name-status', '-M50%', self.base, self.head).splitlines()
+        self.assertTrue(any(line.startswith('R') and line.endswith('\told.Designer.cs\t' + self.DESIGNER)
+                            for line in status), status)
+        self.assertGreater(self.actual()[0]['largest_member_bytes'], 65536)
+        result = self.project(1)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['violations'], ['member_bytes'])
