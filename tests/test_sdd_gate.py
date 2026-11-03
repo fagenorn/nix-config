@@ -184,8 +184,12 @@ class GateCase(LifecycleHarness, unittest.TestCase):
         return base, self.repo_commit(f"task {task}")
 
     def budget_metrics(self, kind, root):
-        return json.loads(self.run_tool("artifact-budget", "check", "--kind", kind, "--root",
-                                        str(root), "--format", "json"))["metrics"]
+        """The checker's metrics for `root`, within budget (exit 0) or over it (exit 3)."""
+        done = subprocess.run(["artifact-budget", "check", "--kind", kind, "--root", str(root),
+                               "--format", "json"], cwd=self.repo, env=self.env,
+                              capture_output=True, text=True)
+        self.assertIn(done.returncode, (0, 3), done.stderr)
+        return json.loads(done.stdout)["metrics"]
 
     def package_root(self, base, head):
         return f".superpowers/sdd/primary/plan/review-{base[:7]}..{head[:7]}.json"
@@ -447,123 +451,31 @@ class ForecastCase(GateCase):
             self.write(f"plan.tasks/task-{n}.md", member + "\n## Review feasibility task\n\n```json\n"
                        + canonical(block) + "\n```\n")
 
-    def read_blocks(self):
-        def block(path, heading):
-            lines = (self.repo / path).read_text(encoding="utf-8").splitlines()
-            return json.loads(lines[lines.index(heading) + 3])
-        return (block("plan.md", "## Review feasibility delivery"),
-                [block(f"plan.tasks/task-{n}.md", "## Review feasibility task") for n in (1, 2)])
-
     def record(self, task):
         return self.gate("record", self.plan, "--task", task)
 
 
 class RecordTest(ForecastCase):
-    def test_record_rewrites_the_forecast_from_the_ledger_and_git(self):
-        base, head = self.start_task(1, "src/app.py", "value = 2\n")
-        out = self.ready(self.record(1))
-        self.assertEqual(out, {"command": "record", "outcome": "ready", "task": 1, "head_sha": head,
-                               "paths": [str(self.plan), str(self.repo / "plan.tasks/task-1.md")],
-                               "changed": True})
-        delivery, tasks = self.read_blocks()
-        self.assertEqual(tasks[0]["task"]["actual_ranges"], [{"base": base, "head": head}])
-        self.assertEqual(delivery["actual_evidence"]["head"], head)
-        self.assertEqual(delivery["actual_evidence"]["tree"], self.repo_git("rev-parse", head + "^{tree}"))
-        self.assertEqual(delivery["actual_evidence"]["process_ranges"],
-                         [{"base": self.forecast_base, "head": base, "boundaries": ["all"]}])
-        self.assertIn(f"Task 1: recorded (head {head})", self.ledger_lines())
-        recording = self.repo_commit("plan: record task 1 evidence")
-        projected = subprocess.run([sys.executable, "-m", "agent_tools.review_feasibility", "project",
-            "--plan", str(self.plan), "--base", self.forecast_base, "--head", recording,
-            "--completed-through", "1"], cwd=self.repo, env=self.env, capture_output=True)
-        self.assertEqual(projected.returncode, 0, projected.stderr)
-        again = self.ready(self.record(1))
-        self.assertEqual((again["head_sha"], again["changed"]), (head, False))
-        self.assertEqual(self.ledger_lines().count(f"Task 1: recorded (head {head})"), 1)
-
-    def test_a_later_task_commit_is_not_taken_for_the_recording(self):
-        base, head = self.start_task(1, "src/app.py", "value = 2\n")
-        self.ready(self.record(1))
-        self.write("src/app.py", "value = 3\n")                      # a review fix over the recorded head
-        self.repo_git("add", "src/app.py"); self.repo_git("commit", "-q", "-m", "review fix")
-        out = self.assert_gate_refused(self.record(1), command="record", step="ledger", gate=None, steps=[])
-        self.assertIn("changes more than its plan files", out["detail"])
-        self.assertEqual(self.ledger_lines().count(f"Task 1: recorded (head {head})"), 1)
-
-    def test_a_due_prerequisite_gets_the_recorded_identity(self):
-        self.delivery["boundaries"][0]["process_commit_subject_bytes"] = [64] * 4
-        child = {"id": "two", "parent": "all", "tasks": [2], "acceptance": "Second", "depends_on": ["one"],
-                 "prerequisite": {"kind": "completed-tasks", "tasks": [1], "commit": None, "tree": None},
-                 "process_package": {"spec": "two-spec.md", "plan": "two.md", "tasks": ["two.tasks/task-1.md"]},
-                 "process_forecast_ids": ["q0", "q1", "q2"], "process_commit_subject_bytes": [64]}
-        first = {**child, "id": "one", "tasks": [1], "depends_on": [], "prerequisite": {"kind": "delivery-base"},
-                 "process_package": {"spec": "one-spec.md", "plan": "one.md", "tasks": ["one.tasks/task-1.md"]},
-                 "process_forecast_ids": ["o0", "o1", "o2"]}
-        self.delivery["boundaries"] += [first, child]
-        for prefix, row in (("o", first), ("q", child)):
-            for n, path in enumerate([row["process_package"]["spec"], row["process_package"]["plan"],
-                                      *row["process_package"]["tasks"]]):
-                self.delivery["process_records"].append({"id": f"{prefix}{n}", "owner": 0, "path": path,
-                    "change": "add", "last_task": 2, "bounds": [{"boundary": row["id"], "added_lines": 1,
-                    "deleted_lines": 0, "record_bytes": 512,
-                    "support": {"kind": "authored-cumulative/v1", "covers": [f"{prefix}{n}"]}}]})
-        for n, block in enumerate(self.tasks, 1):
-            block["task"]["records"][0]["bounds"].append(
-                {**block["task"]["records"][0]["bounds"][0], "boundary": "one" if n == 1 else "two"})
-        self.emit_forecast(); self.repo_commit("children")
-        _, head = self.start_task(1, "src/app.py", "value = 2\n")
-        self.ready(self.record(1))
-        delivery, _ = self.read_blocks()
-        self.assertEqual(delivery["boundaries"][2]["prerequisite"],
-                         {"kind": "completed-tasks", "tasks": [1], "commit": head,
-                          "tree": self.repo_git("rev-parse", head + "^{tree}")})
-
-    def test_record_refuses_each_unsafe_state(self):
-        refused = lambda: self.assert_gate_refused(self.record(1), command="record", step=step, gate=None,
-                                                   steps=steps)
-        step, steps = "ledger", []
-        refused()                                                     # task 1 never dispatched
-        base = self.repo_git("rev-parse", "HEAD")
-        self.append_ledger(f"Task 1: dispatched (base {base})")
-        step, steps = "worktree", ["ledger"]
-        refused()                                                     # no task commit: B == H
-        self.write("src/app.py", "value = 2\n"); self.repo_commit("task 1")
-        self.write("stray.txt", "x\n"); self.repo_git("add", "stray.txt")
-        refused()                                                     # extra dirty tracked path
-        self.repo_git("rm", "-q", "--cached", "stray.txt"); (self.repo / "stray.txt").unlink()
-        member = self.repo / "plan.tasks/task-1.md"; text = member.read_text(encoding="utf-8")
-        self.write("plan.tasks/task-1.md", text.replace('"record_bytes":2048', '"record_bytes":1024'))
-        self.assertNotEqual(member.read_text(encoding="utf-8"), text)
-        self.repo_commit("task 1 lowers its bound")
-        step, steps = "record", ["ledger", "worktree"]
-        refused()                                                     # a task commit edited the forecast
-        self.append_ledger(f"Task 1: recorded (head {base})")
-        step, steps = "ledger", []
-        refused()                                                     # recorded head differs from HEAD's chain
-
-    def test_record_refuses_to_discard_an_uncommitted_plan_edit(self):
+    def test_record_is_a_no_op_that_changes_nothing(self):
+        """`record` is retired: an in-flight run's call writes and commits nothing."""
         self.start_task(1, "src/app.py", "value = 2\n")
-        member = self.repo / "plan.tasks/task-1.md"
-        edited = member.read_bytes() + b"\nReview note: keep this.\n"
-        member.write_bytes(edited)
-        out = self.assert_gate_refused(self.record(1), command="record", step="record", gate=None,
-                                       steps=["ledger", "worktree"])
-        self.assertIn("plan.tasks/task-1.md", out["detail"])
-        self.assertEqual(member.read_bytes(), edited)
-        self.assertFalse(any(line.startswith("Task 1: recorded") for line in self.ledger_lines()))
+        lines, plan = self.ledger_lines(), self.plan.read_bytes()
+        for _ in range(2):
+            out = self.ready(self.record(1))
+            self.assertEqual(out, {"command": "record", "outcome": "ready", "task": 1, "changed": False})
+        self.assertEqual((self.ledger_lines(), self.plan.read_bytes()), (lines, plan))
+        self.assertEqual(self.repo_git("status", "--porcelain"), "")
 
 
 NEXT_STEPS = ["ledger", "mark-progress", "review-package", "validate-report", "budget-check",
-              "metrics-match", "projection", "task-brief", "prepare-brief", "register-worker"]
-# A re-dispatch reuses the ledger's projection, so it runs no `projection` step.
-REDISPATCH_STEPS = [step for step in NEXT_STEPS if step != "projection"]
+              "metrics-match", "task-brief", "prepare-brief", "register-worker"]
 
 # A `workflow-state` shim that refuses `release-worker` and passes every other subcommand on.
 FAIL_RELEASE = ('#!/bin/sh\ncase "$1" in\n  release-worker) echo "release refused" >&2; exit 1 ;;\n'
                 'esac\nexec {python} {workflow} "$@"\n')
 
 
-class NextTest(ForecastCase):
+class NextTest(GateCase):
     def brief(self, task=1):
         return self.workspace / f"task-{task}-implementer-dispatch.md"
 
@@ -578,31 +490,21 @@ class NextTest(ForecastCase):
     def head(self):
         return self.repo_git("rev-parse", "HEAD")
 
-    def delivery_gate(self, head):
+    def delivery_gate(self, head, note=""):
         """(manifest root, metrics, ledger line) of the cumulative gate at `head`."""
         root = self.package_root(self.delivery_base, head)
         metrics = self.budget_metrics("review-package", self.repo / root)
         return root, metrics, (
             f"Delivery gate: {self.delivery_base}..{head} root_bytes={metrics['root_bytes']} "
             f"total_bytes={metrics['total_bytes']} file_count={metrics['file_count']} "
-            f"largest_member_bytes={metrics['largest_member_bytes']}")
+            f"largest_member_bytes={metrics['largest_member_bytes']}{note}")
 
     def workers(self):
         return json.loads(self.state_path.read_text(encoding="utf-8"))["workers"]
 
     def finish(self, task, relative, text):
-        """Commit task `task`'s change and its recording: (task head, recording head)."""
-        head = self.start_task(task, relative, text)[1]
-        self.ready(self.record(task))
-        return head, self.repo_commit(f"plan: record task {task} evidence")
-
-    def projected(self, head, through):
-        """The independent `project` run over `head`: its metrics."""
-        done = subprocess.run([sys.executable, "-m", "agent_tools.review_feasibility", "project",
-            "--plan", str(self.plan), "--base", self.forecast_base, "--head", head,
-            "--completed-through", str(through)], cwd=self.repo, env=self.env, capture_output=True)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        return json.loads(done.stdout)["metrics"]
+        """Commit task `task`'s change: its head."""
+        return self.start_task(task, relative, text)[1]
 
     def test_the_first_call_records_both_bases_and_renders_the_implementer_brief(self):
         head = self.head()
@@ -610,22 +512,16 @@ class NextTest(ForecastCase):
         context.write_text("Fits after setup.\nUse `value`.\n\n", encoding="utf-8")
         out = self.ready(self.first("--context-file", context))
         root, metrics, line = self.delivery_gate(head)
-        through = self.projected(head, 0)
         self.assertEqual(out, {
             "command": "next", "outcome": "ready", "completed": None, "task": 1,
             "brief_path": str(self.brief()),
             "report_path": str(self.workspace / "task-1-report.md"),
             "base_sha": head, "worker_id": None, "mark_progress": "skipped",
-            "delivery": {"base_sha": self.delivery_base, "head_sha": head,
+            "delivery": {"base_sha": self.delivery_base, "head_sha": head, "state": "complete",
                          "manifest_root": root, "metrics": metrics},
-            "projection": {"completed_through": 0, "head_sha": head, "metrics": through},
             "standards": [str(self.bar), str(PROJECT_STANDARDS / "python-rules.md")]})
         self.assertEqual(self.ledger_lines()[1:], [
-            f"Delivery base: {self.delivery_base}", line,
-            f"Projection gate: {self.delivery_base}..{head} through 0 root_bytes={through['root_bytes']} "
-            f"total_bytes={through['total_bytes']} file_count={through['file_count']} "
-            f"largest_member_bytes={through['largest_member_bytes']}",
-            f"Task 1: dispatched (base {head})"])
+            f"Delivery base: {self.delivery_base}", line, f"Task 1: dispatched (base {head})"])
         self.assertEqual(self.brief().read_bytes(), self.golden("golden-implementer-brief.md"))
         self.assertEqual((self.workspace / "task-1-brief.md").read_bytes(),
                          (self.repo / "plan.tasks/task-1.md").read_bytes())
@@ -654,10 +550,10 @@ class NextTest(ForecastCase):
     def test_completing_a_task_appends_its_line_once(self):
         self.ready(self.first())
         base = self.head()
-        task_head, head = self.finish(1, "src/app.py", "value = 2\n")
+        head = self.finish(1, "src/app.py", "value = 2\n")
         out = self.ready(self.next("--completed", 1, "--task", 2))
-        self.assertEqual(self.ledger_lines()[-4:-2], [
-            f"Task 1: complete (commits {base[:7]}..{task_head[:7]}, review clean)",
+        self.assertEqual(self.ledger_lines()[-3:-1], [
+            f"Task 1: complete (commits {base[:7]}..{head[:7]}, review clean)",
             self.delivery_gate(head)[2]])
         self.assertEqual(self.ledger_lines()[-1], f"Task 2: dispatched (base {head})")
         self.assertEqual((out["completed"], out["task"], out["base_sha"]), (1, 2, head))
@@ -671,13 +567,13 @@ class NextTest(ForecastCase):
         self.finish(1, "src/app.py", "value = 2\n")
         self.ready(self.next("--completed", 1, "--task", 2))
         base = self.head()
-        task_head, head = self.finish(2, "notes.txt", "note\n")
+        head = self.finish(2, "notes.txt", "note\n")
         out = self.ready(self.next("--completed", 2, "--parked", 3))
         self.assertEqual(self.ledger_lines()[-2:], [
-            f"Task 2: complete (commits {base[:7]}..{task_head[:7]}, 3 parked)",
+            f"Task 2: complete (commits {base[:7]}..{head[:7]}, 3 parked)",
             self.delivery_gate(head)[2]])
         self.assertEqual([out[key] for key in ("task", "brief_path", "report_path", "base_sha",
-                                               "worker_id", "projection")], [None] * 6)
+                                               "worker_id")], [None] * 5)
         self.assertEqual((out["completed"], out["standards"]), (2, []))
 
     def test_completing_an_undispatched_task_is_refused_before_any_write(self):
@@ -687,15 +583,29 @@ class NextTest(ForecastCase):
             command="next", step="ledger", gate=None, steps=[])
         self.assertEqual(self.ledger_lines(), header)
 
-    def test_an_over_budget_delivery_stops_before_the_next_dispatch(self):
+    def test_an_over_budget_delivery_is_noted_and_the_next_task_is_dispatched(self):
+        self.ready(self.first())
+        head = self.finish(1, "src/app.py", "X" * 70_000 + "\n")
+        out = self.ready(self.next("--completed", 1, "--task", 2))
+        root, metrics, line = self.delivery_gate(head, " over_budget")
+        self.assertEqual(out["delivery"], {"base_sha": self.delivery_base, "head_sha": head,
+                                           "state": "decompose_required", "manifest_root": root,
+                                           "metrics": metrics})
+        self.assertEqual(self.ledger_lines()[-2:], [line, f"Task 2: dispatched (base {head})"])
+        self.assertTrue(self.brief(2).is_file())
+        lines = self.ledger_lines()
+        self.ready(self.next("--completed", 1, "--task", 2))
+        self.assertEqual(self.ledger_lines(), lines)
+
+    def test_an_over_budget_delivery_the_checker_disputes_is_refused(self):
         self.ready(self.first())
         self.finish(1, "src/app.py", "X" * 70_000 + "\n")
-        out = self.assert_gate_refused(
-            self.next("--completed", 1, "--task", 2), command="next", step="validate-report",
-            gate="decompose_required",
-            steps=["ledger", "evidence", "ledger-complete", "review-package"], code=3)
-        self.assertEqual(out["report"]["state"], "decompose_required")
-        self.assertTrue(self.ledger_lines()[-1].startswith("Task 1: complete ("))
+        self.ready(self.next("--completed", 1))                     # builds the package it reuses
+        self.write_budget_shim(force_check({**OVER_BUDGET, "metrics": {**OVER_BUDGET["metrics"],
+                                                                      "file_count": 99}}))
+        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next",
+                                 step="metrics-match", gate="failed",
+                                 steps=["ledger", "ledger-complete", *NEXT_STEPS[2:5]])
         self.assertFalse(self.brief(2).exists())
 
     def test_a_task_without_an_index_row_is_refused_at_task_brief(self):
@@ -705,7 +615,7 @@ class NextTest(ForecastCase):
         self.finish(2, "notes.txt", "note\n")
         self.assert_gate_refused(
             self.next("--completed", 2, "--task", 3), command="next", step="task-brief", gate=None,
-            steps=["ledger", "evidence", "ledger-complete", *NEXT_STEPS[2:7]])
+            steps=["ledger", "ledger-complete", *NEXT_STEPS[2:6]])
         self.assertFalse(any(line.startswith("Task 3") for line in self.ledger_lines()))
 
     def test_a_brief_that_cannot_be_prepared_is_refused_before_a_worker_is_registered(self):
@@ -716,10 +626,10 @@ class NextTest(ForecastCase):
         template.write_text(template.read_text(encoding="utf-8").replace(
             "    End.\n", "    End [SURPRISE].\n"), encoding="utf-8")
         cases = {"template drift": (lambda: self.first(*self.identity(), skill=drifted),
-                                    NEXT_STEPS[:8]),
+                                    NEXT_STEPS[:7]),
                  "an unreadable context file": (lambda: self.first(
                      "--context-file", self.root / "absent.md", *self.identity()),
-                     REDISPATCH_STEPS[:7])}  # the first case recorded the dispatch
+                     NEXT_STEPS[:7])}
         for name, (call, steps) in cases.items():
             with self.subTest(case=name):
                 self.assert_gate_refused(call(), command="next", step="prepare-brief", gate=None,
@@ -746,7 +656,7 @@ class NextTest(ForecastCase):
         brief = self.brief().read_bytes()
         out = self.assert_gate_refused(self.next("--task", 1, *self.identity()), command="next",
                                        step="register-worker", gate=None,
-                                       steps=REDISPATCH_STEPS[:8])
+                                       steps=NEXT_STEPS[:8])
         self.assertEqual(out["detail"], "worker 14:1:1:w1 from an earlier dispatch of task 1 is "
                                         "still registered: release it before calling next again")
         self.assertEqual([(worker["worker_id"], worker["release_event"])
@@ -762,7 +672,7 @@ class NextTest(ForecastCase):
         self.launch()
         head = self.head()
         self.assert_gate_refused(self.first(*self.identity("14:1:9")), command="next",
-                                 step="register-worker", gate=None, steps=NEXT_STEPS[:9])
+                                 step="register-worker", gate=None, steps=NEXT_STEPS[:8])
         self.assertFalse(self.brief().exists())
         self.assertEqual(self.workers(), [])
         self.assertEqual(self.ledger_lines()[-1], f"Task 1: dispatched (base {head})")
@@ -800,7 +710,7 @@ class NextTest(ForecastCase):
         self.finish(1, "src/app.py", "value = 2\n")
         set_ledger_mode(0o444)
         self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next",
-                                 step="ledger-complete", gate=None, steps=["ledger", "evidence"])
+                                 step="ledger-complete", gate=None, steps=["ledger"])
         # The cumulative gate could not be recorded, so it has not passed: `failed`, not listed.
         self.assert_gate_refused(
             self.next("--task", 1), command="next", step="metrics-match", gate="failed",
@@ -822,216 +732,34 @@ class NextTest(ForecastCase):
                 self.assertEqual((done.returncode, done.stdout, done.stderr), (2, "", INVALID))
 
 
-SUMMARY_KEYS = {"artifact_policy_sha256", "base", "completed_through", "forecast_sha256", "head", "kind",
-                "metrics", "packing_policy_sha256", "plan", "plan_package_sha256", "recommended_boundary",
-                "schema_version", "state", "violations"}
-GATE_STEPS = ["ledger", "review-package", "validate-report", "budget-check", "metrics-match"]
+class OldRunTest(ForecastCase):
+    """A run started under the forecast gate: forecast blocks in the plan and the old ledger lines."""
 
-
-class NextProjectionTest(ForecastCase):
     def next(self, *args):
         return self.gate("next", self.plan, "--skill-dir", SKILL, "--standards", PROJECT_STANDARDS, *args)
 
-    def first(self, *args):
-        return self.next("--task", 1, "--delivery-base", self.forecast_base, *args)
-
-    def workers(self):
-        return json.loads(self.state_path.read_text(encoding="utf-8"))["workers"]
-
-    def complete(self, task, path, text):
-        """Run task `task` to a committed recording; return (task head, recording head)."""
-        _, head = self.start_task(task, path, text)
-        self.ready(self.record(task))
-        return head, self.repo_commit(f"plan: record task {task} evidence")
-
-    def lines_matching(self, prefix):
-        return [line for line in self.ledger_lines() if line.startswith(prefix)]
-
-    def test_the_initial_projection_runs_after_the_actual_gate_and_before_dispatch(self):
-        head = self.repo_git("rev-parse", "HEAD")
-        out = self.ready(self.first())
-        self.assertEqual((out["projection"]["completed_through"], out["projection"]["head_sha"]), (0, head))
-        lines = self.ledger_lines()
-        gate = next(i for i, l in enumerate(lines) if l.startswith("Delivery gate:"))
-        projected = next(i for i, l in enumerate(lines) if l.startswith("Projection gate:"))
-        dispatched = lines.index(f"Task 1: dispatched (base {head})")
-        self.assertLess(gate, projected); self.assertLess(projected, dispatched)
-        self.assertTrue(lines[projected].startswith(
-            f"Projection gate: {self.forecast_base}..{head} through 0 root_bytes="))
-        self.assertTrue((self.workspace / f"projection-{head[:7]}-0.json").is_file())
-
-    def test_a_projected_overflow_stops_with_a_confirmable_summary(self):
-        self.delivery["boundaries"][0]["process_commit_subject_bytes"] = [120] * 100
-        self.emit_forecast(); head = self.repo_commit("oversized forecast")
-        done = self.first()
-        out = self.assert_gate_refused(done, command="next", step="projection", gate="decompose_required",
-                                       steps=GATE_STEPS, code=3)
-        self.assertEqual(set(out["report"]), SUMMARY_KEYS)
-        self.assertEqual((out["report"]["state"], out["report"]["head"], out["report"]["completed_through"]),
-                         ("decompose_required", head, 0))
-        self.assertEqual(self.lines_matching("Task 1: dispatched"), [])
-        self.assertFalse((self.workspace / "task-1-implementer-dispatch.md").exists())
-        raw = json.dumps(out["report"]).encode()
-        confirmed = subprocess.run([sys.executable, "-m", "agent_tools.review_feasibility", "confirm",
-            "--plan", str(self.plan), "--base", self.forecast_base, "--input", "-"], input=raw,
-            cwd=self.repo, env=self.env, capture_output=True)
-        self.assertEqual(confirmed.returncode, 3, confirmed.stderr)
-
-    def test_an_invalid_projection_fails_before_dispatch_and_registers_nothing(self):
-        self.launch()
-        self.delivery["delivery_base"] = "0" * 40
-        self.emit_forecast(); self.repo_commit("wrong forecast base")
-        done = self.first(*self.identity())
-        self.assert_gate_refused(done, command="next", step="projection", gate="failed",
-                                 steps=["ledger", "mark-progress", *GATE_STEPS[1:]])
-        self.assertEqual(self.lines_matching("Task 1: dispatched"), [])
-        self.assertEqual(self.workers(), [])
-
-    def test_post_task_order_needs_the_exact_recording_commit(self):
-        self.ready(self.first())
-        base = self.repo_git("rev-parse", "HEAD")
-        _, task_head = self.start_task(1, "src/app.py", "value = 2\n")
-        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="ledger",
-                                 gate=None, steps=[])                       # not recorded
-        self.ready(self.record(1))
-        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
-                                 gate="failed", steps=["ledger"])                   # not committed
-        self.write("notes.txt", "smuggled\n"); recording = self.repo_commit("plan: record task 1 evidence")
-        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
-                                 gate="failed", steps=["ledger"])                   # extra path
-        self.assertEqual(self.lines_matching("Task 1: complete"), [])           # D19: no unverified marker
-        self.assert_gate_refused(self.next("--task", 2), command="next", step="ledger", gate=None, steps=[])
-        self.repo_git("reset", "-q", "--hard", task_head)
-        self.ready(self.record(1)); recording = self.repo_commit("plan: record task 1 evidence")
+    def test_an_old_ledger_and_a_forecast_plan_run_through_next(self):
+        first = self.repo_git("rev-parse", "HEAD")
+        self.append_ledger(f"Delivery base: {self.forecast_base}")
+        self.append_ledger(f"Projection gate: {self.forecast_base}..{first} through 0 root_bytes=1 "
+                           "total_bytes=2 file_count=1 largest_member_bytes=1")
+        _, head = self.start_task(1, "src/app.py", "value = 2\n")
+        self.append_ledger(f"Task 1: recorded (head {head})")
+        self.write("plan.tasks/task-1.md", (self.repo / "plan.tasks/task-1.md").read_text(encoding="utf-8")
+                   + "\nRecorded.\n")
+        recording = self.repo_commit("plan: record task 1 evidence")
+        self.write("src/app.py", "value = 3\n"); fix = self.repo_commit("a commit no forecast allows")
         out = self.ready(self.next("--completed", 1, "--task", 2))
-        self.assertEqual(out["projection"]["head_sha"], recording)
-        self.assertIn(f"Task 1: complete (commits {base[:7]}..{task_head[:7]}, review clean)",
-                      self.ledger_lines())
-        self.assertTrue(self.lines_matching(f"Projection gate: {self.forecast_base}..{recording} through 1 "))
-        again = self.ready(self.next("--task", 2))                       # re-dispatch reuses the line
-        self.assertEqual(len(self.lines_matching("Projection gate:")), 2)
-        self.assertEqual(again["projection"]["head_sha"], recording)
-
-    def test_a_completion_marker_never_authorizes_an_unverified_head(self):
-        self.ready(self.first())
-        self.complete(1, "src/app.py", "value = 2\n")
-        self.ready(self.next("--completed", 1))
-        member = self.repo / "plan.tasks/task-2.md"; text = member.read_text(encoding="utf-8")
-        self.write("plan.tasks/task-2.md", text.replace('"record_bytes":2048', '"record_bytes":1024'))
-        self.assertNotEqual(member.read_text(encoding="utf-8"), text)
-        self.repo_commit("plan: lower task 2 bound")                            # a lowered future bound
-        self.assert_gate_refused(self.next("--task", 2), command="next", step="evidence", gate="failed",
-                                 steps=["ledger"])
-        self.assertEqual(len(self.lines_matching("Projection gate:")), 1)
-        self.assertEqual(self.lines_matching("Task 2: dispatched"), [])
-
-    def trim_plan_root(self):
-        """A process-only trim: the plan root's prose changes, its forecast block does not (#565)."""
-        text = (self.repo / "plan.md").read_text(encoding="utf-8")
-        line = "- Paths are repository-relative.\n"
-        self.assertEqual(text.count(line), 1)
-        self.write("plan.md", text.replace(line, ""))
-
-    def rewrite_block(self, path, old, new):
-        text = (self.repo / path).read_text(encoding="utf-8")
-        self.assertEqual(text.count(old), 1)
-        self.write(path, text.replace(old, new))
-
-    def test_a_plan_root_trim_over_the_recording_passes_evidence(self):
-        self.ready(self.first())
-        self.complete(1, "src/app.py", "value = 2\n")
-        self.trim_plan_root(); trim = self.repo_commit("plan: trim the plan root")
-        out = self.ready(self.next("--completed", 1, "--task", 2))
-        self.assertEqual(out["projection"]["head_sha"], trim)
-
-    def test_a_metadata_tail_over_the_recording_passes_evidence(self):
-        self.ready(self.first())
-        base = self.repo_git("rev-parse", "HEAD")
-        task_head, recording = self.complete(1, "src/app.py", "value = 2\n")
-        self.trim_plan_root(); self.repo_commit("plan: trim the plan root")
-        self.write("spec.md", "# Fixture spec\n\nResume decision.\n")
-        tail = self.repo_commit("spec: log the resume decision")
-        out = self.ready(self.next("--completed", 1, "--task", 2))
-        self.assertEqual(out["projection"]["head_sha"], tail)
-        self.assertIn(f"Task 1: complete (commits {base[:7]}..{task_head[:7]}, review clean)",
-                      self.ledger_lines())
-        self.assertNotEqual(recording, tail)
-
-    def test_a_metadata_tail_outside_the_process_package_is_refused(self):
-        self.ready(self.first())
-        self.complete(1, "src/app.py", "value = 2\n")
-        self.trim_plan_root(); self.repo_commit("plan: trim the plan root")
-        self.write("src/app.py", "value = 3\n"); self.repo_commit("smuggled source change")
-        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
-                                 gate="failed", steps=["ledger"])
-        self.assertEqual(self.lines_matching("Task 1: complete"), [])
-
-    def test_a_metadata_tail_changing_the_delivery_block_is_refused(self):
-        self.ready(self.first())
-        self.complete(1, "src/app.py", "value = 2\n")
-        text = (self.repo / "plan.md").read_text(encoding="utf-8")
-        self.write("plan.md", text.replace('"acceptance":"Fixture delivery"', '"acceptance":"Rewritten"'))
-        self.assertNotEqual((self.repo / "plan.md").read_text(encoding="utf-8"), text)
-        self.repo_commit("plan: rewrite the delivery block")
-        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
-                                 gate="failed", steps=["ledger"])
-
-    def test_a_metadata_tail_changing_a_task_block_is_refused(self):
-        self.ready(self.first())
-        self.complete(1, "src/app.py", "value = 2\n")
-        self.rewrite_block("plan.tasks/task-2.md", '"record_bytes":2048', '"record_bytes":1024')
-        self.repo_commit("plan: lower task 2 bound")
-        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
-                                 gate="failed", steps=["ledger"])
-        self.assertEqual(self.lines_matching("Task 1: complete"), [])
-
-    def test_a_metadata_tail_retyping_a_forecast_number_is_refused(self):
-        self.ready(self.first())
-        self.complete(1, "src/app.py", "value = 2\n")
-        self.rewrite_block("plan.tasks/task-2.md", '"record_bytes":2048', '"record_bytes":2048.0')
-        self.repo_commit("plan: retype task 2 bound")
-        self.assert_gate_refused(self.next("--completed", 1), command="next", step="evidence",
-                                 gate="failed", steps=["ledger"])
-        self.assertEqual(self.lines_matching("Task 1: complete"), [])
-
-    def test_a_metadata_tail_with_a_malformed_process_package_is_refused(self):
-        self.ready(self.first())
-        self.complete(1, "src/app.py", "value = 2\n")
-        self.rewrite_block("plan.md", '"plan.tasks/task-2.md"]}', '1]}')
-        self.repo_commit("plan: malformed process package")
-        self.assert_gate_refused(self.next("--completed", 1), command="next", step="evidence",
-                                 gate="failed", steps=["ledger"])
-
-    def test_a_merge_in_the_metadata_tail_is_refused(self):
-        self.ready(self.first())
-        _, recording = self.complete(1, "src/app.py", "value = 2\n")
-        self.repo_git("checkout", "-q", "-b", "side")
-        self.write("spec.md", "# Fixture spec\n\nSide note.\n"); self.repo_commit("spec: side note")
-        self.repo_git("checkout", "-q", "-")
-        self.trim_plan_root(); self.repo_commit("plan: trim the plan root")
-        self.repo_git("merge", "-q", "--no-ff", "--no-edit", "side")
-        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next", step="evidence",
-                                 gate="failed", steps=["ledger"])
-
-    def test_an_actual_overflow_refuses_before_any_projection(self):
-        self.ready(self.first())
-        self.complete(1, "src/app.py", "".join(f"value_{n} = {n}\n" for n in range(8000)))
-        out = self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next",
-            step="validate-report", gate="decompose_required",
-            steps=["ledger", "evidence", "ledger-complete", "review-package"], code=3)
-        self.assertEqual(out["report"]["state"], "decompose_required")
-        self.assertEqual(len(self.lines_matching("Projection gate:")), 1)
-        self.assertEqual(self.lines_matching("Task 2: dispatched"), [])
-
-    def test_completing_the_last_task_runs_no_projection(self):
-        self.ready(self.first())
-        self.complete(1, "src/app.py", "value = 2\n")
-        self.ready(self.next("--completed", 1, "--task", 2))
-        self.complete(2, "notes.txt", "notes\n")
-        out = self.ready(self.next("--completed", 2))
-        self.assertIsNone(out["projection"])
-        self.assertEqual(len(self.lines_matching("Projection gate:")), 2)
-
+        self.assertEqual((out["delivery"]["state"], out["base_sha"]), ("complete", fix))
+        self.assertNotEqual(recording, fix)
+        self.assertIn(f"Task 1: complete (commits {first[:7]}..{fix[:7]}, review clean)", self.ledger_lines())
+        self.assertNotIn("projection", out)
+        again = self.ready(self.next("--task", 2))              # a re-dispatch needs no projection line
+        self.assertEqual(again["base_sha"], fix)
+        self.write("notes.txt", "notes\n"); self.repo_commit("task 2")
+        self.assertIsNone(self.ready(self.next("--completed", 2))["task"])
+        self.assertFalse(any(line.startswith("Projection gate:") and "through 1" in line
+                             for line in self.ledger_lines()))
 
 if __name__ == "__main__":
     unittest.main()

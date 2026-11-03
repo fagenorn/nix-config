@@ -3417,9 +3417,7 @@ PROJECTION_MACHINE_TEXT = {
 PLANNING_DOCUMENTS = (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md", FROM_ISSUE_DIR / "standards-review.md",
                       PHASE_5_REVIEW_CONTRACT)
 PROJECTION_MACHINE_TEXT[SDD] = (
-    "sdd-gate record PLAN_FILE --task N", "sdd-gate next --completed N",
-    "review-feasibility confirm --plan PLAN_FILE --base DELIVERY_BASE --input -",
-    '"kind":"projected_overflow"', '"kind":"actual_overage"',
+    "sdd-gate next --completed N", '"kind":"actual_overage"',
     "artifact-budget check --kind review-package")
 PROJECTION_MACHINE_TEXT[FROM_ISSUE_DIR / "delegated-owner.md"] = ("decompose_required",)
 BUDGET_BASE = "8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc"
@@ -3459,9 +3457,10 @@ class ProjectionCallerContractsTest(unittest.TestCase):
 
 
 class ExecutionCallerContractsTest(unittest.TestCase):
-    def test_record_precedes_next_and_phase_6_confirms(self):
+    def test_sdd_no_longer_records_or_projects_and_phase_6_confirms(self):
         sdd = normalized(SDD.read_text(encoding="utf-8"))
-        self.assertLess(sdd.index("sdd-gate record PLAN_FILE --task N"), sdd.index("sdd-gate next --completed N"))
+        for retired in ("sdd-gate record", "review-feasibility", "projected_overflow", "plan: record task"):
+            self.assertNotIn(retired, sdd)
         phase6 = normalized((FROM_ISSUE_DIR / "SKILL.md").read_text(encoding="utf-8")
                             .split("## Phase 6", 1)[1].split("## Phase 7", 1)[0])
         self.assertIn("review-feasibility confirm --plan <root> --base <base> --input -", phase6)
