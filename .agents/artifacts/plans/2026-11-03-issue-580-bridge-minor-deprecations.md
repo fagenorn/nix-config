@@ -17,7 +17,7 @@ Issue: https://github.com/fagenorn/nix-config/issues/580. No spec: the issue, it
 - `resolve` output, its refusals and its exit codes do not change: deprecation warns, normal resolution continues (issue 66).
 - `platform-status` stays read-only and starts no child process (R3.6): no `git`, no file opened for writing, no directory created.
 - `removals` stays opaque: validated as an array, entries never read (D7).
-- No conformance check, repair-catalogue entry, `adopt-project` behaviour change or Nix change (D6).
+- No conformance check, repair-catalogue entry, `adopt-project` behaviour change or Nix change (D6). `adopt-project` output does follow the installed manifest's version (D8), so Task 3 derives the adopt tests' pinned `1.0.0` from the committed file.
 - Tests run from the worktree root as `env PYTHONPATH="$PWD/python" python3 -m unittest <test file path> -k <name>`, foreground, timeout 600 s, output cut with `2>&1 | tail -5`.
 - Commits: subject `feat(issue-580): …` or `test(issue-580): …`, say "issue 580", never a bare `#580`, end with the session's `Co-Authored-By` trailer. Never run `just switch`, never push.
 - sdd's final gate runs `just build` and `just agent-workflow-tests` once on the final head (timeout 3600 s each).
@@ -26,6 +26,7 @@ Issue: https://github.com/fagenorn/nix-config/issues/580. No spec: the issue, it
 
 1. `home/common/agent-skills/tests/test_resolve_platform.py`: the manifest validator through the `resolve` subprocess against an installed fixture manifest (`set_manifest(mutated_manifest(...))`), and the committed manifest (`CommittedManifestTest`).
 2. `home/common/agent-skills/tests/test_resolve_platform_status.py`: the `platform-status` subprocess with `--repo-root` and `--fleet`, fixture roots from `make_root`, registry staged with `install_registry`.
+3. `home/common/agent-skills/tests/test_adopt_project.py` and `test_adopt_apply.py`: regression only. They install the committed manifest verbatim, so Task 3 re-derives their two literal `1.0.0` pins from it; they gain no new behaviour.
 
 ## Task index
 
@@ -33,7 +34,7 @@ Task 1 — Closed deprecation entry in the manifest validator — `python/agent_
 
 Task 2 — `platform-status` warns on deprecated uses — `python/agent_tools/resolve_project.py`, `home/common/agent-skills/tests/test_resolve_platform_status.py` — full — [task-2.md](2026-11-03-issue-580-bridge-minor-deprecations.tasks/task-2.md)
 
-Task 3 — Platform 1.1.0 declares the legacy skills config deprecations — `home/common/agent-skills/platform-manifest.json`, `home/common/agent-skills/tests/test_resolve_platform.py`, `python/README.md`, `.agents/artifacts/plans/2026-11-03-issue-580-bridge-minor-deprecations.acceptance.md` — full — [task-3.md](2026-11-03-issue-580-bridge-minor-deprecations.tasks/task-3.md)
+Task 3 — Platform 1.1.0 declares the legacy skills config deprecations — `home/common/agent-skills/platform-manifest.json`, `home/common/agent-skills/tests/test_resolve_platform.py`, `home/common/agent-skills/tests/test_adopt_project.py`, `home/common/agent-skills/tests/test_adopt_apply.py`, `python/README.md`, `.agents/artifacts/plans/2026-11-03-issue-580-bridge-minor-deprecations.acceptance.md` — full — [task-3.md](2026-11-03-issue-580-bridge-minor-deprecations.tasks/task-3.md)
 
 All three are `full`: Task 1 changes the manifest's public schema, Task 2 the `platform-status` report interface, Task 3 the platform version every host activates.
 
@@ -61,5 +62,6 @@ Planning decisions:
 - **D5 The release.** `platform_version` `1.1.0`; `project_schema_versions`, `resolved_schema_version`, `migrations`, `removals` unchanged. Two entries, both `since` `1.1.0`, successor `resolve-project resolve`, migration `legacy-skills-config.retire`: `legacy-skills-config` (`project_file`, `.claude/skills.config.json`) and `legacy-skills-config-writer` (`platform_behavior`, `adopt-project legacy binding config rewrite`, i.e. `adopt_planning.legacy_binding_operations` and the `release_bridge.project_legacy_deploy` projection it applies). Every fleet contract declares `[1.0.0, 2.0.0)`, which admits `1.1.0`. `release_bridge.plan_legacy_release`, `release deploy inspect` and `bindings.deploy` are not declared (O2, O3).
 - **D6 Migration route is documented, not new code.** `legacy-skills-config.retire` is a stable id whose steps are in `python/README.md`: confirm `resolve-project resolve` succeeds; re-point every reader of the legacy file to `resolve-project resolve`; `git rm .claude/skills.config.json`; confirm `deprecated_uses` no longer lists the id. Every step uses a shipped command, and the writer only rewrites an existing file, so it never recreates a removed one. Rejected: a conformance check or repair-catalogue entry (doctor integration is outside O1's scope).
 - **D7 `removals` stays opaque** until a major declares one. The non-finite-number fixtures that used `deprecations` as an untyped slot move to `removals`.
+- **D8 Adopt tests read the committed version.** `adopt_planning.derived_interval` floors a newly amended contract at `manifest["platform_version"]` and the adoption plan republishes that version, so moving the manifest to `1.1.0` changes adopt output by design. The two assertions that pin `1.0.0` (`test_adopt_project.py` `test_platform_block_is_the_three_reproducible_manifest_values`, `test_adopt_apply.py` `test_the_committed_contract_declares_the_platform_and_new_homes`) are derived from the committed file in Task 3, so the next minor does not break them again. Rejected: installing a frozen `1.0.0` fixture manifest in the adopt suites (they would stop exercising the manifest hosts actually install).
 
 ---
