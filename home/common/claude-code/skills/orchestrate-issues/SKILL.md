@@ -226,8 +226,8 @@ Agent(subagent_type="issue-owner", model="opus", effort="high", run_in_backgroun
 > expected duration. If the host moves one to the background anyway, wait for it
 > in the same turn: never end your turn while a command or agent you started
 > still runs.
-> Never loop `sleep` in the foreground or chain a check onto it: use Monitor with
-> an until-condition, or one short bare `sleep N` call and check in the next.
+> Never run `sleep` in the foreground: wait with Monitor with an until-condition
+> or a background Bash command, or end the turn on someone else's blocker.
 >
 > Persist the terminal result through `from-issue`'s terminal return procedure,
 > whose `workflow-state finish --summary-file -` is the durable write, then
@@ -280,21 +280,22 @@ summary's `result`. A null `contract_digest` means the issue ran lifecycle-only:
 that issue's retained `contract_refusals` `detail` when there was one; a summary still carrying
 `delivery_contract_required` is an issue that never received a contract. A summary with a non-null
 `contract_digest`, an empty `pending_stage_ids`, an empty `requirements`, a null `owner` and a
-non-null `custody` is a delivered issue whose `custody` is a stale record that control will never
-dispatch: report it as delivered with that stale custody, never as active or progressing. A `held`
-summary is an issue whose PR merged while ship held the issue open with the `needs-verification`
-label: report it as held, waiting for a human to verify it, never as queued, progressing or closed,
-and with no re-entry line; it stays open, so its dependents stay `blocked` until a human closes it.
+non-null `custody` is delivered with a stale `custody` control will never dispatch: report it as
+delivered, never as active or progressing. A `held`
+summary is an issue whose PR merged while ship held it open with the `needs-verification`
+label: report it as held for human verification, never as queued, progressing or closed, with
+no re-entry line; it stays open, so its dependents stay `blocked` until a human closes it.
 A summary whose `worktree_fact` requirement reads `recorded_worktree_absent` or
-`recorded_worktree_mismatch` is an issue that cannot resume (its recorded worktree is gone or not on
-the issue branch): report it as unable to resume for that reason, never as progressing. Then group
-every `discussion_items` entry by issue and call out anything needing a human. List every issue in
-that same control response's `admission.waiting` as queued for agent slots, with its summary state.
+`recorded_worktree_mismatch` is an issue that cannot resume: report it as unable to resume for that reason, never as progressing. Then group
+every `discussion_items` entry by issue and call out anything needing a human. File an
+issue for a finding only when it names a reproducible failure on a path real use exercises;
+Minors, speculative hardening and test pinning go in the PR body.
+List every issue in that same control response's `admission.waiting` as queued for agent slots, with its summary state.
 Below the table, under **Stop failures**, list each owner handle the final stop pass still left a
 candidate because its stop failed or its `check-launch` answer was unknown, with its `action_id` and
 the failure, and the pass's last sweep when it exited non-zero, with its exit code and, when it
 printed a report, its `skipped` launches; omit the list when there is none.
-Do not perform a second ledger read or reconstruct omitted history.
+Never re-read the ledger or reconstruct omitted history.
 
 An `expired` delta consumes no attempt and never advances the attempt number. Usually it is a
 `resumed` on the same attempt in this same sweep, or a `suspended` summary that a later eligible

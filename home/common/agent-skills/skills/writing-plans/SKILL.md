@@ -167,11 +167,11 @@ Never write "TBD", "TODO", "implement later", "fill in details"; "add appropriat
 
 ## Review feasibility forecast
 
-The root carries one `## Review feasibility delivery` block and each member one `## Review feasibility task` block, each a heading and one fenced `json` line of canonical JSON. Field semantics: nix-config's `python/README.md` § Review feasibility forecast.
+Once the content is final, pin `<base>` with `git merge-base HEAD origin/<integration-branch>` and run `review-feasibility forecast --plan <root> --base <base> --spec <spec> --input -`. From an estimate on stdin, one entry per task in order listing its `Files:` paths, it writes the root's `## Review feasibility delivery` and each member's `## Review feasibility task` block; `--help` gives the shape and sizing rule:
 
-- Delivery: `schema_version` 3, `kind`, `delivery_base`, `proposed_boundary`, `boundaries`, `process_records`, `actual_evidence` (`kind: git-range-ownership/v1`, the base's head and tree, no `process_ranges`) and `derived_from: null`.
-- Boundaries: the root holds every task, children partition their parents; `depends_on` chains carry `completed-tasks` prerequisites with null `commit` and `tree`; each has its own `process_package`, `process_forecast_ids` and one 64-byte `process_commit_subject_bytes` entry per future process commit.
-- Task: a record per `Files:` path, one `authored-cumulative/v1` bound per containing boundary, conservative whole-record sizes including fix rounds, recordings and the Phase-5 edit.
+`{"tasks":[{"files":[{"path":"a.py","change":"modify","added_lines":30,"deleted_lines":10}]}]}`
+
+Rerun it after any edit that changes a task's files. A refusal names the failing field.
 
 ## Package budget
 
@@ -183,11 +183,11 @@ Finish all content, then run `artifact-budget check --kind implementation-plan -
 
 Any later writer, an accepted Phase-5 edit included, first checks every artifact it changed.
 
-**Projection gate.** After the final mutation (self-grade edits included) and a `within_budget` check, pin `<base>` with `git merge-base HEAD origin/<integration-branch>`, commit, then run `review-feasibility gate --plan <root> --base <base> --head <HEAD> --completed-through 0 --save-dir "$(sdd-workspace <root>)"` (`<HEAD>` is `git rev-parse HEAD`), which keeps the full validated result.
+**Projection gate.** After the final mutation (self-grade edits included) and a `within_budget` check, commit, then run `review-feasibility gate --plan <root> --base <base> --head <HEAD> --completed-through 0 --save-dir "$(sdd-workspace <root>)"` (`<HEAD>` is `git rev-parse HEAD`), which keeps the full validated result.
 
 - Exit 0: `complete`, the printed summary as `projection`.
 - Exit 3: `decompose_required`, its artifact still `within_budget`, plus `projection`.
-- Exit 2: one forecast correction round (commit, rerun), then `failed` with the tool's reason in notes.
+- Exit 2: one forecast correction round (fix the estimate or the plan, rerun `forecast`, commit, rerun), then `failed` with the tool's reason in notes.
 
 An artifact overage keeps the over-budget report below, without `projection`.
 

@@ -934,16 +934,27 @@ def _relative_path(value: object, *, durable: bool) -> bool:
     return is_durable if durable else is_retained
 
 
-def _detail_fields(value: Mapping[str, object], *, allow_unpublished: bool) -> bool:
-    """Callers check `notes` with `_require_notes` first, so `notes` is a string here."""
+def _detail_fault(value: Mapping[str, object], *, allow_unpublished: bool) -> str | None:
+    """Return the failing detail rule, or None when the detail fields hold.
+
+    Callers check `notes` with `_require_notes` first, so `notes` is a string here.
+    A reason names a state only after the closed-set check has passed, so it never
+    echoes an input value.
+    """
     state, path, notes = value["detail_state"], value["report_path"], value["notes"]
     if state == "none":
-        return path is None
+        return None if path is None else "report_path must be null when detail_state is none"
     if state == "present":
-        return _relative_path(path, durable=True) and path in notes  # type: ignore[operator]
-    if allow_unpublished and state == "unpublished":
-        return _relative_path(path, durable=False) and path in notes  # type: ignore[operator]
-    return False
+        if not _relative_path(path, durable=True):
+            return "report_path must be a path under .superpowers/issue-delivery/ when detail_state is present"
+    elif allow_unpublished and state == "unpublished":
+        if not _relative_path(path, durable=False):
+            return ("report_path must be a path under .superpowers/ outside issue-delivery/ "
+                    "when detail_state is unpublished")
+    else:
+        return ("detail_state must be none, present or unpublished" if allow_unpublished
+                else "detail_state must be none or present")
+    return None if path in notes else f"report_path must be cited in notes when detail_state is {state}"  # type: ignore[operator]
 
 
 # The closed acceptance_state set and its ship-handoff pairing (#272 D8, D9).
@@ -1024,8 +1035,8 @@ def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int, 
         return
     _require_members(value, _SDD_KEYS, "SDD report")
     _require_notes(value["notes"], notes_max_characters)
-    if not _detail_fields(value, allow_unpublished=True):
-        raise ArtifactBudgetError("invalid SDD report")
+    if (fault := _detail_fault(value, allow_unpublished=True)) is not None:
+        raise ArtifactBudgetError(f"invalid SDD report: {fault}")
     acceptance = value["acceptance_state"]
     if not isinstance(acceptance, str) or acceptance not in ACCEPTANCE_STATES:
         raise ArtifactBudgetError("invalid SDD report")
@@ -1102,22 +1113,33 @@ def validate_ship_summary_report(value: Mapping[str, object], notes_max_characte
             "detail_state", "report_path", "notes"}
     _require_members(value, keys, "ship summary")
     _require_notes(value["notes"], notes_max_characters)
-    if (not _integer(value["issue"], minimum=1)
-            or value["discussion_items"] != [] or type(value["issue_closed"]) is not bool
-            or not _detail_fields(value, allow_unpublished=True)):
-        raise ArtifactBudgetError("invalid ship summary")
+    if not _integer(value["issue"], minimum=1):
+        raise ArtifactBudgetError("invalid ship summary: issue must be a positive integer")
+    if value["discussion_items"] != []:
+        raise ArtifactBudgetError("invalid ship summary: discussion_items must be an empty list")
+    if type(value["issue_closed"]) is not bool:
+        raise ArtifactBudgetError("invalid ship summary: issue_closed must be a boolean")
+    if (fault := _detail_fault(value, allow_unpublished=True)) is not None:
+        raise ArtifactBudgetError(f"invalid ship summary: {fault}")
     pr = value["pr_url"]
     if pr is not None and not _string(pr):
-        raise ArtifactBudgetError("invalid PR URL")
+        raise ArtifactBudgetError("invalid ship summary: pr_url must be null or a non-empty string")
     state = value["state"]
+    refusal = "invalid ship summary state: "
     if state == "merged":
-        valid = _string(pr) and _sha(value["merge_sha"]) and value["detail_state"] in {"none", "present"}
+        if not _string(pr):
+            raise ArtifactBudgetError(refusal + "pr_url must be a non-empty string when state is merged")
+        if not _sha(value["merge_sha"]):
+            raise ArtifactBudgetError(refusal + "merge_sha must be a 40-hex commit when state is merged")
+        if value["detail_state"] not in {"none", "present"}:
+            raise ArtifactBudgetError(refusal + "detail_state must be none or present when state is merged")
     elif state in {"stopped", "failed"}:
-        valid = value["merge_sha"] is None and value["issue_closed"] is False
+        if value["merge_sha"] is not None:
+            raise ArtifactBudgetError(refusal + f"merge_sha must be null when state is {state}")
+        if value["issue_closed"] is not False:
+            raise ArtifactBudgetError(refusal + f"issue_closed must be false when state is {state}")
     else:
-        valid = False
-    if not valid:
-        raise ArtifactBudgetError("invalid ship summary state")
+        raise ArtifactBudgetError(refusal + "state must be merged, stopped or failed")
 
 
 def validate_ledger_result(value: Mapping[str, object], notes_max_characters: int) -> None:

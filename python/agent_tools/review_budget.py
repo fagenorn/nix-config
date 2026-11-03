@@ -45,6 +45,15 @@ def _invoke(argv: list[str], *, payload: bytes | None = None) -> subprocess.Comp
         raise BudgetError("budget authority unavailable") from exc
 
 
+def _refusal_reason(result: subprocess.CompletedProcess) -> str:
+    """The checker's last non-empty stderr line, one line and bounded; its exit code when silent."""
+    lines = [line for line in result.stderr.decode("utf-8", errors="replace").splitlines()
+             if line.strip()]
+    if not lines:
+        return f"exit {result.returncode}"
+    return " ".join(lines[-1].split())[:200]
+
+
 def _valid_overages(overages: object, violations: list[str]) -> bool:
     """Exactly one `{limit, over_by}` entry per violated code (issue 472 D8)."""
     return (isinstance(overages, dict) and set(overages) == set(violations)
@@ -79,7 +88,7 @@ class BudgetAuthority:
         result = _invoke(["check", "--kind", kind, "--root", str(root), "--format", "json",
                           *self._arguments()])
         if result.returncode not in {0, 3} or result.stderr:
-            raise BudgetError("budget check failed")
+            raise BudgetError(f"budget check failed: {_refusal_reason(result)}")
         value = _object(result.stdout, self.report_wire_max_bytes)
         if (set(value) != _CHECK_KEYS
                 or type(value["interface_version"]) is not int or value["interface_version"] != 1
