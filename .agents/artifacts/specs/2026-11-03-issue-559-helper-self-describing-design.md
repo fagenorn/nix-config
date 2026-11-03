@@ -10,7 +10,7 @@ Input: contract_change=hit (new subcommand, refusal messages), concurrency_or_pe
 
 The triage paths name `tests/test_artifact_budget.py` and `tests/test_skill_sections.py`. The
 first does not exist and the second tests the `skill-sections` command, so neither is a seam
-here. The seams this design uses are under Test seams (D8, D10).
+here. The seams this design uses are under Test seams (D7, D8).
 
 ## Problem
 
@@ -84,6 +84,8 @@ The estimate has this shape:
   absent at the base, or deleted by an earlier task. A `modify` or a `delete` needs the path
   present: present at the base or added earlier, and not deleted since. A base entry that is
   not a blob is refused.
+- The estimate is never stored. A rerun takes a complete fresh estimate; the written task
+  blocks show each record's path, change and cumulative line counts.
 
 ### Emitted blocks (D3, D4)
 
@@ -130,7 +132,7 @@ These constants have one home, the generator module, and `--help` prints them.
 The forecast is a planning estimate. Completed work is always measured as it actually is, and
 the cumulative delivery gate catches an underestimate during delivery.
 
-### Writing and refusals (D5)
+### Writing and refusals (D5, D12)
 
 - All values are computed before any file is written. The objects are checked first with the
   validators the gate's loader applies to boundaries and records, so a generator bug is a
@@ -143,6 +145,10 @@ the cumulative delivery gate catches an underestimate during delivery.
 - An existing block that parses and carries recorded evidence (a non-empty `actual_ranges` or
   `process_ranges`) is refused. From the first recording, `sdd-gate record` owns the blocks.
 - The generator commits nothing.
+- When member discovery fails, the refusal carries the checker's own one-line reason (issue
+  472's value-free form), such as `invalid task index row`. The budget authority's `check`
+  appends that line to its `budget check failed` error, so `project`, `gate` and `sdd-gate`
+  details gain it too (D12).
 - **Exit 0** prints one canonical JSON line, `{"written":[...]}`: the repository-relative paths
   whose bytes changed, the root first and then the members. An empty list means nothing
   changed.
@@ -186,15 +192,18 @@ exit 2 and empty stdout (issue 472 D1).
   estimate example and two rules: rerun the generator after any edit that changes a task's
   files, and a refusal names the failing field. The generator runs after the content is final
   and before § Package budget, with `<base>` pinned there. A § Projection gate correction round
-  fixes the estimate or the plan and reruns the generator. The section must not grow past its
-  current 1,013 bytes plus the planning-owner's 89 bytes of headroom.
+  fixes the estimate or the plan and reruns the generator. The file may grow by at most 71
+  bytes: the no-growth contract test (#227) allows that much, inside the planning-owner's 89
+  bytes of Instruction Budget headroom. The writing-plans machine-text pins in the skill
+  contract tests drop `git-range-ownership/v1` and `authored-cumulative/v1`, which the skill no
+  longer tells anyone to write, and gain the `forecast` argv (agent-helpers rule 6). The block
+  headings stay pinned.
 - **sdd § Cumulative delivery gate** drops its parenthetical pointer. `sdd-gate`'s refusal
   already names its `step` and `detail`.
 - **retro § Files, Helpers** names nix-config's command table, `lib/agent-tools.nix`, instead
   of `python/agent_tools/`.
-- **from-issue standards-review § Accepted-edit remeasurement**: a plan edit that changes a
-  task's files reruns `review-feasibility forecast` before the commit and the gate. This adds
-  about 70 bytes within the from-issue-controller's 94 bytes of headroom.
+- **The Phase-5 documents** (`from-issue` standards-review and REVIEW-CONTRACT) stay unchanged
+  (D10).
 - **skill-lint L6.** It applies to every `.md` file under the three skill trees, `evals/` and
   `scripts/` included, because whole skill directories are installed. It reports a token
   `python/` that does not follow a path character, which covers `python/README.md`, and every
@@ -220,7 +229,7 @@ Each seam follows prior art in its suite.
    - Each process bound is at least the written file's whole-record add size.
    - A refusal table covers count mismatch, change versus path state, unknown key, process path
      and duplicate heading. Each case gives exit 2, empty stdout, the member path in the reason
-     and no file changed.
+     and no file changed. A broken Task index row gives the checker's reason (D12).
    - Blocks with recorded evidence are refused.
 2. **The `artifact-budget validate-report` CLI**, through `run_validate` and `assert_refusal`
    (`home/common/agent-skills/tests/test_artifact_budget.py`).
@@ -233,7 +242,10 @@ Each seam follows prior art in its suite.
    - L6 reports `python/README.md` and `agent_tools/`, including in an `evals/` file, and
      leaves `~/.agents/lib/python/` alone.
    - **AC3.** `test_the_live_tree_lints_clean` runs L6 against the live tree.
-4. **The Instruction Budget gate**, `just agent-instruction-budget`, passes on the branch.
+4. **The skill contract tests** (`test_workflow_skill_contracts.py`):
+   `ProjectionCallerContractsTest` with the swapped pins, and the no-growth tests for
+   writing-plans and sdd. **The Instruction Budget gate**, `just agent-instruction-budget`, also
+   passes on the branch.
 
 AC4 (`[evidence]`) cannot be graded at merge. It is pending post-merge evidence: over the next
 10 orchestrated issues, owner Bash calls matching `nix/store|agent_tools|\.agents/lib/python`
@@ -249,9 +261,9 @@ the issue (D11).
   - `invalid SDD state` and `invalid ledger result`;
   - `review-package`;
   - `ship-delivery`'s own messages;
-  - `review-feasibility`'s loader refusals;
-  - `BudgetError`'s `budget check failed` (D6).
-- Parsing task `Files:` prose, and committing the estimate (D1).
+  - `review-feasibility`'s loader refusals (D6).
+- Parsing task `Files:` prose, and committing or storing the estimate (D1).
+- Phase-5 skill text: `from-issue` standards-review and REVIEW-CONTRACT (D10).
 - Installing `python/README.md` or a new share document, and adding skill reference files (D9).
 - Transcript-measurement tooling for AC4 (D11).
 
@@ -262,11 +274,12 @@ the issue (D11).
 | D1 | The generator takes `--plan --base --spec --input`. The input is a planner-written closed estimate JSON, never committed: per task and per path, the change plus line counts. The change is explicit, so it is cross-checked against the path state | Phase-0 open Q1. Forecast field names reused. The bar's token economy. Explicit change mirrors `Files:` Create/Modify/Delete and catches path typos | Parsing `Files:` prose: no task text is machine-read today, `Test:` lines are ambiguous, and line estimates are still needed. Inferring `change`: it loses the typo check |
 | D2 | `record_bytes` = 2,560 per record + 128 per added or deleted line, cumulative per path. A delete is charged its base blob whole. The constants live in one home and are printed by `--help` | python/README.md conservative-bound rule. Hand practice (#557: 40+/24- → 8,192). Calibration over 150 merged PRs at -U10: given true line counts this covers about 93% of adds and 68% of modifies, with 10 false delivery overflows | A sound whole-file bound: 99 of 150 deliveries falsely overflow the 64 KiB member limit. A hunk-aware rule: planners cannot know the hunk count |
 | D3 | Process records are measured from the files as written, plus 2,560 + 4,096 + 256 per task. Subjects are 3 × 64 per task and (N + 4) × 64 for the process. `acceptance` is a fixed text | writing-plans: sizes include recordings and the Phase-5 edit. `sdd-gate record` adds one range per task | Planner-supplied process sizes: the hand computation this issue removes |
-| D4 | Only the single root boundary `all` is generated. There are no child boundaries | 18 of 19 committed plans are root-only; the 19th is #227's own feature plan. YAGNI. A plan that overflows with no recommendation already takes the decompose path | Input-declared children: each needs a synthetic future process package and records, for a path planners almost never use |
+| D4 | Only the single root boundary `all` is generated. There are no child boundaries. AC1's "dependent tasks" are same-path dependencies: a later task builds on a file an earlier task adds | 18 of 19 committed plans are root-only; the 19th is #227's own feature plan. YAGNI. A plan that overflows with no recommendation already takes the decompose path | Input-declared children: each needs a synthetic future process package and records, for a path planners almost never use |
 | D5 | The generator writes in place: replace once-present sections or append, compute and self-validate everything before writing, rewrite only changed files, and refuse blocks that carry recorded evidence. Stdout is `{"written":[...]}` | Issue: "writes (or prints)". The jarbird failure was hand-pasting. `sdd-gate record` owns the blocks after the first recording. The bar's defense in depth | Print-only: the planner pastes long JSON lines by hand again. Preserving recorded evidence: it would make the generator a second owner of `record`'s data |
-| D6 | Refusal breadth: the ship-summary composites (`invalid ship summary`, `invalid PR URL` folded into it, `invalid ship summary state`) name the member and the rule, keeping the old text as a prefix. The shared detail check returns a reason, so the SDD report's detail failure is named too. Nothing else changes | Phase-0 disposition 3: keep it tight and extend only where the same helper change covers it naturally. Issue 472 D1–D3 sets the line format; `invalid SDD state: <fault>` is the prefix precedent | Sharpening every artifact-budget, review-package and ship-delivery composite: an unbounded scope with no reported failure |
+| D6 | Refusal breadth: the ship-summary composites (`invalid ship summary`, `invalid PR URL` folded into it, `invalid ship summary state`) name the member and the rule, keeping the old text as a prefix. The shared detail check returns a reason, so the SDD report's detail failure is named too. No other validator changes | Phase-0 disposition 3: keep it tight and extend only where the same helper change covers it naturally. Issue 472 D1–D3 sets the line format; `invalid SDD state: <fault>` is the prefix precedent | Sharpening every artifact-budget, review-package and ship-delivery composite: an unbounded scope with no reported failure |
 | D7 | AC2 is a table test over every ship-summary rule on the v1 and v2 boundaries. Its over-long-notes row asserts `notes` and the bound, which issue 472 already named | AC2 as written passes on base, and the bar's tests-that-can-fail asks for a check that can fail. The jarbird failure ran through the v2 ship-delivery path | Only the notes row: it is green before the change and proves nothing new |
 | D8 | AC3's check is a new `skill-lint` rule L6 over every `.md` file in the shared, Claude and Codex skill trees, `evals/` and `scripts/` included. It reports `python/` path tokens and `agent_tools/` | skill_lint already owns the skill-tree rules and has a live-tree-clean test (framework-first). Whole skill directories are installed | A standalone test in `tests/test_skill_sections.py`: that file tests the skill-sections command. Matching only the two literal strings: it leaves `python/` paths open |
 | D9 | No relocated document. writing-plans carries the call and a one-line estimate example; `forecast --help` carries the shape and the rule. sdd drops its pointer, and retro names `lib/agent-tools.nix` | Phase-0 open Q4. The planning-owner has 89 bytes of Instruction Budget headroom and only the user may raise it. The generator removes the planner's need for field semantics. Help text is installed with the command | A reference file in the skill directory: an instruction-load model edit plus an L4a naming. Installing python/README.md under `~/.agents/share`: 188 KB of maintainer contracts |
-| D10 | from-issue standards-review's accepted-edit remeasurement reruns `forecast` when a plan edit changes a task's files | REVIEW-CONTRACT § Forecast check makes a missing record Blocking, and that fix would otherwise be hand-written JSON. About 70 bytes fit the 94-byte headroom | Leaving Phase 5 on hand edits: it reopens the issue's failure mode |
+| D10 | The Phase-5 documents stay unchanged. A Phase-5 forecast fix may rerun the generator, which `review-feasibility --help` lists, but no Phase-5 text sends it there | #227's no-growth test leaves standards-review 2 bytes of slack and REVIEW-CONTRACT 17. The issue names the plan phase. Today's hand edits stay possible, so nothing regresses | A rerun sentence in standards-review: it needs about 70 bytes of trims in unrelated pinned rules. A remedy clause in REVIEW-CONTRACT: it would have to drop the process-artifact and recording-subject check to fit |
 | D11 | AC4 is delivered as pending post-merge evidence; the three code criteria are delivered. The ship flow's acceptance handling decides whether to close or hold the issue | Phase-0 disposition 2. AC4 measures 10 future issues | Building transcript-measurement tooling now: out of scope per Phase 0 |
+| D12 | The budget authority's `check` appends the checker's one-line stderr reason to `budget check failed`. The generator's discovery refusals name their cause, and so do `project`, `gate` and `sdd-gate` | D5's refusal contract. Issue 472 makes checker reasons single-line and value-free, within the 400- and 300-character relays. No test pins the bare text | Duplicating member discovery in the generator: a second home for the checker's rules. Leaving it bare: the planner's likeliest refusal would name nothing |
