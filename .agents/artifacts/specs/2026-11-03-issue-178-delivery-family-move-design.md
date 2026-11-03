@@ -179,6 +179,14 @@ lifecycle harness's `HOME` gains that one link. A suite that copied the whole
 delivered-control suite's `isolated_workflow`, instead writes that policy into
 a `HOME` share of its own and runs `-m`.
 
+A source run outside the suites (the agent-skills README's
+`PYTHONPATH=<checkout>/python` instruction) therefore validates against the
+installed share policy, not the checkout's (D14). That is already what every
+`artifact-budget` it reaches by name on `PATH` does. A change to the policy's
+shape fails such a run loudly with the validator's policy refusal, and is
+exercised from source the way the suites do it, with `HOME`'s share pointing
+at the checkout's policy.
+
 ### Sibling calls and the review packaging (D6)
 
 - **`workflow-state`'s calls.** It runs the resolver through `sibling_argv`.
@@ -248,8 +256,11 @@ re-homings and the D3 rename listed here.
 - Source-text scans re-point their constants to the package files: the clock
   scan over `workflow_delivery*` and `delivery_model`, the moved-gate check,
   and the skill-contract constants reader.
-- The in-process runner (`_inprocess_cli.run_script`) keeps its contract and
-  its parity test, and is given `workflow_state`'s package source file (D8).
+- The in-process runner (`_inprocess_cli.run_script`) keeps its contract,
+  its compiled-code cache and its parity test, and is given
+  `workflow_state`'s package source file (D8, D15). It changes no `sys.path`
+  and uses no `importlib`, and the code it runs is the code the `-m` child
+  runs.
 - **Unchanged:** base-helper replays pinned to older commits, which archive
   those commits' `scripts` paths; the retained full tier's pinned-blob staging
   `HOME`; and test-module loads of test files.
@@ -319,6 +330,9 @@ and is never skipped. In one fixture project and `HOME`:
    `schema_version` 11 and hold the registered worker.
 3. The moved helper runs the same `build-delivery` input. Its stdout must be
    byte-identical to the base helper's: sealed digests are unchanged.
+4. The base helper then runs one more `control` round on the ledger the moved
+   helper wrote, and must exit 0. A generation rollback after the switch puts
+   the base helper back in front of those ledgers (D13).
 
 ### Living documents (D11)
 
@@ -332,7 +346,8 @@ and is never skipped. In one fixture project and `HOME`:
   script still loads the rule that forbids it (parent D6).
 - **The agent-skills README.** Its source-run instruction (`workflow-state`
   as `python3 <checkout>/…/workflow-state.py`) becomes
-  `PYTHONPATH=<checkout>/python python3 -m agent_tools.workflow_state`.
+  `PYTHONPATH=<checkout>/python python3 -m agent_tools.workflow_state`, and
+  says the run reads the installed share policy (D14).
 - **The retro skill.** Its helper-source line stops naming the deleted
   `scripts` directory.
 - **The eval runner.** `workflow-state` and `artifact-budget` are now table
@@ -416,7 +431,8 @@ Every commit keeps `just build`, `just agent-workflow-tests` and
   - `just build` passes, and import-checks every new module, including the
     subpackage's submodules.
   - The D7 test passes: a base-written ledger progresses under the moved
-    helper, and `build-delivery` output is byte-identical.
+    helper, the base helper accepts the ledger the moved one wrote, and
+    `build-delivery` output is byte-identical.
   - The built `workflow-state --help` and `artifact-budget --help` match the
     base installed commands byte for byte.
   - The task-brief suite passes with `artifact-budget` reached on `PATH` and
@@ -486,3 +502,6 @@ base f6a48dcf66fbb2171f66920c32afd4f9e5056a93
 | D10 | The installed floor gains `artifact-budget` and `workflow-state`; the workflow-state script-launcher special cases go; one assertion that the built home has no `.agents/lib/python` is added; the wrapper-only `python3` link goes | Parent D9 seam 2; #177 D13; issue AC1, AC2 | A demo-only check of AC2 leaves nothing committed that can fail |
 | D11 | Re-point the living documents (`CLAUDE.md` with no net growth, the standards shard's legacy clauses, the agent-skills README, the retro skill, the eval runner and its README and test, docstrings) and the three light-lane risk paths in the move's commit; the standards index globs stay | The-bar Moves keep their history; parent D6, D14; #177 D10 and its resolver risk-path re-point; the Instruction Budget gate | Leaving the risk paths on deleted files silently drops the light lane's risk hits for the delivery family |
 | D12 | Take the cluster now: #559 shares no moved file, and the delivered-candidate worktree has been stale since 2026-09-24 with no PR | Parent D5; the check made on 2026-11-03 | Waiting for #559: it shares only fixture lines, which merge locally |
+| D13 | (grill) D7 also proves the rollback direction: the base helper accepts and progresses a ledger the moved helper wrote | A generation rollback after `just switch` puts the base helper in front of ledgers written since; the issue's regression floor ("stored ledger stays valid") | Proving only base-to-moved leaves a rollback untested, even though nothing in this slice should change the bytes |
+| D14 | (grill; refines D5) A source run outside the suites reads the installed share policy; the agent-skills README says so; a policy-shape change is exercised from source by pointing `HOME`'s share at the checkout policy | D5; `artifact-budget` reached by name on `PATH` already reads the installed policy in such runs; the-bar Fail loud (a shape mismatch is a policy refusal, not a silent use) | Shipping the policy as package data so source runs read the checkout copy gives the policy a second home and changes the suites' `HOME`-policy seam |
+| D15 | (grill; refines D8) The in-process runner keeps its file contract and compiled-code cache; this is the one in-process path, it edits no `sys.path`, uses no `importlib`, and runs the code the `-m` child runs; shard rule 5 is left unchanged | Issue-500 runner and its parity test; issue 497's suite CPU budget; standards shard rules 3 and 5 | A `runpy.run_module` runner re-reads the module on every one of the suites' in-process runs, and needs a rewritten parity probe that is importable by name. Amending rule 5 for one test helper is a policy change this slice does not need |
