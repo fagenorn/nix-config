@@ -89,5 +89,5 @@ Report `DONE`, with the line `human_gate: owner open-and-merge (E § Task 5, Own
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":5,"records":[{"bounds":[{"added_lines":1100,"boundary":"all","deleted_lines":0,"record_bytes":46080,"support":{"covers":["e1","e2","e3","e4","e5"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e5","last_task":8,"owner":5,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"76e46b54691a7292275095e7bd4641cdbf446bb2","head":"675093485373f61c6f13aefdfbd659dc527932ce"}],"commit_subject_bytes":[64],"id":5,"records":[{"bounds":[{"added_lines":1100,"boundary":"all","deleted_lines":0,"record_bytes":46080,"support":{"covers":["e1","e2","e3","e4","e5"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e5","last_task":8,"owner":5,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
 ```
