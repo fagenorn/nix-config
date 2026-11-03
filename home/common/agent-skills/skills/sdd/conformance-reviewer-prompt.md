@@ -108,9 +108,9 @@ Subagent (reviewer, Opus/high as selected above):
     expected duration. If the host moves one to the background anyway, wait for
     it in the same turn: never end your turn while a command or agent you
     started still runs.
-    Never loop `sleep` in the foreground or chain a check onto it: use Monitor
-    with an until-condition, or one short bare `sleep N` call and check in the
-    next.
+    Never run `sleep` in the foreground: wait with Monitor with an
+    until-condition or a background Bash command, or end the turn on
+    someone else's blocker.
 
     ## Output Format
 

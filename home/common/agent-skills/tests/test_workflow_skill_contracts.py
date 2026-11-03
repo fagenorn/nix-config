@@ -3349,7 +3349,7 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
         "home/common/agent-skills/skills/sdd/SKILL.md",
         "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
     )
-    WAIT_FORMS = ("Monitor with an until-condition", "bare `sleep N` call")
+    WAIT_FORMS = ("Monitor with an until-condition", "a background Bash command")
     END_THE_TURN = "a blocker another session owns: end the turn, never poll"
 
     @classmethod
@@ -3381,7 +3381,7 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
             "`sleep <wait_seconds>`",
             "background `sleep <wait_seconds>`; every wait",
             "`until <check>; do sleep 2; done`",
-            "or one short bare `sleep N` call and check in the next.",
+            "Never run `sleep` in the foreground: wait with Monitor",
         ):
             with self.subTest(spare=text):
                 self.assertEqual(self.chained_waits(text), [])
