@@ -70,6 +70,7 @@ anchored to file:line. **Never merge the two reports**: disposition each on its
 own, and ledger both verdicts plus the correctness reviewer identity
 (`Codex` | `native` | `fallback` + failure class). From `diff-review`, ledger each
 slice's scope too (`full` | `scoped: <N> of <M> product files` | `unmeasured`).
+An axis is `findings` when any of its chunk, slice or integration verdicts is.
 
 **Acceptance verdicts.** When the conformance dispatch carried
 `[ACCEPTANCE_CRITERIA]`, check its `### Acceptance` table on the first pass,
@@ -102,7 +103,7 @@ task) is reviewed in chunks, never stopped or truncated:
    `task-<N>-report.md`), base, head, `git diff --stat <base>..<head>` and its
    paths, read in slices with `git diff <base>..<head> -- ':(literal)<path>'`.
 2. **Own.** Each path of `git diff --no-renames --name-only <base>..<head>` over
-   the range belongs to the last chunk changing it; others treat it as context.
+   the range belongs to the last chunk whose same list has it; others treat it as context.
    Owned lists must jointly equal that list with no path twice; ledger
    `Review chunk <i>/<n>: <base7>..<head7>, <k> paths` before dispatch. An owned
    path an earlier chunk also changes is read from the range base, as above,
@@ -110,8 +111,7 @@ task) is reviewed in chunks, never stopped or truncated:
 3. **Review.** Each chunk gets fresh reviewers, never reused across chunks, the
    range's usual set (both axes on the first pass), its tasks and owned paths
    named; they grade only those, and none carries `[ACCEPTANCE_CRITERIA]`. A
-   chunk read outside its package takes correctness rung 3. An axis is
-   `findings` when any of its chunk, slice or integration verdicts is.
+   chunk read outside its package takes correctness rung 3.
 4. **Integrate.** After a chunked first pass, one more conformance dispatch
    (same tier) gets every chunk verdict, the range's stat and path list and
    `[ACCEPTANCE_CRITERIA]`, reads no package or whole-range diff, may read the
