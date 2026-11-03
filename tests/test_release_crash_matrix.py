@@ -2,8 +2,8 @@
 import unittest
 
 from agent_tools import release_adapter, release_driver
-from . import release_driver_support as rs
-from .forge_world import ROWS, ForgeWorld
+from . import forge_world, release_driver_support as rs, release_test_support as support
+from .forge_world import CANONICAL, ROWS, ForgeWorld
 
 ORDER = ["merge", "tag", "github-release", "deploy"]
 
@@ -109,3 +109,99 @@ class CrashMatrixTest(MatrixCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+TWO_BRANCH = ["merge", "tag", "github-release", "deploy"]
+
+
+class TwoBranchMatrixTest(unittest.TestCase):
+    """Issue 554: the real forge merges, then tags its merge commit (spec §4, AC3)."""
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+        self.world.verification_ready(integration="dev")
+        self.world.merge_observation_ready()
+        self.clock = rs.Clock()
+        self.forge, self.deploy = rs.StatefulForge(self.world), rs.FixtureDeploy()
+        self.world.merge_ready()
+
+    def driver(self, forge=None, crash=None):
+        forge = forge or self.forge
+        if crash is not None:
+            forge = rs.CrashAt(forge, crash, after=True)
+        project = rs.project(self, profiles={"two-branch": rs.forge_merge_profile()}, integration="dev")
+        return release_driver.Driver(project, registry={"github-forge": forge, "fixture-deploy": self.deploy},
+                                     clock=self.clock)
+
+    def merges(self):
+        return [c for c in self.world.calls() if c["tool"] == "gh" and c["argv"][:2] == ["pr", "merge"]]
+
+    def tags(self):
+        return [c["argv"] for c in self.world.calls() if c["tool"] == "git" and c["argv"][:2] == ["tag", "-a"]]
+
+    def test_a_confirmed_two_branch_release_merges_once_and_tags_the_merge_commit(self):
+        driver = self.driver()
+        shown, result = rs.release(driver, rs.candidate())
+        self.assertEqual([c["action"] for c in shown["confirmations"]], TWO_BRANCH[:3])
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual(len(self.merges()), 1)
+        self.assertEqual(self.tags(), [["tag", "-a", CANONICAL["tag"], CANONICAL["merge_commit"],
+                                        "-m", f"release: {CANONICAL['tag']}"]])
+
+    def test_a_crash_after_the_merge_tags_the_merge_commit(self):
+        """Issue 554 row 10, AC3."""
+        driver = self.driver(crash="pr_merge")
+        shown = driver.preview(rs.candidate())
+        with self.assertRaises(rs.Crash):
+            driver.run(rs.candidate(), [c["token"] for c in shown["confirmations"]])
+        self.clock.advance(release_driver.CUSTODY_TTL_MS + 1)
+        resumed = driver.preview(None)
+        self.assertEqual((resumed["mode"], resumed["candidate"]["merge"]), ("resume", support.MERGE))
+        # The crash left merge's intent open with no recorded inspection, so it is not stored
+        # satisfied and is confirmed again; the resumed run inspects it and never re-invokes.
+        self.assertEqual([c["action"] for c in resumed["confirmations"]], TWO_BRANCH[:3])
+        result = driver.run(None, [c["token"] for c in resumed["confirmations"]])
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual(len(self.merges()), 1)
+        self.assertEqual([argv[3] for argv in self.tags()], [CANONICAL["merge_commit"]])
+        actions = {a["name"]: (a["status"], a["attempts"]) for a in driver.status()["release"]["actions"]}
+        # One attempt: the intent the crashed invoke opened. The resume adds an inspection, not an attempt.
+        self.assertEqual(actions["merge"], ("satisfied", 1))
+
+    def test_a_provider_refused_merge_parks_with_no_effect(self):
+        """Issue 554 rows 6 and 7: GitHub refuses a moved base or a moved head; the PR stays open."""
+        for stderr in ("GraphQL: Head branch is out of date (mergePullRequest)",
+                       "GraphQL: Head branch was modified. Review and try the merge again."):
+            with self.subTest(stderr=stderr):
+                self.setUp()
+                self.world.merge_ready(merge_exit=1, merge_stderr=stderr)
+                driver = self.driver()
+                _, result = rs.release(driver, rs.candidate())
+                self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+                reason = driver.status()["release"]["reason"]
+                self.assertTrue(reason.startswith("merge: absent after unknown transient_transport: "), reason)
+                self.assertEqual((len(self.merges()), self.tags()), (1, []))
+                self.assertEqual(driver.abandon()["state"], "abandoned")
+
+    def test_a_landed_merge_that_exits_non_zero_is_satisfied(self):
+        """Issue 554 row 8: the same-call inspection reads MERGED, and the tag follows."""
+        forge = rs.LandedDespiteExit(self.world)
+        self.world.merge_ready(merge_exit=1, merge_stderr="gh: connection reset")
+        driver = self.driver(forge=forge)
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual(len(self.merges()), 1)
+        self.assertEqual([argv[3] for argv in self.tags()], [CANONICAL["merge_commit"]])
+
+    def test_a_floor_refusal_parks_with_its_reason_and_abandons(self):
+        """Issue 554 row 16, AC2."""
+        floor = forge_world.FLOOR_PROTECTION
+        self.world.merge_ready(protection={**floor, "enforce_admins": {"enabled": False}})
+        driver = self.driver()
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "attention")
+        self.assertEqual(driver.status()["release"]["reason"],
+                         "merge: absent after rejected precondition_failed: "
+                         "protection_floor_unmet: enforce_admins")
+        self.assertEqual((self.merges(), self.tags()), ([], []))
+        self.assertEqual(driver.abandon()["state"], "abandoned")

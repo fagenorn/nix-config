@@ -76,7 +76,7 @@ enter this context.
 Both prompts carry, inline (the subagent starts with no context and loads no skills beyond the
 exceptions named below):
 
-- the Phase-0 issue summary and scope boundary, with the note's **Lane triage** record and verdict verbatim,
+- the Phase-0 issue summary and scope boundary,
 - the retained fields it needs (`bindings.paths.artifacts`, `bindings.paths.context`,
   `bindings.paths.hints`, `bindings.tracker`, `bindings.vcs`, `bindings.workflow`),
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
@@ -139,19 +139,13 @@ applies its own blocking fixes before returning.
 
 After the final mutation, write a candidate producer report, run
 `artifact-budget validate-report --boundary producer`, and return only validated stdout bytes.
-never inline artifact contents or task member paths. The exact `complete` report carries `projection`, the summary `review-feasibility gate` printed (exit 0):
+never inline artifact contents or task member paths. The exact `complete` report:
 
 ```
-{"state":"complete","artifact":{"kind":"implementation-plan","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"projection":<gate summary>,"notes":"<bounded note>"}
+{"state":"complete","artifact":{"kind":"implementation-plan","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"notes":"<bounded note>"}
 ```
 
-An exact projected `decompose_required` report (gate exit 3) keeps the artifact `within_budget`:
-
-```
-{"state":"decompose_required","artifact":{"kind":"implementation-plan","path":"<root relative to repo>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"projection":<gate summary>,"notes":"<bounded note>"}
-```
-
-The exact artifact-overage report has no `projection`; it includes the checker's ordered, non-empty
+The exact artifact-overage report includes the checker's ordered, non-empty
 `violations` array:
 
 ```
@@ -160,7 +154,7 @@ The exact artifact-overage report has no `projection`; it includes the checker's
 
 For `failed`, `artifact` is exactly `null` before a root exists or exactly
 `{"kind":"implementation-plan","path":"<root relative to repo>"}` after one
-exists; metrics, budget status, violations and projection are forbidden in both failed
+exists; metrics, budget status and violations are forbidden in both failed
 rows. `complete` plus any status other than `within_budget` is a contract error.
 
 ## Interface_version 2 delivery relay

@@ -792,6 +792,88 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(2, result.returncode, bad)
                 self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
 
+    def test_pr_create_body_file_must_be_outside_the_working_tree(self):
+        """Issue 386: the PR is born with its notes via --body-file, from a path outside the tree."""
+        repo = self.make_repo("https://github.com/fagenorn/argus.git")
+        outside = os.path.join(tempfile.gettempdir(), "release-body-386.md")
+        form = ('gh pr create --repo fagenorn/argus --base main --head issue-7-fix '
+                '--title "fix: guard" --body-file {}')
+        ok = self.run_guard(form.format(outside), cwd=repo)
+        self.assertEqual(0, ok.returncode, ok.stderr)
+        scrubbed = self.run_guard("unset GITHUB_TOKEN && " + form.format(outside), cwd=repo)
+        self.assertEqual(0, scrubbed.returncode, scrubbed.stderr)
+        for bad, problem in (
+            (form.format(os.path.join(repo, "notes.md")), "inside the working tree"),
+            (form.format(os.path.join(repo, "sub", "..", "notes.md")), "absolute path"),
+            (form.format("notes.md"), "absolute path"),
+            (form.format("'/tmp/a;b.md'"), "absolute path"),
+            (form.format("'/tmp/a b.md'"), "absolute path"),
+            (form.format("/tmp/$HOME.md"), "forbidden character `$`"),
+            (form.format("/tmp/x/../../etc/passwd"), "absolute path"),
+            (form.format(outside) + ' --body "y"', "out of place"),
+        ):
+            with self.subTest(command=bad):
+                result = self.run_guard(bad, cwd=repo)
+                self.assertEqual(2, result.returncode, bad)
+                self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
+                self.assertIn(problem, result.stderr)
+
+    def test_pr_create_body_file_safety_branches_each_refuse(self):
+        """Issue 386: each safety branch of the placement check refuses on its own.
+
+        Every row passes the path-spelling rule, so only the named branch can
+        refuse it: removing that branch from the guard turns its row red.
+        """
+        repo = self.make_repo("https://github.com/fagenorn/argus.git")
+        form = ('gh pr create --repo fagenorn/argus --base main --head issue-7-fix '
+                '--title "fix: guard" --body-file {}')
+        outside = os.path.join(tempfile.gettempdir(), "release-body-386.md")
+        link = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "repo-link"
+        link.symlink_to(repo, target_is_directory=True)
+        rows = [
+            # Fail closed: in the .git directory the origin and default branch
+            # resolve but there is no working tree to check the path against.
+            ("no working tree", form.format(outside), repo / ".git",
+             "cannot resolve the working tree"),
+            # realpath: a symlink outside the tree that points into it.
+            ("symlink into the tree", form.format(link / "notes.md"), repo,
+             "inside the working tree"),
+            # Another segment could create or relink the file before gh reads it.
+            ("ln before", "ln -sfn {}/notes.md {} && {}".format(
+                repo, outside, form.format(outside)), repo, "whole command"),
+            ("after a semicolon", "true; " + form.format(outside), repo,
+             "whole command"),
+            ("piped stdin", "cat {}/notes.md | {}".format(
+                repo, form.format("/dev/stdin")), repo, "whole command"),
+            ("followed by", form.format(outside) + " || true", repo, "whole command"),
+            # Device and process files read whatever the shell wired to them.
+            ("/dev/stdin", form.format("/dev/stdin"), repo, "device or process file"),
+            ("/dev/fd/0", form.format("/dev/fd/0"), repo, "device or process file"),
+            ("/proc fd", form.format("/proc/self/fd/0"), repo,
+             "device or process file"),
+            # One segment can still redirect or expand through an unquoted title.
+            ("title redirect", form.format("/tmp/b.md").replace(
+                '"fix: guard"', "x<{}/notes.md".format(repo)), repo,
+             "forbidden character `<`"),
+            ("title brace expansion", form.format(outside).replace(
+                '"fix: guard"', "{x,--base,release}"), repo, "forbidden character `{`"),
+        ]
+        respelled = str(repo).swapcase()
+        if os.path.exists(respelled) and respelled != str(repo):
+            # Case fold: on a case-insensitive volume the respelled repo is the repo.
+            rows.append(("respelled case", form.format(
+                os.path.join(respelled, "notes.md")), repo, "inside the working tree"))
+            rows.append(("respelled /dev", form.format("/DEV/stdin"), repo,
+                         "device or process file"))
+        elif sys.platform == "darwin":
+            self.fail("expected a case-insensitive temporary volume on macOS")
+        for name, command, cwd, problem in rows:
+            with self.subTest(row=name):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
+                self.assertIn(problem, result.stderr)
+
     def test_pr_create_outside_fagenorn_blocks(self):
         repo = self.make_repo("git@github.com:someoneelse/tool.git")
         result = self.run_guard(
@@ -1638,15 +1720,42 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         return repo
 
     def test_every_adapter_spelling_is_an_allowed_row(self):
-        """AC4, D12: one fixture drives the adapter suite and this table."""
+        """AC4, D12: one fixture drives the adapter suite and this table. Issue 554 D5: the
+        merge row is admitted only as the release arm's integration-into-default merge."""
+        commit = self.SPELLINGS["canonical"]["commit"]
         for name, slug, authorized, env in self.REPOSITORY_CLASSES:
             repo = self.tagged_repo(slug)
+            env = {**env, "FAKE_PR_JSON": json.dumps({
+                **self.RELEASE_PR, "headRefOid": commit,
+                "url": f"https://github.com/{slug}/pull/336"})}
             for row in self.SPELLINGS["rows"]:
                 raw = row["raw"].replace(self.CANONICAL_SLUG, slug)
                 with self.subTest(repository=name, row=row["id"]):
                     result = self.run_guard(raw, cwd=repo, env=env)
-                    expect_allowed = authorized or row["kind"] == "read"
+                    if row["id"] == "pr_merge.merge":
+                        expect_allowed = name == "distinct-integration"
+                    else:
+                        expect_allowed = authorized or row["kind"] == "read"
                     self.assertEqual(0 if expect_allowed else 2, result.returncode, result.stderr)
+
+    def test_the_adapter_merge_spelling_refuses_its_near_misses(self):
+        """Issue 554 D5: only the exact rendered spelling passes the release arm."""
+        commit = self.SPELLINGS["canonical"]["commit"]
+        row = next(r for r in self.SPELLINGS["rows"] if r["id"] == "pr_merge.merge")
+        good = row["raw"].replace(self.CANONICAL_SLUG, NODO)
+        repo = self.tagged_repo(NODO)
+        env = {"FAKE_PR_JSON": json.dumps({**self.RELEASE_PR, "headRefOid": commit,
+                                           "url": f"https://github.com/{NODO}/pull/336"})}
+        self.assertEqual(0, self.run_guard(good, cwd=repo, env=env).returncode)
+        for label, command in (
+                ("admin", good + " --admin"), ("auto", good.replace(" --merge", " --auto --merge")),
+                ("squash", good.replace("--merge", "--squash")), ("rebase", good.replace("--merge", "--rebase")),
+                ("delete-branch", good + " --delete-branch"),
+                ("reordered", f"gh pr merge 336 --merge --repo {NODO} --match-head-commit {commit}"),
+                ("short sha", good.replace(commit, commit[:7])),
+                ("no repo", good.replace(f" --repo {NODO}", "")), ("trailing", good + " extra")):
+            with self.subTest(label):
+                self.assertEqual(2, self.run_guard(command, cwd=repo, env=env).returncode)
 
     # Remote branch deletion (issue 458): the push verb's third form.
 
@@ -1859,12 +1968,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
         recognition = {label: "xargs " + command
                        for label, command in provoking(fixture_slug).items()}
-        one_each = {"push": 3, "PR creation": 1, "merge": 1, "release creation": 1,
+        one_each = {"push": 3, "PR creation": 2, "merge": 1, "release creation": 1,
                     "branch deletion": 1}
         covered = set()
         for name, cwd, commands, counts in (
             ("fixture", fixture, provoking(fixture_slug), one_each),
-            ("nodo", nodo, provoking(NODO), {**one_each, "PR creation": 2, "merge": 2}),
+            ("nodo", nodo, provoking(NODO), {**one_each, "PR creation": 4, "merge": 2}),
             ("no context", fixture, recognition, one_each),
         ):
             for label, command in commands.items():
@@ -1905,6 +2014,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                    "[--match-head-commit <sha>] (only dev into main)")
         create = ("gh pr create --repo {slug} --base {base} --head <branch> "
                   '--title "<title>" --body "<body>"')
+        create_file = ("gh pr create --repo {slug} --base {base} --head <branch> "
+                       '--title "<title>" --body-file <path>')
         push = ("git push origin refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>; "
                 "or git push origin --delete refs/heads/<branch>")
 
@@ -1921,11 +2032,15 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              feature.format(slug=NODO) + "; or " + release.format(slug=NODO)),
             ("xargs gh pr merge 7", repo, None, feature.format(slug="<slug>")),
             ("gh pr create --repo fagenorn/nix-config --draft", repo, None,
-             create.format(slug="fagenorn/nix-config", base="main")),
+             create.format(slug="fagenorn/nix-config", base="main") + "; or "
+             + create_file.format(slug="fagenorn/nix-config", base="main")),
             (f"gh pr create --repo {NODO} --draft", nodo, None,
              create.format(slug=NODO, base="dev") + "; or "
-             + create.format(slug=NODO, base="main")),
-            ("xargs gh pr create", repo, None, create.format(slug="<slug>", base="<base>")),
+             + create.format(slug=NODO, base="main") + "; or "
+             + create_file.format(slug=NODO, base="dev") + "; or "
+             + create_file.format(slug=NODO, base="main")),
+            ("xargs gh pr create", repo, None, create.format(slug="<slug>", base="<base>")
+             + "; or " + create_file.format(slug="<slug>", base="<base>")),
             ("/usr/bin/git push origin issue-402-topic", repo, None, push),
             # After the lookup the release form on a feature PR lists the feature arm,
             (f"gh pr merge 7 --repo {NODO} --merge", nodo, pr("issue-7-topic", "dev"),

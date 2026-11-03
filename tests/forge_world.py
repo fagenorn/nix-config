@@ -14,9 +14,19 @@ literals, so the world and the guard suite cannot disagree about a provider spel
 directory the fake `git rev-parse --show-toplevel` names. A call whose argv carries
 `--notes-file <path>` is keyed with that path replaced by `<NOTES>`; the real path is logged.
 
+`merge_ready(...)` registers the `pr_merge` invoke path (issue 554 D6, D13): the protection
+read, the head-branch auto-delete read, the pull request view, the base ref and the one
+`gh pr merge`, each adjustable by a keyword. `FLOOR_PROTECTION` is the protection payload that
+meets the release floor, and `verification_ready` registers it for its default checks.
+
 `verification_ready(...)` registers the three `gh api` reads of `release_verification` (#128
 D12). They stay outside the spelling fixture: the fixture pins the guard's rows, and these
 reads are read-only paths the guard never adjudicates.
+
+`merge_observation_ready(...)` registers the three reads of `release_verification.observe_merge`
+(issue 554 D3): the open release pull requests, the default branch tip and the compare of that
+tip against the candidate. The tip read spells the fixture's `pr_merge.base_ref` row, so it
+agrees with `merge_ready` on the same `base_tip`.
 """
 import json
 import os
@@ -33,6 +43,12 @@ CANONICAL = FIXTURE["canonical"]
 ROWS = {row["id"]: row for row in FIXTURE["rows"]}
 TOOLS = ("gh", "git", "claude-bash-lifecycle-guard")
 CLASS_BRANCHES = {"elevenyellow/nodocom": "dev"}
+FLOOR_PROTECTION = {
+    "required_status_checks": {
+        "strict": True, "contexts": ["Nix Eval", "Instruction Budget"],
+        "checks": [{"context": "Nix Eval", "app_id": None},
+                   {"context": "Instruction Budget", "app_id": None}]},
+    "enforce_admins": {"enabled": True}}
 
 SCRIPT = """#!{python}
 import json, os, sys, time
@@ -119,7 +135,7 @@ class ForgeWorld:
     def canonical(self, slug: str = CANONICAL["slug"], **overrides: object) -> None:
         """Register the happy-path responses for the fixture's canonical values, with `slug`
         (and, for a repository class that has one, its branch) substituted. `overrides` name
-        canonical values to replace: branch, tag, commit, tag_object, pr, head, base_tip,
+        canonical values to replace: branch, tag, commit, tag_object, pr, base_tip,
         merge_commit."""
         values = {**CANONICAL, "slug": slug,
                   "branch": CLASS_BRANCHES.get(slug, CANONICAL["branch"]), **overrides}
@@ -146,17 +162,53 @@ class ForgeWorld:
             "tag_name": values["tag"], "draft": False, "html_url": f"{url}/releases/tag/{values['tag']}"})
         self.respond_json("gh", argv("pr_merge.view"), {
             "state": "MERGED", "baseRefName": values["branch"], "headRefName": "topic",
-            "headRefOid": values["head"], "mergeCommit": {"oid": values["merge_commit"]},
+            "headRefOid": values["commit"], "mergeCommit": {"oid": values["merge_commit"]},
             "url": f"{url}/pull/{values['pr']}", "statusCheckRollup": []})
         self.respond_json("gh", argv("pr_merge.base_ref"), {"object": {"sha": values["base_tip"]}})
         self.respond_json("gh", argv("pr_merge.merge_commit"),
-                          {"parents": [{"sha": values["base_tip"]}, {"sha": values["head"]}]})
-        self.respond_json("gh", argv("pr_merge.protection"), {
-            "required_status_checks": {"contexts": ["Nix Eval"]}, "enforce_admins": {"enabled": True}})
+                          {"parents": [{"sha": values["base_tip"]}, {"sha": values["commit"]}]})
+        self.respond_json("gh", argv("pr_merge.protection"), FLOOR_PROTECTION)
+
+    def merge_ready(self, *, protection=FLOOR_PROTECTION, auto_delete="false", pr_state="OPEN",
+                    pr_base=CANONICAL["branch"], pr_head=CANONICAL["commit"],
+                    base_tip=CANONICAL["base_tip"], merge_exit=0, merge_stderr="",
+                    merge_sleep=0.0) -> None:
+        """Register the `pr_merge` invoke path on the fixture rows' argv (issue 554 D6, D13).
+
+        `protection` is a payload dict, `404` or `403` for those statuses, `"fail"` for an
+        HTTP 500, or `"timeout"` for the floor payload after a 6 s sleep. The merge answers
+        with `merge_exit`, `merge_stderr` and `merge_sleep`.
+        """
+
+        def row(row_id: str) -> list[str]:
+            return ROWS[row_id]["argv"][1:]
+
+        if isinstance(protection, dict):
+            self.respond_json("gh", row("pr_merge.protection"), protection)
+        elif protection == 404:
+            self.not_found("gh", row("pr_merge.protection"))
+        elif protection == 403:
+            self.forbidden("gh", row("pr_merge.protection"))
+        elif protection == "fail":
+            self.respond("gh", row("pr_merge.protection"), exit=1,
+                         stderr="gh: Internal Server Error (HTTP 500)")
+        elif protection == "timeout":
+            self.respond_json("gh", row("pr_merge.protection"), FLOOR_PROTECTION, sleep=6)
+        else:
+            raise ValueError(f"unknown protection answer {protection!r}")
+        self.respond("gh", row("pr_merge.head_auto_delete"), stdout=auto_delete + "\n")
+        self.respond_json("gh", row("pr_merge.view"), {
+            "state": pr_state, "baseRefName": pr_base, "headRefName": "dev", "headRefOid": pr_head,
+            "mergeCommit": None, "url": f"https://github.com/{CANONICAL['slug']}/pull/{CANONICAL['pr']}",
+            "statusCheckRollup": []})
+        self.respond_json("gh", row("pr_merge.base_ref"), {"object": {"sha": base_tip}})
+        self.respond("gh", row("pr_merge.merge"), exit=merge_exit, stderr=merge_stderr,
+                     sleep=merge_sleep)
 
     def invoke_ready(self, slug: str = CANONICAL["slug"], *, origin: str | None = None,
                      full_name: str | None = None, push_urls: list[str] | None = None, tag_local: str | None = None,
                      tag_lookup_exit: int = 0, tag_create_exit: int = 0, compare: str = "ahead",
+                     merged_compare: str = "identical", fetch_exit: int = 0,
                      guard_exit: int = 0, push_exit: int = 0, push_stderr: str = "",
                      push_sleep: float = 0, create_exit: int = 0,
                      create_stdout: str = f"https://github.com/{CANONICAL['slug']}/releases/tag/"
@@ -168,6 +220,9 @@ class ForgeWorld:
         which `invoke.repository` and `tag.compare` are keyed on. `origin` replaces the whole
         origin URL (and so the default push URL), host included. `tag_local` names the commit
         an existing annotated local tag peels to; by default no local tag exists.
+        `merged_compare` answers the containment read of the release PR's merge commit and
+        `fetch_exit` the `git fetch` that precedes tagging it (issue 554 D8); both are inert
+        for a candidate without `merge`.
         """
         tag, commit = CANONICAL["tag"], CANONICAL["commit"]
         origin = origin or f"git@github.com:{slug}.git"
@@ -184,7 +239,12 @@ class ForgeWorld:
         else:
             self.respond("git", listing, stdout="tag\n", exit=tag_lookup_exit)
             self.respond("git", ["rev-parse", f"refs/tags/{tag}^{{commit}}"], stdout=tag_local + "\n")
+        self.respond("gh", ROWS["tag.merged_compare"]["argv"][1:], stdout=merged_compare + "\n")
+        self.respond("git", ["fetch", "--no-tags", "origin", f"refs/heads/{CANONICAL['branch']}"],
+                     exit=fetch_exit)
         self.respond("git", ["tag", "-a", tag, commit, "-m", f"release: {tag}"], exit=tag_create_exit)
+        self.respond("git", ["tag", "-a", tag, CANONICAL["merge_commit"], "-m", f"release: {tag}"],
+                     exit=tag_create_exit)
         self.respond("claude-bash-lifecycle-guard", [], exit=guard_exit,
                      stderr="lifecycle guard: refused" if guard_exit else "")
         self.respond("git", ROWS["tag.push"]["argv"][1:], exit=push_exit, stderr=push_stderr,
@@ -211,8 +271,25 @@ class ForgeWorld:
         if protection_exit:
             self.respond("gh", protection, exit=protection_exit, stderr="gh: Not Found (HTTP 404)")
         else:
-            self.respond_json("gh", protection, {"required_status_checks": {
-                "strict": True, "contexts": [c["context"] for c in checks], "checks": checks}})
+            self.respond_json("gh", protection, {
+                "required_status_checks": {"strict": True, "contexts": [c["context"] for c in checks],
+                                           "checks": checks},
+                "enforce_admins": {"enabled": True}})
         self.respond_json("gh", ["api", f"repos/{slug}/commits/{commit}/check-runs?per_page=100"],
                           {"total_count": len(runs) if total_count is None else total_count,
                            "check_runs": runs})
+
+    def merge_observation_ready(self, *, prs=None, base_tip=CANONICAL["base_tip"], compare="ahead",
+                                slug=CANONICAL["slug"], integration="dev",
+                                default=CANONICAL["branch"], commit=CANONICAL["commit"]):
+        """Register observe_merge's three reads (issue 554 D3). By default one open pull request
+        from `integration` is at `commit`, and the default branch is `compare` of `base_tip`."""
+        if prs is None:
+            prs = [{"number": CANONICAL["pr"], "head": {"sha": commit, "ref": integration}}]
+        owner = slug.split("/")[0]
+        self.respond_json("gh", ["api", f"repos/{slug}/pulls?state=open&base={default}"
+                                        f"&head={owner}:{integration}&per_page=2"], prs)
+        self.respond_json("gh", ["api", f"repos/{slug}/git/ref/heads/{default}"],
+                          {"object": {"sha": base_tip, "type": "commit"}})
+        self.respond_json("gh", ["api", f"repos/{slug}/compare/{base_tip}...{commit}"],
+                          {"status": compare})

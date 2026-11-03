@@ -34,6 +34,24 @@ def forge_profile() -> dict:
     return _load("github-release-profile.json")
 
 
+MERGE = {"pr": 336, "base_tip": "5" * 40}
+
+
+def merge_profile() -> dict:
+    """The JarBird shape: `pr_merge` -> `tag` -> `github-release` on one forge target."""
+    profile = forge_profile()
+    actions = profile["publication"]["actions"]
+    actions[0]["deps"] = ["merge"]
+    actions.insert(0, {
+        "id": "merge", "mode": "materialize", "adapter": "forge", "operation": "pr_merge",
+        "target": "repository", "principal": "maintainer", "credential": "forge-keyring",
+        "effect": "irreversible", "config_schema_version": 1, "config": {}, "deps": [],
+        "observation_deadline_ms": 600000})
+    units = profile["recovery"]["units"]
+    units["merge"] = copy.deepcopy(units["tag"])
+    return profile
+
+
 def publication_free_profile() -> dict:
     return _load("publication-free-profile.json")
 

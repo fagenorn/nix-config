@@ -335,6 +335,10 @@ agent-model-drift *args:
 agent-gate-bundle *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_gate_bundle {{args}}
 
+# Certify issue 554's forge pr_merge against the live sandbox repository (real GitHub calls)
+release-merge-certification *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m tests.release_merge_certification {{args}}
+
 # Capture, evaluate, validate and advance promotion candidates (#127)
 [positional-arguments]
 promotion *args:

@@ -6,6 +6,7 @@ from pathlib import Path
 from agent_tools import release_profile
 from agent_tools.transaction_core import TransactionStore
 from agent_tools.transaction_storage import ProofPlanRejected
+from . import release_driver_support as rs
 from . import release_test_support as support
 
 D = support.descriptors
@@ -264,6 +265,67 @@ class HostLocalProfileTest(unittest.TestCase):
                          {key: value for key, value in daemon.items() if key != "candidate"})
         self.assertEqual([unit["posture"] for unit in inputs["recovery"]["units"]],
                          ["supersedable_only", "supersedable_only"])
+
+
+class MergeBindingTest(unittest.TestCase):
+    """Issue 554 D2, D15: `merge` is an identity member bound beside version and commit."""
+
+    IDENTITY = {"version": "v1.2.3", "commit": "1" * 40,
+                "merge": {"pr": 336, "base_tip": "5" * 40}}
+
+    def compiled(self, profile, profile_id="two-branch", extra=None):
+        descriptors = {**support.descriptors(), **(extra or {})}
+        return release_profile.compile_profile(profile_id, profile, support.base_contract(),
+                                               descriptors)
+
+    def test_a_merge_profile_binds_merge_into_the_subject_and_every_forge_unit(self):
+        compiled = self.compiled(support.merge_profile())
+        self.assertTrue(release_profile.binds_merge(compiled))
+        inputs = release_profile.bind_candidate(compiled, {**support.CANDIDATE, "merge": support.MERGE})
+        self.assertEqual(inputs["subject"]["candidate"], self.IDENTITY)
+        self.assertEqual([u["name"] for u in inputs["proof"]["units"]],
+                         ["merge", "tag", "github-release"])
+        for unit in (*inputs["proof"]["units"], *inputs["recovery"]["units"]):
+            with self.subTest(unit=unit["name"]):
+                self.assertEqual(unit["parameters"]["candidate"], self.IDENTITY)
+                self.assertNotIn("merge", unit["parameters"])
+        self.assertEqual(inputs["proof"]["units"][2]["parameters"]["title"], support.CANDIDATE["title"])
+
+    def test_merge_reaches_only_the_units_of_the_consuming_alias(self):
+        deploy = rs.FixtureDeploy().describe()
+        compiled = self.compiled(rs.forge_merge_profile(), extra={"fixture-deploy": deploy})
+        inputs = release_profile.bind_candidate(compiled, {**support.CANDIDATE, "merge": support.MERGE})
+        candidates = {unit["name"]: unit["parameters"]["candidate"] for unit in inputs["proof"]["units"]}
+        self.assertEqual(candidates["deploy"], {"version": "v1.2.3", "commit": "1" * 40})
+        for name in ("merge", "tag", "github-release"):
+            self.assertEqual(candidates[name], self.IDENTITY)
+
+    def test_a_merge_profile_refuses_a_missing_or_malformed_merge(self):
+        compiled = self.compiled(support.merge_profile())
+        for merge in (None, {}, {"pr": 0, "base_tip": "5" * 40}, {"pr": True, "base_tip": "5" * 40},
+                      {"pr": "336", "base_tip": "5" * 40}, {"pr": 336, "base_tip": "5" * 39},
+                      {"pr": 336, "base_tip": "A" * 40}, {"pr": 336, "base_tip": "5" * 40, "x": 1}):
+            with self.subTest(merge=merge):
+                candidate = dict(support.CANDIDATE) if merge is None else {**support.CANDIDATE, "merge": merge}
+                with self.assertRaises(ValueError):
+                    release_profile.bind_candidate(compiled, candidate)
+        with self.assertRaisesRegex(ValueError, "title"):
+            release_profile.bind_candidate(compiled, {**support.CANDIDATE, "title": 'a "q"',
+                                                      "merge": support.MERGE})
+
+    def test_a_profile_without_a_merge_node_refuses_merge_and_binds_as_before(self):
+        compiled = self.compiled(support.forge_profile(), "github-release")
+        self.assertFalse(release_profile.binds_merge(compiled))
+        with self.assertRaises(ValueError):
+            release_profile.bind_candidate(compiled, {**support.CANDIDATE, "merge": support.MERGE})
+        inputs = release_profile.bind_candidate(compiled, support.CANDIDATE)
+        self.assertEqual(inputs["subject"]["candidate"], {"version": "v1.2.3", "commit": "1" * 40})
+
+    def test_candidate_problem_checks_only_the_operator_members(self):
+        self.assertIsNone(release_profile.candidate_problem(dict(support.CANDIDATE)))
+        self.assertIsNotNone(release_profile.candidate_problem({**support.CANDIDATE, "merge": support.MERGE}))
+        self.assertIsNotNone(release_profile.candidate_problem({**support.CANDIDATE, "version": "1.2.3"}))
+
 
 if __name__ == "__main__":
     unittest.main()
