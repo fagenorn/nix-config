@@ -2265,7 +2265,9 @@ def body_file_problem(path, context):
     root = worktree_root(context.git_bin, context.cwd, context.timeout)
     if root is None:
         return "cannot resolve the working tree to check --body-file against"
-    real = os.path.realpath(path)
+    # Case-folded: a case-insensitive volume must not let a respelled path escape.
+    real = os.path.realpath(path).casefold()
+    root = root.casefold()
     if real == root or real.startswith(root.rstrip("/") + "/"):
         return f"--body-file {shown_value(path)} is inside the working tree"
     return None
