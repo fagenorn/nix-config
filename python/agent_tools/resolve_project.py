@@ -140,6 +140,11 @@ VCS_MEMBERS = (
     "commit",
     "merge",
 )
+MERGE_MEMBERS = ("strategy", "delete_branch")
+# Issue 552 D1: the one `vcs.merge` member an author may leave out. `null` and
+# absent both mean the project declares no required checks, and the resolver
+# never inserts it.
+MERGE_OPTIONAL_MEMBERS = ("required_checks",)
 TRACKER_MEMBERS = ("kind", "cli", "repo_slug", "credential_env")
 PATHS_LIST_MEMBERS = (
     "context",
@@ -641,8 +646,8 @@ def validate_vcs(vcs: dict, violations: list[dict]) -> None:
             vcs["merge"], "/bindings/vcs/merge", "vcs", violations):
         merge = vcs["merge"]
         check_exact_members(
-            merge, "/bindings/vcs/merge", ("strategy", "delete_branch"),
-            "vcs", violations)
+            merge, "/bindings/vcs/merge", MERGE_MEMBERS, "vcs", violations,
+            optional=MERGE_OPTIONAL_MEMBERS)
         if "strategy" in merge:
             check_string(
                 merge["strategy"], "/bindings/vcs/merge/strategy", "vcs", violations)
@@ -650,6 +655,29 @@ def validate_vcs(vcs: dict, violations: list[dict]) -> None:
             check_boolean(
                 merge["delete_branch"], "/bindings/vcs/merge/delete_branch",
                 "vcs", violations)
+        validate_required_checks(merge, violations)
+
+
+def validate_required_checks(merge: dict, violations: list[dict]) -> None:
+    """Issue 552 D1: the optional `bindings.vcs.merge.required_checks` member."""
+    pointer = "/bindings/vcs/merge/required_checks"
+    checks = merge.get("required_checks")
+    if checks is None or not check_list(checks, pointer, "vcs", violations):
+        return
+    if not checks:
+        violations.append(violation(
+            pointer, "must be a non-empty list",
+            "contract.vcs.empty_required_checks"))
+    seen: set[str] = set()
+    for index, check in enumerate(checks):
+        entry = f"{pointer}/{index}"
+        if not check_string(check, entry, "vcs", violations):
+            continue
+        if check in seen:
+            violations.append(violation(
+                entry, "required check is declared more than once",
+                "contract.vcs.duplicate_required_check"))
+        seen.add(check)
 
 
 def validate_tracker(tracker: dict, violations: list[dict]) -> None:
