@@ -30,7 +30,7 @@ Activation readiness: activation not permitted — 7 red, 5 human-pending, 0 gre
 | P5 | Implementation delivered, PR merged, tracker closed and cleanup postconditions reconciled before retirement | refresh | post | human-pending | post-activation |
 | P6 | Retirement is recorded with the evidence that satisfied each strict predicate | AC5 | post | human-pending | post-activation |
 
-Revisions: the header's origin/main `36284d437b88` is the value last fetched at Task 1. A fetch outside this run (2026-11-03T16:00:59Z, shared nix-config clone) fast-forwarded origin/main to `eb5bdd256bcc` before Task 3, so the C3 and C4 rows cite it. Neither `eb5bdd256bcc` nor the current origin/main differs from `36284d437b88` in `.agents/artifacts/evidence/` or in the platform manifest (version 1.0.0, no deprecations or removals), so no verdict depends on which. At Task 6 `git rev-parse origin/main` returns `8776ef5458cee419517e333825211ce66b5d4afc`: it moved again, by the clone's `pull -q --ff-only origin main` at 16:26:43Z (PR #576). This run fetched nothing.
+Origin note: the header's origin/main `36284d437b88` is the value last fetched at Task 1. A fetch outside this run (2026-11-03T16:00:59Z, shared nix-config clone) fast-forwarded origin/main to `eb5bdd256bcc` before Task 3, so the C3 and C4 rows cite it. Neither `eb5bdd256bcc` nor the current origin/main differs from `36284d437b88` in `.agents/artifacts/evidence/` or in the platform manifest (version 1.0.0, no deprecations or removals), so no verdict depends on which. At Task 6 `git rev-parse origin/main` returns `8776ef5458cee419517e333825211ce66b5d4afc`: it moved again, by the clone's `pull -q --ff-only origin main` at 16:26:43Z (PR #576). This run fetched nothing.
 
 ## Roster
 
@@ -227,7 +227,7 @@ C8.c git log -1 --format=%H -- home/common/agent-skills/skills/ship-issue/HUMAN-
 | mbp | host | system-309 | C8.a; C8.b | 2026-11-03T16:08:27Z | 0; 0 | regular file ~/.agents/skills/ship-issue/HUMAN-GATE.md; 4 SKILL.md lines (25, 47, 122, 227) | green |
 | eleven-m5 | host | system-28 | C8.a; C8.b | 2026-11-03T16:08:27Z | 0; 0 | regular file 4782 B; 4 SKILL.md lines (25, 47, 122, 226) | green |
 | anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
-| mbp | home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md | 075934a7152d | C8.c | 2026-11-03T16:08:28Z | 0 | 3fe58ec0f191 (latest; added 5825027f0202 by PR 141, issue 119) | green |
+| mbp | home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md | 075934a7152d | C8.c | 2026-11-03T16:08:28Z | 0 | 3fe58ec0f191 (latest; added 5825027f02a4 by PR 141, issue 119) | green |
 
 Item verdict: **human-pending**
 
@@ -312,7 +312,7 @@ C12.d readlink /run/current-system
 |------|---------|----------|---------|-----|------|----------|---------|
 | eleven-m5 | host | system-28 | C12.a; C12.b; C12.c; C12.d | 2026-11-03T15:56:43Z | 0; 0; 0; 0 | N=28; store paths equal; b2zxn3q6g0w1bsbmc3xag91yy927h8nf-darwin-system-25.11.ebec37a | green |
 | mbp | host | system-309 | C12.a; C12.b; C12.c; C12.d | 2026-11-03T15:56:43Z | 0; 0; 0; 0 | N=309; store paths equal; 3kawdvvw0zcndvg3261xsa5drw4qjgaq-darwin-system-25.11.ebec37a | green |
-| anis-desktop | host | — | C12.a | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
+| anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
 
 The two reachable hosts run different bridge builds (distinct store paths); per D2 and #66 that is recorded and is not red.
 
@@ -349,7 +349,7 @@ Owner-run, not filed: the #70 live paired Claude and Codex trials (#128 D11), on
 
 ## Human gate
 
-This section is the owner's activation and rollback procedure. This attempt does not run it. The owner runs every step, in order, and only when step 2 reads every pre-activation verdict green. `K_H`, `N_H` and the roots below are the values the evidence observed. `<candidate>` is the one parameter: the 40-hex commit of the strict-cutover candidate (built under #579) that C3's approved bundle binds. `N_H` must be re-read in step 2, because any switch before the activation moves it: the observed values are eleven-m5 28 and mbp 309, and a different reading in step 2 replaces them in step 6.
+This section is the owner's activation and rollback procedure. This attempt does not run it. The owner runs every step, in order: steps 1 and 2 first, and step 3 onward only when step 2 reads every pre-activation verdict green. `K_H`, `N_H` and the roots below are the values the evidence observed. `<candidate>` is the one parameter: the 40-hex commit of the strict-cutover candidate (built under #579) that C3's approved bundle binds. `N_H` must be re-read in step 2, because any switch before the activation moves it: the observed values are eleven-m5 28 and mbp 309, and a different reading in step 2 replaces them in step 6.
 
 Observed at evidence time: eleven-m5 has `K_H` /Users/anis/Projects/nix-config and `N_H` 28. mbp has `K_H` /Users/anis/tmp/nix-config and `N_H` 309. anis-desktop was unreachable at evidence time: read K_H and N_H for it in step 2.
 
@@ -405,40 +405,59 @@ From step 2 until retirement is recorded, on every host, run no `just gc`, no `n
 
 Every host in one session, host by host. The approved bundle must bind `<candidate>`. `just switch` is the contract's `nix-activate` command, run from the candidate checkout's root. The new system generation roots the build, so the worktree is removed and leaves no residue for C7. If any host fails to activate, roll back every host already activated, because #71 forbids a mixed live fleet.
 
+Each host block runs in a subshell under `set -e`, so any failing line stops the block before `just switch`: a `.worktrees/cutover-130` left by an earlier attempt makes `worktree add` fail, and the `test` line refuses a checkout whose HEAD is not `<candidate>`. Remove such a leftover worktree and run the block again. `just switch` runs in its own inner subshell, so the operator's shell never stands in the worktree the last line removes.
+
 On eleven-m5:
 
 ```
-git -C /Users/anis/Projects/nix-config fetch origin
-git -C /Users/anis/Projects/nix-config worktree add --detach /Users/anis/Projects/nix-config/.worktrees/cutover-130 <candidate>
-cd /Users/anis/Projects/nix-config/.worktrees/cutover-130 && just switch
-git -C /Users/anis/Projects/nix-config worktree remove /Users/anis/Projects/nix-config/.worktrees/cutover-130
+(
+  set -e
+  git -C /Users/anis/Projects/nix-config fetch origin
+  git -C /Users/anis/Projects/nix-config worktree add --detach /Users/anis/Projects/nix-config/.worktrees/cutover-130 <candidate>
+  test "$(git -C /Users/anis/Projects/nix-config/.worktrees/cutover-130 rev-parse HEAD)" = <candidate>
+  ( cd /Users/anis/Projects/nix-config/.worktrees/cutover-130 && just switch )
+  git -C /Users/anis/Projects/nix-config worktree remove /Users/anis/Projects/nix-config/.worktrees/cutover-130
+)
 ```
 
 On mbp:
 
 ```
-git -C /Users/anis/tmp/nix-config fetch origin
-git -C /Users/anis/tmp/nix-config worktree add --detach /Users/anis/tmp/nix-config/.worktrees/cutover-130 <candidate>
-cd /Users/anis/tmp/nix-config/.worktrees/cutover-130 && just switch
-git -C /Users/anis/tmp/nix-config worktree remove /Users/anis/tmp/nix-config/.worktrees/cutover-130
+(
+  set -e
+  git -C /Users/anis/tmp/nix-config fetch origin
+  git -C /Users/anis/tmp/nix-config worktree add --detach /Users/anis/tmp/nix-config/.worktrees/cutover-130 <candidate>
+  test "$(git -C /Users/anis/tmp/nix-config/.worktrees/cutover-130 rev-parse HEAD)" = <candidate>
+  ( cd /Users/anis/tmp/nix-config/.worktrees/cutover-130 && just switch )
+  git -C /Users/anis/tmp/nix-config worktree remove /Users/anis/tmp/nix-config/.worktrees/cutover-130
+)
 ```
 
-anis-desktop was unreachable at evidence time: read K_H and N_H for it in step 2. The same four lines apply with its `K_H`:
+anis-desktop was unreachable at evidence time: read K_H and N_H for it in step 2. The same block applies with its `K_H`:
 
 ```
-git -C K_H fetch origin
-git -C K_H worktree add --detach K_H/.worktrees/cutover-130 <candidate>
-cd K_H/.worktrees/cutover-130 && just switch
-git -C K_H worktree remove K_H/.worktrees/cutover-130
+(
+  set -e
+  git -C K_H fetch origin
+  git -C K_H worktree add --detach K_H/.worktrees/cutover-130 <candidate>
+  test "$(git -C K_H/.worktrees/cutover-130 rev-parse HEAD)" = <candidate>
+  ( cd K_H/.worktrees/cutover-130 && just switch )
+  git -C K_H worktree remove K_H/.worktrees/cutover-130
+)
 ```
 
 ### 5. Post-activation verification
 
-On each host, run `resolve-project platform-status --fleet` (`platform_version` is the candidate's, every row compatible) and `conformance run --purpose fleet`. Per root, run `conformance run --purpose doctor --repo-root R` as below. Then evaluate P1–P5.
+On each host, run `resolve-project platform-status --fleet` (`platform_version` is the candidate's, every row compatible). Per root, run `conformance run --purpose fleet --repo-root R` and `conformance run --purpose doctor --repo-root R` as below; each names its root, so neither depends on the shell's current directory. Then evaluate P1–P5.
 
 On mbp:
 
 ```
+conformance run --purpose fleet --repo-root /Users/anis/Projects/arcwave
+conformance run --purpose fleet --repo-root /Users/anis/Projects/argus
+conformance run --purpose fleet --repo-root /Users/anis/tmp/nix-config
+conformance run --purpose fleet --repo-root /Users/anis/Projects/jarbird
+conformance run --purpose fleet --repo-root /Users/anis/Projects/nodocom
 conformance run --purpose doctor --repo-root /Users/anis/Projects/arcwave
 conformance run --purpose doctor --repo-root /Users/anis/Projects/argus
 conformance run --purpose doctor --repo-root /Users/anis/tmp/nix-config
@@ -449,10 +468,11 @@ conformance run --purpose doctor --repo-root /Users/anis/Projects/nodocom
 On eleven-m5:
 
 ```
+conformance run --purpose fleet --repo-root /Users/anis/Projects/jarbird
 conformance run --purpose doctor --repo-root /Users/anis/Projects/jarbird
 ```
 
-On anis-desktop, run the same doctor line for each root in its registry.
+On anis-desktop, run the same fleet and doctor lines for each root in its registry.
 
 ### 6. Rollback
 
@@ -472,6 +492,8 @@ sudo /nix/var/nix/profiles/system/bin/switch-to-configuration switch
 ```
 
 After rollback, re-run C12 to show the bridge generation is running again.
+
+When step 6 runs as P2's exercise, re-activation follows: under step 3's freeze, run step 4's host block again on every host at the same `<candidate>`, then repeat step 5's post-activation verification on every host. P4–P6 are evaluated, and retirement is recorded, only after that renewed step 5 is green. When step 6 runs because activation failed, the gate stops on the bridge generation.
 
 ## Criteria map
 
