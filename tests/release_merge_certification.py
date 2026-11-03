@@ -35,6 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CHILD_TIMEOUT_SECONDS = 120
 POLL_INTERVAL_SECONDS = 2
 POLL_LIMIT_SECONDS = 90
+MERGEABLE_LIMIT_SECONDS = 60
 DETAIL_LIMIT = 240
 TOKEN_VARIABLES = ("GITHUB_TOKEN", "GH_TOKEN")
 TOKEN_LIKE = re.compile(r"(?:gh[pousr]_|github_pat_|Bearer )\S*")
@@ -308,21 +309,49 @@ class Certification:
             raise Blocked(f"{refusal}: {_excerpt(done.text)}")
         return done
 
+    def mergeable_state(self, number: int) -> str:
+        """GitHub's own `mergeable_state`, polled while it reads `unknown` (issue 554 D23)."""
+        deadline = time.monotonic() + MERGEABLE_LIMIT_SECONDS
+        while True:
+            state = self.read(["gh", "api", f"repos/{SANDBOX}/pulls/{number}",
+                               "--jq", ".mergeable_state"]).strip()
+            if state != "unknown" or time.monotonic() >= deadline:
+                return state
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+    def head_has_success_status(self, head: str) -> bool:
+        statuses = self.gh_json("api", f"repos/{SANDBOX}/commits/{head}/status")["statuses"]
+        return any(item["context"] == CONTEXT and item["state"] == "success" for item in statuses)
+
     def stale_merge_row(self, row: dict[str, Any], attempts: list[tuple[str, list[str]]],
-                        expected_tip: str) -> None:
-        """Rows b and c: every attempt must be refused as a merge condition, nothing moves."""
+                        expected_tip: str, behind: bool = False) -> None:
+        """Rows b and c: GitHub refuses every attempt and nothing moves.
+
+        Row c passes only on `merge_condition`. Row b (`behind`) reads `mergeable_state` before
+        each attempt and passes on `behind`, whatever the refusal's wording says (D23).
+        """
+        states = []
         for via, argv in attempts:
+            if behind:
+                states.append(self.mergeable_state(row["pr"]))
             self.attempt(row, via, argv)
+        if behind:
+            row["mergeable_state"] = states[-1]
         row["after"] = self.after_state(row["pr"]) or row["after"]
         after = row["after"]
+        classes = {item["class"] for item in row["attempts"]}
         if after["state"] is None:
             self.settle(row, "inconclusive")
         elif after["state"] != "OPEN" or after["base_tip"] != expected_tip:
             self.settle(row, "failed")
-        elif {item["class"] for item in row["attempts"]} != {"merge_condition"}:
-            self.settle(row, "inconclusive")
+        elif behind:
+            refused = all(item["outcome"] == "refused" for item in row["attempts"])
+            judged = (refused and not classes & {"transport", "request"}
+                      and set(states) == {"behind"}
+                      and self.head_has_success_status(row["bound"]["head"]))
+            self.settle(row, "passed" if judged else "inconclusive")
         else:
-            self.settle(row, "passed")
+            self.settle(row, "passed" if classes == {"merge_condition"} else "inconclusive")
 
     def merge_argv(self, number: int, head: str) -> list[str]:
         return ["gh", "pr", "merge", str(number), "--repo", SANDBOX, "--merge",
@@ -408,7 +437,7 @@ class Certification:
         return True
 
     def row_b(self) -> None:
-        """The base moves after binding: GitHub refuses the merge twice over."""
+        """The base moves after binding: GitHub, reporting the PR `behind`, refuses the merge twice."""
         number, head, base_tip = self.open_pr("b")
         row = self.new_row("b", number, head, base_tip)
         self.opened.append(number)
@@ -422,7 +451,7 @@ class Certification:
         graphql = ["gh", "api", "graphql", "-f", f"query={MERGE_MUTATION}", "-f", f"id={node}",
                    "-f", f"head={head}"]
         self.stale_merge_row(row, [("argv", self.merge_argv(number, head)),
-                                   ("graphql", graphql)], moved)
+                                   ("graphql", graphql)], moved, behind=True)
 
     def row_c(self) -> None:
         """The head moves after binding: `--match-head-commit` makes GitHub refuse the merge."""
