@@ -1,9 +1,9 @@
 {
   "actor": "fagenorn",
-  "finished_at": "2026-11-03T15:32:34Z",
+  "finished_at": "2026-11-03T16:30:04Z",
   "guard": "recording-shim",
   "implementation": {
-    "commit": "4fad5d3f57a2abbcbf495bf9be15ae0c1c278e7d",
+    "commit": "bf96554a83d9c5d649e7b26c5715ee84c309e113",
     "pr_merge_descriptor_digest": "sha256:810fe4e4cc16c9e71b28f4842a22165ae81edc21100ac0c77173aeb7e23b70f8"
   },
   "issue": 554,
@@ -19,18 +19,18 @@
   "rows": [
     {
       "after": {
-        "base_tip": "f0c3f5caa6074e91c84d476dcfb6a3a1a76edc09",
-        "merge_commit": "f0c3f5caa6074e91c84d476dcfb6a3a1a76edc09",
+        "base_tip": "18d0f3b53af8bbb93207b88ad01f99f4ccdde2f9",
+        "merge_commit": "18d0f3b53af8bbb93207b88ad01f99f4ccdde2f9",
         "parents": [
-          "864c18a8a539163270b2f17bf6142475c14c076c",
-          "481ad16490e87015029b93bc1fedaf86efb59531"
+          "e85eaa31119fe8b94bffaf734a09401d84ab1646",
+          "853578d2cff7230d6ed5399c628d13bd33379da9"
         ],
         "state": "MERGED"
       },
       "attempts": [
         {
           "class": null,
-          "detail": "https://github.com/fagenorn/release-merge-sandbox/pull/9",
+          "detail": "https://github.com/fagenorn/release-merge-sandbox/pull/13",
           "outcome": "accepted",
           "via": "adapter"
         },
@@ -42,17 +42,17 @@
         }
       ],
       "bound": {
-        "base_tip": "864c18a8a539163270b2f17bf6142475c14c076c",
-        "head": "481ad16490e87015029b93bc1fedaf86efb59531"
+        "base_tip": "e85eaa31119fe8b94bffaf734a09401d84ab1646",
+        "head": "853578d2cff7230d6ed5399c628d13bd33379da9"
       },
       "id": "a",
       "passed": true,
-      "pr": 9,
+      "pr": 13,
       "verdict": "passed"
     },
     {
       "after": {
-        "base_tip": "e85eaa31119fe8b94bffaf734a09401d84ab1646",
+        "base_tip": "d073dfae0810704d86e52b7f1a603b9fc2f0434a",
         "merge_commit": null,
         "parents": null,
         "state": "OPEN"
@@ -60,7 +60,7 @@
       "attempts": [
         {
           "class": "merge_condition",
-          "detail": "X Pull request fagenorn/release-merge-sandbox#10 is not mergeable: the head branch is not up to date with the base branch.",
+          "detail": "X Pull request fagenorn/release-merge-sandbox#14 is not mergeable: the head branch is not up to date with the base branch.",
           "outcome": "refused",
           "via": "argv"
         },
@@ -72,18 +72,18 @@
         }
       ],
       "bound": {
-        "base_tip": "f0c3f5caa6074e91c84d476dcfb6a3a1a76edc09",
-        "head": "b421faf33fe0967414d1f3bc06c5be6ecef8b229"
+        "base_tip": "18d0f3b53af8bbb93207b88ad01f99f4ccdde2f9",
+        "head": "0c2bd38944a8b385f461d59164ad59d9104ef60e"
       },
       "id": "b",
       "mergeable_state": "behind",
       "passed": true,
-      "pr": 10,
+      "pr": 14,
       "verdict": "passed"
     },
     {
       "after": {
-        "base_tip": "e85eaa31119fe8b94bffaf734a09401d84ab1646",
+        "base_tip": "d073dfae0810704d86e52b7f1a603b9fc2f0434a",
         "merge_commit": null,
         "parents": null,
         "state": "OPEN"
@@ -97,16 +97,16 @@
         }
       ],
       "bound": {
-        "base_tip": "e85eaa31119fe8b94bffaf734a09401d84ab1646",
-        "head": "a94f6c70cb41f324bd5b94a4b8d4ca6800df6bd1"
+        "base_tip": "d073dfae0810704d86e52b7f1a603b9fc2f0434a",
+        "head": "7774ecbb969004470666e2b7d233ad9c77d39de3"
       },
       "id": "c",
       "passed": true,
-      "pr": 12,
+      "pr": 16,
       "verdict": "passed"
     }
   ],
   "schema": "release-merge-certification/v1",
-  "spelling": "gh pr merge 9 --repo fagenorn/release-merge-sandbox --merge --match-head-commit 481ad16490e87015029b93bc1fedaf86efb59531",
-  "started_at": "2026-11-03T15:30:58Z"
+  "spelling": "gh pr merge 13 --repo fagenorn/release-merge-sandbox --merge --match-head-commit 853578d2cff7230d6ed5399c628d13bd33379da9",
+  "started_at": "2026-11-03T16:28:23Z"
 }
