@@ -59,7 +59,7 @@ The criteria are untagged; each kind below is classified.
 | AC | Kind | Task | Check |
 |----|------|------|-------|
 | AC1 | code (classified) | Task 2 | `test_review_package.py::test_edited_move_is_one_rename_record_keyed_by_its_new_path`. One record at the new path, coverage complete, `stat` equal to v2 `--numstat` (3/3), the bytes equal to Git's v2 diff, and exactly 3 `+` and 3 `-` lines |
-| AC2 | code (classified) | Task 2 | `RecordPolicyDomainTest::test_living_policy_is_v1_with_a_fifty_percent_rename_threshold` (`adaptive_violations`), `test_oversized_rename_record_stays_whole_and_stops` (exit 3, `member_bytes`, initial candidate) and Task 2 Step 4's `git diff --quiet` of `artifact-budget-policy.json` against the base |
+| AC2 | code (classified) | Task 2 | `RecordPolicyDomainTest::test_living_policy_is_v1_with_a_fifty_percent_rename_threshold` (`adaptive_violations`), `test_oversized_rename_record_stays_whole_and_stops` (exit 3, `member_bytes`, initial candidate), `test_oversized_ef_designer_rename_keeps_its_rename_section` (an EF-eligible rename still exit 3 with no generated evidence, D5, D19) and Task 2 Step 4's `git diff --quiet` of `artifact-budget-policy.json` against the base |
 | AC3 | code (classified) | Task 2 | `test_review_package.py::test_ambiguous_pairing_is_deterministic`: three identical runs per fixture, git's pairing, the unpaired oversized `D` with `whole-file-deletion` evidence, coverage complete |
 | AC4 | code (classified) | Task 2 | `test_review_package.py::test_move_below_the_threshold_is_a_delete_and_an_add`: `D`+`A`, exit 3, `member_bytes` |
 | AC5 | code (classified) | Task 3 | `test_review_projection_cases.py::RenameForecastCases::test_future_rename_projects_and_bounds_the_measured_record`. Exit 0 at `completed_through` 0; the measured rename record is within its bound and the measured total within the projection |
@@ -74,7 +74,12 @@ The criteria are untagged; each kind below is classified.
 - Forecast and completed effects: D7, D8, D9, D13 (Task 3).
 - Scope: D10, D12, with D17 keeping clear of #559's test hunks (Tasks 1–3).
 - Evidence: D18 (Task 4).
-- Planning appended D14–D18.
+- Planning appended D14–D18; the standards review appended D19 (Task 2).
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus, no fallback. Base SHA `3be26be2878da02e4aa9417719f3388f08f0298c`, plan head `50fdcc70`.
+- Findings: 1 should-fix, verified against the live files and accepted: PR569-01 (the oversized rename test used a `.tsx` path that `_ef_designer_evidence` already declines, so it passed without the rename guard; Task 2 adds an EF designer rename, probed at R083 and 188,435 B, per D19). 0 rejected, 0 deferred. No blocking or discussion findings.
 
 ---
 

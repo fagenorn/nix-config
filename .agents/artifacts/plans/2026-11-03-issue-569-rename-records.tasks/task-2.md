@@ -45,7 +45,7 @@ Replace the four spelled-out argv copies with `"git", "-C", str(repo), *EXPECTED
 
 In `test_exact_rename_of_an_oversized_file_keeps_its_rename_record`, add `self.assertNotIn(b"\n@@ ", packaged)` after its two `rename` assertions.
 
-Replace `test_oversized_rename_with_edit_still_stops` with these five tests (AC1, AC2, AC3, AC4; the fixture fractions were probed with git 2.51.2: one-line-per-hunk edits score R099, every third line rewritten R066 with a 109,126 B record, every line rewritten no pair):
+Replace `test_oversized_rename_with_edit_still_stops` with these six tests (AC1, AC2, AC3, AC4; the fixture fractions were probed with git 2.51.2: one-line-per-hunk edits score R099, every third line rewritten R066 with a 109,126 B record, every line rewritten no pair; the EF designer with every third line's table renamed scores R083 with a 188,435 B record). `test_oversized_ef_designer_rename_keeps_its_rename_section` is the one case that fails without the rename guard, because the EF designer contract holds at the new path (Standards review PR569-01):
 
 ```python
     def test_edited_move_is_one_rename_record_keyed_by_its_new_path(self):
@@ -108,6 +108,40 @@ Replace `test_oversized_rename_with_edit_still_stops` with these five tests (AC1
             self.assertEqual(manifest["coverage"], {"complete": True, "file_diff_count": 1})
             packaged = self.shard_bytes(out, manifest)
             self.assertIn(f"rename from {PAGE}\n".encode(), packaged)
+            self.assertGreater(len(packaged), 65_536)
+
+    def test_oversized_ef_designer_rename_keeps_its_rename_section(self):
+        # The EF designer contract holds at the new path, so only the rename guard keeps evidence out (D5).
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env = self.setup_repo(repo)
+            old = repo / "src/App/Migrations/20260826010101_AddWidgets.Designer.cs"
+            old.parent.mkdir(parents=True)
+            old.write_text(EF_DESIGNER_TEXT, encoding="utf-8")
+            base = self.commit(repo, "base", env)
+            old.unlink()
+            new = old.with_name("20260826010101_AddGadgets.Designer.cs")
+            new.write_text("\n".join(
+                line.replace('"widgets"', '"gadgets"') if number % 3 == 0 else line
+                for number, line in enumerate(EF_DESIGNER_TEXT.split("\n"))), encoding="utf-8")
+            head = self.commit(repo, "move and edit generated designer", env)
+            self.assertTrue(self.run_git(repo, *EXPECTED_DIFF, "--name-status", base, head).startswith("R"))
+            out = repo / "review.json"
+
+            result = self.invoke(repo, plan, base, head, out, env)
+
+            self.assertEqual(result.returncode, 3, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["state"], "decompose_required")
+            self.assertIn("member_bytes", report["artifact"]["violations"])
+            manifest = json.loads(out.read_text(encoding="utf-8"))
+            self.assertNotIn("generated_evidence", manifest)
+            self.assertEqual(manifest["coverage"], {"complete": True, "file_diff_count": 1})
+            packaged = self.shard_bytes(out, manifest)
+            source, moved = (path.relative_to(repo).as_posix() for path in (old, new))
+            self.assertTrue(packaged.startswith(f"diff --git a/{source} b/{moved}\n".encode()))
+            self.assertIn(f"rename from {source}\nrename to {moved}\n".encode(), packaged)
+            self.assertNotIn(b"review-package-generated-evidence", packaged)
             self.assertGreater(len(packaged), 65_536)
 
     def test_move_below_the_threshold_is_a_delete_and_an_add(self):
@@ -328,7 +362,7 @@ While planning, each of two mutations made this case error: leaving `fresh_recor
 
 Run: `env PYTHONPATH=python timeout 900 python3 -m unittest -k rename -k move -k ambiguous -k threshold home/common/agent-skills/tests/test_review_package.py tests/test_review_record_view.py tests/test_review_feasibility.py tests/test_review_issue121.py tests/test_review_issue100.py 2>&1 | grep -E '^(FAIL|ERROR):' | sed 's/ (.*//' | sort -u`
 Expected, at Task 1's head:
-- `test_ambiguous_pairing_is_deterministic`, `test_edited_move_is_one_rename_record_keyed_by_its_new_path`, `test_oversized_rename_record_stays_whole_and_stops`, `test_the_inexact_rename_is_one_record_keyed_by_its_new_path` and `test_living_policy_is_v1_with_a_fifty_percent_rename_threshold` all fail.
+- `test_ambiguous_pairing_is_deterministic`, `test_edited_move_is_one_rename_record_keyed_by_its_new_path`, `test_oversized_rename_record_stays_whole_and_stops`, `test_oversized_ef_designer_rename_keeps_its_rename_section`, `test_the_inexact_rename_is_one_record_keyed_by_its_new_path` and `test_living_policy_is_v1_with_a_fifty_percent_rename_threshold` all fail.
 - Both `test_edited_move_measures_as_a_v1_delete_and_add` cases fail too: their living-policy control still reads `D`/`A`.
 - `test_operation_rule_follows_each_policy_threshold` errors on `_record_operations`' arity.
 - `test_move_below_the_threshold_is_a_delete_and_an_add` and `test_exact_rename_with_a_mode_change_stays_header_only` pass both before and after: they guard what must not change.
