@@ -64,7 +64,7 @@ COMMAND_VOCABULARY = frozenset({
     "python3", "railway", "release", "resolve-project", "review-package", "review-range", "rg", "rm",
     "sdd-gate", "sdd-workspace", "sed", "sh", "ship-delivery", "skill-sections", "sleep", "sops", "sort", "source", "ssh",
     "tail", "tar", "task-brief", "tee", "terraform", "test", "timeout",
-    "touch", "unset", "uv", "wc", "workflow-state", "xargs", "yarn", "zsh",
+    "touch", "unset", "uv", "verification-observe", "wc", "workflow-state", "xargs", "yarn", "zsh",
 })
 
 # The one sanctioned chain lives in the lifecycle guard's own Python source; it
