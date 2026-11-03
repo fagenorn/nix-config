@@ -1,7 +1,7 @@
 # Final review — two axes (controller instructions)
 
 Loaded by `SKILL.md` when all tasks are complete. This gate runs for **every**
-risk lane — lanes narrow per-task review, never this one.
+risk lane.
 
 ## Contents
 
@@ -162,8 +162,7 @@ The record is one committed file per plan, beside the plan:
 Before writing, run
 `verified-tree fresh --since <Commit> --record <record path>` for each
 `evidence` row recorded `met`, with that row's own `Commit`, not the head the
-conformance first pass graded (a fixer's re-measurement writes a fresh
-`Commit`, so only later commits count). Run it also for a `code` row recorded
+conformance first pass graded. Run it also for a `code` row recorded
 `met` on a cited run outside the Declared verification line, with that run's
 commit, unless the check was run again and the fresh run cited. `stale`, or an
 exit 2, makes the row `unverified`: an acceptance finding that survives the
@@ -171,20 +170,15 @@ fix wave.
 
 Write each row's final verdict into `Verdict`. When the record has no rows yet,
 write the whole record. Commit the acceptance record, then run the **Final
-verification** step. Under a lifecycle identity, register yourself for that
-commit as `SKILL.md`'s `### Lifecycle workers` describes: run
-`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`,
-commit with
-`launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`,
-then run
-`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`.
-A `launch fence refused: <reason>` takes that section's refusal route.
+verification** step. Under a lifecycle identity, register and release yourself
+for that commit as `SKILL.md`'s `### Lifecycle workers` describes, refusal
+route included, and commit with
+`launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`.
 
 ## Final verification
 
-Run this after the fix wave and its scoped re-reviews (or right after the first
-pass when neither axis had findings) and the acceptance record's commit (when there is one), before
-you choose the terminal state. It is the plan's one run of the declared
+Run this last, after any fix wave and acceptance record commit, before you
+choose the terminal state. It is the plan's one run of the declared
 verification: each id `verified-tree check` lists under `run`, in order,
 dereferenced through `bindings.commands`; an id under `skipped` is not run.
 
@@ -205,7 +199,19 @@ to the SDD ledger, and `verification_state` reports the per-task focused tests.
    ledger, suffixed `; skipped <id>: <reason>` per `skipped` entry.
 4. **Repair once.** A failing command, a `record` that exits 3 with
    `tree_changed`, or a `check` or `record` that exits 2 is not a pass.
-   Dispatch the final-review fixer above once, carrying the failing command and
+   Under a lifecycle identity, when commands failed and each for a cause
+   outside the change that integration-branch paths decide (`dependency`,
+   `environment`, `external_service` or `command_input`), first run for the
+   first in run order, before any release or reap:
+
+   ```text
+   verification-observe failure --repo-root <ledger_repo_root> --input - <<'EOF'
+   {"command_id": "<id>", "failure_class": "<class>", "worktree": "<worktree>", "facts": [{"name": "<name>", "paths": ["<path>"]}]}
+   EOF
+   ```
+
+   Exit 0: suspend per from-issue with `blocked_on=verification`, the printed
+   failure fed to `--verification-input -`. Otherwise dispatch the final-review fixer above once, carrying the failing command and
    its log path, the `git status --porcelain` output for `tree_changed`, or the
    helper's stderr line for an exit 2, then run one scoped correctness
    re-review of that fix diff (the final correctness re-review, same fix-range

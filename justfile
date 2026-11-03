@@ -108,6 +108,7 @@ agent-workflow-tests *args:
     tests/test_review_limits_replay.py \
     tests/test_review_projection_cases.py \
     tests/test_review_history.py \
+    tests/test_review_record_view.py \
     tests/test_review_task7.py \
     tests/test_review_expansion.py \
     tests/test_review_issue121.py \

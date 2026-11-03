@@ -9,5 +9,5 @@ TestCase and imports no `agent_tools`, so the launcher module can import it.
 from pathlib import Path
 
 BUNDLE = Path(__file__).resolve().parent / "fixtures/retained-review-evidence"
-ANCHOR_SHA256 = "sha256:d0968f6a9ca20160bd027bb3ce12b5231efa603057a054a76fe37e5f4870a8a5"
-TOOL_COMMIT = "691d8f257615c5698965918b3cca036c2e9ccec9"
+ANCHOR_SHA256 = "sha256:3df1e2b9a6a20fcdf98f2cdd30a451aedcea829b6f9fea26cc76be3f0aaca0ce"
+TOOL_COMMIT = "7213928f0e3c91de247dc028fe95b95f6a9dcf88"
