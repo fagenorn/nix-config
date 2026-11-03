@@ -47,10 +47,12 @@ Expected: `derivation` has `schema_version` 3, and the row has `default_branch` 
 Run (timeout 300 s): `launch-scope exec … -- guard-policy derive --repository fagenorn/argus | jq -c '{outcome, row}'`
 Expected: `outcome` `derived`, and a `row` equal to Step 4's row.
 
-- [ ] **Step 6: Fleet compatibility**
+- [ ] **Step 6: Compatibility (per D21)**
 
-Run: `resolve-project platform-status --fleet | jq -c '.fleet[] | select(.project_id == "fagenorn/argus")'`
-Expected: `compatible` `true`, `reason_code` `null`, and `root` `/Users/anis/Projects/argus`.
+`fleet_verdict` in `python/agent_tools/resolve_project.py` loads the contract from the registered root's working tree, and D14 leaves the primary checkout at a commit with no contract. So:
+- Run: `resolve-project platform-status --fleet | jq -c '.fleet[] | select(.project_id == "fagenorn/argus")'`. Record the row as observed; expected while the primary checkout predates `M`: `compatible` `false`, `reason_code` `project_schema_unsupported`.
+- Run: `resolve-project platform-status --repo-root "$SCR/argus-verify" | jq -c '.compatibility'` (re-clone as Task 6 Step 3 if the clone is gone). Expected: `compatible` `true`, `reason_code` `null`. This proves the merged contract's interval is compatible.
+- Record `Fleet row pending: owner fast-forwards /Users/anis/Projects/argus to a commit containing <M>, then platform-status --fleet shows compatible`. This half of AC1 is `human_pending` (D21); the run never touches the primary checkout to clear it.
 
 - [ ] **Step 7: The primary checkout is unchanged**
 

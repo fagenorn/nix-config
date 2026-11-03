@@ -25,7 +25,7 @@ Run (timeout 120 s): `env -u GITHUB_TOKEN -u GH_TOKEN gh pr list --repo fagenorn
 - [ ] **Step 2: The floor the owner applied, and the merge shape**
 
 Run (timeout 120 s):
-- `env -u GITHUB_TOKEN -u GH_TOKEN gh api 'repos/fagenorn/argus/commits/<H>/check-runs?per_page=100' --jq '.check_runs[] | [.name, .status, .conclusion, .completed_at] | @tsv'`. Expected: at least one `memory foundation (unit + forced checks)` row, with every such row `completed` / `success`.
+- `env -u GITHUB_TOKEN -u GH_TOKEN gh api 'repos/fagenorn/argus/commits/<H>/check-runs?per_page=100' --jq '.check_runs[] | [.name, .status, .conclusion, .completed_at] | @tsv'`. Expected: at least one `memory foundation (unit + forced checks)` row, with every such row `completed` / `success`. Every such row's `completed_at` must be earlier than Step 1's `mergedAt`; record both times and the comparison as `Floor before merge: <completed_at> < <mergedAt>`. A check that completed only after the merge counts as a missing check.
 - `env -u GITHUB_TOKEN -u GH_TOKEN gh api repos/fagenorn/argus/commits/<M> --jq '[.parents[].sha]'`. Expected: two parents, the second equal to `H`, which marks a merge commit (D8).
 
 A red or missing check, or a squash or rebase merge, is recorded as observed. The task then returns `BLOCKED human_gate` with that observation; a squash or rebase leaves the adoption commit unreachable and registration would refuse it as `not_integrated`.
@@ -93,7 +93,7 @@ Expected: exit 0.
 
 ```bash
 git add .agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md
-launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "docs(issue-129/T6): Argus merge, doctor report 2, verify and conformance" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "docs(issue-129/T6): Argus merge, doctor 2, verify, conformance" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ## Review feasibility task

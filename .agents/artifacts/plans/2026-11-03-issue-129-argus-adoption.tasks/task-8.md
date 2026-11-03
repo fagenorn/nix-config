@@ -13,6 +13,7 @@ Spec § 4 steps 13–14 and § 6, per D13 and D18. This task holds AC2's and AC8
 **Invariants:**
 - The guard is only fed payload files. Nothing is pushed, opened or merged (D13, D16).
 - AC2's merge half is `met` only when both merge probes ran on one qualifying PR. With no qualifying PR it is `human_pending`, and the issue is held `needs-verification` (spec § 6).
+- AC1 is `human_pending` while Task 7 recorded `Fleet row pending:` (D21): registration and the merged contract's compatibility are `met`, the `--fleet` row awaits the owner's fast-forward, and the issue is held `needs-verification`.
 - `A` restates no evidence. Each `Observed` cell cites the `E` section it came from, plus the key value.
 
 **The probe.** `<clone>` is an Argus clone whose `origin` is `git@github.com:fagenorn/argus.git` and whose `refs/remotes/origin/HEAD` is `origin/main`. Run this as one Bash call (timeout 120 s), with literals substituted and each command passed only as a single-quoted argument:
@@ -96,7 +97,7 @@ Expected: exit 0. The last command prints nothing, because none of this branch's
 
 ```bash
 git add .agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md .agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.acceptance.md
-launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "docs(issue-129/T8): guard probes, central-literal diff and acceptance record" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id> -- -m "docs(issue-129/T8): guard probes, literal diff, acceptance" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ## Review feasibility task

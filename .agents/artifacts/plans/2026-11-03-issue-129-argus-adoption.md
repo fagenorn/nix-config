@@ -57,7 +57,7 @@ The criteria are untagged; all nine are classified `evidence`, each filling row 
 
 | AC | Kind | Task | Check |
 |----|------|------|-------|
-| AC1 | evidence (classified) | Task 7 | `adopt-project verify --register` on `/Users/anis/Projects/argus`: `adopted`, `registered` `true`; registry entry exactly `{"project_id": "fagenorn/argus", "root": "/Users/anis/Projects/argus"}`; `platform-status --fleet` row `compatible` |
+| AC1 | evidence (classified) | Task 7 | `adopt-project verify --register` on `/Users/anis/Projects/argus`: `adopted`, `registered` `true`; registry entry exactly `{"project_id": "fagenorn/argus", "root": "/Users/anis/Projects/argus"}`; `platform-status --repo-root` on the merged clone `compatible`; the `--fleet` row `compatible` only after the owner fast-forwards the primary checkout, so that half is `human_pending` (D21) |
 | AC2 | evidence (classified) | Task 8 | Task 7's row `main`/`main`/`["memory foundation (unit + forced checks)"]`; installed-guard probes: push and PR creation exit 0; a green open PR's merge exits 0 with `--match-head-commit` and 2 (the floor) without; AC8 holds. No qualifying PR: merge half `human_pending` (D13) |
 | AC3 | evidence (classified) | Task 6 | Doctor reports 1 (Task 3) and 2: no `host` check `failed`; `host.policy_path.no_follow_readable` and `host.executor.helper_on_path` `passed` in both; all `host` checks `passed` in report 2; each report-1 finding closed by its Task 4 operation (D10) |
 | AC4 | evidence (classified) | Task 4 | § Knowledge classification gives one action per item; the adoption plan's evidence row for `.claude/skills` is `retain-product`; no evidence row is `needs-decision` |
@@ -87,6 +87,12 @@ The spec's section 3 table: each item of the issue 62 inventory that names Argus
 - Bootstrap gate: D8, D16 (Tasks 5, 6). Registration and compile: D12, D14 (Task 7). Probes: D13 (Tasks 5, 8). Clones: D17; evidence: D18; no ADR: D15. Planning appended D16–D20.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, base `ed33215598521ba745f6262233e0c2c98ef1479f`, plan head `d6f95e1e`, no focus, no fallback.
+- Accepted 4, rejected 0, deferred 0. AR129-01 (fleet compatibility reads the primary checkout's working tree) became D21 and Task 7 Step 6; AR129-02 (Task 4 rebuild creates `.agents/` and stages in the clone); AR129-03 (Task 6 and Task 8 commit subjects within 64 bytes); AR129-04 (Task 6 requires the floor check to complete before `mergedAt`).
+- The reviewer could not read the issue comments (no network in its sandbox); the packet carried their summaries.
 
 ## Review feasibility delivery
 
