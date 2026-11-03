@@ -99,5 +99,5 @@ launch-commit --repo-root <ledger root> --run-id <run-id> --worker-id <worker-id
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":6,"records":[{"bounds":[{"added_lines":1228,"boundary":"all","deleted_lines":0,"record_bytes":51200,"support":{"covers":["e1","e2","e3","e4","e5","e6"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e6","last_task":8,"owner":6,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"40b698e9e86695082b1caec4787ac09ce5d3d195","head":"5bb3ca0e52d5a87754ee6cb23c69daa64017e7b0"}],"commit_subject_bytes":[64],"id":6,"records":[{"bounds":[{"added_lines":1228,"boundary":"all","deleted_lines":0,"record_bytes":51200,"support":{"covers":["e1","e2","e3","e4","e5","e6"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"e6","last_task":8,"owner":6,"path":".agents/artifacts/plans/2026-11-03-issue-129-argus-adoption.evidence.md"}]}}
 ```
