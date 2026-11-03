@@ -46,7 +46,7 @@ Both invocations validate their input first, then resolve the project at `--repo
 
 Success exits 0 and prints exactly the canonical bytes of the result, sorted compact ASCII-escaped JSON, and one newline, with nothing on standard error. A refusal exits 2 with nothing on standard output and one standard-error line, `verification-observe: <reason>`, whose whitespace is collapsed to single spaces: a `BlockerRefused` line verbatim, `resolve-project refused: <code> <repair_id>`, `<command_id> is not a verification command`, `integration branch '<branch>' is not a valid branch name`, `git <subcommand>: <Git's last non-empty stderr line>` (or `exit <n>`, or `timed out after 60 s`), or one of the five `guard:` reasons (issue 543 D8). An argparse error, a relative `--repo-root` or an `--input` other than `-` writes exactly `verification-observe: invalid invocation` and exits 2, while `--help` prints argparse's usage and exits 0 (issue 543 D13).
 
-Known limitations: the failure class is the caller's declaration and nothing infers it; repository paths are the only fact kind; the change check does not see a gitignored file under a selected path; and nothing calls the command yet, because its callers arrive in later children of issue 228 (c2 to c4).
+Known limitations: the failure class is the caller's declaration and nothing infers it; repository paths are the only fact kind; the change check does not see a gitignored file under a selected path. Its callers are listed in `home/common/agent-skills/README.md` § Verification blockers.
 
 ## `acceptance-record`
 

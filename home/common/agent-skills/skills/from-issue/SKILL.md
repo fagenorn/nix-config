@@ -38,7 +38,7 @@ Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`, 
 
 With lifecycle identity, run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> -- <argv>`, still in the foreground; a forge verb never goes through it. Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` prints.
 
-Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -` or `--input -`, with the helper named bare or as `~/.agents/bin/workflow-state`, optionally piped into or out of `artifact-budget validate-report --input -`. Pipe each `workflow-state` reply's bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding, but never `build-delivery` or `resume-pack` stdout: neither is a workflow response, and a resume pack stays untrusted until its checks pass.
+Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -`, `--verification-input -` or `--input -`, with the helper named bare or as `~/.agents/bin/workflow-state`, optionally piped into or out of `artifact-budget validate-report --input -`. Pipe each `workflow-state` reply's bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding, but never `build-delivery` or `resume-pack` stdout: neither is a workflow response, and a resume pack stays untrusted until its checks pass.
 
 The ledger, not tracker or intent data, selects the next delivery stage: follow the returned `owner`, `delivery_remainder`, requirement, or terminal variant without manufacturing authority, a retry, or a permission ritual. Every delivery effect runs through ship-issue's `## Delivery loop`.
 
@@ -139,7 +139,15 @@ Release every worker this owner registered (the helper refuses with `live worker
 workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
-with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or sdd's `deadline` (the reaper alone owns `unknown`). A validated `kind: terminal` reply means the anti-zombie bound ended the attempt instead: handle it as the terminal return procedure's replay — print its `reentry`, relay it, write no `finish` — and stop. Otherwise the reply is `kind: suspended`; print the canonical line as the final output:
+with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or sdd's `deadline` or `verification` (the reaper alone owns `unknown`). For `verification` call instead, feeding the failure `verification-observe failure` printed:
+
+```text
+workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --blocked-on verification --verification-input - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
+<the printed failure, unchanged>
+EOF
+```
+
+A validated `kind: terminal` reply means the anti-zombie bound ended the attempt instead: handle it as the terminal return procedure's replay — print its `reentry`, relay it, write no `finish` — and stop. Otherwise the reply is `kind: suspended`; print the canonical line as the final output:
 
 ```text
 Suspended (blocked_on=<value>). Resume: <reentry from the envelope>

@@ -86,7 +86,8 @@ DELEGATED_SHIP_EVALS = (
     "delegating-owner-handles-delegated-return",
     "no-subagent-launch-ships-inline",
 )
-INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
+INPUT_FLAG_RE = re.compile(
+    r"(--request-file|--checkpoint-file|--summary-file|--verification-input|--input)\s+(\S+)")
 V3_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes",
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
     "authorization_intents", "authority_observations", "reevaluation_evidence",
@@ -1037,8 +1038,25 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.from_issue, "## Suspension procedure", "## Phase 0"))
         self.assert_ordered(
             suspension, "`human_gate`", "`external`", "`agent_dispatch`",
-            "`deadline`", "(the reaper alone owns `unknown`)",
+            "`deadline`", "`verification`", "(the reaper alone owns `unknown`)",
         )
+
+    def test_the_verification_cause_has_its_own_suspend_template(self):
+        """Issue 546 D5: the second `suspend` template adds only the cause and its stdin flag,
+        and the lifecycle-call rule lists that flag."""
+        suspends = [line.split(" | ")[0].split() for line in self.from_issue.splitlines()
+                    if line.startswith("workflow-state suspend ")]
+        self.assertEqual([[word for word in words if word.startswith("--")]
+                          for words in suspends],
+                         [["--repo-root", "--run-id", "--action-id", "--blocked-on"],
+                          ["--repo-root", "--run-id", "--action-id", "--blocked-on",
+                           "--verification-input"]])
+        second = suspends[1]
+        self.assertEqual(second[second.index("--blocked-on"):],
+                         ["--blocked-on", "verification", "--verification-input", "-", "<<'EOF'"])
+        rule = next(block for block in self.from_issue.split("\n\n")
+                    if block.startswith("Every lifecycle call is one command"))
+        self.assertIn("`--verification-input -`", rule)
 
     def test_sdd_states_the_deadline_suspension_order(self):
         # #281 D5, D9: the one paragraph of `### Lifecycle workers` naming
@@ -1064,6 +1082,23 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "`current: true`",
             "`blocked_on=deadline`",
         )
+
+    def test_final_verification_declares_a_blocker_the_adapter_accepts(self):
+        """Issue 546 D5: final-review's declaration, each placeholder filled with a valid
+        value, is one the source `normalize_declaration` accepts, and unclassified it is not."""
+        review = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
+        (line,) = [line.strip() for line in review.splitlines()
+                   if line.strip().startswith('{"command_id": ')]
+        for placeholder, value in (("<id>", "nix-build"), ("<class>", "dependency"),
+                                   ("<absolute worktree>", "/tmp/wt"), ("<name>", "flake-lock"),
+                                   ("<path>", "flake.lock")):
+            line = line.replace(f'"{placeholder}"', json.dumps(value))
+        declaration = json.loads(line)
+        done = normalize_declaration(declaration)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        unclassified = {key: value for key, value in declaration.items()
+                        if key != "failure_class"}
+        self.assertIn("unclassified", normalize_declaration(unclassified).stderr)
 
     def test_auto_names_the_dispatch_gap_fallback_and_relays_closed_lines(self):
         # The delegated owner keeps the closed gap line; the earlier controller
@@ -1400,9 +1435,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("workflow-state progress", self.from_issue)
         # Issue 432: the gate and the suspension are literal templates whose identity is
         # the action id alone.
-        templates = {line.split()[1]: line.split(" | ")[0].split()
-                     for line in self.from_issue.splitlines()
-                     if line.startswith(("workflow-state progress ", "workflow-state suspend "))}
+        templates = {}
+        for line in self.from_issue.splitlines():
+            if line.startswith(("workflow-state progress ", "workflow-state suspend ")):
+                templates.setdefault(line.split()[1], line.split(" | ")[0].split())
         self.assertEqual(
             [word for word in templates["progress"] if word.startswith("--")],
             ["--repo-root", "--run-id", "--action-id", "--phase", "--next-needs-context",
@@ -1533,6 +1569,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "kind: owner",
             "kind: delivery_remainder",
             "kind: terminal",
+            "kind: suspended",
         )
         text = normalized(direct)
         for shape in (
@@ -1552,6 +1589,24 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                                    "EXPECTS_MEMBERS")["EXPECTS_MEMBERS"]
         for name in ("expects", *expects):
             self.assertIn(f"`{name}`", observe)
+
+    def test_direct_acquisition_relays_exactly_a_suspended_reply(self):
+        """Issue 546 D6: item 5's members are a `suspended` reply's whole key set, as the
+        source workflow-response validator admits it (issue 544 D16)."""
+        text = normalized(ACQUIRE_DIRECT.read_text(encoding="utf-8"))
+        item = text[text.index("**`kind: suspended`**"):]
+        members = re.findall(r"`([a-z_]+)`", item[:item.index(";")])
+        sample = {"interface_version": 2, "kind": "suspended", "run_id": "run-1", "issue": 151,
+                  "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
+                              "action_id": "151:1:1"},
+                  "blocked_on": "verification", "reentry": "/from-issue 151 --auto"}
+        reply = {name: sample.get(name) for name in members}
+        done = validate_workflow_response(reply)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for name in members:
+            with self.subTest(dropped=name):
+                less = {key: value for key, value in reply.items() if key != name}
+                self.assertEqual(validate_workflow_response(less).returncode, 2)
 
     def test_adjacent_from_issue_acquisition_modes_remain_unchanged(self):
         for route in (ACQUIRE_DISPATCHER, ACQUIRE_INTERACTIVE, ACQUIRE_DURABLE):
@@ -2003,6 +2058,33 @@ class ResumePackContractsTest(unittest.TestCase):
 
     def test_auto_rollover_passes_the_pack_beside_the_continuation(self):
         self.assertIn(self.PACK, self.read(ROLLOVER))
+
+
+def validate_workflow_response(value):
+    """The source `artifact-budget validate-report --boundary workflow-response` over `value`, in
+    a child with `PYTHONPATH` set to `python/` and a temporary `HOME` holding the source policy,
+    because the installed-mode run has no package on its path (issue 505 D8, issue 546)."""
+    with tempfile.TemporaryDirectory() as home:
+        share = Path(home) / ".agents/share"
+        share.mkdir(parents=True)
+        (share / "artifact-budget-policy.json").symlink_to(
+            REPO_ROOT / "home/common/agent-skills/artifact-budget-policy.json")
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "home/common/agent-skills/scripts/artifact_budget.py"),
+             "validate-report", "--boundary", "workflow-response", "--input", "-"],
+            input=json.dumps(value), capture_output=True, text=True, timeout=60, check=False,
+            env={**os.environ, "HOME": home, "PYTHONPATH": str(REPO_ROOT / "python")})
+
+
+def normalize_declaration(declaration):
+    """The source `verification_blocker.normalize_declaration` over `declaration` in a child with
+    `PYTHONPATH` set to `python/` (issue 505 D8, issue 546): exit 0 when it accepts it."""
+    return subprocess.run(
+        [sys.executable, "-c", "import json, sys\n"
+         "from agent_tools.verification_blocker import normalize_declaration\n"
+         "normalize_declaration(json.load(sys.stdin))\n"],
+        input=json.dumps(declaration), capture_output=True, text=True, timeout=60,
+        check=False, env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")})
 
 
 def skill_sections(document, *sections):
@@ -3349,6 +3431,8 @@ PROJECTION_MACHINE_TEXT[SDD] = (
     "artifact-budget check --kind review-package")
 PROJECTION_MACHINE_TEXT[FROM_ISSUE_DIR / "delegated-owner.md"] = ("decompose_required",)
 BUDGET_BASE = "8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc"
+# from-issue/SKILL.md left these pins when issue 546 grew it under labelled instruction
+# ceilings, the standing growth gate this base stood in for (issue 546 D16).
 
 
 def assert_no_larger_than_base(test, paths):
@@ -3379,8 +3463,7 @@ class ProjectionCallerContractsTest(unittest.TestCase):
 
     def test_edited_planning_documents_do_not_grow(self):
         assert_no_larger_than_base(self, (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md",
-                                          FROM_ISSUE_DIR / "standards-review.md", PHASE_5_REVIEW_CONTRACT,
-                                          FROM_ISSUE_DIR / "SKILL.md"))
+                                          FROM_ISSUE_DIR / "standards-review.md", PHASE_5_REVIEW_CONTRACT))
 
 
 class ExecutionCallerContractsTest(unittest.TestCase):
@@ -3392,8 +3475,7 @@ class ExecutionCallerContractsTest(unittest.TestCase):
         self.assertIn("review-feasibility confirm --plan <root> --base <base> --input -", phase6)
 
     def test_edited_execution_documents_do_not_grow(self):
-        assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "SKILL.md",
-                                          FROM_ISSUE_DIR / "delegated-owner.md"))
+        assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "delegated-owner.md"))
 
 
 if __name__ == "__main__":

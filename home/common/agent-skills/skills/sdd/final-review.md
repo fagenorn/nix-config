@@ -205,7 +205,26 @@ to the SDD ledger, and `verification_state` reports the per-task focused tests.
    ledger, suffixed `; skipped <id>: <reason>` per `skipped` entry.
 4. **Repair once.** A failing command, a `record` that exits 3 with
    `tree_changed`, or a `check` or `record` that exits 2 is not a pass.
-   Dispatch the final-review fixer above once, carrying the failing command and
+   Under a lifecycle identity, first classify each failing command. It is a
+   shared blocker only when its cause lies outside the change and
+   integration-branch paths decide it: a pinned dependency (`dependency`), the
+   declared environment (`environment`), an external service
+   (`external_service`) or the command's declared input (`command_input`); a
+   product, test or build failure of the change never is. When at least one
+   command failed and every failing command qualifies, run for the first in
+   run order, in the foreground and before any worker release or reap:
+
+   ```text
+   verification-observe failure --repo-root <ledger_repo_root> --input - <<'EOF'
+   {"command_id": "<id>", "failure_class": "<class>", "worktree": "<absolute worktree>", "facts": [{"name": "<name>", "paths": ["<path>"]}]}
+   EOF
+   ```
+
+   Exit 0: follow from-issue's suspension procedure with
+   `blocked_on=verification` and the printed failure. Every other case
+   repairs: no lifecycle identity, no failing command (a `record` exit 3 or
+   a helper exit 2 alone), a change-caused failure, or a refusal. Dispatch
+   the final-review fixer above once, carrying the failing command and
    its log path, the `git status --porcelain` output for `tree_changed`, or the
    helper's stderr line for an exit 2, then run one scoped correctness
    re-review of that fix diff (the final correctness re-review, same fix-range
