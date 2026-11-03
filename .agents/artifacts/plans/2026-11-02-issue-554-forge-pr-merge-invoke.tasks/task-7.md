@@ -68,7 +68,7 @@ Never route around a refusal: no other command spelling, no direct `gh` or `git`
   - (b1) the rendered argv `gh pr merge <pr> --repo SANDBOX --merge --match-head-commit H`;
   - (b2) `gh api graphql -f query='mutation($id:ID!,$head:GitObjectID!){mergePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head,mergeMethod:MERGE}){pullRequest{state}}}' -f id=<PR node id> -f head=H`.
 
-  It passes only when both attempts are refused with class `merge_condition`, the PR is still `OPEN` and `main` is still B1.
+  It passes only when both attempts are refused, the PR is still `OPEN`, `main` is still B1, the head carries a success status for CONTEXT and GitHub's `mergeable_state`, read before each attempt, is `behind` (D23, refining D20 for row b: the refusal text is not matched, so either attempt may class `unclassified`). Any other state leaves the row `inconclusive`; the evidence records the state and each bounded refusal excerpt.
 - Row c (head mismatch) binds H, then pushes a second commit H′ to the head branch and posts a success status on it. After the wait, it attempts the rendered argv with `--match-head-commit H`. It passes only when that is refused with class `merge_condition`, the PR is still `OPEN` and `main` is unchanged.
 - The refusal classifier is one function, `classify(timed_out: bool, text: str) -> str`, over the attempt's exit and stderr or GraphQL errors (D20). Its patterns are case-insensitive module constants, checked in this order, and the first that matches decides:
   1. `transport`: a timeout, `HTTP 5`, `connection`, `timed out`, `could not resolve host`, `TLS`.

@@ -62,7 +62,7 @@ The issue's criteria are untagged and are classified here.
 | AC1 | code (classified) | Task 4 | `tests/test_release_driver.py::MergePreviewTest::test_a_two_branch_profile_passes_the_shape_gate_and_lists_three_confirmations`, with Task 2's `tests/test_release_grammar.py::DescriptorTest::test_forge_descriptor_pins_pr_merge_supported` and `::MergeProfileTest::test_the_jarbird_shaped_profile_compiles` |
 | AC2 | code (classified) | Task 5 | Rows 1, 2 and 15 (Task 2) and row 16 (Task 5) of the race-row index |
 | AC3 | code (classified) | Task 5 | `tests/test_release_crash_matrix.py::TwoBranchMatrixTest::test_a_crash_after_the_merge_tags_the_merge_commit` (row 10) |
-| AC4 | evidence (classified) | Task 7 | `just release-merge-certification --scratch <dir> --output <evidence>`, live against `fagenorn/release-merge-sandbox`, writes `result: passed` with rows a, b and c `passed` on classified refusals (D20); `tests/test_release_evidence.py::MergeCertificationEvidenceTest` pins it. Task 7's implementer fills row AC4, or names `blocked_on: human_gate` |
+| AC4 | evidence (classified) | Task 7 | `just release-merge-certification --scratch <dir> --output <evidence>`, live against `fagenorn/release-merge-sandbox`, writes `result: passed`: row a merged, row b refused with `mergeable_state` `behind`, PR open, `main` unchanged and a head success status (D23), row c refused `merge_condition` (D20); `tests/test_release_evidence.py::MergeCertificationEvidenceTest` pins it |
 | AC5 | code (classified) | Task 5 | Every row of the race-row index below, each its named test |
 
 **Race-row index** (spec § Race and denial matrix; each test's docstring starts `Issue 554 row <n>`):
@@ -97,9 +97,9 @@ The issue's criteria are untagged and are classified here.
 | D3, D14 (preview observes `merge`; no second floor) | 4 |
 | D12, D21 (park reason; crash resume re-confirms `merge`) | 5 |
 | D1, D9, D18 (skill opens the PR; budget; contract test) | 6 |
-| D10, D11, D19, D20 (harness, sandbox, evidence, refusal classes) | 7 |
+| D10, D11, D19, D20, D23 (harness, sandbox, evidence, refusal classes) | 7 |
 
-Planning appended D15–D19, the standards review D20–D21, and attempt 2 D22.
+Planning appended D15–D19, the standards review D20–D21, attempt 2 D22, and Task 7's live run D23.
 
 ## Standards review provenance
 
