@@ -68,6 +68,61 @@ def python_tree_pointers(snapshot):
                          if PYTHON_TREE.search(line))
     return sorted(found)
 
+GLOBAL_CORPUS = (
+    *skill_lint.TREE_ROOTS,
+    "home/common/claude-code/agents",
+    "home/common/agent-skills/standards",
+    "home/common/agent-guidance/AGENTS.md",
+)
+# Constants no file in the hosting repo states; the check names and recipes are derived instead.
+HOSTING_LITERALS = ("fagenorn/nix-config", "nix-config", "origin/main", "--base main",
+                    "home/common/", "python/agent_tools/")
+# Every exemption is one (file, token) pair with its reason; evals and LICENSE files are skipped by name.
+AGNOSTIC_ALLOW = {
+    # retro audits the global environment and legitimately names nix-config as its generator.
+    ("home/common/agent-skills/skills/retro/SKILL.md", "nix-config"),
+    ("home/common/agent-skills/skills/retro/SKILL.md", "fagenorn/nix-config"),
+    ("home/common/agent-skills/skills/retro/SKILL.md", "home/common/"),
+}
+
+
+def hosting_tokens(snapshot):
+    """Literal tokens plus `just <recipe>` regexes (from the justfile) and required check names."""
+    literals = list(HOSTING_LITERALS)
+    protection = snapshot.read(".github/branch-protection.json")
+    if protection is not None:
+        literals += [c["context"] for c in json.loads(protection)["required_status_checks"]["checks"]]
+    justfile = snapshot.read("justfile")
+    recipes = sorted(set(re.findall(
+        r"^@?([a-z][a-z0-9_-]*)\b[^:\n]*:(?!=)", (justfile or b"").decode(), re.M)))
+    return literals, recipes
+
+
+def hosting_specifics(snapshot):
+    """`path:line:token` for each hosting-project token in the installed global corpus, minus the allowlist."""
+    literals, recipes = hosting_tokens(snapshot)
+    patterns = [(t, re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(t) + r"(?![A-Za-z0-9_-])"
+                               if t[0].isalnum() and t[-1].isalnum() else re.escape(t)))
+                for t in literals]
+    patterns += [(f"just {r}", re.compile(r"(?<![A-Za-z0-9_-])just " + re.escape(r) + r"(?![A-Za-z0-9_-])"))
+                 for r in recipes]
+    found = []
+    scanned = set()
+    for root in GLOBAL_CORPUS:
+        for path in (snapshot.list_files(root) or ([root] if snapshot.read(root) is not None else [])):
+            parts = path.split("/")
+            if "evals" in parts or "__pycache__" in parts or parts[-1].startswith("LICENSE"):
+                continue
+            if parts[-1].endswith((".pyc", ".png", ".jpg", ".pdf")):
+                continue
+            scanned.add(root)
+            text = (snapshot.read(path) or b"").decode("utf-8", "replace")
+            for number, line in enumerate(text.splitlines(), start=1):
+                found.extend(f"{path}:{number}:{token}" for token, pattern in patterns
+                             if pattern.search(line) and (path, token) not in AGNOSTIC_ALLOW)
+    missing = sorted(set(GLOBAL_CORPUS) - scanned)
+    return sorted(found) + [f"{root}: no files scanned" for root in missing]
+
 
 def dict_snapshot(files):
     return skill_lint.Snapshot(
@@ -359,12 +414,60 @@ class CommandTest(unittest.TestCase):
         self.assertTrue(broken.stderr.startswith("skill-lint: "))
 
 
+class AgnosticTest(unittest.TestCase):
+    BASE = {
+        ".github/branch-protection.json": json.dumps(
+            {"required_status_checks": {"checks": [{"context": "Gate One"}]}}).encode(),
+        "justfile": b"# c\nbuild host=x:\n    echo\n@ship:\n    echo\nvar := 1\n",
+        "home/common/agent-skills/skills/a/SKILL.md": b"clean text just building\n",
+        "home/common/claude-code/skills/b/SKILL.md": b"ok\n",
+        "home/common/codex/skills/c/SKILL.md": b"ok\n",
+        "home/common/claude-code/agents/r.md": b"ok\n",
+        "home/common/agent-skills/standards/s.md": b"ok\n",
+        "home/common/agent-guidance/AGENTS.md": b"ok\n",
+    }
+
+    def test_a_missing_root_is_reported(self):
+        files = {p: d for p, d in self.BASE.items() if "standards" not in p}
+        self.assertEqual(hosting_specifics(dict_snapshot(files)),
+                         ["home/common/agent-skills/standards: no files scanned"])
+
+    def hits(self, extra):
+        return hosting_specifics(dict_snapshot({**self.BASE, **extra}))
+
+    def test_clean_corpus_passes(self):
+        self.assertEqual(self.hits({}), [])
+
+    def test_each_token_is_caught_in_each_corpus_root(self):
+        tokens = ["fagenorn/nix-config", "nix-config", "Gate One", "just build", "just ship",
+                  "origin/main", "--base main", "home/common/x", "python/agent_tools/x"]
+        roots = {"home/common/codex/skills/c/SKILL.md", "home/common/claude-code/skills/b/SKILL.md", "home/common/claude-code/agents/r.md",
+                 "home/common/agent-skills/standards/s.md", "home/common/agent-guidance/AGENTS.md",
+                 "home/common/agent-skills/skills/a/ref.md"}
+        for token in tokens:
+            for path in roots:
+                with self.subTest(token=token, path=path):
+                    self.assertTrue(self.hits({path: f"x {token} y\n".encode()}))
+
+    def test_exemptions_are_narrow(self):
+        retro = "home/common/agent-skills/skills/retro/SKILL.md"
+        self.assertEqual(self.hits({retro: b"nix-config at home/common/ fagenorn/nix-config\n"}), [])
+        self.assertTrue(self.hits({retro: b"run just build\n"}))
+        self.assertEqual(self.hits({
+            "home/common/agent-skills/skills/a/evals/e.md": b"nix-config\n",
+            "home/common/agent-skills/skills/a/LICENSE": b"nix-config\n"}), [])
+        self.assertTrue(self.hits({"home/common/agent-skills/skills/a/NOTES.md": b"nix-config\n"}))
+
+
 class LiveTreeTest(unittest.TestCase):
     def test_the_live_tree_lints_clean(self):
         self.assertEqual(skill_lint.lint(skill_lint.working_tree(REPO_ROOT)), [])
 
     def test_the_live_tree_names_no_python_tree_path(self):
         self.assertEqual(python_tree_pointers(skill_lint.working_tree(REPO_ROOT)), [])
+
+    def test_the_live_global_corpus_names_no_hosting_project_specifics(self):
+        self.assertEqual(hosting_specifics(skill_lint.working_tree(REPO_ROOT)), [])
 
     def test_the_live_tree_has_no_debt_file(self):
         self.assertFalse((REPO_ROOT / RETIRED_DEBT).exists())
