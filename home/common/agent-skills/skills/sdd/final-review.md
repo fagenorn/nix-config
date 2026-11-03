@@ -6,6 +6,7 @@ risk lane.
 ## Contents
 
 - First pass
+- Chunked review
 - Fix wave
 - Acceptance record
 - Final verification
@@ -16,7 +17,8 @@ Run `review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD` once, on the full SHA
 the cumulative delivery gate pinned in the ledger, never a recomputed merge base,
 and apply "`SKILL.md`'s `### Review-package gate`" before either axis is
 dispatched. Those two pins are the report's `base_sha` and `head_sha`
-(`SKILL.md`'s `## Finish`); the fix wave does not move them.
+(`SKILL.md`'s `## Finish`); the fix wave does not move them. An over-budget
+package is reviewed per **Chunked review** below.
 
 Pass both axes the manifest root path and all four metrics (`root_bytes`,
 `total_bytes`, `file_count`, `largest_member_bytes`), never shard lists or diff
@@ -66,8 +68,9 @@ Point the conformance dispatch at the ledger's deferred-minor and parked lines. 
 (not counting the `### Acceptance` table), findings Critical/Important/Minor
 anchored to file:line. **Never merge the two reports**: disposition each on its
 own, and ledger both verdicts plus the correctness reviewer identity
-(`Codex` | `native` | `fallback` + failure class). From `diff-review`, ledger its
-scope too (`full` | `scoped: <N> of <M> product files` | `unmeasured`).
+(`Codex` | `native` | `fallback` + failure class). From `diff-review`, ledger each
+slice's scope too (`full` | `scoped: <N> of <M> product files` | `unmeasured`).
+An axis is `findings` when any of its chunk, slice or integration verdicts is.
 
 **Acceptance verdicts.** When the conformance dispatch carried
 `[ACCEPTANCE_CRITERIA]`, check its `### Acceptance` table on the first pass,
@@ -86,6 +89,35 @@ columns in the acceptance record. An acceptance finding is never parked with a
 ruling, and the residual adjudication below never turns one into a parked line.
 One that survives the fix wave is load-bearing: it sets
 `conformance_verdict: findings` and forces the Residuals terminal state.
+
+## Chunked review
+
+Any range whose package gate takes generator exit 3 (first pass, fix range or
+task) is reviewed in chunks, never stopped or truncated:
+
+1. **Cut.** Split at each `Task <N>: dispatched (base <sha>)` inside the range;
+   merge neighbouring tasks greedily into the longest run whose `review-package`
+   passes the gate: that ordinary package is the chunk. A task still over
+   budget, or a range with no task boundary, is one unpackaged chunk: its
+   reviewers get their rubric by path (a task's also `task-<N>-brief.md` and
+   `task-<N>-report.md`), base, head, `git diff --stat <base>..<head>` and its
+   paths, read in slices with `git diff <base>..<head> -- ':(literal)<path>'`.
+2. **Own.** Each path of `git diff --no-renames --name-only <base>..<head>` over
+   the range belongs to the last chunk whose same list has it; others treat it as context.
+   Owned lists must jointly equal that list with no path twice; ledger
+   `Review chunk <i>/<n>: <base7>..<head7>, <k> paths` before dispatch. An owned
+   path an earlier chunk also changes is read from the range base, as above,
+   not from shards.
+3. **Review.** Each chunk gets fresh reviewers, never reused across chunks, the
+   range's usual set (both axes on the first pass), its tasks and owned paths
+   named; they grade only those, and none carries `[ACCEPTANCE_CRITERIA]`. A
+   chunk read outside its package takes correctness rung 3.
+4. **Integrate.** After a chunked first pass, one more conformance dispatch
+   (same tier) gets every chunk verdict, the range's stat and path list and
+   `[ACCEPTANCE_CRITERIA]`, reads no package or whole-range diff, may read the
+   head tree, checks the interfaces between chunks and every `ACn`, and returns
+   the `### Acceptance` table. Its findings are conformance findings; the fix
+   wave's FIX_BASE is then `DELIVERY_HEAD`.
 
 ## Fix wave
 
