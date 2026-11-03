@@ -1918,8 +1918,11 @@ def walk_form(elements, words, flags):
 def match_form(compiled, text):
     """The first of `compiled`'s forms that `text` spells, with its slot values, else None
     (issue 402 D2): the whole-text character rule, the `shlex` words, the forms in
-    table order, and for an exact-spelling operation the rendered form against `text`."""
-    if compiled.whole_text_characters and any(c in UNSAFE_BRANCH_CHARS for c in text):
+    table order, and for an exact-spelling operation the rendered form against `text`.
+    Every operation refuses a shell-active character outside quotes (issue 386): `shlex`
+    keeps `x<notes.md` or `{x,--base,y}` as one word, while the shell redirects or
+    expands it."""
+    if forbidden_character(text, anywhere=compiled.whole_text_characters) is not None:
         return None
     try:
         words = shlex.split(text)
@@ -2251,10 +2254,21 @@ def worktree_root(git_bin, cwd, timeout):
     return os.path.realpath(top)
 
 
-def body_file_problem(path, context):
-    """Why a PR `--body-file` path fails (issue 386), or None: it is an absolute path
-    with no whitespace, shell-active character or `..` component, and it resolves
-    outside the working tree (a missing tree fails closed)."""
+BODY_FILE_DEVICE_ROOTS = ("/dev/", "/proc/")
+
+
+def body_file_problem(path, context, standalone):
+    """Why a PR `--body-file` path fails (issue 386), or None.
+
+    A placement check, not a content boundary: the PR creation must be the whole
+    command (no other segment can make or relink the file first), and the path
+    must be absolute with no whitespace, shell-active character or `..`
+    component, name no device or process file (`/dev/stdin` reads a pipe), and
+    resolve outside the working tree (a tree that cannot be read fails closed).
+    """
+    if not standalone:
+        return ("--body-file is accepted only when the PR creation is the whole "
+                "command, so no other segment can prepare the file")
     if (
         not os.path.isabs(path)
         or any(c in UNSAFE_BRANCH_CHARS or c.isspace() for c in path)
@@ -2262,18 +2276,22 @@ def body_file_problem(path, context):
     ):
         return (f"--body-file {shown_value(path)} is not an absolute path without "
                 "whitespace, shell-active characters or `..`")
+    real = os.path.realpath(path)
+    if any(candidate.casefold().startswith(BODY_FILE_DEVICE_ROOTS)
+           for candidate in (path, real)):
+        return f"--body-file {shown_value(path)} is a device or process file"
     root = worktree_root(context.git_bin, context.cwd, context.timeout)
     if root is None:
         return "cannot resolve the working tree to check --body-file against"
     # Case-folded: a case-insensitive volume must not let a respelled path escape.
-    real = os.path.realpath(path).casefold()
+    real = real.casefold()
     root = root.casefold()
     if real == root or real.startswith(root.rstrip("/") + "/"):
         return f"--body-file {shown_value(path)} is inside the working tree"
     return None
 
 
-def validate_pr_create(text, context, compiled):
+def validate_pr_create(text, context, compiled, standalone):
     problem = ownership_problem(context)
     if problem is not None:
         return refuse("pr-create", problem)
@@ -2312,7 +2330,7 @@ def validate_pr_create(text, context, compiled):
         context.repository, context.base_branch, context.integration_bases
     )
     if match.form.id == "pr-create-file":
-        path_problem = body_file_problem(match.values["path"], context)
+        path_problem = body_file_problem(match.values["path"], context, standalone)
         if path_problem is not None:
             return refuse("pr-create", path_problem, accepted_forms(compiled, context))
     if base not in allowed_bases:
@@ -2800,7 +2818,12 @@ def main():
                 if operation == "push":
                     status = validate_push(text, context, table[operation])
                 elif operation == "pr-create":
-                    status = validate_pr_create(text, context, table[operation])
+                    # Issue 386: the body-file form is judged against the
+                    # whole command too, which must be this one segment.
+                    standalone = (canonical_text(operation, command, directory).rstrip()
+                                  == text.rstrip())
+                    status = validate_pr_create(text, context, table[operation],
+                                                standalone)
                 elif operation == "release":
                     status = validate_release(text, context, table[operation])
                 else:

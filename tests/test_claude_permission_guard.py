@@ -808,13 +808,69 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (form.format("notes.md"), "absolute path"),
             (form.format("'/tmp/a;b.md'"), "absolute path"),
             (form.format("'/tmp/a b.md'"), "absolute path"),
-            (form.format("/tmp/$HOME.md"), "absolute path"),
+            (form.format("/tmp/$HOME.md"), "forbidden character `$`"),
             (form.format("/tmp/x/../../etc/passwd"), "absolute path"),
             (form.format(outside) + ' --body "y"', "out of place"),
         ):
             with self.subTest(command=bad):
                 result = self.run_guard(bad, cwd=repo)
                 self.assertEqual(2, result.returncode, bad)
+                self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
+                self.assertIn(problem, result.stderr)
+
+    def test_pr_create_body_file_safety_branches_each_refuse(self):
+        """Issue 386: each safety branch of the placement check refuses on its own.
+
+        Every row passes the path-spelling rule, so only the named branch can
+        refuse it: removing that branch from the guard turns its row red.
+        """
+        repo = self.make_repo("https://github.com/fagenorn/argus.git")
+        form = ('gh pr create --repo fagenorn/argus --base main --head issue-7-fix '
+                '--title "fix: guard" --body-file {}')
+        outside = os.path.join(tempfile.gettempdir(), "release-body-386.md")
+        link = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "repo-link"
+        link.symlink_to(repo, target_is_directory=True)
+        rows = [
+            # Fail closed: in the .git directory the origin and default branch
+            # resolve but there is no working tree to check the path against.
+            ("no working tree", form.format(outside), repo / ".git",
+             "cannot resolve the working tree"),
+            # realpath: a symlink outside the tree that points into it.
+            ("symlink into the tree", form.format(link / "notes.md"), repo,
+             "inside the working tree"),
+            # Another segment could create or relink the file before gh reads it.
+            ("ln before", "ln -sfn {}/notes.md {} && {}".format(
+                repo, outside, form.format(outside)), repo, "whole command"),
+            ("after a semicolon", "true; " + form.format(outside), repo,
+             "whole command"),
+            ("piped stdin", "cat {}/notes.md | {}".format(
+                repo, form.format("/dev/stdin")), repo, "whole command"),
+            ("followed by", form.format(outside) + " || true", repo, "whole command"),
+            # Device and process files read whatever the shell wired to them.
+            ("/dev/stdin", form.format("/dev/stdin"), repo, "device or process file"),
+            ("/dev/fd/0", form.format("/dev/fd/0"), repo, "device or process file"),
+            ("/proc fd", form.format("/proc/self/fd/0"), repo,
+             "device or process file"),
+            # One segment can still redirect or expand through an unquoted title.
+            ("title redirect", form.format("/tmp/b.md").replace(
+                '"fix: guard"', "x<{}/notes.md".format(repo)), repo,
+             "forbidden character `<`"),
+            ("title brace expansion", form.format(outside).replace(
+                '"fix: guard"', "{x,--base,release}"), repo, "forbidden character `{`"),
+        ]
+        respelled = str(repo).swapcase()
+        if os.path.exists(respelled) and respelled != str(repo):
+            # Case fold: on a case-insensitive volume the respelled repo is the repo.
+            rows.append(("respelled case", form.format(
+                os.path.join(respelled, "notes.md")), repo, "inside the working tree"))
+            rows.append(("respelled /dev", form.format("/DEV/stdin"), repo,
+                         "device or process file"))
+        elif sys.platform == "darwin":
+            self.fail("expected a case-insensitive temporary volume on macOS")
+        for name, command, cwd, problem in rows:
+            with self.subTest(row=name):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(2, result.returncode, command)
                 self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
                 self.assertIn(problem, result.stderr)
 
