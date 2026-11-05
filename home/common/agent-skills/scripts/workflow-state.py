@@ -4517,6 +4517,38 @@ def command_suspend(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_retry_verification(args: argparse.Namespace) -> int:
+    """Arm a human-requested verification retry; acquisition still owns the next launch."""
+    supplied = supplied_time(args.now, "--now")
+    runtime = _delivery()
+
+    def retry(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        assert state is not None
+        issue_state = state["issues"].get(str(args.issue))
+        if (issue_state is None or not issue_state["attempts"]
+                or issue_state["attempts"][-1]["attempt"] != args.attempt):
+            raise WorkflowError("retry requires the issue's latest attempt")
+        attempt = issue_state["attempts"][-1]
+        action_id = f"{args.issue}:{args.attempt}:{len(attempt['launches'])}"
+        if any(worker["launch"] == action_id and worker["released_at"] is None
+               for worker in state["workers"]):
+            raise WorkflowError("verification retry requires all launch workers released")
+        now = format_utc(ledger_time(supplied))
+        if parse_utc(now, "retry time") < parse_utc(state["updated_at"], "run update time"):
+            raise WorkflowError("verification retry time must not move backward")
+        try:
+            verification_blocker.request_retry(
+                state["verification_blockers"], attempt, args.blocker_id)
+        except verification_blocker.BlockerRefused as error:
+            raise WorkflowError(str(error)) from error
+        state["updated_at"] = now
+        return suspended_reply(
+            runtime, run_id=args.run_id, issue=args.issue, attempt=attempt), True
+
+    print_json(transact(args.repo_root, args.run_id, retry))
+    return 0
+
+
 def command_finish(args: argparse.Namespace) -> int:
     """Record an owner's reported terminal result for one attempt.
 
@@ -5991,6 +6023,14 @@ def build_parser() -> argparse.ArgumentParser:
               "--blocked-on verification"))
     suspend.add_argument("--action-id")
     suspend.set_defaults(handler=command_suspend)
+
+    retry_verification = subparsers.add_parser(
+        "retry-verification", help="arm one explicitly human-requested verification retry")
+    add_run_arguments(retry_verification)
+    retry_verification.add_argument("--issue", required=True, type=positive_int)
+    retry_verification.add_argument("--attempt", required=True, type=positive_int)
+    retry_verification.add_argument("--blocker-id", required=True)
+    retry_verification.set_defaults(handler=command_retry_verification)
 
     progress = subparsers.add_parser("progress")
     add_run_arguments(progress)
