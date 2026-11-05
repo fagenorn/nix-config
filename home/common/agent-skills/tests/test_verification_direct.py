@@ -89,6 +89,65 @@ class GateTest(DirectHarness, unittest.TestCase):
         self.assertEqual(self.tree_snapshot(), before)
 
 
+class ExplicitRetryTest(DirectHarness, unittest.TestCase):
+    def retry(self, *, blocker_id=X_ID, attempt=1, minute=6, ok=True):
+        return self.run_cli("retry-verification", "--repo-root", self.root,
+                            "--run-id", self.run_id, "--issue", 73,
+                            "--attempt", attempt, "--blocker-id", blocker_id,
+                            "--now", DIRECT_NOW(minute), ok=ok)
+
+    def test_retry_preserves_failure_and_needs_normal_acquisition(self):
+        before = self.read_state()
+        reply = self.validated_response(self.retry().stdout)
+        self.assertEqual((reply["kind"], reply["blocked_on"]), ("suspended", "human_gate"))
+        after = self.read_state()
+        self.assertEqual(after["verification_blockers"], before["verification_blockers"])
+        held = self.attempt(73)
+        expected = dict(before["issues"]["73"]["attempts"][-1],
+                        blocked_on="human_gate", verification_blocker=None)
+        self.assertEqual(held, expected)
+        self.assertEqual(held["state"], "suspended")
+        owner = self.direct(7, worktree=self.recorded_worktree())
+        self.assertEqual((owner["kind"], owner["action_id"]), ("owner", "73:1:2"))
+        self.assertEqual(self.read_state()["verification_blockers"],
+                         before["verification_blockers"])
+
+    def test_stale_identity_or_blocker_refuses_without_writes(self):
+        before = self.tree_snapshot()
+        for arguments in ({"blocker_id": "sha256:" + "0" * 64}, {"attempt": 2}):
+            with self.subTest(arguments=arguments):
+                done = self.retry(ok=False, **arguments)
+                self.assertEqual((done.returncode, done.stdout), (2, ""))
+                self.assertEqual(self.tree_snapshot(), before)
+
+    def test_active_attempt_cannot_be_reclassified(self):
+        self.retry()
+        self.direct(7, worktree=self.recorded_worktree())
+        before = self.tree_snapshot()
+        done = self.retry(minute=8, ok=False)
+        self.assertEqual((done.returncode, done.stdout), (2, ""))
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_an_unreleased_worker_prevents_retry(self):
+        state = self.read_state()
+        state["workers"].append({"worker_id": "73:1:1:w1", "launch": "73:1:1",
+                                 "parent": None, "registered_at": DIRECT_NOW(4),
+                                 "released_at": None, "release_event": None})
+        self.write_state(state)
+        before = self.tree_snapshot()
+        done = self.retry(ok=False)
+        self.assertEqual((done.returncode, done.stdout), (2, ""))
+        self.assertIn("all launch workers released", done.stderr)
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_backward_time_refuses_without_writes(self):
+        before = self.tree_snapshot()
+        done = self.retry(minute=4, ok=False)
+        self.assertEqual((done.returncode, done.stdout), (2, ""))
+        self.assertIn("time must not move backward", done.stderr)
+        self.assertEqual(self.tree_snapshot(), before)
+
+
 class RefusalTest(DirectHarness, unittest.TestCase):
     def test_an_observation_that_answers_no_open_blocker_exactly_is_refused(self):
         before = self.tree_snapshot()
