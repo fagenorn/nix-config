@@ -306,3 +306,19 @@ class ReconstructionTest(SourceProjectionFixture, unittest.TestCase):
             self.assertEqual([e['parent'] for e in edges], [main, side])
         with self.assertRaisesRegex(ForecastError, 'merge effects'):
             reconstruct_owned(self.repo, start, [merge])
+
+
+class BudgetRefusalReasonTest(unittest.TestCase):
+    """A checker refusal names the checker's last stderr line (issue 559 D12)."""
+    def test_check_refusal_relays_the_checkers_last_line_or_its_exit(self):
+        from unittest.mock import patch
+        from agent_tools import review_budget
+        authority = review_budget.BudgetAuthority(None, 'sha256:' + '0' * 64, 4096)
+        for stderr, expected in ((b'noise\nartifact-budget: invalid input:  invalid task index row\n\n',
+                                  'artifact-budget: invalid input: invalid task index row'),
+                                 (b'x' * 300 + b'\n', 'x' * 200), (b'', 'exit 2')):
+            refused = subprocess.CompletedProcess([], 2, b'', stderr)
+            with self.subTest(stderr=stderr[:20]), patch.object(review_budget, '_invoke', return_value=refused):
+                with self.assertRaises(review_budget.BudgetError) as caught:
+                    authority.check('review-package', Path('review.json'))
+                self.assertEqual(str(caught.exception), 'budget check failed: ' + expected)
