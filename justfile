@@ -79,7 +79,7 @@ evals skill id:
 agent_tools_path := justfile_directory() / "python"
 system_result := justfile_directory() / "result"
 
-# Verify durable workflow lifecycle and skill contracts, 4 test files at a time (--jobs N sets the cap; --jobs 1 runs them serially with live output).
+# Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output).
 agent-workflow-tests *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.suite_runner {{args}} \
     home/common/agent-skills/tests/test_workflow_state.py \
