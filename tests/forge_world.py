@@ -1,8 +1,8 @@
 """A fake provider world for the forge adapter suites (#124 D12, D22).
 
-`ForgeWorld(test_case)` writes executable `gh`, `git` and `claude-bash-lifecycle-guard`
-scripts into a temporary `bin/` and patches `os.environ` until the test's cleanup: `PATH` is
-that `bin/` alone, `GITHUB_TOKEN` is a harness token, and `FORGE_WORLD` names the state
+`ForgeWorld(test_case, tools=())` writes executable `gh`, `git` and `claude-bash-lifecycle-guard`
+scripts, plus one more for each name in `tools`, into a temporary `bin/` and patches
+`os.environ` until the test's cleanup: `PATH` is that `bin/` alone, `GITHUB_TOKEN` is a harness token, and `FORGE_WORLD` names the state
 directory. Each script logs `{tool, argv, stdin, token_visible}` to `calls.jsonl` and answers
 from `responses.json`, keyed by `json.dumps([tool, *argv])`. An unregistered call exits 64,
 and a `gh` that sees a token variable exits 65, so a leaked credential fails loudly.
@@ -183,7 +183,7 @@ sys.exit(response["exit"])
 
 
 class ForgeWorld:
-    def __init__(self, test_case: unittest.TestCase) -> None:
+    def __init__(self, test_case: unittest.TestCase, tools: tuple[str, ...] = ()) -> None:
         tmp = tempfile.TemporaryDirectory()
         test_case.addCleanup(tmp.cleanup)
         root = Path(tmp.name).resolve()
@@ -191,7 +191,7 @@ class ForgeWorld:
         self.state.mkdir()
         self.bin.mkdir()
         self.checkout.mkdir()
-        for tool in TOOLS:
+        for tool in TOOLS + tuple(tools):
             path = self.bin / tool
             path.write_text(SCRIPT.format(python=sys.executable).replace("# store handler\n", STORE_HANDLER),
                             encoding="utf-8")

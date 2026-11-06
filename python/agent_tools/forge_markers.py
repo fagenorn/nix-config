@@ -173,6 +173,11 @@ def _json(argv: list[str], allow: Iterable[int] = ()) -> Any:
         raise ForgeError("payload_invalid", "stdout is not JSON") from None
 
 
+def api_get(path: str, allow: Iterable[int] = ()) -> Any:
+    """The parsed JSON of one `gh api` read, or None when it failed with a status in `allow`."""
+    return _json(["api", path], allow)
+
+
 def _comments(slug: str, issue: int) -> str:
     return f"repos/{slug}/issues/{issue}/comments"
 
