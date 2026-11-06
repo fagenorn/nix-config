@@ -513,6 +513,7 @@ HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull
                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
+MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
 
 
 class GateTest(unittest.TestCase):
@@ -723,6 +724,14 @@ class WorkspaceTest(GitRepos):
 class SourceTest(GitRepos):
     def setUp(self):
         super().setUp()
+        # The resolver reads the installed platform manifest under `HOME`; a hosted runner has
+        # none, so the source manifest is installed into a private one, as `CommandTest` does.
+        home = self.dir / "home"
+        (home / ".agents" / "share").mkdir(parents=True)
+        shutil.copy(MANIFEST, home / ".agents" / "share" / "platform-manifest.json")
+        patch = mock.patch.dict(os.environ, {"HOME": str(home)})
+        patch.start()
+        self.addCleanup(patch.stop)
         shutil.copytree(FIXTURE, self.root, dirs_exist_ok=True)
         self.first = self.commit("fixture")
         self.git(self.root, "push", "-q", "origin", "HEAD:main")
@@ -1242,8 +1251,6 @@ class RaceTest(PassBase):
         self.assertEqual(len(self.markers("verify-closed")), 1)
         self.assertEqual(self.world.issue()["state"], "closed")
 
-
-MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
 
 
 class PinnedReferencesTest(GitRepos):
