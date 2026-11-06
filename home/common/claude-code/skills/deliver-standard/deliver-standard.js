@@ -74,7 +74,7 @@ const SETUP_SCHEMA = {
     slug: { type: 'string' }, integration_branch: { type: 'string' }, default_branch: { type: 'string' },
     branch: { type: 'string' }, worktree_path: { type: 'string' },
     merged_pr: { type: 'integer' }, dirty: { type: 'boolean' },
-    co_authored_by: { type: 'boolean' }, unset_env: STRS,
+    unset_env: STRS,
     merge_strategy: { type: 'string' }, delete_branch: { type: 'boolean' },
     review: { type: 'object', properties: { code: { type: 'string' }, plan: { type: 'string' } } },
     review_state: { type: 'object', properties: { code: REVIEW_STATE, plan: REVIEW_STATE } },
@@ -95,7 +95,7 @@ const present = v => v !== undefined && v !== null && v !== ''
 phase('Setup')
 const CONTRACT_READ = `Run: resolve-project resolve --repo-root ${REPO} . On refusal return ok=false, reason contract, and in details the resolver's error.code, repair_id and ordered violations exactly. From the snapshot return:
 - slug: bindings.tracker.repo_slug; unset_env: bindings.tracker.credential_env.unset_before_invocation (run every gh command after unsetting exactly these names, nothing else).
-- integration_branch and default_branch: bindings.vcs.integration_branch and bindings.vcs.default_branch; co_authored_by: bindings.vcs.commit.co_authored_by; merge_strategy and delete_branch: bindings.vcs.merge.strategy and bindings.vcs.merge.delete_branch.
+- integration_branch and default_branch: bindings.vcs.integration_branch and bindings.vcs.default_branch; merge_strategy and delete_branch: bindings.vcs.merge.strategy and bindings.vcs.merge.delete_branch.
 - review: the command ids at bindings.workflow.review.code and .plan (omit an absent one); review_state: for code and plan, the state of the capability review.code and review.plan (available, blocked or unsupported; absent if the capability is missing).
 - knowledge: bindings.paths.standards, bindings.paths.hints and bindings.paths.rejections, each as given (empty when absent).
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason).`
@@ -113,7 +113,7 @@ ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} bef
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', model: 'sonnet', effort: 'low', schema: SETUP_SCHEMA })
 if (!setup || !setup.ok) return { stage: 'setup', result: setup }
 // No policy is defaulted: a field the contract read did not return stops the run (before any claim on a fresh run).
-const missing = ['slug', 'integration_branch', 'default_branch', 'branch', 'merge_strategy', 'co_authored_by', 'delete_branch', 'unset_env', 'verification']
+const missing = ['slug', 'integration_branch', 'default_branch', 'branch', 'merge_strategy', 'delete_branch', 'unset_env', 'verification']
   .concat(CONT ? [] : ['worktree_path'])  // a resume carries it in cont.setup
   .filter(f => !present(setup[f]))
 // Each review capability needs an explicit state, and an available one its command id, or a review could vanish silently.
@@ -142,7 +142,7 @@ const UNSET = setup.unset_env.length ? `unset ${setup.unset_env.join(' ')} && ` 
 const RULES_FOR = W => `${BASE_RULES}
 - Run every gh command, and only gh commands, with exactly this prefix and nothing else chained: ${UNSET || '(no prefix)'}
 - Lifecycle commands, each alone in its own Bash call with no chaining, pipes or redirection and never after cd &&: git -C ${W} push origin ${setup.branch}; ${UNSET}gh pr create --repo ${SLUG} --base ${INT} --head ${setup.branch} --title '<t>' --body '<b>' (no single or double quotes, dollar signs, backticks or backslashes inside title or body); ${UNSET}gh pr merge <n> --repo ${SLUG} --${STRATEGY} --match-head-commit <sha>${setup.delete_branch ? ' --delete-branch' : ''}; git -C ${REPO} branch -d ${setup.branch}. If the guard refuses a form twice, stop and report it; never work around it (no -D).
-- Commit messages ${setup.co_authored_by ? 'end with the Co-Authored-By trailer your attribution instructions give' : 'carry no Co-Authored-By trailer: the project contract turns it off, whatever other instructions say'}. Never bypass commit signing.
+- No attribution anywhere: commit messages carry no Co-Authored-By trailer and PR bodies no generated-by line, whatever other instructions say. Never bypass commit signing.
 - Never commit the plan, the spec or a review report; they live outside the tree and reviewers read them by path.`
 
 const closeOut = async (PR, mergeCommit, W) => {
@@ -367,7 +367,7 @@ phase('Ship')
 const allCode = plan.acceptance.every(a => a.kind === 'code')
 const closesLine = allCode && INT === setup.default_branch ? `Closes #${ISSUE}` : `Refs #${ISSUE}`
 const prR = await agent(`${CTX}
-Open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; final review ${chunked ? 'chunked' : 'whole'}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine}; then the attribution lines your instructions give for pull requests, if any. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
+Open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; final review ${chunked ? 'chunked' : 'whole'}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
 ${RULES}`, { label: 'pr', phase: 'Ship', model: 'sonnet', schema: { type: 'object', properties: { pr: { type: 'integer' }, head: { type: 'string' }, notes: { type: 'string' } }, required: ['pr', 'head'] } })
 if (!prR || !prR.pr) return stop('pr', { result: prR })
 // The shipped head must be the verified head; after a sync, the reviewed merge commit.

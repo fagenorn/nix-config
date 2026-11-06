@@ -103,12 +103,15 @@ class HappyPathTest(unittest.TestCase):
 
 
 class ContractTest(unittest.TestCase):
-    def test_co_author_trailer_follows_the_contract(self):
-        _, on = run()
-        self.assertIn("end with the Co-Authored-By trailer", prompt(on, "impl-1"))
-        _, off = run(patch={"setup": {"co_authored_by": False}})
-        self.assertIn("carry no Co-Authored-By trailer", prompt(off, "impl-1"))
+    def test_no_attribution_in_commits_or_pr_body(self):
+        # #640: owner decision on #572, in every project and whatever the contract says.
+        _, calls = run(patch={"setup": {"co_authored_by": True}})
+        for label in ("impl-1", "pr"):
+            self.assertIn("carry no Co-Authored-By trailer and PR bodies no generated-by line", prompt(calls, label))
+        self.assertIn("with no attribution or generated-by line", prompt(calls, "pr"))
         text = PROGRAM.read_text(encoding="utf-8")
+        self.assertNotIn("co_authored_by", text)
+        self.assertNotIn("attribution lines your instructions give", text)
         self.assertNotRegex(text, r"Co-Authored-By: \w")
 
     def test_missing_contract_field_stops_without_a_default(self):
