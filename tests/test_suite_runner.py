@@ -481,26 +481,29 @@ class ScheduleOrderTest(RunnerCase):
         bad.write_text("[1", encoding="utf-8")
         self.assertEqual(suite_runner.load_timings(bad), {})
         good = self.work / "good.json"
-        good.write_text('{"a.py": 1.5, "b.py": "x", "c.py": true}', encoding="utf-8")
+        good.write_text('{"a.py": 1.5, "b.py": "x", "c.py": true, "d.py": NaN, '
+                        f'"e.py": {"9" * 400}, "f.py": Infinity}}', encoding="utf-8")
         self.assertEqual(suite_runner.load_timings(good), {"a.py": 1.5})
 
-    def test_a_parallel_run_starts_members_in_schedule_order_and_reports_list_order(self):
-        names = [self.member(f"test_m{n}.py", "") for n in range(3)]
-        for name in names:
+    def test_a_parallel_run_starts_in_schedule_order_and_reports_failures_in_list_order(self):
+        names = [self.member(f"test_m{n}.py", "") for n in range(4)]
+        for n, name in enumerate(names):
             self.member(name, "import unittest\nclass T(unittest.TestCase):\n"
-                              "    def test_x(self): pass\n")
+                              f"    def test_x(self): self.assertTrue({n % 2 == 1})\n")
         out = io.BytesIO()
-        timings = {"test_m0.py": 1.0, "test_m1.py": 9.0, "test_m2.py": 5.0}
+        timings = {"test_m0.py": 1.0, "test_m1.py": 9.0, "test_m2.py": 5.0, "test_m3.py": 7.0}
         cwd = os.getcwd()
         os.chdir(self.work)
         try:
             code = suite_runner.run_suite(names, jobs=2, out=out, timings=timings)
         finally:
             os.chdir(cwd)
-        self.assertEqual(code, 0, out.getvalue().decode())
-        starts = [line.split()[-1] for line in out.getvalue().decode().splitlines()
-                  if line.startswith("suite-runner: start ")]
-        self.assertEqual(starts, ["test_m1.py", "test_m2.py", "test_m0.py"])
+        lines = out.getvalue().decode().splitlines()
+        self.assertEqual(code, 1, "\n".join(lines))
+        starts = [line.split()[-1] for line in lines if line.startswith("suite-runner: start ")]
+        self.assertEqual(starts, ["test_m1.py", "test_m3.py", "test_m2.py", "test_m0.py"])
+        failed = [line.split()[-1] for line in lines if line.startswith("suite-runner: failed ")]
+        self.assertEqual(failed, ["test_m0.py", "test_m2.py"])
 
 
 class CapTest(RunnerCase):
@@ -522,11 +525,20 @@ class CapTest(RunnerCase):
         self.assertEqual(SUMMARY.match(result.stdout.splitlines()[-1]).group(4), str(cap))
 
     def test_help_names_the_command_and_documents_the_default(self):
-        result = self.run_suite("--help", env={suite_runner.JOBS_ENV: "3"})
+        result = self.run_suite("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stdout.startswith("usage: agent-workflow-tests "),
                         result.stdout[:200])
-        self.assertIn("(default: 3,", " ".join(result.stdout.split()))
+        self.assertIn("(default: $SUITE_RUNNER_JOBS when set, else min(8, CPUs - 2))",
+                      " ".join(result.stdout.split()))
+
+    def test_an_explicit_jobs_wins_over_a_bad_environment_value(self):
+        members = self.barrier_members("test_m0.py")
+        result = self.run_suite("--jobs", "1", *members, env={suite_runner.JOBS_ENV: "many"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        bad = self.run_suite(*members, env={suite_runner.JOBS_ENV: "many"})
+        self.assertEqual(bad.returncode, 2, bad.stdout + bad.stderr)
+        self.assertIn(suite_runner.JOBS_ENV, bad.stderr)
 
     def test_one_job_runs_members_one_at_a_time_with_their_output_live(self):
         members = self.barrier_members("test_m0.py", "test_m1.py", "test_m2.py")

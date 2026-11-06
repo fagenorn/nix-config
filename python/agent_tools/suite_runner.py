@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -68,9 +69,17 @@ def load_timings(path: Path = TIMINGS_FILE) -> dict[str, float]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {key: float(value) for key, value in data.items()
-            if isinstance(key, str) and isinstance(value, (int, float))
-            and not isinstance(value, bool)}
+    timings = {}
+    for key, value in data.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        try:
+            seconds = float(value)
+        except OverflowError:
+            continue
+        if math.isfinite(seconds):
+            timings[key] = seconds
+    return timings
 
 
 def schedule_order(members: Sequence[str], timings: Mapping[str, float]) -> list[int]:
@@ -398,14 +407,14 @@ def _jobs(text: str) -> int:
     return jobs
 
 
-def _parser(default: int) -> argparse.ArgumentParser:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-workflow-tests",
         description="Run the agent workflow suite's members, each in its own process.")
     parser.add_argument(
-        "--jobs", metavar="N", type=_jobs, default=default,
+        "--jobs", metavar="N", type=_jobs, default=None,
         help="run at most N members at a time; 1 runs them one at a time "
-             f"with live output (default: %(default)s, from {JOBS_ENV} or "
+             f"with live output (default: ${JOBS_ENV} when set, else "
              f"min({MAX_DEFAULT_JOBS}, CPUs - {RESERVED_CPUS}))")
     parser.add_argument(
         "members", nargs="+", metavar="member",
@@ -414,12 +423,13 @@ def _parser(default: int) -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    try:
-        default = default_jobs(os.cpu_count(), os.environ)
-    except UsageError as error:
-        _parser(1).error(str(error))
-    parser = _parser(default)
+    parser = _parser()
     args = parser.parse_args(argv)
+    if args.jobs is None:
+        try:
+            args.jobs = default_jobs(os.cpu_count(), os.environ)
+        except UsageError as error:
+            parser.error(str(error))
     try:
         validate_members(args.members, Path.cwd())
     except UsageError as error:
