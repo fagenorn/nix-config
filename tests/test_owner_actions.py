@@ -145,6 +145,19 @@ class IdentityTest(Scratch):
                       checkout(self.root / "x", None), self.root / "missing")
         self.assertEqual(oa.fleet_slugs(), frozenset({SLUG, OTHER}))
 
+    def test_a_repo_named_with_a_leading_dot_is_a_fleet_repo(self):
+        dot = "octo/.github"
+        self.register(checkout(self.root / "d", dot))
+        self.assertEqual(oa.checkout_slug(self.root / "d"), dot)
+        self.assertEqual(oa.fleet_slugs(), frozenset({dot}))
+        self.world.respond_json("gh", oa.search_argv(dot), answer([]))
+        self.assertEqual(run_main(["refresh", "--repo", dot])[0], 0)
+        self.assertEqual(oa.read_entry(dot)["count"], 0)
+
+    def test_dot_names_and_dot_owners_are_not_slugs(self):
+        for bad in ("octo/.", "octo/..", ".octo/widgets", "octo/", "/widgets"):
+            self.assertIsNone(oa.SLUG_PATTERN.fullmatch(bad), bad)
+
     def test_corrupt_registry_propagates(self):
         path = agent_platform.registry_path()
         path.parent.mkdir(parents=True)
@@ -305,6 +318,24 @@ class RefreshTest(Scratch):
         self.assertEqual(json.loads(out), {"refreshed": [SLUG], "failed": [{"repo": OTHER, "error": "gh_failed"}]})
         self.assertEqual(oa.read_entry(SLUG)["count"], 1)
         self.assertEqual(oa.read_entry(OTHER)["count"], 0)
+
+    def test_a_cache_write_failure_for_one_repo_does_not_stop_the_fleet(self):
+        self.register(checkout(self.root / "w", SLUG), checkout(self.root / "g", OTHER))
+        self.world.respond_json("gh", oa.search_argv(OTHER), answer([]))
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"])]))
+        real = oa.write_entry
+
+        def write(slug, count, oldest):
+            if slug == OTHER:
+                raise PermissionError(13, "Permission denied")
+            real(slug, count, oldest)
+
+        with mock.patch.object(oa, "write_entry", write):
+            code, out, err = run_main(["refresh"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out), {"refreshed": [SLUG], "failed": [{"repo": OTHER, "error": "cache_write"}]})
+        self.assertIn(f"owner-actions: {OTHER}: ", err)
+        self.assertEqual(oa.read_entry(SLUG)["count"], 1)
 
     def test_success_exits_zero(self):
         self.world.respond_json("gh", oa.search_argv(SLUG), answer([]))

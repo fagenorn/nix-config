@@ -38,7 +38,8 @@ from typing import Any
 from agent_tools import agent_platform, forge_claim, forge_markers, siblings
 from agent_tools.github_remote import github_slug
 
-SLUG_PATTERN = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+# A repository name may begin with a dot (`org/.github`) but is never `.` or `..`; an owner never does.
+SLUG_PATTERN = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/(?!\.{1,2}$)[A-Za-z0-9_.-]+")
 
 COUNTED = ("owner-action", "agent:human-required")
 SCHEMA_VERSION = 1
@@ -512,6 +513,9 @@ def main(argv: list[str] | None = None) -> int:
         except forge_markers.ForgeError as error:
             failed.append({"repo": slug, "error": error.code})
             print(f"owner-actions: {slug}: {error}", file=sys.stderr)
+        except OSError as error:
+            failed.append({"repo": slug, "error": "cache_write"})
+            print(f"owner-actions: {slug}: cache_write: {error}", file=sys.stderr)
         else:
             refreshed.append(slug)
     print(json.dumps({"refreshed": refreshed, "failed": failed}, sort_keys=True))
