@@ -2067,10 +2067,6 @@ class SkillNamedReplyTest(DeliveredCustody, unittest.TestCase):
         self.merge_checkpoint(custody, 1)
         return self.checkpoint_reply
 
-    def reply_host_route(self):
-        self.setup_run()
-        return self.cli("host-route", "--route", "codex").stdout
-
     def test_the_drivers_cover_exactly_the_skill_named_replies(self):
         self.assertEqual(set(self.drivers()), skill_named_workflow_responses())
 

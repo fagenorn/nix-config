@@ -60,9 +60,10 @@ EVALUATED_ATTRIBUTE = (
 )
 
 # The run `Agent Workflow Tests` exists to perform (issue 608): the whole suite on the
-# source surface, at the job count the hosted 4-vCPU runner has always used.
+# source surface, at the job count the hosted 4-vCPU runner has always used, with node
+# for the deliver-standard program scenarios (issue 618).
 SUITE_INVOCATION = ("WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just "
-                    "--command just agent-workflow-tests")
+                    "nixpkgs#nodejs --command just agent-workflow-tests")
 
 REQUIRED_PAYLOAD_KEYS = {
     "required_status_checks",
