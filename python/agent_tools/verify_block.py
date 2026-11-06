@@ -45,7 +45,7 @@ EVENTS = ("deployed", "released")
 RUN_FORMS = ("command", "script", "probe", "ask", "act")
 SYSTEM_FORMS = ("command", "script", "probe")
 RUN_MEMBERS = {
-    "command": ("command", "args"),
+    "command": ("command", "args"),  # `args` is refused with its own finding
     "script": ("script", "at", "args"),
     "ask": ("ask",),
     "act": ("act", "then"),
@@ -92,7 +92,9 @@ def parse_block(text: str) -> tuple[object | None, list[dict]]:
         block = json.loads(
             body, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite_literal
         )
-    except ValueError as error:
+        # A lone surrogate (`"\udc80"`) decodes but names no path or argument any program can be handed.
+        json.dumps(block, ensure_ascii=False).encode("utf-8")
+    except (ValueError, RecursionError) as error:
         return None, [finding("block", "not_json", f"the block is not strict JSON: {error}")]
     return block, []
 
@@ -102,7 +104,7 @@ def is_int(value: object) -> bool:
 
 
 def is_sha(value: object) -> bool:
-    return isinstance(value, str) and SHA.match(value) is not None
+    return isinstance(value, str) and SHA.fullmatch(value) is not None
 
 
 def is_text(value: object) -> bool:
@@ -205,11 +207,11 @@ def check_host(check: dict, path: str, errors: list) -> None:
     host = check["host"]
     host_path = join(path, "host")
     if isinstance(host, str):
-        valid = host == "any" or HOST.match(host) is not None
+        valid = host == "any" or HOST.fullmatch(host) is not None
     elif isinstance(host, list):
         valid = (
             bool(host)
-            and all(isinstance(name, str) and HOST.match(name) for name in host)
+            and all(isinstance(name, str) and HOST.fullmatch(name) for name in host)
             and len(set(host)) == len(host)
         )
     else:
@@ -217,7 +219,7 @@ def check_host(check: dict, path: str, errors: list) -> None:
     if not valid:
         invalid(errors, host_path, "must be a hostname, 'any', or a non-empty list of distinct hostnames")
         return
-    concrete = isinstance(host, str) and host != "any" and HOST.match(host) is not None
+    concrete = isinstance(host, str) and host != "any" and HOST.fullmatch(host) is not None
     if check.get("effects") in ("paid", "live") and not concrete:
         errors.append(finding(host_path, "host_not_concrete", "a live or paid check must name exactly one host"))
 
@@ -228,16 +230,13 @@ def is_relative_posix(path: str) -> bool:
     return all(segment not in ("", ".", "..") for segment in path.split("/"))
 
 
-def check_args(run: dict, path: str, form: str, errors: list) -> None:
-    """`args` is plain data: strings, and for a command no option, which the declared program would parse."""
+def check_args(run: dict, path: str, errors: list) -> None:
+    """A script's `args` are data handed to the committed script: a list of strings."""
     if "args" not in run:
         return
     args = run["args"]
-    args_path = join(path, "args")
     if not (isinstance(args, list) and all(isinstance(arg, str) and "\0" not in arg for arg in args)):
-        invalid(errors, args_path, "must be a list of strings")
-    elif form == "command" and any(arg.startswith("-") for arg in args):
-        errors.append(finding(args_path, "inline_code", "a command's arguments are data, never options its program would parse"))
+        invalid(errors, join(path, "args"), "must be a list of strings")
 
 
 def check_single_line(value: object, path: str, errors: list) -> bool:
@@ -302,12 +301,15 @@ def check_form(run: object, path: str, merge: object, errors: list, refs: Refere
             errors.append(finding(join(path, "script"), "inline_code", "must be a relative path to a file committed in the repository"))
         if "at" in run and not is_sha(run["at"]):
             invalid(errors, join(path, "at"), "must be a 40-character lowercase hex sha")
-        check_args(run, path, form, errors)
+        check_args(run, path, errors)
     elif form == "command":
         command = run["command"]
-        if not isinstance(command, str) or not COMMAND_ID.match(command):
+        if not isinstance(command, str) or not COMMAND_ID.fullmatch(command):
             errors.append(finding(join(path, "command"), "inline_code", "must be a contract command id"))
-        check_args(run, path, form, errors)
+        if "args" in run:
+            # A declared argv is the whole command: a `just` recipe pastes its parameters into shell
+            # lines unquoted and runs a surplus argument as another recipe, so no argument is data.
+            errors.append(finding(join(path, "args"), "inline_code", "a contract command runs with its declared argv only"))
     elif form == "ask":
         if check_single_line(run["ask"], join(path, "ask"), errors) and \
                 APPROVAL_VERB.search(run["ask"]) and APPROVAL_OBJECT.search(run["ask"]):
@@ -381,7 +383,7 @@ def check_reason(check: dict, path: str, errors: list) -> None:
 def check_one(check: object, path: str, merge: object, errors: list, refs: References) -> None:
     if not closed_object(check, path, CHECK_FIELDS, CHECK_REQUIRED, errors):
         return
-    if "ac" in check and not (isinstance(check["ac"], str) and AC.match(check["ac"])):
+    if "ac" in check and not (isinstance(check["ac"], str) and AC.fullmatch(check["ac"])):
         invalid(errors, join(path, "ac"), "must match [A-Za-z][A-Za-z0-9_.-]*")
     if "kind" in check:
         check_choice(check["kind"], join(path, "kind"), KINDS, errors)

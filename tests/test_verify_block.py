@@ -135,7 +135,21 @@ class LintTableTest(unittest.TestCase):
         ("command with spaces", with_check(run={"command": "python3 -c 1"}), "checks[0].run.command", "inline_code"),
         ("command not a string", with_check(run={"command": ["test"]}), "checks[0].run.command", "inline_code"),
         ("command option arg", with_check(run={"command": "test", "args": ["--expr", "1"]}), "checks[0].run.args", "inline_code"),
-        ("command args not strings", with_check(run={"command": "test", "args": [1]}), "checks[0].run.args", "invalid_value"),
+        # A `just` recipe pastes its parameters into shell lines and runs a surplus argument as a recipe.
+        ("command shell text arg", with_check(run={"command": "nix-build", "args": ["mbp", "x; id"]}),
+         "checks[0].run.args", "inline_code"),
+        ("command surplus recipe arg", with_check(run={"command": "nix-build", "args": ["mbp", "", "switch"]}),
+         "checks[0].run.args", "inline_code"),
+        ("script args not strings", with_check(run={"script": "scripts/x.py", "at": SHA2, "args": [1]}),
+         "checks[0].run.args", "invalid_value"),
+        ("deeply nested json", "[" * 200000 + "]" * 200000, "block", "not_json"),
+        ("lone surrogate", '{"v": 1, "merge": "' + SHA + '", "checks": [{"ac": "AC1", "kind": "evidence", "host": "mbp", '
+                           '"when": {"not_before": "2026-12-01T00:00:00+00:00"}, "run": {"script": "justfile\\udc80", "at": "' + SHA2 + '"}}]}',
+         "block", "not_json"),
+        ("sha with trailing newline", with_check(run={"probe": "deployed_includes", "sha": SHA + "\n"}), "checks[0].run.sha", "invalid_value"),
+        ("host with trailing newline", with_check(host="mbp\n"), "checks[0].host", "invalid_value"),
+        ("paid host any with newline", with_check(effects="paid", host="any\n"), "checks[0].host", "invalid_value"),
+        ("command id with trailing newline", with_check(run={"command": "test\n"}), "checks[0].run.command", "inline_code"),
         ("script absolute path", with_check(run={"script": "/bin/sh", "at": SHA2}), "checks[0].run.script", "inline_code"),
         ("script escapes repo", with_check(run={"script": "../x.py", "at": SHA2}), "checks[0].run.script", "inline_code"),
         ("script dot segment", with_check(run={"script": "./x.py", "at": SHA2}), "checks[0].run.script", "inline_code"),
@@ -272,7 +286,6 @@ class ReferenceTest(unittest.TestCase):
 
     def test_accept_rows(self):
         for name, run in (("declared command", {"command": "test"}),
-                          ("declared command with data args", {"command": "test", "args": ["AC1", "x=y"]}),
                           ("committed script", {"script": "scripts/check-thing.py", "at": self.head, "args": ["--fast"]})):
             with self.subTest(name):
                 result, verdict = self.lint_here(run)
@@ -294,7 +307,7 @@ class ReferenceTest(unittest.TestCase):
 
     def test_refuse_rows(self):
         rows = (("undeclared command", {"command": "not-in-contract"}, "checks[0].run.command", "not_declared"),
-                ("git is not a contract command", {"command": "git", "args": ["log"]}, "checks[0].run.command", "not_declared"),
+                ("git is not a contract command", {"command": "git"}, "checks[0].run.command", "not_declared"),
                 ("sh is not a contract command", {"command": "sh"}, "checks[0].run.command", "not_declared"),
                 ("script absent at commit", {"script": "scripts/missing.py", "at": self.head}, "checks[0].run.script", "not_committed"),
                 ("commit absent", {"script": "scripts/check-thing.py", "at": SHA2}, "checks[0].run.at", "unverified_reference"),

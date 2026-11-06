@@ -131,7 +131,7 @@ def read_input(path: str) -> str:
 
 
 def run_lint(args: argparse.Namespace) -> int:
-    if args.pr_head is not None and not SHA.match(args.pr_head):
+    if args.pr_head is not None and not SHA.fullmatch(args.pr_head):
         print(f"verify-pending: --pr-head {args.pr_head} is not a 40-character lowercase hex sha", file=sys.stderr)
         return 2
     if args.pr_workflow and args.pr_head is None and args.pr_branch is None:
@@ -175,7 +175,7 @@ def run_count_since(args: argparse.Namespace) -> int:
     except KeyError as error:
         print(f"verify-pending: an element has no {error} member", file=sys.stderr)
         return 2
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RecursionError) as error:
         print(f"verify-pending: count-since: {error}", file=sys.stderr)
         return 2
     print(json.dumps({"count": count, "needed": args.n}, sort_keys=True))
