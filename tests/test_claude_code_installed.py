@@ -76,6 +76,12 @@ class ClaudeSettingsInstalledTest(unittest.TestCase):
     def test_the_kept_skill_creator_is_the_plugin_copy(self):
         self.assertEqual(self.settings.get("enabledPlugins"), EXPECTED_PLUGINS)
 
+    def test_commits_and_prs_carry_no_attribution(self):
+        # Issue 619: no Co-Authored-By trailer, PR line or session link anywhere.
+        self.assertEqual(self.settings.get("attribution"),
+                         {"commit": "", "pr": "", "sessionUrl": False})
+        self.assertNotIn("includeCoAuthoredBy", self.settings)
+
 
 class ClaudeLaunchersInstalledTest(unittest.TestCase):
     @classmethod

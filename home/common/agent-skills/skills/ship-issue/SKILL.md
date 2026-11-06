@@ -258,7 +258,7 @@ The final ship-summary contains only `issue`, `state`, `pr_url`, full `merge_sha
 
 ## Notes
 
-- Merge commits, learning-doc updates, and blocker fixes fall under standing local-commit authorization. Don't re-confirm each. The `Co-Authored-By` trailer follows retained `bindings.vcs.commit.co_authored_by`.
+- Merge commits, learning-doc updates, and blocker fixes fall under standing local-commit authorization. Don't re-confirm each.
 - If a phase shows an earlier one was wrong (a review finds a misaligned spec, say), back up to that `from-issue` phase. Don't paper over.
 - Absent sibling skills (`from-issue`, `sdd`, `worktrees`) degrade to no-ops; this skill still runs.
 

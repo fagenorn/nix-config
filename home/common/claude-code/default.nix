@@ -240,6 +240,13 @@ let
     skipDangerousModePermissionPrompt = true;
     skipWorkflowUsageWarning = true;
 
+    # No Co-Authored-By trailer, PR line or session link in any project (#619).
+    attribution = {
+      commit = "";
+      pr = "";
+      sessionUrl = false;
+    };
+
     env = {
       CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
       # Ceiling for an explicit Bash timeout (60 min), so a long verification
