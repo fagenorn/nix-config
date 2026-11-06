@@ -8,6 +8,7 @@
 
 import json
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -86,6 +87,9 @@ class References(Protocol):
 
     def script(self, path: str, sha: str) -> tuple[str, str]:
         """`(commit_state, path_state)`; `path_state` is `"unknown"` unless the commit is `"present"`."""
+
+    def flake(self, merge: str) -> tuple[str, str] | None:
+        """`None` when there is no repository to ask, else the `(commit_state, path_state)` of `flake.nix` at `merge`."""
 
 
 def finding(field: str, code: str, message: str) -> dict[str, str]:
@@ -422,7 +426,64 @@ def check_one(check: object, path: str, errors: list, refs: References) -> None:
     check_reason(check, path, errors)
 
 
-def lint_block(block: object, *, refs: References) -> dict:
+def valid_checks(block: dict) -> list[tuple[int, dict]]:
+    """The `(index, check)` pairs of a block whose checks are objects."""
+    checks = block.get("checks")
+    if not isinstance(checks, list):
+        return []
+    return [(index, check) for index, check in enumerate(checks) if isinstance(check, dict)]
+
+
+def check_pre_merge(block: dict, errors: list, pr_workflows: Sequence[str], pr_head: str | None, pr_branch: str | None) -> None:
+    """A check that awaits a CI run of the pull request itself cannot be held after the merge."""
+    for index, check in valid_checks(block):
+        when = check.get("when")
+        if check.get("kind") != "evidence" or not isinstance(when, dict) or set(when) != {"ci_run_includes"}:
+            continue
+        ci = when["ci_run_includes"]
+        if not isinstance(ci, dict) or ci.get("workflow") not in pr_workflows:
+            continue
+        if (pr_head is not None and ci.get("sha") == pr_head) or (pr_branch is not None and ci.get("branch") == pr_branch):
+            errors.append(finding(f"checks[{index}].when", "pre_merge_only", "this run belongs to the pull request, not to the merge commit"))
+
+
+def check_context(
+    block: dict, errors: list, warnings: list, refs: References, code_unmet: Sequence[str],
+    pr_workflows: Sequence[str], pr_head: str | None, pr_branch: str | None, blocks: Sequence[str],
+) -> None:
+    if code_unmet:
+        errors.append(finding("code_unmet", "code_unmet", f"acceptance criteria unmet in code: {', '.join(code_unmet)}"))
+    if pr_workflows:
+        check_pre_merge(block, errors, pr_workflows, pr_head, pr_branch)
+    checks = valid_checks(block)
+    if blocks:
+        for index, check in checks:
+            run = check.get("run")
+            if isinstance(run, dict) and "ask" in run:
+                warnings.append(finding(f"checks[{index}].run.ask", "ask_blocks_issues", f"a human ask holds the issue open and blocks {', '.join(blocks)}"))
+    deploys = [index for index, check in checks if isinstance(check.get("when"), dict) and "deployed_includes" in check["when"]]
+    if deploys and is_sha(block.get("merge")):
+        probe = refs.flake(block["merge"])
+        if probe is None:
+            return
+        commit, found = probe
+        if commit != "present":
+            warnings.append(finding("merge", "merge_not_found", "the merge commit could not be found in the repository"))
+        elif found == "absent":
+            for index in deploys:
+                warnings.append(finding(f"checks[{index}].when.deployed_includes", "no_flake_at_merge", "the merge commit has no flake.nix to deploy"))
+
+
+def lint_block(
+    block: object,
+    *,
+    refs: References,
+    code_unmet: Sequence[str] = (),
+    pr_workflows: Sequence[str] = (),
+    pr_head: str | None = None,
+    pr_branch: str | None = None,
+    blocks: Sequence[str] = (),
+) -> dict:
     errors: list[dict] = []
     warnings: list[dict] = []
     if closed_object(block, "", TOP_FIELDS, TOP_REQUIRED, errors):
@@ -437,4 +498,7 @@ def lint_block(block: object, *, refs: References) -> dict:
             else:
                 for index, check in enumerate(checks):
                     check_one(check, f"checks[{index}]", errors, refs)
+        check_context(block, errors, warnings, refs, code_unmet, pr_workflows, pr_head, pr_branch, blocks)
+    elif code_unmet:
+        check_context({}, errors, warnings, refs, code_unmet, (), None, None, ())
     return {"ok": not errors, "errors": errors, "warnings": warnings}

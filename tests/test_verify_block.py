@@ -204,6 +204,40 @@ class LintTableTest(unittest.TestCase):
                 self.assertIn((field, code), [(e["field"], e["code"]) for e in verdict["errors"]])
 
 
+    PR_ARGS = ["--pr-workflow", "CI", "--pr-head", SHA2, "--pr-branch", "issue-1-x"]
+    CONTEXT_REFUSE = [
+        ("code unmet", base_block(), ["--code-unmet", "AC2"], "code_unmet", "code_unmet"),
+        ("awaits the PR head run", with_check(when={"ci_run_includes": {"workflow": "CI", "branch": "issue-1-x", "sha": SHA2}}),
+         PR_ARGS, "checks[0].when", "pre_merge_only"),
+        ("awaits the PR head on another branch", with_check(when={"ci_run_includes": {"workflow": "CI", "branch": "other", "sha": SHA2}}),
+         PR_ARGS, "checks[0].when", "pre_merge_only"),
+        ("awaits the PR branch", with_check(when={"ci_run_includes": {"workflow": "CI", "branch": "issue-1-x", "sha": "c" * 40}}),
+         PR_ARGS, "checks[0].when", "pre_merge_only"),
+    ]
+    CONTEXT_ACCEPT = [
+        ("same workflow after merge", with_check(when={"ci_run_includes": {"workflow": "CI", "branch": "main", "sha": SHA}}),
+         PR_ARGS),
+        ("other workflow", with_check(when={"ci_run_includes": {"workflow": "nightly", "branch": "issue-1-x", "sha": SHA2}}),
+         PR_ARGS),
+        ("ci plus deploy", with_check(when={"deployed_includes": SHA,
+                                            "ci_run_includes": {"workflow": "CI", "branch": "issue-1-x", "sha": SHA2}}),
+         PR_ARGS),
+    ]
+
+    def test_context_refuse_rows(self):
+        for name, block, args, field, code in self.CONTEXT_REFUSE:
+            with self.subTest(name):
+                result, verdict = lint(block, *args)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn((field, code), [(e["field"], e["code"]) for e in verdict["errors"]])
+
+    def test_context_accept_rows(self):
+        for name, block, args in self.CONTEXT_ACCEPT:
+            with self.subTest(name):
+                result, verdict = lint(block, *args)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class ReferenceTest(unittest.TestCase):
     """D9 against a committed copy of the eval fixture project (contract command id `test`)."""
 
@@ -269,6 +303,67 @@ class CommandShapeTest(unittest.TestCase):
     def test_verdict_is_one_sorted_json_line(self):
         result, verdict = lint(base_block())
         self.assertEqual(result.stdout, json.dumps(verdict, sort_keys=True) + "\n")
+
+    def test_pr_workflow_without_pr_revision_is_usage(self):
+        result, verdict = lint(base_block(), "--pr-workflow", "CI")
+        self.assertEqual((result.returncode, verdict), (2, None))
+        result, verdict = lint(base_block(), "--pr-workflow", "CI", "--pr-head", "abc")
+        self.assertEqual((result.returncode, verdict), (2, None))
+
+
+def git_repo(directory, with_flake):
+    env = {**os.environ, **HERMETIC_GIT}
+    def git(*args):
+        return subprocess.run(["git", "-C", str(directory), *args], env=env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+    git("init", "-q")
+    (Path(directory) / ("flake.nix" if with_flake else "README")).write_text("{}\n")
+    git("add", "-A")
+    git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture")
+    return git("rev-parse", "HEAD")
+
+
+def deploy_block(sha):
+    block = base_block()
+    block["merge"] = sha
+    block["checks"][0]["when"] = {"deployed_includes": sha}
+    return block
+
+
+class WarningTableTest(unittest.TestCase):
+    def assert_warns(self, block, args, field, code):
+        result, verdict = lint(block, *args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(verdict["ok"])
+        self.assertIn((field, code), [(w["field"], w["code"]) for w in verdict["warnings"]])
+        return verdict
+
+    def test_ask_in_blocking_issue_warns(self):
+        block = with_check(kind="human", reason="senses", run=ASK)
+        self.assert_warns(block, ["--blocks", "630"], "checks[0].run.ask", "ask_blocks_issues")
+
+    def test_deploy_check_without_flake_warns(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sha = git_repo(temp, with_flake=False)
+            self.assert_warns(deploy_block(sha), ["--repo-root", temp],
+                              "checks[0].when.deployed_includes", "no_flake_at_merge")
+
+    def test_deploy_check_with_flake_is_silent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sha = git_repo(temp, with_flake=True)
+            result, verdict = lint(deploy_block(sha), "--repo-root", temp)
+            self.assertEqual((result.returncode, verdict["warnings"]), (0, []))
+
+    def test_merge_absent_from_repo_is_not_a_missing_flake(self):
+        with tempfile.TemporaryDirectory() as temp:
+            git_repo(temp, with_flake=True)
+            verdict = self.assert_warns(deploy_block(SHA), ["--repo-root", temp], "merge", "merge_not_found")
+            self.assertNotIn("no_flake_at_merge", [w["code"] for w in verdict["warnings"]])
+
+    def test_no_blocks_no_ask_warning(self):
+        block = with_check(kind="human", reason="senses", run=ASK)
+        result, verdict = lint(block)
+        self.assertEqual((result.returncode, verdict["warnings"]), (0, []))
 
 
 if __name__ == "__main__":

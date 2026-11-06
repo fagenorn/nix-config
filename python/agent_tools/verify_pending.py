@@ -3,7 +3,8 @@
 `verify-pending lint --input <path|->` prints the verdict as one line of
 `json.dumps(verdict, sort_keys=True)` and exits 0 when the block is accepted,
 1 when it is refused and 2 on a usage error, a `--repo-root` that is not a git
-work tree, or an unreadable input path.
+work tree, an unreadable input path, a `--pr-head` that is not a sha, or `--pr-workflow`
+with neither `--pr-head` nor `--pr-branch`.
 """
 
 import argparse
@@ -14,7 +15,7 @@ import subprocess
 import sys
 
 from agent_tools.resolve_project import ContractError, resolve
-from agent_tools.verify_block import lint_block, parse_block
+from agent_tools.verify_block import SHA, lint_block, parse_block
 
 GIT_TIMEOUT = 60
 
@@ -65,6 +66,11 @@ class CliReferences:
             return "unknown", "unknown"
         return git_object(self.root, sha, path)
 
+    def flake(self, merge: str) -> tuple[str, str] | None:
+        if self.root is None:
+            return None
+        return git_object(self.root, merge, "flake.nix")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="verify-pending")
@@ -72,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
     lint = commands.add_parser("lint", help="check a verify block")
     lint.add_argument("--input", required=True, help="a hold comment or JSON block; - reads stdin")
     lint.add_argument("--repo-root", help="a git work tree, to check command and script references")
+    lint.add_argument("--code-unmet", action="append", default=[], metavar="ID", help="an acceptance criterion unmet in code")
+    lint.add_argument("--pr-workflow", action="append", default=[], metavar="NAME", help="a CI workflow that runs on the pull request")
+    lint.add_argument("--pr-head", help="the pull request head sha")
+    lint.add_argument("--pr-branch", help="the pull request branch")
+    lint.add_argument("--blocks", action="append", default=[], metavar="ISSUE", help="an issue this one blocks")
     return parser
 
 
@@ -83,6 +94,12 @@ def read_input(path: str) -> str:
 
 
 def run_lint(args: argparse.Namespace) -> int:
+    if args.pr_head is not None and not SHA.match(args.pr_head):
+        print(f"verify-pending: --pr-head {args.pr_head} is not a 40-character lowercase hex sha", file=sys.stderr)
+        return 2
+    if args.pr_workflow and args.pr_head is None and args.pr_branch is None:
+        print("verify-pending: --pr-workflow needs --pr-head or --pr-branch", file=sys.stderr)
+        return 2
     root = None
     if args.repo_root is not None:
         root = os.path.abspath(args.repo_root)
@@ -102,7 +119,10 @@ def run_lint(args: argparse.Namespace) -> int:
     if parse_errors:
         verdict = {"ok": False, "errors": parse_errors, "warnings": []}
     else:
-        verdict = lint_block(block, refs=CliReferences(root))
+        verdict = lint_block(
+            block, refs=CliReferences(root), code_unmet=args.code_unmet, pr_workflows=args.pr_workflow,
+            pr_head=args.pr_head, pr_branch=args.pr_branch, blocks=args.blocks,
+        )
     print(json.dumps(verdict, sort_keys=True))
     return 0 if verdict["ok"] else 1
 
