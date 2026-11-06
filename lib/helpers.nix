@@ -8,6 +8,11 @@
 let
   lib = inputs.nixpkgs.lib;
   attrs = import ./attrs.nix { inherit lib; };
+  # The nix-config commit this generation was built from, shown by
+  # darwin-version --json and nixos-version --json so a check can tell whether
+  # a merge is deployed on a host. A dirty tree yields <rev>-dirty; null only
+  # when the flake has no git metadata at all.
+  configurationRevision = inputs.self.rev or inputs.self.dirtyRev or null;
   scanPaths =
     path:
     builtins.map (f: path + "/${f}") (
@@ -86,6 +91,7 @@ in
         inputs.home-manager.darwinModules.home-manager
         {
           networking.hostName = hostname;
+          system.configurationRevision = configurationRevision;
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
           home-manager.extraSpecialArgs = { inherit inputs libx myvars; };
@@ -229,6 +235,7 @@ in
       modules = [
         # === Core NixOS/WSL Setup ===
         inputs.nixos-wsl.nixosModules.wsl # Use the nixos-wsl module
+        { system.configurationRevision = configurationRevision; }
         ./../hosts/common/linux-common.nix # Your common Linux settings
         # customConf # Include host-specific config if it exists
 
