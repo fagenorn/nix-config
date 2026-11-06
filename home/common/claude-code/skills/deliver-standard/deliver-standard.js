@@ -116,6 +116,12 @@ if (!setup || !setup.ok) return { stage: 'setup', result: setup }
 const missing = ['slug', 'integration_branch', 'default_branch', 'branch', 'merge_strategy', 'co_authored_by', 'delete_branch', 'unset_env', 'verification']
   .concat(CONT ? [] : ['worktree_path'])  // a resume carries it in cont.setup
   .filter(f => !present(setup[f]))
+// Each review capability needs an explicit state, and an available one its command id, or a review could vanish silently.
+for (const k of ['code', 'plan']) {
+  const st = setup.review_state && setup.review_state[k]
+  if (!present(st)) missing.push(`review_state.${k}`)
+  else if (st === 'available' && !(setup.review && present(setup.review[k]))) missing.push(`review.${k}`)
+}
 if (missing.length) return { stage: 'setup', result: setup, missing, ...(CONT ? { cont: CONT } : {}) }
 if (CONT) Object.assign(setup, { worktree_path: CONT.setup.worktree_path, worktree: CONT.setup.worktree, base_sha: CONT.setup.base_sha, plan_dir: CONT.setup.plan_dir })
 
@@ -123,9 +129,11 @@ let plan = CONT && CONT.plan ? CONT.plan : null
 let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
 const taskLog = CONT && CONT.done ? CONT.done.slice() : []
 let claimIncomplete = !!(CONT && CONT.claim_incomplete)
-const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, ...(claimIncomplete ? { claim_incomplete: true } : {}) } })
+// A partial task's edits stay claimed through any stop until that task is done.
+let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
+const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
 
-if (CONT && setup.dirty && !setup.merged_pr && CONT.partial === undefined) {
+if (CONT && setup.dirty && !setup.merged_pr && partial === undefined) {
   return stop('dirty', { details: `the worktree ${setup.worktree} has uncommitted changes no task claims; commit or discard them, then resume` })
 }
 
@@ -281,6 +289,7 @@ Re-review only these previously reported findings for task ${t.n} against the fi
   }
   if (findingsOf(review).length) return halt('task-review', { task: t, review })
   taskLog.push({ n: t.n, commit: impl.commit, review_rounds: rounds, reviewer })
+  if (partial === t.n) partial = undefined
 }
 
 // ---------------- Final review ----------------
@@ -360,11 +369,14 @@ const prR = await agent(`${CTX}
 Open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; final review ${chunked ? 'chunked' : 'whole'}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine}; then the attribution lines your instructions give for pull requests, if any. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
 ${RULES}`, { label: 'pr', phase: 'Ship', model: 'sonnet', schema: { type: 'object', properties: { pr: { type: 'integer' }, head: { type: 'string' }, notes: { type: 'string' } }, required: ['pr', 'head'] } })
 if (!prR || !prR.pr) return stop('pr', { result: prR })
+// The shipped head must be the verified head; after a sync, the reviewed merge commit.
+if (prR.head !== verify.head) return stop('head-moved', { pr: prR.pr, expected: verify.head, head: prR.head })
 const PR = prR.pr
 
 const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind'] }, head: { type: 'string' }, required: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
 const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: { type: 'string' }, resolved_files: STRS, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 let head = prR.head
+let expected = verify.head
 let syncs = 0
 for (;;) {
   const ck = await agent(`${CTX}
@@ -372,6 +384,7 @@ Wait for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local br
 ${RULES}`, { label: `checks-${syncs + 1}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: CHECKS })
   if (!ck) return stop('checks', { pr: PR, checks: null })
   if (ck.state === 'failed') return stop('checks', { pr: PR, checks: ck })
+  if (ck.head !== expected) return stop('head-moved', { pr: PR, expected, head: ck.head })
   head = ck.head
   if (ck.state === 'passed') break
   if (syncs >= 2) return stop('sync-contention', { pr: PR, syncs })
@@ -379,7 +392,8 @@ ${RULES}`, { label: `checks-${syncs + 1}`, phase: 'Ship', model: 'sonnet', effor
   const sy = await agent(`${CTX}
 The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, commit the merge, and run only the tests covering the files the resolution touched. Do not push. Return conflicted, merge_commit (full sha), resolved_files and the tests you ran; status blocked with notes if you cannot resolve it safely.
 ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
-  if (!sy || sy.status !== 'done') return stop('sync', { pr: PR, sync: sy })
+  if (!sy || sy.status !== 'done' || !present(sy.merge_commit)) return stop('sync', { pr: PR, sync: sy })
+  expected = sy.merge_commit
   if (sy.conflicted) {
     const sr = await agent(`${CTX}
 Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} show --cc ${sy.merge_commit} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer-lite', schema: FINDINGS })

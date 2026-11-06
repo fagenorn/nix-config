@@ -70,7 +70,7 @@ class HappyPathTest(unittest.TestCase):
         head = "b" * 40
         _, calls = run(patch={"setup": {"merge_strategy": "squash", "delete_branch": False,
                                         "unset_env": ["GH_TOKEN"]},
-                              "checks-1": {"head": head}})
+                              "verify": {"head": head}, "pr": {"head": head}, "checks-1": {"head": head}})
         merge = prompt(calls, "merge")
         self.assertIn(f"unset GH_TOKEN && gh pr merge 42 --repo owner/repo --squash "
                       f"--match-head-commit {head}\n", merge)
@@ -165,6 +165,15 @@ class ContractTest(unittest.TestCase):
                         patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
         self.assertEqual(result["stage"], "review-blocked")
         self.assertTrue(result["cont"]["claim_incomplete"])
+
+    def test_review_capability_without_state_or_command_stops(self):
+        for patch, field in (({"review_state": {"plan": "available"}}, "review_state.code"),
+                             ({"review": {"plan": "pr"}}, "review.code")):
+            with self.subTest(field=field):
+                result, calls = run(patch={"setup": patch})
+                self.assertEqual(result["stage"], "setup")
+                self.assertEqual(result["missing"], [field])
+                self.assertEqual(labels(calls), ["setup"])
 
     def test_blocked_review_capability_stops(self):
         result, calls = run(patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
@@ -297,6 +306,19 @@ class ResumeTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"dirty": True}})
         self.assertEqual(result["stage"], "dirty")
         self.assertEqual(labels(calls), ["setup"])
+
+    def test_a_stop_before_the_partial_task_keeps_it_partial(self):
+        result, _ = run(args=dict(ARGS, cont=self.cont(partial=2)),
+                        patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
+        self.assertEqual((result["stage"], result["cont"]["partial"]), ("review-blocked", 2))
+        result, calls = run(args=dict(ARGS, cont=result["cont"]), patch={"setup": {"dirty": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("uncommitted edits", prompt(calls, "impl-2"))
+
+    def test_partial_is_dropped_once_its_task_is_done(self):
+        result, _ = run(args=dict(ARGS, cont=self.cont(partial=2)), replies={"verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertNotIn("partial", result["cont"])
 
     def test_dirty_resume_of_the_partial_task_continues(self):
         result, _ = run(args=dict(ARGS, cont=self.cont(partial=2)), patch={"setup": {"dirty": True}})
@@ -435,6 +457,22 @@ class ShipTest(unittest.TestCase):
         result, _ = run(replies={"close-out": {"issue_state": "OPEN", "notes": "close failed"}})
         self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
         self.assertEqual(result["pr"], 42)
+
+    def test_pushed_head_must_be_the_verified_head(self):
+        result, calls = run(patch={"pr": {"head": "c" * 40}})
+        self.assertEqual((result["stage"], result["expected"]), ("head-moved", SHA))
+        self.assertNotIn("checks-1", labels(calls))
+        result, calls = run(patch={"checks-1": {"head": "c" * 40}})
+        self.assertEqual(result["stage"], "head-moved")
+        self.assertNotIn("merge", labels(calls))
+
+    def test_after_a_sync_the_merge_commit_is_the_expected_head(self):
+        merge = "d" * 40
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA},
+                                     "checks-2": {"state": "passed", "head": merge}},
+                            patch={"sync-1": {"merge_commit": merge}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn(f"--match-head-commit {merge}", prompt(calls, "merge"))
 
     def test_unmerged_pr_stops_before_close_out(self):
         result, calls = run(replies={"merge": {"merged": False, "notes": "head moved"}})
