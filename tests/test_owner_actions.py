@@ -186,9 +186,11 @@ def node(labels, events=(), *, label_total=None, event_total=None):
                               "nodes": [{"createdAt": at, "label": {"name": n}} for n, at in events]}}
 
 
-def answer(nodes, label_exists=True, next_cursor=None):
+def answer(nodes, label_exists=True, next_cursor=None, total=None):
+    """One search page; `total` is the search's issueCount, the number of nodes when omitted."""
     return {"data": {"repository": {"label": {"name": "owner-action"} if label_exists else None},
-                     "search": {"pageInfo": {"hasNextPage": next_cursor is not None,
+                     "search": {"issueCount": len(nodes) if total is None else total,
+                                "pageInfo": {"hasNextPage": next_cursor is not None,
                                              "endCursor": next_cursor},
                                 "nodes": nodes}}}
 
@@ -252,10 +254,10 @@ class RefreshTest(Scratch):
         self.world.respond_json("gh", oa.search_argv(SLUG), answer([
             node(["owner-action"], [("owner-action", "2026-11-01T00:00:00Z")]),
             node(["owner-action"], [("owner-action", "2026-11-02T00:00:00Z")]),
-        ], next_cursor="c1"))
+        ], next_cursor="c1", total=3))
         self.world.respond_json("gh", oa.search_argv(SLUG, "c1"), answer([
             node(["agent:human-required"], [("agent:human-required", "2026-10-15T00:00:00Z")]),
-        ], label_exists=False))
+        ], label_exists=False, total=3))
         self.assertEqual(oa.refresh(SLUG), {"schema_version": 1, "repo": SLUG, "count": 3,
                                             "oldest": "2026-10-15T00:00:00Z"})
         self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG), oa.search_argv(SLUG, "c1")])
@@ -284,6 +286,65 @@ class RefreshTest(Scratch):
             oa.refresh(SLUG)
         self.assertEqual(raised.exception.code, "payload_incomplete")
         self.assertIsNone(oa.read_entry(SLUG))
+
+    def test_a_search_capped_below_its_issue_count_is_incomplete(self):
+        oa.write_entry(SLUG, 3, "2026-10-01T00:00:00Z")
+        before = oa.cache_path(SLUG).read_bytes()
+        nodes = [node(["owner-action"]) for _ in range(1000)]
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer(nodes, total=1101))
+        code, out, err = run_main(["refresh", "--repo", SLUG])
+        self.assertEqual((code, json.loads(out)["failed"]), (1, [{"repo": SLUG, "error": "payload_incomplete"}]))
+        self.assertEqual(oa.cache_path(SLUG).read_bytes(), before)
+
+    def test_the_search_asks_for_its_issue_count_and_requires_one(self):
+        self.assertIn("issueCount", oa.QUERY)
+        for count in (None, True, "1", 1.5):
+            self.world.reset()
+            payload = answer([node(["owner-action"])])
+            if count is None:
+                del payload["data"]["search"]["issueCount"]
+            else:
+                payload["data"]["search"]["issueCount"] = count
+            self.world.respond_json("gh", oa.search_argv(SLUG), payload)
+            with self.assertRaises(oa.forge_markers.ForgeError) as raised:
+                oa.refresh(SLUG)
+            self.assertEqual(raised.exception.code, "payload_invalid", count)
+        self.assertIsNone(oa.read_entry(SLUG))
+
+    def test_a_missing_or_non_boolean_has_next_page_is_invalid(self):
+        oa.write_entry(SLUG, 3, "2026-10-01T00:00:00Z")
+        before = oa.cache_path(SLUG).read_bytes()
+        for info in ({}, {"hasNextPage": None}, {"hasNextPage": "false"}, {"hasNextPage": 0},
+                     {"endCursor": "c1"}):
+            self.world.reset()
+            payload = answer([])
+            payload["data"]["search"]["pageInfo"] = info
+            self.world.respond_json("gh", oa.search_argv(SLUG), payload)
+            code, out, err = run_main(["refresh", "--repo", SLUG])
+            self.assertEqual((code, json.loads(out)["failed"]),
+                             (1, [{"repo": SLUG, "error": "payload_invalid"}]), info)
+            self.assertEqual(oa.cache_path(SLUG).read_bytes(), before)
+
+    def test_a_malformed_api_timestamp_is_invalid_and_writes_nothing(self):
+        oa.write_entry(SLUG, 3, "2026-10-01T00:00:00Z")
+        before = oa.cache_path(SLUG).read_bytes()
+        for at in ("yesterday", "2026-13-45T00:00:00Z", "2026-11-01T00:00:00", ""):
+            self.world.reset()
+            self.world.respond_json("gh", oa.search_argv(SLUG), answer([
+                node(["owner-action"], [("owner-action", at)])]))
+            code, out, err = run_main(["refresh", "--repo", SLUG])
+            self.assertEqual((code, json.loads(out)["failed"]),
+                             (1, [{"repo": SLUG, "error": "payload_invalid"}]), at)
+            self.assertEqual(oa.cache_path(SLUG).read_bytes(), before)
+
+    def test_a_malformed_timestamp_fails_one_repo_not_the_fleet(self):
+        self.register(checkout(self.root / "widgets", SLUG), checkout(self.root / "gadgets", OTHER))
+        self.world.respond_json("gh", oa.search_argv(OTHER), answer([
+            node(["owner-action"], [("owner-action", "not a date")])]))
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"])]))
+        code, out, err = run_main(["refresh"])
+        self.assertEqual((code, json.loads(out)), (1, {"refreshed": [SLUG],
+                                                       "failed": [{"repo": OTHER, "error": "payload_invalid"}]}))
 
     def test_a_repeated_cursor_is_invalid(self):
         self.world.respond_json("gh", oa.search_argv(SLUG), answer([], next_cursor="c1"))
@@ -368,7 +429,9 @@ class RefreshTest(Scratch):
                      json.dumps({"schema_version": 1, "repo": SLUG, "count": True, "oldest": None}),
                      json.dumps({"schema_version": 2, "repo": SLUG, "count": 1, "oldest": None}),
                      json.dumps({"schema_version": 1, "repo": SLUG, "count": -1, "oldest": None}),
-                     json.dumps({"schema_version": 1, "repo": SLUG, "count": 1, "oldest": None, "x": 1})):
+                     json.dumps({"schema_version": 1, "repo": SLUG, "count": 1, "oldest": None, "x": 1}),
+                     json.dumps({"schema_version": 1, "repo": SLUG, "count": 1, "oldest": "not a date"}),
+                     json.dumps({"schema_version": 1, "repo": SLUG, "count": 1, "oldest": "2026-11-01T00:00:00"})):
             path.write_text(text, encoding="utf-8")
             self.assertIsNone(oa.read_entry(SLUG), text)
 
@@ -585,6 +648,15 @@ class StatuslineTest(Scratch):
         oa.cache_path(SLUG).write_text("{", encoding="utf-8")
         self.assertEqual(self.line({"cwd": str(self.widgets)}), "")
         self.popen.assert_called_once()
+
+    def test_a_malformed_cached_timestamp_counts_as_missing_and_schedules_a_refresh(self):
+        for oldest in ("not a date", "2026-11-01T00:00:00"):
+            self.popen.reset_mock()
+            attempted(SLUG, 600)
+            oa.write_entry(SLUG, 2, oldest)
+            self.assertEqual(self.line({"cwd": str(self.widgets)}), "", oldest)
+            self.assertEqual(self.err, "")
+            self.popen.assert_called_once()
 
     def test_a_claim_failure_still_prints_and_is_reported(self):
         age(oa.cache_path(SLUG), 16 * 60)

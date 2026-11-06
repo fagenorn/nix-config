@@ -9,7 +9,10 @@ through `agent_platform.write_atomically`; its mtime is the staleness, and delet
 P4: an item's time is the latest `LabeledEvent` of each counted label it carries, minimum over those
 labels; a repository's `oldest` is the minimum over its items, kept as the server's own string.
 P4b: a refresh publishes only a complete answer: the search is followed page by page, and a truncated
-per-item connection or a search unfinished after `MAX_PAGES` fails the refresh and writes nothing.
+per-item connection, a search unfinished after `MAX_PAGES`, or one that returned fewer nodes than its
+`issueCount` (GitHub caps a search at 1,000 results) fails the refresh and writes nothing. Page flags,
+counts and timestamps must be well formed (an offset-bearing ISO 8601 instant, `Z` included) or the
+refresh fails `payload_invalid`; a cache entry with a malformed `oldest` reads as missing.
 P5: items are counted by their current labels, whatever the server returned.
 P6: the first page also reads the `owner-action` label, and a missing one is created.
 P7: a statusline starts a refresh only by holding an exclusive `flock` on `<name>.refresh`, which also
@@ -229,6 +232,7 @@ def fleet_slugs() -> frozenset[str]:
 QUERY = """query($owner: String!, $name: String!, $search: String!, $after: String) {
   repository(owner: $owner, name: $name) { label(name: "owner-action") { name } }
   search(query: $search, type: ISSUE, first: 100, after: $after) {
+    issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on Issue {
@@ -256,6 +260,14 @@ def cache_path(slug: str) -> Path:
     return agent_platform.state_root() / "owner-actions" / owner / f"{name}.json"
 
 
+def _instant(text: str) -> datetime:
+    """`text` as an offset-bearing ISO 8601 instant, or ValueError."""
+    moment = datetime.fromisoformat(text)
+    if moment.tzinfo is None:
+        raise ValueError(f"timestamp without an offset: {text!r}")
+    return moment
+
+
 def read_entry(slug: str) -> dict | None:
     """The cache entry for `slug` when it parses and has exactly the expected shape, else None."""
     try:
@@ -269,6 +281,11 @@ def read_entry(slug: str) -> dict | None:
             or isinstance(count, bool) or not isinstance(count, int) or count < 0
             or not (entry["oldest"] is None or isinstance(entry["oldest"], str))):
         return None
+    if entry["oldest"] is not None:
+        try:
+            _instant(entry["oldest"])
+        except ValueError:
+            return None
     return entry
 
 
@@ -292,7 +309,7 @@ def render(entry: dict | None, now: float) -> str:
         return ""
     if entry["oldest"] is None:
         return f"owner {entry['count']}"
-    days = max(0, int((now - datetime.fromisoformat(entry["oldest"]).timestamp()) // 86400))
+    days = max(0, int((now - _instant(entry["oldest"]).timestamp()) // 86400))
     return f"owner {entry['count']} (oldest {days}d)"
 
 
@@ -386,10 +403,10 @@ def _invalid(detail: str) -> forge_markers.ForgeError:
     return forge_markers.ForgeError("payload_invalid", detail)
 
 
-def _total(connection: dict, what: str) -> int:
-    total = connection.get("totalCount")
-    if isinstance(total, bool) or not isinstance(total, int):
-        raise _invalid(f"{what}.totalCount is not an integer")
+def _total(connection: dict, what: str, field: str = "totalCount") -> int:
+    total = connection.get(field)
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        raise _invalid(f"{what}.{field} is not a non-negative integer")
     return total
 
 
@@ -400,14 +417,16 @@ def _connection(node: dict, field: str) -> tuple[dict, list]:
     return connection, connection["nodes"]
 
 
-def _page(data: Any) -> tuple[list, dict]:
-    """The nodes and pageInfo of one search answer."""
+def _page(data: Any) -> tuple[list, dict, int]:
+    """The nodes, pageInfo and issueCount of one search answer."""
     search = data.get("data", {}).get("search") if isinstance(data, dict) and isinstance(
         data.get("data"), dict) else None
     if (not isinstance(search, dict) or not isinstance(search.get("nodes"), list)
             or not isinstance(search.get("pageInfo"), dict)):
         raise _invalid("search page has an unexpected shape")
-    return search["nodes"], search["pageInfo"]
+    if not isinstance(search["pageInfo"].get("hasNextPage"), bool):
+        raise _invalid("search pageInfo.hasNextPage is not a boolean")
+    return search["nodes"], search["pageInfo"], _total(search, "search", "issueCount")
 
 
 def _item(node: dict) -> tuple[bool, str | None]:
@@ -426,29 +445,35 @@ def _item(node: dict) -> tuple[bool, str | None]:
                 continue
             label = event.get("label")
             if isinstance(label, dict) and label.get("name") == counted:
+                try:
+                    _instant(event["createdAt"])
+                except ValueError:
+                    raise _invalid(f"label event createdAt is not an ISO 8601 instant: "
+                                   f"{event['createdAt']!r}") from None
                 latest = event["createdAt"]
         if latest is not None:
             times.append(latest)
         elif total > len(events):
             raise forge_markers.ForgeError(
                 "payload_incomplete", "an item's label events are truncated")
-    return bool(names & set(COUNTED)), min(times, key=datetime.fromisoformat) if times else None
+    return bool(names & set(COUNTED)), min(times, key=_instant) if times else None
 
 
 def refresh(slug: str) -> dict:
     """Count the open owner-only items of `slug` and write the cache entry; raises ForgeError."""
     nodes: list = []
     label_missing = False
+    issue_count = 0
     cursor: str | None = None
     seen: set[str] = set()
     for page in range(1, MAX_PAGES + 1):
         data = forge_markers._json(search_argv(slug, cursor))
-        page_nodes, info = _page(data)
+        page_nodes, info, issue_count = _page(data)
         nodes.extend(page_nodes)
         if page == 1:
             repository = data["data"].get("repository")
             label_missing = isinstance(repository, dict) and repository.get("label") is None
-        if info.get("hasNextPage") is not True:
+        if not info["hasNextPage"]:
             break
         cursor = info.get("endCursor")
         if not isinstance(cursor, str) or not cursor or cursor in seen:
@@ -457,6 +482,9 @@ def refresh(slug: str) -> dict:
         if page == MAX_PAGES:
             raise forge_markers.ForgeError(
                 "payload_incomplete", f"search still has pages after {MAX_PAGES}")
+    if len(nodes) < issue_count:
+        raise forge_markers.ForgeError(
+            "payload_incomplete", f"search returned {len(nodes)} of {issue_count} matches")
     count = 0
     oldest: str | None = None
     for node in nodes:
@@ -466,8 +494,7 @@ def refresh(slug: str) -> dict:
         if not counted:
             continue
         count += 1
-        if time is not None and (oldest is None
-                                 or datetime.fromisoformat(time) < datetime.fromisoformat(oldest)):
+        if time is not None and (oldest is None or _instant(time) < _instant(oldest)):
             oldest = time
     if label_missing:
         forge_markers.ensure_label(slug, *forge_claim.OWNER_ACTION)
