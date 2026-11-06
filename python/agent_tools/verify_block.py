@@ -41,51 +41,23 @@ ON_FAIL = ("label", "ask")
 ON_EXPIRE = ("close", "ask")
 EVENTS = ("deployed", "released")
 
-RUN_FORMS = ("tool", "command", "script", "ask", "act")
+# The allowlist: a run is a contract command, a committed script or a built-in probe (or an owner step).
+RUN_FORMS = ("command", "script", "probe", "ask", "act")
+SYSTEM_FORMS = ("command", "script", "probe")
 RUN_MEMBERS = {
-    "tool": ("tool", "args"),
-    "command": ("command",),
+    "command": ("command", "args"),
     "script": ("script", "at", "args"),
     "ask": ("ask",),
     "act": ("act", "then"),
 }
-# D5 class 1: a tool that runs code or another program it is handed.
-INLINE_CODE_TOOLS = frozenset((
-    "sh bash zsh dash ksh fish csh tcsh "
-    "awk gawk mawk sed perl ruby php lua tclsh expect node nodejs deno bun npx npm pnpm yarn pip pipx uv uvx "
-    "poetry go cargo java osascript rscript julia "
-    "vi vim nvim ex emacs "
-    "env xargs eval exec command builtin time timeout gtimeout nice ionice renice stdbuf flock watch caffeinate "
-    "nohup setsid disown chroot sudo doas su runuser script unbuffer parallel ssh docker podman kubectl make "
-    "devenv nix-shell"
-).split())
-INTERPRETER = re.compile(r"^(python|pypy|perl|ruby|php|lua|node|tclsh)[0-9.]*$")
-EXEC_ARGS = frozenset(("-exec", "-execdir", "-ok", "-okdir"))
-# D5 class 3: Nix code-bearing arguments.
-NIX_TOOLS = frozenset(("nix", "nix-build", "nix-instantiate", "nix-store", "nix-env"))
-NIX_CODE_ARGS = frozenset(("--expr", "-E", "--apply", "--arg", "--run", "--command", "-c", "-p", "--packages"))
-NIX_EXEC_SUBCOMMANDS = frozenset(("run", "shell", "develop", "repl", "bundle", "fmt", "env", "profile"))
-FLAKE_REF = re.compile(
-    r"^(github|gitlab|sourcehut|git\+[a-z]+|hg\+[a-z]+|https?|tarball\+[a-z]+|file\+[a-z]+|path|flake|channel):"
-)
-# `nix` words that are not flake references: subcommands, and the options that take a separate value.
-NIX_WORDS = frozenset((
-    "build path-info flake metadata show check info lock archive prefetch derivation store ls cat log hash "
-    "why-depends search copy config realisation print-dev-env verify show-config"
-).split())
-NIX_VALUE_OPTIONS = frozenset((
-    "--system -j --max-jobs --cores -o --out-link --profile --log-format --store --eval-store --builders "
-    "--timeout --max-silent-time --extra-experimental-features --experimental-features"
-).split())
-# D5 class 4: git configuration that names a command.
-GIT_CODE_ARGS = frozenset(("-c", "--config-env", "--exec-path", "--upload-pack", "--receive-pack", "--exec", "-x"))
-# Git subcommands that start a shell (or plant code for later runs) on text they are handed.
-GIT_CODE_SUBCOMMANDS = frozenset(("config", "filter-branch"))
-GIT_VALUE_GLOBALS = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source"))
-# Per subcommand: the long options (matched as git matches them, by unambiguous prefix) and the short letters that name a program.
-GIT_SUBCOMMAND_LONG = {"difftool": ("--extcmd",), "mergetool": ("--extcmd",), "grep": ("--open-files-in-pager",), "clone": ("--upload-pack",)}
-GIT_SUBCOMMAND_SHORT = {"difftool": "x", "mergetool": "x", "grep": "O", "clone": "u"}
-TOOL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+# Built-in read-only probes: each one's parameters are data members of the run, `(required, optional)`.
+PROBES = {
+    "deployed_includes": (("sha",), ()),
+    "released_includes": (("sha",), ()),
+    "ci_run_includes": (("workflow", "branch", "sha"), ()),
+    "count_since": (("source", "since", "n"), ("workflow", "branch")),
+}
+COUNT_SOURCES = ("runs", "releases")
 COMMAND_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 APPROVAL_VERB = re.compile(r"\b(approve|approves|approved|approval|sign[- ]?off|lgtm)\b", re.IGNORECASE)
 APPROVAL_OBJECT = re.compile(r"\b(design|adr|runbook|path[- ]?list|paths|spec|plan)\b", re.IGNORECASE)
@@ -94,14 +66,12 @@ APPROVAL_OBJECT = re.compile(r"\b(design|adr|runbook|path[- ]?list|paths|spec|pl
 class References(Protocol):
     """What the lint must learn from outside the block (D9); every lookup is tri-state."""
 
-    def tool(self, name: str) -> str:
-        """`"present"` or `"absent"`."""
-
     def command(self, command_id: str) -> str:
         """`"present"`, `"absent"` or `"unknown"`."""
 
     def script(self, path: str, sha: str) -> tuple[str, str]:
-        """`(commit_state, path_state)`; `path_state` is `"unknown"` unless the commit is `"present"`."""
+        """`(commit_state, path_state)`; `path_state` is `"present"` (an executable file), `"absent"`,
+        `"not_executable"` or `"unknown"`, and `"unknown"` unless the commit is `"present"`."""
 
     def flake(self, merge: str) -> tuple[str, str] | None:
         """`None` when there is no repository to ask, else the `(commit_state, path_state)` of `flake.nix` at `merge`."""
@@ -258,113 +228,16 @@ def is_relative_posix(path: str) -> bool:
     return all(segment not in ("", ".", "..") for segment in path.split("/"))
 
 
-def names_inline_code(name: str) -> bool:
-    """A program name that runs code it is handed; lowercased, as the macOS volume is case-insensitive."""
-    folded = name.lower()
-    return folded in INLINE_CODE_TOOLS or INTERPRETER.match(folded) is not None
-
-
-def arg_hits_inline_code(arg: str) -> bool:
-    """D5 class 2: the arg, its part after `=`, the first word of each, the basename of each."""
-    candidates = {arg}
-    if "=" in arg:
-        candidates.add(arg.split("=", 1)[1])
-    candidates |= {word for text in candidates for word in text.split()[:1]}
-    candidates |= {text.rsplit("/", 1)[-1] for text in candidates}
-    return any(names_inline_code(text) for text in candidates)
-
-
-def normalised(arg: str) -> str:
-    return arg.split("=", 1)[0] if arg.startswith("-") and "=" in arg else arg
-
-
-def has_flake_scheme(arg: str) -> bool:
-    return FLAKE_REF.match(arg) is not None or ("=" in arg and FLAKE_REF.match(arg.split("=", 1)[1]) is not None)
-
-
-def nix_fetches_flake(texts: list[str]) -> bool:
-    """D5 class 3: a scheme-prefixed, or indirect (registry), flake reference is fetched code."""
-    skip = 0
-    for arg in texts:
-        if skip:
-            skip -= 1
-            continue
-        if arg == "--option":
-            skip = 2
-            continue
-        if arg in NIX_VALUE_OPTIONS:
-            skip = 1
-            continue
-        if has_flake_scheme(arg):
-            return True
-        if arg.startswith("-") or arg in NIX_WORDS or arg.startswith((".", "/")):
-            continue
-        return True
-    return False
-
-
-def git_subcommand(texts: list[str]) -> tuple[str, list[str]]:
-    """The git subcommand and the arguments after it, past the global options."""
-    index = 0
-    while index < len(texts) and texts[index].startswith("-"):
-        index += 2 if texts[index] in GIT_VALUE_GLOBALS else 1
-    return (texts[index], texts[index + 1:]) if index < len(texts) else ("", [])
-
-
-def git_carries_code(texts: list[str]) -> bool:
-    flags = [normalised(arg) for arg in texts]
-    # `-calias.x=!cmd` joins the value onto the short option, so match on the prefix.
-    if any(flag in GIT_CODE_ARGS or (flag.startswith("-c") and not flag.startswith("--")) for flag in flags):
-        return True
-    if any(arg.lower().startswith("ext::") or "=ext::" in arg.lower() for arg in texts):
-        return True
-    command, rest = git_subcommand(texts)
-    if command in GIT_CODE_SUBCOMMANDS:
-        return True
-    if (command == "submodule" and "foreach" in rest) or (command == "bisect" and "run" in rest):
-        return True
-    letter = GIT_SUBCOMMAND_SHORT.get(command)
-    if letter:
-        for flag in flags:
-            if flag.startswith("--"):
-                if len(flag) >= 3 and any(name.startswith(flag) for name in GIT_SUBCOMMAND_LONG[command]):
-                    return True
-            elif flag.startswith("-") and letter in flag:
-                return True
-    return False
-
-
-def args_carry_code(tool: object, args: list) -> bool:
-    texts = [arg for arg in args if isinstance(arg, str)]
-    if any(arg in EXEC_ARGS or arg_hits_inline_code(arg) for arg in texts):
-        return True
-    flags = [normalised(arg) for arg in texts]
-    tool = tool.lower() if isinstance(tool, str) else ""
-    if tool in NIX_TOOLS:
-        if any(flag in NIX_CODE_ARGS for flag in flags):
-            return True
-        if tool == "nix":
-            # Value-taking global options (`--option NAME VALUE`) can precede the subcommand,
-            # so any bare word that is an exec subcommand counts.
-            if any(arg in NIX_EXEC_SUBCOMMANDS for arg in texts if not arg.startswith("-")):
-                return True
-    if tool == "nix" and nix_fetches_flake(texts):
-        return True
-    if tool in NIX_TOOLS and any(has_flake_scheme(arg) for arg in texts):
-        return True
-    return tool == "git" and git_carries_code(texts)
-
-
-def check_args(run: dict, path: str, errors: list) -> None:
-    """Inline code in `args` (checked first), else the argument shape; one finding at most."""
+def check_args(run: dict, path: str, form: str, errors: list) -> None:
+    """`args` is plain data: strings, and for a command no option, which the declared program would parse."""
     if "args" not in run:
         return
     args = run["args"]
     args_path = join(path, "args")
-    if isinstance(args, list) and args_carry_code(run.get("tool"), args):
-        errors.append(finding(args_path, "inline_code", "an argument carries code or names a program to run"))
-    elif not (isinstance(args, list) and all(isinstance(arg, str) for arg in args)):
+    if not (isinstance(args, list) and all(isinstance(arg, str) and "\0" not in arg for arg in args)):
         invalid(errors, args_path, "must be a list of strings")
+    elif form == "command" and any(arg.startswith("-") for arg in args):
+        errors.append(finding(args_path, "inline_code", "a command's arguments are data, never options its program would parse"))
 
 
 def check_single_line(value: object, path: str, errors: list) -> bool:
@@ -374,42 +247,67 @@ def check_single_line(value: object, path: str, errors: list) -> bool:
     return True
 
 
-def check_form(run: object, path: str, errors: list, refs: References, allow_interactive: bool) -> None:
+def check_probe(run: dict, path: str, errors: list) -> None:
+    name = run["probe"]
+    if not isinstance(name, str) or name not in PROBES:
+        invalid(errors, join(path, "probe"), f"must be one of {', '.join(PROBES)}")
+        return
+    required, optional = PROBES[name]
+    for member in run:
+        if member != "probe" and member not in required + optional:
+            errors.append(finding(join(path, member), "unknown_field", f"{member!r} is not a parameter of the {name} probe"))
+    for member in required:
+        if member not in run:
+            errors.append(finding(join(path, member), "missing_field", f"{member!r} is required"))
+    for member in ("workflow", "branch"):
+        if member in run and not is_text(run[member]):
+            invalid(errors, join(path, member), "must be a non-empty string")
+    if "sha" in run and not is_sha(run["sha"]):
+        invalid(errors, join(path, "sha"), "must be a 40-character lowercase hex sha")
+    if name == "count_since":
+        if "source" in run:
+            check_choice(run["source"], join(path, "source"), COUNT_SOURCES, errors)
+        if "since" in run:
+            check_iso(run["since"], join(path, "since"), errors)
+        if "n" in run and not (is_int(run["n"]) and run["n"] >= 1):
+            invalid(errors, join(path, "n"), "must be an integer of at least 1")
+        if run.get("source") == "runs" and "workflow" not in run:
+            errors.append(finding(join(path, "workflow"), "missing_field", "counting runs needs 'workflow'"))
+        if run.get("source") == "releases":
+            for member in ("workflow", "branch"):
+                if member in run:
+                    errors.append(finding(join(path, member), "unknown_field", "counting releases takes no workflow or branch"))
+
+
+def check_form(run: object, path: str, merge: object, errors: list, refs: References, allow_interactive: bool) -> None:
     if not isinstance(run, dict):
         invalid(errors, path, "must be an object")
         return
+    allowed = RUN_FORMS if allow_interactive else SYSTEM_FORMS
     forms = [form for form in RUN_FORMS if form in run]
-    if len(forms) != 1 or (forms[0] in ("ask", "act") and not allow_interactive):
-        errors.append(finding(path, "run_form", f"needs exactly one of {', '.join(RUN_FORMS if allow_interactive else RUN_FORMS[:3])}"))
+    if len(forms) != 1 or forms[0] not in allowed:
+        errors.append(finding(path, "run_form", f"needs exactly one of {', '.join(allowed)}; nothing else runs"))
         return
     form = forms[0]
     before = len(errors)
+    if form == "probe":
+        check_probe(run, path, errors)
+        return
     for name in run:
         if name not in RUN_MEMBERS[form]:
             errors.append(finding(join(path, name), "unknown_field", f"{name!r} is not a member of a {form} run"))
-    if form in ("tool", "script"):
-        key = form
-        name = run[key]
-        key_path = join(path, key)
-        if form == "tool":
-            if not isinstance(name, str):
-                invalid(errors, key_path, "must be a string")
-            elif not TOOL.match(name) or names_inline_code(name):
-                errors.append(finding(key_path, "inline_code", "must be the bare name of an installed program that does not run code it is handed"))
-        elif not (isinstance(name, str) and is_relative_posix(name)):
-            invalid(errors, key_path, "must be a relative POSIX path inside the repository")
-        if form == "script":
-            if "at" not in run:
-                errors.append(finding(join(path, "at"), "missing_field", "'at' is required"))
-            elif not is_sha(run["at"]):
-                invalid(errors, join(path, "at"), "must be a 40-character lowercase hex sha")
-        check_args(run, path, errors)
+    if form == "script":
+        script = run["script"]
+        if not (isinstance(script, str) and is_relative_posix(script)):
+            errors.append(finding(join(path, "script"), "inline_code", "must be a relative path to a file committed in the repository"))
+        if "at" in run and not is_sha(run["at"]):
+            invalid(errors, join(path, "at"), "must be a 40-character lowercase hex sha")
+        check_args(run, path, form, errors)
     elif form == "command":
         command = run["command"]
-        if not isinstance(command, str):
-            invalid(errors, join(path, "command"), "must be a string")
-        elif not COMMAND_ID.match(command):
+        if not isinstance(command, str) or not COMMAND_ID.match(command):
             errors.append(finding(join(path, "command"), "inline_code", "must be a contract command id"))
+        check_args(run, path, form, errors)
     elif form == "ask":
         if check_single_line(run["ask"], join(path, "ask"), errors) and \
                 APPROVAL_VERB.search(run["ask"]) and APPROVAL_OBJECT.search(run["ask"]):
@@ -419,48 +317,55 @@ def check_form(run: object, path: str, errors: list, refs: References, allow_int
         if "then" not in run:
             errors.append(finding(join(path, "then"), "missing_field", "'then' is required"))
         else:
-            check_form(run["then"], join(path, "then"), errors, refs, False)
+            check_form(run["then"], join(path, "then"), merge, errors, refs, False)
     if len(errors) == before:
-        check_references(run, form, path, errors, refs)
+        check_references(run, form, path, merge, errors, refs)
 
 
-def check_references(run: dict, form: str, path: str, errors: list, refs: References) -> None:
+SCRIPT_STATES = {
+    "absent": "the script is not a file committed at that commit (a directory or symbolic link is not one)",
+    "not_executable": "the script is committed without the executable bit; it runs directly, with no interpreter",
+}
+
+
+def check_references(run: dict, form: str, path: str, merge: object, errors: list, refs: References) -> None:
     """D9: the reference of a run that passed every other rule must resolve."""
-    if form == "tool":
-        if refs.tool(run["tool"]) == "absent":
-            errors.append(finding(join(path, "tool"), "not_installed", f"{run['tool']!r} is not installed"))
-    elif form == "command":
+    if form == "command":
         state = refs.command(run["command"])
         if state == "absent":
             errors.append(finding(join(path, "command"), "not_declared", f"{run['command']!r} is not a contract command"))
         elif state != "present":
             errors.append(finding(join(path, "command"), "unverified_reference", "the contract commands could not be read; pass --repo-root"))
     elif form == "script":
-        commit, found = refs.script(run["script"], run["at"])
+        at = run.get("at", merge)
+        if not is_sha(at):
+            return  # the block's `merge` is invalid and already refused
+        at_path = join(path, "at") if "at" in run else "merge"
+        commit, found = refs.script(run["script"], at)
         if commit == "absent":
-            errors.append(finding(join(path, "at"), "unverified_reference", "the commit is not in the repository"))
+            errors.append(finding(at_path, "unverified_reference", "the commit is not in the repository"))
         elif commit != "present":
             errors.append(finding(join(path, "script"), "unverified_reference", "the script could not be checked; pass --repo-root"))
-        elif found == "absent":
-            errors.append(finding(join(path, "script"), "not_committed", "the script is not committed at that commit"))
+        elif found in SCRIPT_STATES:
+            errors.append(finding(join(path, "script"), "not_committed", SCRIPT_STATES[found]))
         elif found != "present":
             errors.append(finding(join(path, "script"), "unverified_reference", "the script could not be checked"))
 
 
-def check_run(run: object, path: str, kind: object, errors: list, refs: References) -> None:
+def check_run(run: object, path: str, kind: object, merge: object, errors: list, refs: References) -> None:
     if not isinstance(run, dict):
         invalid(errors, path, "must be an object")
         return
     forms = [form for form in RUN_FORMS if form in run]
     if len(forms) != 1:
-        errors.append(finding(path, "run_form", f"needs exactly one of {', '.join(RUN_FORMS)}"))
+        errors.append(finding(path, "run_form", f"needs exactly one of {', '.join(RUN_FORMS)}; nothing else runs"))
         return
     if kind in KINDS:
         needs_owner = forms[0] in ("ask", "act")
         if needs_owner != (kind == "human"):
             wanted = "human" if needs_owner else "evidence"
             errors.append(finding(path.rsplit(".", 1)[0] + ".kind", "kind_mismatch", f"a {forms[0]} run needs kind {wanted}"))
-    check_form(run, path, errors, refs, True)
+    check_form(run, path, merge, errors, refs, True)
 
 
 def check_reason(check: dict, path: str, errors: list) -> None:
@@ -473,7 +378,7 @@ def check_reason(check: dict, path: str, errors: list) -> None:
         errors.append(finding(reason_path, "reason_not_allowed", "an evidence check takes no reason"))
 
 
-def check_one(check: object, path: str, errors: list, refs: References) -> None:
+def check_one(check: object, path: str, merge: object, errors: list, refs: References) -> None:
     if not closed_object(check, path, CHECK_FIELDS, CHECK_REQUIRED, errors):
         return
     if "ac" in check and not (isinstance(check["ac"], str) and AC.match(check["ac"])):
@@ -485,7 +390,7 @@ def check_one(check: object, path: str, errors: list, refs: References) -> None:
     if "when" in check:
         check_when(check["when"], join(path, "when"), errors)
     if "run" in check:
-        check_run(check["run"], join(path, "run"), check.get("kind"), errors, refs)
+        check_run(check["run"], join(path, "run"), check.get("kind"), merge, errors, refs)
     if "expect" in check:
         check_expect(check["expect"], join(path, "expect"), errors)
     for name, choices in (("effects", EFFECTS), ("mode", MODES), ("on_fail", ON_FAIL), ("on_expire", ON_EXPIRE)):
@@ -569,7 +474,7 @@ def lint_block(
                 invalid(errors, "checks", "must be a non-empty list of checks")
             else:
                 for index, check in enumerate(checks):
-                    check_one(check, f"checks[{index}]", errors, refs)
+                    check_one(check, f"checks[{index}]", block.get("merge"), errors, refs)
         check_context(block, errors, warnings, refs, code_unmet, pr_workflows, pr_head, pr_branch, blocks)
     elif code_unmet:
         check_context({}, errors, warnings, refs, code_unmet, (), None, None, ())

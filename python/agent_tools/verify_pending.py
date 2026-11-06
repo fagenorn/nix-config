@@ -15,7 +15,6 @@ strictly after T, 75 ("not yet", never a failure) when fewer are, and 2 on bad i
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 
@@ -48,16 +47,38 @@ def git_object(root: str, sha: str, path: str | None) -> tuple[str, str]:
         return "unknown", "unknown"
 
 
+def git_script(root: str, sha: str, path: str) -> tuple[str, str]:
+    """`(commit_state, path_state)` of a script: only an executable file (mode 100755) is `"present"`."""
+    try:
+        if not git_ok(root, "cat-file", "-e", f"{sha}^{{commit}}"):
+            return "absent", "unknown"
+        result = subprocess.run(
+            ["git", "-C", root, "ls-tree", "-z", "--full-tree", sha, "--", path],
+            capture_output=True, timeout=GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return "unknown", "unknown"
+    if result.returncode != 0:
+        return "present", "unknown"
+    for entry in result.stdout.split(b"\0"):
+        meta, _, name = entry.partition(b"\t")
+        if name != path.encode():
+            continue  # only the exact path counts, never a directory prefix or a pattern match
+        mode = meta.split(b" ")[0]
+        if mode == b"100755":
+            return "present", "present"
+        # A plain file lacks the executable bit; a directory, symbolic link or submodule is no file.
+        return "present", "not_executable" if mode == b"100644" else "absent"
+    return "present", "absent"
+
+
 class CliReferences:
-    """The real D9 lookups: `PATH`, the resolved project contract and git objects."""
+    """The real D9 lookups: the resolved project contract and git objects."""
 
     def __init__(self, root: str | None):
         self.root = root
         self.commands: set | None = None
         self.resolved = False
-
-    def tool(self, name: str) -> str:
-        return "present" if shutil.which(name) else "absent"
 
     def command(self, command_id: str) -> str:
         if self.root is None:
@@ -75,7 +96,7 @@ class CliReferences:
     def script(self, path: str, sha: str) -> tuple[str, str]:
         if self.root is None:
             return "unknown", "unknown"
-        return git_object(self.root, sha, path)
+        return git_script(self.root, sha, path)
 
     def flake(self, merge: str) -> tuple[str, str] | None:
         if self.root is None:
