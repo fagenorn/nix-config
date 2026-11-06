@@ -16,11 +16,10 @@ in
   # (see home/common/agent-skills). The former superpowers plugin and its
   # personal marketplace were replaced by vendored skills in that shared tree.
 
-  # Codex-only `orchestrate-issues`: Claude's adapter is linked into
-  # ~/.claude/skills; this stub relays `workflow-state host-route --route codex`
-  # instead. A whole-directory link, because Codex ignores a skill whose SKILL.md
-  # is itself a symlink.
-  home.file.".agents/skills/orchestrate-issues".source = ./skills/orchestrate-issues;
+  # Codex-only `deliver-standard`: Claude's skill runs a Workflow-tool program
+  # Codex lacks, so this stub names the alternatives. A whole-directory link,
+  # because Codex ignores a skill whose SKILL.md is itself a symlink.
+  home.file.".agents/skills/deliver-standard".source = ./skills/deliver-standard;
 
   # Keep Codex's runtime-managed config writable (plugins and marketplaces also
   # use it), while declaratively enforcing the global default reasoning effort.

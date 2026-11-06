@@ -437,6 +437,13 @@ in
     recursive = true;
   };
 
+  # Claude-only standard lane: its SKILL.md starts deliver-standard.js with the
+  # Workflow tool, a Claude Code feature Codex lacks.
+  home.file.".claude/skills/deliver-standard" = {
+    source = ./skills/deliver-standard;
+    recursive = true;
+  };
+
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
   # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
   # subagents dispatch explicitly as reviewer (opus/high), implementer
