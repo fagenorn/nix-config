@@ -29,6 +29,8 @@ const DEFAULTS = [
   [/^setup$/, SETUP],
   [/^worktree$/, { ok: true, worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard' }],
   [/^plan(-revise)?$/, PLAN],
+  [/^direct-impl$/, { ...DONE, acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }], sensitive: false, ineligible: false }],
+  [/^direct-fix$/, DONE],
   [/-codex$/, { available: true, ...PASS }],
   [/review|^final-/, PASS],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],

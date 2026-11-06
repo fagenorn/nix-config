@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-standard',
   description: 'Deliver one standard-lane tracker issue: plan, implement and review each task, final review, verify once, ship',
-  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, decisions?, spec?, cont?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges',
+  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, cont?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round',
   phases: [
     { title: 'Setup', detail: 'resolve contract, pre-flight, claim, worktree' },
     { title: 'Plan', detail: 'plan outside the tree, then review' },
@@ -18,7 +18,9 @@ export const meta = {
 // review with { stage: 'planned', plan, cont }; ready: stop after verify with { stage: 'ready',
 // head, branch, worktree, verify, tasks, acceptance, fix_waves, cont } and no PR, keeping the claim;
 // ship, the default: merge. A ready cont resumed in ship skips the final review and verify when
-// the head is unchanged and the tree clean), cont (the `cont` object of an earlier stop, passed
+// the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
+// implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
+// its lane and no direct plan mode exists), cont (the `cont` object of an earlier stop, passed
 // back unchanged to resume; see RESUME below).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
@@ -30,7 +32,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, plan, plan_reviewed, done, fix_waves, verified?, partial?, claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan, plan_reviewed, done, fix_waves, verified?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed), skips the tasks in cont.done, then
@@ -47,6 +49,10 @@ if (!REPO || !ISSUE) return { stage: 'args', error: 'repo_root and issue are req
 const MODE = args.mode === undefined ? 'ship' : args.mode
 if (!['plan', 'ready', 'ship'].includes(MODE)) return { stage: 'args', error: 'mode must be plan, ready or ship' }
 const CONT = args.cont || null
+if (args.lane !== undefined && !['standard', 'direct'].includes(args.lane)) return { stage: 'args', error: 'lane must be standard or direct' }
+if (CONT && args.lane && args.lane !== (CONT.lane || 'standard')) return { stage: 'args', error: 'a cont keeps its lane; start again without cont: setup re-adopts the branch and the claim' }
+const LANE = args.lane || (CONT && CONT.lane) || 'standard'
+if (LANE === 'direct' && MODE === 'plan') return { stage: 'args', error: 'the direct lane has no plan mode' }
 // The claim holder: a resume keeps cont.setup.holder; else it is built from the host and an id.
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const HOLDER_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -175,7 +181,7 @@ let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
 let fixWaves = (CONT && CONT.fix_waves) || 0
 // The verified head and results of a ready stop; carried until a resume finds the head moved.
 let verified = (CONT && CONT.verified) || null
-const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(verified ? { verified } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
+const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(verified ? { verified } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
 
@@ -274,7 +280,6 @@ const span = i => `git -C ${W} diff ${i.start_head}..${i.commit}`
 log(`claimed #${ISSUE}, worktree ${W}; review code=${REVIEW_CODE || RS.code || 'none'} plan=${REVIEW_PLAN || RS.plan || 'none'}`)
 
 // ---------------- Plan ----------------
-phase('Plan')
 const PLAN_SCHEMA = {
   type: 'object',
   properties: {
@@ -300,6 +305,81 @@ const takePlan = (p, label) => {
   return null
 }
 
+const FOCUSED = 'Run only the tests that cover the files you changed; do not run the full test suite or the project\'s declared verification (that runs once later).'
+let ACS = null, PLAN_REF = null
+const planRefs = () => {
+  ACS = JSON.stringify(plan.acceptance)
+  PLAN_REF = plan.plan_root ? `Plan: ${plan.plan_root} (task files beside it).` : 'No plan: direct lane.'
+}
+let chunked = false
+// A ready stop's verified head, unchanged and clean, needs no second review or verify.
+const SKIP_REVIEW = !!(verified && plan && setup.head === verified.head && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)))
+if (!SKIP_REVIEW) verified = null
+const DIRECT_IMPL = { ...IMPL, properties: { ...IMPL.properties, acceptance: PLAN_SCHEMA.properties.acceptance, sensitive: { type: 'boolean' }, ineligible: { type: 'boolean' } } }
+const DIRECT_FINDINGS = { ...FINDINGS, properties: { ...FINDINGS.properties, escalate: { type: 'boolean' } } }
+
+// ---------------- Direct lane ----------------
+if (LANE === 'direct') {
+  // The deliver-direct skill stays the single source of the implementer's steps; this block never copies its text.
+  let impl = null
+  if (!taskLog.some(d => d.n === 1)) {
+    phase('Tasks')
+    const lost = await renew('tasks', 'Tasks')
+    if (lost) return lost
+    impl = await agent(`${CTX}
+Deliver issue #${ISSUE} in the direct lane. Invoke the deliver-direct skill with the Skill tool to read it: it is the single source for this step. Its steps 1 and 2 are done by this program (the claim is held by ${setup.holder}; the worktree is ${W} on branch ${setup.branch}). Check its Eligibility first: if the issue fails it, change nothing and return status blocked with ineligible true and why. Otherwise follow its step 3 exactly and commit. Do not run its steps 4 to 7: review, verification, ship and close-out belong to this program. Return acceptance (the issue's criteria; kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and sensitive (true when the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations). ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
+An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
+${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: DIRECT_IMPL })
+    if (impl && impl.ineligible) return stop('ineligible', { impl, details: 'rerun in the standard lane without cont; setup re-adopts the worktree and the claim' })
+    if (!implDone(impl)) return haltTask(1, 'task', { task: { n: 1 }, impl })
+    if (!Array.isArray(impl.acceptance) || !impl.acceptance.length) return haltTask(1, 'task', { task: { n: 1 }, impl, details: 'no acceptance criteria' })
+    plan = { status: 'planned', plan_root: null, acceptance: impl.acceptance, tasks: [{ n: 1, title: 'direct', file: null, risk: impl.sensitive ? 'security' : 'low' }] }
+    planReviewed = true
+    taskLog.push({ n: 1, commit: impl.commit, review_rounds: 0, reviewer: null, reviewed_head: null })
+    if (partial === 1) partial = undefined
+  }
+  planRefs()
+  log('direct lane: one implementer, one fresh reviewer')
+  const d1 = taskLog.find(d => d.n === 1)
+  const reviewHead = impl ? impl.commit : setup.head
+  // Implementation completion never skips the fresh review: only a head it already passed does.
+  if (!(SKIP_REVIEW || (!impl && present(d1.reviewed_head) && d1.reviewed_head === setup.head))) {
+    let fix = null
+    phase('Final review')
+    const lost = await renew('final-review', 'Final review')
+    if (lost) return lost
+    const codexP = REVIEW_CODE ? agent(`${CTX}
+${PLAN_REF} Acceptance criteria: ${ACS}.
+Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package; this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
+${RULES}`, { label: 'direct-codex', phase: 'Final review', model: 'sonnet', schema: CODEX }) : Promise.resolve(null)
+    // The stored plan's risk, not this run's reply, picks the reviewer, so a resumed review keeps the implementer's choice.
+    const lite = plan.tasks[0].risk !== 'security'
+    const reviewPrompt = isLite => `${CTX}
+${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RANGE} for issue #${ISSUE} against its acceptance criteria ${ACS}. ${KNOW} Report Important or Critical correctness defects and unmet criteria only, each with a concrete failing input. ${isLite ? 'If the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations, set escalate true. ' : ''}Do not edit anything.`
+    let review = await agent(reviewPrompt(lite), { label: 'direct-review', phase: 'Final review', agentType: lite ? 'reviewer-lite' : 'reviewer', schema: DIRECT_FINDINGS })
+    let passedBy = lite ? 'reviewer-lite' : 'reviewer'
+    if (lite && review && review.escalate === true) {
+      review = await agent(reviewPrompt(false), { label: 'direct-review-full', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+      passedBy = 'reviewer'
+    }
+    const codexR = await codexP
+    if (!review) return stop('direct-review', { review: null })
+    if (REVIEW_CODE && (!codexR || !codexR.available)) return stop('codex-unavailable', { step: 'code', codex: codexR })
+    const findings = findingsOf(review).concat(REVIEW_CODE ? findingsOf(codexR).map(f => ({ ...f, source: 'codex' })) : [])
+    if (REVIEW_CODE) log(`codex review: ${findingsOf(codexR).length} blocking findings`)
+    if (findings.length) {
+      log(`direct review: ${findings.length} blocking findings, one fix round`)
+      fix = await agent(`${CTX}\n${PLAN_REF} Fix these review findings in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findings)}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: 'direct-fix', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+      if (!implDone(fix)) return stop('direct-fix', { fix })
+      const rereview = await agent(`${CTX}
+Re-review only these previously reported findings against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findings)}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'direct-rereview', phase: 'Final review', agentType: 'reviewer-lite', schema: FINDINGS })
+      if (!rereview || findingsOf(rereview).length) return stop('direct-review', { review: rereview, findings })
+      passedBy = 'reviewer-lite'
+    }
+    Object.assign(d1, { reviewed_head: fix ? fix.commit : reviewHead, review_rounds: fix ? 1 : 0, reviewer: passedBy })
+  }
+} else {
+phase('Plan')
 if (!plan || !planReviewed) {
   const lost = await renew('plan', 'Plan')
   if (lost) return lost
@@ -332,14 +412,12 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   }
   planReviewed = true
 }
-const ACS = JSON.stringify(plan.acceptance)
-const PLAN_REF = `Plan: ${plan.plan_root} (task files beside it).`
+planRefs()
 log(`plan: ${plan.tasks.length} tasks`)
 if (MODE === 'plan') return stop('planned', { plan })
 
 // ---------------- Tasks ----------------
 phase('Tasks')
-const FOCUSED = 'Run only the tests that cover the files you changed; do not run the full test suite or the project\'s declared verification (that runs once later).'
 let tasksRenewed = false
 for (const t of plan.tasks) {
   if (taskLog.some(d => d.n === t.n)) continue
@@ -383,10 +461,7 @@ phase('Final review')
 const groups = []
 const PER = 3
 for (let i = 0; i < plan.tasks.length; i += PER) groups.push(plan.tasks.slice(i, i + PER))
-const chunked = groups.length > 1
-// A ready stop's verified head, unchanged and clean, needs no second review or verify.
-const SKIP_REVIEW = !!(verified && plan && setup.head === verified.head && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)))
-if (!SKIP_REVIEW) verified = null
+chunked = groups.length > 1
 if (!SKIP_REVIEW) {
 {
   const lost = await renew('final-review', 'Final review')
@@ -430,6 +505,7 @@ if (finalFindings.length) {
     if (k === 2 || next.some(f => f.relation !== 'narrowing')) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
     waveFindings = next
   }
+}
 }
 }
 
@@ -487,7 +563,7 @@ const closesLine = allCode && INT === setup.default_branch ? `Closes #${ISSUE}` 
   if (lost) return lost
 }
 const prR = await agent(`${CTX}
-Open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; final review ${chunked ? 'chunked' : 'whole'}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
+Open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
 ${RULES}`, { label: 'pr', phase: 'Ship', model: 'sonnet', schema: { type: 'object', properties: { pr: { type: 'integer' }, head: { type: 'string' }, notes: { type: 'string' } }, required: ['pr', 'head'] } })
 if (!prR || !prR.pr) return stop('pr', { result: prR })
 // The shipped head must be the verified head; after a sync, the reviewed merge commit.

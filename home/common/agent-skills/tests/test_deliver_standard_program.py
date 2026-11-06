@@ -815,6 +815,163 @@ class ModeTest(unittest.TestCase):
                     self.assertIn(label, labels(calls))
 
 
+DIRECT = dict(ARGS, lane="direct")
+BAD = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
+
+
+class DirectLaneTest(unittest.TestCase):
+    """#635: setup, one implementer on deliver-direct's steps, one fresh reviewer, at most one fix round."""
+
+    def test_direct_lane_runs_one_implementer_one_fresh_reviewer_and_no_planner(self):
+        result, calls = run(args=DIRECT)
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertFalse([l for l in names if l.startswith("plan") or l == "renew-plan"], names)
+        self.assertEqual([c["label"] for c in calls if c["agentType"] == "implementer"], ["direct-impl"])
+        reviewers = [c for c in calls if c["agentType"] in ("reviewer", "reviewer-lite")]
+        self.assertEqual([(c["label"], c["agentType"]) for c in reviewers], [("direct-review", "reviewer-lite")])
+        self.assertIn("lane: direct.", reviewers[0]["prompt"])
+        self.assertIn("direct-codex", names)
+        self.assertNotIn("final-1", names)
+        self.assertEqual(names[names.index("direct-impl") - 1], "renew-tasks")
+        self.assertIn("renew-final-review", names[:names.index("direct-review")])
+        self.assertIn("direct-lane review", prompt(calls, "pr"))
+
+    def test_direct_lane_in_ready_mode_returns_a_reviewed_head(self):
+        result, calls = run(args=dict(DIRECT, mode="ready"))
+        self.assertEqual((result["stage"], result["head"]), ("ready", SHA))
+        self.assertEqual(result["cont"]["lane"], "direct")
+        self.assertNotIn("pr", labels(calls))
+
+    def test_direct_implementer_follows_deliver_direct_steps(self):
+        _, calls = run(args=DIRECT)
+        impl = prompt(calls, "direct-impl")
+        for needle in ("deliver-direct skill", "Skill tool", "Eligibility", "step 3", "steps 4 to 7",
+                       "/r/.wt/w-issue-9-x", "h1/session-s1"):
+            self.assertIn(needle, impl)
+
+    def test_sensitive_diff_gets_the_full_reviewer(self):
+        _, calls = run(args=DIRECT, patch={"direct-impl": {"sensitive": True}})
+        review = [c for c in calls if c["label"] == "direct-review"][0]
+        self.assertEqual(review["agentType"], "reviewer")
+        self.assertNotIn("lane: direct", review["prompt"])
+
+    def test_reviewer_lite_escalation_hands_the_review_to_the_full_reviewer(self):
+        result, calls = run(args=DIRECT, replies={"direct-review": {"verdict": "pass", "findings": [], "escalate": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "direct-review-full"], ["reviewer"])
+
+    def test_at_most_one_fix_round(self):
+        result, calls = run(args=DIRECT, replies={"direct-review": BAD, "direct-rereview": BAD})
+        self.assertEqual(result["stage"], "direct-review")
+        self.assertEqual(labels(calls).count("direct-fix"), 1)
+        self.assertNotIn("verify", labels(calls))
+        rereview = [c for c in calls if c["label"] == "direct-rereview"][0]
+        self.assertEqual(rereview["agentType"], "reviewer-lite")
+        self.assertIn("bug", rereview["prompt"])
+
+    def test_one_fix_round_that_resolves_continues(self):
+        result, _ = run(args=DIRECT, replies={"direct-review": BAD})
+        self.assertEqual(result["stage"], "done")
+
+    def test_failed_fix_stops(self):
+        result, _ = run(args=DIRECT, replies={"direct-review": BAD, "direct-fix": {"status": "blocked", "notes": "no"}})
+        self.assertEqual(result["stage"], "direct-fix")
+
+    def test_codex_finding_enters_the_fix_round(self):
+        codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "edge"}]}
+        _, calls = run(args=DIRECT, replies={"direct-codex": codex})
+        self.assertIn("edge", prompt(calls, "direct-fix"))
+
+    def test_codex_unavailable_stops(self):
+        result, _ = run(args=DIRECT, replies={"direct-codex": {"available": False, "verdict": "pass", "findings": []}})
+        self.assertEqual((result["stage"], result["step"]), ("codex-unavailable", "code"))
+
+    def test_lane_and_mode_are_checked_before_any_agent(self):
+        for args in (dict(DIRECT, mode="plan"), dict(ARGS, lane="fast")):
+            with self.subTest(args=args):
+                result, calls = run(args=args)
+                self.assertEqual(result["stage"], "args")
+                self.assertEqual(calls, [])
+
+    def test_ineligible_issue_stops_before_review(self):
+        result, calls = run(args=DIRECT, replies={"direct-impl": {"status": "blocked", "ineligible": True, "notes": "needs design"}})
+        self.assertEqual(result["stage"], "ineligible")
+        self.assertNotIn("direct-review", labels(calls))
+
+    def test_missing_acceptance_stops(self):
+        result, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": []}})
+        self.assertEqual(result["stage"], "task")
+        self.assertNotIn("direct-review", labels(calls))
+
+    def test_close_out_grades_the_implementer_criteria(self):
+        acceptance = [{"id": "AC1", "text": "x", "kind": "code"}, {"id": "AC2", "text": "y", "kind": "evidence"}]
+        _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance}})
+        self.assertIn("needs-verification", prompt(calls, "close-out"))
+
+    def test_resume_after_the_review_skips_to_verify(self):
+        stopped, _ = run(args=DIRECT, replies={"verify": None})
+        self.assertEqual((stopped["stage"], stopped["cont"]["lane"]), ("verify", "direct"))
+        self.assertEqual(stopped["cont"]["done"][0]["reviewed_head"], "c0ffee")
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": "c0ffee"}})
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("direct-impl", names)
+        self.assertNotIn("direct-review", names)
+        self.assertNotIn("plan", names)
+        self.assertIn("verify", names)
+
+    def test_resume_on_a_moved_head_reviews_again(self):
+        stopped, _ = run(args=DIRECT, replies={"verify": None})
+        ready, _ = run(args=dict(DIRECT, mode="ready"))
+        for cont in (stopped["cont"], ready["cont"]):
+            with self.subTest(stage=cont.get("verified") and "ready" or "verify"):
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": "e" * 40}})
+                names = labels(calls)
+                self.assertEqual(result["stage"], "done")
+                self.assertNotIn("direct-impl", names)
+                for label in ("renew-final-review", "direct-codex", "direct-review", "verify", "pr", "merge"):
+                    self.assertIn(label, names)
+                self.assertLess(names.index("direct-review"), names.index("verify"))
+
+    def test_ship_after_a_direct_ready_on_the_same_head_skips_review_and_verify(self):
+        ready, _ = run(args=dict(DIRECT, mode="ready"))
+        result, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "renew-checks-1", "checks-1",
+                                         "renew-merge", "merge", "close-out"])
+
+    def test_a_review_stop_resumes_into_the_review_not_the_implementer(self):
+        stopped, _ = run(args=DIRECT, replies={"direct-review": None})
+        self.assertEqual(stopped["stage"], "direct-review")
+        self.assertIsNone(stopped["cont"]["done"][0]["reviewed_head"])
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": "c0ffee"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("direct-impl", labels(calls))
+        self.assertIn("direct-review", labels(calls))
+
+    def test_claim_failures_keep_the_lane(self):
+        failures = {"acquire": {"verdict": "error", "detail": "forge down"},
+                    "worktree": {"ok": False, "notes": "worktree add failed"}}
+        for lane in ("standard", "direct"):
+            for label, reply in failures.items():
+                with self.subTest(lane=lane, label=label):
+                    stopped, _ = run(args=dict(ARGS, lane=lane), replies={label: reply})
+                    self.assertEqual(stopped["stage"], "claim")
+                    self.assertEqual(stopped["cont"]["lane"], lane)
+                    for args in (dict(ARGS, cont=stopped["cont"]), dict(ARGS, lane=lane, cont=stopped["cont"])):
+                        result, calls = run(args=args)
+                        self.assertEqual(result["stage"], "done")
+                        self.assertEqual("direct-impl" in labels(calls), lane == "direct")
+                        self.assertEqual("plan" in labels(calls), lane == "standard")
+
+    def test_resume_cannot_switch_lane(self):
+        stopped, _ = run(args=DIRECT, replies={"verify": None})
+        result, calls = run(args=dict(ARGS, lane="standard", cont=stopped["cont"]))
+        self.assertEqual(result["stage"], "args")
+        self.assertEqual(calls, [])
+
+
 class SourceTest(unittest.TestCase):
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")
