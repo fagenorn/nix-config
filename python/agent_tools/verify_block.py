@@ -9,6 +9,7 @@
 import json
 import re
 from datetime import datetime
+from typing import Protocol
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
@@ -38,6 +39,53 @@ MODES = ("assert", "observe")
 ON_FAIL = ("label", "ask")
 ON_EXPIRE = ("close", "ask")
 EVENTS = ("deployed", "released")
+
+RUN_FORMS = ("tool", "command", "script", "ask", "act")
+RUN_MEMBERS = {
+    "tool": ("tool", "args"),
+    "command": ("command",),
+    "script": ("script", "at", "args"),
+    "ask": ("ask",),
+    "act": ("act", "then"),
+}
+# D5 class 1: a tool that runs code or another program it is handed.
+INLINE_CODE_TOOLS = frozenset((
+    "sh bash zsh dash ksh fish csh tcsh "
+    "awk gawk mawk sed perl ruby php lua tclsh expect node nodejs deno bun npx npm pnpm yarn pip pipx uv uvx "
+    "poetry go cargo java osascript Rscript julia "
+    "vi vim nvim ex emacs "
+    "env xargs eval exec command builtin time timeout gtimeout nice ionice renice stdbuf flock watch caffeinate "
+    "nohup setsid disown chroot sudo doas su runuser script unbuffer parallel ssh docker podman kubectl make "
+    "devenv nix-shell"
+).split())
+INTERPRETER = re.compile(r"^(python|pypy|perl|ruby|php|lua|node|tclsh)[0-9.]*$")
+EXEC_ARGS = frozenset(("-exec", "-execdir", "-ok", "-okdir"))
+# D5 class 3: Nix code-bearing arguments.
+NIX_TOOLS = frozenset(("nix", "nix-build", "nix-instantiate", "nix-store", "nix-env"))
+NIX_CODE_ARGS = frozenset(("--expr", "-E", "--apply", "--arg", "--run", "--command", "-c", "-p", "--packages"))
+NIX_EXEC_SUBCOMMANDS = frozenset(("run", "shell", "develop", "repl", "bundle", "fmt", "env", "profile"))
+FLAKE_REF = re.compile(
+    r"^(github|gitlab|sourcehut|git\+[a-z]+|hg\+[a-z]+|https?|tarball\+[a-z]+|file\+[a-z]+|path|flake):"
+)
+# D5 class 4: git configuration that names a command.
+GIT_CODE_ARGS = frozenset(("-c", "--config-env", "--exec-path", "--upload-pack", "--receive-pack", "--exec", "-x"))
+TOOL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+COMMAND_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+APPROVAL_VERB = re.compile(r"\b(approve|approves|approved|approval|sign[- ]?off|lgtm)\b", re.IGNORECASE)
+APPROVAL_OBJECT = re.compile(r"\b(design|adr|runbook|path[- ]?list|paths|spec|plan)\b", re.IGNORECASE)
+
+
+class References(Protocol):
+    """What the lint must learn from outside the block (D9); every lookup is tri-state."""
+
+    def tool(self, name: str) -> str:
+        """`"present"` or `"absent"`."""
+
+    def command(self, command_id: str) -> str:
+        """`"present"`, `"absent"` or `"unknown"`."""
+
+    def script(self, path: str, sha: str) -> tuple[str, str]:
+        """`(commit_state, path_state)`; `path_state` is `"unknown"` unless the commit is `"present"`."""
 
 
 def finding(field: str, code: str, message: str) -> dict[str, str]:
@@ -184,9 +232,151 @@ def check_host(check: dict, path: str, errors: list) -> None:
         errors.append(finding(host_path, "host_not_concrete", "a live or paid check must name exactly one host"))
 
 
-def check_run(run: object, path: str, kind: object, errors: list) -> None:
+def is_relative_posix(path: str) -> bool:
+    if path == "" or path.startswith("/") or "\\" in path:
+        return False
+    return all(segment not in ("", ".", "..") for segment in path.split("/"))
+
+
+def arg_hits_inline_code(arg: str) -> bool:
+    """D5 class 2: the arg, its part after `=`, the first word of each, the basename of each."""
+    candidates = {arg}
+    if "=" in arg:
+        candidates.add(arg.split("=", 1)[1])
+    candidates |= {word for text in candidates for word in text.split()[:1]}
+    candidates |= {text.rsplit("/", 1)[-1] for text in candidates}
+    return any(text in INLINE_CODE_TOOLS or INTERPRETER.match(text) for text in candidates)
+
+
+def normalised(arg: str) -> str:
+    return arg.split("=", 1)[0] if arg.startswith("-") and "=" in arg else arg
+
+
+def args_carry_code(tool: object, args: list) -> bool:
+    texts = [arg for arg in args if isinstance(arg, str)]
+    if any(arg in EXEC_ARGS or arg_hits_inline_code(arg) for arg in texts):
+        return True
+    flags = [normalised(arg) for arg in texts]
+    if tool in NIX_TOOLS:
+        if any(flag in NIX_CODE_ARGS for flag in flags):
+            return True
+        if tool == "nix":
+            first = next((arg for arg in texts if not arg.startswith("-")), None)
+            if first in NIX_EXEC_SUBCOMMANDS:
+                return True
+        if any(FLAKE_REF.match(arg) or ("=" in arg and FLAKE_REF.match(arg.split("=", 1)[1])) for arg in texts):
+            return True
+    if tool == "git" and any(flag in GIT_CODE_ARGS for flag in flags):
+        return True
+    return False
+
+
+def check_args(run: dict, path: str, errors: list) -> None:
+    """Inline code in `args` (checked first), else the argument shape; one finding at most."""
+    if "args" not in run:
+        return
+    args = run["args"]
+    args_path = join(path, "args")
+    if isinstance(args, list) and args_carry_code(run.get("tool"), args):
+        errors.append(finding(args_path, "inline_code", "an argument carries code or names a program to run"))
+    elif not (isinstance(args, list) and all(isinstance(arg, str) for arg in args)):
+        invalid(errors, args_path, "must be a list of strings")
+
+
+def check_single_line(value: object, path: str, errors: list) -> bool:
+    if not is_text(value) or "\n" in value or "\r" in value:
+        invalid(errors, path, "must be a non-empty single-line string")
+        return False
+    return True
+
+
+def check_form(run: object, path: str, errors: list, refs: References, allow_interactive: bool) -> None:
     if not isinstance(run, dict):
         invalid(errors, path, "must be an object")
+        return
+    forms = [form for form in RUN_FORMS if form in run]
+    if len(forms) != 1 or (forms[0] in ("ask", "act") and not allow_interactive):
+        errors.append(finding(path, "run_form", f"needs exactly one of {', '.join(RUN_FORMS if allow_interactive else RUN_FORMS[:3])}"))
+        return
+    form = forms[0]
+    before = len(errors)
+    for name in run:
+        if name not in RUN_MEMBERS[form]:
+            errors.append(finding(join(path, name), "unknown_field", f"{name!r} is not a member of a {form} run"))
+    if form in ("tool", "script"):
+        key = form
+        name = run[key]
+        key_path = join(path, key)
+        if form == "tool":
+            if not isinstance(name, str):
+                invalid(errors, key_path, "must be a string")
+            elif not TOOL.match(name) or name in INLINE_CODE_TOOLS or INTERPRETER.match(name):
+                errors.append(finding(key_path, "inline_code", "must be the bare name of an installed program that does not run code it is handed"))
+        elif not (isinstance(name, str) and is_relative_posix(name)):
+            invalid(errors, key_path, "must be a relative POSIX path inside the repository")
+        if form == "script":
+            if "at" not in run:
+                errors.append(finding(join(path, "at"), "missing_field", "'at' is required"))
+            elif not is_sha(run["at"]):
+                invalid(errors, join(path, "at"), "must be a 40-character lowercase hex sha")
+        check_args(run, path, errors)
+    elif form == "command":
+        command = run["command"]
+        if not isinstance(command, str):
+            invalid(errors, join(path, "command"), "must be a string")
+        elif not COMMAND_ID.match(command):
+            errors.append(finding(join(path, "command"), "inline_code", "must be a contract command id"))
+    elif form == "ask":
+        if check_single_line(run["ask"], join(path, "ask"), errors) and \
+                APPROVAL_VERB.search(run["ask"]) and APPROVAL_OBJECT.search(run["ask"]):
+            errors.append(finding(join(path, "ask"), "approval_ask", "approval of a document is not a verification question"))
+    else:
+        check_single_line(run["act"], join(path, "act"), errors)
+        if "then" not in run:
+            errors.append(finding(join(path, "then"), "missing_field", "'then' is required"))
+        else:
+            check_form(run["then"], join(path, "then"), errors, refs, False)
+    if len(errors) == before:
+        check_references(run, form, path, errors, refs)
+
+
+def check_references(run: dict, form: str, path: str, errors: list, refs: References) -> None:
+    """D9: the reference of a run that passed every other rule must resolve."""
+    if form == "tool":
+        if refs.tool(run["tool"]) == "absent":
+            errors.append(finding(join(path, "tool"), "not_installed", f"{run['tool']!r} is not installed"))
+    elif form == "command":
+        state = refs.command(run["command"])
+        if state == "absent":
+            errors.append(finding(join(path, "command"), "not_declared", f"{run['command']!r} is not a contract command"))
+        elif state != "present":
+            errors.append(finding(join(path, "command"), "unverified_reference", "the contract commands could not be read; pass --repo-root"))
+    elif form == "script":
+        commit, found = refs.script(run["script"], run["at"])
+        if commit == "absent":
+            errors.append(finding(join(path, "at"), "unverified_reference", "the commit is not in the repository"))
+        elif commit != "present":
+            errors.append(finding(join(path, "script"), "unverified_reference", "the script could not be checked; pass --repo-root"))
+        elif found == "absent":
+            errors.append(finding(join(path, "script"), "not_committed", "the script is not committed at that commit"))
+        elif found != "present":
+            errors.append(finding(join(path, "script"), "unverified_reference", "the script could not be checked"))
+
+
+def check_run(run: object, path: str, kind: object, errors: list, refs: References) -> None:
+    if not isinstance(run, dict):
+        invalid(errors, path, "must be an object")
+        return
+    forms = [form for form in RUN_FORMS if form in run]
+    if len(forms) != 1:
+        errors.append(finding(path, "run_form", f"needs exactly one of {', '.join(RUN_FORMS)}"))
+        return
+    if kind in KINDS:
+        needs_owner = forms[0] in ("ask", "act")
+        if needs_owner != (kind == "human"):
+            wanted = "human" if needs_owner else "evidence"
+            errors.append(finding(path.rsplit(".", 1)[0] + ".kind", "kind_mismatch", f"a {forms[0]} run needs kind {wanted}"))
+    check_form(run, path, errors, refs, True)
 
 
 def check_reason(check: dict, path: str, errors: list) -> None:
@@ -199,7 +389,7 @@ def check_reason(check: dict, path: str, errors: list) -> None:
         errors.append(finding(reason_path, "reason_not_allowed", "an evidence check takes no reason"))
 
 
-def check_one(check: object, path: str, errors: list) -> None:
+def check_one(check: object, path: str, errors: list, refs: References) -> None:
     if not closed_object(check, path, CHECK_FIELDS, CHECK_REQUIRED, errors):
         return
     if "ac" in check and not (isinstance(check["ac"], str) and AC.match(check["ac"])):
@@ -211,7 +401,7 @@ def check_one(check: object, path: str, errors: list) -> None:
     if "when" in check:
         check_when(check["when"], join(path, "when"), errors)
     if "run" in check:
-        check_run(check["run"], join(path, "run"), check.get("kind"), errors)
+        check_run(check["run"], join(path, "run"), check.get("kind"), errors, refs)
     if "expect" in check:
         check_expect(check["expect"], join(path, "expect"), errors)
     for name, choices in (("effects", EFFECTS), ("mode", MODES), ("on_fail", ON_FAIL), ("on_expire", ON_EXPIRE)):
@@ -224,7 +414,7 @@ def check_one(check: object, path: str, errors: list) -> None:
     check_reason(check, path, errors)
 
 
-def lint_block(block: object) -> dict:
+def lint_block(block: object, *, refs: References) -> dict:
     errors: list[dict] = []
     warnings: list[dict] = []
     if closed_object(block, "", TOP_FIELDS, TOP_REQUIRED, errors):
@@ -238,5 +428,5 @@ def lint_block(block: object) -> dict:
                 invalid(errors, "checks", "must be a non-empty list of checks")
             else:
                 for index, check in enumerate(checks):
-                    check_one(check, f"checks[{index}]", errors)
+                    check_one(check, f"checks[{index}]", errors, refs)
     return {"ok": not errors, "errors": errors, "warnings": warnings}

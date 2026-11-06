@@ -14,6 +14,15 @@ SHA2 = "b" * 40
 STUB_TOOLS = ("resolve-project", "jq")
 STUB_BIN = None
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
+FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
+HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+SCRUBBED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+            "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES")
+
 
 def setUpModule():
     """A `bin` of stub executables prepended to PATH, so "installed" (D9) is deterministic."""
@@ -91,6 +100,11 @@ class LintTableTest(unittest.TestCase):
                                            expires_after_days=30, effects="paid")),
         ("min_len expect", with_check(expect={"json": [{"pointer": "/runs", "min_len": 3}]})),
         ("fenced in a comment", "Held for verification.\n\n```verify\n" + json.dumps(base_block()) + "\n```\n"),
+        ("ask form", with_check(kind="human", reason="taste", run={"ask": "Does the dock look right on eleven-m5?"})),
+        ("act form", with_check(kind="human", reason="hands",
+                                run={"act": "just switch", "then": {"tool": "resolve-project", "args": ["platform-status"]}})),
+        ("jq is not an interpreter", with_check(run={"tool": "jq", "args": ["-e", ".ok"]})),
+        ("jq --arg is not Nix code", with_check(run={"tool": "jq", "args": ["--arg", "x", "y", ".x"]})),
     ]
     REFUSE = [
         ("unknown top field", with_top(extra=1), "extra", "unknown_field"),
@@ -116,6 +130,49 @@ class LintTableTest(unittest.TestCase):
         ("not json", "{not json", "block", "not_json"),
         ("duplicate key", '{"v": 1, "v": 1}', "block", "not_json"),
         ("two fences", "```verify\n{}\n```\n```verify\n{}\n```\n", "block", "fence_count"),
+        ("python3 -c", with_check(run={"tool": "python3", "args": ["-c", "print(1)"]}), "checks[0].run.tool", "inline_code"),
+        ("bash", with_check(run={"tool": "bash", "args": ["-c", "true"]}), "checks[0].run.tool", "inline_code"),
+        ("tool path", with_check(run={"tool": "/tmp/x.sh"}), "checks[0].run.tool", "inline_code"),
+        ("timeout wrapper", with_check(run={"tool": "timeout", "args": ["60", "python3", "-c", "print(1)"]}),
+         "checks[0].run.tool", "inline_code"),
+        ("wrapped interpreter in args", with_check(run={"tool": "timeout", "args": ["60", "python3", "-c", "print(1)"]}),
+         "checks[0].run.args", "inline_code"),
+        ("unlisted runner, interpreter in args", with_check(run={"tool": "xcrun", "args": ["/usr/bin/python3", "-c", "print(1)"]}),
+         "checks[0].run.args", "inline_code"),
+        ("find -exec", with_check(run={"tool": "find", "args": [".", "-exec", "true", ";"]}), "checks[0].run.args", "inline_code"),
+        ("find -exec bash", with_check(run={"tool": "find", "args": [".", "-exec", "bash", "-c", "x", ";"]}),
+         "checks[0].run.args", "inline_code"),
+        ("nix expr", with_check(run={"tool": "nix", "args": ["eval", "--expr", "1"]}), "checks[0].run.args", "inline_code"),
+        ("nix expr joined", with_check(run={"tool": "nix", "args": ["eval", "--expr=1"]}), "checks[0].run.args", "inline_code"),
+        ("nix apply", with_check(run={"tool": "nix", "args": ["eval", ".#x", "--apply", "f: f"]}), "checks[0].run.args", "inline_code"),
+        ("nix arg", with_check(run={"tool": "nix-build", "args": ["--arg", "x", "import ./evil.nix"]}), "checks[0].run.args", "inline_code"),
+        ("nix run remote", with_check(run={"tool": "nix", "args": ["run", "github:someone/flake"]}), "checks[0].run.args", "inline_code"),
+        ("nix build remote", with_check(run={"tool": "nix", "args": ["build", "github:someone/flake#x"]}), "checks[0].run.args", "inline_code"),
+        ("nix run local", with_check(run={"tool": "nix", "args": ["run", ".#x"]}), "checks[0].run.args", "inline_code"),
+        ("git config command", with_check(run={"tool": "git", "args": ["-c", "alias.x=!true", "x"]}), "checks[0].run.args", "inline_code"),
+        ("command with spaces", with_check(run={"command": "python3 -c 1"}), "checks[0].run.command", "inline_code"),
+        ("script without sha", with_check(run={"script": "scripts/x.py"}), "checks[0].run.at", "missing_field"),
+        ("script escapes repo", with_check(run={"script": "../x.py", "at": SHA2}), "checks[0].run.script", "invalid_value"),
+        ("two forms", with_check(run={"tool": "jq", "command": "test"}), "checks[0].run", "run_form"),
+        ("no form", with_check(run={"args": []}), "checks[0].run", "run_form"),
+        ("inline code key", with_check(run={"tool": "jq", "code": "print(1)"}), "checks[0].run.code", "unknown_field"),
+        ("act then ask", with_check(kind="human", reason="hands", run={"act": "just switch", "then": {"ask": "ok?"}}),
+         "checks[0].run.then", "run_form"),
+        ("act then python", with_check(kind="human", reason="hands",
+                                       run={"act": "x", "then": {"tool": "python3", "args": ["-c", "1"]}}),
+         "checks[0].run.then.tool", "inline_code"),
+        ("approval ask", with_check(kind="human", reason="taste", run={"ask": "Please approve the design spec"}),
+         "checks[0].run.ask", "approval_ask"),
+        ("adr sign-off ask", with_check(kind="human", reason="taste", run={"ask": "Sign off on ADR 12?"}),
+         "checks[0].run.ask", "approval_ask"),
+        ("ask on evidence", with_check(run=ASK), "checks[0].kind", "kind_mismatch"),
+        ("act on evidence", with_check(run={"act": "just switch", "then": {"tool": "jq", "args": [".ok"]}}),
+         "checks[0].kind", "kind_mismatch"),
+        ("tool on human", with_check(kind="human", reason="hands"), "checks[0].kind", "kind_mismatch"),
+        ("tool not installed", with_check(run={"tool": "no-such-tool-625"}), "checks[0].run.tool", "not_installed"),
+        ("command without repo root", with_check(run={"command": "test"}), "checks[0].run.command", "unverified_reference"),
+        ("script without repo root", with_check(run={"script": "scripts/check-thing.py", "at": SHA2}),
+         "checks[0].run.script", "unverified_reference"),
     ]
 
     def test_accept_rows(self):
@@ -133,6 +190,63 @@ class LintTableTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertFalse(verdict["ok"])
                 self.assertIn((field, code), [(e["field"], e["code"]) for e in verdict["errors"]])
+
+
+class ReferenceTest(unittest.TestCase):
+    """D9 against a committed copy of the eval fixture project (contract command id `test`)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory()
+        scratch = Path(cls.scratch.name).resolve()
+        home = scratch / "home"
+        (home / ".agents" / "share").mkdir(parents=True)
+        shutil.copy(MANIFEST, home / ".agents" / "share" / "platform-manifest.json")
+        cls.root = scratch / "repo"
+        shutil.copytree(FIXTURE, cls.root)
+        (cls.root / "scripts").mkdir()
+        (cls.root / "scripts" / "check-thing.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+        cls.env = cli_env(HOME=str(home), **HERMETIC_GIT)
+        for name in SCRUBBED:
+            cls.env.pop(name, None)
+        def git(*args):
+            return subprocess.run(["git", "-C", str(cls.root), *args], env=cls.env, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("config", "commit.gpgsign", "false")  # throwaway fixture repo
+        git("add", "-A")
+        git("commit", "-q", "-m", "fixture")
+        cls.head = git("rev-parse", "HEAD")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.scratch.cleanup()
+
+    def lint_here(self, run):
+        return lint(with_check(run=run), "--repo-root", str(self.root), env=self.env)
+
+    def test_accept_rows(self):
+        for name, run in (("declared command", {"command": "test"}),
+                          ("committed script", {"script": "scripts/check-thing.py", "at": self.head, "args": ["--fast"]})):
+            with self.subTest(name):
+                result, verdict = self.lint_here(run)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(verdict["errors"], [])
+
+    def test_refuse_rows(self):
+        rows = (("undeclared command", {"command": "not-in-contract"}, "checks[0].run.command", "not_declared"),
+                ("script absent at commit", {"script": "scripts/missing.py", "at": self.head}, "checks[0].run.script", "not_committed"),
+                ("commit absent", {"script": "scripts/check-thing.py", "at": SHA2}, "checks[0].run.at", "unverified_reference"))
+        for name, run, field, code in rows:
+            with self.subTest(name):
+                result, verdict = self.lint_here(run)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn((field, code), [(e["field"], e["code"]) for e in verdict["errors"]])
+
+    def test_repo_root_not_a_repo_is_usage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result, verdict = lint(base_block(), "--repo-root", temp, env=self.env)
+        self.assertEqual((result.returncode, verdict), (2, None))
 
 
 class CommandShapeTest(unittest.TestCase):
