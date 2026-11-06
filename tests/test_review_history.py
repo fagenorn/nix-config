@@ -7,9 +7,8 @@ import sys
 import unittest
 from unittest.mock import patch
 from tests.test_review_feasibility import SourceProjectionFixture
-from agent_tools.review_forecast import ForecastError, edge_facts, load_plan
-from agent_tools.review_projection import ReconstructionUnavailable, reconstruct_owned, _prerequisite
-from agent_tools.review_budget import describe
+from agent_tools.review_forecast import ForecastError, edge_facts
+from agent_tools.review_projection import ReconstructionUnavailable, reconstruct_owned
 
 class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
     def snapshot(self):
@@ -28,10 +27,6 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
         return subprocess.run([sys.executable, '-m', 'agent_tools.review_package',
             str(self.repo / 'all.md'), self.base, self.head, str(self.top / 'actual.json')],
             cwd=self.repo, env=self.env, capture_output=True)
-
-    def assert_invalid(self, result):
-        self.assertEqual((result.returncode, result.stdout), (2, b''), result.stderr)
-        self.assertNotIn(b'projection_unavailable', result.stderr)
 
     def assert_actual_invalid(self, result):
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -66,7 +61,6 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
         self.assertEqual(raw, subprocess.check_output(['git', '-C', str(self.repo), 'cat-file', 'commit', second]))
         self.assertEqual(set(members), set(self.git('rev-list', self.base + '..' + self.head).splitlines()))
         before = self.snapshot()
-        self.assert_invalid(self.project())
         self.assert_actual_invalid(self.producer())
         with self.assertRaises(ForecastError):
             edge_facts(self.repo, first, second, 1)
@@ -99,7 +93,6 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
         first, second = self.seed_owned()
         self.git('replace', '--graft', second, first, self.base)
         before = self.snapshot()
-        self.assert_invalid(self.project())
         self.assert_actual_invalid(self.producer())
         self.assertEqual(before, self.snapshot())
         self.git('replace', '-d', second)
@@ -107,7 +100,6 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
         graft.write_text(f'{second} {first} {self.base}\n')
         self.env['GIT_GRAFT_FILE'] = str(graft)
         before = self.snapshot()
-        self.assert_invalid(self.project())
         self.assert_actual_invalid(self.producer())
         with patch.dict(os.environ, self.env, clear=True):
             with self.assertRaises(ForecastError) as caught:
@@ -115,22 +107,6 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
                     self.fail('environment graft accepted')
             self.assertNotIsInstance(caught.exception, ReconstructionUnavailable)
         self.assertEqual(before, self.snapshot())
-
-    def test_prerequisite_rechecks_original_graph_after_plan_load(self):
-        first, second = self.seed_owned()
-        with patch.dict(os.environ, self.env, clear=True):
-            plan = load_plan(self.repo, self.repo / 'all.md', self.base, self.head,
-                             describe('review-package'))
-            boundary = dict(plan.boundaries[0], prerequisite=dict(kind='completed-tasks',
-                tasks=[1], commit=first, tree=self.git('rev-parse', first + '^{tree}')))
-            self.assertEqual(_prerequisite(plan, boundary, 1), first)
-            parent = self.git('rev-parse', first + '^')
-            (self.repo / '.git/info/grafts').write_text(f'{first} {parent} {self.base}\n')
-            before = self.snapshot()
-            with self.assertRaises(ForecastError) as caught:
-                _prerequisite(plan, boundary, 1)
-            self.assertNotIsInstance(caught.exception, ReconstructionUnavailable)
-            self.assertEqual(before, self.snapshot())
 
     def test_invalid_later_edge_precedes_honest_unsupported_earlier_effect(self):
         self.write('shared.txt', 'seed\nexcluded\n')
@@ -168,7 +144,6 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
                 saved = dict(self.env)
                 self.env.update(env_update)
                 try:
-                    self.assert_invalid(self.project())
                     self.assert_actual_invalid(self.producer())
                     with patch.dict(os.environ, self.env, clear=True):
                         with self.assertRaises(ForecastError) as caught:
@@ -187,7 +162,6 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
         self.assertEqual(self.git('rev-list', '--parents', '-n', '1', second).split()[1:],
                          [first, self.base])
         before = self.snapshot()
-        self.assert_invalid(self.project())
         self.assert_actual_invalid(self.producer())
         self.assertEqual(before, self.snapshot())
 
@@ -212,71 +186,12 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
         self.assertNotIsInstance(caught.exception, ReconstructionUnavailable)
         self.assertEqual(before, self.snapshot())
 
-    def test_rehashed_original_edge_mutation_is_invalid_at_prerequisite_boundary(self):
-        from dataclasses import replace
-        from agent_tools.canonical import telemetry_digest
-        from agent_tools.review_actual import git_diff, record_operation, _split_diff
-        from agent_tools.review_forecast import tree_entry
-        from agent_tools.review_git import HistoryError
-        first, second = self.seed_owned()
-        with patch.dict(os.environ, self.env, clear=True):
-            plan = load_plan(self.repo, self.repo / 'all.md', self.base, self.head,
-                             describe('review-package'))
-            original = plan.ownership
-            checkpoint = original.ordered_commits.index(original.evidence_head)
-            def envelope(ownership):
-                return dict(evidence=plan.delivery['actual_evidence'],
-                    task_ranges=[task['actual_ranges'] for task in plan.tasks],
-                    commits=[dict(commit=c, owner=ownership.owners[c],
-                                  boundaries=list(ownership.process_memberships.get(c, ())))
-                             for c in ownership.ordered_commits],
-                    edges=list(ownership.edges),
-                    metadata_tail=list(ownership.ordered_commits[checkpoint + 1:]))
-            self.assertEqual(telemetry_digest(envelope(original)), original.digest)
-            boundary = dict(plan.boundaries[0], prerequisite=dict(kind='completed-tasks',
-                tasks=[1], commit=first, tree=self.git('rev-parse', first + '^{tree}')))
-            before = self.snapshot()
-            self.assertEqual(_prerequisite(plan, boundary, 1), first)
-            self.assertEqual(before, self.snapshot())
-            edges = json.loads(json.dumps(original.edges))
-            target = next(row for row in edges if row['commit'] == first)
-            self.assertNotEqual(target['parent'], self.base)
-            # Fresh facts for the false pair: only original parent membership is false.
-            names = git_diff(self.repo, self.base, first, '--name-status', '-z').split(b'\0')
-            self.assertEqual(names.pop(), b'')
-            facts = []
-            while names:
-                operation, count = record_operation(names.pop(0))
-                old = names.pop(0).decode('utf-8')
-                new = names.pop(0).decode('utf-8') if count == 2 else old
-                facts.append(dict(operation=operation, path=new, old_path=old,
-                    before=tree_entry(self.repo, self.base, old),
-                    after=tree_entry(self.repo, first, new)))
-            chunks = _split_diff(git_diff(self.repo, self.base, first, '--binary', '-U10'))
-            self.assertEqual(len(chunks), len(facts))
-            for fact, chunk in zip(facts, chunks, strict=True):
-                fact.update(record_bytes=len(chunk),
-                            record_sha256='sha256:' + hashlib.sha256(chunk).hexdigest())
-            target.update(parent=self.base, parent_ordinal=1, records=facts)
-            altered = replace(original, edges=tuple(edges))
-            altered = replace(altered, digest=telemetry_digest(envelope(altered)))
-            self.assertEqual(telemetry_digest(envelope(altered)), altered.digest)
-            self.assertNotEqual(altered.digest, original.digest)
-            before = self.snapshot()
-            with self.assertRaises(ForecastError) as caught:
-                _prerequisite(replace(plan, ownership=altered), boundary, 1)
-            self.assertNotIsInstance(caught.exception, ReconstructionUnavailable)
-            self.assertIsInstance(caught.exception.__cause__, HistoryError)
-            self.assertEqual(caught.exception.__cause__.code, 'original_parent_mismatch')
-            self.assertEqual(before, self.snapshot())
-
     def test_missing_original_parent_object_fails_without_source_writes(self):
         first, second = self.seed_owned()
         parent_object = self.repo / '.git/objects' / first[:2] / first[2:]
         self.assertTrue(parent_object.is_file())
         parent_object.unlink()
         before = self.snapshot()
-        self.assert_invalid(self.project())
         self.assert_actual_invalid(self.producer())
         with self.assertRaises(ForecastError) as caught:
             with reconstruct_owned(self.repo, self.base, [second]):
@@ -299,7 +214,6 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
         with self.assertRaises(HistoryError) as caught:
             original_commit(self.repo, second)
         self.assertEqual(caught.exception.code, 'original_object_identity_mismatch')
-        self.assert_invalid(self.project())
         self.assert_actual_invalid(self.producer())
         self.assertEqual(before, self.snapshot())
 
@@ -311,7 +225,6 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
         self.env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.useReplaceRefs', GIT_CONFIG_VALUE_0='true')
         self.assertEqual(self.git('rev-list', '--parents', '-n', '1', second).split()[1:], [first, self.base])
         before = self.snapshot()
-        self.assert_invalid(self.project())
         self.assert_actual_invalid(self.producer())
         self.assertEqual(before, self.snapshot())
 

@@ -56,7 +56,7 @@ NOT_LAUNCHERS = ("workflow-state",)
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
                   "context-map-lint", "context-meter", "derive-review-feasibility-fixtures",
                   "diff-scope", "lane-triage", "orchestrate-control", "replay-retained", "resolve-project",
-                  "review-feasibility", "review-package", "review-range", "sdd-gate",
+                  "review-package", "review-range", "sdd-gate",
                   "ship-delivery")
 # The retained commands (#249) and their modules: refusal parity cases below.
 RETAINED = {"derive-review-feasibility-fixtures": "derive_review_feasibility_fixtures",
@@ -521,7 +521,6 @@ class AgentToolsLauncherTest(unittest.TestCase):
             + wire(task).decode() + '```\n')
         head = commit('process package')
         before = git('status', '--porcelain'), git('rev-parse', 'HEAD^{tree}')
-        projected, summaries = {}, {}
         for label in ('source', 'built'):
             outdir = top / (label + '-out'); outdir.mkdir()
             root = outdir / 'review.json'
@@ -536,47 +535,16 @@ class AgentToolsLauncherTest(unittest.TestCase):
             self.assertEqual(checked.returncode, 0, checked.stderr)
             metrics = json.loads(actual.stdout)['artifact']['metrics']
             self.assertEqual(metrics, json.loads(checked.stdout)['metrics'])
-            result = command(label, 'review-feasibility', 'project', '--plan', str(repo / 'plan.md'),
-                '--base', base, '--head', head, '--completed-through', '1', '--package-name', 'review.json')
-            self.assertEqual(result.returncode, 0, result.stderr)
-            value = json.loads(result.stdout)
-            self.assertEqual(value['metrics'], metrics)
-            self.assertEqual((value['base'], value['head'], value['tree']),
-                             (base, head, git('rev-parse', head + '^{tree}')))
-            self.assertEqual((value['completed_through'], value['boundary'], value['package_name']),
-                             (1, 'core', 'review.json'))
-            self.assertEqual((value['state'], value['budget_status'], value['violations'],
-                              value['recommended_boundary']), ('complete', 'within_budget', [], None))
-            gated = command(label, 'review-feasibility', 'gate', '--plan', str(repo / 'plan.md'),
-                '--base', base, '--head', head, '--completed-through', '1')
-            confirmed = command(label, 'review-feasibility', 'confirm', '--plan', str(repo / 'plan.md'),
-                '--base', base, '--input', '-', payload=gated.stdout)
-            self.assertEqual((gated.returncode, confirmed.returncode), (0, 0), gated.stderr + confirmed.stderr)
-            self.assertEqual(confirmed.stdout, gated.stdout)
-            summaries[label] = gated.stdout
-            validated = command(label, 'review-feasibility', 'validate-result', '--input', '-',
-                                '--producer-exit', '0', payload=result.stdout)
-            self.assertEqual((validated.returncode, validated.stdout), (0, result.stdout), validated.stderr)
-            for bad, status in ((b'', '0'), (result.stdout + b' ', '0'),
-                    (result.stdout.replace(b'"schema_version":3', b'"schema_version":true'), '0'),
-                    (result.stdout, '3')):
-                refused = command(label, 'review-feasibility', 'validate-result', '--input', '-',
-                                  '--producer-exit', status, payload=bad)
-                self.assertEqual((refused.returncode, refused.stdout), (2, b''), refused.stderr)
-            projected[label] = result.stdout
             description = subprocess.run(['artifact-budget', 'describe', '--kind', 'review-package',
                 '--format', 'json'], env=checkenv, capture_output=True)
             self.assertEqual(description.returncode, 0, description.stderr)
             policy = Path(checkenv['HOME']) / '.agents/share/artifact-budget-policy.json'
             self.assertEqual(json.loads(description.stdout)['policy_sha256'],
                              'sha256:' + hashlib.sha256(policy.read_bytes()).hexdigest())
-            self.assertEqual(value['artifact_policy_sha256'], json.loads(description.stdout)['policy_sha256'])
             refused = subprocess.run(['artifact-budget', 'check', '--kind', 'review-package',
                 '--root', str(root), '--format', 'json', '--expected-policy-sha256', 'sha256:' + '0' * 64],
                 env=checkenv, capture_output=True)
             self.assertEqual(refused.returncode, 2, refused.stderr)
-        self.assertEqual(projected['source'], projected['built'])
-        self.assertEqual(summaries['source'], summaries['built'])
         self.assertEqual((top / 'source-out/review.json').read_bytes(),
                          (top / 'built-out/review.json').read_bytes())
         for a in (top / 'source-out/review.shards').iterdir():

@@ -1,13 +1,10 @@
 """Projected review limits on an issue-121-shaped delivery (issue 227), now advisory in sdd-gate (Stage 2c)."""
 import json
-import subprocess
-import sys
 import unittest
 
 import tests.test_sdd_gate as sdd_cases
 
 CHILDREN = (("first", [1, 2, 3], []), ("middle", [4, 5, 6], ["first"]), ("last", [7, 8], ["middle"]))
-FEASIBILITY = [sys.executable, "-m", "agent_tools.review_feasibility"]
 
 
 def canonical(value):
@@ -81,23 +78,13 @@ class ReplayTest(sdd_cases.GateCase):
         return self.repo_commit("plan: issue-121-shaped forecast")
 
     # -- helpers -------------------------------------------------------------
-    def feasibility(self, *args, raw=None):
-        return subprocess.run([*FEASIBILITY, *map(str, args)], input=raw, cwd=self.repo, env=self.env,
-                              capture_output=True)
-
     def next(self, *args):
         return self.gate("next", self.plan, "--skill-dir", sdd_cases.SKILL, *args)
 
     # -- the replay ----------------------------------------------------------
-    def test_an_oversized_plan_is_refused_at_planning_and_at_sdd_entry(self):
+    def test_an_oversized_forecast_no_longer_stops_sdd_entry(self):
         self.root_subjects = [120] * 100
         head = self.write_plan()
-        gated = self.feasibility("gate", "--plan", self.plan, "--base", self.base, "--head", head,
-                                 "--completed-through", 0)
-        self.assertEqual(gated.returncode, 3, gated.stderr)
-        summary = json.loads(gated.stdout)
-        self.assertEqual((summary["recommended_boundary"]["id"], summary["recommended_boundary"]["tasks"]),
-                         ("first", [1, 2, 3]))
         # Stage 2c: sdd-gate no longer projects, so the forecast no longer stops execution.
         self.ready(self.next("--task", 1, "--delivery-base", self.base))
         self.assertIn(f"Task 1: dispatched (base {head})", self.ledger.read_text(encoding="utf-8"))
