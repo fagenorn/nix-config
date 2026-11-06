@@ -185,21 +185,23 @@ def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Mar
     released: list[int] = []
 
     def judge(owner_action: Marker, snapshot: list[Marker],
-              early: tuple[Marker, list[datetime]] | None = None) -> tuple[Marker | None, str]:
-        """`early` is the claim as an earlier listing showed it and its branch activity, read
-        before `snapshot` was taken, so only the `updated_at` comparison follows `snapshot`."""
+              early: tuple[Marker, list[datetime]] | None = None
+              ) -> tuple[Marker | None, str, list[datetime]]:
+        """Returns the named claim, the verdict and the branch activity judged. `early` is the
+        claim as an earlier listing showed it and its branch activity, read before `snapshot`
+        was taken, so only the `updated_at` comparison follows `snapshot`."""
         nonlocal now
         claim = _claim_named(snapshot, owner_action)
         if claim is None or claim.comment_id in released or not fm.is_live(claim, snapshot):
-            return claim, "released"
+            return claim, "released", []
         now = fm.server_now() if now is None else now
         if early is None:
             moments = branch_activity(slug, claim)
         elif claim.fields.get("branch") != early[0].fields.get("branch"):
-            return claim, "renewed"  # only a renewal since the earlier listing changes the branch
+            return claim, "renewed", []  # only a renewal since the earlier listing changes the branch
         else:
             moments = early[1]
-        return claim, ("stale" if is_stale(max([claim.updated_at, *moments]), now) else "renewed")
+        return claim, ("stale" if is_stale(max([claim.updated_at, *moments]), now) else "renewed"), moments
 
     def still_ticked(owner_action: Marker, snapshot: list[Marker]) -> Marker | None:
         return next((m for m in _live_owner_actions(snapshot)
@@ -209,17 +211,18 @@ def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Mar
         current = still_ticked(marker, markers)
         if current is None:
             continue  # ended, or untick, since the listing this loop started from
-        claim, verdict = judge(current, markers)
+        claim, verdict, moments = judge(current, markers)
         if verdict == "stale":
-            # The snapshot can be old: a renewal ends the box and moves the claim. Read the branch
-            # activity first, then judge once more on a fresh listing immediately before the
-            # irreversible end of the claim, so no forge read sits between that listing and the end.
-            early = (claim, branch_activity(slug, claim))
+            # The snapshot can be old: a renewal ends the box and moves the claim. The branch
+            # activity was read after that snapshot; judge once more, on it and a fresh listing,
+            # immediately before the irreversible end of the claim, so no forge read sits between
+            # that listing and the end.
+            early = (claim, moments)
             markers = fm.list_markers(slug, issue)
             current = still_ticked(current, markers)
             if current is None:
                 continue
-            claim, verdict = judge(current, markers, early)
+            claim, verdict, _ = judge(current, markers, early)
         if verdict == "stale":
             fm.end(slug, issue, claim.comment_id, "owner-action")
             fm.edit(slug, claim.comment_id, fm.with_fields(claim, released="owner-action"))

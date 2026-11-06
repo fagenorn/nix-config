@@ -508,25 +508,39 @@ class StatusTest(Base):
         self.assertEqual(labels[-2:], [REMOVE, ADD])  # the label ends on the issue
         self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
 
-    def test_a_renewal_during_the_branch_activity_read_releases_nothing(self):
-        # Finding 2: the honour reads branch activity before its fresh listing, so a renewal that
-        # lands during that read is in the listing it judges.
+    def test_the_honour_reads_nothing_between_its_fresh_listing_and_the_end(self):
+        # Finding 2: branch activity and server time are read before the fresh listing, so only the
+        # `updated_at` comparison sits between that listing and the irreversible end of the claim.
         self.store(comment(5, claim_body(OTHER, branch="topic"), OLD),
                    comment(30, oa_body(5, OTHER, ticked=True)))
         self.world.respond_json("gh", PUSH, [])
         self.world.respond_json("gh", PRS, [])
-        real, calls = fm.latest_push, [0]
+        code, out = run(*common("acquire"))
+        self.assertEqual((code, out["verdict"], out["released_by_owner"]), (0, "acquired", [5]))
+        argvs = self.world.argvs("gh")
+        ending = argvs.index(post(fm.end_body(5, "owner-action")))
+        self.assertEqual(argvs[ending - 1], LIST)
+        self.assertEqual((argvs[:ending].count(PUSH), argvs[:ending].count(PRS)), (1, 1))  # one read each
 
-        def push(*args, **kwargs):
-            calls[0] += 1
-            if calls[0] == 2:  # the honour's re-check read
-                self.assertEqual(run(*common("renew", holder=OTHER))[1]["verdict"], "renewed")
-            return real(*args, **kwargs)
-        with mock.patch.object(fm, "latest_push", push):
-            code, out = run(*common("acquire"))
-        self.assertEqual((code, out["verdict"], out["by"], out["released_by_owner"]), (3, "held_by", OTHER, []))
-        self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
-        self.assertNotIn(post(fm.end_body(5, "owner-action")), self.mutations())
+    def test_the_fresh_listing_is_judged_when_the_box_stays_ticked(self):
+        # The claim moves between the first listing and the fresh one while its box stays ticked:
+        # a renewal (updated_at moves) or a branch change (judged a renewal even at an old clock).
+        for clock, fields in ((T0, {"renewed": "1"}), (OLD, {"branch": "other"})):
+            with self.subTest(fields=fields):
+                self.fresh_world()
+                self.world.comment_store(SLUG, ISSUE, [comment(5, claim_body(OTHER, branch="topic"), OLD),
+                                                       comment(30, oa_body(5, OTHER, ticked=True))],
+                                         next_id=40, clock=clock)
+                self.world.respond_json("gh", PUSH, [])
+                self.world.respond_json("gh", PRS, [])
+                moved = claim_body(OTHER, branch=fields.get("branch", "topic"),
+                                   **{k: v for k, v in fields.items() if k != "branch"})
+                interleave(self, 1, lambda: fm.edit(SLUG, 5, moved))
+                code, out = run(*common("acquire"))
+                self.assertEqual((code, out["verdict"], out["by"], out["released_by_owner"]),
+                                 (3, "held_by", OTHER, []))
+                self.assertIn(post(fm.end_body(30, "renewed")), self.mutations())
+                self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
 
     def test_a_tick_read_before_the_holder_renewed_releases_nothing(self):
         # COR-001: acquire reads the stale claim and the ticked box, then OTHER renews (ending the box)
