@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import subprocess
@@ -15,7 +16,11 @@ from pathlib import Path
 from typing import BinaryIO, Mapping, Sequence
 
 PREFIX = "suite-runner:"
-DEFAULT_JOBS = 4
+JOBS_ENV = "SUITE_RUNNER_JOBS"
+MAX_DEFAULT_JOBS = 8
+# CPUs left to the host and to other agents' work when the default is derived.
+RESERVED_CPUS = 2
+TIMINGS_FILE = Path(__file__).with_name("suite_timings.json")
 INTERRUPTED = f"{PREFIX} interrupted, waiting for running members"
 INTERRUPT_EXIT = 130
 # Appended to every member's GIT_CONFIG_PARAMETERS, in the form `git -c` exports
@@ -38,6 +43,44 @@ class MemberResult:
     @property
     def passed(self) -> bool:
         return self.returncode == 0
+
+
+def default_jobs(cpu_count: int | None, environ: Mapping[str, str]) -> int:
+    """The job count used when `--jobs` is not given: `SUITE_RUNNER_JOBS` when
+    it is set and non-empty, else `min(8, cpu_count - 2)` with a floor of 1
+    (also the value when the CPU count is unknown). A bad `SUITE_RUNNER_JOBS`
+    raises `UsageError`."""
+    text = environ.get(JOBS_ENV, "")
+    if text:
+        try:
+            return _jobs(text)
+        except argparse.ArgumentTypeError as error:
+            raise UsageError(f"{JOBS_ENV}: {error}") from None
+    return max(1, min(MAX_DEFAULT_JOBS, (cpu_count or 1) - RESERVED_CPUS))
+
+
+def load_timings(path: Path = TIMINGS_FILE) -> dict[str, float]:
+    """Member path to seconds from the committed timing file; empty when the
+    file is missing or malformed, so scheduling falls back to list order."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {key: float(value) for key, value in data.items()
+            if isinstance(key, str) and isinstance(value, (int, float))
+            and not isinstance(value, bool)}
+
+
+def schedule_order(members: Sequence[str], timings: Mapping[str, float]) -> list[int]:
+    """Indexes of `members` in the order they start: longest-first (LPT) by
+    `timings`, members the file does not name first, in list order, because
+    their length is unknown, and ties in list order."""
+    unknown = [i for i, member in enumerate(members) if member not in timings]
+    known = [i for i, member in enumerate(members) if member in timings]
+    known.sort(key=lambda i: (-timings[members[i]], i))
+    return unknown + known
 
 
 def member_command(member: str) -> list[str]:
@@ -234,8 +277,8 @@ def _run_serial(members: Sequence[str], environment: Mapping[str, str],
     return results
 
 
-def _run_parallel(members: Sequence[str], jobs: int, environment: Mapping[str, str],
-                  out: _Output) -> list[MemberResult | None]:
+def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
+                  environment: Mapping[str, str], out: _Output) -> list[MemberResult | None]:
     results: list[MemberResult | None] = [None] * len(members)
     stop = threading.Event()
     next_index = 0
@@ -246,12 +289,13 @@ def _run_parallel(members: Sequence[str], jobs: int, environment: Mapping[str, s
         nonlocal next_index
         while True:
             # Taking a member, writing its start line and launching it share
-            # the output lock: members start in list order, and no start line
+            # the output lock: members start in `order`, and no start line
             # lands inside another member's block.
             with out.lock:
                 if stop.is_set() or next_index == len(members):
                     return
-                index, member = next_index, members[next_index]
+                index = order[next_index]
+                member = members[index]
                 next_index += 1
                 out.write(_line(f"{PREFIX} start {member}"))
                 started = time.monotonic()
@@ -313,8 +357,11 @@ def _run_parallel(members: Sequence[str], jobs: int, environment: Mapping[str, s
     return results
 
 
-def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO) -> int:
+def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
+              timings: Mapping[str, float] | None = None) -> int:
     """Run every member and write the report; 0 when all passed, else 1.
+    Parallel runs start members in `schedule_order(members, timings)`, serial
+    runs in list order.
 
     A KeyboardInterrupt propagates after the running members have finished and
     written their blocks. Must be called from the main thread: the runner holds
@@ -331,7 +378,8 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO) -> int:
         if jobs == 1:
             results = _run_serial(members, environment, output)
         else:
-            results = _run_parallel(members, jobs, environment, output)
+            order = schedule_order(members, timings or {})
+            results = _run_parallel(members, order, jobs, environment, output)
         missing = [member for member, result in zip(members, results) if result is None]
         if missing:
             raise RuntimeError(f"members left without a result: {', '.join(missing)}")
@@ -350,14 +398,15 @@ def _jobs(text: str) -> int:
     return jobs
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(default: int) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-workflow-tests",
         description="Run the agent workflow suite's members, each in its own process.")
     parser.add_argument(
-        "--jobs", metavar="N", type=_jobs, default=DEFAULT_JOBS,
+        "--jobs", metavar="N", type=_jobs, default=default,
         help="run at most N members at a time; 1 runs them one at a time "
-             "with live output (default: %(default)s)")
+             f"with live output (default: %(default)s, from {JOBS_ENV} or "
+             f"min({MAX_DEFAULT_JOBS}, CPUs - {RESERVED_CPUS}))")
     parser.add_argument(
         "members", nargs="+", metavar="member",
         help="a test file (.py, run by unittest) or a shell script (.sh, run by bash)")
@@ -365,14 +414,19 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = _parser()
+    try:
+        default = default_jobs(os.cpu_count(), os.environ)
+    except UsageError as error:
+        _parser(1).error(str(error))
+    parser = _parser(default)
     args = parser.parse_args(argv)
     try:
         validate_members(args.members, Path.cwd())
     except UsageError as error:
         parser.error(str(error))
     try:
-        return run_suite(args.members, jobs=args.jobs, out=sys.stdout.buffer)
+        return run_suite(args.members, jobs=args.jobs, out=sys.stdout.buffer,
+                         timings=load_timings())
     except KeyboardInterrupt:
         return INTERRUPT_EXIT
 

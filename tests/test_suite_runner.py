@@ -13,6 +13,7 @@ no assertion depends on how long anything took (D9). The one exception is
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -440,6 +441,68 @@ class FailureIsolationTest(RunnerCase):
         self.assertRegex(self.block(result.stdout, "test_good.py")[1], r" passed exit=0 ")
 
 
+class DefaultJobsTest(unittest.TestCase):
+    def test_the_default_is_cpus_minus_two_capped_at_eight_with_a_floor_of_one(self):
+        for cpus, expected in ((2, 1), (4, 2), (10, 8), (32, 8), (None, 1), (1, 1)):
+            with self.subTest(cpus=cpus):
+                self.assertEqual(suite_runner.default_jobs(cpus, {}), expected)
+
+    def test_the_environment_overrides_the_derived_default(self):
+        for cpus in (2, 10, 32, None):
+            with self.subTest(cpus=cpus):
+                self.assertEqual(
+                    suite_runner.default_jobs(cpus, {suite_runner.JOBS_ENV: "4"}), 4)
+
+    def test_an_empty_environment_value_is_unset(self):
+        self.assertEqual(suite_runner.default_jobs(10, {suite_runner.JOBS_ENV: ""}), 8)
+
+    def test_a_bad_environment_value_is_a_usage_error(self):
+        for text in ("0", "-1", "many"):
+            with self.subTest(text=text):
+                with self.assertRaises(suite_runner.UsageError):
+                    suite_runner.default_jobs(10, {suite_runner.JOBS_ENV: text})
+
+
+class ScheduleOrderTest(RunnerCase):
+    members = ["a.py", "b.py", "c.py", "d.py", "e.py"]
+
+    def test_members_start_longest_first_unknown_first_ties_in_list_order(self):
+        timings = {"a.py": 5.0, "b.py": 50.0, "d.py": 5.0, "e.py": 20.0}
+        order = suite_runner.schedule_order(self.members, timings)
+        self.assertEqual([self.members[i] for i in order],
+                         ["c.py", "b.py", "e.py", "a.py", "d.py"])
+
+    def test_no_timings_keeps_list_order(self):
+        self.assertEqual(suite_runner.schedule_order(self.members, {}), [0, 1, 2, 3, 4])
+
+    def test_a_missing_or_malformed_timing_file_is_empty(self):
+        self.assertEqual(suite_runner.load_timings(self.work / "absent.json"), {})
+        bad = self.work / "bad.json"
+        bad.write_text("[1", encoding="utf-8")
+        self.assertEqual(suite_runner.load_timings(bad), {})
+        good = self.work / "good.json"
+        good.write_text('{"a.py": 1.5, "b.py": "x", "c.py": true}', encoding="utf-8")
+        self.assertEqual(suite_runner.load_timings(good), {"a.py": 1.5})
+
+    def test_a_parallel_run_starts_members_in_schedule_order_and_reports_list_order(self):
+        names = [self.member(f"test_m{n}.py", "") for n in range(3)]
+        for name in names:
+            self.member(name, "import unittest\nclass T(unittest.TestCase):\n"
+                              "    def test_x(self): pass\n")
+        out = io.BytesIO()
+        timings = {"test_m0.py": 1.0, "test_m1.py": 9.0, "test_m2.py": 5.0}
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            code = suite_runner.run_suite(names, jobs=2, out=out, timings=timings)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(code, 0, out.getvalue().decode())
+        starts = [line.split()[-1] for line in out.getvalue().decode().splitlines()
+                  if line.startswith("suite-runner: start ")]
+        self.assertEqual(starts, ["test_m1.py", "test_m2.py", "test_m0.py"])
+
+
 class CapTest(RunnerCase):
     def test_two_jobs_reach_two_open_members_and_never_exceed_them(self):
         members = self.barrier_members(*(f"test_m{n}.py" for n in range(5)))
@@ -449,21 +512,21 @@ class CapTest(RunnerCase):
         self.assertEqual(sorted(self.seen()), sorted(members))
         self.assertEqual(max(self.seen().values()), 2)
 
-    def test_the_default_cap_is_four(self):
-        self.assertEqual(suite_runner.DEFAULT_JOBS, 4)
-        members = self.barrier_members(*(f"test_m{n}.py" for n in range(6)))
-        result = self.run_suite(*members, cap=4, total=6)
+    def test_the_default_cap_follows_the_cpu_count(self):
+        cap = suite_runner.default_jobs(os.cpu_count(), {})
+        members = self.barrier_members(*(f"test_m{n}.py" for n in range(cap + 2)))
+        result = self.run_suite(*members, cap=cap, total=cap + 2,
+                                env={suite_runner.JOBS_ENV: ""})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.most_open(result.stdout), 4)
-        self.assertEqual(max(self.seen().values()), 4)
-        self.assertEqual(SUMMARY.match(result.stdout.splitlines()[-1]).group(4), "4")
+        self.assertEqual(self.most_open(result.stdout), cap)
+        self.assertEqual(SUMMARY.match(result.stdout.splitlines()[-1]).group(4), str(cap))
 
     def test_help_names_the_command_and_documents_the_default(self):
-        result = self.run_suite("--help")
+        result = self.run_suite("--help", env={suite_runner.JOBS_ENV: "3"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stdout.startswith("usage: agent-workflow-tests "),
                         result.stdout[:200])
-        self.assertIn("(default: 4)", " ".join(result.stdout.split()))
+        self.assertIn("(default: 3,", " ".join(result.stdout.split()))
 
     def test_one_job_runs_members_one_at_a_time_with_their_output_live(self):
         members = self.barrier_members("test_m0.py", "test_m1.py", "test_m2.py")
