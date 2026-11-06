@@ -254,6 +254,14 @@ let
       BASH_MAX_TIMEOUT_MS = "3600000";
     };
 
+    # Owner-action status line (issue 624): prints `owner N (oldest Xd)` for the current
+    # project's repo only, from the cache, with no network call, and starts a detached
+    # refresh when that repo's entry is older than 15 minutes.
+    statusLine = {
+      type = "command";
+      command = "${agentTools.launchers.owner-actions} statusline";
+    };
+
     hooks.PreToolUse = [
       {
         matcher = "Bash";
