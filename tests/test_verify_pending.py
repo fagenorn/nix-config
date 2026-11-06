@@ -464,6 +464,18 @@ class ExecuteTest(unittest.TestCase):
         else:
             self.fail("the grandchild outlived the timeout")
 
+    def test_non_utf8_output_is_a_result_not_an_exception(self):
+        argv = [self.script("raw.py", "import sys\nsys.stdout.buffer.write(b'a\\xffb')\nsys.stderr.buffer.write(b'\\xfe')")]
+        result = vx.execute(argv, self.dir)
+        self.assertEqual((result.exit, result.timed_out), (0, False))
+        self.assertEqual((result.stdout, result.stderr), ("a\ufffdb", "\ufffd"))
+
+    def test_non_utf8_output_on_timeout_is_a_result(self):
+        argv = [self.script("rawslow.py", "import sys, time\nsys.stdout.buffer.write(b'\\xff')\nsys.stdout.flush()\ntime.sleep(60)")]
+        result = vx.execute(argv, self.dir, timeout=2)
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.stdout, "\ufffd")
+
     def test_spawn_error_is_unexpected(self):
         result = vx.execute([str(self.dir / "absent")], self.dir)
         self.assertEqual(vx.classify(result, None), "exit_unexpected")

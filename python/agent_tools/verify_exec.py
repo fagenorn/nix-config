@@ -162,7 +162,7 @@ def execute(argv: Sequence[str], cwd: Path, timeout: float = TIMEOUT) -> Result:
     try:
         proc = subprocess.Popen(
             list(argv), cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, start_new_session=True, env=_env())
+            stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True, env=_env())
     except OSError as error:
         return Result(None, "", str(error), False)
     try:
