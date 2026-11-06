@@ -52,7 +52,7 @@ RUN_MEMBERS = {
 INLINE_CODE_TOOLS = frozenset((
     "sh bash zsh dash ksh fish csh tcsh "
     "awk gawk mawk sed perl ruby php lua tclsh expect node nodejs deno bun npx npm pnpm yarn pip pipx uv uvx "
-    "poetry go cargo java osascript Rscript julia "
+    "poetry go cargo java osascript rscript julia "
     "vi vim nvim ex emacs "
     "env xargs eval exec command builtin time timeout gtimeout nice ionice renice stdbuf flock watch caffeinate "
     "nohup setsid disown chroot sudo doas su runuser script unbuffer parallel ssh docker podman kubectl make "

@@ -132,6 +132,8 @@ class LintTableTest(unittest.TestCase):
         ("two fences", "```verify\n{}\n```\n```verify\n{}\n```\n", "block", "fence_count"),
         ("python3 -c", with_check(run={"tool": "python3", "args": ["-c", "print(1)"]}), "checks[0].run.tool", "inline_code"),
         ("bash", with_check(run={"tool": "bash", "args": ["-c", "true"]}), "checks[0].run.tool", "inline_code"),
+        ("Rscript", with_check(run={"tool": "Rscript", "args": ["-e", "1"]}), "checks[0].run.tool", "inline_code"),
+        ("Rscript arg", with_check(run={"tool": "xcrun", "args": ["Rscript", "-e", "1"]}), "checks[0].run.args", "inline_code"),
         ("tool path", with_check(run={"tool": "/tmp/x.sh"}), "checks[0].run.tool", "inline_code"),
         ("timeout wrapper", with_check(run={"tool": "timeout", "args": ["60", "python3", "-c", "print(1)"]}),
          "checks[0].run.tool", "inline_code"),
