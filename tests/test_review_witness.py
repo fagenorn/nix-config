@@ -1,5 +1,5 @@
 """Retained bundle contract: tool closure, witness, anchor and validation (issue 249; RP2, RP3, RP7, RP16)."""
-import copy, hashlib, json, os, shutil, tempfile, unittest
+import copy, hashlib, json, os, shutil, subprocess, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -335,6 +335,36 @@ class WitnessTest(unittest.TestCase):
         git(linked, "add", "-A")
         self.refused("tool_closure", tool_closure, linked,
                      commit_files(linked, {"python/agent_tools/target.py": b"# target\n"}, "a committed symlink"))
+
+    def test_batched_blob_reads_equal_per_blob_cat_file(self):
+        """Issue 613: the closure reads every blob through one `cat-file --batch`, byte for byte what one
+        `cat-file blob` per file reads, a replaced blob included; a missing or non-blob object is refused."""
+        from agent_tools.review_actual import GenerationError
+        from agent_tools.review_witness import _blobs
+        repo = Path(shutil.copytree(self.root / "repos/tool/repo", self.tmp / "tool", symlinks=True))
+        head = git(repo, "rev-parse", "HEAD")
+        rows = [line.split("\t")[0].split()[2] for line in
+                git(repo, "ls-tree", "-r", "--full-tree", head, "--", "python/agent_tools/").splitlines()]
+        read = lambda: [subprocess.run(["git", "-C", str(repo), "cat-file", "blob", oid], check=True,
+                                       capture_output=True).stdout for oid in rows]
+        calls, real = [], subprocess.run
+        def counting(argv, *args, **kwargs):
+            calls.append(list(argv))
+            return real(argv, *args, **kwargs)
+        with patch.object(subprocess, "run", counting):
+            closure = tool_closure(repo, head)
+        self.assertEqual(len([argv for argv in calls if "cat-file" in argv]), 1)
+        self.assertEqual([row["raw_sha256"] for row in closure["files"]],
+                         [hashlib.sha256(raw).hexdigest() for raw in read()])
+        git(repo, "replace", rows[0], rows[1])  # the closure refuses replaced history; the reader alone follows it
+        per_blob = read()
+        self.assertEqual(per_blob[0], per_blob[1])
+        self.assertEqual(_blobs(repo, rows), per_blob)
+        self.assertEqual(_blobs(repo, []), [])
+        tree = git(repo, "rev-parse", f"{head}^{{tree}}")
+        for oids in ([rows[2], "0" * 40], [tree], [rows[2], rows[2][:12]]):
+            with self.subTest(oids=oids), self.assertRaises(GenerationError):
+                _blobs(repo, oids)
 
     def test_running_closure_changed_extra_or_missing_file_fails(self):
         closure = self.closure()

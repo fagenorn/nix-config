@@ -33,6 +33,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 from typing import Mapping
 
 from agent_tools.canonical import telemetry_digest
@@ -134,12 +135,43 @@ def tool_closure(tool_repo: Path, tool_commit: str) -> dict:
             metadata, path = entry.split(b"\t", 1)
             mode, _, blob = metadata.decode("ascii").split()
             _require(mode in ("100644", "100755"), "tool_closure")
-            files.append({"path": path.decode("utf-8")[len(_PACKAGE):], "blob": blob,
-                          "raw_sha256": _sha(_run_git(tool_repo, "cat-file", "blob", blob, binary=True))})
+            files.append({"path": path.decode("utf-8")[len(_PACKAGE):], "blob": blob})
+        for row, raw in zip(files, _blobs(tool_repo, [row["blob"] for row in files])):
+            row["raw_sha256"] = _sha(raw)
     except (ForecastError, GenerationError, UnicodeDecodeError) as exc:
         raise WitnessError("tool_closure") from exc
     _require(files, "tool_closure")
     return {"commit": tool_commit, "files": sorted(files, key=lambda row: row["path"])}
+
+
+def _blobs(repo: Path, oids: list[str]) -> list[bytes]:
+    """Each of `oids`' bytes, as `git cat-file blob` reads it, through one `git cat-file --batch` (issue 613).
+
+    A missing object, one that is not a blob, a short read and a failed Git run are `GenerationError`, as a
+    failed `cat-file blob` is.
+    """
+    if not oids:
+        return []
+    try:
+        stdout = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch"],
+                                input="".join(f"{oid}\n" for oid in oids).encode("ascii"),
+                                check=True, capture_output=True).stdout
+    except (OSError, subprocess.CalledProcessError, UnicodeEncodeError) as exc:
+        raise GenerationError("git command failed") from exc
+    blobs, position = [], 0
+    for oid in oids:
+        end = stdout.find(b"\n", position)
+        header = stdout[position:end].split(b" ") if end >= 0 else []
+        if len(header) != 3 or header[:2] != [oid.encode("ascii"), b"blob"] or not header[2].isdigit():
+            raise GenerationError("git command failed")
+        start, size = end + 1, int(header[2])
+        if stdout[start + size:start + size + 1] != b"\n":
+            raise GenerationError("git command failed")
+        blobs.append(stdout[start:start + size])
+        position = start + size + 1
+    if position != len(stdout):
+        raise GenerationError("git command failed")
+    return blobs
 
 
 def verify_running_closure(closure: dict) -> None:

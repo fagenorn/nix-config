@@ -180,9 +180,10 @@ class ReviewMeasurement:
     violations: tuple[str, ...]
 
 
-def git_diff(repo: Path, base_tree: str, head_tree: str, *view: str,
+def git_diff(repo: "Path | RecordView", base_tree: str, head_tree: str, *view: str,
              record_policy: Mapping = RECORD_POLICY) -> bytes:
-    """Every measurement view of one record domain uses that domain's explicit record policy."""
+    """Every measurement view of one record domain uses that domain's explicit record policy. `repo` is a
+    repository, read through a fresh record view, or an open `RecordView` an operation reuses (issue 613)."""
     choices = _packing_choices(record_policy)
     if view not in (("--numstat", "-z"), ("--name-only", "-z"), ("--name-status", "-z"),
                     *(("--binary", f"-U{choice['context_lines']}") for choice in choices)):
@@ -191,28 +192,35 @@ def git_diff(repo: Path, base_tree: str, head_tree: str, *view: str,
                       *record_policy["diff_args"], *view, base_tree, head_tree)
 
 
-def record_git(repo: Path, *args: str) -> bytes:
-    """Run `git <args>` for a record in a fresh view of `repo`'s objects, isolated from every attribute and
-    configuration source (issue 255; D1, D7).
+class RecordView:
+    """A fresh view of `repo`'s objects, isolated from every attribute and configuration source (issue 255;
+    D1, D7), that one operation opens once and reuses for each of its record Git calls (issue 613).
 
     The view is a new bare Git directory made without `git init`, so no template applies. It holds an unborn
     `HEAD`, an empty `refs/`, a `config` that declares only the repository format, and an absolute alternate
     to `repo`'s object directory. Git runs there under the caller's environment without any `GIT_*` variable
     or `XDG_CONFIG_HOME`, with `HOME` set to the view and system configuration and attributes off. No
     working tree, index, attributes file or configuration beyond Git's defaults and the argv's own `-c`
-    reaches the output. The view is removed on every outcome.
+    reaches the output. Record Git calls read objects and write nothing, so a call sees the same view
+    whether it is the first or a later one. The view is removed when the `with` block ends, on every outcome.
     """
-    found = _run_git(repo, "rev-parse", "--path-format=absolute", "--git-path", "objects",
-                     "--show-object-format")
-    lines = found.split("\n")
-    if len(lines) != 3 or lines[2] or not os.path.isabs(lines[0]) or lines[1] not in ("sha1", "sha256"):
-        raise GenerationError("git command failed")
-    objects, object_format = lines[0], lines[1]
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith("GIT_") and key != "XDG_CONFIG_HOME"}
-    try:
-        with tempfile.TemporaryDirectory(prefix="record-view-") as name:
-            view = Path(name)
+
+    def __init__(self, repo: Path):
+        self.repo = Path(repo)
+        self._scratch: tempfile.TemporaryDirectory | None = None
+
+    def __enter__(self) -> "RecordView":
+        found = _run_git(self.repo, "rev-parse", "--path-format=absolute", "--git-path", "objects",
+                         "--show-object-format")
+        lines = found.split("\n")
+        if len(lines) != 3 or lines[2] or not os.path.isabs(lines[0]) or lines[1] not in ("sha1", "sha256"):
+            raise GenerationError("git command failed")
+        objects, object_format = lines[0], lines[1]
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith("GIT_") and key != "XDG_CONFIG_HOME"}
+        try:
+            self._scratch = tempfile.TemporaryDirectory(prefix="record-view-")
+            view = self._path = Path(self._scratch.name)
             (view / "refs").mkdir()
             (view / "objects/info").mkdir(parents=True)
             (view / "HEAD").write_text("ref: refs/heads/record-view\n", encoding="utf-8")
@@ -222,15 +230,50 @@ def record_git(repo: Path, *args: str) -> bytes:
                 config += f"[extensions]\n\tobjectFormat = {object_format}\n"
             (view / "config").write_text(config, encoding="utf-8")
             (view / "objects/info/alternates").write_text(objects + "\n", encoding="utf-8")
-            env.update(HOME=str(view), GIT_CONFIG_NOSYSTEM="1", GIT_ATTR_NOSYSTEM="1")
-            return subprocess.run(["git", f"--git-dir={view}", *args], cwd=view, env=env,
+        except OSError as exc:
+            try:
+                self._close()
+            except OSError:
+                pass  # the setup failure is the refusal, as when the old view's cleanup failed too
+            raise GenerationError("git command failed") from exc
+        env.update(HOME=str(view), GIT_CONFIG_NOSYSTEM="1", GIT_ATTR_NOSYSTEM="1")
+        self._env = env
+        return self
+
+    def __exit__(self, kind, value, traceback) -> None:
+        try:
+            self._close()
+        except OSError as exc:
+            if kind is None:
+                raise GenerationError("git command failed") from exc
+
+    def _close(self) -> None:
+        scratch, self._scratch = self._scratch, None
+        if scratch is not None:
+            scratch.cleanup()
+
+    def git(self, *args: str) -> bytes:
+        """`git <args>` in this view; its stdout."""
+        if self._scratch is None:
+            raise GenerationError("record view is not open")
+        try:
+            return subprocess.run(["git", f"--git-dir={self._path}", *args], cwd=self._path, env=self._env,
                                   check=True, capture_output=True).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise GenerationError("git command failed") from exc
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise GenerationError("git command failed") from exc
 
 
-def commit_subject(repo: Path, sha: str) -> str:
-    """`sha`'s subject line through `record_git`, strictly UTF-8, without its trailing newline (D10)."""
+def record_git(repo: "Path | RecordView", *args: str) -> bytes:
+    """Run `git <args>` for a record in `repo` when it is an open `RecordView`, else in a fresh view of the
+    repository `repo`, removed on every outcome."""
+    if isinstance(repo, RecordView):
+        return repo.git(*args)
+    with RecordView(repo) as view:
+        return view.git(*args)
+
+
+def commit_subject(repo: "Path | RecordView", sha: str) -> str:
+    """`sha`'s subject line through a record view, strictly UTF-8, without its trailing newline (D10)."""
     raw = record_git(repo, "show", "-s", "--no-show-signature", "--format=%s", sha).removesuffix(b"\n")
     try:
         return raw.decode("utf-8", errors="strict")
@@ -257,35 +300,36 @@ def actual_inputs_from_trees(repo: Path, base_tree: str, head_tree: str, *,
     for tree in (base_tree, head_tree):
         if not isinstance(tree, str) or SHA_RE.fullmatch(tree) is None:
             raise GenerationError("invalid tree identity")
-    paths = _changed_paths(git_diff(repo, base_tree, head_tree, "--name-only", "-z",
-                                    record_policy=record_policy))
-    stats = _parse_numstat(git_diff(repo, base_tree, head_tree, "--numstat", "-z",
-                                    record_policy=record_policy))
-    if len(set(paths)) != len(paths) or len(paths) != stats["files_changed"]:
-        raise GenerationError("diff coverage does not match numstat")
-    operations = _record_operations(
-        git_diff(repo, base_tree, head_tree, "--name-status", "-z", record_policy=record_policy), paths,
-        record_policy)
-    for number, choice in enumerate(_packing_choices(record_policy)):
-        context = None if number == 0 else choice["context_lines"]
-        raw = git_diff(repo, base_tree, head_tree, "--binary", f"-U{choice['context_lines']}",
-                       record_policy=record_policy)
-        chunks = _chunks_by_path(_split_diff(raw), operations)
-        records = []
-        for path, operation, chunk in zip(paths, operations, chunks):
-            evidence = None
-            payload = chunk
-            # A rename record keeps its whole section: generated evidence reads one path's sides (issue 569).
-            if len(chunk) > limits.member_max_bytes and not operation.startswith("R"):
-                item = _ef_designer_evidence(repo, base_tree, head_tree, path, len(chunk))
-                if item is None and operation == "D":
-                    item = _whole_file_deletion_evidence(repo, base_tree, path, len(chunk))
-                if item is not None:
-                    compact = _canonical({"review-package-generated-evidence": item})
-                    if len(compact) <= limits.member_max_bytes:
-                        evidence, payload = item, compact
-            records.append(ReviewRecord(path, payload, len(chunk), evidence))
-        yield CandidateInput(context, tuple(records), commits, stats, len(raw), base, head, package_name)
+    with RecordView(repo) as view:  # one view for every diff of this measurement (issue 613)
+        paths = _changed_paths(git_diff(view, base_tree, head_tree, "--name-only", "-z",
+                                        record_policy=record_policy))
+        stats = _parse_numstat(git_diff(view, base_tree, head_tree, "--numstat", "-z",
+                                        record_policy=record_policy))
+        if len(set(paths)) != len(paths) or len(paths) != stats["files_changed"]:
+            raise GenerationError("diff coverage does not match numstat")
+        operations = _record_operations(
+            git_diff(view, base_tree, head_tree, "--name-status", "-z", record_policy=record_policy), paths,
+            record_policy)
+        for number, choice in enumerate(_packing_choices(record_policy)):
+            context = None if number == 0 else choice["context_lines"]
+            raw = git_diff(view, base_tree, head_tree, "--binary", f"-U{choice['context_lines']}",
+                           record_policy=record_policy)
+            chunks = _chunks_by_path(_split_diff(raw), operations)
+            records = []
+            for path, operation, chunk in zip(paths, operations, chunks):
+                evidence = None
+                payload = chunk
+                # A rename record keeps its whole section: generated evidence reads one path's sides (issue 569).
+                if len(chunk) > limits.member_max_bytes and not operation.startswith("R"):
+                    item = _ef_designer_evidence(repo, base_tree, head_tree, path, len(chunk))
+                    if item is None and operation == "D":
+                        item = _whole_file_deletion_evidence(repo, base_tree, path, len(chunk))
+                    if item is not None:
+                        compact = _canonical({"review-package-generated-evidence": item})
+                        if len(compact) <= limits.member_max_bytes:
+                            evidence, payload = item, compact
+                records.append(ReviewRecord(path, payload, len(chunk), evidence))
+            yield CandidateInput(context, tuple(records), commits, stats, len(raw), base, head, package_name)
 
 
 def pack_input(item: CandidateInput, limits: ReviewLimits) -> ReviewCandidate:
@@ -670,8 +714,11 @@ def _commits(repo: Path, base: str, head: str) -> list[dict[str, str]]:
     except HistoryError as exc:
         raise GenerationError("invalid original history") from exc
     commits: list[dict[str, str]] = []
-    for sha in listed:
-        if SHA_RE.fullmatch(sha) is None:
-            raise GenerationError("malformed Git commit list")
-        commits.append({"sha": sha, "subject": commit_subject(repo, sha)})
+    if not listed:
+        return commits
+    with RecordView(repo) as view:
+        for sha in listed:
+            if SHA_RE.fullmatch(sha) is None:
+                raise GenerationError("malformed Git commit list")
+            commits.append({"sha": sha, "subject": commit_subject(view, sha)})
     return commits
