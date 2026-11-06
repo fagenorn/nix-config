@@ -35,6 +35,10 @@ claim it names is live and still stale at that moment: the claim is ended (reaso
 A box ticked on a claim that is no longer stale is ended (reason `renewed`) and releases
 nothing. A stale claim is never stolen: `acquire` against it without a ticked box is `held_by`.
 
+The `land` subcommand (`land acquire|release|status`, issue 629) is the cross-host land lock
+of `agent_tools.forge_land_lock`: `main` routes it there and reports its usage errors in its
+own one-line shape.
+
 D10, residual window, accepted: an honour reads the server time and the branch activity first,
 then takes a fresh listing and ends the claim right after judging that listing's `updated_at`, so
 a renewal that landed before that listing is never undone. One that lands between that listing
@@ -48,6 +52,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from agent_tools import forge_land_lock
 from agent_tools import forge_markers as fm
 from agent_tools.forge_markers import ForgeError, Marker
 
@@ -88,6 +93,7 @@ def _issue(value: str) -> int:
 REPO = _pattern(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", "repo")
 HOLDER = _pattern(r"[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*", "holder")
 BRANCH = _pattern(r"[A-Za-z0-9_][A-Za-z0-9_./-]*", "branch")
+SHA = _pattern(r"[0-9a-f]{40}", "sha")
 REASON = _pattern(r"[A-Za-z0-9._:/@+-]+", "reason")
 
 
@@ -103,6 +109,15 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--branch", type=BRANCH, default=None)
         elif name == "release":
             sub.add_argument("--reason", type=REASON, default="done")
+    land = commands.add_parser("land")
+    actions = land.add_subparsers(dest="action", required=True)
+    for name in forge_land_lock.ACTIONS:
+        sub = actions.add_parser(name)
+        sub.add_argument("--repo", required=True, type=REPO)
+        sub.add_argument("--branch", required=True, type=BRANCH)
+        sub.add_argument("--sha", required=True, type=SHA)
+        if name == "acquire":
+            sub.add_argument("--wait", action="store_true")
     return parser
 
 
@@ -411,6 +426,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
     except UsageError as error:
+        if argv[:1] == ["land"]:
+            _emit(forge_land_lock.usage_result(argv, str(error)))
+            return USAGE
         _emit({"command": argv[0] if argv and argv[0] in COMMANDS else None, "repo": None,
                "issue": None, "holder": None, "verdict": "error", "comment_id": None, "by": None,
                "error": "usage", "detail": str(error)})
@@ -418,9 +436,13 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as stop:  # -h/--help: argparse printed the help text
         return stop.code if isinstance(stop.code, int) else 0
     try:
-        code, result = COMMANDS[args.command](args)
+        code, result = (forge_land_lock.run(args) if args.command == "land"
+                        else COMMANDS[args.command](args))
     except ForgeError as error:
-        code, result = FORGE_ERROR, _result(args, "error", error=error.code, detail=error.detail)
+        code, result = FORGE_ERROR, (
+            forge_land_lock.result(args, "error", error=error.code, detail=error.detail)
+            if args.command == "land"
+            else _result(args, "error", error=error.code, detail=error.detail))
     _emit(result)
     return code
 
