@@ -130,7 +130,7 @@ class ContractTest(unittest.TestCase):
     def test_setup_preflight_names_merged_pr_existing_branch_and_applicability(self):
         _, calls = run()
         setup = prompt(calls, "setup")
-        for needle in ("already-merged", "existing-branch", "no-longer-applies",
+        for needle in ("duplicate", "re-adopt", "no-longer-applies",
                        "bindings.vcs.worktree.prefix", "bindings.vcs.worktree.root",
                        "--state all --search 9"):
             self.assertIn(needle, setup)
@@ -313,6 +313,92 @@ class ClaimTest(unittest.TestCase):
         _, calls = run(args={"repo_root": "/r", "issue": 9, "cont": cont})
         self.assertIn("--holder h9/b1 ", prompt(calls, "renew-plan"))
         self.assertNotIn("acquire", labels(calls))
+
+
+class SetupIdempotenceTest(unittest.TestCase):
+    """#635: setup re-adopts an existing branch or worktree, never resets, stops on a merged duplicate."""
+
+    EXISTING = {"local_branch": True, "remote_branch": True, "worktree": True, "dirty": True,
+                "status": " M home/x.py", "head": "e" * 40}
+    BANNED = ("reset --hard", "git clean", "checkout --", "git restore")
+
+    def test_dirty_existing_worktree_is_readopted_without_reset(self):
+        result, calls = run(patch={"setup": {"existing": self.EXISTING}})
+        self.assertEqual(result["stage"], "dirty")
+        self.assertEqual(labels(calls), ["setup", "acquire", "worktree"])
+        self.assertIn(" M home/x.py", result["details"])
+        self.assertEqual(result["cont"]["setup"]["worktree"], "/r/.wt/w-issue-9-x")
+        self.assertNotIn("claim_incomplete", result["cont"])
+        worktree = prompt(calls, "worktree")
+        self.assertIn("adopt", worktree)
+        self.assertNotIn("worktree add", worktree)
+        for call in calls:
+            for banned in self.BANNED:
+                self.assertNotIn(banned, call["prompt"], call["label"])
+
+    def test_resume_of_the_adopted_dirty_worktree_still_stops_dirty(self):
+        first, _ = run(patch={"setup": {"existing": self.EXISTING}})
+        result, calls = run(args=dict(ARGS, cont=first["cont"]), patch={"setup": {"dirty": True}})
+        self.assertEqual(result["stage"], "dirty")
+        self.assertEqual(labels(calls), ["setup"])
+
+    def test_clean_existing_worktree_is_adopted_and_delivered(self):
+        result, calls = run(patch={"setup": {"existing": dict(self.EXISTING, dirty=False, status="")}})
+        self.assertEqual(result["stage"], "done")
+        worktree = prompt(calls, "worktree")
+        self.assertIn("merge-base origin/dev HEAD", worktree)
+        self.assertNotIn("worktree add", worktree)
+        self.assertIn("Never reset, clean, restore or stash anything in it.", worktree)
+
+    def test_existing_local_branch_gets_a_worktree_without_a_new_branch(self):
+        existing = dict(self.EXISTING, worktree=False, remote_branch=False, dirty=False, status="")
+        result, calls = run(patch={"setup": {"existing": existing}})
+        self.assertEqual(result["stage"], "done")
+        worktree = prompt(calls, "worktree")
+        self.assertIn("git -C /r worktree add /r/.wt/w-issue-9-x issue-9-x", worktree)
+        self.assertNotIn("-b issue-9-x", worktree)
+
+    def test_remote_only_branch_is_checked_out_from_origin(self):
+        existing = dict(self.EXISTING, worktree=False, local_branch=False, dirty=False, status="")
+        _, calls = run(patch={"setup": {"existing": existing}})
+        self.assertIn("git -C /r worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x origin/issue-9-x",
+                      prompt(calls, "worktree"))
+
+    def test_merged_pr_referencing_the_issue_stops_as_a_duplicate(self):
+        result, calls = run(replies={"setup": {"ok": False, "reason": "duplicate", "duplicate_pr": 41}})
+        self.assertEqual(result["stage"], "setup")
+        self.assertEqual(labels(calls), ["setup"])
+        result, calls = run(patch={"setup": {"merged_pr": 41}})
+        self.assertEqual((result["stage"], result["duplicate"]), ("setup", 41))
+        self.assertEqual(labels(calls), ["setup"])
+
+    def test_failed_adoption_resumes_by_adopting_again(self):
+        local = dict(self.EXISTING, worktree=False, remote_branch=False, dirty=False, status="")
+        failed, _ = run(patch={"setup": {"existing": local}},
+                        replies={"worktree": {"ok": False, "notes": "worktree add failed"}})
+        self.assertEqual(failed["stage"], "claim")
+        self.assertTrue(failed["cont"]["claim_incomplete"])
+        result, calls = run(args=dict(ARGS, cont=failed["cont"]), patch={"setup": {"existing": local}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("existing", prompt(calls, "setup"))
+        worktree = prompt(calls, "worktree")
+        self.assertIn("git -C /r worktree add /r/.wt/w-issue-9-x issue-9-x", worktree)
+        self.assertNotIn("-b issue-9-x", worktree)
+
+    def test_resume_of_a_half_made_worktree_adopts_it(self):
+        failed, _ = run(replies={"worktree": {"ok": False, "notes": "plan_dir failed"}})
+        made = dict(self.EXISTING, dirty=False, status="")
+        result, calls = run(args=dict(ARGS, cont=failed["cont"]), patch={"setup": {"existing": made}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("worktree add", prompt(calls, "worktree"))
+
+    def test_setup_prompt_readopts_and_names_the_duplicate_rule(self):
+        _, calls = run()
+        setup = prompt(calls, "setup")
+        for needle in ("duplicate", "merged PR", "re-adopt", "--state all --search 9",
+                       "never reset, clean, restore or stash", "worktree-mismatch"):
+            self.assertIn(needle, setup)
+        self.assertNotIn("existing-branch", setup)
 
 
 class PlanTest(unittest.TestCase):

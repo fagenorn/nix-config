@@ -23,6 +23,8 @@ export const meta = {
 // before each stage boundary (a renew that finds the claim ended stops with no cont; one
 // that gets no answer stops with a cont whose resume acquires again), released at close-out.
 //
+// A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
+//
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
 // { setup, plan, plan_reviewed, done, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
@@ -86,7 +88,8 @@ const SETUP_SCHEMA = {
     ok: { type: 'boolean' }, reason: { type: 'string' }, details: { type: 'string' },
     host: { type: 'string' }, slug: { type: 'string' }, integration_branch: { type: 'string' }, default_branch: { type: 'string' },
     branch: { type: 'string' }, worktree_path: { type: 'string' },
-    merged_pr: { type: 'integer' }, dirty: { type: 'boolean' },
+    merged_pr: { type: 'integer' }, dirty: { type: 'boolean' }, duplicate_pr: { type: 'integer' },
+    existing: { type: 'object', properties: { local_branch: { type: 'boolean' }, remote_branch: { type: 'boolean' }, worktree: { type: 'boolean' }, dirty: { type: 'boolean' }, status: { type: 'string' }, head: { type: 'string' } } },
     unset_env: STRS,
     merge_strategy: { type: 'string' }, delete_branch: { type: 'boolean' },
     review: { type: 'object', properties: { code: { type: 'string' }, plan: { type: 'string' } } },
@@ -122,19 +125,24 @@ const CONTRACT_READ = `Run: hostname -s and return its output as host. Run: reso
 - review: the command ids at bindings.workflow.review.code and .plan (omit an absent one); review_state: for code and plan, the state of the capability review.code and review.plan (available, blocked or unsupported; absent if the capability is missing).
 - knowledge: bindings.paths.standards, bindings.paths.hints and bindings.paths.rejections, each as given (empty when absent).
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason).`
+// Shared by the fresh setup and the incomplete-claim resume: the facts the worktree step chooses its command from.
+const EXISTING_READ = (branch, path) => `Read what already exists for the delivery, and change nothing: never reset, clean, restore or stash, and never delete a branch or worktree. Return existing with local_branch (a local branch named ${branch} exists), remote_branch (origin/${branch} exists), worktree (the path ${path} exists and is on branch ${branch}), dirty (git -C ${path} status --porcelain is non-empty), status (that output, its first 40 lines) and head (git -C ${path} rev-parse HEAD, or the branch tip when there is no worktree). Omit existing when there is no such branch and no such path. Refuse with reason worktree-mismatch and the path when ${path} is on another branch or ${branch} is checked out at another path.`
 const setup = await agent(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
 1. ${CONTRACT_READ}
 2. If a merged PR has head ${CONT.setup && CONT.setup.branch} (gh pr list --repo <slug> --state merged --head ${CONT.setup && CONT.setup.branch}), return ok=true with merged_pr set to its number; the worktree may already be gone.
 3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}`}. If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty.
-4. Return every contract field read fresh, branch as in the earlier setup. Change nothing.
+${CONT.claim_incomplete ? `4. After git -C ${REPO} fetch origin: ${EXISTING_READ(CONT.setup && CONT.setup.branch, CONT.setup && CONT.setup.worktree_path)} An earlier worktree step may have created the branch, the worktree or both before it failed, so report existing afresh.
+5.` : '4.'} Return every contract field read fresh, branch as in the earlier setup. Change nothing.
 ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} before delivery. Change nothing in this step except one issue comment named below.
 1. ${CONTRACT_READ}
-2. gh issue view ${ISSUE} --repo <slug> --json state,labels,title and gh pr list --repo <slug> --state all --search ${ISSUE}. Refuse (ok=false) with reason closed, parked (label needs-verification or parked), open-pr or already-merged (a merged PR that delivers this issue).
-3. Derive branch from bindings.vcs.branch_pattern for this issue (slug from the issue title), and worktree_path as <bindings.vcs.worktree.root resolved against project.root>/<bindings.vcs.worktree.prefix><branch>. After git -C ${REPO} fetch origin, refuse with reason existing-branch if a local or remote branch named branch or <prefix><branch> exists or worktree_path exists (the caller cleans up or resumes with cont).
+2. Derive branch from bindings.vcs.branch_pattern for this issue (slug from the issue title), and worktree_path as <bindings.vcs.worktree.root resolved against project.root>/<bindings.vcs.worktree.prefix><branch>. Then gh issue view ${ISSUE} --repo <slug> --json state,labels,title and gh pr list --repo <slug> --state all --search ${ISSUE} --json number,state,headRefName. Refuse (ok=false) with reason closed, parked (label needs-verification or parked), duplicate (a merged PR referencing this issue, a possible duplicate delivery: set duplicate_pr to its number) or open-pr (an open PR referencing this issue whose head is not branch).
+3. After git -C ${REPO} fetch origin, re-adopt instead of refusing when the work already exists. ${EXISTING_READ('<branch>', '<worktree_path>')}
 4. Read the issue and the code at origin/<integration_branch>: if the issue no longer applies (already fixed or obsolete), comment the evidence on the issue and refuse with reason no-longer-applies.
 5. Return ok=true with every field above.
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', model: 'sonnet', effort: 'low', schema: SETUP_SCHEMA })
 if (!setup || !setup.ok) return { stage: 'setup', result: setup }
+// A fresh run never closes out a merged PR: it is a possible duplicate delivery, for the owner to judge.
+if (!CONT && setup.merged_pr) return { stage: 'setup', result: setup, duplicate: setup.merged_pr }
 // No policy is defaulted: a field the contract read did not return stops the run (before any claim on a fresh run).
 const missing = ['slug', 'integration_branch', 'default_branch', 'branch', 'merge_strategy', 'delete_branch', 'unset_env', 'verification']
   .concat(CONT ? [] : ['worktree_path'])  // a resume carries it in cont.setup
@@ -187,7 +195,7 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', model: 's
   return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, tasks: taskLog, acceptance }
 }
 
-if (setup.merged_pr) {
+if (CONT && setup.merged_pr) {
   phase('Ship')
   log(`PR #${setup.merged_pr} is already merged; closing out`)
   return await closeOut(setup.merged_pr, null, setup.worktree)
@@ -202,14 +210,23 @@ const REVIEW_CODE = RS.code === 'available' && setup.review && setup.review.code
 const REVIEW_PLAN = RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
 
 if (CLAIMING) {
+  // This run's own setup report, never an earlier run's: a failed worktree step may have left the branch or the worktree behind.
+  const EX = setup.existing || null
   const acq = await agent(`Claim issue #${ISSUE} of ${SLUG} for delivery. Run, alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
 It prints one JSON line and adds the in-progress label itself. Return its verdict (error, with detail, on exit 1 or 2), by and comment_id. Run nothing else and change nothing.
 ${RULES_FOR(setup.worktree_path)}`, { label: 'acquire', phase: 'Setup', model: 'sonnet', effort: 'low', schema: ACQUIRE_SCHEMA })
   // Held by another holder: nothing of ours exists yet, so the stop carries no cont.
   if (acq && (acq.verdict === 'held_by' || acq.verdict === 'lost_to')) return { stage: 'claimed', verdict: acq.verdict, by: acq.by }
   if (!acq || (acq.verdict !== 'acquired' && acq.verdict !== 'already_held')) { claimIncomplete = true; return stop('claim', { result: acq }) }
+  const WT = EX && EX.worktree
+    ? `The worktree ${setup.worktree_path} already exists on branch ${setup.branch}: adopt it as it is and run no worktree command. base_sha is git -C ${setup.worktree_path} merge-base origin/${INT} HEAD.`
+    : EX && EX.local_branch
+      ? `git -C ${REPO} fetch origin, then git -C ${REPO} worktree add ${setup.worktree_path} ${setup.branch} (the local branch exists: adopt it). base_sha is git -C ${setup.worktree_path} merge-base origin/${INT} HEAD.`
+      : EX && EX.remote_branch
+        ? `git -C ${REPO} fetch origin, then git -C ${REPO} worktree add --no-track -b ${setup.branch} ${setup.worktree_path} origin/${setup.branch} (only the remote branch exists: adopt it). base_sha is git -C ${setup.worktree_path} merge-base origin/${INT} HEAD.`
+        : `git -C ${REPO} fetch origin, then git -C ${REPO} worktree add --no-track -b ${setup.branch} ${setup.worktree_path} origin/${INT}. base_sha is the origin/${INT} sha you branched from.`
   const claim = await agent(`Set up the worktree for issue #${ISSUE} of ${SLUG}, each command in its own Bash call. An earlier attempt may have done part of this: skip a step already done (the worktree already at that path on branch ${setup.branch}; the plan directory already there).
-1. git -C ${REPO} fetch origin, then git -C ${REPO} worktree add --no-track -b ${setup.branch} ${setup.worktree_path} origin/${INT}. base_sha is the origin/${INT} sha you branched from.
+1. ${WT} Never reset, clean, restore or stash anything in it.
 2. plan_dir is <git -C ${setup.worktree_path} rev-parse --absolute-git-dir>/deliver-standard; create it. It lives in the worktree's git dir, outside the tree, so the plan never enters a commit.
 Return ok, worktree (${setup.worktree_path}), base_sha (full sha) and plan_dir; on any failure ok=false with the reason and what you already did.
 ${RULES_FOR(setup.worktree_path)}`, { label: 'worktree', phase: 'Setup', model: 'sonnet', effort: 'low', schema: CLAIM_SCHEMA })
@@ -217,6 +234,9 @@ ${RULES_FOR(setup.worktree_path)}`, { label: 'worktree', phase: 'Setup', model: 
   if (!claim || !claim.ok || !present(claim.worktree) || !present(claim.base_sha) || !present(claim.plan_dir)) { claimIncomplete = true; return stop('claim', { result: claim }) }
   Object.assign(setup, { worktree: claim.worktree, base_sha: claim.base_sha, plan_dir: claim.plan_dir })
   claimIncomplete = false
+  if (EX && EX.dirty && partial === undefined) {
+    return stop('dirty', { details: `the adopted worktree ${setup.worktree} has uncommitted changes, left as found; commit or discard them, then resume with cont: ${EX.status}`, status: EX.status })
+  }
 }
 
 const W = setup.worktree
