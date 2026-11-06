@@ -71,7 +71,7 @@ class EnvironmentTest(unittest.TestCase):
 class MovedGateTest(unittest.TestCase):
     def test_workflow_state_holds_no_copy_of_select_phase_action(self):
         script = (Path(__file__).resolve().parents[1]
-                  / "home/common/agent-skills/scripts/workflow-state.py")
+                  / "home/common/agent-skills/scripts/workflow_state.py")
         text = script.read_text(encoding="utf-8")
         self.assertNotIn("def select_phase_action", text)
         self.assertIn("select_phase_action", text)

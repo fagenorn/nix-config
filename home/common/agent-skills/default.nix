@@ -67,6 +67,8 @@ in
     # `workflow-state` loads the store file this link resolves to into its own
     # process (issue 498 D2, D7).
     ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
+    # The `workflow-state` command, which its entry point imports (issue 612).
+    ".agents/lib/python/workflow_state.py".source = ./scripts/workflow_state.py;
     ".agents/lib/python/workflow_delivery.py".source = ./scripts/workflow_delivery.py;
     ".agents/lib/python/workflow_delivery_wire.py".source = ./scripts/workflow_delivery_wire.py;
     ".agents/lib/python/workflow_delivery_build.py".source = ./scripts/workflow_delivery_build.py;

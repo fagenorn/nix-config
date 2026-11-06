@@ -29,6 +29,8 @@ else:
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
+# The module the thin `SCRIPT` entry point imports (issue 612).
+MODULE = Path(__file__).parents[1] / "scripts" / "workflow_state.py"
 SDD_WORKSPACE = Path(__file__).parents[1] / "skills" / "sdd" / "scripts" / "sdd-workspace"
 MODEL = Path(__file__).parents[1] / "scripts" / "delivery_model" / "__init__.py"
 MODEL_FIXTURES = Path(__file__).with_name("_delivery_model_fixtures.py")
@@ -5715,7 +5717,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self._spawn_151()
         schema_one = self._as_legacy(self.read_state(), 1)
         original = copy.deepcopy(schema_one)
-        workflow = load_source_module(SCRIPT, "workflow_state_schema_four_test")
+        workflow = load_source_module(MODULE, "workflow_state_schema_four_test")
         contract, _ = self.delivery_fixtures.contract_and_delivery(self.delivery_model)
         migrated = workflow.upgrade_state(
             schema_one, run_id=self.run_id, identity=ORCHESTRATED,
@@ -5733,7 +5735,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
 
     def test_schema_one_and_two_mutations_write_only_final_schema_four_once(self):
         self._spawn_151()
-        workflow = load_source_module(SCRIPT, "workflow_state_atomic_migration")
+        workflow = load_source_module(MODULE, "workflow_state_atomic_migration")
         baseline = self.read_state()
         for version in (1, 2):
             state = self._as_legacy(baseline, version, handle="orchestrate-151")
@@ -5750,7 +5752,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
 
     def test_locked_loader_requires_keyword_migration_context(self):
         self.init_run()
-        workflow = load_source_module(SCRIPT, "workflow_state_loader_context")
+        workflow = load_source_module(MODULE, "workflow_state_loader_context")
         with self.assertRaises(TypeError):
             workflow.read_locked_state(self.state_path, self.run_id, {})
 
@@ -5768,7 +5770,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         terminal["outcome"]["report_path"] = "/tmp/legacy-detail.md"
         legacy = self._as_legacy(legacy, 2)
         legacy_rows = copy.deepcopy(legacy["issues"])
-        workflow = load_source_module(SCRIPT, "workflow_state_legacy_rows")
+        workflow = load_source_module(MODULE, "workflow_state_legacy_rows")
         migrated = workflow.upgrade_state(legacy, run_id=self.run_id, identity=ORCHESTRATED,
                                           migration_contracts={})
         self.assertEqual(migrated["schema_version"], 7)
@@ -5838,7 +5840,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
 
     def test_legacy_hybrid_delivery_fields_refuse_without_write_or_migration(self):
         self._spawn_151()
-        workflow = load_source_module(SCRIPT, "workflow_state_schema_two_hybrid")
+        workflow = load_source_module(MODULE, "workflow_state_schema_two_hybrid")
         baseline = self.read_state()
         for version in (1, 2):
             self.install_legacy(baseline, "orchestrate-151", version)
@@ -7461,7 +7463,7 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
         """Run `mark-progress` in-process with `interleave()` between its probe and
         its transaction (#250 D14); returns the exit code, stderr and the ledger
         bytes `interleave()` left behind."""
-        workflow = load_source_module(SCRIPT, module_name)
+        workflow = load_source_module(MODULE, module_name)
         probe = workflow.probe_progress_head
         left = {}
 
@@ -8179,12 +8181,12 @@ class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(at["action"], "handoff")
 
     def test_the_four_flags_default_to_none_and_resolve_in_the_policy_home(self):
-        workflow = load_source_module(SCRIPT, "workflow_state_phase_budget_defaults")
+        workflow = load_source_module(MODULE, "workflow_state_phase_budget_defaults")
         args = workflow.build_parser().parse_args(self.MINIMAL)
         self.assertEqual((args.turn_ceiling, args.turn_headroom, args.context_ceiling,
                           args.context_headroom), (None, None, None, None))
         defaults = {}
-        for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8"))):
+        for node in ast.walk(ast.parse(MODULE.read_text(encoding="utf-8"))):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "add_argument" and node.args
                     and isinstance(node.args[0], ast.Constant)
@@ -8216,7 +8218,7 @@ class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
     def test_progress_reads_each_spelling_the_meter_removes_as_context_tokens(self):
         """The context meter drops every prefix of --context-tokens from --context-t on (D15)."""
         parser = load_source_module(
-            SCRIPT, "workflow_state_context_tokens_spellings").build_parser()
+            MODULE, "workflow_state_context_tokens_spellings").build_parser()
         for spelling in ("--context-t", "--context-tok", "--context-tokens"):
             with self.subTest(spelling=spelling):
                 self.assertEqual(parser.parse_args([*self.MINIMAL, spelling, "5"]).context_tokens, 5)
@@ -8497,7 +8499,7 @@ class ResolverOutcomeTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.workflow = load_source_module(SCRIPT, "workflow_state_resolver_outcome")
+        cls.workflow = load_source_module(MODULE, "workflow_state_resolver_outcome")
 
     def message(self, returncode, stdout, stderr):
         completed = subprocess.CompletedProcess(
@@ -8598,6 +8600,10 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
                 directory.mkdir(parents=True)
             installed_script = binaries / "workflow-state.py"
             installed_script.write_bytes((scripts / "workflow-state.py").read_bytes())
+            # The entry point imports the command from the library (issue 612).
+            (library / "workflow_state.py").write_bytes(
+                (scripts / "workflow_state.py").read_bytes()
+            )
             # home-manager links the module to its store file (issue 498 D7).
             (store / "artifact_budget.py").write_bytes(
                 (scripts / "artifact_budget.py").read_bytes()
@@ -8615,8 +8621,9 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
                 f"SPAWN_EVENTS = {sorted(SPAWN_EVENTS)!r}\n"
                 "spawned = []\n"
                 "spec = importlib.util.spec_from_file_location('ws', sys.argv[1])\n"
-                "module = importlib.util.module_from_spec(spec)\n"
-                "spec.loader.exec_module(module)\n"
+                "entry = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(entry)\n"
+                "module = entry.load()\n"
                 "_, resolved = module.artifact_budget_paths()\n"
                 "sys.addaudithook(lambda event, _: spawned.append(event)\n"
                 "                 if event in SPAWN_EVENTS else None)\n"
@@ -8739,7 +8746,7 @@ class InProcessArtifactBudgetTest(LifecycleHarness, unittest.TestCase):
         # the boundary's refusal. No wire-bounded input crashes the validator on the
         # supported interpreters, so the seam is the loaded module's `invoke`
         # (issue 498 D4, D8).
-        workflow = load_source_module(SCRIPT, "workflow_state_issue_498_crash")
+        workflow = load_source_module(MODULE, "workflow_state_issue_498_crash")
         module = workflow._artifact_budget()
         wire = json.dumps(self.merged_result()).encode("utf-8")
         argv = ["validate-report", "--boundary", "ship-summary", "--input", "-"]
@@ -8867,8 +8874,9 @@ class LedgerClockSeamTest(LifecycleHarness, unittest.TestCase):
         return found
 
     def test_only_ledger_clock_reads_the_clock_or_the_override(self):
-        scripts = SCRIPT.parent
-        self.assertEqual(set(self.sites(SCRIPT)),
+        scripts = MODULE.parent
+        self.assertEqual(self.sites(SCRIPT), [])
+        self.assertEqual(set(self.sites(MODULE)),
                          {("override", "ledger_clock"), ("clock", "ledger_clock")})
         others = [*sorted(scripts.glob("workflow_delivery*.py")),
                   *sorted((scripts / "delivery_model").glob("*.py"))]
@@ -9096,7 +9104,7 @@ class ObservationCatalogueTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.workflow = load_source_module(SCRIPT, "workflow_state_observation_catalogue")
+        cls.workflow = load_source_module(MODULE, "workflow_state_observation_catalogue")
         cls.builder = load_source_module(BUILDER, "workflow_state_observation_builder")
         cls.wire = load_source_module(WIRE, "workflow_state_observation_wire")
 
@@ -9275,7 +9283,7 @@ class DirectObserveExpectsTest(LifecycleHarness, unittest.TestCase):
                 self.assertEqual(set(expects["example"]), set(expects["members"]))
 
     def test_an_undescribed_requirement_refuses_the_reply(self):
-        workflow = load_source_module(SCRIPT, "workflow_state_undescribed_observe")
+        workflow = load_source_module(MODULE, "workflow_state_undescribed_observe")
         scope_tuple = {"kind": "scope_tuple", "subject_id": "select",
                        "reason_code": "scope_tuple_required", "detail_pointer": None}
         with self.assertRaises(workflow.WorkflowError) as refused:
@@ -9345,7 +9353,7 @@ class TakeoverBlockersTest(LifecycleHarness, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.workflow_state = load_source_module(SCRIPT, "workflow_state_test_takeover")
+        cls.workflow_state = load_source_module(MODULE, "workflow_state_test_takeover")
 
     @staticmethod
     def worker(launch, ordinal=1, released_at=None):
@@ -9413,7 +9421,7 @@ class OrchestratedHoldTest(LifecycleHarness, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.workflow_state = load_source_module(SCRIPT, "workflow_state_test_orchestrated_hold")
+        cls.workflow_state = load_source_module(MODULE, "workflow_state_test_orchestrated_hold")
 
     def setUp(self):
         super().setUp()
@@ -9510,7 +9518,7 @@ class OrchestratedHoldTest(LifecycleHarness, unittest.TestCase):
         first = self.run_id
         self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
         self.install_legacy(held, "orchestrate-73", 2)
-        workflow = load_source_module(SCRIPT, "workflow_state_test_cut_migration")
+        workflow = load_source_module(MODULE, "workflow_state_test_cut_migration")
         with mock.patch.object(workflow, "atomic_write_state", side_effect=OSError("cut")):
             with self.assertRaises(OSError):
                 workflow.transact(str(self.root), self.run_id,
@@ -9539,7 +9547,7 @@ if DeliveredControlHarness is not None:
             store = attempt_store.store_root(self.root / ".superpowers")
             run_id = self.ledger.parent.name
             self.assertEqual(list(attempt_store.hold_runs(store, DELIVERED)), [run_id])
-            module = load_source_module(SCRIPT, "workflow_state_test_delivered_hold")
+            module = load_source_module(MODULE, "workflow_state_test_delivered_hold")
             self.assertIsNone(module.refuse_orchestrated_hold(self.root, DELIVERED))
 
 
