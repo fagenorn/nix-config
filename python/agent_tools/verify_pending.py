@@ -26,8 +26,14 @@ GIT_TIMEOUT = 60
 
 
 def git_ok(root: str, *args: str) -> bool:
-    """True when `git -C root args` exits 0; raises OSError or SubprocessError when git cannot run."""
+    """True when `git -C root args` exits 0; raises OSError, SubprocessError or ValueError when git cannot run."""
     return subprocess.run(["git", "-C", root, *args], capture_output=True, timeout=GIT_TIMEOUT).returncode == 0
+
+
+def git_blob(root: str, spec: str) -> bool:
+    """True when `spec` names a blob; a directory or a missing path is not one."""
+    result = subprocess.run(["git", "-C", root, "cat-file", "-t", spec], capture_output=True, timeout=GIT_TIMEOUT)
+    return result.returncode == 0 and result.stdout.strip() == b"blob"
 
 
 def git_object(root: str, sha: str, path: str | None) -> tuple[str, str]:
@@ -37,8 +43,8 @@ def git_object(root: str, sha: str, path: str | None) -> tuple[str, str]:
             return "absent", "unknown"
         if path is None:
             return "present", "unknown"
-        return ("present", "present") if git_ok(root, "cat-file", "-e", f"{sha}:{path}") else ("present", "absent")
-    except (OSError, subprocess.SubprocessError):
+        return ("present", "present") if git_blob(root, f"{sha}:{path}") else ("present", "absent")
+    except (OSError, subprocess.SubprocessError, ValueError):
         return "unknown", "unknown"
 
 
@@ -115,7 +121,7 @@ def run_lint(args: argparse.Namespace) -> int:
         root = os.path.abspath(args.repo_root)
         try:
             is_repo = git_ok(root, "rev-parse", "--git-dir")
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, ValueError):
             is_repo = False
         if not is_repo:
             print(f"verify-pending: --repo-root {args.repo_root} is not a git work tree", file=sys.stderr)

@@ -66,10 +66,25 @@ NIX_TOOLS = frozenset(("nix", "nix-build", "nix-instantiate", "nix-store", "nix-
 NIX_CODE_ARGS = frozenset(("--expr", "-E", "--apply", "--arg", "--run", "--command", "-c", "-p", "--packages"))
 NIX_EXEC_SUBCOMMANDS = frozenset(("run", "shell", "develop", "repl", "bundle", "fmt", "env", "profile"))
 FLAKE_REF = re.compile(
-    r"^(github|gitlab|sourcehut|git\+[a-z]+|hg\+[a-z]+|https?|tarball\+[a-z]+|file\+[a-z]+|path|flake):"
+    r"^(github|gitlab|sourcehut|git\+[a-z]+|hg\+[a-z]+|https?|tarball\+[a-z]+|file\+[a-z]+|path|flake|channel):"
 )
+# `nix` words that are not flake references: subcommands, and the options that take a separate value.
+NIX_WORDS = frozenset((
+    "build path-info flake metadata show check info lock archive prefetch derivation store ls cat log hash "
+    "why-depends search copy config realisation print-dev-env verify show-config"
+).split())
+NIX_VALUE_OPTIONS = frozenset((
+    "--system -j --max-jobs --cores -o --out-link --profile --log-format --store --eval-store --builders "
+    "--timeout --max-silent-time --extra-experimental-features --experimental-features"
+).split())
 # D5 class 4: git configuration that names a command.
 GIT_CODE_ARGS = frozenset(("-c", "--config-env", "--exec-path", "--upload-pack", "--receive-pack", "--exec", "-x"))
+# Git subcommands that start a shell (or plant code for later runs) on text they are handed.
+GIT_CODE_SUBCOMMANDS = frozenset(("config", "filter-branch"))
+GIT_VALUE_GLOBALS = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source"))
+# Per subcommand: the long options (matched as git matches them, by unambiguous prefix) and the short letters that name a program.
+GIT_SUBCOMMAND_LONG = {"difftool": ("--extcmd",), "mergetool": ("--extcmd",), "grep": ("--open-files-in-pager",), "clone": ("--upload-pack",)}
+GIT_SUBCOMMAND_SHORT = {"difftool": "x", "mergetool": "x", "grep": "O", "clone": "u"}
 TOOL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 COMMAND_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 APPROVAL_VERB = re.compile(r"\b(approve|approves|approved|approval|sign[- ]?off|lgtm)\b", re.IGNORECASE)
@@ -98,6 +113,7 @@ def finding(field: str, code: str, message: str) -> dict[str, str]:
 
 def parse_block(text: str) -> tuple[object | None, list[dict]]:
     """Extract and strictly parse the block; on failure `(None, [finding])`."""
+    text = text.replace("\r\n", "\n")  # GitHub keeps a comment edited in the web UI with CRLF endings
     fences = FENCE.findall(text)
     if len(fences) > 1:
         return None, [finding("block", "fence_count", f"{len(fences)} verify fences; exactly one is allowed")]
@@ -237,7 +253,7 @@ def check_host(check: dict, path: str, errors: list) -> None:
 
 
 def is_relative_posix(path: str) -> bool:
-    if path == "" or path.startswith("/") or "\\" in path:
+    if path == "" or path.startswith("/") or "\\" in path or "\0" in path:
         return False
     return all(segment not in ("", ".", "..") for segment in path.split("/"))
 
@@ -262,6 +278,62 @@ def normalised(arg: str) -> str:
     return arg.split("=", 1)[0] if arg.startswith("-") and "=" in arg else arg
 
 
+def has_flake_scheme(arg: str) -> bool:
+    return FLAKE_REF.match(arg) is not None or ("=" in arg and FLAKE_REF.match(arg.split("=", 1)[1]) is not None)
+
+
+def nix_fetches_flake(texts: list[str]) -> bool:
+    """D5 class 3: a scheme-prefixed, or indirect (registry), flake reference is fetched code."""
+    skip = 0
+    for arg in texts:
+        if skip:
+            skip -= 1
+            continue
+        if arg == "--option":
+            skip = 2
+            continue
+        if arg in NIX_VALUE_OPTIONS:
+            skip = 1
+            continue
+        if has_flake_scheme(arg):
+            return True
+        if arg.startswith("-") or arg in NIX_WORDS or arg.startswith((".", "/")):
+            continue
+        return True
+    return False
+
+
+def git_subcommand(texts: list[str]) -> tuple[str, list[str]]:
+    """The git subcommand and the arguments after it, past the global options."""
+    index = 0
+    while index < len(texts) and texts[index].startswith("-"):
+        index += 2 if texts[index] in GIT_VALUE_GLOBALS else 1
+    return (texts[index], texts[index + 1:]) if index < len(texts) else ("", [])
+
+
+def git_carries_code(texts: list[str]) -> bool:
+    flags = [normalised(arg) for arg in texts]
+    # `-calias.x=!cmd` joins the value onto the short option, so match on the prefix.
+    if any(flag in GIT_CODE_ARGS or (flag.startswith("-c") and not flag.startswith("--")) for flag in flags):
+        return True
+    if any(arg.lower().startswith("ext::") or "=ext::" in arg.lower() for arg in texts):
+        return True
+    command, rest = git_subcommand(texts)
+    if command in GIT_CODE_SUBCOMMANDS:
+        return True
+    if (command == "submodule" and "foreach" in rest) or (command == "bisect" and "run" in rest):
+        return True
+    letter = GIT_SUBCOMMAND_SHORT.get(command)
+    if letter:
+        for flag in flags:
+            if flag.startswith("--"):
+                if len(flag) >= 3 and any(name.startswith(flag) for name in GIT_SUBCOMMAND_LONG[command]):
+                    return True
+            elif flag.startswith("-") and letter in flag:
+                return True
+    return False
+
+
 def args_carry_code(tool: object, args: list) -> bool:
     texts = [arg for arg in args if isinstance(arg, str)]
     if any(arg in EXEC_ARGS or arg_hits_inline_code(arg) for arg in texts):
@@ -276,11 +348,11 @@ def args_carry_code(tool: object, args: list) -> bool:
             # so any bare word that is an exec subcommand counts.
             if any(arg in NIX_EXEC_SUBCOMMANDS for arg in texts if not arg.startswith("-")):
                 return True
-        if any(FLAKE_REF.match(arg) or ("=" in arg and FLAKE_REF.match(arg.split("=", 1)[1])) for arg in texts):
-            return True
-    if tool == "git" and any(flag in GIT_CODE_ARGS for flag in flags):
+    if tool == "nix" and nix_fetches_flake(texts):
         return True
-    return False
+    if tool in NIX_TOOLS and any(has_flake_scheme(arg) for arg in texts):
+        return True
+    return tool == "git" and git_carries_code(texts)
 
 
 def check_args(run: dict, path: str, errors: list) -> None:
