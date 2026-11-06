@@ -143,10 +143,28 @@ class ContractTest(unittest.TestCase):
         self.assertIn("git -C /r/.wt/w-issue-9-x push origin issue-9-x;", text)
         self.assertNotIn("&& git", text)
 
-    def test_claim_failure_stops_with_its_result(self):
-        result, calls = run(replies={"claim": {"ok": False, "reason": "worktree add failed"}})
-        self.assertEqual(result["stage"], "claim")
-        self.assertEqual(labels(calls), ["setup", "claim"])
+    def test_claim_failure_stops_with_a_cont_that_finishes_the_claim(self):
+        for reply in ({"ok": False, "reason": "worktree add failed"},
+                      {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "base_sha": SHA}):
+            with self.subTest(reply=reply):
+                result, calls = run(replies={"claim": reply})
+                self.assertEqual(result["stage"], "claim")
+                self.assertEqual(labels(calls), ["setup", "claim"])
+                cont = result["cont"]
+                self.assertTrue(cont["claim_incomplete"])
+                result, calls = run(args=dict(ARGS, cont=cont))
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(labels(calls)[:3], ["setup", "claim", "plan"])
+                self.assertIn("skip a step already done", prompt(calls, "claim"))
+                self.assertIn("an earlier claim stopped part way", prompt(calls, "setup"))
+                self.assertIn("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x", prompt(calls, "claim"))
+
+    def test_blocked_capability_during_an_unfinished_claim_keeps_the_claim_cont(self):
+        result, _ = run(replies={"claim": {"ok": False, "reason": "x"}})
+        result, _ = run(args=dict(ARGS, cont=result["cont"]),
+                        patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
+        self.assertEqual(result["stage"], "review-blocked")
+        self.assertTrue(result["cont"]["claim_incomplete"])
 
     def test_blocked_review_capability_stops(self):
         result, calls = run(patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
@@ -213,6 +231,7 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(result["stage"], "plan")
         self.assertEqual(result["findings"][0]["summary"], "gap")
         self.assertFalse(result["cont"]["plan_reviewed"])
+        self.assertIsNone(result["cont"]["plan"])
         self.assertNotIn("impl-1", labels(calls))
 
     def test_revision_asking_questions_drops_the_plan(self):
@@ -282,6 +301,12 @@ class ResumeTest(unittest.TestCase):
     def test_dirty_resume_of_the_partial_task_continues(self):
         result, _ = run(args=dict(ARGS, cont=self.cont(partial=2)), patch={"setup": {"dirty": True}})
         self.assertEqual(result["stage"], "done")
+
+    def test_resume_after_merge_closes_out_even_with_a_blocked_review(self):
+        result, calls = run(args=dict(ARGS, cont=self.cont()),
+                            patch={"setup": {"merged_pr": 42, "review_state": {"code": "blocked", "plan": "blocked"}}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls), ["setup", "close-out"])
 
     def test_resume_after_merge_goes_to_close_out(self):
         result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_pr": 42}})

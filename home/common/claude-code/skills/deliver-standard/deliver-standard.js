@@ -18,8 +18,8 @@ export const meta = {
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
 //
-// RESUME: every stop after the claim returns { stage, ..., cont }, where cont is
-// { setup, plan, plan_reviewed, done, partial? }. Passing it back as args.cont
+// RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
+// { setup, plan, plan_reviewed, done, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed), skips the tasks in cont.done, then
@@ -34,6 +34,8 @@ const REPO = args && args.repo_root
 const ISSUE = args && args.issue
 if (!REPO || !ISSUE) return { stage: 'args', error: 'repo_root and issue are required' }
 const CONT = args.cont || null
+// A fresh run, or a resume whose claim stopped part way, runs the (idempotent) claim step.
+const CLAIMING = !CONT || !!CONT.claim_incomplete
 
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
@@ -100,7 +102,7 @@ const CONTRACT_READ = `Run: resolve-project resolve --repo-root ${REPO} . On ref
 const setup = await agent(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
 1. ${CONTRACT_READ}
 2. If a merged PR has head ${CONT.setup && CONT.setup.branch} (gh pr list --repo <slug> --state merged --head ${CONT.setup && CONT.setup.branch}), return ok=true with merged_pr set to its number; the worktree may already be gone.
-3. Otherwise confirm: the issue is open and carries the in-progress label; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}. If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty.
+3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open and carries the in-progress label; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}`}. If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty.
 4. Return every contract field read fresh, branch as in the earlier setup. Change nothing.
 ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} before delivery. Change nothing in this step except one issue comment named below.
 1. ${CONTRACT_READ}
@@ -112,27 +114,20 @@ ${BASE_RULES}`, { label: 'setup', phase: 'Setup', model: 'sonnet', effort: 'low'
 if (!setup || !setup.ok) return { stage: 'setup', result: setup }
 // No policy is defaulted: a field the contract read did not return stops the run (before any claim on a fresh run).
 const missing = ['slug', 'integration_branch', 'default_branch', 'branch', 'merge_strategy', 'co_authored_by', 'delete_branch', 'unset_env', 'verification']
-  .concat(CONT ? [] : ['worktree_path'])
+  .concat(CONT ? [] : ['worktree_path'])  // a resume carries it in cont.setup
   .filter(f => !present(setup[f]))
 if (missing.length) return { stage: 'setup', result: setup, missing, ...(CONT ? { cont: CONT } : {}) }
-if (CONT) Object.assign(setup, { worktree: CONT.setup.worktree, base_sha: CONT.setup.base_sha, plan_dir: CONT.setup.plan_dir })
+if (CONT) Object.assign(setup, { worktree_path: CONT.setup.worktree_path, worktree: CONT.setup.worktree, base_sha: CONT.setup.base_sha, plan_dir: CONT.setup.plan_dir })
 
 let plan = CONT && CONT.plan ? CONT.plan : null
 let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
 const taskLog = CONT && CONT.done ? CONT.done.slice() : []
-const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog } })
+let claimIncomplete = !!(CONT && CONT.claim_incomplete)
+const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, ...(claimIncomplete ? { claim_incomplete: true } : {}) } })
 
 if (CONT && setup.dirty && !setup.merged_pr && CONT.partial === undefined) {
   return stop('dirty', { details: `the worktree ${setup.worktree} has uncommitted changes no task claims; commit or discard them, then resume` })
 }
-
-const RS = setup.review_state || {}
-for (const k of ['plan', 'code']) {
-  // Before a fresh claim nothing is held, so the stop carries no cont: fix the capability and start again.
-  if (RS[k] === 'blocked') return CONT ? stop('review-blocked', { review: k }) : { stage: 'review-blocked', review: k }
-}
-const REVIEW_CODE = RS.code === 'available' && setup.review && setup.review.code ? setup.review.code : null
-const REVIEW_PLAN = RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
 
 const SLUG = setup.slug, INT = setup.integration_branch, STRATEGY = setup.merge_strategy
 const UNSET = setup.unset_env.length ? `unset ${setup.unset_env.join(' ')} && ` : ''
@@ -164,15 +159,25 @@ if (setup.merged_pr) {
   return await closeOut(setup.merged_pr, null, setup.worktree)
 }
 
-if (!CONT) {
-  const claim = await agent(`Claim issue #${ISSUE} of ${SLUG} for delivery, each command in its own Bash call.
+const RS = setup.review_state || {}
+for (const k of ['plan', 'code']) {
+  // Before a fresh claim nothing is held, so the stop carries no cont: fix the capability and start again.
+  if (RS[k] === 'blocked') return CONT ? stop('review-blocked', { review: k }) : { stage: 'review-blocked', review: k }
+}
+const REVIEW_CODE = RS.code === 'available' && setup.review && setup.review.code ? setup.review.code : null
+const REVIEW_PLAN = RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
+
+if (CLAIMING) {
+  const claim = await agent(`Claim issue #${ISSUE} of ${SLUG} for delivery, each command in its own Bash call. An earlier attempt may have done part of this: skip a step already done (the label already on the issue; the worktree already at that path on branch ${setup.branch}; the plan directory already there).
 1. Add the in-progress label (create it if missing: gh label create in-progress --repo ${SLUG} --description 'Being delivered by an agent'), then gh issue edit ${ISSUE} --repo ${SLUG} --add-label in-progress.
 2. git -C ${REPO} fetch origin, then git -C ${REPO} worktree add --no-track -b ${setup.branch} ${setup.worktree_path} origin/${INT}. base_sha is the origin/${INT} sha you branched from.
 3. plan_dir is <git -C ${setup.worktree_path} rev-parse --absolute-git-dir>/deliver-standard; create it. It lives in the worktree's git dir, outside the tree, so the plan never enters a commit.
 Return ok, worktree (${setup.worktree_path}), base_sha (full sha) and plan_dir; on any failure ok=false with the reason and what you already did.
 ${RULES_FOR(setup.worktree_path)}`, { label: 'claim', phase: 'Setup', model: 'sonnet', effort: 'low', schema: CLAIM_SCHEMA })
-  if (!claim || !claim.ok || !present(claim.worktree) || !present(claim.base_sha) || !present(claim.plan_dir)) return { stage: 'claim', result: claim, setup }
+  // A claim that stopped part way may hold the label or the worktree: its cont finishes the claim on resume.
+  if (!claim || !claim.ok || !present(claim.worktree) || !present(claim.base_sha) || !present(claim.plan_dir)) return { stage: 'claim', result: claim, cont: { setup, plan: null, plan_reviewed: false, done: [], claim_incomplete: true } }
   Object.assign(setup, { worktree: claim.worktree, base_sha: claim.base_sha, plan_dir: claim.plan_dir })
+  claimIncomplete = false
 }
 
 const W = setup.worktree
@@ -207,7 +212,8 @@ ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
 const takePlan = (p, label) => {
   if (p && p.status === 'needs_user') { plan = null; planReviewed = false; return stop('plan', { needs_user: p.questions }) }
-  if (!wellFormed(p)) return stop('plan', { step: label, invalid: p })
+  // A failed revision may have half-edited the files on disk, so the plan is dropped and a resume plans again.
+  if (!wellFormed(p)) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p }) }
   plan = p
   return null
 }
