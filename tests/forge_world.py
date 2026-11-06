@@ -97,9 +97,9 @@ if tool == "gh" and (state / "store.json").exists():
                     and argv[7].startswith("body=")
                     and all(a == "-f" for a in argv[8::2]) and all(a.startswith("labels[]=") for a in argv[9::2])):
                 return "create_issue", (argv[5][6:], argv[7][5:], [a[len("labels[]="):] for a in argv[9::2]]), None
-            if (len(argv) == 2 and argv[0] == "api"
-                    and argv[1].startswith("repos/" + slug + "/issues?labels=")):
-                return "list_issues", unquote(argv[1].split("?labels=", 1)[1].split("&", 1)[0]), None
+            if (len(argv) == 4 and argv[:3] == ["api", "--paginate", "--slurp"]
+                    and argv[3].startswith("repos/" + slug + "/issues?labels=")):
+                return "list_issues", unquote(argv[3].split("?labels=", 1)[1].split("&", 1)[0]), None
         base = "repos/" + slug + "/issues/" + str(issue) + "/comments"
         one = "repos/" + slug + "/issues/comments/"
         body = argv[5][5:] if len(argv) == 6 and argv[4] == "-f" and argv[5].startswith("body=") else None
@@ -167,7 +167,7 @@ if tool == "gh" and (state / "store.json").exists():
                                   "author_association": "OWNER", "updated_at": store["clock"]})
             out = {"number": number}
         else:
-            out = [c for c in st["created"] if target in c["labels"]]
+            out = [[c for c in st["created"] if target in c["labels"]]]
         save(store)
         if out is not None:
             sys.stdout.write(json.dumps(out))

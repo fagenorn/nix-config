@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -265,16 +265,34 @@ def evaluate_when(when: Mapping, merge: str, ctx: Context) -> Due:
 
 
 def _stamps(ctx: Context, run: Mapping) -> list[str]:
+    """The timestamps a counting probe counts, read across every page of the listing."""
+    pages = forge_markers.api_pages(
+        f"repos/{ctx.slug}/releases?per_page=100" if run["source"] == "releases"
+        else f"repos/{ctx.slug}/actions/runs?" + _run_query(run))
     if run["source"] == "releases":
-        payload = forge_markers.api_get(f"repos/{ctx.slug}/releases?per_page=100")
-        if not isinstance(payload, list):
+        if not all(isinstance(page, list) for page in pages):
             raise ForgeError("payload_invalid", "releases is not a list")
-        return [item["published_at"] for item in payload
+        return [item["published_at"] for page in pages for item in page
                 if isinstance(item, dict) and not item.get("draft")
                 and isinstance(item.get("published_at"), str)]
-    query = "per_page=100" + (f"&branch={run['branch']}" if run.get("branch") else "")
-    return [item["created_at"] for item in _runs_of(_workflow_runs(ctx, query), run["workflow"])
+    runs = []
+    for page in pages:
+        listed = page.get("workflow_runs") if isinstance(page, dict) else None
+        if not isinstance(listed, list):
+            raise ForgeError("payload_invalid", "no workflow_runs list")
+        runs.extend(item for item in listed if isinstance(item, dict))
+    return [item["created_at"] for item in _runs_of(runs, run["workflow"])
             if isinstance(item.get("created_at"), str)]
+
+
+def _run_query(run: Mapping) -> str:
+    """The workflow-run listing query: per page, the branch and runs created since `since`."""
+    try:
+        since = verify_block.parse_time(run["since"]).astimezone(timezone.utc)
+    except ValueError as error:
+        raise ForgeError("payload_invalid", str(error)) from None
+    query = "per_page=100" + (f"&branch={run['branch']}" if run.get("branch") else "")
+    return query + "&created=" + quote(f">={since:%Y-%m-%dT%H:%M:%SZ}", safe="")
 
 
 def _probe(exit_code: int, output: dict, facts: dict[str, str]) -> Probe:

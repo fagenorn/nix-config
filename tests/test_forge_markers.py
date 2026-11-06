@@ -217,6 +217,24 @@ class TrustedContestTest(unittest.TestCase):
         self.assertEqual((result.won, result.winner.comment_id), (False, 1))
 
 
+class ListIssuesTest(unittest.TestCase):
+    def test_every_page_of_the_labelled_issues_is_read(self):
+        world = ForgeWorld(self)
+        since = datetime(2026, 11, 6, 10, tzinfo=timezone.utc)
+        world.respond_json("gh", ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues?labels=follow-up"
+                                  "&state=all&since=2026-11-06T10:00:00Z&per_page=100"],
+                           [[{"number": n} for n in range(1, 101)], [{"number": 101}]])
+        self.assertEqual([i["number"] for i in fm.list_issues(SLUG, "follow-up", since)], list(range(1, 102)))
+
+    def test_a_page_that_is_not_issues_is_refused(self):
+        world = ForgeWorld(self)
+        since = datetime(2026, 11, 6, 10, tzinfo=timezone.utc)
+        world.respond_json("gh", ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues?labels=x"
+                                  "&state=all&since=2026-11-06T10:00:00Z&per_page=100"], [{"number": 1}])
+        with self.assertRaises(fm.ForgeError):
+            fm.list_issues(SLUG, "x", since)
+
+
 class NoHostClockTest(unittest.TestCase):
     def test_module_reads_no_host_clock(self):
         source = Path(fm.__file__).read_text("utf-8")

@@ -137,6 +137,25 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(vi.live_one(ended.markers, vi.WINDOW, match).comment_id, 12)
         self.assertIsNone(vi.live_one(held.markers, vi.DUE, {"block": "10", "check": "0"}))
 
+    def test_a_window_before_the_block_carries_over_to_a_replacement_block(self):
+        fields = {"event": "deployed", "merge": MERGE, "host": "mbp"}
+        held = self.select(gnode(8, marker(vi.WINDOW, fields)), gnode(9, result(8, 0, "pass")),
+                           gnode(10, hold(block())), gnode(11, marker(vi.WINDOW, fields, "again")),
+                           gnode(12, marker(vi.WINDOW, {**fields, "host": "x"}), "NONE"))
+        self.assertEqual([m.comment_id for m in held.markers], [8, 11])
+        self.assertEqual(vi.live_one(held.markers, vi.WINDOW, {"event": "deployed", "merge": MERGE}).comment_id, 8)
+        ended = self.select(gnode(8, marker(vi.WINDOW, fields)), gnode(9, fm.end_body(8, "stale")),
+                            gnode(10, hold(block())))
+        self.assertIsNone(vi.live_one(ended.markers, vi.WINDOW, {"event": "deployed", "merge": MERGE}))
+
+    def test_an_ended_result_is_not_the_latest(self):
+        held = self.select(gnode(10, hold(block())), gnode(11, result(10, 0, "fail")),
+                           gnode(12, result(10, 0, "pass")), gnode(13, fm.end_body(12, "stale")))
+        self.assertEqual(vi.latest_result(held.markers, 10, 0).comment_id, 11)
+        gone = self.select(gnode(10, hold(block())), gnode(11, result(10, 0, "pass")),
+                           gnode(12, fm.end_body(11, "stale")))
+        self.assertIsNone(vi.latest_result(gone.markers, 10, 0))
+
     def test_latest_result_ignores_other_kinds(self):
         held = self.select(gnode(10, hold(block())), gnode(11, result(10, 0, "pass")),
                            gnode(12, marker(vi.RUN, {"block": "10", "check": "0", "host": "mbp"})))
@@ -348,6 +367,11 @@ class WhenTest(unittest.TestCase):
         self.assertNotIn("darwin-version", [call["tool"] for call in world.calls()])
 
 
+RELEASES = ["api", "--paginate", "--slurp", f"repos/{SLUG}/releases?per_page=100"]
+RUNS_SINCE = ["api", "--paginate", "--slurp", f"repos/{SLUG}/actions/runs?per_page=100&branch=main"
+              "&created=%3E%3D2026-11-01T00%3A00%3A00Z"]
+
+
 class ProbeTest(unittest.TestCase):
     def test_deployed_probe_exits(self):
         world = world_with(self, "darwin-version")
@@ -368,13 +392,31 @@ class ProbeTest(unittest.TestCase):
 
     def test_count_since_releases(self):
         world = world_with(self)
-        world.respond_json("gh", ["api", f"repos/{SLUG}/releases?per_page=100"], [
+        world.respond_json("gh", RELEASES, [[
             {"draft": False, "published_at": "2026-11-02T00:00:00Z"},
             {"draft": True, "published_at": "2026-11-03T00:00:00Z"},
-            {"draft": False, "published_at": "2026-10-01T00:00:00Z"}])
+            {"draft": False, "published_at": "2026-10-01T00:00:00Z"}]])
         run = {"probe": "count_since", "source": "releases", "since": "2026-11-01T00:00:00+00:00", "n": 1}
         self.assertEqual(vf.run_probe(run, context(world)).exit, 0)
         self.assertEqual(vf.run_probe({**run, "n": 2}, context(world)).exit, 75)
+
+    def test_count_since_releases_counts_every_page(self):
+        world = world_with(self)
+        page = [{"draft": False, "published_at": "2026-11-02T00:00:00Z"}] * 100
+        world.respond_json("gh", RELEASES, [page, page[:30]])
+        run = {"probe": "count_since", "source": "releases", "since": "2026-11-01T00:00:00+00:00", "n": 130}
+        self.assertEqual(vf.run_probe(run, context(world)).exit, 0)
+        self.assertEqual(vf.run_probe({**run, "n": 131}, context(world)).exit, 75)
+
+    def test_count_since_runs_counts_every_page_of_the_workflow(self):
+        world = world_with(self)
+        ci = {"name": "ci.yaml", "path": ".github/workflows/ci.yaml", "created_at": "2026-11-02T00:00:00Z"}
+        other = {"name": "lint", "path": ".github/workflows/lint.yaml", "created_at": "2026-11-02T00:00:00Z"}
+        world.respond_json("gh", RUNS_SINCE, [{"workflow_runs": [other] * 100}, {"workflow_runs": [ci] * 3}])
+        run = {"probe": "count_since", "source": "runs", "workflow": "ci.yaml", "branch": "main",
+               "since": "2026-11-01T00:00:00+00:00", "n": 3}
+        self.assertEqual(vf.run_probe(run, context(world)).exit, 0)
+        self.assertEqual(vf.run_probe({**run, "n": 4}, context(world)).exit, 75)
 
 
 HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
@@ -839,6 +881,32 @@ class PassTransitionsTest(PassBase):
         mark = len(self.world.argvs("gh"))
         self.assertEqual(self.run_pass()[0]["reason"], "window_not_open")
         self.assertEqual(self.mutations(mark), [])
+
+    def test_a_replacement_block_inherits_the_window_and_posts_none(self):
+        self.world.respond_json("darwin-version", ["--json"], {"configurationRevision": REV})
+        pushed(self.world, REV)
+        ancestry(self.world, MERGE, REV, 0)
+        opened = marker("window-open", {"event": "deployed", "merge": MERGE, "host": "mbp"})
+        self.hold(ok_check(when={"days_after": {"event": "deployed", "days": 7}}),
+                  extra=[stored_comment(9, opened, at="2026-11-04T10:00:00Z")])
+        self.assertEqual(self.run_pass()[0]["reason"], "window_not_open")
+        self.assertEqual(len(self.markers("window-open")), 1)
+        self.assertEqual(self.mutations(), [])
+
+    def test_an_ended_pass_is_rechecked_and_does_not_close_the_issue(self):
+        self.hold(ok_check(), extra=[stored_comment(11, result(10, 0, "pass")),
+                                     stored_comment(12, fm.end_body(11, "withdrawn"))])
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))
+        self.assertEqual(self.spawned("verify-ok"), 1)
+        self.assertEqual(self.world.issue()["state"], "closed")
+        self.assertEqual(len(self.markers("verify-result")), 2)
+
+    def test_an_ended_pass_alone_never_closes(self):
+        self.hold(check(run={"command": "check-later"}),
+                  extra=[stored_comment(11, result(10, 0, "pass")),
+                         stored_comment(12, fm.end_body(11, "withdrawn"))])
+        self.assertEqual(self.run_pass()[0]["state"], "pending")
+        self.assertEqual((self.world.issue()["state"], self.spawned("verify-later")), ("open", 1))
 
     def test_report_is_read_only(self):
         self.hold(ok_check())

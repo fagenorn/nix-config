@@ -187,6 +187,14 @@ def api_get(path: str, allow: Iterable[int] = ()) -> Any:
     return _json(["api", path], allow)
 
 
+def api_pages(path: str) -> list[Any]:
+    """The parsed JSON page of every page of one paginated `gh api` read, in order."""
+    pages = _json(["api", "--paginate", "--slurp", path])
+    if not isinstance(pages, list):
+        raise ForgeError("payload_invalid", "paginated listing is not an array of pages")
+    return pages
+
+
 def _comments(slug: str, issue: int) -> str:
     return f"repos/{slug}/issues/{issue}/comments"
 
@@ -332,12 +340,12 @@ def create_issue(slug: str, title: str, body: str, labels: Sequence[str] = ()) -
 
 
 def list_issues(slug: str, label: str, since: datetime) -> list[dict]:
-    """The issues (any state) carrying `label` and updated since `since`, one page of 100."""
-    issues = _json(["api", f"repos/{slug}/issues?labels={quote(label)}&state=all"
-                    f"&since={since:%Y-%m-%dT%H:%M:%SZ}&per_page=100"])
-    if not isinstance(issues, list) or not all(isinstance(i, dict) for i in issues):
+    """Every issue (any state) carrying `label` and updated since `since`, across all pages."""
+    pages = api_pages(f"repos/{slug}/issues?labels={quote(label)}&state=all"
+                      f"&since={since:%Y-%m-%dT%H:%M:%SZ}&per_page=100")
+    if not all(isinstance(page, list) and all(isinstance(i, dict) for i in page) for page in pages):
         raise ForgeError("payload_invalid", "issues are not an array of objects")
-    return issues
+    return [issue for page in pages for issue in page]
 
 
 def close_issue(slug: str, issue: int, reason: str) -> None:

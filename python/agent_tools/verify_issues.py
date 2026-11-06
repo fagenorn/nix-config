@@ -5,8 +5,9 @@ comment whose association is in `TRUSTED`, that is not itself a marker and whose
 `verify` fence. Unfenced JSON is never a block, an unparsable newest block never falls back to
 an older one, and the newest block is chosen by comment id, not by time.
 
-The run's markers are the markers after that block by a trusted author, `end` markers included;
-every other author's marker is invisible. A result's identity is its block and check index; the
+The run's markers are the markers after that block by a trusted author, `end` markers included,
+and the trusted `window-open` and `end` markers before it: a window belongs to a merge and an
+event, not to a block, so a replacement block inherits it. Every other author's marker is invisible. A result's identity is its block and check index; the
 `ac` field is never part of it (P15).
 
 This module runs no process, reads no clock and touches no file.
@@ -70,15 +71,17 @@ def select(comments: list[Comment]) -> Held | None:
         return None
     newest = max(blocks, key=lambda c: c.id)
     block, errors = verify_block.parse_block(newest.body)
-    found = [_as_marker(c) for c in comments if c.id > newest.id and c.association in TRUSTED]
-    markers = sorted((m for m in found if m is not None), key=lambda m: m.comment_id)
+    found = [_as_marker(c) for c in comments if c.association in TRUSTED and c.id != newest.id]
+    found = [m for m in found if m is not None and (
+        m.comment_id > newest.id or m.kind in (WINDOW, forge_markers.END_KIND))]
+    markers = sorted(found, key=lambda m: m.comment_id)
     return Held(newest.id, block, errors, markers)
 
 
 def latest_result(markers: list[forge_markers.Marker], block_id: int, check: int) -> forge_markers.Marker | None:
-    """The newest result of the block's check, whatever its `ac` field says."""
+    """The newest live result of the block's check, whatever its `ac` field says."""
     found = [m for m in markers if m.kind == RESULT and m.fields.get("block") == str(block_id)
-             and m.fields.get("check") == str(check)]
+             and m.fields.get("check") == str(check) and forge_markers.is_live(m, markers)]
     return max(found, key=lambda m: m.comment_id, default=None)
 
 
