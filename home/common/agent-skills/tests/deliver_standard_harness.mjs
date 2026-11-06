@@ -12,7 +12,7 @@ const PASS = { verdict: 'pass', findings: [] }
 const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], mutation_checked: true, notes: 'ok' }
 const SETUP = {
   ok: true, slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main',
-  branch: 'issue-9-x', worktree_path: '/r/.wt/w-issue-9-x', dirty: false, co_authored_by: true, unset_env: [], merge_strategy: 'merge', delete_branch: true,
+  branch: 'issue-9-x', worktree_path: '/r/.wt/w-issue-9-x', dirty: false, unset_env: [], merge_strategy: 'merge', delete_branch: true,
   review: { code: 'cr', plan: 'pr' }, review_state: { code: 'available', plan: 'available' },
   knowledge: { standards: ['/r/docs/standards'], hints: ['/r/.hints'], rejections: ['/r/.rej'] },
   verification: [{ id: 'build', argv: ['make', 'build'], cwd: '.' }],
