@@ -35,11 +35,11 @@ claim it names is live and still stale at that moment: the claim is ended (reaso
 A box ticked on a claim that is no longer stale is ended (reason `renewed`) and releases
 nothing. A stale claim is never stolen: `acquire` against it without a ticked box is `held_by`.
 
-D10, residual window, accepted: an honour judges stale on a fresh listing taken immediately
-before it ends the claim, so a renewal that landed before that listing is never undone. One that
-lands between that listing and the end can still lose the claim; the holder's `renew` then
-reports `not_held` (D3), so holders run `renew` before each irreversible step and stop on
-`not_held`.
+D10, residual window, accepted: an honour reads the server time and the branch activity first,
+then takes a fresh listing and ends the claim right after judging that listing's `updated_at`, so
+a renewal that landed before that listing is never undone. One that lands between that listing
+and the end can still lose the claim; the holder's `renew` then reports `not_held` (D3), so
+holders run `renew` before each irreversible step and stop on `not_held`.
 """
 import argparse
 import json
@@ -138,15 +138,19 @@ def retire_owner_actions(slug: str, issue: int, markers: list[Marker], claim_id:
     return named
 
 
+def branch_activity(slug: str, claim: Marker) -> list[datetime]:
+    """The last push and the newest pull request `updated_at` of the claim's branch, when it
+    records one and they exist (D4)."""
+    branch = claim.fields.get("branch")
+    if not branch:
+        return []
+    return [m for m in (fm.latest_push(slug, branch), fm.latest_pr_event(slug, branch)) if m is not None]
+
+
 def activity_at(slug: str, claim: Marker) -> datetime:
     """The claim's latest activity: its `updated_at`, and, only when it records a branch, the
     branch's last push and the newest `updated_at` of the branch's pull requests (D4)."""
-    moments = [claim.updated_at]
-    branch = claim.fields.get("branch")
-    if branch:
-        moments += [m for m in (fm.latest_push(slug, branch), fm.latest_pr_event(slug, branch))
-                    if m is not None]
-    return max(moments)
+    return max([claim.updated_at, *branch_activity(slug, claim)])
 
 
 def is_stale(activity: datetime, now: datetime) -> bool:
@@ -180,13 +184,22 @@ def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Mar
     now: datetime | None = None
     released: list[int] = []
 
-    def judge(owner_action: Marker, snapshot: list[Marker]) -> tuple[Marker | None, str]:
+    def judge(owner_action: Marker, snapshot: list[Marker],
+              early: tuple[Marker, list[datetime]] | None = None) -> tuple[Marker | None, str]:
+        """`early` is the claim as an earlier listing showed it and its branch activity, read
+        before `snapshot` was taken, so only the `updated_at` comparison follows `snapshot`."""
         nonlocal now
         claim = _claim_named(snapshot, owner_action)
         if claim is None or claim.comment_id in released or not fm.is_live(claim, snapshot):
             return claim, "released"
         now = fm.server_now() if now is None else now
-        return claim, ("stale" if is_stale(activity_at(slug, claim), now) else "renewed")
+        if early is None:
+            moments = branch_activity(slug, claim)
+        elif claim.fields.get("branch") != early[0].fields.get("branch"):
+            return claim, "renewed"  # only a renewal since the earlier listing changes the branch
+        else:
+            moments = early[1]
+        return claim, ("stale" if is_stale(max([claim.updated_at, *moments]), now) else "renewed")
 
     def still_ticked(owner_action: Marker, snapshot: list[Marker]) -> Marker | None:
         return next((m for m in _live_owner_actions(snapshot)
@@ -198,13 +211,15 @@ def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Mar
             continue  # ended, or untick, since the listing this loop started from
         claim, verdict = judge(current, markers)
         if verdict == "stale":
-            # The snapshot can be old: a renewal ends the box and moves the claim. Judge once more on
-            # a fresh listing immediately before the irreversible end of the claim.
+            # The snapshot can be old: a renewal ends the box and moves the claim. Read the branch
+            # activity first, then judge once more on a fresh listing immediately before the
+            # irreversible end of the claim, so no forge read sits between that listing and the end.
+            early = (claim, branch_activity(slug, claim))
             markers = fm.list_markers(slug, issue)
             current = still_ticked(current, markers)
             if current is None:
                 continue
-            claim, verdict = judge(current, markers)
+            claim, verdict = judge(current, markers, early)
         if verdict == "stale":
             fm.end(slug, issue, claim.comment_id, "owner-action")
             fm.edit(slug, claim.comment_id, fm.with_fields(claim, released="owner-action"))
@@ -213,8 +228,9 @@ def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Mar
         else:
             fm.end(slug, issue, current.comment_id, verdict)
     again = fm.list_markers(slug, issue)
-    if released and not fm.contest(again, CLAIM_KIND, {"issue": str(issue)}):
-        fm.remove_label(slug, issue, IN_PROGRESS[0])
+    if released:
+        # Like release: a claim acquired between `again` and the removal gets its label back.
+        _, again = _settle_in_progress(slug, issue, again)
     if not _live_owner_actions(again):
         fm.remove_label(slug, issue, OWNER_ACTION[0])
     return again, sorted(released)
@@ -281,33 +297,48 @@ def renew(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     return 0, _result(args, "renewed", winner.comment_id)
 
 
-def _unfinished_release(markers: list[Marker], issue: int, holder: str, reason: str) -> Marker | None:
-    """The holder's claim whose `end` marker (reason `reason`) was written but whose own
-    `released` field is missing: a release that stopped half way, or whose edit a delayed
-    `renew` PATCH overwrote (D9). The newest such claim, else None."""
-    ended_for = {int(m.fields["of"]) for m in markers
-                 if m.kind == fm.END_KIND and m.fields.get("reason") == reason
-                 and m.fields.get("of", "").isdigit()}
-    return next((m for m in sorted(markers, key=lambda m: m.comment_id, reverse=True)
-                 if m.kind == CLAIM_KIND and m.fields.get("issue") == str(issue)
-                 and _holder_of(m) == holder and "released" not in m.fields
-                 and m.comment_id in ended_for), None)
+def _last_release(markers: list[Marker], issue: int, holder: str, reason: str) -> Marker | None:
+    """The claim a retried `release` finishes: the issue's newest claim, when it is the holder's
+    and an `end` marker with `reason` ended it. Its release may have stopped after the `end`
+    (the `released` edit, the owner-action retirement or a label call failed), or a delayed
+    `renew` PATCH may have dropped its `released` field (D9); every remaining step is idempotent.
+    An older claim of the holder is never one: a later claim means its release is long over."""
+    claims = [m for m in markers if m.kind == CLAIM_KIND and m.fields.get("issue") == str(issue)]
+    newest = max(claims, key=lambda m: m.comment_id, default=None)
+    if newest is None or _holder_of(newest) != holder:
+        return None
+    ended = any(m.kind == fm.END_KIND and m.fields.get("of") == str(newest.comment_id)
+                and m.fields.get("reason") == reason for m in markers)
+    return newest if ended else None
 
 
-def _settle_in_progress(args: argparse.Namespace) -> bool:
-    """Remove the `in-progress` label when no live claim remains; True when it stays removed.
+def _retired_owner_action_label(slug: str, issue: int, markers: list[Marker], claim_id: int) -> None:
+    """Remove the `owner-action` label a retried release's retirement left behind: when the claim
+    had an `owner-action` marker and none of the issue is live any more (D10)."""
+    named = any(m.kind == OWNER_ACTION_KIND and m.fields.get("claim") == str(claim_id) for m in markers)
+    if named and not _live_owner_actions(markers):
+        fm.remove_label(slug, issue, OWNER_ACTION[0])
+
+
+def _settle_in_progress(slug: str, issue: int,
+                        markers: list[Marker] | None = None) -> tuple[bool, list[Marker]]:
+    """Remove the `in-progress` label when no live claim remains, judged on `markers` (a fresh
+    listing when None). Returns whether it stays removed and the newest listing taken.
 
     Removal is not atomic with the listing that justified it, so a listing after the removal
     restores the label when a claim was acquired in between (that acquirer's own labelling may
     have come first)."""
-    match = {"issue": str(args.issue)}
-    if fm.contest(fm.list_markers(args.repo, args.issue), CLAIM_KIND, match):
-        return False
-    fm.remove_label(args.repo, args.issue, IN_PROGRESS[0])
-    if fm.contest(fm.list_markers(args.repo, args.issue), CLAIM_KIND, match):
-        _mark_in_progress(args)
-        return False
-    return True
+    match = {"issue": str(issue)}
+    markers = fm.list_markers(slug, issue) if markers is None else markers
+    if fm.contest(markers, CLAIM_KIND, match):
+        return False, markers
+    fm.remove_label(slug, issue, IN_PROGRESS[0])
+    markers = fm.list_markers(slug, issue)
+    if fm.contest(markers, CLAIM_KIND, match):
+        fm.ensure_label(slug, *IN_PROGRESS)
+        fm.add_label(slug, issue, IN_PROGRESS[0])
+        return False, markers
+    return True, markers
 
 
 def release(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
@@ -318,14 +349,18 @@ def release(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         claim = mine[0]
         fm.end(args.repo, args.issue, claim.comment_id, args.reason)
     else:
-        claim = _unfinished_release(markers, args.issue, args.holder, args.reason)
+        claim = _last_release(markers, args.issue, args.holder, args.reason)
         if claim is None:
             # Nothing of this holder's to end; a free issue still sheds a label an earlier release
             # left behind, and a live claim of anyone else keeps it.
-            return CONTENDED, _result(args, "not_held", label_removed=_settle_in_progress(args))
-    fm.edit(args.repo, claim.comment_id, fm.with_fields(claim, released=args.reason))
-    retire_owner_actions(args.repo, args.issue, markers, claim.comment_id, "released")
-    return 0, _result(args, "released", claim.comment_id, label_removed=_settle_in_progress(args))
+            return CONTENDED, _result(args, "not_held",
+                                      label_removed=_settle_in_progress(args.repo, args.issue)[0])
+    if mine or "released" not in claim.fields:
+        fm.edit(args.repo, claim.comment_id, fm.with_fields(claim, released=args.reason))
+    if not retire_owner_actions(args.repo, args.issue, markers, claim.comment_id, "released") and not mine:
+        _retired_owner_action_label(args.repo, args.issue, markers, claim.comment_id)
+    return 0, _result(args, "released", claim.comment_id,
+                      label_removed=_settle_in_progress(args.repo, args.issue)[0])
 
 
 def status(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:

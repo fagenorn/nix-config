@@ -305,8 +305,44 @@ class ReleaseRenewTest(Base):
         self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
         self.world.respond("gh", REMOVE)
         code, out = run(*common("release"))
-        self.assertEqual((code, out["verdict"], out["label_removed"]), (3, "not_held", True))
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["label_removed"]), (0, "released", 5, True))
         self.assertEqual(self.mutations()[-1], REMOVE)
+        self.assertEqual(len(self.world.stored()), 2)  # no second end marker, no second edit
+        self.assertEqual(self.mutations().count(patch(5, claim_body(ME, released="done"))), 1)
+
+    def test_release_retry_finishes_retiring_the_owner_actions(self):
+        # Finding 3a: the claim is ended and edited, then retirement fails at the marker's end or at
+        # the label removal; the same release again ends the marker and removes the label.
+        for failing in ("end", "label"):
+            with self.subTest(failing=failing):
+                self.fresh_world()
+                self.store(comment(5, claim_body(ME)), comment(30, oa_body(5, ME)))
+                if failing == "label":
+                    self.world.respond("gh", OA_REMOVE, exit=1, stderr="gh: Server Error (HTTP 500)")
+                    code, out = run(*common("release"))
+                    self.world.respond("gh", OA_REMOVE)
+                else:
+                    real_end = fm.end
+                    with mock.patch.object(fm, "end", side_effect=lambda s, i, of, r: (
+                            real_end(s, i, of, r) if of == 5 else (_ for _ in ()).throw(fm.ForgeError("gh_failed", "boom")))):
+                        code, out = run(*common("release"))
+                self.assertEqual((code, out["verdict"]), (1, "error"))
+                code, out = run(*common("release"))
+                self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "released", 5))
+                self.assertEqual(self.live("owner-action"), [])
+                self.assertEqual(self.mutations()[-2:], [OA_REMOVE, REMOVE])
+                self.assertEqual(self.mutations().count(post(fm.end_body(5, "done"))), 1)
+
+    def test_release_after_a_later_claim_does_not_touch_an_old_claim(self):
+        # Finding 3b: claim 5 was released, a delayed renew PATCH dropped its `released` field and
+        # OTHER claimed since; a release by ME now holds nothing and leaves claim 5 as it is.
+        dropped = claim_body(ME, renewed="1")
+        self.store(comment(5, dropped), comment(6, fm.end_body(5, "done")), comment(7, claim_body(OTHER)))
+        code, out = run(*common("release"))
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["label_removed"]),
+                         (3, "not_held", None, False))
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual(next(c["body"] for c in self.world.stored() if c["id"] == 5), dropped)
 
     def test_release_by_a_non_holder_leaves_the_label_of_a_live_claim(self):
         self.store(comment(5, claim_body(OTHER)))
@@ -458,6 +494,39 @@ class StatusTest(Base):
         code, out = finish(renewal)
         self.assertEqual((code, out["verdict"], out["comment_id"]), (3, "not_held", 5))
         self.assertEqual([m.fields["holder"] for m in self.live()], [ME])
+
+    def test_an_honour_does_not_strip_the_label_from_a_claim_acquired_meanwhile(self):
+        # Finding 1: status honours the box and lists no live claim; OTHER acquires and labels before
+        # the label removal; the removal must be followed by a restore.
+        self.store(comment(5, claim_body(ME), OLD), comment(30, oa_body(5, ME, ticked=True)))
+        # listings: status, the honour's fresh re-check, the honour's closing listing
+        interleave(self, 3, lambda: self.assertEqual(run(*common("acquire", holder=OTHER))[1]["verdict"],
+                                                     "acquired"))
+        code, out = run(*common("status"))
+        self.assertEqual((code, out["verdict"], out["by"], out["released_by_owner"]), (0, "held_by", OTHER, [5]))
+        labels = [a for a in self.mutations() if a in (REMOVE, ADD)]
+        self.assertEqual(labels[-2:], [REMOVE, ADD])  # the label ends on the issue
+        self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
+
+    def test_a_renewal_during_the_branch_activity_read_releases_nothing(self):
+        # Finding 2: the honour reads branch activity before its fresh listing, so a renewal that
+        # lands during that read is in the listing it judges.
+        self.store(comment(5, claim_body(OTHER, branch="topic"), OLD),
+                   comment(30, oa_body(5, OTHER, ticked=True)))
+        self.world.respond_json("gh", PUSH, [])
+        self.world.respond_json("gh", PRS, [])
+        real, calls = fm.latest_push, [0]
+
+        def push(*args, **kwargs):
+            calls[0] += 1
+            if calls[0] == 2:  # the honour's re-check read
+                self.assertEqual(run(*common("renew", holder=OTHER))[1]["verdict"], "renewed")
+            return real(*args, **kwargs)
+        with mock.patch.object(fm, "latest_push", push):
+            code, out = run(*common("acquire"))
+        self.assertEqual((code, out["verdict"], out["by"], out["released_by_owner"]), (3, "held_by", OTHER, []))
+        self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
+        self.assertNotIn(post(fm.end_body(5, "owner-action")), self.mutations())
 
     def test_a_tick_read_before_the_holder_renewed_releases_nothing(self):
         # COR-001: acquire reads the stale claim and the ticked box, then OTHER renews (ending the box)
