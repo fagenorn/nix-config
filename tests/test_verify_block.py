@@ -402,5 +402,29 @@ class CountSinceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
 
+README = Path(__file__).parents[1] / "python/README.md"
+
+
+class ReadmeDemoTest(unittest.TestCase):
+    def example(self):
+        text = README.read_text(encoding="utf-8")
+        start = text.index("\n## verify-pending\n")
+        end = text.find("\n## ", start + 1)
+        section = text[start:end if end != -1 else len(text)]
+        return section
+
+    def test_documented_example_is_accepted(self):
+        result, verdict = lint(self.example())
+        self.assertEqual((result.returncode, verdict["ok"]), (0, True), result.stdout)
+
+    def test_example_with_inline_python_is_refused_naming_the_field(self):
+        block = json.loads(self.example().split("```verify\n", 1)[1].split("\n```", 1)[0])
+        block["checks"][0]["run"] = {"tool": "python3", "args": ["-c", "print(1)"]}
+        result, verdict = lint(block)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(("checks[0].run.tool", "inline_code"),
+                      [(e["field"], e["code"]) for e in verdict["errors"]])
+
+
 if __name__ == "__main__":
     unittest.main()
