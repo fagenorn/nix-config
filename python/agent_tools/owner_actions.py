@@ -12,19 +12,30 @@ P4b: a refresh publishes only a complete answer: the search is followed page by 
 per-item connection or a search unfinished after `MAX_PAGES` fails the refresh and writes nothing.
 P5: items are counted by their current labels, whatever the server returned.
 P6: the first page also reads the `owner-action` label, and a missing one is created.
+P7: a statusline starts a refresh only by holding an exclusive `flock` on `<name>.refresh`, which also
+records the last attempt's time; the child inherits the locked descriptor, and attempts are spaced
+`RETRY_AFTER` apart whatever their outcome.
+P8: the detached child is `sibling_argv("owner_actions") + ["refresh", "--repo", slug]` in its own session,
+its output going to `<name>.log`.
+P10: a statusline prints nothing for the expected blank cases and lets every other failure escape to `main`,
+which reports the traceback on stderr and exits 1.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import re
+import subprocess
 import sys
+import time
+import traceback
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_tools import agent_platform, forge_claim, forge_markers
+from agent_tools import agent_platform, forge_claim, forge_markers, siblings
 from agent_tools.github_remote import github_slug
 
 SLUG_PATTERN = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*")
@@ -32,6 +43,8 @@ SLUG_PATTERN = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9
 COUNTED = ("owner-action", "agent:human-required")
 SCHEMA_VERSION = 1
 MAX_PAGES = 10
+STALE_AFTER = 900
+RETRY_AFTER = 120
 
 _KEY = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 _SECTION_NAME = re.compile(r"[A-Za-z0-9.-]+")
@@ -264,6 +277,110 @@ def write_entry(slug: str, count: int, oldest: str | None) -> None:
         cache_path(slug), (json.dumps(entry, sort_keys=True) + "\n").encode("utf-8"))
 
 
+def claim_path(slug: str) -> Path:
+    return cache_path(slug).with_suffix(".refresh")
+
+
+def log_path(slug: str) -> Path:
+    return cache_path(slug).with_suffix(".log")
+
+
+def render(entry: dict | None, now: float) -> str:
+    """The status-line text for a cache entry, without a newline; `""` when there is nothing to say."""
+    if entry is None or entry["count"] == 0:
+        return ""
+    if entry["oldest"] is None:
+        return f"owner {entry['count']}"
+    days = max(0, int((now - datetime.fromisoformat(entry["oldest"]).timestamp()) // 86400))
+    return f"owner {entry['count']} (oldest {days}d)"
+
+
+def claim_refresh(slug: str, now: float) -> int | None:
+    """A descriptor holding the claim's exclusive lock when the caller should spawn, else None (P7)."""
+    path = claim_path(slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return None
+        try:
+            last = float(os.read(fd, 64).decode("utf-8", "replace").strip())
+        except ValueError:
+            last = None
+        if last is not None and 0 <= now - last < RETRY_AFTER:
+            os.close(fd)
+            return None
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{now:.3f}\n".encode("ascii"))
+        return fd
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def spawn_refresh(slug: str, claim_fd: int) -> None:
+    """Start the detached child that refreshes `slug` and holds the claim until it exits (P8)."""
+    with open(log_path(slug), "wb") as log:
+        subprocess.Popen(siblings.sibling_argv("owner_actions") + ["refresh", "--repo", slug],
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                         cwd="/", pass_fds=(claim_fd,))
+
+
+def _cwd(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("cwd"), str):
+        return payload["cwd"]
+    workspace = payload.get("workspace")
+    if isinstance(workspace, dict) and isinstance(workspace.get("current_dir"), str):
+        return workspace["current_dir"]
+    return None
+
+
+def statusline(stdin_text: str) -> str:
+    """Everything `statusline` prints; expected blank cases return `""`, other failures raise (P10)."""
+    try:
+        payload = json.loads(stdin_text)
+    except ValueError:
+        return ""
+    cwd = _cwd(payload)
+    if cwd is None:
+        return ""
+    slug = checkout_slug(cwd)
+    if slug is None or slug not in fleet_slugs():
+        return ""
+    now = time.time()
+    entry = read_entry(slug)
+    stale = entry is None
+    if not stale:
+        try:
+            stale = now - cache_path(slug).stat().st_mtime > STALE_AFTER
+        except FileNotFoundError:
+            stale = True
+    if stale:
+        try:
+            fd = claim_refresh(slug, now)
+        except OSError as error:
+            print(f"owner-actions: refresh claim for {slug} failed: {error}", file=sys.stderr)
+        else:
+            if fd is not None:
+                try:
+                    spawn_refresh(slug, fd)
+                except OSError as error:
+                    print(f"owner-actions: refresh spawn for {slug} failed: {error}", file=sys.stderr)
+                finally:
+                    os.close(fd)
+    text = render(read_entry(slug), now)
+    return text + "\n" if text else ""
+
+
 def _invalid(detail: str) -> forge_markers.ForgeError:
     return forge_markers.ForgeError("payload_invalid", detail)
 
@@ -368,7 +485,16 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     refreshing = commands.add_parser("refresh", help="refresh the cached owner-action counts")
     refreshing.add_argument("--repo", type=_slug, help="one owner/name slug; default is the fleet")
+    commands.add_parser("statusline", help="print the cwd repository's owner actions from the cache")
     args = parser.parse_args(argv)
+    if args.command == "statusline":
+        try:
+            text = statusline(sys.stdin.read())
+        except Exception:
+            traceback.print_exc()
+            return 1
+        sys.stdout.write(text)
+        return 0
     refreshed: list[str] = []
     failed: list[dict] = []
     if args.repo is not None:

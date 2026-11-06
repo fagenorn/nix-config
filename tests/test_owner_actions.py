@@ -1,15 +1,19 @@
 """owner-actions (issue 624): repository identity, refresh against the fake gh, statusline from the cache."""
 import contextlib
+import fcntl
 import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import agent_platform
+from agent_tools import agent_platform, siblings
 from agent_tools import owner_actions as oa
 from .forge_world import ForgeWorld
 
@@ -354,6 +358,275 @@ class RefreshTest(Scratch):
                 oa.refresh(SLUG)
             self.assertEqual(raised.exception.code, "payload_invalid")
         self.assertIsNone(oa.read_entry(SLUG))
+
+
+PYTHON_DIR = Path(__file__).resolve().parent.parent / "python"
+DAY = 86400
+
+
+def iso(seconds_ago: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(time.time() - seconds_ago, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def age(path: Path, seconds: float) -> None:
+    then = time.time() - seconds
+    os.utime(path, (then, then))
+
+
+def attempted(slug: str, seconds_ago: float) -> None:
+    """Record a refresh attempt `seconds_ago` in the claim file, as claim_refresh would."""
+    path = oa.claim_path(slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{time.time() - seconds_ago:.3f}\n", encoding="utf-8")
+
+
+def claim_free(slug: str) -> bool:
+    fd = os.open(oa.claim_path(slug), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def wait_for(condition, message, timeout=15):
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError(message)
+        time.sleep(0.05)
+
+
+class StatuslineTest(Scratch):
+    """A two-repo fleet with a fixture cache: SLUG has 2 items (oldest 3 days 1 hour), OTHER has 0.
+    A third checkout, STRANGER, has a cache entry but is not registered."""
+
+    def setUp(self):
+        super().setUp()
+        self.widgets = checkout(self.root / "widgets", SLUG)
+        self.gadgets = checkout(self.root / "gadgets", OTHER)
+        self.stranger = checkout(self.root / "stranger", STRANGER)
+        self.register(self.widgets, self.gadgets)
+        oa.write_entry(SLUG, 2, iso(3 * DAY + 3600))
+        oa.write_entry(OTHER, 0, None)
+        oa.write_entry(STRANGER, 5, iso(9 * DAY))
+        popen = mock.patch.object(oa.subprocess, "Popen")
+        self.popen = popen.start()
+        self.addCleanup(popen.stop)
+
+    def line(self, payload, code=0) -> str:
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(text)), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(oa.main(["statusline"]), code)
+        self.assertEqual(self.world.calls(), [])
+        self.err = err.getvalue()
+        return out.getvalue()
+
+    def test_prints_count_and_age_for_the_cwd_repo_only(self):
+        (self.widgets / "src").mkdir()
+        self.assertEqual(self.line({"cwd": str(self.widgets / "src")}), "owner 2 (oldest 3d)\n")
+        self.assertEqual(self.line({"workspace": {"current_dir": str(self.widgets)}}), "owner 2 (oldest 3d)\n")
+        self.assertEqual(self.err, "")
+        self.popen.assert_not_called()
+
+    def test_count_without_a_label_time(self):
+        oa.write_entry(SLUG, 1, None)
+        self.assertEqual(self.line({"cwd": str(self.widgets)}), "owner 1\n")
+
+    def test_blank_for_zero_non_fleet_non_git_and_bad_input(self):
+        plain = self.root / "plain"
+        plain.mkdir()
+        for payload in ({"cwd": str(self.gadgets)}, {"cwd": str(self.stranger)}, {"cwd": str(plain)},
+                        "not json", "[]", {"cwd": 7}, {}):
+            self.assertEqual(self.line(payload), "", payload)
+            self.assertEqual(self.err, "", payload)
+        self.popen.assert_not_called()
+
+    def test_corrupt_registry_is_blank_and_reported(self):
+        agent_platform.registry_path().write_text("{", encoding="utf-8")
+        self.assertEqual(self.line({"cwd": str(self.widgets)}, code=1), "")
+        self.assertIn("PlatformManifestError", self.err)
+        self.popen.assert_not_called()
+
+    def test_an_unexpected_failure_is_blank_and_reported(self):
+        with mock.patch.object(oa, "read_entry", side_effect=RuntimeError("boom")):
+            self.assertEqual(self.line({"cwd": str(self.widgets)}, code=1), "")
+        self.assertIn("RuntimeError: boom", self.err)
+        self.popen.assert_not_called()
+
+    def test_fresh_entry_spawns_nothing(self):
+        age(oa.cache_path(SLUG), 14 * 60)
+        self.line({"cwd": str(self.widgets)})
+        self.popen.assert_not_called()
+
+    def test_stale_entry_spawns_one_detached_refresh_and_prints_fast(self):
+        age(oa.cache_path(SLUG), 16 * 60)
+        started = time.perf_counter()
+        printed = self.line({"cwd": str(self.widgets)})
+        elapsed = time.perf_counter() - started
+        self.assertEqual(printed, "owner 2 (oldest 3d)\n")
+        self.assertLess(elapsed, 0.1)
+        self.popen.assert_called_once()
+        args, kwargs = self.popen.call_args
+        self.assertEqual(args[0], siblings.sibling_argv("owner_actions") + ["refresh", "--repo", SLUG])
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertEqual(kwargs["cwd"], "/")
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        for stream in ("stdout", "stderr"):
+            self.assertEqual(kwargs[stream].name, str(oa.log_path(SLUG)))
+        self.assertEqual(len(kwargs["pass_fds"]), 1)
+        self.assertTrue(claim_free(SLUG), "the parent must close its claim descriptor")
+
+    def test_a_failed_attempt_spaces_retries(self):
+        age(oa.cache_path(SLUG), 16 * 60)
+        self.line({"cwd": str(self.widgets)})
+        self.popen.assert_called_once()
+        # The mocked child refreshed nothing: the entry is still stale and the claim is free.
+        for _ in range(3):
+            self.assertEqual(self.line({"cwd": str(self.widgets)}), "owner 2 (oldest 3d)\n")
+        self.popen.assert_called_once()
+        attempted(SLUG, oa.RETRY_AFTER + 1)
+        self.line({"cwd": str(self.widgets)})
+        self.assertEqual(self.popen.call_count, 2)
+
+    def test_a_held_claim_blocks_the_spawn(self):
+        age(oa.cache_path(SLUG), 16 * 60)
+        attempted(SLUG, 10 * 60)
+        fd = os.open(oa.claim_path(SLUG), os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            self.assertEqual(self.line({"cwd": str(self.widgets)}), "owner 2 (oldest 3d)\n")
+            self.popen.assert_not_called()
+        finally:
+            os.close(fd)
+        self.line({"cwd": str(self.widgets)})
+        self.popen.assert_called_once()
+
+    def test_garbage_or_future_attempt_times_expire(self):
+        age(oa.cache_path(SLUG), 16 * 60)
+        oa.claim_path(SLUG).write_text("not a time\n", encoding="utf-8")
+        self.line({"cwd": str(self.widgets)})
+        attempted(SLUG, -3600)
+        self.line({"cwd": str(self.widgets)})
+        self.assertEqual(self.popen.call_count, 2)
+
+    def test_concurrent_calls_spawn_once(self):
+        age(oa.cache_path(SLUG), 16 * 60)
+        self.popen.side_effect = lambda *a, **k: time.sleep(0.05)
+        barrier = threading.Barrier(8)
+        printed, errors = [], []
+        payload = json.dumps({"cwd": str(self.widgets)})
+
+        def call():
+            try:
+                barrier.wait()
+                printed.append(oa.statusline(payload))
+            except Exception as error:  # surfaced below
+                errors.append(error)
+
+        threads = [threading.Thread(target=call) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        self.assertEqual(errors, [])
+        self.assertEqual(printed, ["owner 2 (oldest 3d)\n"] * 8)
+        self.popen.assert_called_once()
+
+    def test_missing_entry_of_a_fleet_repo_spawns_and_prints_nothing(self):
+        oa.cache_path(OTHER).unlink()
+        self.assertEqual(self.line({"cwd": str(self.gadgets)}), "")
+        self.popen.assert_called_once()
+        self.assertEqual(self.popen.call_args[0][0][-2:], ["--repo", OTHER])
+
+    def test_a_spawn_failure_still_prints_and_is_reported(self):
+        age(oa.cache_path(SLUG), 16 * 60)
+        self.popen.side_effect = OSError("exec format error")
+        self.assertEqual(self.line({"cwd": str(self.widgets)}), "owner 2 (oldest 3d)\n")
+        self.assertIn(f"owner-actions: refresh spawn for {SLUG} failed: exec format error", self.err)
+
+    def test_an_unreadable_fresh_entry_counts_as_missing(self):
+        oa.cache_path(SLUG).write_text("{", encoding="utf-8")
+        self.assertEqual(self.line({"cwd": str(self.widgets)}), "")
+        self.popen.assert_called_once()
+
+    def test_a_claim_failure_still_prints_and_is_reported(self):
+        age(oa.cache_path(SLUG), 16 * 60)
+        with mock.patch.object(oa.os, "open", side_effect=PermissionError("denied")):
+            self.assertEqual(self.line({"cwd": str(self.widgets)}), "owner 2 (oldest 3d)\n")
+        self.assertIn(f"owner-actions: refresh claim for {SLUG} failed: denied", self.err)
+        self.popen.assert_not_called()
+
+    def test_render(self):
+        now = time.time()
+        self.assertEqual(oa.render(None, now), "")
+        self.assertEqual(oa.render({"count": 0, "oldest": None}, now), "")
+        self.assertEqual(oa.render({"count": 4, "oldest": iso(DAY - 60)}, now), "owner 4 (oldest 0d)")
+        self.assertEqual(oa.render({"count": 4, "oldest": iso(10 * DAY + 60)}, now), "owner 4 (oldest 10d)")
+        self.assertEqual(oa.render({"count": 4, "oldest": iso(-3600)}, now), "owner 4 (oldest 0d)")
+
+
+class StatuslineEndToEndTest(Scratch):
+    """Real statusline processes against the fake gh: the detached child really runs."""
+
+    def setUp(self):
+        super().setUp()
+        self.widgets = checkout(self.root / "widgets", SLUG)
+        self.register(self.widgets)
+        oa.write_entry(SLUG, 1, iso(2 * DAY + 60))
+        age(oa.cache_path(SLUG), 20 * 60)
+        self.env = {**self.world.env(), "HOME": str(self.home), "PYTHONPATH": str(PYTHON_DIR)}
+
+    def start(self):
+        return subprocess.Popen([sys.executable, "-m", "agent_tools.owner_actions", "statusline"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=self.env)
+
+    def finish(self, process):
+        out, err = process.communicate(json.dumps({"cwd": str(self.widgets)}), timeout=10)
+        return process.returncode, out, err
+
+    def test_returns_before_the_refresh_finishes(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"]), node(["owner-action"])]),
+                                sleep=2)
+        started = time.monotonic()
+        result = self.finish(self.start())
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual(result, (0, "owner 1 (oldest 2d)\n", ""))
+        wait_for(lambda: (oa.read_entry(SLUG) or {}).get("count") == 2 and claim_free(SLUG),
+                 "the detached refresh never rewrote the cache and released the claim")
+        self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG)])
+        self.assertEqual(self.world.argvs("git"), [])
+        self.assertIn('"refreshed": ["octo/widgets"]', oa.log_path(SLUG).read_text("utf-8"))
+
+    def test_concurrent_processes_start_one_refresh(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"]), node(["owner-action"])]),
+                                sleep=2)
+        processes = [self.start() for _ in range(4)]
+        for process in processes:
+            self.assertEqual(self.finish(process), (0, "owner 1 (oldest 2d)\n", ""))
+        wait_for(lambda: (oa.read_entry(SLUG) or {}).get("count") == 2 and claim_free(SLUG),
+                 "the detached refresh never rewrote the cache and released the claim")
+        self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG)])
+
+    def test_a_second_call_after_a_failed_refresh_starts_nothing(self):
+        self.world.respond("gh", oa.search_argv(SLUG), exit=1, stderr="gh: Bad Gateway (HTTP 502)")
+        before = oa.cache_path(SLUG).read_bytes()
+        self.assertEqual(self.finish(self.start()), (0, "owner 1 (oldest 2d)\n", ""))
+        wait_for(lambda: self.world.argvs("gh") and claim_free(SLUG), "the failed refresh never finished")
+        self.assertIn("gh_failed", oa.log_path(SLUG).read_text("utf-8"))
+        claim = oa.claim_path(SLUG).read_bytes()
+        self.assertEqual(self.finish(self.start()), (0, "owner 1 (oldest 2d)\n", ""))
+        # A spawn always rewrites the attempt time first, so an unchanged claim proves none happened.
+        self.assertEqual(oa.claim_path(SLUG).read_bytes(), claim)
+        self.assertTrue(claim_free(SLUG))
+        self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG)])
+        self.assertEqual(oa.cache_path(SLUG).read_bytes(), before)
 
 
 if __name__ == "__main__":
