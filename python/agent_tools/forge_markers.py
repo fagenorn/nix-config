@@ -8,7 +8,8 @@ through `gh api`, with `GITHUB_TOKEN` and `GH_TOKEN` removed from every child.
 D2, winner and write: among the live markers of one kind whose fields contain a match set, the
 smallest comment id wins. `write` posts, re-lists, takes the contest over the re-read plus its
 own id and deletes its own comment when it is not the winner. Safety assumes a listing
-reflects every comment created before the listing started.
+reflects every comment created before the listing started. A caller that names trusted
+associations makes markers by any other author invisible to its contest.
 
 D9, ending is append-only: a marker is ended by posting an `end` marker naming its id, and
 nothing edits or deletes an `end` marker. A marker is live when it is not itself an `end`
@@ -21,7 +22,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -176,12 +177,17 @@ def _comments(slug: str, issue: int) -> str:
     return f"repos/{slug}/issues/{issue}/comments"
 
 
-def list_markers(slug: str, issue: int) -> list[Marker]:
-    """Every parseable marker on the issue, ascending comment id."""
+def list_markers(slug: str, issue: int,
+                 associations: Collection[str] | None = None) -> list[Marker]:
+    """Every parseable marker on the issue, ascending comment id.
+
+    With `associations`, a comment whose `author_association` is not in it is dropped before
+    parsing, `end` markers included; `None` reads every comment."""
     pages = _json(["api", "--paginate", "--slurp", _comments(slug, issue) + "?per_page=100"])
     if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
         raise ForgeError("payload_invalid", "comment listing is not an array of pages")
-    found = [parse(c) for page in pages for c in page if isinstance(c, dict)]
+    found = [parse(c) for page in pages for c in page if isinstance(c, dict)
+             and (associations is None or c.get("author_association") in associations)]
     return sorted((m for m in found if m is not None), key=lambda m: m.comment_id)
 
 
@@ -204,21 +210,23 @@ def end(slug: str, issue: int, of: int, reason: str) -> int:
 
 
 def write(slug: str, issue: int, kind: str, fields: Mapping[str, str], sentence: str,
-          match: Mapping[str, str], extra: str = "") -> WriteResult:
+          match: Mapping[str, str], extra: str = "",
+          associations: Collection[str] | None = None) -> WriteResult:
     """Post a marker and settle contention for it (D2).
 
     `match` must be contained in `fields` (ValueError otherwise, before anything is posted).
     The post comes first and the listing after it. The winner is the smallest live comment id
     of `kind` matching `match` in the re-read plus this write's own comment. A loser deletes
     its own comment and reports the smallest other contested marker. One post, at most one
-    delete, no retry.
+    delete, no retry. With `associations` the re-read is `list_markers(slug, issue,
+    associations)`; the own comment counts whatever its association.
     """
     if any(fields.get(k) != v for k, v in match.items()):
         raise ValueError("match pairs must be contained in the marker's fields")
     body = render(kind, fields, sentence, extra)
     posted = _posted(slug, issue, body)
     own_id = posted["id"]
-    reread = list_markers(slug, issue)
+    reread = list_markers(slug, issue, associations)
     if not any(m.comment_id == own_id for m in reread):
         own = parse({"id": own_id, "body": body,
                      "updated_at": posted.get("updated_at") or "1970-01-01T00:00:00Z"})

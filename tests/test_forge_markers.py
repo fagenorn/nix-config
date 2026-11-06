@@ -183,6 +183,40 @@ class RaceTest(unittest.TestCase):
         self.assertFalse(any("DELETE" in argv for argv in world.argvs("gh")))
 
 
+TRUSTED = ("OWNER", "MEMBER")
+
+
+def by(association, cid, body):
+    return {**comment(cid, body), "author_association": association}
+
+
+class TrustedContestTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def test_untrusted_markers_never_win_or_end_a_contest(self):
+        self.world.comment_store(SLUG, ISSUE, [by("NONE", 1, claim_body("x/forged")),
+                                               by("OWNER", 2, claim_body(B)),
+                                               by("NONE", 3, fm.end_body(2, "forged"))])
+        self.assertEqual([m.comment_id for m in fm.list_markers(SLUG, ISSUE, TRUSTED)], [2])
+        result = fm.write(SLUG, ISSUE, "claim", {"issue": str(ISSUE), "holder": A}, f"Claimed by {A}.", MATCH,
+                          associations=TRUSTED)
+        self.assertEqual((result.won, result.winner.comment_id), (False, 2))
+
+    def test_the_own_comment_counts_whatever_its_association(self):
+        self.world.comment_store(SLUG, ISSUE, [by("NONE", 1, claim_body("x/forged"))])
+        result = fm.write(SLUG, ISSUE, "claim", {"issue": str(ISSUE), "holder": A}, f"Claimed by {A}.", MATCH,
+                          associations=TRUSTED)
+        self.assertTrue(result.won)
+        self.assertEqual([c["id"] for c in self.world.stored()], [1, result.own_id])
+
+    def test_no_associations_keeps_the_issue_623_reading(self):
+        self.world.comment_store(SLUG, ISSUE, [by("NONE", 1, claim_body("x/forged"))])
+        self.assertEqual([m.comment_id for m in fm.list_markers(SLUG, ISSUE)], [1])
+        result = fm.write(SLUG, ISSUE, "claim", {"issue": str(ISSUE), "holder": A}, f"Claimed by {A}.", MATCH)
+        self.assertEqual((result.won, result.winner.comment_id), (False, 1))
+
+
 class NoHostClockTest(unittest.TestCase):
     def test_module_reads_no_host_clock(self):
         source = Path(fm.__file__).read_text("utf-8")

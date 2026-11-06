@@ -1,0 +1,88 @@
+"""Trusted block and marker selection for the verify-pending run (issue 630).
+
+An issue's held verification is the newest `verify` block posted by a trusted author (P3): a
+comment whose association is in `TRUSTED`, that is not itself a marker and whose body carries a
+`verify` fence. Unfenced JSON is never a block, an unparsable newest block never falls back to
+an older one, and the newest block is chosen by comment id, not by time.
+
+The run's markers are the markers after that block by a trusted author, `end` markers included;
+every other author's marker is invisible. A result's identity is its block and check index; the
+`ac` field is never part of it (P15).
+
+This module runs no process, reads no clock and touches no file.
+"""
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from agent_tools import forge_markers, verify_block
+
+TRUSTED = ("OWNER", "MEMBER")
+RESULT, RUN, WINDOW, DUE, FOLLOWUP, CLOSED, FOLLOWUP_OF = (
+    "verify-result", "verify-run", "window-open", "verify-due",
+    "verify-followup", "verify-closed", "verify-followup-of")
+
+
+@dataclass(frozen=True)
+class Comment:
+    id: int
+    association: str
+    body: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class Held:
+    block_id: int
+    block: object | None
+    errors: list[dict]
+    markers: list[forge_markers.Marker]
+
+
+def comments_from_graphql(nodes: list) -> list[Comment]:
+    """The comments of GraphQL nodes, ascending id; ForgeError `payload_invalid` for a bad node."""
+    comments = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise forge_markers.ForgeError("payload_invalid", f"comment node {node!r} is not an object")
+        cid = node.get("databaseId")
+        if isinstance(cid, bool) or not isinstance(cid, int):
+            raise forge_markers.ForgeError("payload_invalid", f"comment databaseId {cid!r}")
+        for key in ("authorAssociation", "body", "createdAt"):
+            if not isinstance(node.get(key), str):
+                raise forge_markers.ForgeError("payload_invalid", f"comment {cid} has no string {key}")
+        comments.append(Comment(cid, node["authorAssociation"], node["body"], node["createdAt"]))
+    return sorted(comments, key=lambda c: c.id)
+
+
+def _as_marker(comment: Comment) -> forge_markers.Marker | None:
+    return forge_markers.parse({"id": comment.id, "body": comment.body, "updated_at": comment.created_at})
+
+
+def _is_block(comment: Comment) -> bool:
+    return (comment.association in TRUSTED and _as_marker(comment) is None
+            and verify_block.FENCE.search(comment.body.replace("\r\n", "\n")) is not None)
+
+
+def select(comments: list[Comment]) -> Held | None:
+    """The newest trusted block with the trusted markers after it, or None when there is no block."""
+    blocks = [c for c in comments if _is_block(c)]
+    if not blocks:
+        return None
+    newest = max(blocks, key=lambda c: c.id)
+    block, errors = verify_block.parse_block(newest.body)
+    found = [_as_marker(c) for c in comments if c.id > newest.id and c.association in TRUSTED]
+    markers = sorted((m for m in found if m is not None), key=lambda m: m.comment_id)
+    return Held(newest.id, block, errors, markers)
+
+
+def latest_result(markers: list[forge_markers.Marker], block_id: int, check: int) -> forge_markers.Marker | None:
+    """The newest result of the block's check, whatever its `ac` field says."""
+    found = [m for m in markers if m.kind == RESULT and m.fields.get("block") == str(block_id)
+             and m.fields.get("check") == str(check)]
+    return max(found, key=lambda m: m.comment_id, default=None)
+
+
+def live_one(markers: list[forge_markers.Marker], kind: str, match: Mapping[str, str]) -> forge_markers.Marker | None:
+    """The winning live marker of `kind` matching `match`, or None."""
+    contested = forge_markers.contest(markers, kind, match)
+    return contested[0] if contested else None
