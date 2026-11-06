@@ -1,8 +1,10 @@
 """forge_markers (issue 623): grammar, reads and writes against the fake gh, and the race table."""
+import json
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from agent_tools import forge_markers as fm
 from .forge_world import ForgeWorld, host_clock
@@ -189,6 +191,149 @@ class NoHostClockTest(unittest.TestCase):
         for spelling in ("time.time", ".now(", "utcnow", "date.today", "localtime"):
             self.assertNotIn(spelling, source)
         self.assertIn("from datetime import datetime", source)
+
+
+REF = "refs/agent-locks/land/main"
+# Distinct names: the module-level `A` and `B` are the race table's holders (`SCHEDULES` captured
+# them at import, `race` reads them at run time); rebinding them here would break RaceTest.
+OID_A, OID_B = "a" * 40, "b" * 40
+NODE = "R_kgDOtest"
+
+
+class RefTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def test_read_ref_present_and_absent(self):
+        self.world.ref_store(SLUG, {REF: OID_A})
+        self.assertEqual(fm.read_ref(SLUG, REF), OID_A)
+        self.assertIsNone(fm.read_ref(SLUG, "refs/agent-locks/land/dev"))
+        self.assertEqual(self.world.argvs("gh")[0], ["api", f"repos/{SLUG}/git/ref/agent-locks/land/main"])
+
+    def test_create_ref_once_then_422(self):
+        self.world.ref_store(SLUG)
+        self.assertTrue(fm.create_ref(SLUG, REF, OID_A))
+        self.assertFalse(fm.create_ref(SLUG, REF, OID_B))
+        self.assertEqual(self.world.refs(), {REF: OID_A})
+        self.assertEqual(self.world.argvs("gh")[0],
+                         ["api", "-X", "POST", f"repos/{SLUG}/git/refs", "-f", f"ref={REF}", "-f", f"sha={OID_A}"])
+
+    def test_node_id(self):
+        self.world.ref_store(SLUG)
+        self.assertEqual(fm.repo_node_id(SLUG), NODE)
+
+    def test_cas_moves_only_from_the_observed_oid(self):
+        self.world.ref_store(SLUG, {REF: OID_A})
+        self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_B, OID_B), "gh_failed")
+        self.assertEqual(self.world.refs(), {REF: OID_A})
+        self.assertIsNone(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B))
+        self.assertEqual(self.world.refs(), {REF: OID_B})
+        self.assertEqual(self.world.argvs("gh")[-1],
+                         ["api", "graphql", "-f", f"query={fm.UPDATE_REFS}", "-f", f"repositoryId={NODE}",
+                          "-f", f"name={REF}", "-f", f"before={OID_A}", "-f", f"after={OID_B}"])
+        self.assertIn("force: true", fm.UPDATE_REFS)
+
+    def test_cas_delete_only_from_the_observed_oid(self):
+        self.world.ref_store(SLUG, {REF: OID_A})
+        self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_B, fm.ZERO_OID), "gh_failed")
+        self.assertEqual(self.world.refs(), {REF: OID_A})
+        self.assertIsNone(fm.cas_ref(SLUG, NODE, REF, OID_A, fm.ZERO_OID))
+        self.assertEqual(self.world.refs(), {})
+        self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, fm.ZERO_OID), "gh_failed")
+
+    def test_a_lying_cas_reports_failure_but_applied(self):
+        self.world.ref_store(SLUG, {REF: OID_A}, cas_lies=1)
+        self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B), "gh_failed")
+        self.assertEqual(fm.read_ref(SLUG, REF), OID_B)
+
+    def test_cas_keeps_the_failure_code(self):
+        for code in ("gh_failed", "gh_timeout"):
+            with self.subTest(code=code), \
+                    mock.patch.object(fm, "_gh", side_effect=fm.ForgeError(code, "x")):
+                self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B), code)
+        with mock.patch.object(fm, "_gh", side_effect=fm.ForgeError("gh_missing", "x")), \
+                self.assertRaises(fm.ForgeError) as caught:
+            fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B)
+        self.assertEqual(caught.exception.code, "gh_missing")
+
+    def test_cas_answering_errors_with_exit_zero_is_not_applied(self):
+        for payload in ({"data": {"updateRefs": {"clientMutationId": None}}, "errors": [{"message": "x"}]},
+                        {"data": {"updateRefs": None}}):
+            with self.subTest(payload=payload), \
+                    mock.patch.object(fm, "_gh", return_value=(0, json.dumps(payload))):
+                self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B), "gh_failed")
+
+    def test_node_id_outside_the_grammar_is_invalid(self):
+        with mock.patch.object(fm, "_gh", return_value=(0, "not a node id\n")), \
+                self.assertRaises(fm.ForgeError) as caught:
+            fm.repo_node_id(SLUG)
+        self.assertEqual(caught.exception.code, "payload_invalid")
+
+    def test_ref_store_default_is_not_shared(self):
+        self.world.ref_store(SLUG)
+        fm.create_ref(SLUG, REF, OID_A)
+        self.world.reset()
+        self.world.ref_store(SLUG)
+        self.assertEqual(self.world.refs(), {})
+
+    def test_no_ref_delete_through_rest(self):
+        self.world.ref_store(SLUG, {REF: OID_A})
+        fm.cas_ref(SLUG, NODE, REF, OID_A, fm.ZERO_OID)
+        self.assertFalse([a for a in self.world.argvs("gh") if "DELETE" in a and any("git/refs" in p for p in a)])
+
+    def test_commit_pulls(self):
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{OID_A}/pulls?per_page=100"], [
+            {"number": 12, "state": "closed", "merged_at": "2026-11-01T00:00:00Z",
+             "base": {"ref": "main"}, "head": {"ref": "issue-7-x", "sha": OID_A}},
+            {"number": 13, "state": "open", "merged_at": None,
+             "base": {"ref": "dev"}, "head": {"ref": "issue-8-y", "sha": OID_B}}])
+        self.assertEqual(fm.commit_pulls(SLUG, OID_A), [
+            fm.Pull(12, "closed", True, "main", "issue-7-x", OID_A), fm.Pull(13, "open", False, "dev", "issue-8-y", OID_B)])
+
+    def test_commit_pulls_rejects_a_bad_payload(self):
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{OID_A}/pulls?per_page=100"], {"number": 1})
+        with self.assertRaises(fm.ForgeError) as caught:
+            fm.commit_pulls(SLUG, OID_A)
+        self.assertEqual(caught.exception.code, "payload_invalid")
+
+    def closed_page(self, page, items):
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/pulls?state=closed&base=main&sort=updated"
+                                       f"&direction=desc&per_page=100&page={page}"], items)
+
+    @staticmethod
+    def closed_item(number, sha):
+        return {"number": number, "state": "closed", "merged_at": None,
+                "base": {"ref": "main"}, "head": {"ref": f"issue-{number}-x", "sha": sha}}
+
+    def test_closed_pulls_headed_filters_by_head_sha(self):
+        self.closed_page(1, [self.closed_item(12, OID_B), self.closed_item(13, OID_A)])
+        self.assertEqual(fm.closed_pulls_headed(SLUG, "main", OID_B),
+                         [fm.Pull(12, "closed", False, "main", "issue-12-x", OID_B)])
+
+    def test_closed_pulls_headed_pages_until_a_short_page_or_the_bound(self):
+        full = [self.closed_item(n, OID_B) for n in range(100, 200)]
+        self.closed_page(1, full)
+        self.closed_page(2, [self.closed_item(5, OID_A)])
+        self.assertEqual(len(fm.closed_pulls_headed(SLUG, "main", OID_A)), 1)
+        for page in range(1, fm.CLOSED_PAGES + 2):
+            self.closed_page(page, full)
+        self.assertEqual(len(fm.closed_pulls_headed(SLUG, "main", OID_B)), 100 * fm.CLOSED_PAGES)
+        pages = [a[1] for a in self.world.argvs("gh") if "state=closed" in a[1]]
+        self.assertEqual(len(pages) - 2, fm.CLOSED_PAGES)
+
+    def test_closed_pulls_headed_rejects_a_bad_payload(self):
+        self.closed_page(1, {"number": 1})
+        with self.assertRaises(fm.ForgeError) as caught:
+            fm.closed_pulls_headed(SLUG, "main", OID_A)
+        self.assertEqual(caught.exception.code, "payload_invalid")
+
+    def test_closing_issues(self):
+        owner, name = SLUG.split("/")
+        self.world.respond_json("gh", ["api", "graphql", "-f", f"query={fm.CLOSING_ISSUES}", "-f", f"owner={owner}",
+                                       "-f", f"name={name}", "-F", "number=12"],
+                                {"data": {"repository": {"pullRequest": {"closingIssuesReferences": {
+                                    "nodes": [{"number": 7}, {"number": 9}]}}}}})
+        self.assertEqual(fm.closing_issues(SLUG, 12), [7, 9])
 
 
 if __name__ == "__main__":

@@ -18,7 +18,8 @@ REPO_ROOT = Path(__file__).parents[4]
 PROGRAM = REPO_ROOT / "home/common/claude-code/skills/deliver-standard/deliver-standard.js"
 HARNESS = Path(__file__).with_name("deliver_standard_harness.mjs")
 SHA = "a" * 40
-ARGS = {"repo_root": "/r", "issue": 9}
+ARGS = {"repo_root": "/r", "issue": 9, "session_id": "s1"}
+HOLDER = "h1/session-s1"
 PLAN = {
     "status": "planned", "plan_root": "/g/plan.md",
     "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
@@ -61,8 +62,9 @@ class HappyPathTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         self.assertTrue(result["merged"])
         self.assertEqual(labels(calls), [
-            "setup", "claim", "plan", "plan-codex", "plan-review", "impl-1", "review-1", "final-codex",
-            "final-1", "verify", "pr", "checks-1", "merge", "close-out"])
+            "setup", "acquire", "worktree", "renew-plan", "plan", "plan-codex", "plan-review", "renew-tasks",
+            "impl-1", "review-1", "renew-final-review", "final-codex", "final-1", "renew-verify", "verify",
+            "renew-ship", "pr", "renew-checks-1", "checks-1", "renew-merge", "merge", "close-out"])
 
     def test_merge_carries_contract_strategy_and_the_checked_head(self):
         # The contract decides the form; a host guard that accepts fewer forms refuses
@@ -128,13 +130,13 @@ class ContractTest(unittest.TestCase):
     def test_setup_preflight_names_merged_pr_existing_branch_and_applicability(self):
         _, calls = run()
         setup = prompt(calls, "setup")
-        for needle in ("already-merged", "existing-branch", "no-longer-applies",
+        for needle in ("duplicate", "re-adopt", "no-longer-applies",
                        "bindings.vcs.worktree.prefix", "bindings.vcs.worktree.root",
                        "--state all --search 9"):
             self.assertIn(needle, setup)
         self.assertNotIn("--add-label", setup)
-        claim = prompt(calls, "claim")
-        for needle in ("--add-label in-progress", "worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x origin/dev",
+        claim = prompt(calls, "worktree")
+        for needle in ("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x origin/dev",
                        "rev-parse --absolute-git-dir"):
             self.assertIn(needle, claim)
 
@@ -150,20 +152,20 @@ class ContractTest(unittest.TestCase):
         for reply in ({"ok": False, "reason": "worktree add failed"},
                       {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "base_sha": SHA}):
             with self.subTest(reply=reply):
-                result, calls = run(replies={"claim": reply})
+                result, calls = run(replies={"worktree": reply})
                 self.assertEqual(result["stage"], "claim")
-                self.assertEqual(labels(calls), ["setup", "claim"])
+                self.assertEqual(labels(calls), ["setup", "acquire", "worktree"])
                 cont = result["cont"]
                 self.assertTrue(cont["claim_incomplete"])
                 result, calls = run(args=dict(ARGS, cont=cont))
                 self.assertEqual(result["stage"], "done")
-                self.assertEqual(labels(calls)[:3], ["setup", "claim", "plan"])
-                self.assertIn("skip a step already done", prompt(calls, "claim"))
+                self.assertEqual(labels(calls)[:5], ["setup", "acquire", "worktree", "renew-plan", "plan"])
+                self.assertIn("skip a step already done", prompt(calls, "worktree"))
                 self.assertIn("an earlier claim stopped part way", prompt(calls, "setup"))
-                self.assertIn("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x", prompt(calls, "claim"))
+                self.assertIn("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x", prompt(calls, "worktree"))
 
     def test_blocked_capability_during_an_unfinished_claim_keeps_the_claim_cont(self):
-        result, _ = run(replies={"claim": {"ok": False, "reason": "x"}})
+        result, _ = run(replies={"worktree": {"ok": False, "reason": "x"}})
         result, _ = run(args=dict(ARGS, cont=result["cont"]),
                         patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
         self.assertEqual(result["stage"], "review-blocked")
@@ -197,6 +199,206 @@ class ContractTest(unittest.TestCase):
             text = prompt(calls, label)
             for path in ("/r/docs/standards", "/r/.hints", "/r/.rej", "the-bar.md"):
                 self.assertIn(path, text, label)
+
+
+RENEW = f"forge-claim renew --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x"
+BOUNDARIES = [("renew-plan", "plan"), ("renew-tasks", "impl-1"), ("renew-final-review", "final-codex"),
+              ("renew-verify", "verify"), ("renew-ship", "pr"), ("renew-checks-1", "checks-1"),
+              ("renew-merge", "merge")]
+
+
+class ClaimTest(unittest.TestCase):
+    """#635: one claim primitive; held elsewhere stops before any worktree; renew at every boundary."""
+
+    def test_claim_held_elsewhere_stops_before_any_worktree(self):
+        for verdict in ("held_by", "lost_to"):
+            with self.subTest(verdict=verdict):
+                result, calls = run(replies={"acquire": {"verdict": verdict, "by": "h2/b1", "comment_id": 5}})
+                self.assertEqual((result["stage"], result["verdict"], result["by"]), ("claimed", verdict, "h2/b1"))
+                self.assertNotIn("cont", result)
+                self.assertEqual(labels(calls), ["setup", "acquire"])
+
+    def test_acquire_names_the_holder_and_branch(self):
+        _, calls = run()
+        self.assertIn(f"forge-claim acquire --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x",
+                      prompt(calls, "acquire"))
+        _, calls = run(args={"repo_root": "/r", "issue": 9, "batch_id": "b7"})
+        self.assertIn("--holder h1/b7 ", prompt(calls, "acquire"))
+
+    def test_already_held_continues(self):
+        result, _ = run(replies={"acquire": {"verdict": "already_held", "comment_id": 5}})
+        self.assertEqual(result["stage"], "done")
+
+    def test_acquire_error_stops_with_a_cont_that_finishes_the_claim(self):
+        for reply in ({"verdict": "error", "detail": "forge down"}, None):
+            with self.subTest(reply=reply):
+                result, calls = run(replies={"acquire": reply})
+                self.assertEqual(result["stage"], "claim")
+                self.assertTrue(result["cont"]["claim_incomplete"])
+                self.assertEqual(labels(calls), ["setup", "acquire"])
+
+    def test_renew_runs_before_every_stage_boundary(self):
+        _, calls = run()
+        names = labels(calls)
+        self.assertEqual([l for l in names if l.startswith("renew-")], [b for b, _ in BOUNDARIES])
+        for boundary, first in BOUNDARIES:
+            with self.subTest(boundary=boundary):
+                self.assertIn(RENEW, prompt(calls, boundary))
+                self.assertEqual(names[names.index(first) - 1], boundary)
+
+    def test_ended_claim_stops_at_its_boundary_with_no_cont(self):
+        for boundary, first in BOUNDARIES:
+            with self.subTest(boundary=boundary):
+                result, calls = run(replies={boundary: {"verdict": "not_held", "by": "h2/b1"}})
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", boundary[len("renew-"):]))
+                self.assertNotIn(first, labels(calls))
+                self.assertNotIn("cont", result)
+
+    def test_unanswered_renew_stops_with_a_cont_that_reacquires(self):
+        for boundary, first in BOUNDARIES:
+            for reply in ({"verdict": "error", "detail": "forge down"}, None):
+                with self.subTest(boundary=boundary, reply=reply):
+                    result, calls = run(replies={boundary: reply})
+                    self.assertEqual((result["stage"], result["at"]), ("claim-lost", boundary[len("renew-"):]))
+                    self.assertNotIn(first, labels(calls))
+                    self.assertTrue(result["cont"]["claim_incomplete"])
+
+    def test_resume_after_an_unanswered_renew_reacquires_and_finishes(self):
+        stopped, _ = run(replies={"renew-ship": None})
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
+                            replies={"acquire": {"verdict": "already_held", "comment_id": 7}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:3], ["setup", "acquire", "worktree"])
+        self.assertNotIn("plan", labels(calls))
+        self.assertNotIn("impl-1", labels(calls))
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
+                            replies={"acquire": {"verdict": "lost_to", "by": "h2/b1"}})
+        self.assertEqual(result["stage"], "claimed")
+        self.assertEqual(labels(calls), ["setup", "acquire"])
+
+    def test_holder_id_is_required_and_checked(self):
+        for args in ({"repo_root": "/r", "issue": 9}, dict(ARGS, session_id="a b"),
+                     {"repo_root": "/r", "issue": 9, "batch_id": "-x"}):
+            with self.subTest(args=args):
+                result, calls = run(args=args)
+                self.assertEqual(result["stage"], "args")
+                self.assertEqual(calls, [])
+
+    def test_unusable_host_stops_before_the_claim(self):
+        for host in (None, "bad host"):
+            with self.subTest(host=host):
+                result, calls = run(patch={"setup": {"host": host}})
+                self.assertEqual(result["stage"], "setup")
+                self.assertEqual(labels(calls), ["setup"])
+
+    def test_setup_checks_no_claim_by_label_or_assignee(self):
+        _, calls = run()
+        setup = prompt(calls, "setup")
+        self.assertNotIn("assignee", setup)
+        self.assertNotIn("in-progress", setup)
+        self.assertIn("parked", setup)
+        self.assertNotIn("--add-label", prompt(calls, "worktree"))
+
+    def test_close_out_releases_the_claim(self):
+        _, calls = run()
+        close = prompt(calls, "close-out")
+        self.assertIn(f"forge-claim release --repo owner/repo --issue 9 --holder {HOLDER} --reason done", close)
+        self.assertNotIn("Remove the in-progress label", close)
+        result, _ = run(replies={"close-out": {"issue_state": "CLOSED", "released": False, "notes": "not_held"}})
+        self.assertEqual(result["stage"], "close-out")
+
+    def test_resume_keeps_the_holder_of_the_claim(self):
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": "h9/b1"}, "plan": None, "plan_reviewed": False, "done": []}
+        _, calls = run(args={"repo_root": "/r", "issue": 9, "cont": cont})
+        self.assertIn("--holder h9/b1 ", prompt(calls, "renew-plan"))
+        self.assertNotIn("acquire", labels(calls))
+
+
+class SetupIdempotenceTest(unittest.TestCase):
+    """#635: setup re-adopts an existing branch or worktree, never resets, stops on a merged duplicate."""
+
+    EXISTING = {"local_branch": True, "remote_branch": True, "worktree": True, "dirty": True,
+                "status": " M home/x.py", "head": "e" * 40}
+    BANNED = ("reset --hard", "git clean", "checkout --", "git restore")
+
+    def test_dirty_existing_worktree_is_readopted_without_reset(self):
+        result, calls = run(patch={"setup": {"existing": self.EXISTING}})
+        self.assertEqual(result["stage"], "dirty")
+        self.assertEqual(labels(calls), ["setup", "acquire", "worktree"])
+        self.assertIn(" M home/x.py", result["details"])
+        self.assertEqual(result["cont"]["setup"]["worktree"], "/r/.wt/w-issue-9-x")
+        self.assertNotIn("claim_incomplete", result["cont"])
+        worktree = prompt(calls, "worktree")
+        self.assertIn("adopt", worktree)
+        self.assertNotIn("worktree add", worktree)
+        for call in calls:
+            for banned in self.BANNED:
+                self.assertNotIn(banned, call["prompt"], call["label"])
+
+    def test_resume_of_the_adopted_dirty_worktree_still_stops_dirty(self):
+        first, _ = run(patch={"setup": {"existing": self.EXISTING}})
+        result, calls = run(args=dict(ARGS, cont=first["cont"]), patch={"setup": {"dirty": True}})
+        self.assertEqual(result["stage"], "dirty")
+        self.assertEqual(labels(calls), ["setup"])
+
+    def test_clean_existing_worktree_is_adopted_and_delivered(self):
+        result, calls = run(patch={"setup": {"existing": dict(self.EXISTING, dirty=False, status="")}})
+        self.assertEqual(result["stage"], "done")
+        worktree = prompt(calls, "worktree")
+        self.assertIn("merge-base origin/dev HEAD", worktree)
+        self.assertNotIn("worktree add", worktree)
+        self.assertIn("Never reset, clean, restore or stash anything in it.", worktree)
+
+    def test_existing_local_branch_gets_a_worktree_without_a_new_branch(self):
+        existing = dict(self.EXISTING, worktree=False, remote_branch=False, dirty=False, status="")
+        result, calls = run(patch={"setup": {"existing": existing}})
+        self.assertEqual(result["stage"], "done")
+        worktree = prompt(calls, "worktree")
+        self.assertIn("git -C /r worktree add /r/.wt/w-issue-9-x issue-9-x", worktree)
+        self.assertNotIn("-b issue-9-x", worktree)
+
+    def test_remote_only_branch_is_checked_out_from_origin(self):
+        existing = dict(self.EXISTING, worktree=False, local_branch=False, dirty=False, status="")
+        _, calls = run(patch={"setup": {"existing": existing}})
+        self.assertIn("git -C /r worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x origin/issue-9-x",
+                      prompt(calls, "worktree"))
+
+    def test_merged_pr_referencing_the_issue_stops_as_a_duplicate(self):
+        result, calls = run(replies={"setup": {"ok": False, "reason": "duplicate", "duplicate_pr": 41}})
+        self.assertEqual(result["stage"], "setup")
+        self.assertEqual(labels(calls), ["setup"])
+        result, calls = run(patch={"setup": {"merged_pr": 41}})
+        self.assertEqual((result["stage"], result["duplicate"]), ("setup", 41))
+        self.assertEqual(labels(calls), ["setup"])
+
+    def test_failed_adoption_resumes_by_adopting_again(self):
+        local = dict(self.EXISTING, worktree=False, remote_branch=False, dirty=False, status="")
+        failed, _ = run(patch={"setup": {"existing": local}},
+                        replies={"worktree": {"ok": False, "notes": "worktree add failed"}})
+        self.assertEqual(failed["stage"], "claim")
+        self.assertTrue(failed["cont"]["claim_incomplete"])
+        result, calls = run(args=dict(ARGS, cont=failed["cont"]), patch={"setup": {"existing": local}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("existing", prompt(calls, "setup"))
+        worktree = prompt(calls, "worktree")
+        self.assertIn("git -C /r worktree add /r/.wt/w-issue-9-x issue-9-x", worktree)
+        self.assertNotIn("-b issue-9-x", worktree)
+
+    def test_resume_of_a_half_made_worktree_adopts_it(self):
+        failed, _ = run(replies={"worktree": {"ok": False, "notes": "plan_dir failed"}})
+        made = dict(self.EXISTING, dirty=False, status="")
+        result, calls = run(args=dict(ARGS, cont=failed["cont"]), patch={"setup": {"existing": made}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("worktree add", prompt(calls, "worktree"))
+
+    def test_setup_prompt_readopts_and_names_the_duplicate_rule(self):
+        _, calls = run()
+        setup = prompt(calls, "setup")
+        for needle in ("duplicate", "merged PR", "re-adopt", "--state all --search 9",
+                       "never reset, clean, restore or stash", "worktree-mismatch"):
+            self.assertIn(needle, setup)
+        self.assertNotIn("existing-branch", setup)
 
 
 class PlanTest(unittest.TestCase):
@@ -307,7 +509,7 @@ class ResumeTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=self.cont(partial=2)))
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[:3], ["setup", "impl-2", "review-2"])
+        self.assertEqual(names[:4], ["setup", "renew-tasks", "impl-2", "review-2"])
         self.assertNotIn("plan", names)
         self.assertNotIn("impl-1", names)
         self.assertIn("re-adopt", prompt(calls, "setup"))
@@ -449,7 +651,7 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[names.index("checks-1"):], ["checks-1", "sync-1", "checks-2", "merge", "close-out"])
+        self.assertEqual(names[names.index("checks-1"):], ["checks-1", "sync-1", "renew-checks-2", "checks-2", "renew-merge", "merge", "close-out"])
 
     def test_conflicted_sync_is_rereviewed(self):
         _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}},
@@ -497,6 +699,307 @@ class ShipTest(unittest.TestCase):
         self.assertNotIn("close-out", labels(calls))
 
 
+class FixWaveTest(unittest.TestCase):
+    """#635 owner comment: a narrowing re-review earns a second wave; a new kind stops; waves are counted."""
+
+    FIRST = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "race in acquire"}]}
+
+    @staticmethod
+    def narrowing(summary="race in release"):
+        return {"verdict": "findings",
+                "findings": [{"severity": "critical", "summary": summary, "relation": "narrowing"}]}
+
+    def test_narrowing_findings_earn_a_second_wave(self):
+        result, calls = run(replies={"final-1": self.FIRST, "fix-wave-review": self.narrowing()})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 2))
+        self.assertEqual([l for l in labels(calls) if l.startswith("fix-wave")],
+                         ["fix-wave", "fix-wave-review", "fix-wave-2", "fix-wave-review-2"])
+        self.assertIn("race in release", prompt(calls, "fix-wave-2"))
+        self.assertIn("race in release", prompt(calls, "fix-wave-review-2"))
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-wave-review-2"], ["reviewer"])
+
+    def test_a_new_kind_of_finding_stops_after_one_wave(self):
+        new = {"severity": "critical", "summary": "leak", "relation": "new"}
+        bare = {"severity": "critical", "summary": "leak"}
+        narrow = {"severity": "critical", "summary": "race in release", "relation": "narrowing"}
+        for findings in ([new], [bare], [narrow, new]):
+            with self.subTest(findings=findings):
+                rv = {"verdict": "findings", "findings": findings}
+                result, calls = run(replies={"final-1": self.FIRST, "fix-wave-review": rv})
+                self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 1))
+                self.assertNotIn("fix-wave-2", labels(calls))
+
+    def test_findings_after_the_second_wave_stop(self):
+        result, calls = run(replies={"final-1": self.FIRST, "fix-wave-review": self.narrowing(),
+                                     "fix-wave-review-2": self.narrowing("race in renew")})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 2))
+        self.assertNotIn("fix-wave-3", labels(calls))
+
+    def test_failed_second_wave_stops(self):
+        result, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": self.narrowing(),
+                                 "fix-wave-2": {"status": "blocked", "notes": "no"}})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave", 2))
+
+    def test_rereview_is_asked_to_classify_each_finding(self):
+        _, calls = run(replies={"final-1": self.FIRST})
+        rereview = prompt(calls, "fix-wave-review")
+        for needle in ("relation", "narrowing", "Unsure is new"):
+            self.assertIn(needle, rereview)
+
+    def test_waves_are_counted(self):
+        result, _ = run()
+        self.assertEqual(result["fix_waves"], 0)
+        result, _ = run(replies={"final-1": self.FIRST})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 1))
+
+
+class ModeTest(unittest.TestCase):
+    """#635: each mode stops at its stage and returns its stage object."""
+
+    def test_plan_mode_stops_after_plan_review_with_the_plan(self):
+        result, calls = run(args=dict(ARGS, mode="plan"))
+        self.assertEqual(result["stage"], "planned")
+        self.assertEqual(result["plan"]["plan_root"], "/r/.git/worktrees/w/deliver-standard/plan.md")
+        self.assertTrue(result["cont"]["plan_reviewed"])
+        self.assertEqual(labels(calls)[-1], "plan-review")
+        self.assertFalse([c for c in calls if c["agentType"] == "implementer"])
+
+    def test_plan_mode_with_questions_returns_them(self):
+        result, _ = run(args=dict(ARGS, mode="plan"),
+                        replies={"plan": {"status": "needs_user", "questions": ["q"]}})
+        self.assertEqual((result["stage"], result["needs_user"]), ("plan", ["q"]))
+
+    def test_ready_mode_stops_after_verify_with_no_pr(self):
+        result, calls = run(args=dict(ARGS, mode="ready"))
+        self.assertEqual((result["stage"], result["head"], result["branch"]), ("ready", SHA, "issue-9-x"))
+        self.assertEqual(result["verify"], [{"id": "build", "status": "pass", "summary": "ok"}])
+        self.assertEqual(result["fix_waves"], 0)
+        self.assertEqual(result["acceptance"], PLAN["acceptance"])
+        self.assertEqual(result["cont"]["verified"]["head"], SHA)
+        self.assertEqual(labels(calls)[-1], "verify")
+        for label in ("renew-ship", "pr", "checks-1", "merge", "close-out"):
+            self.assertNotIn(label, labels(calls))
+
+    def test_ship_mode_is_the_default(self):
+        _, default = run()
+        _, ship = run(args=dict(ARGS, mode="ship"))
+        self.assertEqual(labels(default), labels(ship))
+        self.assertEqual(labels(ship)[-1], "close-out")
+
+    def test_unknown_mode_is_an_args_error(self):
+        result, calls = run(args=dict(ARGS, mode="deploy"))
+        self.assertEqual(result["stage"], "args")
+        self.assertEqual(calls, [])
+
+    def test_plan_then_ready_then_ship_resume_each_stage(self):
+        planned, _ = run(args=dict(ARGS, mode="plan"))
+        ready, calls = run(args=dict(ARGS, mode="ready", cont=planned["cont"]))
+        self.assertEqual(ready["stage"], "ready")
+        self.assertNotIn("plan", labels(calls))
+        self.assertNotIn("plan-review", labels(calls))
+        self.assertIn("rev-parse HEAD", prompt(calls, "setup"))
+        done, calls = run(args=dict(ARGS, mode="ship", cont=ready["cont"]), patch={"setup": {"head": SHA}})
+        self.assertEqual(done["stage"], "done")
+        self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "renew-checks-1", "checks-1",
+                                         "renew-merge", "merge", "close-out"])
+
+    def test_ship_after_ready_reviews_again_when_the_head_moved_or_is_dirty(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        for patch in ({"head": "e" * 40}, {"head": SHA, "dirty": True}):
+            with self.subTest(patch=patch):
+                result, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": patch})
+                if patch.get("dirty"):
+                    self.assertEqual(result["stage"], "dirty")
+                    continue
+                for label in ("final-1", "verify"):
+                    self.assertIn(label, labels(calls))
+
+    def test_cached_verification_is_reused_only_for_the_same_contract(self):
+        """COR-001: the cache is keyed by the freshly resolved verification contract, not the head alone."""
+        build = {"id": "build", "argv": ["make", "build"], "cwd": "."}
+        lint = {"id": "lint", "argv": ["make", "lint"], "cwd": "."}
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        reordered = {"cwd": ".", "argv": ["make", "build"], "id": "build"}
+        same, calls = run(args=dict(ARGS, cont=ready["cont"]),
+                          patch={"setup": {"head": SHA, "verification": [reordered]}})
+        self.assertEqual(same["stage"], "done")
+        self.assertNotIn("verify", labels(calls))
+        added_results = [{"id": "build", "status": "pass", "summary": "ok"},
+                         {"id": "lint", "status": "pass", "summary": "ok"}]
+        changes = {
+            "added command": ([build, lint], added_results),
+            "changed argv": ([dict(build, argv=["make", "build", "-j"])], None),
+            "changed cwd": ([dict(build, cwd="sub")], None),
+        }
+        for name, (verification, results) in changes.items():
+            with self.subTest(change=name):
+                reply = {"head": SHA, "clean": True,
+                         "results": results or [{"id": "build", "status": "pass", "summary": "ok"}]}
+                result, calls = run(args=dict(ARGS, cont=ready["cont"]),
+                                    patch={"setup": {"head": SHA, "verification": verification}, "verify": reply})
+                self.assertEqual(result["stage"], "done")
+                self.assertIn("verify", labels(calls))
+                self.assertNotIn("final-1", labels(calls))
+                self.assertIn(json.dumps(verification, separators=(",", ":")), prompt(calls, "verify"))
+
+
+DIRECT = dict(ARGS, lane="direct")
+BAD = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
+
+
+class DirectLaneTest(unittest.TestCase):
+    """#635: setup, one implementer on deliver-direct's steps, one fresh reviewer, at most one fix round."""
+
+    def test_direct_lane_runs_one_implementer_one_fresh_reviewer_and_no_planner(self):
+        result, calls = run(args=DIRECT)
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertFalse([l for l in names if l.startswith("plan") or l == "renew-plan"], names)
+        self.assertEqual([c["label"] for c in calls if c["agentType"] == "implementer"], ["direct-impl"])
+        reviewers = [c for c in calls if c["agentType"] in ("reviewer", "reviewer-lite")]
+        self.assertEqual([(c["label"], c["agentType"]) for c in reviewers], [("direct-review", "reviewer-lite")])
+        self.assertIn("lane: direct.", reviewers[0]["prompt"])
+        self.assertIn("direct-codex", names)
+        self.assertNotIn("final-1", names)
+        self.assertEqual(names[names.index("direct-impl") - 1], "renew-tasks")
+        self.assertIn("renew-final-review", names[:names.index("direct-review")])
+        self.assertIn("direct-lane review", prompt(calls, "pr"))
+
+    def test_direct_lane_in_ready_mode_returns_a_reviewed_head(self):
+        result, calls = run(args=dict(DIRECT, mode="ready"))
+        self.assertEqual((result["stage"], result["head"]), ("ready", SHA))
+        self.assertEqual(result["cont"]["lane"], "direct")
+        self.assertNotIn("pr", labels(calls))
+
+    def test_direct_implementer_follows_deliver_direct_steps(self):
+        _, calls = run(args=DIRECT)
+        impl = prompt(calls, "direct-impl")
+        for needle in ("deliver-direct skill", "Skill tool", "Eligibility", "step 3", "steps 4 to 7",
+                       "/r/.wt/w-issue-9-x", "h1/session-s1"):
+            self.assertIn(needle, impl)
+
+    def test_sensitive_diff_gets_the_full_reviewer(self):
+        _, calls = run(args=DIRECT, patch={"direct-impl": {"sensitive": True}})
+        review = [c for c in calls if c["label"] == "direct-review"][0]
+        self.assertEqual(review["agentType"], "reviewer")
+        self.assertNotIn("lane: direct", review["prompt"])
+
+    def test_reviewer_lite_escalation_hands_the_review_to_the_full_reviewer(self):
+        result, calls = run(args=DIRECT, replies={"direct-review": {"verdict": "pass", "findings": [], "escalate": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "direct-review-full"], ["reviewer"])
+
+    def test_at_most_one_fix_round(self):
+        result, calls = run(args=DIRECT, replies={"direct-review": BAD, "direct-rereview": BAD})
+        self.assertEqual(result["stage"], "direct-review")
+        self.assertEqual(labels(calls).count("direct-fix"), 1)
+        self.assertNotIn("verify", labels(calls))
+        rereview = [c for c in calls if c["label"] == "direct-rereview"][0]
+        self.assertEqual(rereview["agentType"], "reviewer-lite")
+        self.assertIn("bug", rereview["prompt"])
+
+    def test_one_fix_round_that_resolves_continues(self):
+        result, _ = run(args=DIRECT, replies={"direct-review": BAD})
+        self.assertEqual(result["stage"], "done")
+
+    def test_failed_fix_stops(self):
+        result, _ = run(args=DIRECT, replies={"direct-review": BAD, "direct-fix": {"status": "blocked", "notes": "no"}})
+        self.assertEqual(result["stage"], "direct-fix")
+
+    def test_codex_finding_enters_the_fix_round(self):
+        codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "edge"}]}
+        _, calls = run(args=DIRECT, replies={"direct-codex": codex})
+        self.assertIn("edge", prompt(calls, "direct-fix"))
+
+    def test_codex_unavailable_stops(self):
+        result, _ = run(args=DIRECT, replies={"direct-codex": {"available": False, "verdict": "pass", "findings": []}})
+        self.assertEqual((result["stage"], result["step"]), ("codex-unavailable", "code"))
+
+    def test_lane_and_mode_are_checked_before_any_agent(self):
+        for args in (dict(DIRECT, mode="plan"), dict(ARGS, lane="fast")):
+            with self.subTest(args=args):
+                result, calls = run(args=args)
+                self.assertEqual(result["stage"], "args")
+                self.assertEqual(calls, [])
+
+    def test_ineligible_issue_stops_before_review(self):
+        result, calls = run(args=DIRECT, replies={"direct-impl": {"status": "blocked", "ineligible": True, "notes": "needs design"}})
+        self.assertEqual(result["stage"], "ineligible")
+        self.assertNotIn("direct-review", labels(calls))
+
+    def test_missing_acceptance_stops(self):
+        result, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": []}})
+        self.assertEqual(result["stage"], "task")
+        self.assertNotIn("direct-review", labels(calls))
+
+    def test_close_out_grades_the_implementer_criteria(self):
+        acceptance = [{"id": "AC1", "text": "x", "kind": "code"}, {"id": "AC2", "text": "y", "kind": "evidence"}]
+        _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance}})
+        self.assertIn("needs-verification", prompt(calls, "close-out"))
+
+    def test_resume_after_the_review_skips_to_verify(self):
+        stopped, _ = run(args=DIRECT, replies={"verify": None})
+        self.assertEqual((stopped["stage"], stopped["cont"]["lane"]), ("verify", "direct"))
+        self.assertEqual(stopped["cont"]["done"][0]["reviewed_head"], "c0ffee")
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": "c0ffee"}})
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("direct-impl", names)
+        self.assertNotIn("direct-review", names)
+        self.assertNotIn("plan", names)
+        self.assertIn("verify", names)
+
+    def test_resume_on_a_moved_head_reviews_again(self):
+        stopped, _ = run(args=DIRECT, replies={"verify": None})
+        ready, _ = run(args=dict(DIRECT, mode="ready"))
+        for cont in (stopped["cont"], ready["cont"]):
+            with self.subTest(stage=cont.get("verified") and "ready" or "verify"):
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": "e" * 40}})
+                names = labels(calls)
+                self.assertEqual(result["stage"], "done")
+                self.assertNotIn("direct-impl", names)
+                for label in ("renew-final-review", "direct-codex", "direct-review", "verify", "pr", "merge"):
+                    self.assertIn(label, names)
+                self.assertLess(names.index("direct-review"), names.index("verify"))
+
+    def test_ship_after_a_direct_ready_on_the_same_head_skips_review_and_verify(self):
+        ready, _ = run(args=dict(DIRECT, mode="ready"))
+        result, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "renew-checks-1", "checks-1",
+                                         "renew-merge", "merge", "close-out"])
+
+    def test_a_review_stop_resumes_into_the_review_not_the_implementer(self):
+        stopped, _ = run(args=DIRECT, replies={"direct-review": None})
+        self.assertEqual(stopped["stage"], "direct-review")
+        self.assertIsNone(stopped["cont"]["done"][0]["reviewed_head"])
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": "c0ffee"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("direct-impl", labels(calls))
+        self.assertIn("direct-review", labels(calls))
+
+    def test_claim_failures_keep_the_lane(self):
+        failures = {"acquire": {"verdict": "error", "detail": "forge down"},
+                    "worktree": {"ok": False, "notes": "worktree add failed"}}
+        for lane in ("standard", "direct"):
+            for label, reply in failures.items():
+                with self.subTest(lane=lane, label=label):
+                    stopped, _ = run(args=dict(ARGS, lane=lane), replies={label: reply})
+                    self.assertEqual(stopped["stage"], "claim")
+                    self.assertEqual(stopped["cont"]["lane"], lane)
+                    for args in (dict(ARGS, cont=stopped["cont"]), dict(ARGS, lane=lane, cont=stopped["cont"])):
+                        result, calls = run(args=args)
+                        self.assertEqual(result["stage"], "done")
+                        self.assertEqual("direct-impl" in labels(calls), lane == "direct")
+                        self.assertEqual("plan" in labels(calls), lane == "standard")
+
+    def test_resume_cannot_switch_lane(self):
+        stopped, _ = run(args=DIRECT, replies={"verify": None})
+        result, calls = run(args=dict(ARGS, lane="standard", cont=stopped["cont"]))
+        self.assertEqual(result["stage"], "args")
+        self.assertEqual(calls, [])
+
+
 class SourceTest(unittest.TestCase):
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")
@@ -508,6 +1011,26 @@ class SourceTest(unittest.TestCase):
         self.assertTrue(text.startswith("export const meta = {"))
         meta = text[:text.index("\n}\n")]
         self.assertIsNone(re.search(r"\$\{|\.\.\.", meta))
+
+    def test_skill_frontmatter_args_and_size(self):
+        raw = PROGRAM.with_name("SKILL.md").read_bytes()
+        self.assertLessEqual(len(raw), 1056)
+        text = raw.decode("utf-8")
+        self.assertTrue(text.startswith(
+            "---\nname: deliver-standard\n"
+            "description: Runs the standard-lane Workflow program for one issue. Use for deliver-standard.\n---\n"))
+        start = text.index("`args` `{")
+        workflow_args = text[start:text.index("}`", start)]
+        for key in ("repo_root", "issue", "session_id: ${CLAUDE_SESSION_ID}", "batch_id?", "mode?", "lane?",
+                    "decisions?", "spec?"):
+            with self.subTest(key=key):
+                self.assertIn(key, workflow_args)
+
+    def test_meta_names_the_new_args(self):
+        text = PROGRAM.read_text(encoding="utf-8")
+        meta = text[:text.index("\n}\n")]
+        for arg in ("session_id", "batch_id", "mode?", "lane?"):
+            self.assertIn(arg, meta)
 
 
 if __name__ == "__main__":
