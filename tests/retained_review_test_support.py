@@ -8,10 +8,12 @@ support rather than a suite and is not listed as one.
 """
 
 import base64
+import copy
 import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -82,6 +84,26 @@ def commit_files(repo, files, message, *, sign_key=None) -> str:
         "-c", "gpg.format=ssh", "-c", f"user.signingkey={sign_key}", "-c", "commit.gpgsign=true"]
     git(repo, *signing, "commit", "-q", "--allow-empty", "-m", message)
     return git(repo, "rev-parse", "HEAD")
+
+
+def copy_fixture(template, tmp, built):
+    """Copy the fixture directory `template` into `tmp` and return `built`, what its builder returned there,
+    with each `Path` under `template` rebased onto `tmp` and every other value a deep copy.
+
+    A class builds an expensive Git fixture once into `template` and each test takes a private copy, the
+    issue-500 template pattern (issue 613): the tests see the same objects, refs and files they would see
+    after building it themselves.
+    """
+    template, tmp = Path(template), Path(tmp)
+    shutil.copytree(template, tmp, symlinks=True, dirs_exist_ok=True)
+
+    def rebase(value):
+        if isinstance(value, Path) and value.is_relative_to(template):
+            return tmp / value.relative_to(template)
+        if isinstance(value, tuple):
+            return tuple(rebase(item) for item in value)
+        return copy.deepcopy(value)
+    return rebase(built)
 
 
 def ssh_signer(tmp) -> tuple[Path, bytes]:
