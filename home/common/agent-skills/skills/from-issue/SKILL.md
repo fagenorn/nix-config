@@ -207,6 +207,6 @@ From-issue owns the terminal durable write: handle the ship report, and any Phas
 
 ## Notes
 - Standing local-commit authorization covers spec, plan, doc and fix commits where project policy or an explicit scoped user grant covers the concrete action, target and effect; the same rule covers push, PR, merge and cleanup. When neither grants the action, suspend with `blocked_on=human_gate` and print the re-entry line. An actual permission or launch-guard denial stops the action and is never routed around.
-- Append `Co-Authored-By` when retained `bindings.vcs.commit.co_authored_by` is true. **Never disable GPG signing** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
+- **Never disable GPG signing** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
 - **PR bodies, comments and subagent prompts use full URLs, not bare `#N`**; use `bindings.tracker.repo_slug`.
 - If a phase reveals the previous one was wrong, redo that phase.
