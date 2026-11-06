@@ -15,6 +15,12 @@ nothing edits or deletes an `end` marker. A marker is live when it is not itself
 marker, carries no `released` field and no `end` marker in the same listing names it, so a
 stale edit can drop a field but can never bring an ended marker back.
 
+Ref primitives (issue 629): `read_ref`, `create_ref`, `repo_node_id` and `cas_ref`, a
+compare-and-swap through the GraphQL `updateRefs` mutation with `force: true` (the oid pair is
+the guard; an `after` of `ZERO_OID` deletes). Any CAS error, timeout or lie is "not done": the
+caller re-reads the ref to learn what happened and keeps the returned code to report when the
+ref is unchanged (D1). REST ref deletion is never used.
+
 The module reads no host clock: "now" is the server's `Date` header (D5).
 """
 import json
@@ -37,6 +43,16 @@ HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 END_KIND = "end"
 TIMEOUT = 30
 DETAIL_LIMIT = 240
+ZERO_OID = "0" * 40
+OID = re.compile(r"[0-9a-f]{40}")
+NODE_ID = re.compile(r"[A-Za-z0-9_=-]+")
+UPDATE_REFS = ("mutation($repositoryId: ID!, $name: GitRefname!, $before: GitObjectID!, "
+               "$after: GitObjectID!) { updateRefs(input: {repositoryId: $repositoryId, "
+               "refUpdates: [{name: $name, beforeOid: $before, afterOid: $after, force: true}]}) "
+               "{ clientMutationId } }")
+CLOSING_ISSUES = ("query($owner: String!, $name: String!, $number: Int!) { "
+                  "repository(owner: $owner, name: $name) { pullRequest(number: $number) { "
+                  "closingIssuesReferences(first: 5) { nodes { number } } } } }")
 
 
 class ForgeError(Exception):
@@ -62,6 +78,16 @@ class WriteResult:
     won: bool
     own_id: int
     winner: Marker | None
+
+
+@dataclass(frozen=True)
+class Pull:
+    number: int
+    state: str
+    merged: bool
+    base_ref: str
+    head_ref: str
+    head_sha: str
 
 
 def render(kind: str, fields: Mapping[str, str], sentence: str, extra: str = "") -> str:
@@ -291,3 +317,90 @@ def latest_pr_event(slug: str, branch: str) -> datetime | None:
     if not isinstance(pulls, list) or not all(isinstance(p, dict) for p in pulls):
         raise ForgeError("payload_invalid", "pull requests are not an array of objects")
     return max((_instant(p.get("updated_at")) for p in pulls), default=None)
+
+
+def read_ref(slug: str, ref: str) -> str | None:
+    """The sha a full ref name (`refs/...`) points at, None when HTTP 404 says it is absent."""
+    payload = _json(["api", f"repos/{slug}/git/ref/{quote(ref.removeprefix('refs/'), safe='/')}"],
+                    allow=(404,))
+    if payload is None:
+        return None
+    obj = payload.get("object") if isinstance(payload, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if (not isinstance(payload, dict) or payload.get("ref") != ref
+            or not isinstance(sha, str) or not OID.fullmatch(sha)):
+        raise ForgeError("payload_invalid", f"ref payload for {ref}")
+    return sha
+
+
+def create_ref(slug: str, ref: str, sha: str) -> bool:
+    """Create the ref at `sha`: True when created, False on HTTP 422 (re-read to learn why)."""
+    status, _ = _gh(["api", "-X", "POST", f"repos/{slug}/git/refs", "-f", f"ref={ref}",
+                     "-f", f"sha={sha}"], allow=(422,))
+    return status == 0
+
+
+def repo_node_id(slug: str) -> str:
+    _, out = _gh(["api", f"repos/{slug}", "--jq", ".node_id"])
+    node_id = out.strip()
+    if not NODE_ID.fullmatch(node_id):
+        raise ForgeError("payload_invalid", "repository node id")
+    return node_id
+
+
+def cas_ref(slug: str, repository_id: str, ref: str, before: str, after: str) -> str | None:
+    """Move `ref` from `before` to `after` (`ZERO_OID` deletes) through `updateRefs`.
+
+    None means gh reported the swap applied. Any other outcome returns its failure code
+    (`gh_timeout` or `gh_failed`) without raising: a failed swap, a timeout and a swap that
+    applied while reporting failure look alike, so the caller re-reads the ref (D1) and keeps
+    the code to report if the ref is unchanged. `gh_missing` and `payload_invalid` raise.
+    """
+    try:
+        payload = _json(["api", "graphql", "-f", f"query={UPDATE_REFS}", "-f", f"repositoryId={repository_id}",
+                         "-f", f"name={ref}", "-f", f"before={before}", "-f", f"after={after}"])
+    except ForgeError as error:
+        if error.code in ("gh_timeout", "gh_failed"):
+            return error.code
+        raise
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if (not isinstance(payload, dict) or "errors" in payload
+            or not isinstance(data, dict) or data.get("updateRefs") is None):
+        return "gh_failed"
+    return None
+
+
+def commit_pulls(slug: str, sha: str) -> list[Pull]:
+    """The pull requests that contain commit `sha`."""
+    payload = _json(["api", f"repos/{slug}/commits/{sha}/pulls?per_page=100"])
+    if not isinstance(payload, list):
+        raise ForgeError("payload_invalid", "commit pulls are not an array")
+    pulls = []
+    for item in payload:
+        base = item.get("base") if isinstance(item, dict) else None
+        head = item.get("head") if isinstance(item, dict) else None
+        number = item.get("number") if isinstance(item, dict) else None
+        refs = (base.get("ref") if isinstance(base, dict) else None,
+                head.get("ref") if isinstance(head, dict) else None,
+                head.get("sha") if isinstance(head, dict) else None)
+        if (isinstance(number, bool) or not isinstance(number, int)
+                or item.get("state") not in ("open", "closed")
+                or not all(isinstance(r, str) for r in refs)):
+            raise ForgeError("payload_invalid", "commit pull entry")
+        pulls.append(Pull(number, item["state"], item.get("merged_at") is not None, *refs))
+    return pulls
+
+
+def closing_issues(slug: str, pr: int) -> list[int]:
+    """The issue numbers the pull request closes, in the forge's order."""
+    owner, name = slug.split("/", 1)
+    payload = _json(["api", "graphql", "-f", f"query={CLOSING_ISSUES}", "-f", f"owner={owner}",
+                     "-f", f"name={name}", "-F", f"number={pr}"])
+    try:
+        nodes = payload["data"]["repository"]["pullRequest"]["closingIssuesReferences"]["nodes"]
+        numbers = [node["number"] for node in nodes]
+    except (KeyError, TypeError):
+        raise ForgeError("payload_invalid", "closing issues payload") from None
+    if any(isinstance(n, bool) or not isinstance(n, int) for n in numbers):
+        raise ForgeError("payload_invalid", "closing issue number")
+    return numbers
