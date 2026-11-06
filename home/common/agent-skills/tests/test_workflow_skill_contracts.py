@@ -3321,14 +3321,15 @@ class DirectLaneRoutingTest(unittest.TestCase):
         self.assertIn("if neither source answers, wait for every check", text)
 
     def test_deliver_direct_review_also_runs_the_configured_code_review(self):
-        """#572: a declared workflow.review.code runs beside the fresh reviewer, never skipped."""
+        """#572: an available workflow.review.code runs beside the fresh reviewer, never skipped."""
         text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
         step4 = text[text.index("**Review.**"):text.index("**Ship.**")]
         for rule in (
             "`reviewer-lite` with `lane: direct`",
-            "When `bindings.workflow.review.code` is declared, also run it",
-            "`codex-collaboration`'s `diff-review`",
-            "if it cannot run, stop and report; never skip it",
+            "When `capabilities.review.code` is `available`, also run `bindings.workflow.review.code`",
+            "`codex-collaboration`'s `diff-review` with no review package",
+            "`blocked`, or it cannot run: stop and report; never skip it",
+            "Fix real Important+ findings from both",
         ):
             with self.subTest(rule=rule):
                 self.assertIn(rule, step4)
