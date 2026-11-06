@@ -1033,7 +1033,8 @@ class ProjectIdentityTest(AdoptTestCase):
     def test_recommendation_is_byte_identical_across_runs(self):
         root = reconcile_repo(self.home)
         first = run("plan", "--repo-root", str(root), home=self.home)
-        second = run("plan", "--repo-root", str(root), home=self.home)
+        # A child, so the two runs differ in hash seed as well (issue 612).
+        second = run_child("plan", "--repo-root", str(root), home=self.home)
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(first[1], second[1])
 
@@ -1222,7 +1223,8 @@ class PlanIdentityTest(AdoptTestCase):
     def test_two_runs_on_an_unchanged_fixture_are_byte_identical(self):
         root = nix_config_shape_repo(self.home)
         first = run("plan", "--repo-root", str(root), home=self.home)
-        second = run("plan", "--repo-root", str(root), home=self.home)
+        # A child, so the two runs differ in hash seed as well (issue 612).
+        second = run_child("plan", "--repo-root", str(root), home=self.home)
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(first[1], second[1])
 
@@ -1863,8 +1865,9 @@ class CandidateAnswerTest(AdoptTestCase):
         second = ("candidate-class", ODD, "archive-history")
         forward = run("plan", "--repo-root", str(root), "--answer", *first,
                       "--answer", *second, home=self.home)
-        backward = run("plan", "--repo-root", str(root), "--answer", *second,
-                       "--answer", *first, home=self.home)
+        # A child, so the two runs differ in hash seed as well (issue 612).
+        backward = run_child("plan", "--repo-root", str(root), "--answer", *second,
+                             "--answer", *first, home=self.home)
         self.assertEqual(forward[0], 0, forward[2])
         self.assertEqual(forward[1], backward[1])
 

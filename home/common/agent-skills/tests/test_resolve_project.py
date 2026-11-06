@@ -400,7 +400,8 @@ class SnapshotShapeTest(ResolverTestCase):
     def test_two_runs_emit_byte_identical_stdout(self):
         root = self.make_root()
         first = run("resolve", "--repo-root", str(root), home=self.home)
-        second = run("resolve", "--repo-root", str(root), home=self.home)
+        # A child, so the two runs differ in hash seed as well (issue 612).
+        second = run_child("resolve", "--repo-root", str(root), home=self.home)
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(first[1], second[1])
 
