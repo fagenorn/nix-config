@@ -59,7 +59,6 @@ let
     "release"
     "replay-retained"
     "resolve-project"
-    "review-feasibility"
     "review-package"
     "review-range"
     "sdd-gate"
