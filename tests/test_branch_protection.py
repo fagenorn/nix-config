@@ -59,6 +59,11 @@ EVALUATED_ATTRIBUTE = (
     ".#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath"
 )
 
+# The run `Agent Workflow Tests` exists to perform (issue 608): the whole suite on the
+# source surface, at the job count the hosted 4-vCPU runner has always used.
+SUITE_INVOCATION = ("WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just "
+                    "--command just agent-workflow-tests")
+
 REQUIRED_PAYLOAD_KEYS = {
     "required_status_checks",
     "enforce_admins",
@@ -73,7 +78,8 @@ EXPECTED_PROTECTION_PAYLOAD = {
     "required_status_checks": {
         "strict": True,
         "checks": [{"context": "Nix Eval", "app_id": 15368},
-                   {"context": "Instruction Budget", "app_id": 15368}],
+                   {"context": "Instruction Budget", "app_id": 15368},
+                   {"context": "Agent Workflow Tests", "app_id": 15368}],
     },
     "enforce_admins": True,
     "required_pull_request_reviews": None,
@@ -282,46 +288,6 @@ def step_blocks(key, path=WORKFLOW):
     return steps
 
 
-def summary_shell_body():
-    """Extract the advisory summary shell body from the workflow source."""
-    lines = job_blocks()["agent-workflow-tests"]
-    marker = "      - name: Record advisory observation"
-    start = lines.index(marker)
-    run = lines.index("        run: |", start)
-    body = []
-    for line in lines[run + 1:]:
-        if line.startswith("      - "):
-            break
-        if line.startswith("          "):
-            body.append(line[10:])
-    return "\n".join(body)
-
-
-def execute_summary(event="pull_request"):
-    """Run the checked-in summary with fixture GitHub expression values."""
-    substitutions = {
-        "${{ github.event_name }}": event,
-        "${{ steps.started.outputs.epoch }}": "100",
-        "${{ steps.checkout.outcome }}": "success",
-        "${{ steps.install_nix.outcome }}": "failure",
-        "${{ steps.provision_just.outcome }}": "cancelled",
-        "${{ steps.suite.outcome }}": "skipped",
-    }
-    body = summary_shell_body()
-    for expression, value in substitutions.items():
-        body = body.replace(expression, value)
-    with tempfile.TemporaryDirectory() as directory:
-        summary = Path(directory) / "summary"
-        result = subprocess.run(
-            ["bash", "-euo", "pipefail", "-c", body],
-            check=True,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "GITHUB_STEP_SUMMARY": str(summary)},
-        )
-        return result.stdout, summary.read_text(encoding="utf-8")
-
-
 def forwards_budget_args(body):
     """Whether the one budget call is the invocation that forwards `args`.
 
@@ -408,20 +374,6 @@ def budget_step_problems(step):
     return problems
 
 
-def has_measurement_contract(steps, name, step_id):
-    """A measurement's continuation belongs to that named step alone."""
-    owned = steps.get(name, [])
-    return (
-        f"        id: {step_id}" in owned
-        and "        continue-on-error: true" in owned
-    )
-
-
-def has_summary_always_guard(steps):
-    """The evidence writer must run even after an earlier measurement failed."""
-    return "        if: always()" in steps.get("Record advisory observation", [])
-
-
 def payload():
     return json.loads(PROTECTION.read_text(encoding="utf-8"))
 
@@ -433,101 +385,23 @@ def required_contexts():
 
 
 class WorkflowShape(unittest.TestCase):
-    def test_advisory_job_observes_each_step_and_writes_the_v1_record(self):
-        blocks = job_blocks()
-        self.assertIn("agent-workflow-tests", blocks)
-        self.assertEqual(
-            "agent-workflow-tests",
-            job_names().get("Agent Workflow Tests (advisory)"),
-        )
+    def test_agent_workflow_tests_job_runs_the_whole_suite_and_fails_with_it(self):
+        """Issue 608: the suite gates merges, so its job must fail when a test fails."""
+        self.assertEqual("agent-workflow-tests", job_names().get("Agent Workflow Tests"))
         body = job_body("agent-workflow-tests")
         self.assertIn("runs-on: ubuntu-24.04", body)
         self.assertIn("timeout-minutes: 45", body)
-        self.assertIn("if: github.event_name != 'schedule'", body)
-        self.assertNotIn("needs:", body)
-        self.assertNotIn("strategy:", body)
-        self.assertNotIn("matrix:", body)
-        self.assertNotIn("conclusion", summary_shell_body())
-        self.assertIn("github.event_name", summary_shell_body())
-        self.assertIn("unknown", summary_shell_body())
-        self.assertNotRegex(body, re.compile(r"^    continue-on-error:", re.MULTILINE))
-        self.assertIn("nix shell --inputs-from . nixpkgs#just --command just --version", body)
-        self.assertIn(
-            "WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just "
-            "--command just agent-workflow-tests",
-            body,
-        )
-
-        expected_steps = {
-            "Checkout": "checkout",
-            "Install Nix": "install_nix",
-            "Provision just": "provision_just",
-            "Run agent workflow tests": "suite",
-        }
+        self.assertNotIn("continue-on-error", body)
         steps = step_blocks("agent-workflow-tests")
-        for name, step_id in expected_steps.items():
-            with self.subTest(step=name):
-                self.assertIn(name, steps)
-                owned = steps[name]
-                self.assertIn(f"        id: {step_id}", owned)
-                self.assertIn("        continue-on-error: true", owned)
-                self.assertTrue(has_measurement_contract(steps, name, step_id))
-                self.assertIn(f"steps.{step_id}.outcome", summary_shell_body())
-        without_checkout = dict(steps)
-        without_checkout.pop("Checkout", None)
-        self.assertFalse(
-            has_measurement_contract(without_checkout, "Checkout", "checkout"),
-            "another step's continuation must not satisfy missing checkout",
-        )
-        self.assertTrue(has_summary_always_guard(steps))
-        # Issue 436: five suite modules build fixtures from pinned ancestor
-        # commits and refuse to skip, so the advisory checkout fetches history.
+        self.assertEqual(["Checkout", "Install Nix", "Run agent workflow tests"], list(steps))
+        # Issue 436: suite modules build fixtures from pinned ancestor commits and
+        # refuse to skip, so the checkout fetches history.
         self.assertIn("          fetch-depth: 0", steps["Checkout"])
+        suite = steps["Run agent workflow tests"]
+        self.assertIn(f"        run: {SUITE_INVOCATION}", suite)
+        self.assertEqual(["SUITE_RUNNER_JOBS: \"4\""], step_env(suite))
 
-        stdout, summary = execute_summary()
-        self.assertEqual(stdout, summary)
-        marker = "AGENT_WORKFLOW_OBSERVATION_V1="
-        self.assertTrue(stdout.startswith(marker))
-        record = json.loads(stdout.removeprefix(marker))
-        self.assertEqual("agent-workflow-observation/v1", record["schema"])
-        self.assertEqual("pull_request", record["trigger"])
-        self.assertEqual(
-            {
-                "checkout": "success",
-                "install_nix": "failure",
-                "provision_just": "cancelled",
-                "suite": "skipped",
-            },
-            record["raw"],
-        )
-        self.assertIs(type(record["elapsed_seconds"]), int)
-        self.assertGreaterEqual(record["elapsed_seconds"], 0)
-
-    def test_advisory_contract_rejects_step_and_summary_mutations(self):
-        """The evidence seam fails closed for each independently owned YAML line."""
-        steps = step_blocks("agent-workflow-tests")
-        wrong_id = dict(steps)
-        wrong_id["Checkout"] = [
-            line.replace("id: checkout", "id: checkout_bogus")
-            for line in wrong_id["Checkout"]
-        ]
-        self.assertFalse(has_measurement_contract(wrong_id, "Checkout", "checkout"))
-
-        absent_always = dict(steps)
-        absent_always["Record advisory observation"] = [
-            line
-            for line in absent_always["Record advisory observation"]
-            if line.strip() != "if: always()"
-        ]
-        self.assertFalse(has_summary_always_guard(absent_always))
-
-        misplaced_always = dict(absent_always)
-        misplaced_always["Checkout"] = [
-            *misplaced_always["Checkout"], "        if: always()"
-        ]
-        self.assertFalse(has_summary_always_guard(misplaced_always))
-
-    def test_advisory_job_has_the_required_triggers_without_schedule(self):
+    def test_agent_workflow_tests_job_has_the_required_triggers_without_schedule(self):
         self.assertIsNotNone(trigger_block("pull_request"))
         self.assertEqual(["main"], trigger_branches("pull_request"))
         self.assertEqual(["main"], trigger_branches("push"))
@@ -703,7 +577,8 @@ class WorkflowShape(unittest.TestCase):
         longer forwards the arguments the step builds each leave every other assertion
         here green. Whether the step builds `--base` and `--raise-label` under the right
         event and label is BudgetWorkflowShape's behavioural test, not this one."""
-        self.assertEqual(["Nix Eval", "Instruction Budget"], required_contexts())
+        self.assertEqual(["Nix Eval", "Instruction Budget", "Agent Workflow Tests"],
+                         required_contexts())
         jobs = required_jobs()
         nix_path, nix_key = jobs["Nix Eval"]
         nix_body = job_body(nix_key, nix_path)
@@ -716,6 +591,9 @@ class WorkflowShape(unittest.TestCase):
         self.assertTrue(forwards_budget_args(budget_body), budget_body)
         self.assertIn("--base HEAD^1", budget_body)
         self.assertIn("--raise-label", budget_body)
+        suite_path, suite_key = jobs["Agent Workflow Tests"]
+        self.assertEqual(WORKFLOW, suite_path)
+        self.assertIn(SUITE_INVOCATION, job_body(suite_key, suite_path))
 
     def test_the_budget_forwarding_rejects_mutations(self):
         body = job_body("instruction-budget", BUDGET_WORKFLOW)
