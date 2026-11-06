@@ -39,7 +39,8 @@ reads the comments now and `wait_cursor(n)` blocks until `n` entries have run. G
 carry `author_association` `OWNER`, and the fake serves the GraphQL listing, label add and
 remove, close, issue creation and the labelled issue listing; `fail_once` names operations
 (`graphql`, `add_label`, `remove_label`, `close`, `create_issue`, `list_issues`, `post`, `edit`)
-that each answer `HTTP 502` once and change nothing. `host_clock`
+that each answer `HTTP 502` once and change nothing; a created issue can be closed by number
+and keeps its `state`. `host_clock`
 makes every host-clock read of the named modules return one instant, so a module that reads
 the host clock instead of the server's fails its test.
 """
@@ -89,9 +90,11 @@ if tool == "gh" and (state / "store.json").exists():
             if (len(argv) == 4 and argv[:3] == ["api", "-X", "DELETE"]
                     and argv[3].startswith(issue_url + "/labels/")):
                 return "remove_label", unquote(argv[3][len(issue_url + "/labels/"):]), None
-            if (len(argv) == 8 and argv[:4] == ["api", "-X", "PATCH", issue_url] and argv[4] == "-f"
+            prefix = "repos/" + slug + "/issues/"
+            if (len(argv) == 8 and argv[:3] == ["api", "-X", "PATCH"] and argv[3].startswith(prefix)
+                    and argv[3][len(prefix):].isdigit() and argv[4] == "-f"
                     and argv[5] == "state=closed" and argv[6] == "-f" and argv[7].startswith("state_reason=")):
-                return "close", argv[7][len("state_reason="):], None
+                return "close", (int(argv[3][len(prefix):]), argv[7][len("state_reason="):]), None
             if (len(argv) >= 8 and len(argv) % 2 == 0 and argv[:4] == ["api", "-X", "POST", "repos/" + slug + "/issues"]
                     and argv[4] == "-f" and argv[5].startswith("title=") and argv[6] == "-f"
                     and argv[7].startswith("body=")
@@ -157,14 +160,22 @@ if tool == "gh" and (state / "store.json").exists():
             st["labels"].remove(target)
             out = [{"name": n} for n in st["labels"]]
         elif kind == "close":
-            st["state"], st["state_reason"] = "closed", target
+            number, reason = target
+            if number == store["issue"]:
+                st["state"], st["state_reason"] = "closed", reason
+            else:
+                made = [c for c in st["created"] if c["number"] == number]
+                if not made:
+                    fail_404()
+                made[0]["state"], made[0]["state_reason"] = "closed", reason
             out = {"state": "closed"}
         elif kind == "create_issue":
             title, issue_body, labels = target
             number = st["next_issue"]
             st["next_issue"] += 1
             st["created"].append({"number": number, "title": title, "body": issue_body, "labels": labels,
-                                  "author_association": "OWNER", "updated_at": store["clock"]})
+                                  "author_association": "OWNER", "updated_at": store["clock"],
+                                  "state": "open", "state_reason": None})
             out = {"number": number}
         else:
             out = [[c for c in st["created"] if target in c["labels"]]]

@@ -7,11 +7,17 @@ an older one, and the newest block is chosen by comment id, not by time.
 
 The run's markers are the markers after that block by a trusted author, `end` markers included,
 and the trusted `window-open` and `end` markers before it: a window belongs to a merge and an
-event, not to a block, so a replacement block inherits it. Every other author's marker is invisible. A result's identity is its block and check index; the
-`ac` field is never part of it (P15).
+event, not to a block, so a replacement block inherits it. Every other author's marker is invisible.
+
+A result's identity is its block version and check index; the `ac` field is never part of it (P15).
+A block version is the block comment's id and a digest of the block's content (`block_key`), so
+editing or reordering the checks of a comment keeps the id but starts a new version: a marker
+written for an earlier version names another `block` and is never read back as this one's.
 
 This module runs no process, reads no clock and touches no file.
 """
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -37,6 +43,15 @@ class Held:
     block: object | None
     errors: list[dict]
     markers: list[forge_markers.Marker]
+    key: str = ""
+
+
+def block_key(block_id: int, block: object | None) -> str:
+    """The version of a block: `<comment id>.<digest of its canonical JSON>`, the bare id when unparsed."""
+    if block is None:
+        return str(block_id)
+    text = json.dumps(block, sort_keys=True, separators=(",", ":"))
+    return f"{block_id}.{hashlib.sha256(text.encode()).hexdigest()[:16]}"
 
 
 def comments_from_graphql(nodes: list) -> list[Comment]:
@@ -75,12 +90,12 @@ def select(comments: list[Comment]) -> Held | None:
     found = [m for m in found if m is not None and (
         m.comment_id > newest.id or m.kind in (WINDOW, forge_markers.END_KIND))]
     markers = sorted(found, key=lambda m: m.comment_id)
-    return Held(newest.id, block, errors, markers)
+    return Held(newest.id, block, errors, markers, block_key(newest.id, block))
 
 
-def latest_result(markers: list[forge_markers.Marker], block_id: int, check: int) -> forge_markers.Marker | None:
-    """The newest live result of the block's check, whatever its `ac` field says."""
-    found = [m for m in markers if m.kind == RESULT and m.fields.get("block") == str(block_id)
+def latest_result(markers: list[forge_markers.Marker], key: str, check: int) -> forge_markers.Marker | None:
+    """The newest live result of the check of block version `key`, whatever its `ac` field says."""
+    found = [m for m in markers if m.kind == RESULT and m.fields.get("block") == key
              and m.fields.get("check") == str(check) and forge_markers.is_live(m, markers)]
     return max(found, key=lambda m: m.comment_id, default=None)
 

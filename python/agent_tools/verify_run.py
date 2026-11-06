@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from agent_tools import forge_markers, verify_block, verify_exec, verify_facts, verify_issues
 from agent_tools.forge_markers import ForgeError, Marker
@@ -61,9 +62,36 @@ def list_held(slug: str) -> list[dict]:
     return nodes
 
 
+def runner_trusted(slug: str) -> bool:
+    """Whether the authenticated `gh` account's own comments would count as trusted (`TRUSTED`).
+
+    The runner reads back only trusted markers, so one whose account the forge labels anything
+    else (a collaborator, say) cannot see what it wrote: it would repost every marker each pass
+    and never expire a check. The association is the forge's, so it is derived the way the forge
+    derives it: the owner of a user-owned repository, or an active member of the owning
+    organization. A payload without the fields it needs is a `ForgeError`."""
+    user = forge_markers.api_get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    repository = forge_markers.api_get(f"repos/{slug}")
+    owner = repository.get("owner") if isinstance(repository, dict) else None
+    owner_login = owner.get("login") if isinstance(owner, dict) else None
+    if not (isinstance(login, str) and login and isinstance(owner_login, str) and owner_login):
+        raise ForgeError("payload_invalid", "no authenticated login or repository owner")
+    if owner.get("type") != "Organization":
+        return login.lower() == owner_login.lower()
+    membership = forge_markers.api_get(f"user/memberships/orgs/{quote(owner_login, safe='')}", allow=(403, 404))
+    return isinstance(membership, dict) and membership.get("state") == "active"
+
+
 def pass_repo(project: Project, host: str, refs: verify_block.References, *,
               issue: int | None = None, report: bool = False) -> list[dict]:
-    """One pass over every listed issue (only `issue` when given); a listing failure propagates."""
+    """One pass over every listed issue (only `issue` when given); a listing failure propagates.
+
+    A pass that writes first checks the runner's own account is trusted and otherwise ends with
+    one `runner_untrusted` line, before any write or run; a report writes nothing and skips the check."""
+    if not report and not runner_trusted(project.slug):
+        return [{"repo": project.slug, "issue": None, "check": None, "ac": None,
+                 "state": "skipped", "reason": "runner_untrusted"}]
     lines: list[dict] = []
     for node in list_held(project.slug):
         if issue is None or node.get("number") == issue:
@@ -107,7 +135,7 @@ class _Pass:
         self.node = node
         self.lines: list[dict] = []
         self.block: dict = {}
-        self.block_id = 0
+        self.block_key = ""
         self.markers: list[Marker] = []
         self.states: list[str | None] = []
         self.followups: dict[int, str] = {}
@@ -135,8 +163,8 @@ class _Pass:
             return self.line(None, None, "skipped", "no_block")
         if held.block is None or not verify_block.lint_block(held.block, refs=self.refs)["ok"]:
             return self.line(None, None, "skipped", "block_invalid")
-        self.block, self.block_id, self.markers = held.block, held.block_id, held.markers
-        closed = self.live(verify_issues.CLOSED, {"block": str(self.block_id)})
+        self.block, self.block_key, self.markers = held.block, held.key, held.markers
+        closed = self.live(verify_issues.CLOSED, {"block": self.block_key})
         if closed is not None and closed.fields.get("outcome") in ("verified", "expired"):
             verified = closed.fields["outcome"] == "verified"
             if not self.report:
@@ -154,8 +182,8 @@ class _Pass:
 
     def check(self, index: int, check: Mapping) -> None:
         ac = check["ac"]
-        key = {"block": str(self.block_id), "check": str(index)}
-        previous = verify_issues.latest_result(self.markers, self.block_id, index)
+        key = {"block": self.block_key, "check": str(index)}
+        previous = verify_issues.latest_result(self.markers, self.block_key, index)
         prev = previous.fields.get("state") if previous is not None else None
         self.states[index] = prev
         if prev in FINAL:
@@ -243,7 +271,7 @@ class _Pass:
     def record(self, index: int, ac: str, state: str, code: int | None, facts: Mapping[str, str],
                command: str, output: str) -> Marker:
         """Post one result marker and note the check's new state."""
-        fields = {"block": str(self.block_id), "check": str(index), "ac": ac, "state": state,
+        fields = {"block": self.block_key, "check": str(index), "ac": ac, "state": state,
                   "host": self.host}
         if code is not None:
             fields["exit"] = str(code)
@@ -271,7 +299,28 @@ class _Pass:
             if not won.won:
                 return
             claim = won.winner
-        tag_fields = {"issue": str(n), "block": str(self.block_id), "check": str(index)}
+        tag_fields = {"issue": str(n), "block": self.block_key, "check": str(index)}
+        found = self.filed(claim, tag_fields)
+        if found:
+            number = min(found)
+        else:
+            forge_markers.ensure_label(self.slug, *FOLLOW_UP)
+            body = forge_markers.render(
+                verify_issues.FOLLOWUP_OF, tag_fields,
+                f"Follow-up of #{n}: {ac} observed below target on {self.host}.", fenced)
+            created = forge_markers.create_issue(
+                self.slug, f"Follow-up: {ac} of #{n} observed below target", body, (FOLLOW_UP[0],))
+            # The claim names a host, not a run, so another run on this host may have listed none
+            # too and filed its own: the lowest number stands and any other is closed, so every
+            # run converges on one open follow-up whatever the interleaving (CR-2).
+            number = min([*self.filed(claim, tag_fields), created])
+            if number != created:
+                forge_markers.close_issue(self.slug, created, "not_planned")
+        forge_markers.edit(self.slug, result.comment_id, forge_markers.with_fields(result, followup=str(number)))
+        self.followups[index] = str(number)
+
+    def filed(self, claim: Marker, tag_fields: Mapping[str, str]) -> list[int]:
+        """The numbers of the trusted follow-up issues tagged with `tag_fields`, closed ones included."""
         found = []
         for issue in forge_markers.list_issues(self.slug, FOLLOW_UP[0], claim.updated_at):
             if issue.get("author_association") not in TRUSTED or isinstance(issue.get("number"), bool) \
@@ -281,17 +330,7 @@ class _Pass:
                                        "updated_at": issue.get("updated_at")})
             if tag is not None and tag.kind == verify_issues.FOLLOWUP_OF and tag.fields == tag_fields:
                 found.append(issue["number"])
-        if found:
-            number = min(found)
-        else:
-            forge_markers.ensure_label(self.slug, *FOLLOW_UP)
-            body = forge_markers.render(
-                verify_issues.FOLLOWUP_OF, tag_fields,
-                f"Follow-up of #{n}: {ac} observed below target on {self.host}.", fenced)
-            number = forge_markers.create_issue(
-                self.slug, f"Follow-up: {ac} of #{n} observed below target", body, (FOLLOW_UP[0],))
-        forge_markers.edit(self.slug, result.comment_id, forge_markers.with_fields(result, followup=str(number)))
-        self.followups[index] = str(number)
+        return found
 
     # --- closing (P9) ----------------------------------------------------------
 
@@ -311,7 +350,7 @@ class _Pass:
                 for i, state in enumerate(states) if state == "miss")
         else:
             return
-        block = {"block": str(self.block_id)}
+        block = {"block": self.block_key}
         if not self.write(verify_issues.CLOSED, {**block, "outcome": outcome}, sentence, block).won:
             return
         self.finish(outcome == "verified")

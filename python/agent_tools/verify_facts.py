@@ -28,6 +28,7 @@ TOKENS = ("GITHUB_TOKEN", "GH_TOKEN")
 VERSION_TOOLS = ("darwin-version", "nixos-version")
 TOOL_TIMEOUT = 60
 REVISION = re.compile(r"[0-9a-f]{40}")
+REPORTED = re.compile(r"[0-9A-Fa-f]{7,40}")
 NOT_YET = 75
 INCLUDED = ("ahead", "identical")
 EXCLUDED = ("behind", "diverged")
@@ -181,11 +182,31 @@ def deploy_observation(ctx: Context, sha: str) -> dict | None:
         return release_adapter.REGISTRY[name].inspect(request)
 
 
+def _observed_revision(observation: object) -> str | None:
+    """The revision the deploy watch saw running (7 to 40 hex characters), or None when it saw none."""
+    subject = observation.get("observed_subject") if isinstance(observation, dict) else None
+    revision = subject.get("commit") if isinstance(subject, dict) else None
+    return revision.lower() if isinstance(revision, str) and REPORTED.fullmatch(revision) else None
+
+
 def released_includes(ctx: Context, sha: str) -> Reading:
+    """Whether what is released contains `sha`.
+
+    With a bound deploy watch the adapter answers for exactly `sha` (`satisfied` only when `sha`
+    itself is the deployed revision), so a later commit deployed on top of it reads as not
+    satisfied; containment is therefore checked against the revision the watch observed."""
     if registered_deploy_adapter(ctx.deploy) is not None:
         observation = deploy_observation(ctx, sha)
-        satisfied = isinstance(observation, dict) and observation.get("outcome") == "satisfied"
-        return Reading("due" if satisfied else "not_released", {})
+        if isinstance(observation, dict) and observation.get("outcome") == "satisfied":
+            return Reading("due", {})
+        observed = _observed_revision(observation)
+        if observed is None:
+            return Reading("not_released", {})
+        facts = {"rev": observed}
+        found = includes(ctx, sha, observed)
+        if found is None:
+            return Reading("compare_unknown", facts)
+        return Reading("due" if found else "not_released", facts)
     if ctx.deploy.get("command") is not None:
         return Reading("deploy_watch_unread", {})
     latest = forge_markers.api_get(f"repos/{ctx.slug}/releases/latest", allow=(404,))

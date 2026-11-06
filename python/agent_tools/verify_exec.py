@@ -32,11 +32,25 @@ GIT_TIMEOUT = 120
 _INDEX = re.compile(r"0|[1-9][0-9]*")
 
 
-def _env(**extra: str) -> dict[str, str]:
+TOKENS = ("GITHUB_TOKEN", "GH_TOKEN")
+
+
+def child_env(**extra: str) -> dict[str, str]:
     """`os.environ` without the forge tokens: the one environment every child gets."""
-    env = {key: value for key, value in os.environ.items() if key not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    env = {key: value for key, value in os.environ.items() if key not in TOKENS}
     env.update(extra)
     return env
+
+
+@contextlib.contextmanager
+def _tokenless() -> Iterator[None]:
+    """Remove the forge tokens from `os.environ` for the block, for readers that start git children
+    from the inherited environment, and restore them after it."""
+    previous = {name: os.environ.pop(name) for name in TOKENS if name in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(previous)
 
 
 # --- gate -------------------------------------------------------------------
@@ -82,18 +96,21 @@ class Source:
 def project_source(entry: Mapping) -> Iterator[Source]:
     """The resolved contract at the entry's registered `origin` branch, in a scratch export."""
     with contextlib.ExitStack() as stack:
-        try:
-            source = stack.enter_context(adopt_verify.remote_source(
-                Path(entry["root"]), guard_policy.resolver,
-                (entry.get("branch_override") or {}).get("branch"),
-                network_timeout=GIT_TIMEOUT, reader=guard_policy.CONTRACT_READER))
-        except adopt_inspection.AdoptError as error:
-            raise SourceError(error.repair_id) from None
-        status, payload = guard_policy.resolver(source.resolver_root, "resolve")
-        if status != 0:
-            raise SourceError(adopt_inspection.resolver_repair_id(payload))
-        if payload["bindings"]["vcs"]["integration_branch"] != source.branch:
-            raise SourceError("branch_mismatch")
+        # The shared source reader starts its git children from the inherited environment, so the
+        # tokens are out of `os.environ` for the whole read (P16); the caller's block runs outside it.
+        with _tokenless():
+            try:
+                source = stack.enter_context(adopt_verify.remote_source(
+                    Path(entry["root"]), guard_policy.resolver,
+                    (entry.get("branch_override") or {}).get("branch"),
+                    network_timeout=GIT_TIMEOUT, reader=guard_policy.CONTRACT_READER))
+            except adopt_inspection.AdoptError as error:
+                raise SourceError(error.repair_id) from None
+            status, payload = guard_policy.resolver(source.resolver_root, "resolve")
+            if status != 0:
+                raise SourceError(adopt_inspection.resolver_repair_id(payload))
+            if payload["bindings"]["vcs"]["integration_branch"] != source.branch:
+                raise SourceError("branch_mismatch")
         # The snapshot's command cwds are real paths; the export root must be one too, or
         # `run_argv` cannot relativise them (a symlinked temp dir, as on macOS).
         yield Source(payload, source.resolver_root.resolve(), source.commit, source.branch)
@@ -109,7 +126,7 @@ class WorkspaceError(Exception):
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(root), *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,
-        timeout=GIT_TIMEOUT, env=_env(GIT_TERMINAL_PROMPT="0"))
+        timeout=GIT_TIMEOUT, env=child_env(GIT_TERMINAL_PROMPT="0"))
 
 
 def ensure_commit(root: Path, sha: str) -> bool:
@@ -162,7 +179,7 @@ def execute(argv: Sequence[str], cwd: Path, timeout: float = TIMEOUT) -> Result:
     try:
         proc = subprocess.Popen(
             list(argv), cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True, env=_env())
+            stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True, env=child_env())
     except OSError as error:
         return Result(None, "", str(error), False)
     try:

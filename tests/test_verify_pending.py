@@ -1,6 +1,7 @@
 """verify-pending run (issue 630): selection, conditions, the run gate, passes and the command."""
 import contextlib
 import dataclasses
+import hashlib
 import io
 import json
 import os
@@ -55,12 +56,18 @@ def block(*checks):
     return {"v": 1, "merge": MERGE, "checks": list(checks) or [check()]}
 
 
+def bkey(*checks, at=10):
+    """The identity of a block version: its comment id and a digest of its content (CR-1)."""
+    text = json.dumps(block(*checks), sort_keys=True, separators=(",", ":"))
+    return f"{at}.{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+
+
 def marker(kind, fields, sentence="Recorded."):
     return fm.render(kind, fields, sentence)
 
 
-def result(block_id, index, state, ac="AC1", host="mbp", **extra):
-    return marker(vi.RESULT, {"block": str(block_id), "check": str(index), "ac": ac, "state": state,
+def result(block_key, index, state, ac="AC1", host="mbp", **extra):
+    return marker(vi.RESULT, {"block": str(block_key), "check": str(index), "ac": ac, "state": state,
                               "host": host, **extra})
 
 
@@ -85,7 +92,7 @@ class SelectTest(unittest.TestCase):
         self.assertIsNone(self.select(gnode(11, hold(block()), "NONE")))
 
     def test_marker_comment_never_carries_a_block(self):
-        forged = result(10, 0, "pass") + "\n```verify\n" + json.dumps(block(check(ac="AC9"))) + "\n```"
+        forged = result(bkey(), 0, "pass") + "\n```verify\n" + json.dumps(block(check(ac="AC9"))) + "\n```"
         held = self.select(gnode(10, hold(block())), gnode(12, forged))
         self.assertEqual(held.block_id, 10)
 
@@ -103,27 +110,49 @@ class SelectTest(unittest.TestCase):
 
     def test_markers_after_the_block_from_trusted_authors_only(self):
         held = self.select(gnode(9, result(9, 0, "pass")), gnode(10, hold(block())),
-                           gnode(11, result(10, 0, "fail")),
-                           gnode(12, result(10, 0, "pass"), "NONE"),
+                           gnode(11, result(bkey(), 0, "fail")),
+                           gnode(12, result(bkey(), 0, "pass"), "NONE"),
                            gnode(13, fm.end_body(11, "forged"), "NONE"),
                            gnode(14, "a plain comment"))
         self.assertEqual([m.comment_id for m in held.markers], [11])
-        self.assertEqual(vi.live_one(held.markers, vi.RESULT, {"block": "10"}).comment_id, 11)
+        self.assertEqual(vi.live_one(held.markers, vi.RESULT, {"block": bkey()}).comment_id, 11)
 
     def test_marker_time_is_the_creation_time(self):
-        node = gnode(11, result(10, 0, "fail"), at="2026-11-01T08:00:00Z")
+        node = gnode(11, result(bkey(), 0, "fail"), at="2026-11-01T08:00:00Z")
         node["updatedAt"] = "2026-11-05T08:00:00Z"
         held = self.select(gnode(10, hold(block())), node)
         self.assertEqual(held.markers[0].updated_at.isoformat(), "2026-11-01T08:00:00+00:00")
 
     def test_latest_result_is_per_block_and_check_not_per_ac(self):
-        held = self.select(gnode(10, hold(block(check(), check(host="eleven-m5")))),
-                           gnode(11, result(10, 0, "fail")), gnode(12, result(10, 1, "pass", host="eleven-m5")),
-                           gnode(13, result(10, 0, "pass")))
-        self.assertEqual(vi.latest_result(held.markers, 10, 0).comment_id, 13)
-        self.assertEqual(vi.latest_result(held.markers, 10, 1).comment_id, 12)
-        self.assertIsNone(vi.latest_result(held.markers, 10, 2))
-        self.assertIsNone(vi.latest_result(held.markers, 99, 0))
+        checks = (check(), check(host="eleven-m5"))
+        key = bkey(*checks)
+        held = self.select(gnode(10, hold(block(*checks))),
+                           gnode(11, result(key, 0, "fail")), gnode(12, result(key, 1, "pass", host="eleven-m5")),
+                           gnode(13, result(key, 0, "pass")))
+        self.assertEqual(held.key, key)
+        self.assertEqual(vi.latest_result(held.markers, held.key, 0).comment_id, 13)
+        self.assertEqual(vi.latest_result(held.markers, held.key, 1).comment_id, 12)
+        self.assertIsNone(vi.latest_result(held.markers, held.key, 2))
+        self.assertIsNone(vi.latest_result(held.markers, bkey(*checks, at=99), 0))
+
+    def test_a_result_of_an_earlier_version_of_an_edited_block_is_never_the_latest(self):
+        older = bkey(check(ac="AC1"))
+        held = self.select(gnode(10, hold(block(check(ac="AC2")))), gnode(11, result(older, 0, "pass")))
+        self.assertNotEqual(held.key, older)
+        self.assertEqual(held.key.split(".")[0], "10")
+        self.assertIsNone(vi.latest_result(held.markers, held.key, 0))
+        self.assertEqual(vi.latest_result(held.markers, older, 0).comment_id, 11)
+
+    def test_reordered_checks_are_another_version(self):
+        one, two = check(ac="AC1"), check(ac="AC2", host="eleven-m5")
+        self.assertNotEqual(bkey(one, two), bkey(two, one))
+        held = self.select(gnode(10, hold(block(two, one))), gnode(11, result(bkey(one, two), 0, "pass")))
+        self.assertIsNone(vi.latest_result(held.markers, held.key, 0))
+
+    def test_the_version_ignores_how_the_block_is_spelled(self):
+        compact = "```verify\n" + json.dumps(block()) + "\n```"
+        spaced = "```verify\n" + json.dumps(block(), indent=2, sort_keys=True) + "\n```"
+        self.assertEqual(self.select(gnode(10, compact)).key, self.select(gnode(10, spaced)).key)
 
     def test_live_one_honours_end_markers(self):
         fields = {"event": "deployed", "merge": MERGE, "host": "mbp"}
@@ -135,7 +164,7 @@ class SelectTest(unittest.TestCase):
                             gnode(12, marker(vi.WINDOW, {**fields, "host": "eleven-m5"})),
                             gnode(13, fm.end_body(11, "stale")))
         self.assertEqual(vi.live_one(ended.markers, vi.WINDOW, match).comment_id, 12)
-        self.assertIsNone(vi.live_one(held.markers, vi.DUE, {"block": "10", "check": "0"}))
+        self.assertIsNone(vi.live_one(held.markers, vi.DUE, {"block": bkey(), "check": "0"}))
 
     def test_a_window_before_the_block_carries_over_to_a_replacement_block(self):
         fields = {"event": "deployed", "merge": MERGE, "host": "mbp"}
@@ -149,17 +178,17 @@ class SelectTest(unittest.TestCase):
         self.assertIsNone(vi.live_one(ended.markers, vi.WINDOW, {"event": "deployed", "merge": MERGE}))
 
     def test_an_ended_result_is_not_the_latest(self):
-        held = self.select(gnode(10, hold(block())), gnode(11, result(10, 0, "fail")),
-                           gnode(12, result(10, 0, "pass")), gnode(13, fm.end_body(12, "stale")))
-        self.assertEqual(vi.latest_result(held.markers, 10, 0).comment_id, 11)
-        gone = self.select(gnode(10, hold(block())), gnode(11, result(10, 0, "pass")),
+        held = self.select(gnode(10, hold(block())), gnode(11, result(bkey(), 0, "fail")),
+                           gnode(12, result(bkey(), 0, "pass")), gnode(13, fm.end_body(12, "stale")))
+        self.assertEqual(vi.latest_result(held.markers, held.key, 0).comment_id, 11)
+        gone = self.select(gnode(10, hold(block())), gnode(11, result(bkey(), 0, "pass")),
                            gnode(12, fm.end_body(11, "stale")))
-        self.assertIsNone(vi.latest_result(gone.markers, 10, 0))
+        self.assertIsNone(vi.latest_result(gone.markers, gone.key, 0))
 
     def test_latest_result_ignores_other_kinds(self):
-        held = self.select(gnode(10, hold(block())), gnode(11, result(10, 0, "pass")),
-                           gnode(12, marker(vi.RUN, {"block": "10", "check": "0", "host": "mbp"})))
-        self.assertEqual(vi.latest_result(held.markers, 10, 0).comment_id, 11)
+        held = self.select(gnode(10, hold(block())), gnode(11, result(bkey(), 0, "pass")),
+                           gnode(12, marker(vi.RUN, {"block": bkey(), "check": "0", "host": "mbp"})))
+        self.assertEqual(vi.latest_result(held.markers, held.key, 0).comment_id, 11)
 
     def test_comments_are_sorted_by_ascending_id(self):
         comments = vi.comments_from_graphql([gnode(12, "b"), gnode(10, "a"), gnode(11, "c")])
@@ -285,6 +314,26 @@ class WhenTest(unittest.TestCase):
         with mock.patch.object(vf, "deploy_observation", return_value={"outcome": "absent"}):
             self.assertEqual(vf.evaluate_when({"released_includes": MERGE}, MERGE, bound).reason, "not_released")
         self.assertEqual(world.argvs("gh"), [])
+
+    def test_a_descendant_of_the_merge_deployed_counts_as_released(self):
+        world = world_with(self)
+        bound = context(world, deploy={"adapter": "github-actions-health", "command": None, "config": {}})
+        deployed = {"outcome": "diverged", "reason": "health_commit_mismatch",
+                    "observed_subject": {"commit": REV[:12], "run": 1}}
+        ancestry(world, MERGE, REV[:12], 0)
+        with mock.patch.object(vf, "deploy_observation", return_value=deployed):
+            due = vf.evaluate_when({"released_includes": MERGE}, MERGE, bound)
+        self.assertEqual((due.due, due.facts), (True, {"rev": REV[:12]}))
+
+    def test_a_deployed_revision_that_lacks_the_merge_is_not_released(self):
+        world = world_with(self)
+        bound = context(world, deploy={"adapter": "github-actions-health", "command": None, "config": {}})
+        ancestry(world, MERGE, REV[:12], 1)
+        for observed in ({"commit": REV[:12], "run": 1}, {"commit": None, "run": None}, {"commit": "zz", "run": 1}):
+            deployed = {"outcome": "diverged", "reason": "health_commit_mismatch", "observed_subject": observed}
+            with mock.patch.object(vf, "deploy_observation", return_value=deployed):
+                self.assertEqual(vf.evaluate_when({"released_includes": MERGE}, MERGE, bound).reason,
+                                 "not_released", observed)
 
     def test_a_command_backed_watch_stays_pending_without_tags(self):
         world = world_with(self)
@@ -547,6 +596,28 @@ class ExecuteTest(unittest.TestCase):
                          ([str(wt / "s/c.sh"), "x"], wt))
 
 
+@contextlib.contextmanager
+def child_environments():
+    """Run with forge tokens set, recording the environment each `subprocess.run` child starts with."""
+    seen, real = [], subprocess.run
+
+    def spy(argv, *args, **kwargs):
+        env = kwargs.get("env")
+        seen.append((list(argv), dict(os.environ if env is None else env)))
+        return real(argv, *args, **kwargs)
+
+    with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "token-one", "GH_TOKEN": "token-two"}):
+        with mock.patch("subprocess.run", spy):
+            yield seen
+        assert os.environ["GITHUB_TOKEN"] == "token-one" and os.environ["GH_TOKEN"] == "token-two"
+
+
+def assert_tokenless(test, seen):
+    test.assertTrue(any(argv[0] == "git" for argv, _ in seen), "no git child was started")
+    for argv, env in seen:
+        test.assertEqual({"GITHUB_TOKEN", "GH_TOKEN"} & set(env), set(), argv)
+
+
 class GitRepos(unittest.TestCase):
     """A bare `origin` and a clone (`root`) that lags it: origin's `main` is one commit ahead."""
 
@@ -658,6 +729,12 @@ class SourceTest(GitRepos):
                 with vx.project_source(self.entry):
                     pass
         self.assertEqual(str(caught.exception), "branch_mismatch")
+
+    def test_no_forge_token_reaches_a_git_child_of_the_source_read(self):
+        with child_environments() as seen:
+            with vx.project_source(self.entry):
+                pass
+        assert_tokenless(self, seen)
 
     def test_an_unresolvable_contract_at_origin_is_a_source_error(self):
         self.git(self.root, "rm", "-q", ".agents/project.json")
@@ -821,7 +898,8 @@ class PassTransitionsTest(PassBase):
         self.assertIn(f"#{ISSUE}", created["title"])
         self.assertEqual(created["labels"], ["verification-follow-up"])
         self.assertEqual(fm.parse({"id": 500, "body": created["body"], "updated_at": T0}).fields,
-                         {"issue": str(ISSUE), "block": "10", "check": "0"})
+                         {"issue": str(ISSUE), "block": bkey(check(mode="observe", run={"command": "check-bad"})),
+                          "check": "0"})
         result, = self.markers("verify-result")
         self.assertEqual((result.fields["state"], result.fields["followup"]), ("miss", "500"))
         self.assertEqual(len(self.markers("verify-followup")), 1)
@@ -838,7 +916,8 @@ class PassTransitionsTest(PassBase):
         self.assertEqual(self.markers("verify-closed")[0].body.split("\n")[1], "Verified: AC1.")
 
     def test_expiry_closes_as_not_verified(self):
-        due = marker("verify-due", {"block": "10", "check": "0", "host": "mbp"})
+        due = marker("verify-due", {"block": bkey(check(run={"command": "check-later"})), "check": "0",
+                                    "host": "mbp"})
         self.hold(check(run={"command": "check-later"}),
                   extra=[stored_comment(11, due, at="2026-10-15T10:00:00Z")])
         with host_clock(WRONG, vf, fm):
@@ -905,7 +984,7 @@ class PassTransitionsTest(PassBase):
         self.assertEqual(self.mutations(), [])
 
     def test_an_ended_pass_is_rechecked_and_closes_only_on_the_fresh_pass(self):
-        self.hold(ok_check(), extra=[stored_comment(11, result(10, 0, "pass")),
+        self.hold(ok_check(), extra=[stored_comment(11, result(bkey(ok_check()), 0, "pass")),
                                      stored_comment(12, fm.end_body(11, "withdrawn"))])
         self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))
         self.assertEqual(self.spawned("verify-ok"), 1)
@@ -914,7 +993,7 @@ class PassTransitionsTest(PassBase):
 
     def test_an_ended_pass_alone_never_closes(self):
         self.hold(check(run={"command": "check-later"}),
-                  extra=[stored_comment(11, result(10, 0, "pass")),
+                  extra=[stored_comment(11, result(bkey(check(run={"command": "check-later"})), 0, "pass")),
                          stored_comment(12, fm.end_body(11, "withdrawn"))])
         self.assertEqual(self.run_pass()[0]["state"], "pending")
         self.assertEqual((self.world.issue()["state"], self.spawned("verify-later")), ("open", 1))
@@ -925,7 +1004,7 @@ class PassTransitionsTest(PassBase):
         self.assertEqual((self.mutations(), self.spawned("verify-ok"), self.workspaces), ([], 0, []))
 
     def test_a_closed_marker_finishes_an_interrupted_close(self):
-        closed = marker("verify-closed", {"block": "10", "outcome": "verified"}, "Verified: AC1.")
+        closed = marker("verify-closed", {"block": bkey(ok_check()), "outcome": "verified"}, "Verified: AC1.")
         self.hold(ok_check(), extra=[stored_comment(11, closed)])
         self.assertEqual(self.run_pass()[-1], line(None, None, "closed", "verified"))
         self.assertEqual(self.spawned("verify-ok"), 0)
@@ -964,7 +1043,7 @@ class RecoveryTest(PassBase):
         self.assertEqual(self.spawned("verify-bad"), 1)
 
     def test_two_hosts_recovering_one_follow_up_file_one_issue(self):
-        miss = result(10, 0, "miss")
+        miss = result(bkey(check(mode="observe", host="any", run={"command": "check-bad"})), 0, "miss")
         self.hold(check(mode="observe", host="any", run={"command": "check-bad"}),
                   extra=[stored_comment(11, miss)],
                   schedule=["post:agent:verify-followup", "post:agent:verify-followup", "list", "list"])
@@ -974,6 +1053,74 @@ class RecoveryTest(PassBase):
         self.assertEqual(len(self.markers("verify-followup")), 1)
         self.assertEqual(self.markers("verify-result")[0].fields["followup"], "500")
         self.assertEqual(self.spawned("verify-bad"), 0)
+
+
+class RunnerTrustTest(PassBase):
+    """The runner reads back only OWNER and MEMBER markers, so it must itself be one (finding 1)."""
+
+    def setUp(self):
+        super().setUp()
+        self.hold(ok_check())
+
+    def identity(self, login, owner="octo", kind="User", membership=None):
+        self.world.respond_json("gh", ["api", "user"], {"login": login})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}"], {"owner": {"login": owner, "type": kind}})
+        path = ["api", f"user/memberships/orgs/{owner}"]
+        if membership is None:
+            self.world.not_found("gh", path)
+        else:
+            self.world.respond_json("gh", path, {"state": membership})
+
+    def pass_repo(self, **kwargs):
+        return vr.pass_repo(self.project, "mbp", Refs(), **kwargs)
+
+    def assert_refused(self):
+        self.assertEqual(self.pass_repo(), [{"repo": SLUG, "issue": None, "check": None, "ac": None,
+                                             "state": "skipped", "reason": "runner_untrusted"}])
+        self.assertEqual((self.mutations(), self.spawned("verify-ok"), self.workspaces), ([], 0, []))
+
+    def test_a_collaborator_account_on_a_user_owned_repository_is_refused_before_any_write(self):
+        self.identity("helper")
+        self.assert_refused()
+
+    def test_the_repository_owner_runs(self):
+        self.identity("Octo")
+        self.assertIn(line(None, None, "closed", "verified"), self.pass_repo())
+
+    def test_an_active_organization_member_runs(self):
+        self.identity("helper", owner="acme", kind="Organization", membership="active")
+        self.assertIn(line(None, None, "closed", "verified"), self.pass_repo())
+
+    def test_a_pending_or_absent_organization_membership_is_refused(self):
+        self.identity("helper", owner="acme", kind="Organization", membership="pending")
+        self.assert_refused()
+        self.identity("helper", owner="acme", kind="Organization", membership=None)
+        self.assert_refused()
+
+    def test_a_report_writes_nothing_and_needs_no_identity(self):
+        self.assertEqual(self.pass_repo(report=True), [line(0, "AC1", "due", "due")])
+        self.assertNotIn(["api", "user"], self.world.argvs("gh"))
+
+    def test_an_unreadable_identity_is_a_forge_error(self):
+        self.world.respond_json("gh", ["api", "user"], {"name": "no login"})
+        with self.assertRaises(fm.ForgeError):
+            self.pass_repo()
+
+
+class SameHostRecoveryTest(PassBase):
+    def test_two_runs_on_the_claims_own_host_leave_one_open_follow_up(self):
+        observe = check(mode="observe", host="any", run={"command": "check-bad"})
+        key = {"block": bkey(observe), "check": "0"}
+        self.hold(observe, extra=[stored_comment(11, result(key["block"], 0, "miss")),
+                                  stored_comment(12, marker("verify-followup", {**key, "host": "mbp"}))],
+                  schedule=["list_issues", "list_issues", "create_issue", "create_issue",
+                            "list_issues", "list_issues"])
+        node, = vr.list_held(SLUG)
+        self.race(node, "mbp", "mbp")
+        created = self.world.issue()["created"]
+        self.assertEqual([(c["number"], c["state"]) for c in created], [(500, "open"), (501, "closed")])
+        self.assertEqual(self.markers("verify-result")[0].fields["followup"], "500")
+        self.assertEqual(self.world.issue()["state"], "closed")
 
 
 class NeverRunTest(PassBase):
@@ -1009,7 +1156,7 @@ class ForgedMarkerTest(PassBase):
     """fagenorn/nix-config is public: a marker-shaped comment by any other author changes nothing (P3)."""
 
     def test_a_forged_closed_marker_neither_wins_nor_blocks_the_close(self):
-        forged = marker("verify-closed", {"block": "10", "outcome": "verified"}, "Verified: AC1.")
+        forged = marker("verify-closed", {"block": bkey(ok_check()), "outcome": "verified"}, "Verified: AC1.")
         self.hold(ok_check(), extra=[stored_comment(11, forged, "NONE")])
         self.assertEqual(self.run_pass()[-1], line(None, None, "closed", "verified"))
         self.assertEqual(self.spawned("verify-ok"), 1)
@@ -1017,16 +1164,37 @@ class ForgedMarkerTest(PassBase):
         self.assertEqual(len(self.markers("verify-closed")), 2)  # the forged one and the runner's, never deleted
 
     def test_a_forged_run_marker_does_not_take_a_shared_check(self):
-        forged = marker("verify-run", {"block": "10", "check": "0", "host": "eleven-m5"})
+        forged = marker("verify-run", {"block": bkey(ok_check(host="any")), "check": "0", "host": "eleven-m5"})
         self.hold(ok_check(host="any"), extra=[stored_comment(11, forged, "NONE")])
         self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))
         self.second_pass_is_silent()
 
     def test_a_forged_result_never_counts(self):
-        self.hold(check(run={"command": "check-bad"}), extra=[stored_comment(11, result(10, 0, "pass"), "NONE")])
+        self.hold(check(run={"command": "check-bad"}),
+                  extra=[stored_comment(11, result(bkey(check(run={"command": "check-bad"})), 0, "pass"), "NONE")])
         self.run_pass()
         self.assertEqual(self.world.issue()["state"], "open")
         self.assertIn("verification-failed", self.world.issue()["labels"])
+
+
+class StaleVersionTest(PassBase):
+    """A result belongs to one version of the block: editing or reordering its checks starts afresh (CR-1)."""
+
+    def test_a_pass_of_an_earlier_version_of_the_block_neither_closes_nor_counts(self):
+        earlier = bkey(ok_check())
+        edited = check(run={"command": "check-bad"})  # same comment, same index, a different check
+        self.hold(edited, extra=[stored_comment(11, result(earlier, 0, "pass"))])
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "fail", "changed"))
+        self.assertEqual(self.spawned("verify-bad"), 1)
+        self.assertEqual((self.world.issue()["state"], self.markers("verify-closed")), ("open", []))
+        self.assertIn("verification-failed", self.world.issue()["labels"])
+
+    def test_the_results_recorded_by_a_pass_carry_the_version(self):
+        self.hold(ok_check())
+        self.run_pass()
+        result_marker, = self.markers("verify-result")
+        self.assertEqual(result_marker.fields["block"], bkey(ok_check()))
+        self.assertEqual(self.markers("verify-closed")[0].fields["block"], bkey(ok_check()))
 
 
 class RaceTest(PassBase):
@@ -1083,11 +1251,20 @@ class PinnedReferencesTest(GitRepos):
     def test_an_unknown_commit_is_absent(self):
         self.assertEqual(self.refs.script("scripts/check.sh", "f" * 40)[0], "absent")
 
+    def test_no_forge_token_reaches_a_git_child_of_a_lookup(self):
+        with child_environments() as seen:
+            self.refs.script("scripts/check.sh", self.merge)
+            self.refs.flake(self.merge)
+            self.refs.flake("f" * 40)
+        assert_tokenless(self, seen)
+
 
 class CommandTest(PassBase):
     def setUp(self):
         super().setUp()
         self.world.respond("gh", ["auth", "status"], stdout="Logged in\n")
+        self.world.respond_json("gh", ["api", "user"], {"login": "octo"})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}"], {"owner": {"login": "octo", "type": "User"}})
         home = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
         (home / ".agents" / "share").mkdir(parents=True)
@@ -1144,6 +1321,15 @@ class CommandTest(PassBase):
         mark = len(self.world.argvs("gh"))
         self.assertEqual(self.cli("run", "--host", "mbp")[:2], (0, []))
         self.assertEqual(self.mutations(mark), [])
+
+    def test_a_runner_the_forge_would_not_trust_is_refused_and_exits_1(self):
+        self.world.respond_json("gh", ["api", "user"], {"login": "helper"})
+        self.hold(ok_check())
+        code, lines, err = self.cli("run", "--host", "mbp")
+        self.assertEqual((code, lines), (1, [{"repo": SLUG, "issue": None, "check": None, "ac": None,
+                                              "state": "skipped", "reason": "runner_untrusted"}]))
+        self.assertIn(SLUG, err)
+        self.assertEqual((self.mutations(), self.spawned("verify-ok")), ([], 0))
 
     def test_no_forge_credential_exits_0_quietly(self):
         self.world.respond("gh", ["auth", "status"], exit=1, stderr="You are not logged into any GitHub hosts")

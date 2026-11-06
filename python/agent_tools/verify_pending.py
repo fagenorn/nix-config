@@ -20,7 +20,9 @@ independent); `--report` prints what is due and runs and writes nothing. Stdout 
 `json.dumps(line, sort_keys=True)` per line, each `{repo, issue, check, ac, state, reason}`.
 A project that cannot be read is a `skipped` line with reason `project_unresolved`, one whose
 tracker is not GitHub is `tracker_not_github` (both omitted when `--repo` is given), and a forge
-failure while listing is `forge_error`. Exit 1 when any line is a `forge_error`, 2 on a usage
+failure while listing is `forge_error`. A write pass whose `gh` account the forge would not label
+`OWNER` or `MEMBER` (it could not read back its own markers) is a `runner_untrusted` line, written
+before any write or run. Exit 1 when any line is a `forge_error` or `runner_untrusted`, 2 on a usage
 error (a host that is not a hostname, a `--repo` no project registers, a refused registry) and
 otherwise 0, including with no forge credential: that prints `verify-pending: no-forge-credential`
 on stderr, nothing on stdout, and makes no other `gh` call.
@@ -45,12 +47,14 @@ GIT_TIMEOUT = 60
 
 def git_ok(root: str, *args: str) -> bool:
     """True when `git -C root args` exits 0; raises OSError, SubprocessError or ValueError when git cannot run."""
-    return subprocess.run(["git", "-C", root, *args], capture_output=True, timeout=GIT_TIMEOUT).returncode == 0
+    return subprocess.run(["git", "-C", root, *args], capture_output=True, timeout=GIT_TIMEOUT,
+                          env=verify_exec.child_env()).returncode == 0
 
 
 def git_blob(root: str, spec: str) -> bool:
     """True when `spec` names a blob; a directory or a missing path is not one."""
-    result = subprocess.run(["git", "-C", root, "cat-file", "-t", spec], capture_output=True, timeout=GIT_TIMEOUT)
+    result = subprocess.run(["git", "-C", root, "cat-file", "-t", spec], capture_output=True, timeout=GIT_TIMEOUT,
+                            env=verify_exec.child_env())
     return result.returncode == 0 and result.stdout.strip() == b"blob"
 
 
@@ -73,7 +77,7 @@ def git_script(root: str, sha: str, path: str) -> tuple[str, str]:
             return "absent", "unknown"
         result = subprocess.run(
             ["git", "-C", root, "ls-tree", "-z", "--full-tree", sha, "--", path],
-            capture_output=True, timeout=GIT_TIMEOUT,
+            capture_output=True, timeout=GIT_TIMEOUT, env=verify_exec.child_env(),
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return "unknown", "unknown"
@@ -277,7 +281,11 @@ def run_run(args: argparse.Namespace) -> int:
         return 2
     for line in lines:
         print(json.dumps(line, sort_keys=True))
-    return 1 if any(line["reason"] == "forge_error" for line in lines) else 0
+        if line["reason"] == "runner_untrusted":
+            print(f"verify-pending: {line['repo']}: the gh account is neither the repository owner nor an "
+                  "organization member, so the markers it writes would be invisible to it; "
+                  "run `gh auth login` as one", file=sys.stderr)
+    return 1 if any(line["reason"] in ("forge_error", "runner_untrusted") for line in lines) else 0
 
 
 def main(argv: list[str] | None = None) -> int:
