@@ -2417,6 +2417,108 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(2, result.returncode, command)
                 self.assertIn(f"lifecycle guard: {reason}", result.stderr)
 
+    def test_a_push_or_pr_creation_after_cd_is_judged_against_that_directory(self):
+        """Issue 418 D1-D3: one leading `cd <absolute dir> && ` moves a push's or PR
+        creation's repository context to <dir>; any other directory change refuses."""
+        here = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        there = self.make_repo("git@github.com:fagenorn/guard-fixture.git",
+                               default_branch="trunk")
+        foreign = self.make_repo("git@github.com:someoneelse/tool.git")
+        feature = "issue-418-topic"
+        create = ("gh pr create --repo fagenorn/guard-fixture --base trunk "
+                  f'--head {feature} --title "x" --body "y"')
+        for command, cwd in (
+            (f"cd {there} && git push origin {feature}", here),
+            (f"cd {there} && git push -u origin main", here),
+            (f"cd {there} && {create}", here),
+            (f"cd {there} && {create}", foreign),
+            (f"unset GITHUB_TOKEN && cd {there} && git push origin {feature}", here),
+            (f"cd {there} && env -u GITHUB_TOKEN git push origin {feature}", here),
+            (f"cd {there.parent} && git -C {there.name} push origin {feature}", here),
+            (f"cd {there} && git -C {here} push origin {feature}", foreign),
+            (f"cd {there}/ && git push origin {feature}", None),
+            # A mention is not a directory change.
+            (f"echo cd {foreign} && git push origin {feature}", here),
+            (f'git push origin {feature} && echo "cd {foreign}"', here),
+            # No repository-bound verb: nothing to judge.
+            (f"cd {foreign} && ls", here),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        for command, cwd, reason in (
+            (f"cd {there} && git push origin trunk", here,
+             "unsafe push: refusing to push the default branch trunk"),
+            (f"cd {here} && git push origin main", there,
+             "unsafe push: refusing to push the default branch main"),
+            (f"cd {foreign} && git push origin {feature}", here,
+             "unsafe push: repository someoneelse/tool is outside standing authorization"),
+            (f"cd {foreign} && {create}", there,
+             "unsafe PR creation: repository someoneelse/tool is outside standing authorization"),
+            (f"cd {there} && " + create.replace('--body "y"', "--body-file /tmp/notes-418.md"),
+             here, "unsafe PR creation: --body-file is accepted only when the PR creation "
+                   "is the whole command"),
+            # Merge and branch deletion keep their whole-command refusal.
+            (f"cd {there} && gh pr merge 1 --repo fagenorn/guard-fixture --merge "
+             "--delete-branch", there, "unsafe merge: forbidden character `&`"),
+            (f"cd {there} && git branch -d {feature}", there,
+             "unsafe branch deletion: forbidden character `&`"),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn(f"lifecycle guard: {reason}", result.stderr)
+        unresolved = "the directory the verb runs in cannot be resolved"
+        for label, command in (
+            ("push", f"cd {there.name} && git push origin {feature}"),
+            ("push", f"cd {there}/../{there.name} && git push origin {feature}"),
+            ("push", f"cd {there} || git push origin {feature}"),
+            ("push", f"cd {there}; git push origin {feature}"),
+            ("push", f"cd {there}  && git push origin {feature}"),
+            ("push", f"cd -P {there} && git push origin {feature}"),
+            ("push", f'cd "{there}" && git push origin {feature}'),
+            ("push", f"cd ~ && git push origin {feature}"),
+            ("push", f"cd && git push origin {feature}"),
+            ("push", f"pushd {there} && git push origin {feature}"),
+            ("push", f"popd && git push origin {feature}"),
+            ("push", f"chdir {there} && git push origin {feature}"),
+            ("push", f"builtin cd {there} && git push origin {feature}"),
+            ("push", f"cd {there} && cd {here} && git push origin {feature}"),
+            ("push", f"cd {there} && true && git push origin {feature}"),
+            ("push", f"git push origin {feature}; cd {there}"),
+            ("push", f"while true; do git push origin {feature}; cd {there}; done"),
+            ("push", f"(cd {there}) && git push origin {feature}"),
+            ("push", f"eval 'cd {there}' && git push origin {feature}"),
+            # Redirections before or attached to the directory word (review R1).
+            ("push", f">/dev/null cd {there} && git push origin trunk"),
+            ("push", f"> /dev/null cd {there} && git push origin trunk"),
+            ("push", f"2>/dev/null cd {there} && git push origin trunk"),
+            ("push", f"cd>/dev/null {there} && git push origin trunk"),
+            ("push", f"cd {there} >/dev/null && git push origin {feature}"),
+            ("push", f"cd {there} 2>&1 && git push origin {feature}"),
+            # Expansions that run a directory word (review R2).
+            ("push", f"eval '${{CMD:-cd {there}}}' && git push origin trunk"),
+            ("push", f"${{CMD:-cd}} {there} && git push origin trunk"),
+            ("push", f"X=cd; $X {there} && git push origin trunk"),
+            ("push", f"true $(cd {there}) && git push origin trunk"),
+            # Wrapper options that set the directory.
+            ("push", f"env -C {there} git push origin trunk"),
+            ("push", f"env --chdir={there} git push origin trunk"),
+            ("push", f"cd {there} && env -C {here} git push origin main"),
+            ("PR creation", f"cd {there} && {create} && git push origin {feature}"),
+            ("PR creation", f"cd {there.name} && {create}"),
+            ("PR creation", f"popd && {create}"),
+            ("PR creation", f">/dev/null cd {there} && {create}"),
+            ("PR creation", f"cd>/dev/null {there} && {create}"),
+            ("PR creation", f"eval '${{CMD:-cd {there}}}' && {create}"),
+            ("PR creation", f"${{CMD:-cd}} {there} && {create}"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=here)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn(f"lifecycle guard: unsafe {label}: {unresolved}", result.stderr)
+                self.assertIn("; accepted: ", result.stderr)
+
     def test_tag_push_near_misses_are_refused(self):
         repo = self.tagged_repo("fagenorn/nix-config")
         lightweight = self.tagged_repo("fagenorn/nix-config", tag="v2.0.0", annotated=False)

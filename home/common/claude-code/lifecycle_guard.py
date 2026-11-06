@@ -133,6 +133,17 @@ INVOCATION_FORM_HINT = "run git and gh by name, and carry a directory only as gi
 # Words that detach a process from the task that started it (#278). Refused
 # in every repository, before the policy loads.
 DETACHING_WORDS = ("nohup", "setsid", "disown")
+# Words that change the shell's directory (issue 418): bash's `cd`, `pushd`,
+# `popd` and zsh's `chdir`.
+DIRECTORY_WORDS = ("cd", "chdir", "pushd", "popd")
+# Wrapper options that set the wrapped program's directory, by wrapper.
+CHDIR_SHORT_OPTIONS = {"env": "C", "sudo": "D"}
+CHDIR_LONG_OPTION = "--chdir"
+CD_PRELUDE_PROBLEM = (
+    "the directory the verb runs in cannot be resolved: a directory change is "
+    "accepted only as one leading cd <absolute directory> && before a single "
+    "push or PR creation; or carry the directory as git -C <dir>"
+)
 DETACHING_ROUTES = (
     "a detached process outlives the task stop; run it with the Bash tool's "
     "background mode (run_in_background: true), or wrap a lifecycle launch in "
@@ -1112,11 +1123,18 @@ def detaching_word(command):
     command-position word (or its basename) is an evaluator, a token carrying
     `$(` or a backtick, and the command text handed to `env -S`. A raw-text match
     names the word that occurs earliest in that text. A word in argument
-    position otherwise passes.
+    position otherwise passes. The scan is `shell_run_word`, shared with the
+    directory pass (issue 418).
     """
+    return shell_run_word(command, DETACHING_WORDS)
+
+
+def shell_run_word(command, words):
+    """The member of `words` the shell would run in `command`, or None (see
+    `detaching_word` for the matching rules)."""
 
     def earliest(text):
-        hits = [(text.find(word), word) for word in DETACHING_WORDS if word in text]
+        hits = [(text.find(word), word) for word in words if word in text]
         return min(hits)[1] if hits else None
 
     def name(value):
@@ -1164,13 +1182,120 @@ def detaching_word(command):
         for flag, (value, operator) in zip(flags, tokens):
             if operator:
                 continue
-            if flag and name(value) in DETACHING_WORDS:
+            if flag and name(value) in words:
                 return name(value)
             if "$(" in value or "`" in value:
                 found = earliest(value)
                 if found is not None:
                     return found
     return None
+
+
+def chdir_option(wrapper, word):
+    """True when `word`, an option of `wrapper`, sets the wrapped directory."""
+    letter = CHDIR_SHORT_OPTIONS.get(wrapper)
+    if letter is None:
+        return False
+    if word.startswith("--"):
+        name = word.partition("=")[0]
+        # getopt_long accepts any unambiguous prefix; reading more as a directory
+        # change only refuses more.
+        return len(name) >= 4 and CHDIR_LONG_OPTION.startswith(name)
+    letters = WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT.get(wrapper, frozenset())
+    for character in word[1:]:
+        if character == letter:
+            return True
+        if character in letters:
+            return False
+    return False
+
+
+def directory_change(text):
+    """Does the shell running `text` possibly change directory (issue 418)?
+
+    A directory word the shell may run anywhere counts, by the shared scan
+    `shell_run_word`: after or attached to a redirection, or named by substring
+    in evaluator, `env -S`, substitution or untokenisable text. So does a word at
+    a command position that carries an expansion (it can be `cd`) and a wrapper
+    option that sets the directory (`env -C`, `sudo -D`, `--chdir`).
+    """
+    if shell_run_word(text, DIRECTORY_WORDS) is not None:
+        return True
+    segments = split_segments(text)
+    if segments is None:
+        return False
+    fresh = (True, None, (), False)
+    readings = (True, False)
+    states = dict.fromkeys(readings, fresh)
+    for segment in segments:
+        tokens = tokenize_segment(segment)
+        if tokens is None:
+            states = dict.fromkeys(readings, fresh)
+            continue
+        flags = [False] * len(tokens)
+        for reading in readings:
+            read_flags, _payloads, after = detaching_command_flags(
+                tokens, states[reading], embedded_targets=reading)
+            dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
+            states[reading] = after if dangling else fresh
+            flags = [a or b for a, b in zip(flags, read_flags)]
+        for index, (flag, (value, operator)) in enumerate(zip(flags, tokens)):
+            if operator:
+                continue
+            word = split_redirection(value)[0]
+            if flag and ("$" in word or "`" in word):
+                return True
+            wrapper = program_name(word)
+            if wrapper not in CHDIR_SHORT_OPTIONS:
+                continue
+            for later, later_operator in tokens[index + 1:]:
+                if later_operator or not later.startswith("-"):
+                    break
+                if chdir_option(wrapper, later):
+                    return True
+    return False
+
+
+def cd_prelude_directory(command):
+    """(directory, remainder) when `command` is one leading `cd <absolute dir> && `
+    (after an optional `unset` scrub spelling) before a single segment, else None
+    (issue 418 D1)."""
+    rest = command
+    for spelling in SCRUB_PREFIXES:
+        if spelling.startswith("unset "):
+            stripped = strip_spelling(rest, spelling)
+            if stripped is not None:
+                rest = stripped
+                break
+    if not rest.startswith("cd "):
+        return None
+    rest = rest[len("cd "):]
+    word, space, after = rest.partition(" ")
+    if not space or not after.startswith("&& "):
+        return None
+    remainder = after[len("&& "):]
+    if not remainder or remainder[0].isspace():
+        return None
+    if (git_directory_problem(word) or not os.path.isabs(word)
+            or ".." in word.split("/")
+            or any(character in word for character in "<>$`")):
+        return None
+    segments = split_segments(remainder)
+    if segments is None or len(segments) != 1:
+        return None
+    return word, remainder
+
+
+def shell_directory(command):
+    """(directory, problem): the directory a leading `cd` moves a push or PR
+    creation to, or the problem with any other directory change (issue 418)."""
+    prelude = cd_prelude_directory(command)
+    if prelude is not None:
+        if not directory_change(prelude[1]):
+            return prelude[0], None
+    elif not directory_change(command):
+        return None, None
+    return None, CD_PRELUDE_PROBLEM
 
 
 def strip_spelling(text, spelling):
@@ -2789,6 +2914,7 @@ def main():
         if operation == "label":
             return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
 
+    shell_dir, shell_problem = shell_directory(command)
     # One context per distinct target directory, all under one deadline.
     contexts = {}
     for operation, segment, problem, directory in operations:
@@ -2796,6 +2922,10 @@ def main():
             return refuse(operation, DEADLINE_REFUSAL)
         if problem is not None:
             return refuse(operation, problem, accepted_forms(table[operation], None))
+        in_shell_directory = operation in ("push", "pr-create")
+        if in_shell_directory and shell_problem is not None:
+            return refuse(operation, shell_problem,
+                          accepted_forms(table[operation], None))
         try:
             # Push and PR creation are judged per segment; the other verbs on the
             # whole command, so they tolerate no chaining.
@@ -2808,7 +2938,10 @@ def main():
                     text, args.git_bin, args.child_timeout_seconds, table[operation]
                 )
             else:
-                target = target_directory(directory, payload.get("cwd"))
+                target = target_directory(
+                    directory,
+                    shell_dir if in_shell_directory and shell_dir is not None
+                    else payload.get("cwd"))
                 context = contexts.get(target)
                 if context is None:
                     context = contexts[target] = Context(
