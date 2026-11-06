@@ -2519,6 +2519,81 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertIn(f"lifecycle guard: unsafe {label}: {unresolved}", result.stderr)
                 self.assertIn("; accepted: ", result.stderr)
 
+    def test_pr_creation_and_merge_are_judged_against_the_repository_they_name(self):
+        """Issue 418 D4-D7: a `--repo` slug with a derived row, other than the
+        directory's repository, is judged from that row, never from the directory."""
+        here = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        plain = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        create = ('gh pr create --repo {slug} --base {base} --head issue-418-topic '
+                  '--title "x" --body "y"')
+        merge = "gh pr merge 418 --repo {slug} --merge --delete-branch"
+        for command, cwd, env in (
+            (create.format(slug=NODO, base="dev"), here, {}),
+            (create.format(slug=NODO, base="main"), here, {}),
+            ("unset GITHUB_TOKEN && " + create.format(slug=NODO, base="dev"), here, {}),
+            (create.format(slug=NODO, base="dev"), plain, {}),
+            (create.format(slug=NODO, base="dev"), None, {}),
+            (f"cd {here} && " + create.format(slug=NODO, base="dev"), plain, {}),
+            (merge.format(slug=NODO), here, {}),
+            ("unset GITHUB_TOKEN && " + merge.format(slug=NODO), None, {}),
+            (f"gh pr merge 1484 --repo {NODO} --merge", here, self.release_env()),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                result = self.run_guard(command, cwd=cwd, env=env)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        unconfirmed = (f"repository {NODO}: the row check did not confirm its derived "
+                       "policy row: unavailable (registry_invalid)")
+        for command, cwd, env, reason in (
+            (create.format(slug=NODO, base="release"), here, {},
+             "unsafe PR creation: --base release is not one of dev, main"),
+            (create.format(slug=NODO, base="dev"), here, {"FAKE_DERIVE_MODE": "unavailable"},
+             f"unsafe PR creation: {unconfirmed}"),
+            (merge.format(slug=NODO), here, {"FAKE_DERIVE_MODE": "unavailable"},
+             f"unsafe merge: {unconfirmed}"),
+            (create.format(slug=NODO, base="dev").replace('--body "y"',
+                                                          "--body-file /tmp/notes-418.md"),
+             here, {}, "unsafe PR creation: cannot resolve the working tree to check "
+                       "--body-file against"),
+            # No row: the directory's refusal stands.
+            (create.format(slug="fagenorn/argus", base="main"), here, {},
+             "unsafe PR creation: --repo fagenorn/argus is not the current repository "
+             "fagenorn/nix-config"),
+            (merge.format(slug="fagenorn/argus"), here, {},
+             "unsafe merge: --repo fagenorn/argus is not the current repository "
+             "fagenorn/nix-config"),
+            (merge.format(slug="elevenyellow/other"), None, {},
+             "unsafe merge: repository unknown is outside standing authorization"),
+            # Release creation stays judged against the directory.
+            (f'gh release create v1.2.3 --repo {NODO} --verify-tag --title "v1.2.3" '
+             "--notes-file /tmp/notes.md", here, {},
+             f"unsafe release creation: --repo {NODO} is not the current repository "
+             "fagenorn/nix-config"),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                result = self.run_guard(command, cwd=cwd, env=env)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn(f"lifecycle guard: {reason}", result.stderr)
+        # The named repository's row is checked once and the directory's context, which
+        # has no row here, runs none. The chained merge is refused by its whole-command
+        # grammar, judged in the directory context.
+        log = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "derive.log"
+        result = self.run_guard(
+            create.format(slug=NODO, base="dev") + " && " + merge.format(slug=NODO),
+            cwd=here, env={"FAKE_DERIVE_LOG": str(log)})
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("lifecycle guard: unsafe merge: forbidden character `&`", result.stderr)
+        self.assertEqual(f"{NODO}\n", log.read_text(encoding="utf-8"))
+        # The reverse direction: a slug with no row, named from a checkout that has
+        # one, keeps that checkout's refusal after its own row check.
+        log.unlink()
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        result = self.run_guard(create.format(slug="fagenorn/nix-config", base="main"),
+                                cwd=nodo, env={"FAKE_DERIVE_LOG": str(log)})
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("lifecycle guard: unsafe PR creation: --repo fagenorn/nix-config is "
+                      f"not the current repository {NODO}", result.stderr)
+        self.assertEqual(f"{NODO}\n", log.read_text(encoding="utf-8"))
+
     def test_tag_push_near_misses_are_refused(self):
         repo = self.tagged_repo("fagenorn/nix-config")
         lightweight = self.tagged_repo("fagenorn/nix-config", tag="v2.0.0", annotated=False)

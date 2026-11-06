@@ -1556,30 +1556,54 @@ def load_compiled_policy(path):
     return dict(derived), None
 
 
+def bounded_timeout(deadline, child_timeout):
+    """The bound for the next child, read immediately before it starts.
+
+    A child starts only when its whole bound ends before the deadline: the bound
+    is never clipped to the time left, so a child that starts has the full
+    `child_timeout` and one that cannot is refused before it starts.
+    """
+    if deadline - time.monotonic() < child_timeout:
+        raise DeadlineExhausted()
+    return child_timeout
+
+
 class Context:
-    """Injected dependencies plus one target directory's repository facts,
-    resolved once per directory (issue 400 D8).
+    """Injected dependencies plus one repository's facts, resolved once per
+    directory or per named repository (issue 400 D8, issue 418 D4).
 
     `cwd` is that directory: the payload `cwd`, or a push's `git -C` directory
-    (`target_directory`). Building a context is the one place the compiled
+    (`target_directory`). With `repository` given this is a named-repository
+    context (issue 418 D5): the repository is the slug a PR creation or merge
+    names with `--repo`, no checkout is read for it (`cwd` is None, no `git`
+    child runs), and the base branch is its row's `default_branch` once the row
+    check confirms the row. Building a context is the one place the compiled
     policy is opened and the one place the row check runs, so a command with no
     push, PR creation, merge or release creation never reads the first or
     starts the second.
     """
 
-    def __init__(self, args, base, cwd, deadline):
+    def __init__(self, args, base, cwd, deadline, repository=None):
         self.git_bin = args.git_bin
         self.gh_bin = args.gh_bin
         self.jq_bin = args.jq_bin
         self.deadline = deadline
         self.child_timeout = args.child_timeout_seconds
         self.authorized_owners = base.authorized_owners
-        self.repository = detect_repository(self.git_bin, cwd, self.timeout)
-        self.base_branch = default_branch(self.git_bin, cwd, self.timeout)
-        self.cwd = cwd
+        self.named = repository is not None
+        if self.named:
+            self.repository = repository
+            self.base_branch = None
+            self.cwd = None
+        else:
+            self.repository = detect_repository(self.git_bin, cwd, self.timeout)
+            self.base_branch = default_branch(self.git_bin, cwd, self.timeout)
+            self.cwd = cwd
         rows, self.compiled_problem = load_compiled_policy(args.policy)
         self.derived_row = rows.get(self.repository)
         self.row_problem = self._row_problem(base, args)
+        if self.named and self.derived_row is not None and self.row_problem is None:
+            self.base_branch = self.derived_row["default_branch"]
         # A derived row with two distinct branches declares an integration
         # branch exactly as an `integration_bases` entry does, so every reader
         # of `integration_bases` sees both without knowing where a row came from.
@@ -1599,23 +1623,17 @@ class Context:
 
     @property
     def timeout(self):
-        """The bound for the next child, read immediately before it starts.
-
-        A child starts only when its whole bound ends before the deadline: the
-        bound is never clipped to the time left, so a child that starts has the
-        full `--child-timeout-seconds` and one that cannot is refused before it
-        starts.
-        """
-        if self.deadline - time.monotonic() < self.child_timeout:
-            raise DeadlineExhausted()
-        return self.child_timeout
+        """The bound for the next child (`bounded_timeout`)."""
+        return bounded_timeout(self.deadline, self.child_timeout)
 
     def _row_problem(self, base, args):
         """Why the repository's derived row cannot be used, or None (also None with no row).
 
         Three checks, in this order, and the first to fail is the answer: the
         literal conflict, `origin/HEAD` against the row's default branch, and the
-        row check.
+        row check. A named-repository context has no checkout, so it skips the
+        second: the row check proves the row's default branch against `origin`'s
+        listed default itself (issue 418 D5).
         """
         row = self.derived_row
         if row is None:
@@ -1625,7 +1643,7 @@ class Context:
                 f"repository {self.repository} has both a literal integration base "
                 "and a derived policy row; repair: run claude-guard-policy"
             )
-        if self.base_branch != row["default_branch"]:
+        if not self.named and self.base_branch != row["default_branch"]:
             live = self.base_branch if self.base_branch is not None else "no branch"
             return (
                 f"repository {self.repository}: origin/HEAD names {live}, "
@@ -2867,6 +2885,38 @@ def validate_release_merge(pr_facts, base, integration_base, head_commit, contex
     return 0
 
 
+def repository_context(operation, text, target, contexts, args, base, deadline, compiled):
+    """The context a verb is judged in (issue 418 D4).
+
+    A PR creation or merge whose `--repo` slug differs from its target
+    directory's repository, and which has a row in the compiled policy, is
+    judged in a named-repository context built from that row, and the directory
+    context is not built. Anything else (another verb, a text that matches no
+    form, the directory's own slug, a slug with no row) is judged in the
+    directory context, as before.
+    """
+    requested = None
+    if operation in ("pr-create", "merge"):
+        match = match_form(compiled, text)
+        if match is not None:
+            requested = match.values["slug"]
+    if requested is not None:
+        here = detect_repository(
+            args.git_bin, target, bounded_timeout(deadline, args.child_timeout_seconds))
+        if here != requested:
+            key = ("repository", requested)
+            named = contexts.get(key)
+            if named is None:
+                named = contexts[key] = Context(
+                    args, base, None, deadline, repository=requested)
+            if named.derived_row is not None:
+                return named
+    context = contexts.get(target)
+    if context is None:
+        context = contexts[target] = Context(args, base, target, deadline)
+    return context
+
+
 def main():
     table = compile_form_table(FORM_TABLE)
     started = time.monotonic()
@@ -2942,12 +2992,9 @@ def main():
                     directory,
                     shell_dir if in_shell_directory and shell_dir is not None
                     else payload.get("cwd"))
-                context = contexts.get(target)
-                if context is None:
-                    context = contexts[target] = Context(
-                        args, base, target,
-                        started + INVOCATION_DEADLINE_SECONDS,
-                    )
+                context = repository_context(
+                    operation, text, target, contexts, args, base,
+                    started + INVOCATION_DEADLINE_SECONDS, table[operation])
                 if operation == "push":
                     status = validate_push(text, context, table[operation])
                 elif operation == "pr-create":
