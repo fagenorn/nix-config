@@ -64,7 +64,7 @@ PLAN_MEMBER_RE = re.compile(r"task-([1-9][0-9]*)\.md\Z")
 SHARD_RE = re.compile(r"shard-([0-9]{3})\.(diff|jsonl)\Z")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 BOUNDARY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-# Restated from `agent_tools.review_gate`, which this flat script does not import.
+# The retired `review-feasibility gate` summary (#605); old SDD stop reports still carry it.
 SUMMARY_KEYS = frozenset({
     "artifact_policy_sha256", "base", "completed_through", "forecast_sha256", "head", "kind",
     "metrics", "packing_policy_sha256", "plan", "plan_package_sha256", "recommended_boundary",

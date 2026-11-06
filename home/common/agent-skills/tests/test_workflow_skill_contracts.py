@@ -3450,7 +3450,6 @@ PROJECTION_MACHINE_TEXT = {
         '{"state":"complete","artifact":{"kind":"implementation-plan"',
         '"largest_member_bytes":<int>},"budget_status":"within_budget"},"notes":',
         '{"state":"decompose_required","artifact":{"kind":"implementation-plan"'),
-    FROM_ISSUE_DIR / "SKILL.md": ("review-feasibility confirm --plan <root> --base <base> --input -",),
 }
 PLANNING_DOCUMENTS = (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md", FROM_ISSUE_DIR / "standards-review.md",
                       PHASE_5_REVIEW_CONTRACT)
@@ -3494,14 +3493,15 @@ class ProjectionCallerContractsTest(unittest.TestCase):
 
 
 class ExecutionCallerContractsTest(unittest.TestCase):
-    def test_sdd_no_longer_records_or_projects_and_phase_6_confirms(self):
+    def test_sdd_no_longer_records_or_projects_and_phase_6_fails_a_projection(self):
         sdd = normalized(SDD.read_text(encoding="utf-8"))
         for retired in ("sdd-gate record", "review-feasibility", "projected_overflow", "plan: record task",
                         "actual_overage"):
             self.assertNotIn(retired, sdd)
         phase6 = normalized((FROM_ISSUE_DIR / "SKILL.md").read_text(encoding="utf-8")
                             .split("## Phase 6", 1)[1].split("## Phase 7", 1)[0])
-        self.assertIn("review-feasibility confirm --plan <root> --base <base> --input -", phase6)
+        self.assertNotIn("review-feasibility", phase6)
+        self.assertIn("`projected_overflow` or a disagreement is `failed`", phase6)
 
     def test_an_oversized_range_is_chunked_with_its_literal_diff_protocol(self):
         review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
