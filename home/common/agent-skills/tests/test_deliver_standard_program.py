@@ -699,6 +699,60 @@ class ShipTest(unittest.TestCase):
         self.assertNotIn("close-out", labels(calls))
 
 
+class FixWaveTest(unittest.TestCase):
+    """#635 owner comment: a narrowing re-review earns a second wave; a new kind stops; waves are counted."""
+
+    FIRST = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "race in acquire"}]}
+
+    @staticmethod
+    def narrowing(summary="race in release"):
+        return {"verdict": "findings",
+                "findings": [{"severity": "critical", "summary": summary, "relation": "narrowing"}]}
+
+    def test_narrowing_findings_earn_a_second_wave(self):
+        result, calls = run(replies={"final-1": self.FIRST, "fix-wave-review": self.narrowing()})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 2))
+        self.assertEqual([l for l in labels(calls) if l.startswith("fix-wave")],
+                         ["fix-wave", "fix-wave-review", "fix-wave-2", "fix-wave-review-2"])
+        self.assertIn("race in release", prompt(calls, "fix-wave-2"))
+        self.assertIn("race in release", prompt(calls, "fix-wave-review-2"))
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-wave-review-2"], ["reviewer"])
+
+    def test_a_new_kind_of_finding_stops_after_one_wave(self):
+        new = {"severity": "critical", "summary": "leak", "relation": "new"}
+        bare = {"severity": "critical", "summary": "leak"}
+        narrow = {"severity": "critical", "summary": "race in release", "relation": "narrowing"}
+        for findings in ([new], [bare], [narrow, new]):
+            with self.subTest(findings=findings):
+                rv = {"verdict": "findings", "findings": findings}
+                result, calls = run(replies={"final-1": self.FIRST, "fix-wave-review": rv})
+                self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 1))
+                self.assertNotIn("fix-wave-2", labels(calls))
+
+    def test_findings_after_the_second_wave_stop(self):
+        result, calls = run(replies={"final-1": self.FIRST, "fix-wave-review": self.narrowing(),
+                                     "fix-wave-review-2": self.narrowing("race in renew")})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 2))
+        self.assertNotIn("fix-wave-3", labels(calls))
+
+    def test_failed_second_wave_stops(self):
+        result, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": self.narrowing(),
+                                 "fix-wave-2": {"status": "blocked", "notes": "no"}})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave", 2))
+
+    def test_rereview_is_asked_to_classify_each_finding(self):
+        _, calls = run(replies={"final-1": self.FIRST})
+        rereview = prompt(calls, "fix-wave-review")
+        for needle in ("relation", "narrowing", "Unsure is new"):
+            self.assertIn(needle, rereview)
+
+    def test_waves_are_counted(self):
+        result, _ = run()
+        self.assertEqual(result["fix_waves"], 0)
+        result, _ = run(replies={"final-1": self.FIRST})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 1))
+
+
 class SourceTest(unittest.TestCase):
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")

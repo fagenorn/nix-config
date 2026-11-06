@@ -65,7 +65,7 @@ const FINDINGS = {
   type: 'object',
   properties: {
     verdict: { type: 'string', enum: ['pass', 'findings'] },
-    findings: { type: 'array', items: { type: 'object', properties: { severity: SEV, file: { type: 'string' }, summary: { type: 'string' }, failing_input: { type: 'string' } }, required: ['severity', 'summary'] } },
+    findings: { type: 'array', items: { type: 'object', properties: { severity: SEV, file: { type: 'string' }, summary: { type: 'string' }, failing_input: { type: 'string' }, relation: { type: 'string', enum: ['narrowing', 'new'] } }, required: ['severity', 'summary'] } },
   },
   required: ['verdict', 'findings'],
 }
@@ -165,7 +165,9 @@ const taskLog = CONT && CONT.done ? CONT.done.slice() : []
 let claimIncomplete = !!(CONT && CONT.claim_incomplete)
 // A partial task's edits stay claimed through any stop until that task is done.
 let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
-const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
+// Fix waves already spent, carried through a resume; declared before stop() because early failures call it.
+let fixWaves = (CONT && CONT.fix_waves) || 0
+const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
 
 if (CONT && setup.dirty && !setup.merged_pr && partial === undefined) {
   return stop('dirty', { details: `the worktree ${setup.worktree} has uncommitted changes no task claims; commit or discard them, then resume` })
@@ -192,7 +194,7 @@ Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted,
 ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state', 'notes'] } })
   const want = allCode ? 'CLOSED' : 'OPEN'
   if (!co || co.issue_state !== want || co.released !== true) return stop('close-out', { pr: PR, close_out: co, expected_issue_state: want })
-  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, tasks: taskLog, acceptance }
+  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, tasks: taskLog, acceptance, fix_waves: fixWaves }
 }
 
 if (CONT && setup.merged_pr) {
@@ -336,7 +338,7 @@ for (const t of plan.tasks) {
     if (lost) return lost
   }
   const start = `${CTX}\n${PLAN_REF}`
-  const halt = (stage, extra) => ({ ...stop(stage, extra), cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, partial: t.n } })
+  const halt = (stage, extra) => ({ ...stop(stage, extra), cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, partial: t.n } })
   let impl = await agent(`${start}
 Implement task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${FOCUSED} ${IMPL_RETURN} Return status blocked with notes if the task file is wrong or impossible.${CONT && CONT.partial === t.n ? `
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
@@ -397,11 +399,22 @@ ${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} ch
   finalFindings = finalFindings.concat(findingsOf(integ))
 }
 if (finalFindings.length) {
-  log(`final review: ${finalFindings.length} blocking findings, one fix wave`)
-  const fw = await agent(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(finalFindings)}. If a finding is wrong, explain with evidence in notes. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: 'fix-wave', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
-  if (!implDone(fw)) return stop('fix-wave', { fw, finalFindings })
-  const rv = await agent(`${CTX}\nRe-review these final-review findings against the fix (${span(fw)}); implementer notes: ${fw.notes}. Findings: ${JSON.stringify(finalFindings)}. Report any still unresolved and any new Important or Critical defect.`, { label: 'fix-wave-review', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
-  if (!rv || findingsOf(rv).length) return stop('fix-wave-review', { rv })
+  // At most two waves: the second runs only when the first re-review's findings all narrow the first round (same kind of defect on another path); a new kind stops.
+  let waveFindings = finalFindings
+  for (let k = 1; k <= 2; k++) {
+    const fwLabel = k === 1 ? 'fix-wave' : `fix-wave-${k}`
+    const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
+    log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
+    fixWaves++
+    const fw = await agent(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+    if (!implDone(fw)) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves })
+    const rv = await agent(`${CTX}\nRe-review these final-review findings against the fix (${span(fw)}); implementer notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}. Report any still unresolved and any new Important or Critical defect. For each finding you still report, set relation: narrowing when it is the same kind of defect as one of the findings above reached on another path, input or call site; new when it is a different kind. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+    if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+    const next = findingsOf(rv)
+    if (!next.length) break
+    if (k === 2 || next.some(f => f.relation !== 'narrowing')) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+    waveFindings = next
+  }
 }
 
 // ---------------- Verify ----------------
