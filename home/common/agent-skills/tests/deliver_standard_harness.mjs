@@ -9,14 +9,13 @@ const program = readFileSync(process.argv[2], 'utf8')
 const scenario = JSON.parse(readFileSync(0, 'utf8'))
 const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
-const DONE = { status: 'done', commit: 'c0ffee', tests: ['t'], mutation_checked: true, notes: 'ok' }
+const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], mutation_checked: true, notes: 'ok' }
 const SETUP = {
   ok: true, slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main',
-  branch: 'issue-9-x', worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard',
-  dirty: false, co_authored_by: true, unset_env: [], merge_strategy: 'merge', delete_branch: true,
+  branch: 'issue-9-x', worktree_path: '/r/.wt/w-issue-9-x', dirty: false, co_authored_by: true, unset_env: [], merge_strategy: 'merge', delete_branch: true,
   review: { code: 'cr', plan: 'pr' }, review_state: { code: 'available', plan: 'available' },
   knowledge: { standards: ['/r/docs/standards'], hints: ['/r/.hints'], rejections: ['/r/.rej'] },
-  verification: [{ id: 'build', argv: ['make', 'build'] }],
+  verification: [{ id: 'build', argv: ['make', 'build'], cwd: '.' }],
 }
 const PLAN = {
   status: 'planned', plan_root: '/r/.git/worktrees/w/deliver-standard/plan.md',
@@ -26,14 +25,14 @@ const PLAN = {
 // Ordered: the first matching pattern wins.
 const DEFAULTS = [
   [/^setup$/, SETUP],
+  [/^claim$/, { ok: true, worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard' }],
   [/^plan(-revise)?$/, PLAN],
   [/-codex$/, { available: true, ...PASS }],
-  [/^sync-review-/, PASS],
+  [/review|^final-/, PASS],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],
   [/^verify-fix-/, DONE],
-  [/^verify/, { head: SHA, results: [{ id: 'build', status: 'pass', summary: 'ok' }] }],
+  [/^verify/, { head: SHA, clean: true, results: [{ id: 'build', status: 'pass', summary: 'ok' }] }],
   [/^(impl|fix)-|^fix-wave$/, DONE],
-  [/review|^final-/, PASS],
   [/^pr$/, { pr: 42, head: SHA }],
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'] }],
   [/^merge$/, { merged: true, merge_commit: SHA, notes: 'merged' }],

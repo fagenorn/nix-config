@@ -61,16 +61,18 @@ class HappyPathTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         self.assertTrue(result["merged"])
         self.assertEqual(labels(calls), [
-            "setup", "plan", "plan-codex", "plan-review", "impl-1", "review-1", "final-codex",
+            "setup", "claim", "plan", "plan-codex", "plan-review", "impl-1", "review-1", "final-codex",
             "final-1", "verify", "pr", "checks-1", "merge", "close-out"])
 
     def test_merge_carries_contract_strategy_and_the_checked_head(self):
+        # The contract decides the form; a host guard that accepts fewer forms refuses
+        # at the merge step, which then stops at stage merge (see the program header).
         head = "b" * 40
         _, calls = run(patch={"setup": {"merge_strategy": "squash", "delete_branch": False,
-                                        "unset_env": ["GH_TOKEN", "OTHER"]},
+                                        "unset_env": ["GH_TOKEN"]},
                               "checks-1": {"head": head}})
         merge = prompt(calls, "merge")
-        self.assertIn(f"unset GH_TOKEN OTHER && gh pr merge 42 --repo owner/repo --squash "
+        self.assertIn(f"unset GH_TOKEN && gh pr merge 42 --repo owner/repo --squash "
                       f"--match-head-commit {head}\n", merge)
         self.assertNotIn("--delete-branch", merge)
         self.assertNotIn("GITHUB_TOKEN", PROGRAM.read_text(encoding="utf-8"))
@@ -125,8 +127,26 @@ class ContractTest(unittest.TestCase):
         setup = prompt(calls, "setup")
         for needle in ("already-merged", "existing-branch", "no-longer-applies",
                        "bindings.vcs.worktree.prefix", "bindings.vcs.worktree.root",
-                       "--state all --search 9", "rev-parse --absolute-git-dir"):
+                       "--state all --search 9"):
             self.assertIn(needle, setup)
+        self.assertNotIn("--add-label", setup)
+        claim = prompt(calls, "claim")
+        for needle in ("--add-label in-progress", "worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x origin/dev",
+                       "rev-parse --absolute-git-dir"):
+            self.assertIn(needle, claim)
+
+    def test_only_gh_commands_carry_the_credential_prefix(self):
+        _, calls = run(patch={"setup": {"unset_env": ["GH_TOKEN"]}})
+        text = prompt(calls, "impl-1")
+        self.assertIn("unset GH_TOKEN && gh pr create", text)
+        self.assertIn("; git -C /r branch -d issue-9-x.", text)
+        self.assertIn("git -C /r/.wt/w-issue-9-x push origin issue-9-x;", text)
+        self.assertNotIn("&& git", text)
+
+    def test_claim_failure_stops_with_its_result(self):
+        result, calls = run(replies={"claim": {"ok": False, "reason": "worktree add failed"}})
+        self.assertEqual(result["stage"], "claim")
+        self.assertEqual(labels(calls), ["setup", "claim"])
 
     def test_blocked_review_capability_stops(self):
         result, calls = run(patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
@@ -169,9 +189,41 @@ class PlanTest(unittest.TestCase):
         self.assertIsNone(result["cont"]["plan"])
         self.assertEqual(result["cont"]["setup"]["worktree"], "/r/.wt/w-issue-9-x")
 
-    def test_codex_plan_review_unavailable_stops(self):
+    def test_codex_plan_review_unavailable_stops_and_resume_reviews_again(self):
         result, _ = run(replies={"plan-codex": {"available": False, "verdict": "pass", "findings": []}})
         self.assertEqual((result["stage"], result["step"]), ("codex-unavailable", "plan"))
+        self.assertFalse(result["cont"]["plan_reviewed"])
+        _, calls = run(args=dict(ARGS, cont=result["cont"]))
+        names = labels(calls)
+        self.assertNotIn("plan", names)
+        self.assertIn("plan-review", names)
+        self.assertIn("plan-codex", names)
+
+    def test_plan_without_tasks_stops_instead_of_crashing(self):
+        result, calls = run(replies={"plan": {"status": "planned", "plan_root": "/g/plan.md",
+                                              "acceptance": PLAN["acceptance"]}})
+        self.assertEqual((result["stage"], result["step"]), ("plan", "plan"))
+        self.assertIsNone(result["cont"]["plan"])
+        self.assertNotIn("plan-review", labels(calls))
+
+    def test_failed_revision_stops_unreviewed(self):
+        finding = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
+        result, calls = run(replies={"plan-review": finding, "plan-revise": None})
+        self.assertEqual(result["stage"], "plan")
+        self.assertEqual(result["findings"][0]["summary"], "gap")
+        self.assertFalse(result["cont"]["plan_reviewed"])
+        self.assertNotIn("impl-1", labels(calls))
+
+    def test_revision_asking_questions_drops_the_plan(self):
+        finding = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
+        result, _ = run(replies={"plan-review": finding,
+                                 "plan-revise": {"status": "needs_user", "questions": ["q"]}})
+        self.assertEqual(result["needs_user"], ["q"])
+        self.assertIsNone(result["cont"]["plan"])
+
+    def test_silent_plan_reviewer_stops(self):
+        result, _ = run(replies={"plan-review": None})
+        self.assertEqual(result["stage"], "plan-review")
 
     def test_plan_findings_trigger_one_revision(self):
         finding = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
@@ -202,7 +254,7 @@ class ResumeTest(unittest.TestCase):
     def cont(self, **extra):
         setup = {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x",
                  "plan_dir": "/g"}
-        return dict({"setup": setup, "plan": dict(PLAN, tasks=tasks(2)),
+        return dict({"setup": setup, "plan": dict(PLAN, tasks=tasks(2)), "plan_reviewed": True,
                      "done": [{"n": 1, "commit": "c1"}]}, **extra)
 
     def test_cont_readopts_skips_plan_and_finished_tasks(self):
@@ -221,6 +273,21 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(result["stage"], "setup")
         self.assertEqual(labels(calls), ["setup"])
 
+    def test_dirty_resume_without_a_partial_task_stops(self):
+        result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"dirty": True}})
+        self.assertEqual(result["stage"], "dirty")
+        self.assertEqual(labels(calls), ["setup"])
+
+    def test_dirty_resume_of_the_partial_task_continues(self):
+        result, _ = run(args=dict(ARGS, cont=self.cont(partial=2)), patch={"setup": {"dirty": True}})
+        self.assertEqual(result["stage"], "done")
+
+    def test_resume_after_merge_goes_to_close_out(self):
+        result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_pr": 42}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls), ["setup", "close-out"])
+        self.assertIn("gh issue close 9", prompt(calls, "close-out"))
+
     def test_cont_without_plan_plans_again(self):
         _, calls = run(args=dict(ARGS, cont={"setup": self.cont()["setup"], "plan": None, "done": []}))
         self.assertIn("plan", labels(calls))
@@ -234,6 +301,25 @@ class ReviewAndVerifyTest(unittest.TestCase):
         for label in ("final-1", "final-2", "final-integration"):
             self.assertIn(label, names)
 
+    def test_silent_final_reviewer_stops(self):
+        result, calls = run(replies={"final-1": None})
+        self.assertEqual(result["stage"], "final-review")
+        self.assertNotIn("fix-wave", labels(calls))
+
+    def test_silent_task_reviewer_stops(self):
+        result, _ = run(replies={"review-1": None})
+        self.assertEqual(result["stage"], "task-review")
+        self.assertEqual(result["cont"]["partial"], 1)
+
+    def test_done_without_a_commit_is_not_done(self):
+        result, _ = run(replies={"impl-1": {"status": "done", "notes": "ok"}})
+        self.assertEqual(result["stage"], "task")
+
+    def test_fix_reviews_cover_the_whole_fix_range(self):
+        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
+        _, calls = run(replies={"final-1": bad})
+        self.assertIn("diff b0..c0ffee", prompt(calls, "fix-wave-review"))
+
     def test_codex_code_review_unavailable_stops(self):
         result, _ = run(replies={"final-codex": {"available": False, "verdict": "pass", "findings": []}})
         self.assertEqual((result["stage"], result["step"]), ("codex-unavailable", "code"))
@@ -245,12 +331,34 @@ class ReviewAndVerifyTest(unittest.TestCase):
         self.assertIn("edge", prompt(calls, "fix-wave"))
         self.assertIn("fix-wave-review", labels(calls))
 
+    def test_missing_or_unearned_results_and_dirty_tree_fail_verification(self):
+        for reply in ({"head": SHA, "clean": True, "results": []},
+                      {"head": SHA, "clean": True, "results": [{"id": "build", "status": "skipped", "summary": "s"}]},
+                      {"head": SHA, "clean": False, "results": [{"id": "build", "status": "pass", "summary": "ok"}]}):
+            with self.subTest(reply=reply):
+                result, calls = run(replies={"verify": reply, "verify-2": reply, "verify-3": reply})
+                self.assertEqual(result["stage"], "verify")
+                self.assertNotIn("pr", labels(calls))
+
+    def test_verify_fix_is_reviewed(self):
+        fail = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
+        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "weakened test"}]}
+        result, calls = run(replies={"verify": fail, "verify-fix-review-1": bad})
+        self.assertEqual(result["stage"], "verify-fix-review")
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "verify-fix-review-1"], ["reviewer-lite"])
+
+    def test_verification_runs_in_each_command_cwd(self):
+        _, calls = run(patch={"setup": {"verification": [{"id": "build", "argv": ["npm", "test"], "cwd": "web"}]}})
+        verify = prompt(calls, "verify")
+        self.assertIn('"cwd":"web"', verify)
+        self.assertIn("<worktree>/<its cwd>", verify)
+
     def test_verify_failing_after_two_fixes_stops(self):
-        fail = {"head": SHA, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
+        fail = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
         result, calls = run(replies={"verify": fail, "verify-2": fail, "verify-3": fail})
         self.assertEqual(result["stage"], "verify")
         self.assertEqual([l for l in labels(calls) if l.startswith("verify-fix")],
-                         ["verify-fix-1", "verify-fix-2"])
+                         ["verify-fix-1", "verify-fix-review-1", "verify-fix-2", "verify-fix-review-2"])
 
 
 class ShipTest(unittest.TestCase):
@@ -289,6 +397,11 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"checks-1": behind, "checks-2": behind, "checks-3": behind})
         self.assertEqual(result["stage"], "sync-contention")
         self.assertEqual([l for l in labels(calls) if l.startswith("sync-")], ["sync-1", "sync-2"])
+
+    def test_close_out_that_leaves_the_issue_open_is_not_done(self):
+        result, _ = run(replies={"close-out": {"issue_state": "OPEN", "notes": "close failed"}})
+        self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
+        self.assertEqual(result["pr"], 42)
 
     def test_unmerged_pr_stops_before_close_out(self):
         result, calls = run(replies={"merge": {"merged": False, "notes": "head moved"}})
