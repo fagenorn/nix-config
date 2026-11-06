@@ -34,7 +34,12 @@ shared state (issue 623): list, POST, PATCH and DELETE of that issue's comments 
 responses. An optional `schedule` forces the order of named store operations across concurrent
 callers: an operation that matches a schedule entry beyond the cursor waits until the cursor
 reaches it, and one that matches no entry at or past the cursor runs unscheduled. `stored()`
-reads the comments now and `wait_cursor(n)` blocks until `n` entries have run. `host_clock`
+reads the comments now and `wait_cursor(n)` blocks until `n` entries have run. Given `labels`
+(issue 630) the store also holds the issue's state, labels and created issues, posted comments
+carry `author_association` `OWNER`, and the fake serves the GraphQL listing, label add and
+remove, close, issue creation and the labelled issue listing; `fail_once` names operations
+(`graphql`, `add_label`, `remove_label`, `close`, `create_issue`, `list_issues`, `post`, `edit`)
+that each answer `HTTP 502` once and change nothing. `host_clock`
 makes every host-clock read of the named modules return one instant, so a module that reads
 the host clock instead of the server's fails its test.
 """
@@ -66,9 +71,35 @@ FLOOR_PROTECTION = {
 STORE_HANDLER = """\
 if tool == "gh" and (state / "store.json").exists():
     import fcntl
+    from urllib.parse import unquote
+
+    ISSUE_KINDS = ("graphql", "add_label", "remove_label", "close", "create_issue", "list_issues")
 
     def store_op(store):
         slug, issue = store["slug"], store["issue"]
+        issue_url = "repos/" + slug + "/issues/" + str(issue)
+        if "issue_state" in store:
+            if (len(argv) == 8 and argv[:3] == ["api", "graphql", "-f"] and argv[3].startswith("query=")
+                    and argv[4] == "-f" and argv[5].startswith("owner=") and argv[6] == "-f"
+                    and argv[7].startswith("name=") and argv[5][6:] + "/" + argv[7][5:] == slug):
+                return "graphql", None, None
+            if (len(argv) == 6 and argv[:4] == ["api", "-X", "POST", issue_url + "/labels"]
+                    and argv[4] == "-f" and argv[5].startswith("labels[]=")):
+                return "add_label", argv[5][len("labels[]="):], None
+            if (len(argv) == 4 and argv[:3] == ["api", "-X", "DELETE"]
+                    and argv[3].startswith(issue_url + "/labels/")):
+                return "remove_label", unquote(argv[3][len(issue_url + "/labels/"):]), None
+            if (len(argv) == 8 and argv[:4] == ["api", "-X", "PATCH", issue_url] and argv[4] == "-f"
+                    and argv[5] == "state=closed" and argv[6] == "-f" and argv[7].startswith("state_reason=")):
+                return "close", argv[7][len("state_reason="):], None
+            if (len(argv) >= 8 and len(argv) % 2 == 0 and argv[:4] == ["api", "-X", "POST", "repos/" + slug + "/issues"]
+                    and argv[4] == "-f" and argv[5].startswith("title=") and argv[6] == "-f"
+                    and argv[7].startswith("body=")
+                    and all(a == "-f" for a in argv[8::2]) and all(a.startswith("labels[]=") for a in argv[9::2])):
+                return "create_issue", (argv[5][6:], argv[7][5:], [a[len("labels[]="):] for a in argv[9::2]]), None
+            if (len(argv) == 2 and argv[0] == "api"
+                    and argv[1].startswith("repos/" + slug + "/issues?labels=")):
+                return "list_issues", unquote(argv[1].split("?labels=", 1)[1].split("&", 1)[0]), None
         base = "repos/" + slug + "/issues/" + str(issue) + "/comments"
         one = "repos/" + slug + "/issues/comments/"
         body = argv[5][5:] if len(argv) == 6 and argv[4] == "-f" and argv[5].startswith("body=") else None
@@ -87,7 +118,7 @@ if tool == "gh" and (state / "store.json").exists():
         parts = entry.split(":", 1) if kind == "post" else entry.split(":", 2)
         if parts[0] != kind:
             return False
-        if kind == "list":
+        if kind in ISSUE_KINDS or kind == "list":
             return len(parts) == 1
         if kind == "post":
             return len(parts) == 2 and parts[1] in body.split("\\n", 1)[0]
@@ -103,6 +134,44 @@ if tool == "gh" and (state / "store.json").exists():
     def fail_404():
         sys.stderr.write("gh: Not Found (HTTP 404)\\n")
         sys.exit(1)
+
+    def issue_op(store, kind, target):
+        st = store["issue_state"]
+        out = None
+        if kind == "graphql":
+            nodes = []
+            if st["state"] == "open" and "needs-verification" in st["labels"]:
+                nodes = [{"number": store["issue"], "labels": {"nodes": [{"name": n} for n in st["labels"]]},
+                          "comments": {"nodes": [
+                              {"databaseId": c["id"], "authorAssociation": c.get("author_association", "OWNER"),
+                               "body": c["body"], "createdAt": c["created_at"], "updatedAt": c["updated_at"]}
+                              for c in sorted(store["comments"], key=lambda c: c["id"])]}}]
+            out = {"data": {"repository": {"issues": {"nodes": nodes}}}}
+        elif kind == "add_label":
+            if target not in st["labels"]:
+                st["labels"].append(target)
+            out = [{"name": n} for n in st["labels"]]
+        elif kind == "remove_label":
+            if target not in st["labels"]:
+                fail_404()
+            st["labels"].remove(target)
+            out = [{"name": n} for n in st["labels"]]
+        elif kind == "close":
+            st["state"], st["state_reason"] = "closed", target
+            out = {"state": "closed"}
+        elif kind == "create_issue":
+            title, issue_body, labels = target
+            number = st["next_issue"]
+            st["next_issue"] += 1
+            st["created"].append({"number": number, "title": title, "body": issue_body, "labels": labels,
+                                  "author_association": "OWNER", "updated_at": store["clock"]})
+            out = {"number": number}
+        else:
+            out = [c for c in st["created"] if target in c["labels"]]
+        save(store)
+        if out is not None:
+            sys.stdout.write(json.dumps(out))
+        sys.exit(0)
 
     waiting_for = None
     deadline = time.monotonic() + 10
@@ -120,6 +189,14 @@ if tool == "gh" and (state / "store.json").exists():
             if not matches or matches[0] == cursor:
                 if matches:
                     store["cursor"] = cursor + 1
+                name = {"patch": "edit"}.get(kind, kind)
+                if name in store.get("fail_once", []):
+                    store["fail_once"].remove(name)
+                    save(store)
+                    sys.stderr.write("gh: Server Error (HTTP 502)\\n")
+                    sys.exit(1)
+                if kind in ISSUE_KINDS:
+                    issue_op(store, kind, target)
                 comments = store["comments"]
                 found = [c for c in comments if c["id"] == target]
                 if kind == "list":
@@ -127,6 +204,8 @@ if tool == "gh" and (state / "store.json").exists():
                 elif kind == "post":
                     out = {"id": store["next_id"], "body": body, "created_at": store["clock"],
                            "updated_at": store["clock"]}
+                    if "issue_state" in store:
+                        out["author_association"] = "OWNER"
                     store["next_id"] += 1
                     comments.append(out)
                 elif not found:
@@ -231,11 +310,21 @@ class ForgeWorld:
         self.respond(tool, argv, exit=1, stderr="gh: Forbidden (HTTP 403)")
 
     def comment_store(self, slug: str, issue: int, comments=(), *, next_id: int = 100,
-                      clock: str = "2026-11-06T10:00:00Z", schedule=()) -> None:
-        """Serve one issue's comments from shared state (see STORE_HANDLER)."""
-        (self.state / "store.json").write_text(json.dumps({
-            "slug": slug, "issue": issue, "comments": list(comments), "next_id": next_id,
-            "clock": clock, "schedule": list(schedule), "cursor": 0}), encoding="utf-8")
+                      clock: str = "2026-11-06T10:00:00Z", schedule=(), labels=None,
+                      next_issue: int = 500, fail_once=()) -> None:
+        """Serve one issue's comments from shared state (see STORE_HANDLER); `labels` (a list)
+        also gives the issue its state, labels and issue creation and listing."""
+        store = {"slug": slug, "issue": issue, "comments": list(comments), "next_id": next_id,
+                 "clock": clock, "schedule": list(schedule), "cursor": 0, "fail_once": list(fail_once)}
+        if labels is not None:
+            store["issue_state"] = {"state": "open", "state_reason": None, "labels": list(labels),
+                                    "created": [], "next_issue": next_issue}
+        (self.state / "store.json").write_text(json.dumps(store), encoding="utf-8")
+
+    def issue(self) -> dict:
+        """The stored issue now: state, state reason, labels and the issues created."""
+        store = json.loads((self.state / "store.json").read_text("utf-8"))["issue_state"]
+        return {key: store[key] for key in ("state", "state_reason", "labels", "created")}
 
     def stored(self) -> list[dict]:
         """The store's comments now, ascending id."""

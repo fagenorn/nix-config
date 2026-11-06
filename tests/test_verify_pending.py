@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from agent_tools import forge_markers as fm
 from agent_tools import verify_exec as vx
 from agent_tools import verify_facts as vf
 from agent_tools import verify_issues as vi
+from agent_tools import verify_run as vr
 
 from .forge_world import ForgeWorld, host_clock
 
@@ -611,3 +613,351 @@ class SourceTest(GitRepos):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Refs:
+    """Every reference resolves: these rows exercise the runner, not the lint's lookups (Task 5 tests those)."""
+    def command(self, command_id):
+        return "present"
+
+    def script(self, path, sha):
+        return "present", "present"
+
+    def flake(self, merge):
+        return None
+
+
+def stored_comment(cid, body, association="OWNER", at=T0):
+    return {"id": cid, "body": body, "created_at": at, "updated_at": at, "author_association": association}
+
+
+def line(index, ac, state, reason):
+    return {"repo": SLUG, "issue": ISSUE, "check": index, "ac": ac, "state": state, "reason": reason}
+
+
+def bindings(root):
+    def command(tool):
+        return {"argv": [tool], "cwd": str(root), "env": []}
+    return {"commands": {"check-ok": command("verify-ok"), "check-bad": command("verify-bad"),
+                         "check-later": command("verify-later"), "nix-activate": command("verify-ok")},
+            "workflow": {"verification": ["check-ok", "check-bad", "check-later"]},
+            "vcs": {"integration_branch": "main", "default_branch": "main"},
+            "deploy": {"adapter": "none", "command": None, "config": {}},
+            "tracker": TRACKER}
+
+
+def ok_check(**over):
+    return check(run={"command": "check-ok"}, **over)
+
+
+class PassBase(unittest.TestCase):
+    def setUp(self):
+        self.world = world_with(self, "verify-ok", "verify-bad", "verify-later", "darwin-version")
+        for tool, code in (("verify-ok", 0), ("verify-bad", 1), ("verify-later", 75)):
+            self.world.respond(tool, [], exit=code, stdout=f"{tool} ran\n")
+        for name, color in (("verification-failed", "B60205"), ("verification-follow-up", "FBCA04")):
+            self.world.respond("gh", ["api", "-X", "POST", f"repos/{SLUG}/labels", "-f", f"name={name}",
+                                      "-f", f"color={color}"])
+        script = self.world.checkout / "scripts" / "check.sh"
+        script.parent.mkdir()
+        script.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(0)\n", encoding="utf-8")
+        script.chmod(0o755)
+        self.project = vr.Project("octo/widgets", SLUG, self.world.checkout, self.world.checkout, TIP,
+                                  bindings(self.world.checkout))
+        self.workspaces = []
+        patch = mock.patch.object(vx, "workspace", self.fake_workspace)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    @contextlib.contextmanager
+    def fake_workspace(self, root, commit):
+        self.workspaces.append((root, commit))
+        yield self.world.checkout
+
+    def hold(self, *checks, association="OWNER", extra=(), fail_once=(), schedule=()):
+        self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(*checks)), association), *extra],
+                                 labels=["needs-verification"], fail_once=list(fail_once), schedule=list(schedule))
+
+    def run_pass(self, host="mbp", report=False):
+        return [entry for node in vr.list_held(SLUG)
+                for entry in vr.pass_issue(self.project, host, node, Refs(), report=report)]
+
+    def race(self, node, *hosts):
+        errors = []
+
+        def runner(host):
+            try:
+                vr.pass_issue(self.project, host, node, Refs())
+            except Exception as error:  # surfaced below
+                errors.append(error)
+        threads = [threading.Thread(target=runner, args=(host,)) for host in hosts]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        self.assertEqual(errors, [])
+
+    def mutations(self, since=0):
+        return [argv for argv in self.world.argvs("gh")[since:] if "-X" in argv]
+
+    def spawned(self, tool):
+        return len([call for call in self.world.calls() if call["tool"] == tool])
+
+    def markers(self, kind):
+        found = [fm.parse(c) for c in self.world.stored()]
+        return [m for m in found if m and m.kind == kind]
+
+    def second_pass_is_silent(self):
+        mark = len(self.world.argvs("gh"))
+        self.run_pass()
+        self.assertEqual(self.mutations(mark), [])
+
+
+class PassTransitionsTest(PassBase):
+    def test_pass_closes_once_in_a_recoverable_order_and_a_rerun_posts_nothing(self):
+        self.hold(ok_check())
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pass", "changed"), line(None, None, "closed", "verified")])
+        self.assertEqual([m.fields["state"] for m in self.markers("verify-result")], ["pass"])
+        closed, = self.markers("verify-closed")
+        self.assertEqual(closed.body.split("\n")[1], "Verified: AC1.")
+        self.assertEqual((self.world.issue()["state"], self.world.issue()["state_reason"]), ("closed", "completed"))
+        self.assertEqual(self.world.issue()["labels"], [])
+        issue = f"repos/{SLUG}/issues/{ISSUE}"
+        finishing = [(a[2], a[3]) for a in self.mutations() if a[3] == issue or a[3].startswith(issue + "/labels/")]
+        self.assertEqual(finishing, [("DELETE", issue + "/labels/verification-failed"), ("PATCH", issue),
+                                     ("DELETE", issue + "/labels/needs-verification")])
+        self.second_pass_is_silent()
+
+    def test_fail_labels_before_recording_and_a_rerun_posts_nothing(self):
+        self.hold(check(run={"command": "check-bad"}))
+        self.run_pass()
+        self.assertEqual([m.fields["state"] for m in self.markers("verify-result")], ["fail"])
+        self.assertIn("verification-failed", self.world.issue()["labels"])
+        self.assertEqual(self.world.issue()["state"], "open")
+        posts = [a[3] for a in self.mutations() if a[2] == "POST"]
+        self.assertLess(posts.index(f"repos/{SLUG}/issues/{ISSUE}/labels"),
+                        posts.index(f"repos/{SLUG}/issues/{ISSUE}/comments"))
+        self.second_pass_is_silent()
+        self.assertEqual(self.spawned("verify-bad"), 2)
+
+    def test_on_fail_ask_records_the_fail_without_a_label(self):
+        self.hold(check(run={"command": "check-bad"}, on_fail="ask"))
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "fail", "fail_ask")])
+        self.assertEqual([m.fields["state"] for m in self.markers("verify-result")], ["fail"])
+        self.assertNotIn("verification-failed", self.world.issue()["labels"])
+        self.assertEqual([a for a in self.mutations() if "labels" in a[3]], [])
+        self.second_pass_is_silent()
+
+    def test_fail_then_pass_changes_state_and_clears_the_label(self):
+        self.hold(check(run={"command": "check-bad"}))
+        self.run_pass()
+        self.world.respond("verify-bad", [], exit=0)
+        self.run_pass()
+        self.assertEqual([m.fields["state"] for m in self.markers("verify-result")], ["fail", "pass"])
+        self.assertNotIn("verification-failed", self.world.issue()["labels"])
+        self.assertEqual(self.world.issue()["state"], "closed")
+
+    def test_observe_miss_closes_and_files_one_follow_up(self):
+        self.hold(check(mode="observe", run={"command": "check-bad"}))
+        self.run_pass()
+        created, = self.world.issue()["created"]
+        self.assertIn(f"#{ISSUE}", created["title"])
+        self.assertEqual(created["labels"], ["verification-follow-up"])
+        self.assertEqual(fm.parse({"id": 500, "body": created["body"], "updated_at": T0}).fields,
+                         {"issue": str(ISSUE), "block": "10", "check": "0"})
+        result, = self.markers("verify-result")
+        self.assertEqual((result.fields["state"], result.fields["followup"]), ("miss", "500"))
+        self.assertEqual(len(self.markers("verify-followup")), 1)
+        self.assertEqual(self.markers("verify-closed")[0].body.split("\n")[1],
+                         "Verified: none. Observed below target: AC1 (follow-up #500).")
+        self.assertEqual(self.world.issue()["state_reason"], "completed")
+        self.second_pass_is_silent()
+        self.assertEqual(len(self.world.issue()["created"]), 1)
+
+    def test_observe_hit_is_verified(self):
+        self.hold(ok_check(mode="observe"))
+        self.run_pass()
+        self.assertEqual(self.markers("verify-result")[0].fields["state"], "hit")
+        self.assertEqual(self.markers("verify-closed")[0].body.split("\n")[1], "Verified: AC1.")
+
+    def test_expiry_closes_as_not_verified(self):
+        due = marker("verify-due", {"block": "10", "check": "0", "host": "mbp"})
+        self.hold(check(run={"command": "check-later"}),
+                  extra=[stored_comment(11, due, at="2026-10-15T10:00:00Z")])
+        with host_clock(WRONG, vf, fm):
+            self.run_pass()
+        self.assertEqual(self.spawned("verify-later"), 0)
+        self.assertEqual(self.markers("verify-result")[0].fields["state"], "expired")
+        self.assertEqual(self.markers("verify-closed")[0].body.split("\n")[1], "Not verified: AC1 expired.")
+        self.assertEqual(self.world.issue()["state_reason"], "not_planned")
+        self.assertIn("needs-verification", self.world.issue()["labels"])
+        self.second_pass_is_silent()
+
+    def test_not_yet_posts_one_due_marker(self):
+        self.hold(check(run={"command": "check-later"}))
+        self.assertEqual(self.run_pass()[0]["reason"], "not_yet")
+        self.assertEqual(len(self.markers("verify-due")), 1)
+        self.second_pass_is_silent()
+        self.assertEqual(self.spawned("verify-later"), 2)
+        self.assertEqual(self.markers("verify-result"), [])
+
+    def test_two_hosts_close_only_when_both_checks_resolved(self):
+        self.hold(ok_check(ac="AC1"), ok_check(ac="AC2", host="eleven-m5"))
+        self.run_pass("mbp")
+        self.assertEqual(self.markers("verify-closed"), [])
+        self.run_pass("eleven-m5")
+        self.assertEqual(self.markers("verify-closed")[0].body.split("\n")[1], "Verified: AC1, AC2.")
+
+    def test_two_checks_of_one_ac_keep_separate_results(self):
+        self.hold(ok_check(), ok_check(host="eleven-m5"))
+        self.assertEqual(self.run_pass("mbp"), [line(0, "AC1", "pass", "changed"),
+                                                line(1, "AC1", "pending", "not_this_host")])
+        self.assertEqual(self.markers("verify-closed"), [])
+        self.run_pass("eleven-m5")
+        self.assertEqual([m.fields["check"] for m in self.markers("verify-result")], ["0", "1"])
+        self.assertEqual(self.markers("verify-closed")[0].body.split("\n")[1], "Verified: AC1.")
+
+    def test_each_run_form_checks_out_the_commit_it_was_checked_at(self):
+        pinned = "d" * 40
+        self.hold(ok_check(ac="AC1"), check(ac="AC2", run={"script": "scripts/check.sh"}),
+                  check(ac="AC3", run={"script": "scripts/check.sh", "at": pinned}))
+        self.run_pass()
+        self.assertEqual([commit for _, commit in self.workspaces], [TIP, MERGE, pinned])
+
+    def test_window_opening_posts_one_marker(self):
+        self.world.respond_json("darwin-version", ["--json"], {"configurationRevision": REV})
+        pushed(self.world, REV)
+        ancestry(self.world, MERGE, REV, 0)
+        self.hold(ok_check(when={"days_after": {"event": "deployed", "days": 7}}))
+        self.assertEqual(self.run_pass()[0]["reason"], "window_opening")
+        window, = self.markers("window-open")
+        self.assertEqual(window.fields, {"event": "deployed", "merge": MERGE, "host": "mbp"})
+        mark = len(self.world.argvs("gh"))
+        self.assertEqual(self.run_pass()[0]["reason"], "window_not_open")
+        self.assertEqual(self.mutations(mark), [])
+
+    def test_report_is_read_only(self):
+        self.hold(ok_check())
+        self.assertEqual(self.run_pass(report=True), [line(0, "AC1", "due", "due")])
+        self.assertEqual((self.mutations(), self.spawned("verify-ok"), self.workspaces), ([], 0, []))
+
+    def test_a_closed_marker_finishes_an_interrupted_close(self):
+        closed = marker("verify-closed", {"block": "10", "outcome": "verified"}, "Verified: AC1.")
+        self.hold(ok_check(), extra=[stored_comment(11, closed)])
+        self.assertEqual(self.run_pass()[-1], line(None, None, "closed", "verified"))
+        self.assertEqual(self.spawned("verify-ok"), 0)
+        self.assertEqual((self.world.issue()["state"], self.world.issue()["labels"]), ("closed", []))
+        self.assertEqual(len(self.world.stored()), 2)
+
+
+class RecoveryTest(PassBase):
+    def test_a_failed_close_is_finished_by_the_next_pass(self):
+        self.hold(ok_check(), fail_once=["close"])
+        self.assertEqual(self.run_pass()[-1]["reason"], "forge_error")
+        self.assertEqual(self.world.issue()["state"], "open")
+        self.assertIn("needs-verification", self.world.issue()["labels"])
+        self.assertEqual(self.run_pass()[-1], line(None, None, "closed", "verified"))
+        self.assertEqual((self.world.issue()["state"], self.world.issue()["labels"]), ("closed", []))
+        self.assertEqual(len(self.markers("verify-closed")), 1)
+        self.assertEqual(self.spawned("verify-ok"), 1)
+
+    def test_a_failed_label_is_added_by_the_next_pass(self):
+        self.hold(check(run={"command": "check-bad"}), fail_once=["add_label"])
+        self.assertEqual(self.run_pass()[-1]["reason"], "forge_error")
+        self.assertEqual(self.markers("verify-result"), [])
+        self.run_pass()
+        self.assertIn("verification-failed", self.world.issue()["labels"])
+        self.assertEqual([m.fields["state"] for m in self.markers("verify-result")], ["fail"])
+
+    def test_a_failed_follow_up_edit_files_no_second_issue(self):
+        self.hold(check(mode="observe", run={"command": "check-bad"}), fail_once=["edit"])
+        self.assertEqual(self.run_pass()[-1]["reason"], "forge_error")
+        self.assertEqual(len(self.world.issue()["created"]), 1)
+        self.assertNotIn("followup", self.markers("verify-result")[0].fields)
+        self.run_pass()
+        self.assertEqual(len(self.world.issue()["created"]), 1)
+        self.assertEqual(self.markers("verify-result")[0].fields["followup"], "500")
+        self.assertEqual(self.world.issue()["state"], "closed")
+        self.assertEqual(self.spawned("verify-bad"), 1)
+
+    def test_two_hosts_recovering_one_follow_up_file_one_issue(self):
+        miss = result(10, 0, "miss")
+        self.hold(check(mode="observe", host="any", run={"command": "check-bad"}),
+                  extra=[stored_comment(11, miss)],
+                  schedule=["post:agent:verify-followup", "post:agent:verify-followup", "list", "list"])
+        node, = vr.list_held(SLUG)
+        self.race(node, "mbp", "anis-desktop")
+        self.assertEqual(len(self.world.issue()["created"]), 1)
+        self.assertEqual(len(self.markers("verify-followup")), 1)
+        self.assertEqual(self.markers("verify-result")[0].fields["followup"], "500")
+        self.assertEqual(self.spawned("verify-bad"), 0)
+
+
+class NeverRunTest(PassBase):
+    def assert_never_run(self, reason, *checks, association="OWNER"):
+        self.hold(*checks, association=association)
+        lines = self.run_pass()
+        self.assertEqual(lines[0]["reason"], reason)
+        self.assertEqual((self.spawned("verify-ok"), self.workspaces, self.markers("verify-result")), (0, [], []))
+
+    def test_non_member_block(self):
+        self.assert_never_run("no_block", ok_check(), association="CONTRIBUTOR")
+
+    def test_inline_code_run(self):
+        self.assert_never_run("block_invalid", check(run={"tool": "python3", "args": ["-c", "print(1)"]}))
+
+    def test_live_and_paid(self):
+        self.assert_never_run("effects_live", ok_check(effects="live"))
+        self.assert_never_run("effects_paid", ok_check(effects="paid"))
+
+    def test_ask_and_act(self):
+        self.assert_never_run("owner_check", check(kind="human", reason="senses", run={"ask": "Is it bright?"}))
+        self.assert_never_run("owner_check", check(kind="human", reason="hands",
+                                                   run={"act": "Plug it in", "then": {"command": "check-ok"}}))
+
+    def test_a_block_naming_nix_activate_is_not_run(self):
+        self.assert_never_run("command_not_verification", check(run={"command": "nix-activate"}))
+
+    def test_another_hosts_check(self):
+        self.assert_never_run("not_this_host", ok_check(host="eleven-m5"))
+
+
+class ForgedMarkerTest(PassBase):
+    """fagenorn/nix-config is public: a marker-shaped comment by any other author changes nothing (P3)."""
+
+    def test_a_forged_closed_marker_neither_wins_nor_blocks_the_close(self):
+        forged = marker("verify-closed", {"block": "10", "outcome": "verified"}, "Verified: AC1.")
+        self.hold(ok_check(), extra=[stored_comment(11, forged, "NONE")])
+        self.assertEqual(self.run_pass()[-1], line(None, None, "closed", "verified"))
+        self.assertEqual(self.spawned("verify-ok"), 1)
+        self.assertEqual(self.world.issue()["state"], "closed")
+        self.assertEqual(len(self.markers("verify-closed")), 2)  # the forged one and the runner's, never deleted
+
+    def test_a_forged_run_marker_does_not_take_a_shared_check(self):
+        forged = marker("verify-run", {"block": "10", "check": "0", "host": "eleven-m5"})
+        self.hold(ok_check(host="any"), extra=[stored_comment(11, forged, "NONE")])
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))
+        self.second_pass_is_silent()
+
+    def test_a_forged_result_never_counts(self):
+        self.hold(check(run={"command": "check-bad"}), extra=[stored_comment(11, result(10, 0, "pass"), "NONE")])
+        self.run_pass()
+        self.assertEqual(self.world.issue()["state"], "open")
+        self.assertIn("verification-failed", self.world.issue()["labels"])
+
+
+class RaceTest(PassBase):
+    def test_two_hosts_racing_on_an_any_check_run_it_once(self):
+        runs = f"repos/{SLUG}/actions/runs?branch=main&head_sha={MERGE}&per_page=100"
+        self.world.respond_json("gh", ["api", runs], {"workflow_runs": [
+            {"name": "ci.yaml", "path": "x/ci.yaml", "status": "completed", "conclusion": "success"}]})
+        probe = {"probe": "ci_run_includes", "workflow": "ci.yaml", "branch": "main", "sha": MERGE}
+        self.hold(check(host="any", run=probe),
+                  schedule=["post:agent:verify-run", "post:agent:verify-run", "list", "list"])
+        node, = vr.list_held(SLUG)
+        self.race(node, "mbp", "anis-desktop")
+        self.assertEqual(len([a for a in self.world.argvs("gh") if a == ["api", runs]]), 1)
+        self.assertEqual(len(self.markers("verify-run")), 1)
+        self.assertEqual(len(self.markers("verify-result")), 1)
+        self.assertEqual(len(self.markers("verify-closed")), 1)
+        self.assertEqual(self.world.issue()["state"], "closed")

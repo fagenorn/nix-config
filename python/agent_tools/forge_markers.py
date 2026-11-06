@@ -22,7 +22,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -304,3 +304,34 @@ def latest_pr_event(slug: str, branch: str) -> datetime | None:
     if not isinstance(pulls, list) or not all(isinstance(p, dict) for p in pulls):
         raise ForgeError("payload_invalid", "pull requests are not an array of objects")
     return max((_instant(p.get("updated_at")) for p in pulls), default=None)
+
+
+def graphql(query: str, variables: Mapping[str, str]) -> Any:
+    """The parsed JSON of one `gh api graphql` call with string variables."""
+    return _json(["api", "graphql", "-f", f"query={query}",
+                  *(arg for key, value in variables.items() for arg in ("-f", f"{key}={value}"))])
+
+
+def create_issue(slug: str, title: str, body: str, labels: Sequence[str] = ()) -> int:
+    """Create an issue; its number."""
+    created = _json(["api", "-X", "POST", f"repos/{slug}/issues", "-f", f"title={title}",
+                     "-f", f"body={body}", *(arg for name in labels for arg in ("-f", f"labels[]={name}"))])
+    number = created.get("number") if isinstance(created, dict) else None
+    if isinstance(number, bool) or not isinstance(number, int):
+        raise ForgeError("payload_invalid", "created issue has no number")
+    return number
+
+
+def list_issues(slug: str, label: str, since: datetime) -> list[dict]:
+    """The issues (any state) carrying `label` and updated since `since`, one page of 100."""
+    issues = _json(["api", f"repos/{slug}/issues?labels={quote(label)}&state=all"
+                    f"&since={since:%Y-%m-%dT%H:%M:%SZ}&per_page=100"])
+    if not isinstance(issues, list) or not all(isinstance(i, dict) for i in issues):
+        raise ForgeError("payload_invalid", "issues are not an array of objects")
+    return issues
+
+
+def close_issue(slug: str, issue: int, reason: str) -> None:
+    """Close the issue with a state reason (`completed` or `not_planned`); closing a closed issue is a no-op."""
+    _gh(["api", "-X", "PATCH", f"repos/{slug}/issues/{issue}", "-f", "state=closed",
+         "-f", f"state_reason={reason}"])
