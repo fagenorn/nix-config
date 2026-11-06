@@ -92,7 +92,6 @@ V3_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes"
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
     "authorization_intents", "authority_observations", "reevaluation_evidence",
     "delivery_observations", "requested_scope", "recovery", "verification"}
-CODEX_ORCHESTRATE = REPO_ROOT / "home/common/codex/skills/orchestrate-issues/SKILL.md"
 CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
 SKILL_TREES = (REPO_ROOT / "home/common/agent-skills/skills",
                REPO_ROOT / "home/common/claude-code/skills",
@@ -232,10 +231,6 @@ ORCHESTRATE_MACHINE_TEXT = {
         "--action-id <action_id> --stall-minutes <stall_minutes> --since <liveness_since>",
         "`wait_seconds`", "`liveness_since`", "`stalled`", "`past_deadline`",
         "`not_current`",
-    ),
-    CODEX_ORCHESTRATE: (
-        "workflow-state host-route --route codex", "--boundary workflow-response",
-        "/from-issue <n> --auto",
     ),
 }
 
@@ -1135,15 +1130,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                     self.assertEqual(value.strip("`.,;"), "-", flag)
                 self.assertLessEqual(text.count("--result-file"), 1)
 
-    def test_codex_orchestrate_stub_relays_the_unsupported_route(self):
-        raw = CODEX_ORCHESTRATE.read_text(encoding="utf-8")
-        self.assertTrue(raw.startswith("---\nname: orchestrate-issues\n"))
-        text = normalized(raw)
-        for forbidden in ("workflow-state control", "init-run", "run_in_background",
-                          "agent-dispatch"):
-            self.assertNotIn(forbidden, text)
-        self.assertIn('home.file.".agents/skills/orchestrate-issues".source = '
-                      './skills/orchestrate-issues;', CODEX_MODULE.read_text(encoding="utf-8"))
+    def test_codex_gets_no_orchestrate_issues(self):
+        # #618: the Codex stub is retired (#572 S1); orchestrate-issues stays Claude-only.
+        self.assertFalse((REPO_ROOT / "home/common/codex/skills/orchestrate-issues").exists())
+        self.assertNotIn("orchestrate-issues", CODEX_MODULE.read_text(encoding="utf-8"))
+
+    def test_codex_deliver_standard_stub_is_linked_and_names_the_alternatives(self):
+        # #618: the standard-lane program needs Claude's Workflow tool.
+        raw = (REPO_ROOT / "home/common/codex/skills/deliver-standard/SKILL.md").read_text(encoding="utf-8")
+        self.assertTrue(raw.startswith("---\nname: deliver-standard\n"))
+        self.assertIn("`deliver-direct`", raw)
+        self.assertIn('home.file.".agents/skills/deliver-standard".source = '
+                      './skills/deliver-standard;', CODEX_MODULE.read_text(encoding="utf-8"))
         self.assertFalse((REPO_ROOT / "home/common/agent-skills/skills/orchestrate-issues")
                          .exists())
 
@@ -2907,7 +2905,7 @@ path_unchanged_since() { return 0; }
 
 
 class InstalledOrchestrateRoutesTest(unittest.TestCase):
-    """D25: each agent's installed tree holds its own orchestrate-issues."""
+    """D25, #618: only the Claude tree holds orchestrate-issues."""
 
     @classmethod
     def setUpClass(cls):
@@ -2917,12 +2915,12 @@ class InstalledOrchestrateRoutesTest(unittest.TestCase):
                                     "`just agent-installed-skill-tests`")
         cls.root = Path(root)
 
-    def test_codex_tree_holds_the_stub_and_claude_tree_the_adapter(self):
-        installed = lambda tree: (self.root / tree / "orchestrate-issues/SKILL.md"
-                                  ).read_text(encoding="utf-8")
-        self.assertEqual(installed(".agents/skills"),
-                         CODEX_ORCHESTRATE.read_text(encoding="utf-8"))
-        self.assertEqual(installed(".claude/skills"), ORCHESTRATE.read_text(encoding="utf-8"))
+    def test_only_the_claude_tree_holds_the_adapter(self):
+        self.assertFalse((self.root / ".agents/skills/orchestrate-issues").exists())
+        self.assertTrue((self.root / ".agents/skills/deliver-standard/SKILL.md").is_file())
+        self.assertTrue((self.root / ".claude/skills/deliver-standard/deliver-standard.js").is_file())
+        installed = (self.root / ".claude/skills/orchestrate-issues/SKILL.md").read_text(encoding="utf-8")
+        self.assertEqual(installed, ORCHESTRATE.read_text(encoding="utf-8"))
 
 
 class AcceptanceGradingContractsTest(unittest.TestCase):
