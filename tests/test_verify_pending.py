@@ -1,11 +1,21 @@
 """verify-pending run (issue 630): selection, conditions, the run gate, passes and the command."""
+import contextlib
+import dataclasses
 import json
 import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest import mock
 
 from agent_tools import forge_markers as fm
+from agent_tools import verify_exec as vx
 from agent_tools import verify_facts as vf
 from agent_tools import verify_issues as vi
 
@@ -359,6 +369,232 @@ class ProbeTest(unittest.TestCase):
         run = {"probe": "count_since", "source": "releases", "since": "2026-11-01T00:00:00+00:00", "n": 1}
         self.assertEqual(vf.run_probe(run, context(world)).exit, 0)
         self.assertEqual(vf.run_probe({**run, "n": 2}, context(world)).exit, 75)
+
+
+HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FIXTURE = REPO_ROOT / "home/common/agent-skills/evals/fixture-repo"
+
+
+class GateTest(unittest.TestCase):
+    VERIFICATION = ["nix-build"]
+
+    def gate(self, **over):
+        return vx.gate(check(**over), self.VERIFICATION)
+
+    def test_read_only_forms_run(self):
+        self.assertEqual(self.gate(), vx.Gate(True, "due"))
+        self.assertTrue(self.gate(run={"script": "scripts/check.sh"}).runnable)
+        self.assertTrue(self.gate(run={"command": "nix-build"}).runnable)
+
+    def test_owner_live_and_paid_checks_never_run(self):
+        self.assertEqual(self.gate(kind="human", reason="senses", run={"ask": "Does it look right?"}).reason,
+                         "owner_check")
+        self.assertEqual(self.gate(kind="human", reason="hands",
+                                   run={"act": "Plug it in", "then": {"probe": "deployed_includes", "sha": MERGE}}
+                                   ).reason, "owner_check")
+        self.assertEqual(self.gate(effects="live").reason, "effects_live")
+        self.assertEqual(self.gate(effects="paid").reason, "effects_paid")
+
+    def test_a_contract_command_outside_verification_is_live(self):
+        self.assertEqual(self.gate(run={"command": "nix-activate"}), vx.Gate(False, "command_not_verification"))
+
+
+class ExpectTest(unittest.TestCase):
+    def test_expect_tests(self):
+        out = json.dumps({"a": {"b/c": [1, 2, 3]}, "ok": True, "n": 1})
+        self.assertTrue(vx.expect_met(None, "not json"))
+        self.assertTrue(vx.expect_met({"json": [{"pointer": "/a/b~1c", "min_len": 3}]}, out))
+        self.assertTrue(vx.expect_met({"json": [{"pointer": "/a/b~1c/1", "equals": 2}]}, out))
+        self.assertFalse(vx.expect_met({"json": [{"pointer": "/n", "equals": True}]}, out))
+        self.assertFalse(vx.expect_met({"json": [{"pointer": "/missing", "equals": 1}]}, out))
+        self.assertFalse(vx.expect_met({"json": [{"pointer": "", "min_len": 4}]}, out))
+        self.assertFalse(vx.expect_met({"json": [{"pointer": "/ok", "equals": True}]}, "{\"ok\": true, \"ok\": true}"))
+
+    def test_classify(self):
+        def result(code, out=""):
+            return vx.Result(code, out, "", False)
+        self.assertEqual(vx.classify(result(0), None), "met")
+        self.assertEqual(vx.classify(result(0, "[]"), {"json": [{"pointer": "", "min_len": 1}]}), "not_met")
+        self.assertEqual(vx.classify(result(1), None), "not_met")
+        self.assertEqual(vx.classify(result(75), None), "not_yet")
+        self.assertEqual(vx.classify(result(2), None), "exit_unexpected")
+        self.assertEqual(vx.classify(result(None), None), "exit_unexpected")
+        self.assertEqual(vx.classify(vx.Result(None, "", "", True), None), "timeout")
+        self.assertEqual(vx.trim("x" * 10 + "tail", 4), "tail")
+
+
+class ExecuteTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.dir, ignore_errors=True))
+
+    def script(self, name, body):
+        path = self.dir / name
+        path.write_text(f"#!{sys.executable}\n{body}\n", encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    def test_exit_output_and_no_token(self):
+        argv = [self.script("c.py", "import os, sys\nprint(os.environ.get('GITHUB_TOKEN'), os.environ.get('GH_TOKEN'))\n"
+                                    "sys.exit(75)")]
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t", "GH_TOKEN": "t"}):
+            result = vx.execute(argv, self.dir)
+        self.assertEqual((result.exit, result.stdout.strip(), result.timed_out), (75, "None None", False))
+
+    def test_timeout_kills_the_process_group(self):
+        pidfile = self.dir / "pid"
+        argv = [self.script("slow.py", "import subprocess, sys, time\n"
+                                       f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                                       f"open({str(pidfile)!r}, 'w').write(str(p.pid))\ntime.sleep(60)")]
+        started = time.monotonic()
+        result = vx.execute(argv, self.dir, timeout=2)
+        self.assertLess(time.monotonic() - started, 20, "the pipes were held open by a surviving grandchild")
+        self.assertTrue(result.timed_out)
+        grandchild = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the grandchild outlived the timeout")
+
+    def test_spawn_error_is_unexpected(self):
+        result = vx.execute([str(self.dir / "absent")], self.dir)
+        self.assertEqual(vx.classify(result, None), "exit_unexpected")
+
+    def test_run_argv_relativises_against_the_contract_root(self):
+        export, wt = Path("/tmp/export-1"), Path("/tmp/wt")
+        bindings = {"commands": {"nix-build": {"argv": ["just", "build"], "cwd": "/tmp/export-1/sub", "env": []}}}
+        self.assertEqual(vx.run_argv({"command": "nix-build"}, bindings, export, wt), (["just", "build"], wt / "sub"))
+        self.assertEqual(vx.run_argv({"script": "s/c.sh", "args": ["x"]}, bindings, export, wt),
+                         ([str(wt / "s/c.sh"), "x"], wt))
+
+
+class GitRepos(unittest.TestCase):
+    """A bare `origin` and a clone (`root`) that lags it: origin's `main` is one commit ahead."""
+
+    def setUp(self):
+        patch = mock.patch.dict(os.environ, HERMETIC_GIT)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.dir = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(lambda: shutil.rmtree(self.dir, ignore_errors=True))
+        self.origin, self.root = self.dir / "origin.git", self.dir / "root"
+        self.git(self.dir, "init", "-q", "--bare", "-b", "main", str(self.origin))
+        self.git(self.origin, "config", "uploadpack.allowAnySHA1InWant", "true")
+        self.git(self.dir, "clone", "-q", str(self.origin), str(self.root))
+        self.git(self.root, "config", "commit.gpgsign", "false")
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def commit(self, message):
+        self.git(self.root, "add", "-A")
+        self.git(self.root, "commit", "-q", "-m", message)
+        return self.git(self.root, "rev-parse", "HEAD")
+
+    def lag(self, to):
+        """Push HEAD to origin's main, then move the clone and its tracking ref back to `to`."""
+        self.git(self.root, "push", "-q", "origin", "HEAD:main")
+        self.git(self.root, "reset", "-q", "--hard", to)
+        self.git(self.root, "update-ref", "refs/remotes/origin/main", to)
+        subprocess.run(["git", "-C", str(self.root), "update-ref", "-d", "ORIG_HEAD"], capture_output=True)
+        self.git(self.root, "reflog", "expire", "--expire=now", "--all")
+        self.git(self.root, "gc", "-q", "--prune=now")
+
+
+class WorkspaceTest(GitRepos):
+    def setUp(self):
+        super().setUp()
+        (self.root / "f").write_text("one\n")
+        self.first = self.commit("one")
+        self.git(self.root, "push", "-q", "origin", "HEAD:main")
+        (self.root / "f").write_text("two\n")
+        self.second = self.commit("two")
+        self.lag(self.first)
+
+    def test_a_commit_only_origin_holds_is_fetched_and_checked_out_detached(self):
+        with vx.workspace(self.root, self.second) as wt:
+            self.assertEqual((wt / "f").read_text(), "two\n")
+            kept = wt
+        self.assertFalse(kept.exists())
+        self.assertFalse(kept.parent.exists())
+        self.assertEqual(len(self.git(self.root, "worktree", "list").splitlines()), 1)
+        self.assertEqual((self.root / "f").read_text(), "one\n")
+
+    def test_a_held_commit(self):
+        with vx.workspace(self.root, self.first) as wt:
+            self.assertEqual((wt / "f").read_text(), "one\n")
+
+    def test_a_held_commit_is_not_fetched(self):
+        with mock.patch.object(vx, "_git", wraps=vx._git) as git:
+            self.assertTrue(vx.ensure_commit(self.root, self.first))
+        self.assertEqual([call.args[1] for call in git.call_args_list], ["cat-file"])
+
+    def test_cleanup_after_an_error_and_an_unknown_commit(self):
+        with self.assertRaises(RuntimeError):
+            with vx.workspace(self.root, self.second) as wt:
+                kept = wt
+                raise RuntimeError("check crashed")
+        self.assertFalse(kept.exists())
+        with self.assertRaises(vx.WorkspaceError):
+            with vx.workspace(self.root, "f" * 40):
+                pass
+
+
+class SourceTest(GitRepos):
+    def setUp(self):
+        super().setUp()
+        shutil.copytree(FIXTURE, self.root, dirs_exist_ok=True)
+        self.first = self.commit("fixture")
+        self.git(self.root, "push", "-q", "origin", "HEAD:main")
+        self.contract = self.root / ".agents" / "project.json"
+        contract = json.loads(self.contract.read_text("utf-8"))
+        contract["bindings"]["commands"]["check-ok"] = {"argv": ["true"], "cwd": ".", "env": []}
+        contract["bindings"]["workflow"]["verification"] = ["test", "check-ok"]
+        self.contract.write_text(json.dumps(contract, indent=2), encoding="utf-8")
+        self.tip = self.commit("allow check-ok")
+        self.lag(self.first)
+        self.entry = {"project_id": contract["project"]["id"], "root": str(self.root)}
+
+    def test_the_contract_is_read_at_origin_not_from_the_lagging_checkout(self):
+        with vx.project_source(self.entry) as source:
+            self.assertIn("check-ok", source.snapshot["bindings"]["workflow"]["verification"])
+            self.assertEqual((source.commit, source.branch), (self.tip, "main"))
+            self.assertEqual(Path(source.snapshot["bindings"]["commands"]["check-ok"]["cwd"]), source.contract_root)
+            export = source.contract_root
+        self.assertFalse(export.exists())
+        local = json.loads(self.contract.read_text("utf-8"))
+        self.assertNotIn("check-ok", local["bindings"]["workflow"]["verification"])
+
+    def test_a_branch_the_contract_does_not_name_is_a_source_error(self):
+        real = vx.adopt_verify.remote_source
+
+        @contextlib.contextmanager
+        def elsewhere(*args, **kwargs):
+            with real(*args, **kwargs) as source:
+                yield dataclasses.replace(source, branch="elsewhere")
+
+        with mock.patch.object(vx.adopt_verify, "remote_source", elsewhere):
+            with self.assertRaises(vx.SourceError) as caught:
+                with vx.project_source(self.entry):
+                    pass
+        self.assertEqual(str(caught.exception), "branch_mismatch")
+
+    def test_an_unresolvable_contract_at_origin_is_a_source_error(self):
+        self.git(self.root, "rm", "-q", ".agents/project.json")
+        self.commit("drop the contract")
+        self.git(self.root, "push", "-q", "--force", "origin", "HEAD:main")
+        with self.assertRaises(vx.SourceError):
+            with vx.project_source(self.entry):
+                pass
 
 
 if __name__ == "__main__":
