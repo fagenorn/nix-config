@@ -162,6 +162,15 @@ def _gh(argv: list[str], allow: Iterable[int] = ()) -> tuple[int, str]:
     raise ForgeError("gh_failed", done.stderr.strip())
 
 
+def logged_in() -> bool:
+    """Whether `gh` holds a credential: `gh auth status` succeeds. Any forge failure, a missing `gh` included, is False."""
+    try:
+        _gh(["auth", "status"])
+    except ForgeError:
+        return False
+    return True
+
+
 def _json(argv: list[str], allow: Iterable[int] = ()) -> Any:
     """The parsed stdout of a `gh` call, or None when it failed with a status in `allow`."""
     status, out = _gh(argv, allow)

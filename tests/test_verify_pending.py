@@ -1,6 +1,7 @@
 """verify-pending run (issue 630): selection, conditions, the run gate, passes and the command."""
 import contextlib
 import dataclasses
+import io
 import json
 import os
 import shutil
@@ -19,7 +20,10 @@ from agent_tools import forge_markers as fm
 from agent_tools import verify_exec as vx
 from agent_tools import verify_facts as vf
 from agent_tools import verify_issues as vi
+from agent_tools import verify_pending
 from agent_tools import verify_run as vr
+from agent_tools.resolve_project import resolve
+from agent_tools.verify_block import lint_block
 
 from .forge_world import ForgeWorld, host_clock
 
@@ -961,3 +965,162 @@ class RaceTest(PassBase):
         self.assertEqual(len(self.markers("verify-result")), 1)
         self.assertEqual(len(self.markers("verify-closed")), 1)
         self.assertEqual(self.world.issue()["state"], "closed")
+
+
+MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
+
+
+class PinnedReferencesTest(GitRepos):
+    """The lint's lookups for the runner read origin's commits, never the lagging checkout (P17)."""
+
+    def setUp(self):
+        super().setUp()
+        (self.root / "README").write_text("x\n")
+        self.base = self.commit("base")
+        self.git(self.root, "push", "-q", "origin", "HEAD:main")
+        script = self.root / "scripts" / "check.sh"
+        script.parent.mkdir()
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        (self.root / "scripts" / "link.sh").symlink_to("check.sh")
+        self.merge = self.commit("add the check")
+        self.lag(self.base)
+        self.refs = verify_pending.PinnedReferences(self.root, {"check-ok"})
+
+    def test_a_merge_the_checkout_lacks_is_fetched_before_the_lookup(self):
+        self.assertEqual(self.refs.script("scripts/check.sh", self.merge), ("present", "present"))
+        self.assertEqual(self.refs.script("scripts/link.sh", self.merge), ("present", "absent"))
+        held = {"v": 1, "merge": self.merge, "checks": [check(run={"script": "scripts/check.sh"})]}
+        self.assertTrue(lint_block(held, refs=self.refs)["ok"])
+        self.assertFalse((self.root / "scripts").exists())
+
+    def test_the_flake_is_read_at_the_merge_after_fetching_it(self):
+        self.assertEqual(self.refs.flake(self.merge), ("present", "absent"))
+        self.assertEqual(self.refs.flake("f" * 40), ("absent", "unknown"))
+
+    def test_commands_come_from_the_snapshot(self):
+        self.assertEqual((self.refs.command("check-ok"), self.refs.command("nix-activate")), ("present", "absent"))
+
+    def test_an_unknown_commit_is_absent(self):
+        self.assertEqual(self.refs.script("scripts/check.sh", "f" * 40)[0], "absent")
+
+
+class CommandTest(PassBase):
+    def setUp(self):
+        super().setUp()
+        self.world.respond("gh", ["auth", "status"], stdout="Logged in\n")
+        home = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
+        (home / ".agents" / "share").mkdir(parents=True)
+        shutil.copy(MANIFEST, home / ".agents" / "share" / "platform-manifest.json")
+        self.root = home / "project"
+        shutil.copytree(FIXTURE, self.root)
+        contract_path = self.root / ".agents" / "project.json"
+        contract = json.loads(contract_path.read_text("utf-8"))
+        contract["bindings"]["tracker"].update({"kind": "github", "repo_slug": SLUG})
+        contract["bindings"]["commands"]["check-ok"] = {"argv": ["verify-ok"], "cwd": ".", "env": []}
+        contract["bindings"]["commands"]["test"]["argv"] = ["verify-ok"]  # PATH is the fake bin alone
+        contract["bindings"]["workflow"]["verification"] = ["test", "check-ok"]
+        contract_path.write_text(json.dumps(contract, indent=2), encoding="utf-8")
+        self.registry = home / ".agents" / "state" / "fleet" / "registry.json"
+        self.registry.parent.mkdir(parents=True)
+        self.register({"project_id": "octo/widgets", "root": str(self.root)})
+        patch = mock.patch.dict(os.environ, {"HOME": str(home)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.sources = []
+        patch = mock.patch.object(vx, "project_source", self.fake_source)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    @contextlib.contextmanager
+    def fake_source(self, entry):
+        """The contract as origin's integration branch holds it: here, the copied fixture at TIP."""
+        self.sources.append(entry["project_id"])
+        try:
+            snapshot = resolve(entry["root"])
+        except Exception as error:  # ContractError: the real seam raises SourceError
+            raise vx.SourceError(str(error)) from None
+        yield vx.Source(snapshot, Path(snapshot["project"]["root"]), TIP, "main")
+
+    def register(self, *entries):
+        self.registry.write_text(json.dumps({"schema_version": 1, "projects": list(entries)}), encoding="utf-8")
+
+    def cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = verify_pending.main(list(argv))
+            except SystemExit as exit:
+                code = exit.code
+        return code, [json.loads(entry) for entry in out.getvalue().splitlines()], err.getvalue()
+
+    def test_demo_one_run_closes_the_issue_and_a_second_posts_nothing(self):
+        self.hold(ok_check())
+        code, lines, _ = self.cli("run", "--host", "mbp")
+        self.assertEqual(code, 0)
+        self.assertIn(line(None, None, "closed", "verified"), lines)
+        self.assertEqual(self.markers("verify-closed")[0].body.split("\n")[1], "Verified: AC1.")
+        self.assertEqual(self.workspaces, [(self.root, TIP)])
+        mark = len(self.world.argvs("gh"))
+        self.assertEqual(self.cli("run", "--host", "mbp")[:2], (0, []))
+        self.assertEqual(self.mutations(mark), [])
+
+    def test_no_forge_credential_exits_0_quietly(self):
+        self.world.respond("gh", ["auth", "status"], exit=1, stderr="You are not logged into any GitHub hosts")
+        self.hold(ok_check())
+        self.assertEqual(self.cli("run", "--host", "mbp"), (0, [], "verify-pending: no-forge-credential\n"))
+        self.assertEqual(self.world.argvs("gh"), [["auth", "status"]])
+        self.assertEqual(self.sources, [])
+
+    def test_usage_errors_exit_2(self):
+        self.hold(ok_check())
+        self.assertEqual(self.cli("run", "--host", "MBP!")[0], 2)
+        self.assertEqual(self.cli("run", "--host", "mbp", "--repo", "other/repo")[0], 2)
+        self.assertEqual(self.spawned("verify-ok"), 0)
+
+    def test_report_prints_due_checks_and_writes_nothing(self):
+        self.hold(ok_check(), ok_check(ac="AC2", host="eleven-m5"))
+        code, lines, _ = self.cli("run", "--host", "mbp", "--repo", SLUG, "--report")
+        self.assertEqual(code, 0)
+        self.assertEqual([(entry["check"], entry["state"], entry["reason"]) for entry in lines],
+                         [(0, "due", "due"), (1, "pending", "not_this_host")])
+        self.assertEqual((self.mutations(), self.spawned("verify-ok")), ([], 0))
+
+    def test_issue_alone_filters_every_project_as_the_issue_writes_it(self):
+        self.hold(ok_check())
+        self.assertEqual(self.cli("run", "--host", "mbp", "--issue", "8")[:2], (0, []))
+        self.assertEqual(self.spawned("verify-ok"), 0)
+        code, lines, _ = self.cli("run", "--host", "mbp", "--issue", str(ISSUE))
+        self.assertEqual(code, 0)
+        self.assertIn(line(None, None, "closed", "verified"), lines)
+
+    def test_issue_with_repo(self):
+        self.hold(ok_check())
+        self.assertEqual(self.cli("run", "--host", "mbp", "--repo", SLUG, "--issue", "8")[:2], (0, []))
+        self.assertEqual(self.spawned("verify-ok"), 0)
+
+    def test_forge_error_is_reported_and_exits_1(self):
+        owner, name = SLUG.split("/")
+        self.world.respond("gh", ["api", "graphql", "-f", f"query={vr.QUERY}", "-f", f"owner={owner}",
+                                  "-f", f"name={name}"], exit=1, stderr="gh: Server Error (HTTP 502)")
+        code, lines, _ = self.cli("run", "--host", "mbp")
+        self.assertEqual((code, lines), (1, [{"repo": SLUG, "issue": None, "check": None, "ac": None,
+                                              "state": "skipped", "reason": "forge_error"}]))
+
+    def test_an_unresolvable_project_is_reported(self):
+        empty = self.root.parent / "empty"
+        empty.mkdir()
+        self.register({"project_id": "a/broken", "root": str(empty)})
+        self.assertEqual(self.cli("run", "--host", "mbp")[:2], (0, [{"repo": "a/broken", "issue": None, "check": None,
+                                                                    "ac": None, "state": "skipped",
+                                                                    "reason": "project_unresolved"}]))
+
+
+class RecipeTest(unittest.TestCase):
+    def test_just_verify_runs_the_command_and_the_suite_runs_this_file(self):
+        lines = (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines()
+        start = lines.index("verify host *args:")
+        self.assertEqual(lines[start + 1],
+                         '  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verify_pending run --host {{host}} {{args}}')
+        self.assertIn("    tests/test_verify_pending.py \\", lines)
