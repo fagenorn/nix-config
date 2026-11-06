@@ -50,12 +50,12 @@ PLATFORM_BLOCK_MEMBERS = [
     "project_schema_versions", "removals", "resolved_schema_version",
 ]
 PROJECT_BLOCK_MEMBERS = [
-    "platform_interval", "project_id", "project_schema_version", "root",
+    "deprecated_uses", "platform_interval", "project_id", "project_schema_version", "root",
 ]
 COMPATIBILITY_MEMBERS = ["compatible", "reason_code", "repair_id"]
 FLEET_ROW_MEMBERS = [
-    "compatible", "platform_interval", "project_id", "project_schema_version",
-    "reason_code", "repair_id", "root",
+    "compatible", "deprecated_uses", "platform_interval", "project_id",
+    "project_schema_version", "reason_code", "repair_id", "root",
 ]
 
 
@@ -80,6 +80,7 @@ class PlatformStatusTest(ResolverTestCase):
         code, payload, err = self.status()
         self.assertEqual(code, 0, err)
         self.assertEqual(sorted(payload), PLATFORM_STATUS_MEMBERS)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertIsNone(payload["project"])
         self.assertIsNone(payload["compatibility"])
         self.assertIsNone(payload["fleet"])
@@ -278,6 +279,7 @@ class PlatformStatusFleetTest(ResolverTestCase):
         self.assert_reported_broken(row, entry)
         self.assertIsNone(row["project_schema_version"])
         self.assertIsNone(row["platform_interval"])
+        self.assertIsNone(row["deprecated_uses"])
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
                      "root reads a 0000 file, so the case cannot be staged")
@@ -452,6 +454,151 @@ class PlatformStatusFleetTest(ResolverTestCase):
         self.assertTrue(payload["compatibility"]["compatible"])
         self.assertEqual([row["project_id"] for row in payload["fleet"]],
                          ["fagenorn/registered"])
+
+
+DEPRECATIONS = [
+    {"id": "legacy-file", "kind": "project_file",
+     "subject": ".claude/skills.config.json", "since": "1.1.0",
+     "successor": "resolve-project resolve",
+     "migration": "legacy-file.retire"},
+    {"id": "legacy-writer", "kind": "platform_behavior",
+     "subject": "adopt-project legacy binding config rewrite",
+     "since": "1.1.0", "successor": "resolve-project resolve",
+     "migration": "legacy-file.retire"},
+]
+
+
+class PlatformStatusDeprecationTest(ResolverTestCase):
+    """Issue 580 D2: a project holding a deprecated path is warned through
+    `deprecated_uses`, and nothing else about the answer changes."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.set_manifest(mutated_manifest(deprecations=DEPRECATIONS))
+
+    def status(self, *args: str) -> dict:
+        code, out, err = run("platform-status", *args, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        return json.loads(out)
+
+    def legacy_root(self, project_id: str = "fagenorn/nix-config") -> Path:
+        contract = source_contract()
+        contract["project"]["id"] = project_id
+        root = self.make_root(contract)
+        (root / ".claude").mkdir(exist_ok=True)
+        (root / ".claude" / "skills.config.json").write_text("{}\n")
+        return root
+
+    def test_a_project_holding_the_file_is_warned_and_stays_compatible(self):
+        payload = self.status("--repo-root", str(self.legacy_root()))
+        self.assertEqual(payload["project"]["deprecated_uses"],
+                         ["legacy-file"])
+        self.assertEqual(payload["compatibility"], {
+            "compatible": True, "reason_code": None, "repair_id": None})
+        self.assertEqual(payload["platform"]["deprecations"], DEPRECATIONS)
+
+    def test_a_platform_behavior_is_never_a_use_even_if_its_subject_exists(self):
+        behavior = {**DEPRECATIONS[1], "subject": "README.md"}
+        self.set_manifest(mutated_manifest(deprecations=[behavior]))
+        root = self.make_root()
+        (root / "README.md").write_text("x\n")
+        payload = self.status("--repo-root", str(root))
+        self.assertEqual(payload["project"]["deprecated_uses"], [])
+
+    def test_uses_are_listed_in_ascending_id_order(self):
+        entries = [
+            {**DEPRECATIONS[0], "id": "zeta", "subject": "zeta.json"},
+            {**DEPRECATIONS[0], "id": "alpha", "subject": "alpha.json"},
+        ]
+        self.set_manifest(mutated_manifest(deprecations=entries))
+        root = self.make_root()
+        for name in ("zeta.json", "alpha.json"):
+            (root / name).write_text("{}\n")
+        payload = self.status("--repo-root", str(root))
+        self.assertEqual(payload["project"]["deprecated_uses"],
+                         ["alpha", "zeta"])
+
+    def test_a_project_without_the_file_has_no_use(self):
+        payload = self.status("--repo-root", str(self.make_root()))
+        self.assertEqual(payload["project"]["deprecated_uses"], [])
+
+    def test_a_dangling_symlink_counts_as_a_use(self):
+        root = self.make_root()
+        (root / ".claude").mkdir(exist_ok=True)
+        (root / ".claude" / "skills.config.json").symlink_to(
+            root / "absent-target")
+        payload = self.status("--repo-root", str(root))
+        self.assertEqual(payload["project"]["deprecated_uses"],
+                         ["legacy-file"])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root searches a 0000 directory, so the case cannot be staged")
+    def test_an_uninspectable_subject_is_uncertain_never_absent(self):
+        # `os.path.lexists` answers False for EACCES, which would report an
+        # existing deprecated file as absent. Inspection failure is null
+        # (nothing can be said), and compatibility is untouched.
+        root = self.legacy_root()
+        claude = root / ".claude"
+        self.addCleanup(claude.chmod, 0o755)
+        claude.chmod(0o000)
+        payload = self.status("--repo-root", str(root))
+        self.assertIsNone(payload["project"]["deprecated_uses"])
+        self.assertEqual(payload["compatibility"], {
+            "compatible": True, "reason_code": None, "repair_id": None})
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/nix-config", "root": str(root)}))
+        fleet = self.status("--fleet")["fleet"]
+        self.assertEqual(len(fleet), 1)
+        self.assertIsNone(fleet[0]["deprecated_uses"])
+        self.assertTrue(fleet[0]["compatible"])
+
+    def test_resolve_still_succeeds_on_a_deprecated_use(self):
+        code, out, err = run("resolve", "--repo-root",
+                             str(self.legacy_root()), home=self.home)
+        self.assertEqual(code, 0, err or out)
+
+    def test_fleet_rows_carry_their_own_uses(self):
+        # The registry refuses a repeated project id, so each root carries
+        # its own, declared in its contract to keep the identity check green.
+        legacy = self.legacy_root("fagenorn/legacy")
+        clean_contract = source_contract()
+        clean_contract["project"]["id"] = "fagenorn/clean"
+        clean = self.make_root(clean_contract)
+        gone = self.make_root()
+        shutil.rmtree(gone)
+        entries = [{"project_id": project_id, "root": str(root)}
+                   for project_id, root in (("fagenorn/legacy", legacy),
+                                            ("fagenorn/clean", clean),
+                                            ("fagenorn/gone", gone))]
+        install_registry(self.home, registry(*entries))
+        rows = {row["root"]: row
+                for row in self.status("--fleet")["fleet"]}
+        self.assertEqual(rows[str(legacy)]["deprecated_uses"],
+                         ["legacy-file"])
+        self.assertTrue(rows[str(legacy)]["compatible"])
+        self.assertEqual(rows[str(clean)]["deprecated_uses"], [])
+        self.assertIsNone(rows[str(gone)]["deprecated_uses"])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root searches a 0000 directory, so the case cannot be staged")
+    def test_a_root_behind_an_unsearchable_parent_is_a_reported_row(self):
+        # `Path.is_dir()` re-raises EACCES, so a registered root whose parent
+        # cannot be searched must still yield a null, never a refusal.
+        locked = self.home / "locked"
+        locked.mkdir()
+        root = locked / "proj"
+        root.mkdir()
+        self.addCleanup(locked.chmod, 0o755)
+        locked.chmod(0o000)
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/locked", "root": str(root)}))
+        code, out, err = run("platform-status", "--fleet", home=self.home)
+        self.assertEqual(code, 0, err or out)
+        rows = json.loads(out)["fleet"]
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["deprecated_uses"])
+        self.assertFalse(rows[0]["compatible"])
+        self.assertEqual(rows[0]["reason_code"], "project_schema_unsupported")
 
 
 if __name__ == "__main__":

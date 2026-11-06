@@ -51,6 +51,7 @@ from .test_adopt_project import (
     LINKED_SOURCES,
     LINKED_SUMMARY,
     LINT_TOML,
+    MANIFEST,
     MOVED_TOOL,
     MOVED_TOOL_AFTER,
     MOVED_TOOL_NEW,
@@ -404,8 +405,11 @@ class ApplySuccessTest(ApplyTestCase):
     def test_the_committed_contract_declares_the_platform_and_new_homes(self):
         contract = json.loads(git(
             self.root, "show", f"{self.branch}:{CONTRACT}"))
+        version = json.loads(MANIFEST.read_text("utf-8"))["platform_version"]
+        major = int(version.split(".")[0])
         self.assertEqual(contract["platform"],
-                         {"min_inclusive": "1.0.0", "max_exclusive": "2.0.0"})
+                         {"min_inclusive": version,
+                          "max_exclusive": f"{major + 1}.0.0"})
         self.assertEqual(contract["bindings"]["paths"]["artifacts"],
                          {"specs": ".agents/artifacts/specs",
                           "plans": ".agents/artifacts/plans"})
