@@ -59,9 +59,22 @@ class Base(unittest.TestCase):
 
     def lock(self, sha=None, **kwargs):
         self.world.ref_store(SLUG, {REF: sha} if sha else {}, **kwargs)
+        self.closed = []
+        self.respond_closed()
 
-    def pulls(self, sha, *prs):
-        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{sha}/pulls?per_page=100"], list(prs))
+    def respond_closed(self):
+        self.world.respond_json("gh", [
+            "api", f"repos/{SLUG}/pulls?state=closed&base={BRANCH}&sort=updated&direction=desc&per_page=100&page=1"],
+            self.closed)
+
+    def pulls(self, sha, *prs, by_commit=False):
+        """Register the forge's answers for `sha` the way GitHub gives them: the commit lookup lists
+        only open pull requests (a commit outside the default branch), the closed listing has the
+        closed ones; `by_commit` is a merge commit into the default branch, which lists them too."""
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{sha}/pulls?per_page=100"],
+                                [p for p in prs if by_commit or p["state"] == "open"])
+        self.closed = [p for p in self.closed if p not in prs] + [p for p in prs if p["state"] != "open"]
+        self.respond_closed()
         for p in prs:
             self.closing(p["number"])
 
@@ -145,6 +158,28 @@ class AcquireTest(Base):
                 code, out = run(*land("acquire", A))
                 self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "closed"))
                 self.assertEqual(self.world.refs(), {REF: A})
+
+    def test_a_merged_holder_the_commit_lookup_does_not_list_is_taken_over(self):
+        """Squash or rebase merges and closed pull requests leave the head outside the default branch."""
+        for state, merged in (("closed", True), ("closed", False)):
+            with self.subTest(merged=merged):
+                self.world.reset()
+                self.lock(B)
+                self.pulls(A, pull(11, sha=A))
+                self.pulls(B, pull(12, state=state, merged=merged, sha=B))
+                code, out = run(*land("status", A))
+                self.assertEqual((code, out["verdict"], out["pr"]), (0, "stale", 12))
+                code, out = run(*land("acquire", A))
+                self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "closed"))
+                self.assertEqual(self.world.refs(), {REF: A})
+
+    def test_a_holder_listed_by_the_commit_lookup_needs_no_closed_listing(self):
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(12, state="closed", merged=True, sha=B), by_commit=True)
+        code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "closed"))
+        self.assertEqual([a for a in self.world.argvs("gh") if any("state=closed" in p for p in a)], [])
 
     def test_a_lying_cas_is_classified_by_the_re_read(self):
         self.lock(B, cas_lies=1)
@@ -534,6 +569,22 @@ class WaitTest(Base):
                 self.assertEqual((code, out["verdict"], out["error"]), (1, "error", failure))
                 self.assertEqual(clock.slept, [120, 120])
                 self.assertEqual(self.world.refs(), {REF: B})
+
+    def test_a_waiter_whose_head_moved_stops_without_touching_the_lock(self):
+        """PR 11 advances from A to C while the A-waiter sleeps and another process takes C."""
+        def advance(elapsed):
+            if elapsed >= 120 and not moved:
+                moved.append(True)
+                self.pulls(A, pull(11, sha=C))  # A is still contained in PR 11, whose head is now C
+                self.pulls(C, pull(11, sha=C))
+                self.world.set_ref(REF, C)
+        moved = []
+        clock = FakeClock(advance)
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "no_open_pr"))
+        self.assertEqual(self.cas_calls(), [])
+        self.assertEqual(self.world.refs(), {REF: C})
+        self.assertEqual(clock.slept, [120])
 
     def test_one_shot_acquire_never_sleeps(self):
         with mock.patch.object(land_lock, "sleep", side_effect=AssertionError("slept")):

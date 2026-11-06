@@ -370,25 +370,52 @@ def cas_ref(slug: str, repository_id: str, ref: str, before: str, after: str) ->
     return None
 
 
+def _pull(item: Any) -> Pull:
+    base = item.get("base") if isinstance(item, dict) else None
+    head = item.get("head") if isinstance(item, dict) else None
+    number = item.get("number") if isinstance(item, dict) else None
+    refs = (base.get("ref") if isinstance(base, dict) else None,
+            head.get("ref") if isinstance(head, dict) else None,
+            head.get("sha") if isinstance(head, dict) else None)
+    if (isinstance(number, bool) or not isinstance(number, int)
+            or item.get("state") not in ("open", "closed")
+            or not all(isinstance(r, str) for r in refs)):
+        raise ForgeError("payload_invalid", "pull entry")
+    return Pull(number, item["state"], item.get("merged_at") is not None, *refs)
+
+
 def commit_pulls(slug: str, sha: str) -> list[Pull]:
-    """The pull requests that contain commit `sha`."""
+    """The pull requests the forge associates with commit `sha`.
+
+    GitHub documents that a commit outside the default branch gets only its open pull requests
+    (verified live: a closed-unmerged head answers `[]`), so this never finds a squash-merged,
+    rebase-merged or closed holder; `closed_pulls_headed` does.
+    """
     payload = _json(["api", f"repos/{slug}/commits/{sha}/pulls?per_page=100"])
     if not isinstance(payload, list):
         raise ForgeError("payload_invalid", "commit pulls are not an array")
-    pulls = []
-    for item in payload:
-        base = item.get("base") if isinstance(item, dict) else None
-        head = item.get("head") if isinstance(item, dict) else None
-        number = item.get("number") if isinstance(item, dict) else None
-        refs = (base.get("ref") if isinstance(base, dict) else None,
-                head.get("ref") if isinstance(head, dict) else None,
-                head.get("sha") if isinstance(head, dict) else None)
-        if (isinstance(number, bool) or not isinstance(number, int)
-                or item.get("state") not in ("open", "closed")
-                or not all(isinstance(r, str) for r in refs)):
-            raise ForgeError("payload_invalid", "commit pull entry")
-        pulls.append(Pull(number, item["state"], item.get("merged_at") is not None, *refs))
-    return pulls
+    return [_pull(item) for item in payload]
+
+
+CLOSED_PAGES = 5  # 500 most recently updated closed pull requests
+
+
+def closed_pulls_headed(slug: str, branch: str, sha: str) -> list[Pull]:
+    """The closed pull requests on base `branch` whose head is `sha`, newest update first.
+
+    Scans at most `CLOSED_PAGES` pages of the closed listing, which is not limited to the
+    default branch: a closed holder older than that window is not found.
+    """
+    found: list[Pull] = []
+    for page in range(1, CLOSED_PAGES + 1):
+        payload = _json(["api", f"repos/{slug}/pulls?state=closed&base={quote(branch, safe='/')}"
+                         f"&sort=updated&direction=desc&per_page=100&page={page}"])
+        if not isinstance(payload, list):
+            raise ForgeError("payload_invalid", "closed pulls are not an array")
+        found += [pull for pull in map(_pull, payload) if pull.head_sha == sha]
+        if len(payload) < 100:
+            break
+    return found
 
 
 def closing_issues(slug: str, pr: int) -> list[int]:

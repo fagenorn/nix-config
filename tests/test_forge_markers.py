@@ -296,6 +296,37 @@ class RefTest(unittest.TestCase):
             fm.commit_pulls(SLUG, OID_A)
         self.assertEqual(caught.exception.code, "payload_invalid")
 
+    def closed_page(self, page, items):
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/pulls?state=closed&base=main&sort=updated"
+                                       f"&direction=desc&per_page=100&page={page}"], items)
+
+    @staticmethod
+    def closed_item(number, sha):
+        return {"number": number, "state": "closed", "merged_at": None,
+                "base": {"ref": "main"}, "head": {"ref": f"issue-{number}-x", "sha": sha}}
+
+    def test_closed_pulls_headed_filters_by_head_sha(self):
+        self.closed_page(1, [self.closed_item(12, OID_B), self.closed_item(13, OID_A)])
+        self.assertEqual(fm.closed_pulls_headed(SLUG, "main", OID_B),
+                         [fm.Pull(12, "closed", False, "main", "issue-12-x", OID_B)])
+
+    def test_closed_pulls_headed_pages_until_a_short_page_or_the_bound(self):
+        full = [self.closed_item(n, OID_B) for n in range(100, 200)]
+        self.closed_page(1, full)
+        self.closed_page(2, [self.closed_item(5, OID_A)])
+        self.assertEqual(len(fm.closed_pulls_headed(SLUG, "main", OID_A)), 1)
+        for page in range(1, fm.CLOSED_PAGES + 2):
+            self.closed_page(page, full)
+        self.assertEqual(len(fm.closed_pulls_headed(SLUG, "main", OID_B)), 100 * fm.CLOSED_PAGES)
+        pages = [a[1] for a in self.world.argvs("gh") if "state=closed" in a[1]]
+        self.assertEqual(len(pages) - 2, fm.CLOSED_PAGES)
+
+    def test_closed_pulls_headed_rejects_a_bad_payload(self):
+        self.closed_page(1, {"number": 1})
+        with self.assertRaises(fm.ForgeError) as caught:
+            fm.closed_pulls_headed(SLUG, "main", OID_A)
+        self.assertEqual(caught.exception.code, "payload_invalid")
+
     def test_closing_issues(self):
         owner, name = SLUG.split("/")
         self.world.respond_json("gh", ["api", "graphql", "-f", f"query={fm.CLOSING_ISSUES}", "-f", f"owner={owner}",

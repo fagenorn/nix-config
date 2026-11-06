@@ -6,7 +6,9 @@ reports failure is judged by re-reading the ref, and a ref left unchanged is a f
 carrying the CAS's own code, never a lost race.
 
 D2, the holder is derived, not stored, and the head decides: `classify` reads the pull requests
-that contain the lock sha, and only an open pull request whose head is the lock holds it.
+that contain the lock sha (`_on_branch`: the forge's commit lookup, which for a commit outside
+the default branch lists open pull requests only, plus the closed pull requests headed at the
+lock), and only an open pull request whose head is the lock holds it.
 
 D3, staleness: no wall clock and no event is read; a lock is stale only when `classify` answers
 `closed`, and a one-shot acquire never takes over a `held` lock.
@@ -93,7 +95,17 @@ def holder(slug: str, pr: int | None) -> str | None:
 
 
 def _on_branch(slug: str, sha: str, branch: str) -> list[fm.Pull]:
-    return [p for p in fm.commit_pulls(slug, sha) if p.base_ref == branch]
+    """The pull requests on `branch` that contain `sha`, plus the closed ones headed at it.
+
+    The forge's commit lookup returns only open pull requests for a commit outside the default
+    branch, so a squash-merged, rebase-merged or closed holder is found by its head sha instead,
+    and only when no pull request already has that head.
+    """
+    pulls = [p for p in fm.commit_pulls(slug, sha) if p.base_ref == branch]
+    if not any(p.head_sha == sha for p in pulls):
+        known = {p.number for p in pulls}
+        pulls += [p for p in fm.closed_pulls_headed(slug, branch, sha) if p.number not in known]
+    return pulls
 
 
 def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
@@ -157,8 +169,13 @@ def usage_result(argv: list[str], detail: str) -> dict[str, Any]:
             "waited_s": None, "error": "usage", "detail": detail}
 
 
-def wait_acquire(args: Any, mine: list[fm.Pull], node: Callable[[], str]) -> tuple[int, dict[str, Any]]:
-    """D4, D8: poll `acquire_once` until it succeeds, the bound passes or polls keep failing."""
+def wait_acquire(args: Any, mine: list[fm.Pull], node: Callable[[], str],
+                 eligible: Callable[[], list[fm.Pull]]) -> tuple[int, dict[str, Any]]:
+    """D4, D8: poll `acquire_once` until it succeeds, the bound passes or polls keep failing.
+
+    D6 holds at every attempt: `mine` is read again before each poll after the first, and a
+    caller whose pull request no longer has its sha as head stops with `no_open_pr`.
+    """
     start = monotonic()
     watch: list[Any] = [object(), None]  # [oid or None, first seen]; the sentinel matches nothing
     failures = 0
@@ -172,8 +189,14 @@ def wait_acquire(args: Any, mine: list[fm.Pull], node: Callable[[], str]) -> tup
         seen(lock)
         return monotonic() - watch[1] >= IDLE_AFTER
 
+    first = True
     while True:
         try:
+            if not first:
+                mine = eligible()
+            first = False
+            if not mine:
+                return _no_open_pr(args)
             outcome = acquire_once(args.repo, args.branch, args.sha, mine, idle, node, seen)
         except fm.ForgeError as error:
             failures += 1
@@ -194,12 +217,19 @@ def wait_acquire(args: Any, mine: list[fm.Pull], node: Callable[[], str]) -> tup
         sleep(min(POLL, start + BOUND - monotonic()))
 
 
+def _no_open_pr(args: Any) -> tuple[int, dict[str, Any]]:
+    return 2, result(args, "error", error="no_open_pr",
+                     detail=f"no open pull request on {args.branch} has head {args.sha}")
+
+
 def _acquire(args: Any) -> tuple[int, dict[str, Any]]:
-    mine = [p for p in fm.commit_pulls(args.repo, args.sha)
-            if p.state == "open" and p.base_ref == args.branch and p.head_sha == args.sha]
+    def eligible() -> list[fm.Pull]:
+        return [p for p in fm.commit_pulls(args.repo, args.sha)
+                if p.state == "open" and p.base_ref == args.branch and p.head_sha == args.sha]
+
+    mine = eligible()
     if not mine:
-        return 2, result(args, "error", error="no_open_pr",
-                         detail=f"no open pull request on {args.branch} has head {args.sha}")
+        return _no_open_pr(args)
     cached: list[str] = []
 
     def node() -> str:
@@ -208,7 +238,7 @@ def _acquire(args: Any) -> tuple[int, dict[str, Any]]:
         return cached[0]
 
     if args.wait:
-        return wait_acquire(args, mine, node)
+        return wait_acquire(args, mine, node, eligible)
     outcome = acquire_once(args.repo, args.branch, args.sha, mine, lambda _: False, node)
     if outcome.verdict in ("acquired", "already_held", "moved"):
         return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
