@@ -9,11 +9,11 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import subprocess
-from typing import Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal, telemetry_digest
-from agent_tools.review_actual import (RECORD_POLICY, SHA_RE, GenerationError, _run_git, _split_diff, git_diff,
-                                       record_operation)
+from agent_tools.review_actual import (RECORD_POLICY, SHA_RE, GenerationError, RecordView, _run_git, _split_diff,
+                                       git_diff, record_operation)
 from agent_tools.review_budget import BudgetAuthority
 from agent_tools.review_git import (HistoryError, original_commit, original_commits, original_range,
                                     original_ancestor, original_edge)
@@ -241,6 +241,69 @@ def tree_entry(repo: Path, tree: str, path: str) -> dict | None:
     return {"mode": mode, "kind": kind, "oid": identity(oid, "object")}
 
 
+# Paths per batched `ls-tree`, so one call's argv stays far below the platform limit.
+TREE_BATCH = 512
+
+
+def tree_entries(repo: Path, tree: str, paths: Iterable[str]) -> Callable[[str], dict | None]:
+    """A lookup that answers `tree_entry(repo, tree, path)` for each of `paths` from one `ls-tree` per
+    `TREE_BATCH` of them (issue 613).
+
+    Git lists several literal paths of one tree exactly as it lists each alone while every path is plain (no
+    empty, `.` or `..` component) and none is a directory prefix of another; for a nested pair the listing
+    descends into the directory instead of naming it. Outside that case, and whenever the listing holds
+    anything but one row per requested path at most, the lookup is `tree_entry` itself, so every answer and
+    every refusal is the per-path one. The listing runs on the first lookup, and a path not among `paths`
+    is looked up alone.
+    """
+    wanted = tuple(dict.fromkeys(paths))
+    names = set(wanted)
+
+    def single(path: str) -> dict | None:
+        return tree_entry(repo, tree, path)
+
+    parts = [path.split("/") for path in wanted]
+    if (not wanted or any(not part or part in (".", "..") for split in parts for part in split)
+            or any("/".join(split[:n]) in names for split in parts for n in range(1, len(split)))):
+        return single
+    found: dict[str, dict] | None = None
+
+    def listed() -> dict[str, dict] | None:
+        entries: dict[str, dict] = {}
+        for start in range(0, len(wanted), TREE_BATCH):
+            raw = _run_git(repo, "--literal-pathspecs", "ls-tree", "-z", tree, "--",
+                           *wanted[start:start + TREE_BATCH], binary=True)
+            rows = raw.split(b"\0")
+            if rows.pop() != b"":
+                return None
+            for row in rows:
+                metadata, tab, name = row.partition(b"\t")
+                try:
+                    path = name.decode("utf-8")
+                    mode, kind, oid = metadata.decode("ascii").split()
+                except (UnicodeDecodeError, ValueError):
+                    return None
+                if not tab or path not in names or path in entries or SHA_RE.fullmatch(oid) is None:
+                    return None
+                entries[path] = {"mode": mode, "kind": kind, "oid": oid}
+        return entries
+
+    def lookup(path: str) -> dict | None:
+        nonlocal found, single_only
+        if path not in names or single_only:
+            return single(path)
+        if found is None:
+            found = listed()
+            if found is None:
+                single_only = True
+                return single(path)
+        entry = found.get(path)
+        return None if entry is None else dict(entry)
+
+    single_only = False
+    return lookup
+
+
 def committed_bytes(repo: Path, head: str, path: str) -> bytes:
     entry = tree_entry(repo, head, path)
     if entry is None or entry["kind"] != "blob" or entry["mode"] not in {"100644", "100755"}:
@@ -318,14 +381,15 @@ def edge_facts(repo: Path, parent: str, commit: str, ordinal: int, *,
     except HistoryError as exc:
         raise ForecastError("invalid original edge") from exc
     parent_tree, commit_tree = parent_commit.tree, child_commit.tree
-    status = git_diff(repo, parent_tree, commit_tree, "--name-status", "-z",
-                      record_policy=record_policy).split(b"\0")
-    if status[-1] != b"":
-        raise ForecastError("invalid Git status framing")
-    status.pop()
-    chunks = _split_diff(git_diff(repo, parent_tree, commit_tree, "--binary", "-U10",
-                                  record_policy=record_policy))
-    facts = []
+    with RecordView(repo) as view:  # one view for both diffs of the edge (issue 613)
+        status = git_diff(view, parent_tree, commit_tree, "--name-status", "-z",
+                          record_policy=record_policy).split(b"\0")
+        if status[-1] != b"":
+            raise ForecastError("invalid Git status framing")
+        status.pop()
+        chunks = _split_diff(git_diff(view, parent_tree, commit_tree, "--binary", "-U10",
+                                      record_policy=record_policy))
+    named = []
     while status:
         try:
             operation, names = record_operation(status.pop(0), record_policy)
@@ -335,8 +399,12 @@ def edge_facts(repo: Path, parent: str, commit: str, ordinal: int, *,
             raise ForecastError("invalid Git status framing")
         old = path_name(status.pop(0).decode("utf-8"))
         new = path_name(status.pop(0).decode("utf-8")) if names == 2 else old
-        facts.append({"operation": operation, "path": new, "old_path": old,
-                      "before": tree_entry(repo, parent_tree, old), "after": tree_entry(repo, commit_tree, new)})
+        named.append((operation, old, new))
+    # One listing per side of the edge, rather than one per record and side (issue 613).
+    before = tree_entries(repo, parent_tree, [old for _, old, _ in named])
+    after = tree_entries(repo, commit_tree, [new for _, _, new in named])
+    facts = [{"operation": operation, "path": new, "old_path": old, "before": before(old), "after": after(new)}
+             for operation, old, new in named]
     if len(chunks) != len(facts):
         raise ForecastError("Git edge record coverage mismatch")
     for item, chunk in zip(facts, chunks):

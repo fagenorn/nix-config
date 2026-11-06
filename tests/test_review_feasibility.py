@@ -25,11 +25,14 @@ class BoundaryTreeTest(unittest.TestCase):
         with self.assertRaises(ForecastError):
             validate_boundaries(cyclic, 2, "all")
 
+import copy
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 class SharedPackingPolicyTest(unittest.TestCase):
@@ -122,21 +125,48 @@ class SourceProjectionFixture:
     plan_stem = 'all'
     seed = {}  # extra base files: path -> text
 
+    # What `_build` leaves on the instance besides its directory; each test takes a deep copy (issue 613).
+    _STATE = ('ranges', 'base', 'head', 'tasks', 'delivery')
+
+    @classmethod
+    def setUpClass(cls):
+        """Build the fixture once per class into a template that every test copies (issue 613)."""
+        super().setUpClass()
+        template = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(template.cleanup)
+        builder = cls.__new__(cls)
+        builder._enter(Path(template.name))
+        builder._build()
+        cls._template = (Path(template.name), {name: getattr(builder, name) for name in cls._STATE})
+
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory()
         self.addCleanup(self.scratch.cleanup)
-        self.top = Path(self.scratch.name)
+        template, state = self._template
+        shutil.copytree(template, self.scratch.name, symlinks=True, dirs_exist_ok=True)
+        self._enter(Path(self.scratch.name))
+        for name, value in state.items():
+            setattr(self, name, copy.deepcopy(value))
+
+    def _enter(self, top):
+        """Point the instance at the fixture directory `top`: its repository and its budget home."""
+        self.top = top
         self.repo = self.top / 'repo'
-        self.repo.mkdir()
         source = Path(__file__).resolve().parents[1]
         home = self.top / 'home'
-        (home / '.agents/lib/python').mkdir(parents=True)
-        (home / '.agents/share').mkdir(parents=True)
         legacy = source / 'home/common/agent-skills'
-        (home / '.agents/lib/python/artifact_budget.py').symlink_to(legacy / 'scripts/artifact_budget.py')
-        (home / '.agents/share/artifact-budget-policy.json').symlink_to(legacy / 'artifact-budget-policy.json')
         self.env = dict(os.environ, HOME=str(home), PYTHONPATH=str(source / 'python'),
                         PATH=str(legacy / 'scripts') + os.pathsep + os.environ['PATH'])
+
+    def _build(self):
+        """The fixture: a budget home and a repository with its base, process and checkpoint commits."""
+        source = Path(__file__).resolve().parents[1]
+        home, legacy = self.top / 'home', source / 'home/common/agent-skills'
+        (home / '.agents/lib/python').mkdir(parents=True)
+        (home / '.agents/share').mkdir(parents=True)
+        (home / '.agents/lib/python/artifact_budget.py').symlink_to(legacy / 'scripts/artifact_budget.py')
+        (home / '.agents/share/artifact-budget-policy.json').symlink_to(legacy / 'artifact-budget-policy.json')
+        self.repo.mkdir()
         self.git('init', '-q')
         self.git('config', 'user.name', 'Fixture')
         self.git('config', 'user.email', 'fixture@example.test')
@@ -220,6 +250,94 @@ class TreeEntryTest(SourceProjectionFixture, unittest.TestCase):
         self.assertEqual((entry['mode'], entry['kind']), ('100644', 'blob'))
         self.assertIsNone(tree_entry(self.repo, tree, ':(top)other.txt'),
                           'pathspec magic must not resolve to a different path')
+
+
+class TreeEntriesTest(unittest.TestCase):
+    """Issue 613: `tree_entries` answers every path as `tree_entry` does, from one `ls-tree` per tree."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.scratch.cleanup)
+        repo = cls.repo = Path(cls.scratch.name) / 'repo'
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+        run = lambda *args: subprocess.run(['git', '-C', str(repo), *args], env=env, check=True,
+                                           capture_output=True, text=True).stdout.strip()
+        repo.mkdir()
+        run('init', '-q')
+        for name, data in (('a.txt', 'a'), ('exec.sh', 'x'), ('d/e/f.txt', 'f'), ('d/g.txt', 'g'),
+                           ('caf\u00e9.txt', 'c'), (':(top)literal.txt', 'l'), ('spaced name.txt', 's')):
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(data)
+        (repo / 'exec.sh').chmod(0o755)
+        (repo / 'link').symlink_to('a.txt')
+        run('add', '-A')
+        run('update-index', '--add', '--cacheinfo', '160000,' + '1' * 40 + ',sub')
+        cls.tree = run('write-tree')
+        # No path is a directory prefix of another, so one listing answers them all.
+        cls.paths = ('a.txt', 'exec.sh', 'link', 'd/e', 'd/g.txt', 'caf\u00e9.txt', ':(top)literal.txt',
+                     'spaced name.txt', 'sub', 'missing', 'D/G.TXT', ':(top)a.txt', 'd/missing', 'nowhere/x')
+
+    @staticmethod
+    def outcome(call):
+        """`call()`'s answer, or the type and message of what it raised."""
+        try:
+            return call()
+        except Exception as exc:  # the per-path lookup's refusal is part of its answer
+            return type(exc), str(exc)
+
+    def counted(self, call):
+        """`call()`'s result and the `ls-tree` runs it made."""
+        from agent_tools import review_forecast
+        runs, real = [], review_forecast._run_git
+        def run(repo, *args, **kwargs):
+            runs.append(args)
+            return real(repo, *args, **kwargs)
+        with patch.object(review_forecast, '_run_git', run):
+            return call(), [args for args in runs if 'ls-tree' in args]
+
+    def test_batched_lookup_equals_the_per_path_lookup_with_one_listing(self):
+        from agent_tools.review_forecast import tree_entries
+        expected = {path: tree_entry(self.repo, self.tree, path) for path in self.paths}
+        self.assertEqual({expected[p]['kind'] for p in ('a.txt', 'd/e', 'sub', 'link')}, {'blob', 'tree', 'commit'})
+        lookup, runs = self.counted(lambda: tree_entries(self.repo, self.tree, [*self.paths, 'a.txt']))
+        self.assertEqual(runs, [], 'the listing runs on the first lookup')
+        answers, runs = self.counted(lambda: {path: lookup(path) for path in self.paths})
+        self.assertEqual(answers, expected)
+        self.assertEqual(len(runs), 1)
+        answers['a.txt']['oid'] = 'changed'
+        self.assertEqual(lookup('a.txt'), expected['a.txt'], 'each answer is a fresh copy')
+
+    def test_nested_unrequested_or_unlisted_paths_take_the_per_path_lookup(self):
+        from agent_tools import review_forecast
+        from agent_tools.review_forecast import tree_entries
+        for paths in (('d', 'd/e/f.txt', 'a.txt'), ('d/e', 'd/e/f.txt'), ('a.txt', 'a.txt/x'), ('sub', 'sub/x'),
+                      ('link', 'link/x'), ('a.txt', '', 'd'), ('./a.txt', 'd'), ('d/../a.txt',), ('d//g.txt',)):
+            with self.subTest(paths=paths):
+                lookup = tree_entries(self.repo, self.tree, paths)
+                answers, runs = self.counted(lambda: [self.outcome(lambda: lookup(p)) for p in paths if p])
+                self.assertEqual(answers, [self.outcome(lambda: tree_entry(self.repo, self.tree, p))
+                                           for p in paths if p])
+                self.assertEqual(len(runs), len([p for p in paths if p]))
+        lookup = tree_entries(self.repo, self.tree, ('a.txt', 'exec.sh'))
+        answer, runs = self.counted(lambda: lookup('d/g.txt'))
+        self.assertEqual((answer, len(runs)), (tree_entry(self.repo, self.tree, 'd/g.txt'), 1))
+        real = review_forecast._run_git
+        def extra(repo, *args, **kwargs):  # the batched listing alone gains a row nobody asked for
+            listed = real(repo, *args, **kwargs)
+            return listed + b'100644 blob ' + b'2' * 40 + b'\td/g.txt\0' if 'exec.sh' in args[-2:] else listed
+        lookup = tree_entries(self.repo, self.tree, ('a.txt', 'exec.sh'))
+        with patch.object(review_forecast, '_run_git', extra):
+            first = lookup('a.txt')
+        self.assertEqual([first, lookup('exec.sh')], [tree_entry(self.repo, self.tree, p) for p in ('a.txt', 'exec.sh')])
+
+    def test_refusals_are_the_per_path_refusals(self):
+        from agent_tools.review_actual import GenerationError
+        from agent_tools.review_forecast import tree_entries
+        with self.assertRaises(GenerationError):
+            tree_entry(self.repo, '0' * 40, 'a.txt')
+        with self.assertRaises(GenerationError):
+            tree_entries(self.repo, '0' * 40, ['a.txt', 'd'])('a.txt')
 
 
 class GraphRefusalTest(BoundaryTreeTest):

@@ -25,11 +25,12 @@ from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import (PACKING_POLICY_V1_SHA256, RECORD_POLICY_V1, RECORD_POLICY_V1_SHA256,
-                                       FutureCommit, GenerationError, _split_diff, actual_inputs,
+                                       FutureCommit, GenerationError, RecordView, _split_diff, actual_inputs,
                                        actual_inputs_from_trees, git_diff, select_candidate)
 from agent_tools.review_budget import BudgetAuthority
 from agent_tools.review_expansion import Budget
-from agent_tools.review_forecast import ForecastError, canonical_bytes, edge_facts, raw_digest, tree_entry
+from agent_tools.review_forecast import (ForecastError, canonical_bytes, edge_facts, raw_digest, tree_entries,
+                                         tree_entry)
 from agent_tools.review_git import HistoryError, original_commit, original_commits, original_range
 from agent_tools.review_pack import ReviewRecordSize
 from agent_tools.review_projection import ReconstructionUnavailable, reconstruct_owned
@@ -219,19 +220,20 @@ def contribution_edges(repo: Path, pins: Issue121Pins, classes: Sequence[dict]) 
     edges = []
     with _authenticated():
         parent, *chain = original_commits(repo, (pins.base, *(row["commit"] for row in expected)))
-        for row, commit in zip(expected, chain):
-            if commit.parents != (parent.oid,):
-                raise ContributionError("history_nonlinear")
-            edge = edge_facts(repo, parent.oid, commit.oid, 1, record_policy=RECORD_POLICY_V1)
-            chunks = _split_diff(git_diff(repo, parent.tree, commit.tree, "--binary", "-U10",
-                                          record_policy=RECORD_POLICY_V1))
-            if [raw_digest(chunk) for chunk in chunks] != [record["record_sha256"] for record in edge["records"]]:
-                raise ContributionError("edge_record_mismatch")
-            for record, chunk in zip(edge["records"], chunks):
-                headers = [line for line in chunk.split(b"\n") if line.startswith(b"@@")]
-                record["hunk_header_sha256"] = raw_digest(b"\n".join(headers))
-            edges.append(_identified({**edge, "owner": row["owner"]}))
-            parent = commit
+        with RecordView(repo) as view:  # one record view for every edge's diff (issue 613)
+            for row, commit in zip(expected, chain):
+                if commit.parents != (parent.oid,):
+                    raise ContributionError("history_nonlinear")
+                edge = edge_facts(repo, parent.oid, commit.oid, 1, record_policy=RECORD_POLICY_V1)
+                chunks = _split_diff(git_diff(view, parent.tree, commit.tree, "--binary", "-U10",
+                                              record_policy=RECORD_POLICY_V1))
+                if [raw_digest(chunk) for chunk in chunks] != [record["record_sha256"] for record in edge["records"]]:
+                    raise ContributionError("edge_record_mismatch")
+                for record, chunk in zip(edge["records"], chunks):
+                    headers = [line for line in chunk.split(b"\n") if line.startswith(b"@@")]
+                    record["hunk_header_sha256"] = raw_digest(b"\n".join(headers))
+                edges.append(_identified({**edge, "owner": row["owner"]}))
+                parent = commit
     return tuple(edges)
 
 
@@ -251,9 +253,10 @@ def _anchors(repo: Path, pins: Issue121Pins, edges: Sequence[dict]) -> list[dict
         trust, revoked = Path(scratch) / "allowed-signers", Path(scratch) / "revoked"
         trust.write_bytes(pins.allowed_signer)
         revoked.write_bytes(b"")
-        head_tree = original_commit(repo, pins.head).tree
-        for path in _plan_paths(pins):
-            entry = tree_entry(repo, head_tree, path)
+        head_tree, plan_paths = original_commit(repo, pins.head).tree, _plan_paths(pins)
+        head_entries = tree_entries(repo, head_tree, plan_paths)
+        for path in plan_paths:
+            entry = head_entries(path)
             if entry is None or entry["kind"] != "blob" or pinned.get(path, entry["oid"]) != entry["oid"]:
                 raise ContributionError("anchor_blob_mismatch")
             written = _written(edges, path)

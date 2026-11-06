@@ -23,7 +23,7 @@ from agent_tools.review_actual import (RECORD_POLICY_V1, RECORD_POLICY_V1_SHA256
                                        actual_inputs_from_trees, record_git)
 from agent_tools.review_expansion import Budget
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, edge_facts, read_regular, strict_json,
-                                         tree_entry)
+                                         tree_entries)
 from agent_tools.review_git import HistoryError, original_commit, original_commits, original_range
 
 KIND = "issue-100-retained-history"
@@ -360,15 +360,19 @@ def model_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue1
                 edges.append(edge_facts(repo, parent, oid, ordinal, record_policy=RECORD_POLICY_V1))
         refs = _refs(edges)
         overlaps = []
+        listings = {name: tree_entries(repo, trees[name], pins.pending_paths) for name in ("base", "live", "head")}
         for path in pins.pending_paths:
-            entries = {f"{name}_entry": tree_entry(repo, trees[name], path) for name in ("base", "live", "head")}
+            entries = {f"{name}_entry": listings[name](path) for name in ("base", "live", "head")}
             digests = {f"{a}_{b}_sha256": _sha(_recipe(repo, pins, trees[a], trees[b], path)) for a, b in _PAIRS}
             overlaps.append(_identified({"path": path, **entries, **digests}))
         pending = {row["path"]: row["id"] for row in overlaps}
         contributions = []
+        fresh_paths = [record["path"] for record in fresh]
+        head_entries, live_entries = (tree_entries(repo, trees["head"], fresh_paths),
+                                      tree_entries(live_repo, trees["live"], fresh_paths))
         for record in fresh:
             path = record["path"]
-            head_entry, live_entry = tree_entry(repo, trees["head"], path), tree_entry(live_repo, trees["live"], path)
+            head_entry, live_entry = head_entries(path), live_entries(path)
             disposition = ("historical_process" if path in pins.process_paths
                            else "integrated" if head_entry == live_entry else "candidate")
             contributions.append(_identified({

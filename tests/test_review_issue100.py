@@ -12,7 +12,7 @@ from agent_tools.review_git import HistoryError
 from agent_tools.review_issue100 import (ISSUE_100_PINS, Issue100Error, compact_100, derive_100, fresh_records,
                                          historical_records, model_100, validate_100, verify_archive)
 
-from .retained_review_test_support import git, issue100_fixture, snapshot, source_budget_env
+from .retained_review_test_support import copy_fixture, git, issue100_fixture, snapshot, source_budget_env
 
 
 def rehashed(row, **change):
@@ -26,11 +26,17 @@ def validated(model, pins):
 
 
 class Issue100Test(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Built once and copied per test (issue 613); `source_budget_env` leaves its home in the template too.
+        cls.template = Path(tempfile.mkdtemp()); cls.addClassCleanup(shutil.rmtree, cls.template)
+        cls.built = issue100_fixture(cls.template)
+        with patch.dict(os.environ, source_budget_env(cls.template), clear=True):
+            cls.limits = describe("review-package").limits
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
-        self.repo, self.live, self.archive, self.pins = issue100_fixture(self.tmp)
-        with patch.dict(os.environ, source_budget_env(self.tmp), clear=True):
-            self.limits = describe("review-package").limits
+        self.repo, self.live, self.archive, self.pins = copy_fixture(self.template, self.tmp, self.built)
 
     def archive_bytes(self):
         return {p.relative_to(self.archive): p.read_bytes() for p in self.archive.rglob("*") if p.is_file()}

@@ -285,6 +285,37 @@ class RecordViewTest(unittest.TestCase):
         self.assertEqual(str(caught.exception), "git command failed")
         self.assertEqual(list(scratch.iterdir()), [])
 
+    def test_one_view_serves_every_record_call_of_an_operation(self):
+        """Issue 613: a reused `RecordView` answers every record call as a fresh view does, survives a failed
+        call, refuses once closed and is removed when its block ends; one measurement opens one view for its
+        diffs and one for its subjects, rather than one per call."""
+        from agent_tools.review_actual import GenerationError, RecordView, commit_subject, git_diff
+        env = self.environment(self.tmp / "reuse")
+        scratch = Path(tempfile.mkdtemp(dir=self.tmp, prefix="scratch-"))
+        with patch.dict(os.environ, env, clear=True):
+            fresh = [git_diff(self.fixture, *self.trees, *view) for view in VIEWS]
+            fresh.append(commit_subject(self.fixture, self.head))
+            with patch.object(tempfile, "tempdir", str(scratch)):
+                with RecordView(self.fixture) as view:
+                    reused = [git_diff(view, *self.trees, *v) for v in VIEWS]
+                    with self.assertRaises(GenerationError):
+                        view.git("cat-file", "-t", "0" * 40)
+                    reused.append(commit_subject(view, self.head))
+                    self.assertEqual(len(list(scratch.iterdir())), 1)
+                self.assertEqual(list(scratch.iterdir()), [])
+                with self.assertRaises(GenerationError):
+                    view.git("cat-file", "-t", self.head)
+            calls, real = [], subprocess.run
+            def counting(argv, *args, **kwargs):
+                calls.append(list(argv))
+                return real(argv, *args, **kwargs)
+            with patch.object(subprocess, "run", counting):
+                inputs = list(actual_inputs(self.fixture, self.base, self.head, "review.json", LIMITS))
+        self.assertEqual(reused, fresh)
+        self.assertEqual(inputs, self.clean[0])
+        self.assertEqual(len([argv for argv in calls if "--git-path" in argv]), 2)
+        self.assertEqual(len([argv for argv in calls if any(a.startswith("--git-dir=") for a in argv)]), 10)
+
     def test_subjects_come_from_one_isolated_reader(self):
         from agent_tools.review_actual import GenerationError, commit_subject, record_git
         self.assertEqual(commit_subject(self.fixture, self.head), "caf\u00e9 subject")

@@ -15,7 +15,7 @@ from agent_tools.review_forecast import history_commit
 from agent_tools.review_task7 import (TASK7_PINS, TASK8_EFFECT, EstimateError, RendererSpec, Task7Pins,
                                       compose, derive_task7, validate_task7)
 
-from .retained_review_test_support import (HOSTILE_GIT_ENV, commit_files, git, init_repo, snapshot,
+from .retained_review_test_support import (HOSTILE_GIT_ENV, commit_files, copy_fixture, git, init_repo, snapshot,
                                            source_budget_env)
 
 ZERO = "0" * 40
@@ -160,9 +160,14 @@ def interleaved(tag, count=40):
 
 
 class Task7ModelTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.template = Path(tempfile.mkdtemp()); cls.addClassCleanup(shutil.rmtree, cls.template)
+        cls.built = fixture_pins(cls.template)  # built once and copied per test (issue 613)
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
-        self.repo, self.pins = fixture_pins(self.tmp)
+        self.repo, self.pins = copy_fixture(self.template, self.tmp, self.built)
 
     def forged(self, table, path, change):
         rows = [dict(r) for r in table["rows"]]
