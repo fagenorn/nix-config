@@ -3316,10 +3316,15 @@ class DirectLaneRoutingTest(unittest.TestCase):
         self.assertLessEqual(len(raw), 4991)
         text = normalized(raw.decode("utf-8"))
         step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
-        for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id>`",
+        for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id> --branch <branch>`",
                       "`forge-claim release`", "`acquired`", "`already_held`"):
             with self.subTest(token=token):
                 self.assertIn(token, step1)
+        # COR-002: the claim records its branch (so branch activity counts) and is renewed before push and merge.
+        step5 = text[text.index("**Ship.**"):text.index("**Wait in-turn.**")]
+        for token in ("`forge-claim renew`", "`renewed`", "before the push", "before the merge"):
+            with self.subTest(token=token):
+                self.assertIn(token, step5)
         for gone in ("assignee", "in-progress", "gh issue view"):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, step1)

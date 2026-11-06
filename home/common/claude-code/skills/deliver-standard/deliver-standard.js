@@ -179,7 +179,7 @@ let claimIncomplete = !!(CONT && CONT.claim_incomplete)
 let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
 // Fix waves already spent, carried through a resume; declared before stop() because early failures call it.
 let fixWaves = (CONT && CONT.fix_waves) || 0
-// The verified head and results of a ready stop; carried until a resume finds the head moved.
+// The verified head, results and verification contract of a ready stop; carried until a resume finds the head moved; its results are reused only under the same contract.
 let verified = (CONT && CONT.verified) || null
 const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(verified ? { verified } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
 
@@ -315,6 +315,10 @@ let chunked = false
 // A ready stop's verified head, unchanged and clean, needs no second review or verify.
 const SKIP_REVIEW = !!(verified && plan && setup.head === verified.head && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)))
 if (!SKIP_REVIEW) verified = null
+// The verification contract as freshly resolved, key order aside: cached results answer only this contract.
+const canon = v => Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v)
+const VERIFY_CONTRACT = canon(setup.verification)
+const VERIFY_CACHED = SKIP_REVIEW && verified.contract === VERIFY_CONTRACT
 const DIRECT_IMPL = { ...IMPL, properties: { ...IMPL.properties, acceptance: PLAN_SCHEMA.properties.acceptance, sensitive: { type: 'boolean' }, ineligible: { type: 'boolean' } } }
 const DIRECT_FINDINGS = { ...FINDINGS, properties: { ...FINDINGS.properties, escalate: { type: 'boolean' } } }
 
@@ -531,8 +535,8 @@ const verifyProblems = v => {
   if (!v.clean) out.push({ id: '?', summary: 'the worktree has uncommitted changes, so the verified tree is not the pushed head' })
   return out
 }
-let verify = SKIP_REVIEW ? { head: verified.head, clean: true, results: verified.results } : null
-if (!SKIP_REVIEW) {
+let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results } : null
+if (!VERIFY_CACHED) {
 {
   const lost = await renew('verify', 'Verify')
   if (lost) return lost
@@ -550,7 +554,7 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
 }
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
 if (MODE === 'ready') {
-  verified = { head: verify.head, results: verify.results }
+  verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT }
   return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, tasks: taskLog, acceptance: plan.acceptance, fix_waves: fixWaves })
 }
 

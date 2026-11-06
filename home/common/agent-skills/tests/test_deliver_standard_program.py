@@ -814,6 +814,34 @@ class ModeTest(unittest.TestCase):
                 for label in ("final-1", "verify"):
                     self.assertIn(label, labels(calls))
 
+    def test_cached_verification_is_reused_only_for_the_same_contract(self):
+        """COR-001: the cache is keyed by the freshly resolved verification contract, not the head alone."""
+        build = {"id": "build", "argv": ["make", "build"], "cwd": "."}
+        lint = {"id": "lint", "argv": ["make", "lint"], "cwd": "."}
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        reordered = {"cwd": ".", "argv": ["make", "build"], "id": "build"}
+        same, calls = run(args=dict(ARGS, cont=ready["cont"]),
+                          patch={"setup": {"head": SHA, "verification": [reordered]}})
+        self.assertEqual(same["stage"], "done")
+        self.assertNotIn("verify", labels(calls))
+        added_results = [{"id": "build", "status": "pass", "summary": "ok"},
+                         {"id": "lint", "status": "pass", "summary": "ok"}]
+        changes = {
+            "added command": ([build, lint], added_results),
+            "changed argv": ([dict(build, argv=["make", "build", "-j"])], None),
+            "changed cwd": ([dict(build, cwd="sub")], None),
+        }
+        for name, (verification, results) in changes.items():
+            with self.subTest(change=name):
+                reply = {"head": SHA, "clean": True,
+                         "results": results or [{"id": "build", "status": "pass", "summary": "ok"}]}
+                result, calls = run(args=dict(ARGS, cont=ready["cont"]),
+                                    patch={"setup": {"head": SHA, "verification": verification}, "verify": reply})
+                self.assertEqual(result["stage"], "done")
+                self.assertIn("verify", labels(calls))
+                self.assertNotIn("final-1", labels(calls))
+                self.assertIn(json.dumps(verification, separators=(",", ":")), prompt(calls, "verify"))
+
 
 DIRECT = dict(ARGS, lane="direct")
 BAD = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
