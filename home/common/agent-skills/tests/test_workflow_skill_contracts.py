@@ -3304,6 +3304,22 @@ class DirectLaneRoutingTest(unittest.TestCase):
             with self.subTest(form=form):
                 self.assertIn(form, text)
 
+    def test_deliver_direct_review_fixes_from_its_first_runs(self):
+        """#572 PR 600 review: claim before a stale close, one verification after review,
+        needs-verification is an issue label created if missing, required checks from a source."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        claim = text.index("**Claim.**")
+        self.assertNotIn("still applies", text[:claim])
+        self.assertIn("still applies", text[claim:text.index("**Worktree.**")])
+        step3 = text[text.index("**Test first.**"):text.index("**Review.**")]
+        step4 = text[text.index("**Review.**"):text.index("**Ship.**")]
+        self.assertNotIn("workflow.verification", step3)
+        self.assertIn("After review and any fixes, run each `workflow.verification` id once", step4)
+        self.assertNotIn("plus `needs-verification`", text)
+        self.assertIn("add the `needs-verification` label to the issue (create it if missing)", text)
+        self.assertIn("`gh api repos/<slug>/rules/branches/<int>`", text)
+        self.assertIn("if neither source answers, wait for every check", text)
+
 
 class HandBuiltTimeContractsTest(unittest.TestCase):
     """#309 D9: no skill document hands workflow-state a time; the helper reads its clock."""
