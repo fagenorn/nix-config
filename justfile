@@ -145,6 +145,8 @@ agent-workflow-tests *args:
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
     tests/test_lane_triage.py \
+    tests/test_forge_markers.py \
+    tests/test_forge_claim.py \
     tests/test_skill_sections.py \
     tests/test_phase_budget.py \
     tests/test_context_meter.py \

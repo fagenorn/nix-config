@@ -27,13 +27,26 @@ reads are read-only paths the guard never adjudicates.
 (issue 554 D3): the open release pull requests, the default branch tip and the compare of that
 tip against the candidate. The tip read spells the fixture's `pr_merge.base_ref` row, so it
 agrees with `merge_ready` on the same `base_tip`.
+
+`comment_store(slug, issue, comments, ...)` makes the fake `gh` serve one issue's comments from
+shared state (issue 623): list, POST, PATCH and DELETE of that issue's comments act on one
+`store.json` under an exclusive `flock`, and every other argv falls through to the registered
+responses. An optional `schedule` forces the order of named store operations across concurrent
+callers: an operation that matches a schedule entry beyond the cursor waits until the cursor
+reaches it, and one that matches no entry at or past the cursor runs unscheduled. `stored()`
+reads the comments now and `wait_cursor(n)` blocks until `n` entries have run. `host_clock`
+makes every host-clock read of the named modules return one instant, so a module that reads
+the host clock instead of the server's fails its test.
 """
+import contextlib
 import json
 import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -50,6 +63,94 @@ FLOOR_PROTECTION = {
                    {"context": "Instruction Budget", "app_id": None}]},
     "enforce_admins": {"enabled": True}}
 
+STORE_HANDLER = """\
+if tool == "gh" and (state / "store.json").exists():
+    import fcntl
+
+    def store_op(store):
+        slug, issue = store["slug"], store["issue"]
+        base = "repos/" + slug + "/issues/" + str(issue) + "/comments"
+        one = "repos/" + slug + "/issues/comments/"
+        body = argv[5][5:] if len(argv) == 6 and argv[4] == "-f" and argv[5].startswith("body=") else None
+        if argv == ["api", "--paginate", "--slurp", base + "?per_page=100"]:
+            return "list", None, None
+        if body is not None and argv[:4] == ["api", "-X", "POST", base]:
+            return "post", None, body
+        if body is not None and argv[:3] == ["api", "-X", "PATCH"] and argv[3].startswith(one) and argv[3][len(one):].isdigit():
+            return "patch", int(argv[3][len(one):]), body
+        if len(argv) == 4 and argv[:3] == ["api", "-X", "DELETE"] and argv[3].startswith(one) and argv[3][len(one):].isdigit():
+            return "delete", int(argv[3][len(one):]), None
+        return None
+
+    def entry_matches(entry, op):
+        kind, target, body = op
+        parts = entry.split(":", 1) if kind == "post" else entry.split(":", 2)
+        if parts[0] != kind:
+            return False
+        if kind == "list":
+            return len(parts) == 1
+        if kind == "post":
+            return len(parts) == 2 and parts[1] in body.split("\\n", 1)[0]
+        if len(parts) < 2 or parts[1] != str(target):
+            return False
+        return len(parts) == 2 or (kind == "patch" and parts[2] in body.split("\\n", 1)[0])
+
+    def save(store):
+        tmp = state / "store.json.tmp"
+        tmp.write_text(json.dumps(store), encoding="utf-8")
+        os.replace(tmp, state / "store.json")
+
+    def fail_404():
+        sys.stderr.write("gh: Not Found (HTTP 404)\\n")
+        sys.exit(1)
+
+    waiting_for = None
+    deadline = time.monotonic() + 10
+    while True:
+        with open(state / "store.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            store = json.loads((state / "store.json").read_text("utf-8"))
+            op = store_op(store)
+            if op is None:
+                break
+            kind, target, body = op
+            cursor = store["cursor"]
+            matches = [i for i, entry in enumerate(store["schedule"])
+                       if i >= cursor and entry_matches(entry, op)]
+            if not matches or matches[0] == cursor:
+                if matches:
+                    store["cursor"] = cursor + 1
+                comments = store["comments"]
+                found = [c for c in comments if c["id"] == target]
+                if kind == "list":
+                    out = sorted(comments, key=lambda c: c["id"])
+                elif kind == "post":
+                    out = {"id": store["next_id"], "body": body, "created_at": store["clock"],
+                           "updated_at": store["clock"]}
+                    store["next_id"] += 1
+                    comments.append(out)
+                elif not found:
+                    fail_404()
+                elif kind == "patch":
+                    found[0]["body"] = body
+                    found[0]["updated_at"] = store["clock"]
+                    out = found[0]
+                else:
+                    comments.remove(found[0])
+                    out = None
+                save(store)
+                if kind == "list":
+                    out = [out]
+                if out is not None:
+                    sys.stdout.write(json.dumps(out))
+                sys.exit(0)
+            waiting_for = matches[0]
+        if time.monotonic() > deadline:
+            sys.stderr.write("fake gh: schedule entry " + str(waiting_for) + " never reached\\n")
+            sys.exit(66)
+        time.sleep(0.01)
+"""
+
 SCRIPT = """#!{python}
 import json, os, sys, time
 from pathlib import Path
@@ -65,6 +166,7 @@ with open(state / "calls.jsonl", "a", encoding="utf-8") as log:
 if tool == "gh" and token:
     sys.stderr.write("gh: a token variable reached the child\\n")
     sys.exit(65)
+# store handler
 responses = json.loads((state / "responses.json").read_text("utf-8"))
 keyed = list(argv)
 if "--notes-file" in keyed:
@@ -91,7 +193,8 @@ class ForgeWorld:
         self.checkout.mkdir()
         for tool in TOOLS:
             path = self.bin / tool
-            path.write_text(SCRIPT.format(python=sys.executable), encoding="utf-8")
+            path.write_text(SCRIPT.format(python=sys.executable).replace("# store handler\n", STORE_HANDLER),
+                            encoding="utf-8")
             path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         patch = mock.patch.dict(os.environ, {"PATH": str(self.bin), "GITHUB_TOKEN": "harness-token",
                                              "FORGE_WORLD": str(self.state)})
@@ -107,6 +210,8 @@ class ForgeWorld:
         """Forget every registered response and every logged call."""
         (self.state / "responses.json").write_text("{}", encoding="utf-8")
         (self.state / "calls.jsonl").write_text("", encoding="utf-8")
+        for name in ("store.json", "store.lock"):
+            (self.state / name).unlink(missing_ok=True)
 
     def respond(self, tool: str, argv: list[str], *, exit: int = 0, stdout: str = "",
                 stderr: str = "", sleep: float = 0) -> None:
@@ -124,6 +229,29 @@ class ForgeWorld:
 
     def forbidden(self, tool: str, argv: list[str]) -> None:
         self.respond(tool, argv, exit=1, stderr="gh: Forbidden (HTTP 403)")
+
+    def comment_store(self, slug: str, issue: int, comments=(), *, next_id: int = 100,
+                      clock: str = "2026-11-06T10:00:00Z", schedule=()) -> None:
+        """Serve one issue's comments from shared state (see STORE_HANDLER)."""
+        (self.state / "store.json").write_text(json.dumps({
+            "slug": slug, "issue": issue, "comments": list(comments), "next_id": next_id,
+            "clock": clock, "schedule": list(schedule), "cursor": 0}), encoding="utf-8")
+
+    def stored(self) -> list[dict]:
+        """The store's comments now, ascending id."""
+        store = json.loads((self.state / "store.json").read_text("utf-8"))
+        return sorted(store["comments"], key=lambda c: c["id"])
+
+    def wait_cursor(self, at_least: int, timeout: float = 10.0) -> None:
+        """Block until `at_least` schedule entries have run; AssertionError after `timeout`."""
+        deadline = time.monotonic() + timeout
+        while True:
+            store = json.loads((self.state / "store.json").read_text("utf-8"))
+            if store["cursor"] >= at_least:
+                return
+            if time.monotonic() > deadline:
+                raise AssertionError(f"schedule cursor stayed at {store['cursor']}, wanted {at_least}")
+            time.sleep(0.01)
 
     def calls(self) -> list[dict]:
         text = (self.state / "calls.jsonl").read_text("utf-8")
@@ -293,3 +421,27 @@ class ForgeWorld:
                           {"object": {"sha": base_tip, "type": "commit"}})
         self.respond_json("gh", ["api", f"repos/{slug}/compare/{base_tip}...{commit}"],
                           {"status": compare})
+
+
+@contextlib.contextmanager
+def host_clock(instant: datetime, *modules):
+    """Make every host-clock read return `instant`: `time.time`, and `now`/`utcnow`/`today`
+    on the `datetime` name of each module in `modules` (issue 623 D5)."""
+    class WrongClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+
+        @classmethod
+        def utcnow(cls):
+            return instant.astimezone(timezone.utc).replace(tzinfo=None)
+
+        @classmethod
+        def today(cls):
+            return cls.now()
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch("time.time", return_value=instant.timestamp()))
+        for module in modules:
+            stack.enter_context(mock.patch.object(module, "datetime", WrongClock))
+        yield
