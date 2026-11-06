@@ -238,6 +238,12 @@ def is_relative_posix(path: str) -> bool:
     return all(segment not in ("", ".", "..") for segment in path.split("/"))
 
 
+def names_inline_code(name: str) -> bool:
+    """A program name that runs code it is handed; lowercased, as the macOS volume is case-insensitive."""
+    folded = name.lower()
+    return folded in INLINE_CODE_TOOLS or INTERPRETER.match(folded) is not None
+
+
 def arg_hits_inline_code(arg: str) -> bool:
     """D5 class 2: the arg, its part after `=`, the first word of each, the basename of each."""
     candidates = {arg}
@@ -245,7 +251,7 @@ def arg_hits_inline_code(arg: str) -> bool:
         candidates.add(arg.split("=", 1)[1])
     candidates |= {word for text in candidates for word in text.split()[:1]}
     candidates |= {text.rsplit("/", 1)[-1] for text in candidates}
-    return any(text in INLINE_CODE_TOOLS or INTERPRETER.match(text) for text in candidates)
+    return any(names_inline_code(text) for text in candidates)
 
 
 def normalised(arg: str) -> str:
@@ -257,12 +263,14 @@ def args_carry_code(tool: object, args: list) -> bool:
     if any(arg in EXEC_ARGS or arg_hits_inline_code(arg) for arg in texts):
         return True
     flags = [normalised(arg) for arg in texts]
+    tool = tool.lower() if isinstance(tool, str) else ""
     if tool in NIX_TOOLS:
         if any(flag in NIX_CODE_ARGS for flag in flags):
             return True
         if tool == "nix":
-            first = next((arg for arg in texts if not arg.startswith("-")), None)
-            if first in NIX_EXEC_SUBCOMMANDS:
+            # Value-taking global options (`--option NAME VALUE`) can precede the subcommand,
+            # so any bare word that is an exec subcommand counts.
+            if any(arg in NIX_EXEC_SUBCOMMANDS for arg in texts if not arg.startswith("-")):
                 return True
         if any(FLAKE_REF.match(arg) or ("=" in arg and FLAKE_REF.match(arg.split("=", 1)[1])) for arg in texts):
             return True
@@ -310,7 +318,7 @@ def check_form(run: object, path: str, errors: list, refs: References, allow_int
         if form == "tool":
             if not isinstance(name, str):
                 invalid(errors, key_path, "must be a string")
-            elif not TOOL.match(name) or name in INLINE_CODE_TOOLS or INTERPRETER.match(name):
+            elif not TOOL.match(name) or names_inline_code(name):
                 errors.append(finding(key_path, "inline_code", "must be the bare name of an installed program that does not run code it is handed"))
         elif not (isinstance(name, str) and is_relative_posix(name)):
             invalid(errors, key_path, "must be a relative POSIX path inside the repository")
