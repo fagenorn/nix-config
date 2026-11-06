@@ -11,12 +11,19 @@ that contain the lock sha, and only an open pull request whose head is the lock 
 D3, staleness: no wall clock and no event is read; a lock is stale only when `classify` answers
 `closed`, and a one-shot acquire never takes over a `held` lock.
 
+D4, the only idle takeover is `wait_acquire`'s, of an oid this process has itself watched
+unchanged for `IDLE_AFTER` seconds of `monotonic()`; every completed ref observation, a lost
+CAS's re-read and an observed absence included, restarts the watch when the oid differs.
+
 D5, a lock moves to the caller's new head only when every open pull request containing it is the
 caller's; a branch merely stacked on the holder's head never moves it.
 
 D6, `acquire` needs an open pull request whose head is the caller's sha before any ref write.
 
 D7, every call prints one JSON object; exit 0 success, 3 contention, 1 forge error, 2 usage.
+
+D8, `--wait` attempts at offsets 0, `POLL`, ... `BOUND` and then answers `land-contended`
+(exit 3); a `gh_failed`/`gh_timeout` poll counts as failed and `FAILED_POLLS` in a row are fatal.
 
 D9, `release` is a compare-and-swap delete sent without a prior read, then re-read.
 """
@@ -28,6 +35,10 @@ from agent_tools import forge_markers as fm
 
 LOCK_PREFIX = "refs/agent-locks/land/"
 CREATE_ROUNDS = 3
+IDLE_AFTER = 2700
+POLL = 120
+BOUND = 3600
+FAILED_POLLS = 3
 ACTIONS = ("acquire", "release", "status")
 
 monotonic = time.monotonic
@@ -146,6 +157,43 @@ def usage_result(argv: list[str], detail: str) -> dict[str, Any]:
             "waited_s": None, "error": "usage", "detail": detail}
 
 
+def wait_acquire(args: Any, mine: list[fm.Pull], node: Callable[[], str]) -> tuple[int, dict[str, Any]]:
+    """D4, D8: poll `acquire_once` until it succeeds, the bound passes or polls keep failing."""
+    start = monotonic()
+    watch: list[Any] = [object(), None]  # [oid or None, first seen]; the sentinel matches nothing
+    failures = 0
+    last: Outcome | None = None
+
+    def seen(oid: str | None) -> None:
+        if watch[0] != oid:
+            watch[0], watch[1] = oid, monotonic()
+
+    def idle(lock: str) -> bool:
+        seen(lock)
+        return monotonic() - watch[1] >= IDLE_AFTER
+
+    while True:
+        try:
+            outcome = acquire_once(args.repo, args.branch, args.sha, mine, idle, node, seen)
+        except fm.ForgeError as error:
+            failures += 1
+            if error.code not in ("gh_failed", "gh_timeout") or failures >= FAILED_POLLS:
+                raise
+        else:
+            failures = 0
+            if outcome.verdict in ("acquired", "already_held", "moved"):
+                return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
+                                 took_over=outcome.took_over, waited_s=int(monotonic() - start))
+            if outcome.lock_sha is not None:
+                last = outcome
+        if monotonic() - start >= BOUND:
+            return 3, result(args, "land-contended", lock_sha=last.lock_sha if last else None,
+                             pr=last.pr if last else None,
+                             by=holder(args.repo, last.pr) if last else None,
+                             waited_s=int(monotonic() - start))
+        sleep(min(POLL, start + BOUND - monotonic()))
+
+
 def _acquire(args: Any) -> tuple[int, dict[str, Any]]:
     mine = [p for p in fm.commit_pulls(args.repo, args.sha)
             if p.state == "open" and p.base_ref == args.branch and p.head_sha == args.sha]
@@ -159,6 +207,8 @@ def _acquire(args: Any) -> tuple[int, dict[str, Any]]:
             cached.append(fm.repo_node_id(args.repo))
         return cached[0]
 
+    if args.wait:
+        return wait_acquire(args, mine, node)
     outcome = acquire_once(args.repo, args.branch, args.sha, mine, lambda _: False, node)
     if outcome.verdict in ("acquired", "already_held", "moved"):
         return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,

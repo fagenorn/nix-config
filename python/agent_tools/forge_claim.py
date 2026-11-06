@@ -116,6 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--repo", required=True, type=REPO)
         sub.add_argument("--branch", required=True, type=BRANCH)
         sub.add_argument("--sha", required=True, type=SHA)
+        if name == "acquire":
+            sub.add_argument("--wait", action="store_true")
     return parser
 
 

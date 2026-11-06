@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 from datetime import datetime, timezone
 
@@ -379,3 +380,185 @@ class CliTest(Base):
     def test_issue_claim_commands_unchanged(self):
         code, out = finish(start_cli("acquire", "--repo", SLUG, "--issue", "x", "--holder", OTHER))
         self.assertEqual((code, out["error"], out["issue"]), (2, "usage", None))
+
+
+class FakeClock:
+    """`monotonic` and `sleep` for forge_land_lock; `on_sleep(elapsed)` runs after each sleep."""
+
+    def __init__(self, on_sleep=None):
+        self.start = self.now = 1000.0
+        self.slept, self.on_sleep = [], on_sleep
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+        if self.on_sleep:
+            self.on_sleep(self.now - self.start)
+
+
+class WaitTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.prepare(B)
+
+    def prepare(self, lock_sha):
+        self.lock(lock_sha)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(12, sha=B))
+        self.pulls(C, pull(12, sha=C))
+
+    def wait(self, clock):
+        with mock.patch.object(land_lock, "monotonic", clock.monotonic), \
+                mock.patch.object(land_lock, "sleep", clock.sleep):
+            return run(*land("acquire", A, "--wait"))
+
+    def attempts(self):
+        return [a for a in self.world.argvs("gh") if a[:4] == ["api", "-X", "POST", f"repos/{SLUG}/git/refs"]]
+
+    def move_once(self, at, sha):
+        done = []
+
+        def on_sleep(elapsed):
+            if elapsed >= at and not done:
+                done.append(True)
+                self.world.set_ref(REF, sha)
+        return on_sleep
+
+    def test_never_released_lock_gives_up_land_contended(self):
+        clock = FakeClock(self.move_once(2400, C))  # the holder moves its lock: the watch restarts at 2400
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["lock_sha"], out["pr"]),
+                         (3, "land-contended", 3600, C, 12))
+        self.assertEqual(clock.slept, [120] * 30)
+        self.assertEqual(len(self.attempts()), 31)
+        self.assertEqual(self.cas_calls(), [])
+        self.assertEqual(self.world.refs(), {REF: C})
+
+    def test_waiter_takes_over_only_after_its_own_45_minute_watch(self):
+        clock = FakeClock()
+        with host_clock(datetime(2100, 1, 1, tzinfo=timezone.utc), fm, forge_claim):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 2760))
+        self.assertEqual(len(self.attempts()), 24)  # 0 .. 2640 held_by (< 2700), 2760 takes over
+        self.assertEqual(len(self.cas_calls()), 1)
+        self.assertEqual(self.world.refs(), {REF: A})
+
+    def test_a_moved_oid_restarts_the_watch(self):
+        clock = FakeClock(self.move_once(600, C))
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 3360))
+        self.assertEqual([[a[-3], a[-1]] for a in self.cas_calls()], [[f"before={C}", f"after={A}"]])
+
+    def test_a_release_while_waiting_is_acquired_by_create(self):
+        clock = FakeClock(self.move_once(360, None))
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", None, 360))
+        self.assertEqual(self.cas_calls(), [])
+
+    def test_transient_poll_failures_are_skipped_then_fatal(self):
+        real, calls = fm.create_ref, [0]
+
+        def flaky(*args):
+            calls[0] += 1
+            if calls[0] <= limit:
+                raise fm.ForgeError("gh_failed", "boom")
+            return real(*args)
+        for limit, expected in ((2, (0, "acquired")), (3, (1, "error"))):
+            with self.subTest(limit=limit):
+                self.world.reset()
+                self.prepare(None)
+                calls[0] = 0
+                clock = FakeClock()
+                with mock.patch.object(fm, "create_ref", flaky):
+                    code, out = self.wait(clock)
+                self.assertEqual((code, out["verdict"]), expected)
+                self.assertEqual(clock.slept, [120, 120])
+
+    def test_only_consecutive_failed_polls_are_fatal(self):
+        real, calls = fm.create_ref, [0]
+
+        def flaky(*args):
+            calls[0] += 1
+            if calls[0] % 3:
+                raise fm.ForgeError("gh_failed", "boom")  # two failed polls, then one that answers
+            return real(*args)
+        clock = FakeClock()
+        with mock.patch.object(fm, "create_ref", flaky):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "idle"))
+        self.assertGreater(len(clock.slept), 3)
+
+    def test_an_interrupted_watch_restarts(self):
+        """Plan D4: watch B, lose the CAS and see C, then see B again: B's 45 minutes start afresh."""
+        real, raced = fm.cas_ref, []
+
+        def racing_cas(*args):
+            if not raced:
+                raced.append(True)
+                self.world.set_ref(REF, C)  # another taker wins B first
+            return real(*args)
+        clock = FakeClock(self.move_once(2880, B))  # ... and B comes back
+        with mock.patch.object(fm, "cas_ref", racing_cas):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["waited_s"]), (3, "land-contended", B, 3600))
+        self.assertEqual(len(self.cas_calls()), 1)  # 2760 lost to C; B seen anew at 2880 needs until 5580
+        self.assertEqual(self.world.refs(), {REF: B})
+
+    def test_an_observed_absence_restarts_the_watch(self):
+        clock = FakeClock()
+        real, gone = fm.read_ref, []
+
+        def read(*args):
+            if clock.now - clock.start >= 1200 and not gone:
+                gone.append(True)
+                return None  # released and re-taken at B between two reads
+            return real(*args)
+        with mock.patch.object(fm, "read_ref", read):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (3, "land-contended", B))
+        self.assertEqual(self.cas_calls(), [])  # B's watch restarted at 1200: 3900 > 3600
+
+    def test_unchanged_cas_failures_exit_on_the_third_poll(self):
+        for failure in ("gh_failed", "gh_timeout"):
+            with self.subTest(failure=failure):
+                self.world.reset()
+                self.lock(B)
+                self.pulls(A, pull(11, sha=A))
+                self.pulls(B, pull(12, state="closed", merged=True, sha=B))
+                clock = FakeClock()
+                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: f):
+                    code, out = self.wait(clock)
+                self.assertEqual((code, out["verdict"], out["error"]), (1, "error", failure))
+                self.assertEqual(clock.slept, [120, 120])
+                self.assertEqual(self.world.refs(), {REF: B})
+
+    def test_one_shot_acquire_never_sleeps(self):
+        with mock.patch.object(land_lock, "sleep", side_effect=AssertionError("slept")):
+            code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["waited_s"]), (3, "held_by", None))
+
+    def test_wait_is_only_an_acquire_flag(self):
+        code, out = run(*land("status", A, "--wait"))
+        self.assertEqual((code, out["error"]), (2, "usage"))
+
+
+class IdleRaceTest(Base):
+    def test_concurrent_idle_stealers_one_wins(self):
+        self.lock(C, schedule=["get", "get", "cas", "cas"])
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(13, sha=B))
+        self.pulls(C, pull(12, sha=C))
+        mine = {A: [fm.Pull(11, "open", False, BRANCH, "issue-11-x", A)],
+                B: [fm.Pull(13, "open", False, BRANCH, "issue-13-x", B)]}
+
+        def steal(sha):
+            return land_lock.acquire_once(SLUG, BRANCH, sha, mine[sha], lambda _: True, lambda: "R_kgDOtest")
+        with ThreadPoolExecutor(2) as pool:
+            outcomes = list(pool.map(steal, (A, B)))
+        self.assertEqual(sorted(o.verdict for o in outcomes), ["acquired", "lost_to"])
+        winner = next(o for o in outcomes if o.verdict == "acquired")
+        self.assertEqual(winner.took_over, "idle")
+        self.assertEqual(self.world.refs(), {REF: winner.lock_sha})
