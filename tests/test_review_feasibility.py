@@ -323,13 +323,15 @@ class TreeEntriesTest(unittest.TestCase):
         answer, runs = self.counted(lambda: lookup('d/g.txt'))
         self.assertEqual((answer, len(runs)), (tree_entry(self.repo, self.tree, 'd/g.txt'), 1))
         real = review_forecast._run_git
-        def extra(repo, *args, **kwargs):  # the batched listing alone gains a row nobody asked for
+        def folding(repo, *args, **kwargs):  # a Git whose pathspecs fold case: `D/G.TXT` lists `d/g.txt`
             listed = real(repo, *args, **kwargs)
-            return listed + b'100644 blob ' + b'2' * 40 + b'\td/g.txt\0' if 'exec.sh' in args[-2:] else listed
-        lookup = tree_entries(self.repo, self.tree, ('a.txt', 'exec.sh'))
-        with patch.object(review_forecast, '_run_git', extra):
-            first = lookup('a.txt')
-        self.assertEqual([first, lookup('exec.sh')], [tree_entry(self.repo, self.tree, p) for p in ('a.txt', 'exec.sh')])
+            return listed + b'100644 blob ' + b'2' * 40 + b'\td/g.txt\0' if 'D/G.TXT' in args else listed
+        paths = ('a.txt', 'D/G.TXT', 'exec.sh')
+        with patch.object(review_forecast, '_run_git', folding):
+            lookup = tree_entries(self.repo, self.tree, paths)
+            self.assertEqual([self.outcome(lambda: lookup(p)) for p in paths],
+                             [self.outcome(lambda: tree_entry(self.repo, self.tree, p)) for p in paths])
+            self.assertEqual(self.outcome(lambda: lookup('D/G.TXT')), (ForecastError, 'tree path mismatch'))
 
     def test_refusals_are_the_per_path_refusals(self):
         from agent_tools.review_actual import GenerationError

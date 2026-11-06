@@ -303,8 +303,9 @@ class RecordViewTest(unittest.TestCase):
                     reused.append(commit_subject(view, self.head))
                     self.assertEqual(len(list(scratch.iterdir())), 1)
                 self.assertEqual(list(scratch.iterdir()), [])
-                with self.assertRaises(GenerationError):
+                with self.assertRaises(GenerationError) as closed:
                     view.git("cat-file", "-t", self.head)
+                self.assertEqual(str(closed.exception), "record view is not open")
             calls, real = [], subprocess.run
             def counting(argv, *args, **kwargs):
                 calls.append(list(argv))
