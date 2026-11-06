@@ -128,7 +128,8 @@ if (CONT && setup.dirty && !setup.merged_pr && CONT.partial === undefined) {
 
 const RS = setup.review_state || {}
 for (const k of ['plan', 'code']) {
-  if (RS[k] === 'blocked') return stop('review-blocked', { review: k })
+  // Before a fresh claim nothing is held, so the stop carries no cont: fix the capability and start again.
+  if (RS[k] === 'blocked') return CONT ? stop('review-blocked', { review: k }) : { stage: 'review-blocked', review: k }
 }
 const REVIEW_CODE = RS.code === 'available' && setup.review && setup.review.code ? setup.review.code : null
 const REVIEW_PLAN = RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
@@ -181,8 +182,8 @@ const CTX = `Issue #${ISSUE} of ${SLUG}. Worktree: ${W} (branch ${setup.branch},
 const K = setup.knowledge || {}
 const list = a => (a && a.length ? a.join(', ') : 'none')
 const KNOW = `Ground the review in: ~/.agents/standards/the-bar.md and its stacks/ shards matching the changed file types (when present); the project's standards (${list(K.standards)}), only shards whose globs intersect the change; review hints (${list(K.hints)}); recorded rejections (${list(K.rejections)}): never raise a finding a rejection already settles.`
-const implDone = i => !!(i && i.status === 'done' && present(i.commit))
-const span = i => (present(i.start_head) ? `git -C ${W} diff ${i.start_head}..${i.commit}` : `git -C ${W} show ${i.commit}`)
+const implDone = i => !!(i && i.status === 'done' && present(i.commit) && present(i.start_head))
+const span = i => `git -C ${W} diff ${i.start_head}..${i.commit}`
 log(`claimed #${ISSUE}, worktree ${W}; review code=${REVIEW_CODE || RS.code || 'none'} plan=${REVIEW_PLAN || RS.plan || 'none'}`)
 
 // ---------------- Plan ----------------
@@ -319,7 +320,7 @@ const VERIFY = {
   required: ['head', 'clean', 'results'],
 }
 const verifyPrompt = `${CTX}
-Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(setup.verification)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --name-only ${RANGE}) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. Do not change any file.
+Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(setup.verification)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. Do not change any file.
 ${RULES}`
 // Every declared id needs exactly one result; skipped only where the contract gives when_changed globs; and a clean tree.
 const verifyProblems = v => {

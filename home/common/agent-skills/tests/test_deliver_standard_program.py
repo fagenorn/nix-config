@@ -152,6 +152,7 @@ class ContractTest(unittest.TestCase):
         result, calls = run(patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
         self.assertEqual(result["stage"], "review-blocked")
         self.assertEqual(result["review"], "code")
+        self.assertNotIn("cont", result)
         self.assertEqual(labels(calls), ["setup"])
 
     def test_unsupported_review_capability_skips_codex(self):
@@ -311,9 +312,16 @@ class ReviewAndVerifyTest(unittest.TestCase):
         self.assertEqual(result["stage"], "task-review")
         self.assertEqual(result["cont"]["partial"], 1)
 
-    def test_done_without_a_commit_is_not_done(self):
-        result, _ = run(replies={"impl-1": {"status": "done", "notes": "ok"}})
-        self.assertEqual(result["stage"], "task")
+    def test_done_without_both_range_ends_is_not_done(self):
+        for reply in ({"status": "done", "start_head": "b0", "notes": "ok"},
+                      {"status": "done", "commit": "c1", "notes": "ok"}):
+            with self.subTest(reply=reply):
+                result, _ = run(replies={"impl-1": reply})
+                self.assertEqual(result["stage"], "task")
+
+    def test_skip_eligibility_lists_both_sides_of_a_rename(self):
+        _, calls = run()
+        self.assertIn("diff --no-renames --name-only", prompt(calls, "verify"))
 
     def test_fix_reviews_cover_the_whole_fix_range(self):
         bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
