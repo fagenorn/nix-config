@@ -69,6 +69,7 @@ let
     "skill-sections"
     "verification-observe"
     "verified-tree"
+    "verify-pending"
   ];
 
   # A launcher script: bash under `-p`, which ignores BASH_ENV and the functions
