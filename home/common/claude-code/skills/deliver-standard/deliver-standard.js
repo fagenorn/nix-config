@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-standard',
   description: 'Deliver one standard-lane tracker issue: plan, implement and review each task, final review, verify once, ship',
-  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, decisions?, spec?, cont?}',
+  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, decisions?, spec?, cont?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges',
   phases: [
     { title: 'Setup', detail: 'resolve contract, pre-flight, claim, worktree' },
     { title: 'Plan', detail: 'plan outside the tree, then review' },
@@ -14,8 +14,12 @@ export const meta = {
 
 // Args: repo_root (the checkout), issue (number), session_id or batch_id (the claim
 // holder is <host>/<batch_id> or <host>/session-<session_id>), decisions (owner answers to a
-// needs_user stop), spec (path of an approved design spec), cont (the `cont`
-// object of an earlier stop, passed back unchanged to resume; see RESUME below).
+// needs_user stop), spec (path of an approved design spec), mode (plan: stop after the plan
+// review with { stage: 'planned', plan, cont }; ready: stop after verify with { stage: 'ready',
+// head, branch, worktree, verify, tasks, acceptance, fix_waves, cont } and no PR, keeping the claim;
+// ship, the default: merge. A ready cont resumed in ship skips the final review and verify when
+// the head is unchanged and the tree clean), cont (the `cont` object of an earlier stop, passed
+// back unchanged to resume; see RESUME below).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
 //
@@ -26,7 +30,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, plan, plan_reviewed, done, partial?, claim_incomplete? }. Passing it back as args.cont
+// { setup, plan, plan_reviewed, done, fix_waves, verified?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed), skips the tasks in cont.done, then
@@ -40,6 +44,8 @@ export const meta = {
 const REPO = args && args.repo_root
 const ISSUE = args && args.issue
 if (!REPO || !ISSUE) return { stage: 'args', error: 'repo_root and issue are required' }
+const MODE = args.mode === undefined ? 'ship' : args.mode
+if (!['plan', 'ready', 'ship'].includes(MODE)) return { stage: 'args', error: 'mode must be plan, ready or ship' }
 const CONT = args.cont || null
 // The claim holder: a resume keeps cont.setup.holder; else it is built from the host and an id.
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -87,7 +93,7 @@ const SETUP_SCHEMA = {
   properties: {
     ok: { type: 'boolean' }, reason: { type: 'string' }, details: { type: 'string' },
     host: { type: 'string' }, slug: { type: 'string' }, integration_branch: { type: 'string' }, default_branch: { type: 'string' },
-    branch: { type: 'string' }, worktree_path: { type: 'string' },
+    branch: { type: 'string' }, worktree_path: { type: 'string' }, head: { type: 'string' },
     merged_pr: { type: 'integer' }, dirty: { type: 'boolean' }, duplicate_pr: { type: 'integer' },
     existing: { type: 'object', properties: { local_branch: { type: 'boolean' }, remote_branch: { type: 'boolean' }, worktree: { type: 'boolean' }, dirty: { type: 'boolean' }, status: { type: 'string' }, head: { type: 'string' } } },
     unset_env: STRS,
@@ -130,7 +136,7 @@ const EXISTING_READ = (branch, path) => `Read what already exists for the delive
 const setup = await agent(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
 1. ${CONTRACT_READ}
 2. If a merged PR has head ${CONT.setup && CONT.setup.branch} (gh pr list --repo <slug> --state merged --head ${CONT.setup && CONT.setup.branch}), return ok=true with merged_pr set to its number; the worktree may already be gone.
-3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}`}. If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty.
+3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}`}. If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty. Return head: git -C <worktree> rev-parse HEAD (the full sha).
 ${CONT.claim_incomplete ? `4. After git -C ${REPO} fetch origin: ${EXISTING_READ(CONT.setup && CONT.setup.branch, CONT.setup && CONT.setup.worktree_path)} An earlier worktree step may have created the branch, the worktree or both before it failed, so report existing afresh.
 5.` : '4.'} Return every contract field read fresh, branch as in the earlier setup. Change nothing.
 ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} before delivery. Change nothing in this step except one issue comment named below.
@@ -167,7 +173,11 @@ let claimIncomplete = !!(CONT && CONT.claim_incomplete)
 let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
 // Fix waves already spent, carried through a resume; declared before stop() because early failures call it.
 let fixWaves = (CONT && CONT.fix_waves) || 0
-const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
+// The verified head and results of a ready stop; carried until a resume finds the head moved.
+let verified = (CONT && CONT.verified) || null
+const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(verified ? { verified } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
+
+const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
 
 if (CONT && setup.dirty && !setup.merged_pr && partial === undefined) {
   return stop('dirty', { details: `the worktree ${setup.worktree} has uncommitted changes no task claims; commit or discard them, then resume` })
@@ -325,6 +335,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
 const ACS = JSON.stringify(plan.acceptance)
 const PLAN_REF = `Plan: ${plan.plan_root} (task files beside it).`
 log(`plan: ${plan.tasks.length} tasks`)
+if (MODE === 'plan') return stop('planned', { plan })
 
 // ---------------- Tasks ----------------
 phase('Tasks')
@@ -338,7 +349,7 @@ for (const t of plan.tasks) {
     if (lost) return lost
   }
   const start = `${CTX}\n${PLAN_REF}`
-  const halt = (stage, extra) => ({ ...stop(stage, extra), cont: { setup, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, partial: t.n } })
+  const halt = (stage, extra) => haltTask(t.n, stage, extra)
   let impl = await agent(`${start}
 Implement task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${FOCUSED} ${IMPL_RETURN} Return status blocked with notes if the task file is wrong or impossible.${CONT && CONT.partial === t.n ? `
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
@@ -373,6 +384,10 @@ const groups = []
 const PER = 3
 for (let i = 0; i < plan.tasks.length; i += PER) groups.push(plan.tasks.slice(i, i + PER))
 const chunked = groups.length > 1
+// A ready stop's verified head, unchanged and clean, needs no second review or verify.
+const SKIP_REVIEW = !!(verified && plan && setup.head === verified.head && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)))
+if (!SKIP_REVIEW) verified = null
+if (!SKIP_REVIEW) {
 {
   const lost = await renew('final-review', 'Final review')
   if (lost) return lost
@@ -416,6 +431,7 @@ if (finalFindings.length) {
     waveFindings = next
   }
 }
+}
 
 // ---------------- Verify ----------------
 phase('Verify')
@@ -439,11 +455,13 @@ const verifyProblems = v => {
   if (!v.clean) out.push({ id: '?', summary: 'the worktree has uncommitted changes, so the verified tree is not the pushed head' })
   return out
 }
+let verify = SKIP_REVIEW ? { head: verified.head, clean: true, results: verified.results } : null
+if (!SKIP_REVIEW) {
 {
   const lost = await renew('verify', 'Verify')
   if (lost) return lost
 }
-let verify = await agent(verifyPrompt, { label: 'verify', phase: 'Verify', model: 'sonnet', effort: 'low', schema: VERIFY })
+verify = await agent(verifyPrompt, { label: 'verify', phase: 'Verify', model: 'sonnet', effort: 'low', schema: VERIFY })
 let vRounds = 0
 while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
@@ -453,7 +471,12 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
   if (!fr || findingsOf(fr).length) return stop('verify-fix-review', { review: fr })
   verify = await agent(verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', model: 'sonnet', effort: 'low', schema: VERIFY })
 }
+}
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
+if (MODE === 'ready') {
+  verified = { head: verify.head, results: verify.results }
+  return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, tasks: taskLog, acceptance: plan.acceptance, fix_waves: fixWaves })
+}
 
 // ---------------- Ship ----------------
 phase('Ship')

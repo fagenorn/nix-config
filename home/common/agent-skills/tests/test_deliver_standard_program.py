@@ -753,6 +753,68 @@ class FixWaveTest(unittest.TestCase):
         self.assertEqual((result["stage"], result["fix_waves"]), ("done", 1))
 
 
+class ModeTest(unittest.TestCase):
+    """#635: each mode stops at its stage and returns its stage object."""
+
+    def test_plan_mode_stops_after_plan_review_with_the_plan(self):
+        result, calls = run(args=dict(ARGS, mode="plan"))
+        self.assertEqual(result["stage"], "planned")
+        self.assertEqual(result["plan"]["plan_root"], "/r/.git/worktrees/w/deliver-standard/plan.md")
+        self.assertTrue(result["cont"]["plan_reviewed"])
+        self.assertEqual(labels(calls)[-1], "plan-review")
+        self.assertFalse([c for c in calls if c["agentType"] == "implementer"])
+
+    def test_plan_mode_with_questions_returns_them(self):
+        result, _ = run(args=dict(ARGS, mode="plan"),
+                        replies={"plan": {"status": "needs_user", "questions": ["q"]}})
+        self.assertEqual((result["stage"], result["needs_user"]), ("plan", ["q"]))
+
+    def test_ready_mode_stops_after_verify_with_no_pr(self):
+        result, calls = run(args=dict(ARGS, mode="ready"))
+        self.assertEqual((result["stage"], result["head"], result["branch"]), ("ready", SHA, "issue-9-x"))
+        self.assertEqual(result["verify"], [{"id": "build", "status": "pass", "summary": "ok"}])
+        self.assertEqual(result["fix_waves"], 0)
+        self.assertEqual(result["acceptance"], PLAN["acceptance"])
+        self.assertEqual(result["cont"]["verified"]["head"], SHA)
+        self.assertEqual(labels(calls)[-1], "verify")
+        for label in ("renew-ship", "pr", "checks-1", "merge", "close-out"):
+            self.assertNotIn(label, labels(calls))
+
+    def test_ship_mode_is_the_default(self):
+        _, default = run()
+        _, ship = run(args=dict(ARGS, mode="ship"))
+        self.assertEqual(labels(default), labels(ship))
+        self.assertEqual(labels(ship)[-1], "close-out")
+
+    def test_unknown_mode_is_an_args_error(self):
+        result, calls = run(args=dict(ARGS, mode="deploy"))
+        self.assertEqual(result["stage"], "args")
+        self.assertEqual(calls, [])
+
+    def test_plan_then_ready_then_ship_resume_each_stage(self):
+        planned, _ = run(args=dict(ARGS, mode="plan"))
+        ready, calls = run(args=dict(ARGS, mode="ready", cont=planned["cont"]))
+        self.assertEqual(ready["stage"], "ready")
+        self.assertNotIn("plan", labels(calls))
+        self.assertNotIn("plan-review", labels(calls))
+        self.assertIn("rev-parse HEAD", prompt(calls, "setup"))
+        done, calls = run(args=dict(ARGS, mode="ship", cont=ready["cont"]), patch={"setup": {"head": SHA}})
+        self.assertEqual(done["stage"], "done")
+        self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "renew-checks-1", "checks-1",
+                                         "renew-merge", "merge", "close-out"])
+
+    def test_ship_after_ready_reviews_again_when_the_head_moved_or_is_dirty(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        for patch in ({"head": "e" * 40}, {"head": SHA, "dirty": True}):
+            with self.subTest(patch=patch):
+                result, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": patch})
+                if patch.get("dirty"):
+                    self.assertEqual(result["stage"], "dirty")
+                    continue
+                for label in ("final-1", "verify"):
+                    self.assertIn(label, labels(calls))
+
+
 class SourceTest(unittest.TestCase):
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")
