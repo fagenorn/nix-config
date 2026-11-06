@@ -47,6 +47,9 @@ Decision: keep advisory — original three-run Ubuntu cohort evaluated. Follow-u
 [#160](https://github.com/fagenorn/nix-config/issues/160) must be resolved before
 any future promotion decision.
 
+Superseded by [#608](https://github.com/fagenorn/nix-config/issues/608): with #160
+fixed, Agent Workflow Tests became a required check and no longer writes this record.
+
 ## Incomplete or fallback records
 
 - incomplete/fallback records: 0
