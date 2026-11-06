@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.verify_block import count_since
+
 SHA = "a" * 40
 SHA2 = "b" * 40
 STUB_TOOLS = ("resolve-project", "jq")
@@ -364,6 +366,40 @@ class WarningTableTest(unittest.TestCase):
         block = with_check(kind="human", reason="senses", run=ASK)
         result, verdict = lint(block)
         self.assertEqual((result.returncode, verdict["warnings"]), (0, []))
+
+
+T = "2026-11-01T00:00:00Z"
+RUNS = [{"createdAt": "2026-10-31T23:00:00Z"}, {"createdAt": "2026-11-01T00:00:00Z"},
+        {"createdAt": "2026-11-02T08:00:00Z"}, {"createdAt": "2026-11-03T08:00:00+01:00"}]
+RELEASES = [{"publishedAt": "2026-11-04T10:00:00Z"}, {"publishedAt": "2026-10-01T10:00:00Z"}]
+
+
+class CountSinceTest(unittest.TestCase):
+    def test_runs_below_and_at_n(self):
+        stamps = [r["createdAt"] for r in RUNS]
+        self.assertEqual(count_since(stamps, T, 3), 75)
+        self.assertEqual(count_since(stamps, T, 2), 0)
+
+    def test_releases_below_and_at_n(self):
+        stamps = [r["publishedAt"] for r in RELEASES]
+        self.assertEqual(count_since(stamps, T, 2), 75)
+        self.assertEqual(count_since(stamps, T, 1), 0)
+
+    def test_bad_inputs_raise(self):
+        for stamps, n in ((["2026-11-02T00:00:00"], 1), (["soon"], 1), ([], 0), ([], True)):
+            with self.subTest(stamps=stamps, n=n), self.assertRaises(ValueError):
+                count_since(stamps, T, n)
+
+    def test_command_reads_run_and_release_lists(self):
+        runs = run_cli(["count-since", "--input", "-", "--since", T, "--n", "3"], json.dumps(RUNS))
+        self.assertEqual((runs.returncode, json.loads(runs.stdout)), (75, {"count": 2, "needed": 3}))
+        releases = run_cli(["count-since", "--input", "-", "--since", T, "--n", "1", "--key", "publishedAt"],
+                           json.dumps(RELEASES))
+        self.assertEqual((releases.returncode, json.loads(releases.stdout)), (0, {"count": 1, "needed": 1}))
+
+    def test_command_bad_input_is_usage(self):
+        result = run_cli(["count-since", "--input", "-", "--since", T, "--n", "1"], json.dumps([{"other": T}]))
+        self.assertEqual(result.returncode, 2)
 
 
 if __name__ == "__main__":

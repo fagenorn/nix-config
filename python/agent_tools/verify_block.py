@@ -8,7 +8,7 @@
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -502,3 +502,30 @@ def lint_block(
     elif code_unmet:
         check_context({}, errors, warnings, refs, code_unmet, (), None, None, ())
     return {"ok": not errors, "errors": errors, "warnings": warnings}
+
+
+NOT_YET = 75
+
+
+def parse_time(value: object) -> datetime:
+    """An ISO 8601 time with a UTC offset (`Z` accepted) as an aware datetime; ValueError otherwise."""
+    if not isinstance(value, str):
+        raise ValueError(f"not a time string: {value!r}")
+    text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"time has no UTC offset: {value!r}")
+    return parsed
+
+
+def count_after(timestamps: Iterable[str], since: str) -> int:
+    """How many of `timestamps` fall strictly after `since`; ValueError on an unusable time."""
+    start = parse_time(since)
+    return sum(1 for stamp in map(parse_time, timestamps) if stamp > start)
+
+
+def count_since(timestamps: Iterable[str], since: str, n: int) -> int:
+    """0 when at least `n` of `timestamps` are strictly after `since`, else 75 (not yet)."""
+    if not is_int(n) or n < 1:
+        raise ValueError(f"n must be an integer of at least 1, got {n!r}")
+    return 0 if count_after(timestamps, since) >= n else NOT_YET

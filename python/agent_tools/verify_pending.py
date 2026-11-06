@@ -5,6 +5,11 @@
 1 when it is refused and 2 on a usage error, a `--repo-root` that is not a git
 work tree, an unreadable input path, a `--pr-head` that is not a sha, or `--pr-workflow`
 with neither `--pr-head` nor `--pr-branch`.
+
+`verify-pending count-since --input <path|-> --since T --n N [--key K]` reads a
+JSON array whose elements are times or objects with a time at `K` (default
+`createdAt`), prints `{"count", "needed"}` and exits 0 when at least N are
+strictly after T, 75 ("not yet", never a failure) when fewer are, and 2 on bad input.
 """
 
 import argparse
@@ -15,7 +20,7 @@ import subprocess
 import sys
 
 from agent_tools.resolve_project import ContractError, resolve
-from agent_tools.verify_block import SHA, lint_block, parse_block
+from agent_tools.verify_block import SHA, count_after, count_since, lint_block, parse_block
 
 GIT_TIMEOUT = 60
 
@@ -83,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     lint.add_argument("--pr-head", help="the pull request head sha")
     lint.add_argument("--pr-branch", help="the pull request branch")
     lint.add_argument("--blocks", action="append", default=[], metavar="ISSUE", help="an issue this one blocks")
+    since = commands.add_parser("count-since", help="count times after a moment; exit 75 when fewer than --n")
+    since.add_argument("--input", required=True, help="a JSON array of times or of objects; - reads stdin")
+    since.add_argument("--since", required=True, help="the moment, an ISO 8601 time with a UTC offset")
+    since.add_argument("--n", required=True, type=int, help="how many times are needed")
+    since.add_argument("--key", default="createdAt", help="the member of an object element that holds its time")
     return parser
 
 
@@ -127,9 +137,27 @@ def run_lint(args: argparse.Namespace) -> int:
     return 0 if verdict["ok"] else 1
 
 
+def run_count_since(args: argparse.Namespace) -> int:
+    try:
+        elements = json.loads(read_input(args.input))
+        if not isinstance(elements, list):
+            raise ValueError("input is not a JSON array")
+        stamps = [element[args.key] if isinstance(element, dict) else element for element in elements]
+        code = count_since(stamps, args.since, args.n)
+        count = count_after(stamps, args.since)
+    except KeyError as error:
+        print(f"verify-pending: an element has no {error} member", file=sys.stderr)
+        return 2
+    except (OSError, ValueError) as error:
+        print(f"verify-pending: count-since: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps({"count": count, "needed": args.n}, sort_keys=True))
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return run_lint(args)
+    return run_count_since(args) if args.command == "count-since" else run_lint(args)
 
 
 if __name__ == "__main__":
