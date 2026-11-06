@@ -1,16 +1,19 @@
-"""Run a Python CLI script inside the test process, shaped like subprocess.run (#262 D4).
+"""Run a Python CLI script or module inside the test process, shaped like subprocess.run (#262 D4).
 
 `input`, `cwd` and `text` mean what they mean to `subprocess.run` (issue 500 D2, D3).
 """
 
+import importlib.util
 import io
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import traceback
 import types
 from unittest import mock
+import warnings
 
 
 _CODE: dict[str, types.CodeType] = {}
@@ -36,15 +39,45 @@ def run_script(script, args, *, env, input=None, cwd=None, text=True):
     code = _CODE.get(path)
     if code is None:
         code = _CODE[path] = compile(Path(path).read_bytes(), path, "exec")
-    argv = [path, *map(str, args)]
+
+    def execute():
+        module = types.ModuleType("__main__")
+        module.__file__ = path
+        sys.modules["__main__"] = module
+        exec(code, module.__dict__)
+
+    return _run([path, *map(str, args)], [sys.executable, path], execute, env=env,
+                input=input, cwd=cwd, text=text)
+
+
+def run_module(name, args, *, env, input=None, cwd=None, text=True):
+    """`subprocess.run([sys.executable, "-m", name, *args], ...)` in process, as
+    `run_script` runs a script (issue 612).
+
+    The module runs as `__main__` from its cached bytecode; the modules it imports
+    are the test process's own, already imported once.
+    """
+    origin = importlib.util.find_spec(name).origin
+
+    def execute():
+        # The module may already be imported by the test; running it again as
+        # `__main__` is what is wanted, so runpy's warning about that is not output.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                    message=".*found in sys.modules after import of package")
+            runpy.run_module(name, run_name="__main__", alter_sys=True)
+
+    return _run([origin, *map(str, args)], [sys.executable, "-m", name], execute, env=env,
+                input=input, cwd=cwd, text=text)
+
+
+def _run(argv, command, execute, *, env, input, cwd, text):
     if input is None:
         data = b""
     elif text:
         data = input.encode("utf-8")
     else:
         data = bytes(input)
-    module = types.ModuleType("__main__")
-    module.__file__ = path
     stdin = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8")
     stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
     stderr = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors="backslashreplace")
@@ -57,9 +90,8 @@ def run_script(script, args, *, env, input=None, cwd=None, text=True):
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(sys, "stdin", stdin), mock.patch.object(sys, "stdout", stdout), \
                 mock.patch.object(sys, "stderr", stderr):
-            sys.modules["__main__"] = module
             try:
-                exec(code, module.__dict__)
+                execute()
             except SystemExit as exit_:
                 if exit_.code is None:
                     returncode = 0
@@ -78,5 +110,5 @@ def run_script(script, args, *, env, input=None, cwd=None, text=True):
                     sys.modules["__main__"] = saved
     finally:
         os.chdir(directory)
-    return subprocess.CompletedProcess([sys.executable, *argv], returncode,
+    return subprocess.CompletedProcess([*command, *argv[1:]], returncode,
                                        _captured(stdout, text), _captured(stderr, text))

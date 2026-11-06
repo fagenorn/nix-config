@@ -51,6 +51,7 @@ from .test_adopt_project import (
     write_adoption_records,
     write_depth_tree,
 )
+from ._inprocess_cli import run_module
 from .test_adopt_apply import apply_repo, readoption_repo
 
 VERIFY_MEMBERS = ["adoption_commit", "blockers", "checks", "evidence_record",
@@ -152,10 +153,8 @@ class VerifyTestCase(unittest.TestCase):
         return json.loads(self.registry_path().read_text("utf-8"))
 
     def fleet(self) -> list[dict]:
-        proc = subprocess.run(
-            [sys.executable, "-m", "agent_tools.resolve_project", "platform-status", "--fleet"],
-            capture_output=True, text=True, timeout=120,
-            env={**os.environ, "HOME": str(self.home)})
+        proc = run_module("agent_tools.resolve_project", ("platform-status", "--fleet"),
+                          env={**os.environ, "HOME": str(self.home)})
         self.assertEqual(proc.returncode, 0, proc.stdout)
         return json.loads(proc.stdout)["fleet"]
 

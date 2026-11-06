@@ -600,11 +600,10 @@ class LifecycleHarness:
 
     def validated_response(self, stdout):
         """Decode reply bytes the `workflow-response` boundary passes unchanged (#191 D7)."""
-        validated = subprocess.run(
-            [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
-             "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
-            input=stdout, capture_output=True, text=True, check=False,
-            env=self.cli_env)
+        validated = INPROCESS_CLI.run_script(
+            ARTIFACT_BUDGET, ["validate-report", "--boundary", "workflow-response", "--input",
+                              "-", "--policy", str(BUDGET_POLICY)],
+            input=stdout, env=self.cli_env)
         self.assertEqual((validated.returncode, validated.stderr), (0, ""))
         self.assertEqual(validated.stdout, stdout)
         return json.loads(stdout)
@@ -9040,11 +9039,10 @@ class OwnerLivenessTest(LifecycleHarness, unittest.TestCase):
         for name, value in (("stall_at_off_minute", {**live, "stall_at": "2026-08-13T20:40:30Z"}),
                             ("wait_on_stalled", {**stalled, "wait_seconds": 60})):
             with self.subTest(name=name):
-                checked = subprocess.run(
-                    [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
-                     "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
-                    input=json.dumps(value), capture_output=True, text=True, check=False,
-                    env=self.cli_env)
+                checked = INPROCESS_CLI.run_script(
+                    ARTIFACT_BUDGET, ["validate-report", "--boundary", "workflow-response",
+                                      "--input", "-", "--policy", str(BUDGET_POLICY)],
+                    input=json.dumps(value), env=self.cli_env)
                 self.assertEqual(checked.returncode, 2)
 
 
@@ -9086,11 +9084,10 @@ class ControlWaitSecondsTest(LifecycleHarness, unittest.TestCase):
             with self.subTest(wait_seconds=value):
                 mutated = json.loads(json.dumps(response))
                 self.wait_action(mutated)["wait_seconds"] = value
-                checked = subprocess.run(
-                    [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
-                     "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
-                    input=json.dumps(mutated), capture_output=True, text=True, check=False,
-                    env=self.cli_env)
+                checked = INPROCESS_CLI.run_script(
+                    ARTIFACT_BUDGET, ["validate-report", "--boundary", "workflow-response",
+                                      "--input", "-", "--policy", str(BUDGET_POLICY)],
+                    input=json.dumps(mutated), env=self.cli_env)
                 self.assertEqual(checked.returncode, 2)
 
 

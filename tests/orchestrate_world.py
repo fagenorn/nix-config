@@ -87,10 +87,14 @@ if rule is not None:
     sys.exit(rule["exit"])
 '''
 
-REAL_TAIL = '''done = subprocess.run([sys.executable, script, *argv], input=stdin, capture_output=True)
-sys.stdout.buffer.write(done.stdout)
-sys.stderr.buffer.write(done.stderr)
-sys.exit(done.returncode)
+# The real script runs in this process, as `python script argv` would run it, so a tool
+# call costs one interpreter start (issue 612): the consumed stdin is handed back as
+# `sys.stdin`, and the script's own exit and output are the shim's.
+REAL_TAIL = '''import io, runpy
+sys.argv = [script, *argv]
+sys.path[0] = os.path.dirname(script)
+sys.stdin = io.TextIOWrapper(io.BytesIO(stdin), encoding="utf-8")
+runpy.run_path(script, run_name="__main__")
 '''
 
 GIT_SHIM = '''#!{python}

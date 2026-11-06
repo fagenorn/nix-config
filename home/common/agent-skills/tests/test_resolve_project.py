@@ -1,8 +1,11 @@
 """Contract tests for `resolve-project` (`agent_tools.resolve_project`).
 
-Runs the resolver as a subprocess against temporary repository roots and parses
+Runs the resolver's command line against temporary repository roots and parses
 its stdout, the seam established by test_resolve_bindings.py and
-test_workflow_state.py. The resolver is imported in process only by the cases
+test_workflow_state.py. `run` runs it in this process (`_inprocess_cli`, issue
+612); `run_child` and `run_with_path` run it as a real child process, and
+`ProcessWiringTest` pins that a child's exit code, stdout and stderr are the
+in-process run's. The resolver is imported in process only by the cases
 whose seam no subprocess run can reach — the generic failure wrapper, the
 emit-side non-finite guard (both through the shared `load_module` below) and
 the public `resolve()` seam (`PublicResolveTest`, #279).
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import io
 import json
 import os
@@ -32,6 +36,8 @@ import unittest
 from pathlib import Path
 
 from agent_tools import resolve_project
+
+from ._inprocess_cli import run_module
 
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 DECLARATION = Path(__file__).resolve().parents[1] / "host-declaration.json"
@@ -149,7 +155,15 @@ SUBCOMMANDS = ("resolve", "check-projections", "write-projections",
                "platform-status")
 
 
-def run(*args: str, home: Path) -> tuple[int, str, str]:
+def run(*args: str, home: Path, cwd: Path | None = None) -> tuple[int, str, str]:
+    """The resolver's command line run in this process (issue 612)."""
+    proc = run_module("agent_tools.resolve_project", args,
+                      env={**os.environ, "HOME": str(home)}, cwd=cwd)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def run_child(*args: str, home: Path) -> tuple[int, str, str]:
+    """The resolver as a real child process, for the process wiring itself."""
     proc = subprocess.run(
         [sys.executable, "-m", "agent_tools.resolve_project", *args],
         capture_output=True, text=True, timeout=60,
@@ -233,6 +247,19 @@ CODEX_HEADER = (
 MANAGED_LINE = "@.agents/instructions/bootstrap.md"
 
 
+_INIT_TEMPLATE = tempfile.TemporaryDirectory()
+
+
+@functools.cache
+def _init_template() -> Path:
+    """An empty `git init` checkout, made once per process and copied into every
+    project root (issue 612, the #500 pattern)."""
+    root = Path(_INIT_TEMPLATE.name).resolve() / "repo"
+    root.mkdir()
+    git(root, "init", "--quiet")
+    return root
+
+
 def make_project_root(contract: object | None = None, *,
                       projections: bool = True) -> Path:
     """A temp root holding a valid contract, its instruction source, and —
@@ -248,7 +275,7 @@ def make_project_root(contract: object | None = None, *,
     # root is always the physical path; without it every `str(root)`
     # comparison below would compare two spellings of one directory.
     root = Path(tempfile.mkdtemp()).resolve()
-    git(root, "init", "--quiet")
+    shutil.copytree(_init_template(), root, symlinks=True, dirs_exist_ok=True)
     (root / "home" / "common" / "agent-skills" / "standards").mkdir(parents=True)
     (root / "docs" / "standards").mkdir(parents=True)
     (root / ".out-of-scope").mkdir()
@@ -785,15 +812,12 @@ class DiscoveryTest(ResolverTestCase):
     """SF-002: the nearest-ancestor walk taken without `--repo-root`."""
 
     def resolve_from(self, cwd: Path) -> tuple[int, object, str]:
-        proc = subprocess.run(
-            [sys.executable, "-m", "agent_tools.resolve_project", "resolve"],
-            capture_output=True, text=True, timeout=60, cwd=str(cwd),
-            env={**os.environ, "HOME": str(self.home)})
+        code, out, err = run("resolve", home=self.home, cwd=cwd)
         try:
-            payload: object = json.loads(proc.stdout)
+            payload: object = json.loads(out)
         except json.JSONDecodeError:
             payload = None
-        return proc.returncode, payload, proc.stderr
+        return code, payload, err
 
     def test_a_nested_directory_finds_the_nearest_ancestor(self):
         root = self.make_root()
@@ -823,10 +847,32 @@ class UsageErrorTest(ResolverTestCase):
     def test_an_unregistered_subcommand_exits_two_without_json(self):
         for args in ((),):
             with self.subTest(args=args):
-                code, out, err = run(*args, home=self.home)
+                code, out, err = run_child(*args, home=self.home)
                 self.assertEqual(code, 2)
                 self.assertEqual(out, "")
                 self.assertNotEqual(err, "")
+
+
+class ProcessWiringTest(ResolverTestCase):
+    """The real `python -m agent_tools.resolve_project` child answers exactly what
+    the in-process `run` answers: argv parsing, the exit code and both streams
+    (issue 612)."""
+
+    def test_a_child_process_matches_the_in_process_run(self):
+        root = self.make_root()
+        broken = self.make_root(projections=False)
+        (broken / ".agents/project.json").write_text("{ not json", "utf-8")
+        rows = (
+            ("snapshot", ("resolve", "--repo-root", str(root))),
+            ("refusal", ("resolve", "--repo-root", str(broken))),
+            ("usage error", ("resolve", "--no-such-flag")),
+            ("help", ("--help",)),
+        )
+        for name, args in rows:
+            with self.subTest(name):
+                child = run_child(*args, home=self.home)
+                self.assertEqual(run(*args, home=self.home), child)
+                self.assertEqual(child[0], {"snapshot": 0, "help": 0}.get(name, 2))
 
 
 def load_module():
