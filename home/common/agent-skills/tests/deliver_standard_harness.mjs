@@ -11,7 +11,7 @@ const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
 const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], mutation_checked: true, notes: 'ok' }
 const SETUP = {
-  ok: true, slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main',
+  ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main',
   branch: 'issue-9-x', worktree_path: '/r/.wt/w-issue-9-x', dirty: false, unset_env: [], merge_strategy: 'merge', delete_branch: true,
   review: { code: 'cr', plan: 'pr' }, review_state: { code: 'available', plan: 'available' },
   knowledge: { standards: ['/r/docs/standards'], hints: ['/r/.hints'], rejections: ['/r/.rej'] },
@@ -24,8 +24,10 @@ const PLAN = {
 }
 // Ordered: the first matching pattern wins.
 const DEFAULTS = [
+  [/^renew-/, { verdict: 'renewed', comment_id: 7 }],
+  [/^acquire$/, { verdict: 'acquired', comment_id: 7 }],
   [/^setup$/, SETUP],
-  [/^claim$/, { ok: true, worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard' }],
+  [/^worktree$/, { ok: true, worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard' }],
   [/^plan(-revise)?$/, PLAN],
   [/-codex$/, { available: true, ...PASS }],
   [/review|^final-/, PASS],
@@ -36,7 +38,7 @@ const DEFAULTS = [
   [/^pr$/, { pr: 42, head: SHA }],
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'] }],
   [/^merge$/, { merged: true, merge_commit: SHA, notes: 'merged' }],
-  [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, notes: 'ok' }],
+  [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, notes: 'ok' }],
 ]
 
 const calls = []
