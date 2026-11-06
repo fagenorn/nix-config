@@ -368,8 +368,8 @@ class WhenTest(unittest.TestCase):
 
 
 RELEASES = ["api", "--paginate", "--slurp", f"repos/{SLUG}/releases?per_page=100"]
-RUNS_SINCE = ["api", "--paginate", "--slurp", f"repos/{SLUG}/actions/runs?per_page=100&branch=main"
-              "&created=%3E%3D2026-11-01T00%3A00%3A00Z"]
+RUNS_SINCE = ["api", "--paginate", "--slurp", f"repos/{SLUG}/actions/workflows/ci.yaml/runs?per_page=100"
+              "&branch=main&created=%3E%3D2026-11-01T00%3A00%3A00Z"]
 
 
 class ProbeTest(unittest.TestCase):
@@ -408,15 +408,26 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(vf.run_probe(run, context(world)).exit, 0)
         self.assertEqual(vf.run_probe({**run, "n": 131}, context(world)).exit, 75)
 
-    def test_count_since_runs_counts_every_page_of_the_workflow(self):
+    def test_count_since_runs_reads_every_page_of_the_per_workflow_listing(self):
         world = world_with(self)
-        ci = {"name": "ci.yaml", "path": ".github/workflows/ci.yaml", "created_at": "2026-11-02T00:00:00Z"}
-        other = {"name": "lint", "path": ".github/workflows/lint.yaml", "created_at": "2026-11-02T00:00:00Z"}
-        world.respond_json("gh", RUNS_SINCE, [{"workflow_runs": [other] * 100}, {"workflow_runs": [ci] * 3}])
+        ci = {"name": "CI", "path": ".github/workflows/ci.yaml", "created_at": "2026-11-02T00:00:00Z"}
+        world.respond_json("gh", RUNS_SINCE, [{"total_count": 103, "workflow_runs": [ci] * 100},
+                                              {"total_count": 103, "workflow_runs": [ci] * 3}])
         run = {"probe": "count_since", "source": "runs", "workflow": "ci.yaml", "branch": "main",
-               "since": "2026-11-01T00:00:00+00:00", "n": 3}
+               "since": "2026-11-01T00:00:00+00:00", "n": 103}
         self.assertEqual(vf.run_probe(run, context(world)).exit, 0)
-        self.assertEqual(vf.run_probe({**run, "n": 4}, context(world)).exit, 75)
+        self.assertEqual(vf.run_probe({**run, "n": 104}, context(world)).exit, 75)
+        self.assertFalse([argv for argv in world.argvs("gh") if f"repos/{SLUG}/actions/runs?" in " ".join(argv)])
+
+    def test_count_since_runs_refuses_a_truncated_listing(self):
+        world = world_with(self)
+        ci = {"name": "CI", "path": ".github/workflows/ci.yaml", "created_at": "2026-11-02T00:00:00Z"}
+        world.respond_json("gh", RUNS_SINCE, [{"total_count": 1500, "workflow_runs": [ci] * 100}] * 10)
+        run = {"probe": "count_since", "source": "runs", "workflow": "ci.yaml", "branch": "main",
+               "since": "2026-11-01T00:00:00+00:00", "n": 1200}
+        with self.assertRaises(fm.ForgeError) as raised:
+            vf.run_probe(run, context(world))
+        self.assertIn("truncated", str(raised.exception))
 
 
 HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
@@ -893,7 +904,7 @@ class PassTransitionsTest(PassBase):
         self.assertEqual(len(self.markers("window-open")), 1)
         self.assertEqual(self.mutations(), [])
 
-    def test_an_ended_pass_is_rechecked_and_does_not_close_the_issue(self):
+    def test_an_ended_pass_is_rechecked_and_closes_only_on_the_fresh_pass(self):
         self.hold(ok_check(), extra=[stored_comment(11, result(10, 0, "pass")),
                                      stored_comment(12, fm.end_body(11, "withdrawn"))])
         self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))

@@ -265,24 +265,33 @@ def evaluate_when(when: Mapping, merge: str, ctx: Context) -> Due:
 
 
 def _stamps(ctx: Context, run: Mapping) -> list[str]:
-    """The timestamps a counting probe counts, read across every page of the listing."""
-    pages = forge_markers.api_pages(
-        f"repos/{ctx.slug}/releases?per_page=100" if run["source"] == "releases"
-        else f"repos/{ctx.slug}/actions/runs?" + _run_query(run))
+    """The timestamps a counting probe counts, read across every page of the listing.
+
+    Runs are listed from the workflow's own endpoint, so other workflows cannot crowd its runs
+    out of a capped search. A listing shorter than its `total_count` was truncated by the forge
+    and is refused rather than counted low."""
     if run["source"] == "releases":
+        pages = forge_markers.api_pages(f"repos/{ctx.slug}/releases?per_page=100")
         if not all(isinstance(page, list) for page in pages):
             raise ForgeError("payload_invalid", "releases is not a list")
         return [item["published_at"] for page in pages for item in page
                 if isinstance(item, dict) and not item.get("draft")
                 and isinstance(item.get("published_at"), str)]
-    runs = []
+    workflow = quote(run["workflow"], safe="")
+    pages = forge_markers.api_pages(f"repos/{ctx.slug}/actions/workflows/{workflow}/runs?" + _run_query(run))
+    runs, total = [], 0
     for page in pages:
         listed = page.get("workflow_runs") if isinstance(page, dict) else None
+        count = page.get("total_count") if isinstance(page, dict) else None
         if not isinstance(listed, list):
             raise ForgeError("payload_invalid", "no workflow_runs list")
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise ForgeError("payload_invalid", "no total_count")
         runs.extend(item for item in listed if isinstance(item, dict))
-    return [item["created_at"] for item in _runs_of(runs, run["workflow"])
-            if isinstance(item.get("created_at"), str)]
+        total = max(total, count)
+    if len(runs) < total:
+        raise ForgeError("payload_invalid", f"run listing truncated: {len(runs)} of {total} runs listed")
+    return [item["created_at"] for item in runs if isinstance(item.get("created_at"), str)]
 
 
 def _run_query(run: Mapping) -> str:
