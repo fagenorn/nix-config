@@ -64,9 +64,8 @@ Apply Blocking fixes inline — `apply` and `push` are separate steps, in this o
 1. Edit the file(s).
 2. Run Phase 2's verification step (SKILL.md's `## Phase 2 — Verify locally`) on the modified
    worktree, before the commit.
-3. `git add` the changed files; commit `fix(issue-<num>): address PR review — <short blocker>`
-   (follow retained `bindings.vcs.commit.co_authored_by`), through `launch-commit` when this run
-   holds a `Lifecycle worker:` line (SKILL.md's `### Local commits`).
+3. `git add` the changed files; commit `fix(issue-<num>): address PR review — <short blocker>`, through `launch-commit`
+   when this run holds a `Lifecycle worker:` line (SKILL.md's `### Local commits`).
 4. Run `check-launch` (SKILL.md's `## Launch guard`); on anything but `current: true`, take the
    no-write stop. Then `git push origin <branch>` (`## gh hygiene`).
 5. Verify the push landed: `gh pr view <pr-num> --json headRefOid` must equal `git rev-parse HEAD`.
