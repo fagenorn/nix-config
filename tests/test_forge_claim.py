@@ -6,10 +6,12 @@ import os
 import subprocess
 import sys
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
 
 from agent_tools import forge_claim
 from agent_tools import forge_markers as fm
-from .forge_world import ForgeWorld
+from .forge_world import ForgeWorld, host_clock
 
 SLUG, ISSUE = "octo/widgets", 7
 ME, OTHER = "mbp/session-a", "eleven-m5/session-b"
@@ -254,6 +256,159 @@ class ReleaseRenewTest(Base):
         claim5 = next(c["body"] for c in self.world.stored() if c["id"] == 5)
         self.assertEqual(claim5, claim_body(ME, renewed="1"))  # the stale PATCH dropped `released` ...
         self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])  # ... and the end still holds
+
+
+NOW = ["api", "--include", "rate_limit"]
+PUSH = ["api", f"repos/{SLUG}/activity?ref=refs/heads/topic&activity_type=push&per_page=1"]
+PRS = ["api", f"repos/{SLUG}/pulls?state=all&head=octo:topic&per_page=100"]
+WRONG_CLOCKS = (datetime(1970, 1, 1, tzinfo=timezone.utc), datetime(2100, 1, 1, tzinfo=timezone.utc))
+OLD = "2026-11-01T00:00:00Z"  # server now is 2026-11-06T10:00:00Z
+
+
+class StatusTest(Base):
+    def fresh_world(self):
+        super().fresh_world()
+        self.world.respond("gh", NOW, stdout="HTTP/2.0 200 OK\nDate: Fri, 06 Nov 2026 10:00:00 GMT\n\n{}")
+
+    def under_wrong_clocks(self, *argv):
+        results = []
+        for instant in WRONG_CLOCKS:
+            with host_clock(instant, forge_claim, fm):
+                results.append(run(*argv))
+        return results
+
+    def comment_posts(self):
+        return [a for a in self.world.argvs("gh")
+                if a[:4] == ["api", "-X", "POST", f"repos/{SLUG}/issues/{ISSUE}/comments"]]
+
+    def test_the_clock_seam_reaches_both_modules(self):
+        for instant in WRONG_CLOCKS:
+            with host_clock(instant, forge_claim, fm):
+                self.assertEqual(forge_claim.datetime.now(timezone.utc), instant)
+                self.assertEqual(fm.datetime.now(timezone.utc), instant)
+
+    def test_free(self):
+        self.store()
+        for code, out in self.under_wrong_clocks(*common("status")):
+            self.assertEqual((code, out["verdict"], out["released_by_owner"]), (0, "free", []))
+        self.assertNotIn(NOW, self.world.argvs("gh"))
+
+    def test_fresh_claim_is_held_by_whatever_the_host_clock(self):
+        self.store(comment(5, claim_body(OTHER), "2026-11-05T10:00:01Z"))
+        for code, out in self.under_wrong_clocks(*common("status")):
+            self.assertEqual((code, out["verdict"], out["by"], out["comment_id"]), (0, "held_by", OTHER, 5))
+        self.assertEqual(self.mutations(), [])
+
+    def test_branch_push_or_pr_event_keeps_a_claim_fresh(self):
+        for push, prs in (([{"timestamp": "2026-11-06T09:00:00Z"}], []),
+                          ([], [{"updated_at": "2026-11-06T09:00:00Z"}])):
+            with self.subTest(push=push, prs=prs):
+                self.fresh_world()
+                self.store(comment(5, claim_body(OTHER, branch="topic"), OLD))
+                self.world.respond_json("gh", PUSH, push)
+                self.world.respond_json("gh", PRS, prs)
+                for code, out in self.under_wrong_clocks(*common("status")):
+                    self.assertEqual((code, out["verdict"], out["activity_at"]),
+                                     (0, "held_by", "2026-11-06T09:00:00Z"))
+
+    def test_stale_posts_one_owner_action_across_repeat_calls(self):
+        self.store(comment(5, claim_body(OTHER), "2026-11-05T10:00:00Z"), next_id=30)
+        results = self.under_wrong_clocks(*common("status"))
+        self.assertEqual([(c, o["verdict"], o["by"], o["owner_action_comment_id"], o["owner_action_posted"])
+                          for c, o in results],
+                         [(0, "stale", OTHER, 30, True), (0, "stale", OTHER, 30, False)])
+        self.assertEqual(self.comment_posts(), [post(oa_body(5, OTHER))])
+        self.assertEqual(self.mutations().count(OA_ADD), 2)  # reconciled on every stale call (D6)
+        self.assertFalse(any("PATCH" in a or "DELETE" in a for a in self.mutations()))
+        self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
+
+    def test_a_failed_label_call_is_repaired_without_a_second_marker(self):
+        self.store(comment(5, claim_body(OTHER), OLD), next_id=30)
+        self.world.respond("gh", OA_ADD, exit=1, stderr="gh: Server Error (HTTP 500)")
+        code, out = run(*common("status"))
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
+        self.world.respond("gh", OA_ADD)
+        code, out = run(*common("status"))
+        self.assertEqual((code, out["verdict"], out["owner_action_comment_id"], out["owner_action_posted"]),
+                         (0, "stale", 30, False))
+        self.assertEqual(self.comment_posts(), [post(oa_body(5, OTHER))])
+        self.assertEqual(self.mutations().count(OA_ADD), 2)
+
+    def test_a_fresh_claim_retires_an_obsolete_owner_action(self):
+        self.store(comment(5, claim_body(OTHER, renewed="1")), comment(30, oa_body(5, OTHER)))
+        code, out = run(*common("status"))
+        self.assertEqual((code, out["verdict"]), (0, "held_by"))
+        self.assertEqual(self.mutations(), [post(fm.end_body(30, "renewed")), OA_REMOVE])
+
+    def test_a_tick_after_the_holder_renewed_releases_nothing(self):
+        self.store(comment(5, claim_body(OTHER), OLD), next_id=30)
+        self.assertEqual(run(*common("status"))[1]["verdict"], "stale")
+        self.assertEqual(run(*common("renew", holder=OTHER))[1]["verdict"], "renewed")  # ends marker 30
+        fm.edit(SLUG, 30, oa_body(5, OTHER, ticked=True))  # the owner ticks the old box afterwards
+        code, out = run(*common("acquire"))
+        self.assertEqual((code, out["verdict"], out["by"], out["released_by_owner"]), (3, "held_by", OTHER, []))
+        self.assertEqual(self.mutations()[-1], patch(30, oa_body(5, OTHER, ticked=True)))  # acquire mutated nothing
+        self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
+        self.assertEqual(self.live("owner-action"), [])
+
+    def test_a_tick_on_a_claim_that_is_no_longer_stale_releases_nothing(self):
+        self.store(comment(5, claim_body(OTHER, branch="topic"), OLD), comment(30, oa_body(5, OTHER, ticked=True)))
+        self.world.respond_json("gh", PUSH, [{"timestamp": "2026-11-06T09:00:00Z"}])
+        self.world.respond_json("gh", PRS, [])
+        with host_clock(WRONG_CLOCKS[1], forge_claim, fm):
+            code, out = run(*common("acquire"))
+        self.assertEqual((code, out["verdict"], out["released_by_owner"]), (3, "held_by", []))
+        self.assertEqual(self.mutations(), [post(fm.end_body(30, "renewed")), OA_REMOVE])
+        self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
+
+    def test_acquire_against_an_unticked_stale_claim_is_held_by(self):
+        self.store(comment(5, claim_body(OTHER), "2026-10-01T00:00:00Z"), comment(30, oa_body(5, OTHER)))
+        for code, out in self.under_wrong_clocks(*common("acquire")):
+            self.assertEqual((code, out["verdict"], out["by"]), (3, "held_by", OTHER))
+        self.assertEqual(self.mutations(), [])
+
+    def test_ticked_box_releases_and_acquire_proceeds(self):
+        self.store(comment(5, claim_body(OTHER), OLD), comment(30, oa_body(5, OTHER, ticked=True)))
+        with host_clock(WRONG_CLOCKS[0], forge_claim, fm):
+            code, out = run(*common("acquire"))
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["released_by_owner"]),
+                         (0, "acquired", 42, [5]))
+        self.assertEqual(self.mutations(), [
+            post(fm.end_body(5, "owner-action")), patch(5, claim_body(OTHER, released="owner-action")),
+            post(fm.end_body(30, "released")), REMOVE, OA_REMOVE, post(claim_body(ME)), ENSURE, ADD])
+        self.assertEqual([m.fields["holder"] for m in self.live()], [ME])
+
+    def test_ticked_box_makes_status_free(self):
+        self.store(comment(5, claim_body(OTHER), OLD), comment(30, oa_body(5, OTHER, ticked=True)))
+        code, out = run(*common("status"))
+        self.assertEqual((code, out["verdict"], out["released_by_owner"]), (0, "free", [5]))
+        self.assertEqual(self.live(), [])
+
+    def test_a_tick_on_an_already_released_claim_only_ends_the_marker(self):
+        self.store(comment(5, claim_body(OTHER, released="done"), OLD), comment(30, oa_body(5, OTHER, ticked=True)))
+        code, out = run(*common("status"))
+        self.assertEqual((code, out["verdict"], out["released_by_owner"]), (0, "free", []))
+        self.assertEqual(self.mutations(), [post(fm.end_body(30, "released")), OA_REMOVE])
+
+    def test_a_delayed_renewal_cannot_revive_a_claim_released_by_the_box(self):
+        # OTHER's renew reads claim 5; ME's acquire honours the tick and acquires; then the PATCH lands.
+        self.store(comment(5, claim_body(OTHER), OLD), comment(30, oa_body(5, OTHER, ticked=True)),
+                   schedule=["list", "post:agent:end v1 of=5 ", f"post:holder={ME}", "patch:5:renewed=1"])
+        renewal = start_cli(*common("renew", holder=OTHER))
+        self.world.wait_cursor(1)
+        code, out = run_cli(*common("acquire"))
+        self.assertEqual((code, out["verdict"], out["released_by_owner"]), (0, "acquired", [5]))
+        code, out = finish(renewal)
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (3, "not_held", 5))
+        self.assertEqual([m.fields["holder"] for m in self.live()], [ME])
+
+
+class NoHostClockTest(unittest.TestCase):
+    def test_cli_reads_no_host_clock(self):
+        source = Path(forge_claim.__file__).read_text("utf-8")
+        for spelling in ("time.time", ".now(", "utcnow", "date.today", "localtime"):
+            self.assertNotIn(spelling, source)
+        self.assertIn("from datetime import datetime", source)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Issue claims on GitHub issue comments (issue 623): acquire, renew and release.
+"""Issue claims on GitHub issue comments (issue 623): acquire, renew, release and status.
 
 A claim is a `claim` marker (`agent_tools.forge_markers`) and the `in-progress` label is only
 a filter over it. Contention is settled by the marker contest (D2): the smallest live claim
@@ -21,12 +21,29 @@ released claim cannot come back.
 D10, owner-action retirement: `renew` and `release` end every live `owner-action` marker that
 names their claim, and the `owner-action` label goes when none remains live on the issue.
 
-The module reads no host clock.
+D4, branch activity: a claim recorded with `--branch` counts the branch's last push and the
+`updated_at` of its pull requests as activity beside its own renewals; a claim with no branch
+counts only its own `updated_at`.
+
+D5, server now: "now" is the server's `Date` header (`forge_markers.server_now`); a claim is
+stale when `now - activity >= 24 hours`. The module reads no host clock.
+
+D6, owner-action: `status` reports a stale claim by posting one `owner-action` marker whose
+checkbox the owner ticks. The next `status` or `acquire` honours a ticked box only while the
+claim it names is live and still stale at that moment: the claim is ended (reason
+`owner-action`), edited to `released=owner-action`, and the marker ended (reason `released`).
+A box ticked on a claim that is no longer stale is ended (reason `renewed`) and releases
+nothing. A stale claim is never stolen: `acquire` against it without a ticked box is `held_by`.
+
+D10, residual window, accepted: an honour that read a ticked box just before the holder's
+renewal can still end the claim; the holder's `renew` then reports `not_held` (D3), so holders
+run `renew` before each irreversible step and stop on `not_held`.
 """
 import argparse
 import json
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from agent_tools import forge_markers as fm
@@ -36,6 +53,9 @@ CLAIM_KIND = "claim"
 IN_PROGRESS = ("in-progress", "FBCA04")
 OWNER_ACTION = ("owner-action", "D93F0B")
 OWNER_ACTION_KIND = "owner-action"
+STALE_AFTER = timedelta(hours=24)
+RELEASE_BOX = "Release this claim"
+TICKED = re.compile(rf"\s*[-*] \[[xX]\] {RELEASE_BOX}\s*")
 
 CONTENDED, FORGE_ERROR, USAGE = 3, 1, 2
 
@@ -72,14 +92,14 @@ REASON = _pattern(r"[A-Za-z0-9._:/@+-]+", "reason")
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="forge-claim", description="Claim a forge issue so one session delivers it.")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("acquire", "renew", "release"):
+    for name in ("acquire", "renew", "release", "status"):
         sub = commands.add_parser(name)
         sub.add_argument("--repo", required=True, type=REPO)
         sub.add_argument("--issue", required=True, type=_issue)
         sub.add_argument("--holder", required=True, type=HOLDER)
-        if name != "release":
+        if name in ("acquire", "renew"):
             sub.add_argument("--branch", type=BRANCH, default=None)
-        else:
+        elif name == "release":
             sub.add_argument("--reason", type=REASON, default="done")
     return parser
 
@@ -116,8 +136,85 @@ def retire_owner_actions(slug: str, issue: int, markers: list[Marker], claim_id:
     return named
 
 
+def activity_at(slug: str, claim: Marker) -> datetime:
+    """The claim's latest activity: its `updated_at`, and, only when it records a branch, the
+    branch's last push and the newest `updated_at` of the branch's pull requests (D4)."""
+    moments = [claim.updated_at]
+    branch = claim.fields.get("branch")
+    if branch:
+        moments += [m for m in (fm.latest_push(slug, branch), fm.latest_pr_event(slug, branch))
+                    if m is not None]
+    return max(moments)
+
+
+def is_stale(activity: datetime, now: datetime) -> bool:
+    return now - activity >= STALE_AFTER
+
+
+def _ticked(marker: Marker) -> bool:
+    return any(TICKED.fullmatch(line) for line in marker.body.splitlines()[1:])
+
+
+def _live_owner_actions(markers: list[Marker]) -> list[Marker]:
+    return [m for m in markers if m.kind == OWNER_ACTION_KIND and fm.is_live(m, markers)]
+
+
+def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Marker], list[int]]:
+    """Honour the ticked release boxes of the issue's live stale-claim `owner-action` markers (D6).
+
+    Returns the markers to continue with (a fresh listing when anything was ended) and the
+    claim ids released, ascending. The server clock is read at most once, and only when a
+    ticked box exists."""
+    ticked = [m for m in _live_owner_actions(markers)
+              if m.fields.get("issue") == str(issue) and m.fields.get("reason") == "stale-claim"
+              and _ticked(m)]
+    if not ticked:
+        return markers, []
+    now: datetime | None = None
+    released: list[int] = []
+    for marker in ticked:
+        claim = next((m for m in markers if m.kind == CLAIM_KIND
+                      and str(m.comment_id) == marker.fields.get("claim")), None)
+        live = (claim is not None and claim.comment_id not in released
+                and fm.is_live(claim, markers))
+        if not live:
+            fm.end(slug, issue, marker.comment_id, "released")
+            continue
+        now = fm.server_now() if now is None else now
+        if is_stale(activity_at(slug, claim), now):
+            fm.end(slug, issue, claim.comment_id, "owner-action")
+            fm.edit(slug, claim.comment_id, fm.with_fields(claim, released="owner-action"))
+            fm.end(slug, issue, marker.comment_id, "released")
+            released.append(claim.comment_id)
+        else:
+            fm.end(slug, issue, marker.comment_id, "renewed")
+    again = fm.list_markers(slug, issue)
+    if released and not fm.contest(again, CLAIM_KIND, {"issue": str(issue)}):
+        fm.remove_label(slug, issue, IN_PROGRESS[0])
+    if not _live_owner_actions(again):
+        fm.remove_label(slug, issue, OWNER_ACTION[0])
+    return again, sorted(released)
+
+
+def retire_obsolete(slug: str, issue: int, markers: list[Marker], keep: int | None) -> list[int]:
+    """End every live `owner-action` of the issue whose claim is not `keep` (D10).
+
+    The reason is `renewed` when that claim is live in `markers`, else `released`. When at
+    least one was ended and no live `owner-action` remains, the `owner-action` label goes.
+    Returns the ended ids, ascending."""
+    live = _live_owner_actions(markers)
+    obsolete = [m for m in live if m.fields.get("claim") != (None if keep is None else str(keep))]
+    for marker in obsolete:
+        claim_live = any(c.kind == CLAIM_KIND and str(c.comment_id) == marker.fields.get("claim")
+                         and fm.is_live(c, markers) for c in markers)
+        fm.end(slug, issue, marker.comment_id, "renewed" if claim_live else "released")
+    if obsolete and len(obsolete) == len(live):
+        fm.remove_label(slug, issue, OWNER_ACTION[0])
+    return sorted(m.comment_id for m in obsolete)
+
+
 def acquire(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
-    markers = fm.list_markers(args.repo, args.issue)
+    markers, freed = honour_ticks(args.repo, args.issue, fm.list_markers(args.repo, args.issue))
     match = {"issue": str(args.issue)}
     held = fm.contest(markers, CLAIM_KIND, match)
     winner = held[0] if held else None
@@ -128,16 +225,17 @@ def acquire(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         written = fm.write(args.repo, args.issue, CLAIM_KIND, fields, f"Claimed by {args.holder}.", match)
         if written.won:
             _mark_in_progress(args)
-            return 0, _result(args, "acquired", written.own_id)
+            return 0, _result(args, "acquired", written.own_id, released_by_owner=freed)
         winner = written.winner
         comment_id = winner.comment_id if winner is not None else None
         if _holder_of(winner) == args.holder:
-            return 0, _result(args, "already_held", comment_id)
-        return CONTENDED, _result(args, "lost_to", comment_id, _holder_of(winner))
+            return 0, _result(args, "already_held", comment_id, released_by_owner=freed)
+        return CONTENDED, _result(args, "lost_to", comment_id, _holder_of(winner), released_by_owner=freed)
     if _holder_of(winner) == args.holder:
         _mark_in_progress(args)
-        return 0, _result(args, "already_held", winner.comment_id)
-    return CONTENDED, _result(args, "held_by", winner.comment_id, _holder_of(winner))
+        return 0, _result(args, "already_held", winner.comment_id, released_by_owner=freed)
+    return CONTENDED, _result(args, "held_by", winner.comment_id, _holder_of(winner),
+                         released_by_owner=freed)
 
 
 def renew(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
@@ -177,7 +275,40 @@ def release(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     return 0, _result(args, "released", claim.comment_id, label_removed=label_removed)
 
 
-COMMANDS = {"acquire": acquire, "renew": renew, "release": release}
+def status(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+    markers, freed = honour_ticks(args.repo, args.issue, fm.list_markers(args.repo, args.issue))
+    held = fm.contest(markers, CLAIM_KIND, {"issue": str(args.issue)})
+    report = {"released_by_owner": freed, "activity_at": None, "owner_action_comment_id": None,
+              "owner_action_posted": False}
+    if not held:
+        retire_obsolete(args.repo, args.issue, markers, None)
+        return 0, _result(args, "free", **report)
+    winner = held[0]
+    activity = activity_at(args.repo, winner)
+    report["activity_at"] = activity.strftime("%Y-%m-%dT%H:%M:%SZ")
+    base = (winner.comment_id, _holder_of(winner))
+    if not is_stale(activity, fm.server_now()):
+        retire_obsolete(args.repo, args.issue, markers, None)
+        return 0, _result(args, "held_by", *base, **report)
+    retire_obsolete(args.repo, args.issue, markers, winner.comment_id)
+    match = {"issue": str(args.issue), "reason": "stale-claim", "claim": str(winner.comment_id)}
+    existing = fm.contest(markers, OWNER_ACTION_KIND, match)
+    if existing:
+        report["owner_action_comment_id"] = existing[0].comment_id
+    else:
+        written = fm.write(
+            args.repo, args.issue, OWNER_ACTION_KIND, match,
+            f"The claim of {_holder_of(winner)} has had no renewal, push or pull request activity "
+            "for 24 hours.", match, f"- [ ] {RELEASE_BOX}")
+        report["owner_action_posted"] = written.won
+        report["owner_action_comment_id"] = (written.own_id if written.won else
+                                             written.winner.comment_id if written.winner else None)
+    fm.ensure_label(args.repo, *OWNER_ACTION)
+    fm.add_label(args.repo, args.issue, OWNER_ACTION[0])
+    return 0, _result(args, "stale", *base, **report)
+
+
+COMMANDS = {"acquire": acquire, "renew": renew, "release": release, "status": status}
 
 
 def _emit(result: dict[str, Any]) -> None:
