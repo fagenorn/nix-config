@@ -531,6 +531,27 @@ class PlatformStatusDeprecationTest(ResolverTestCase):
         self.assertEqual(payload["project"]["deprecated_uses"],
                          ["legacy-file"])
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root searches a 0000 directory, so the case cannot be staged")
+    def test_an_uninspectable_subject_is_uncertain_never_absent(self):
+        # `os.path.lexists` answers False for EACCES, which would report an
+        # existing deprecated file as absent. Inspection failure is null
+        # (nothing can be said), and compatibility is untouched.
+        root = self.legacy_root()
+        claude = root / ".claude"
+        self.addCleanup(claude.chmod, 0o755)
+        claude.chmod(0o000)
+        payload = self.status("--repo-root", str(root))
+        self.assertIsNone(payload["project"]["deprecated_uses"])
+        self.assertEqual(payload["compatibility"], {
+            "compatible": True, "reason_code": None, "repair_id": None})
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/nix-config", "root": str(root)}))
+        fleet = self.status("--fleet")["fleet"]
+        self.assertEqual(len(fleet), 1)
+        self.assertIsNone(fleet[0]["deprecated_uses"])
+        self.assertTrue(fleet[0]["compatible"])
+
     def test_resolve_still_succeeds_on_a_deprecated_use(self):
         code, out, err = run("resolve", "--repo-root",
                              str(self.legacy_root()), home=self.home)
