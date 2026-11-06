@@ -8,6 +8,7 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from agent_tools import forge_claim
 from agent_tools import forge_markers as fm
@@ -75,6 +76,22 @@ def finish(proc):
 
 def run_cli(*argv):
     return finish(start_cli(*argv))
+
+
+def interleave(test, after_listing, action):
+    """Run `action` once, right after the `after_listing`-th listing of the module under test returns:
+    another caller's whole command lands between that read and the caller's next write."""
+    real, seen = fm.list_markers, [0]
+
+    def listing(*args, **kwargs):
+        result = real(*args, **kwargs)
+        seen[0] += 1
+        if seen[0] == after_listing:
+            action()
+        return result
+    patcher = mock.patch.object(fm, "list_markers", listing)
+    patcher.start()
+    test.addCleanup(patcher.stop)
 
 
 class Base(unittest.TestCase):
@@ -239,7 +256,7 @@ class ReleaseRenewTest(Base):
         self.store()
         code, out = run(*common("release"))
         self.assertEqual((code, out["verdict"]), (3, "not_held"))
-        self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.mutations(), [REMOVE])  # a free issue carries no in-progress label
 
     def test_a_delayed_renewal_cannot_revive_a_released_claim(self):
         # renew reads claim 5; release ends it; OTHER acquires; only then does renew's PATCH land.
@@ -256,6 +273,46 @@ class ReleaseRenewTest(Base):
         claim5 = next(c["body"] for c in self.world.stored() if c["id"] == 5)
         self.assertEqual(claim5, claim_body(ME, renewed="1"))  # the stale PATCH dropped `released` ...
         self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])  # ... and the end still holds
+
+    def test_release_does_not_strip_the_label_from_a_claim_acquired_meanwhile(self):
+        # COR-002: release lists no live claim, OTHER acquires and labels, then release removes the label.
+        self.store(comment(5, claim_body(ME)))
+        interleave(self, 2, lambda: run(*common("acquire", holder=OTHER)))
+        code, out = run(*common("release"))
+        self.assertEqual((code, out["verdict"], out["label_removed"]), (0, "released", False))
+        self.assertEqual(self.mutations()[-3:], [REMOVE, ENSURE, ADD])
+        self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
+
+    def test_release_retry_finishes_after_the_comment_edit_failed(self):
+        # COR-003: the end marker is written, the PATCH fails; the same release again completes it.
+        self.store(comment(5, claim_body(ME)))
+        with mock.patch.object(fm, "edit", side_effect=fm.ForgeError("gh_failed", "boom")):
+            code, out = run(*common("release"))
+        self.assertEqual((code, out["verdict"]), (1, "error"))
+        self.assertEqual(self.mutations(), [post(fm.end_body(5, "done"))])
+        code, out = run(*common("release"))
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["label_removed"]),
+                         (0, "released", 5, True))
+        self.assertEqual(self.mutations(), [post(fm.end_body(5, "done")),
+                                            patch(5, claim_body(ME, released="done")), REMOVE])
+        self.assertEqual([c["id"] for c in self.world.stored()], [5, 40])  # no second end marker
+
+    def test_release_retry_removes_the_label_after_its_removal_failed(self):
+        # COR-003: everything is written, only the label removal failed; the retry removes it.
+        self.store(comment(5, claim_body(ME)))
+        self.world.respond("gh", REMOVE, exit=1, stderr="gh: Server Error (HTTP 500)")
+        code, out = run(*common("release"))
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
+        self.world.respond("gh", REMOVE)
+        code, out = run(*common("release"))
+        self.assertEqual((code, out["verdict"], out["label_removed"]), (3, "not_held", True))
+        self.assertEqual(self.mutations()[-1], REMOVE)
+
+    def test_release_by_a_non_holder_leaves_the_label_of_a_live_claim(self):
+        self.store(comment(5, claim_body(OTHER)))
+        code, out = run(*common("release"))
+        self.assertEqual((code, out["verdict"], out["label_removed"]), (3, "not_held", False))
+        self.assertEqual(self.mutations(), [])
 
 
 NOW = ["api", "--include", "rate_limit"]
@@ -401,6 +458,17 @@ class StatusTest(Base):
         code, out = finish(renewal)
         self.assertEqual((code, out["verdict"], out["comment_id"]), (3, "not_held", 5))
         self.assertEqual([m.fields["holder"] for m in self.live()], [ME])
+
+    def test_a_tick_read_before_the_holder_renewed_releases_nothing(self):
+        # COR-001: acquire reads the stale claim and the ticked box, then OTHER renews (ending the box)
+        # before acquire writes; the stale snapshot must not end the renewed claim.
+        self.store(comment(5, claim_body(OTHER), OLD), comment(30, oa_body(5, OTHER, ticked=True)))
+        interleave(self, 1, lambda: self.assertEqual(run(*common("renew", holder=OTHER))[1]["verdict"],
+                                                     "renewed"))
+        code, out = run(*common("acquire"))
+        self.assertEqual((code, out["verdict"], out["by"], out["released_by_owner"]), (3, "held_by", OTHER, []))
+        self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
+        self.assertNotIn(post(fm.end_body(5, "owner-action")), self.mutations())
 
 
 class NoHostClockTest(unittest.TestCase):
