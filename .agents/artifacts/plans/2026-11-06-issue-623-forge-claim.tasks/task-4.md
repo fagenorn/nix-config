@@ -21,27 +21,27 @@ In `tests/test_agent_tools_launchers.py`, add `"forge-claim"` to `LAUNCHER_FLOOR
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `just agent-installed-skill-tests 2>&1 | grep -E "forge-claim|^(OK|FAILED)" | tail -5`
-Expected: FAIL — `test_the_command_table_generates_each_deployed_command` subtest `launcher='forge-claim'`: `'forge-claim' not found`.
+Run: `just agent-installed-skill-tests > "${TMPDIR:-/tmp}/issue-623-launchers.log" 2>&1; echo "exit=$?"; grep -E "forge-claim|^(OK|FAILED)" "${TMPDIR:-/tmp}/issue-623-launchers.log" | tail -5`
+Expected: `exit=` non-zero, and the log names `test_the_command_table_generates_each_deployed_command` subtest `launcher='forge-claim'`: `'forge-claim' not found`.
 
 - [ ] **Step 3: Wire it**
 
 1. `lib/agent-tools.nix`: add `"forge-claim"` to `commands` between `"diff-scope"` and `"guard-policy"`.
 2. `justfile`, recipe `agent-workflow-tests`: add `    tests/test_forge_markers.py \` and `    tests/test_forge_claim.py \` directly after the `    tests/test_lane_triage.py \` line.
 3. `python/README.md`: add a `## forge-claim` section after `## lane-triage`, one paragraph each, stating (issue 623; source entries `python -m agent_tools.forge_claim`, library `agent_tools.forge_markers`):
-   - the marker grammar and liveness (D1), the smallest-live-id winner and the post / re-read / delete-own write with its listing assumption (D2), and that labels are filters while markers decide;
+   - the marker grammar (D1), liveness and append-only `end` markers that no later edit can undo (D9), the smallest-live-id winner and the post / re-read / delete-own write with its listing assumption (D2), and that labels are filters while markers decide;
    - the four subcommands with their arguments, the holder format `<host>/<batch_id>` or `<host>/session-<id>`, `--branch` (D4), `--reason` (default `done`);
-   - every verdict with its exit code (D8) and the output object's keys, including `released_by_owner`, `activity_at`, `owner_action_comment_id`, `owner_action_posted`, `label_removed`;
+   - every verdict with its exit code (D8), the one-line JSON object on every call including usage errors (`error: "usage"`, exit 2), and the output object's keys, including `released_by_owner`, `activity_at`, `owner_action_comment_id`, `owner_action_posted`, `label_removed`;
    - staleness: activity sources (D4), server `Date` as now (D5), `>= 24 h`, renewal bumps `renewed` (D3);
-   - stale is never stolen: the one `owner-action` marker with its `- [ ] Release this claim` box, the label, and how the next `status` or `acquire` honours a ticked box (D6, D7);
+   - stale is never stolen: the one `owner-action` marker with its `- [ ] Release this claim` box, the label reconciled on every stale `status`, how the next `status` or `acquire` honours a ticked box only while the claim is still stale (D6, D7), how `renew`, `release` and a fresh `status` retire obsolete owner-action markers, and the residual window with its rule that holders `renew` before each irreversible step (D10);
    - that every `gh` child runs without `GITHUB_TOKEN`/`GH_TOKEN`, so the keyring credential answers.
 
 - [ ] **Step 4: Verify**
 
-Run: `just build 2>&1 | tail -3`
-Expected: exit 0.
-Run: `just agent-installed-skill-tests 2>&1 | tail -3`
-Expected: `OK` (no failure in `tests/test_agent_tools_launchers.py`).
+Run: `bash -o pipefail -c 'just build 2>&1 | tail -3'` (timeout 3600 s)
+Expected: exit 0 (the pipe carries `just build`'s own status).
+Run: `bash -o pipefail -c 'just agent-installed-skill-tests 2>&1 | tail -3'` (timeout 3600 s)
+Expected: exit 0 and `OK` (no failure in `tests/test_agent_tools_launchers.py`).
 Run: `grep -c "tests/test_forge_markers.py\|tests/test_forge_claim.py" justfile`
 Expected: `2`.
 Run: `if ! grep -q '^## forge-claim' python/README.md; then exit 1; fi`
