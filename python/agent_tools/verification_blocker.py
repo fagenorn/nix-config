@@ -425,6 +425,24 @@ def requirement(record: Mapping) -> dict:
                     for fact in record["facts"]]})
 
 
+def request_retry(blockers: Mapping, attempt: dict, blocker_id: str) -> None:
+    """Arm one explicitly requested retry without resolving or rewriting its failure.
+
+    The attempt remains suspended on a human gate until ordinary acquisition grants
+    a new launch. Shared blockers, progress counters and verification results stay intact.
+    """
+    _blocker_id(blocker_id, "blocker_id")
+    if (attempt["state"] != "suspended" or attempt["blocked_on"] != "verification"
+            or attempt["verification_blocker"] != blocker_id):
+        raise _refuse("attempt", "must be suspended on the named verification blocker")
+    record = blockers.get(blocker_id)
+    reference = {"issue": attempt["issue"], "attempt": attempt["attempt"]}
+    if record is None or record["state"] != "open" or reference not in record["attempts"]:
+        raise _refuse("blocker_id", "must name this attempt's open blocker")
+    attempt["blocked_on"] = "human_gate"
+    attempt["verification_blocker"] = None
+
+
 def validate_observations(value: object) -> list:
     """Check a request's list of observations; returns `value` itself (issue 545 D4).
 

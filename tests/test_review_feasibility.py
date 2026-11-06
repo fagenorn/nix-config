@@ -177,9 +177,76 @@ class SharedPackingPolicyTest(unittest.TestCase):
                 group[key] = previous
 
 
+class RecordPolicyDomainTest(unittest.TestCase):
+    """Issue 569: the retained domain's record policy v1 is frozen beside the living policy."""
+
+    def test_frozen_v1_identities_and_the_closed_policy_set(self):
+        from agent_tools.canonical import telemetry_digest
+        from agent_tools.review_actual import (PACKING_POLICY, PACKING_POLICY_V1, PACKING_POLICY_V1_SHA256,
+            RECORD_POLICY, RECORD_POLICY_V1, RECORD_POLICY_V1_SHA256, GenerationError, git_diff)
+        self.assertEqual(RECORD_POLICY_V1_SHA256,
+                         'sha256:73cc5609e8a395d33a210b20f413a72179300475b2f6d1c55fed097c7f6ee63b')
+        self.assertEqual(PACKING_POLICY_V1_SHA256,
+                         'sha256:fbb7b821b21015c5e56a4829c0c33dd2e7233a09a5826287cc563634098b43bf')
+        self.assertEqual(telemetry_digest(RECORD_POLICY_V1), RECORD_POLICY_V1_SHA256)
+        self.assertEqual(telemetry_digest(PACKING_POLICY_V1), PACKING_POLICY_V1_SHA256)
+        self.assertEqual(PACKING_POLICY_V1['record_policy_sha256'], RECORD_POLICY_V1_SHA256)
+        self.assertEqual({k: v for k, v in PACKING_POLICY_V1.items() if k != 'record_policy_sha256'},
+                         {k: v for k, v in PACKING_POLICY.items() if k != 'record_policy_sha256'})
+        self.assertIsNot(RECORD_POLICY_V1, RECORD_POLICY)
+        empty = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'  # refused before any repository read
+        for policy in (dict(RECORD_POLICY), dict(RECORD_POLICY_V1), {}):
+            with self.subTest(policy=policy.get('kind')), \
+                    self.assertRaisesRegex(GenerationError, 'unsupported record policy'):
+                git_diff(Path('.'), empty, empty, '--name-only', '-z', record_policy=policy)
+        for group, key, label in ((RECORD_POLICY_V1, 'kind', 'unsupported record policy'),
+                                  (PACKING_POLICY_V1, 'fallback', 'unsupported packing policy')):
+            previous = group[key]
+            try:
+                group[key] = 'mutated'
+                with self.subTest(key=key), self.assertRaisesRegex(GenerationError, label):
+                    git_diff(Path('.'), empty, empty, '--name-only', '-z', record_policy=RECORD_POLICY_V1)
+            finally:
+                group[key] = previous
+
+    def test_living_policy_is_v2_with_a_fifty_percent_rename_threshold(self):
+        from agent_tools.review_actual import (PACKING_POLICY, PACKING_POLICY_SHA256, PACKING_POLICY_V1_SHA256,
+            RECORD_POLICY, RECORD_POLICY_SHA256, RECORD_POLICY_V1)
+        self.assertEqual(RECORD_POLICY, {**RECORD_POLICY_V1, 'kind': 'review-git-records/v2',
+                                         'diff_args': ['--find-renames=50%', *RECORD_POLICY_V1['diff_args'][1:]]})
+        self.assertEqual(RECORD_POLICY_V1['diff_args'][0], '--find-renames=100%')
+        self.assertEqual(RECORD_POLICY['git_config'], ['-c', 'diff.renames=true', '-c', 'diff.renameLimit=0',
+                                                       '-c', 'core.quotePath=true'])
+        self.assertEqual((PACKING_POLICY['kind'], PACKING_POLICY['record_policy_sha256']),
+                         ('review-packing/v1', RECORD_POLICY_SHA256))
+        self.assertNotEqual(PACKING_POLICY_SHA256, PACKING_POLICY_V1_SHA256)
+        self.assertEqual(PACKING_POLICY['adaptive_violations'], ['member_count', 'aggregate_bytes'])
+
+    def test_operation_rule_follows_each_policy_threshold(self):
+        from agent_tools.review_actual import RECORD_POLICY, RECORD_POLICY_V1, GenerationError, _record_operations
+        accepted = ((RECORD_POLICY, b'R050\0old\0new\0', ['new'], ('R050',)),
+                    (RECORD_POLICY, b'R100\0old\0new\0M\0kept\0', ['new', 'kept'], ('R100', 'M')),
+                    (RECORD_POLICY_V1, b'R100\0old\0new\0', ['new'], ('R100',)),
+                    (RECORD_POLICY_V1, b'A\0a\0D\0d\0T\0t\0', ['a', 'd', 't'], ('A', 'D', 'T')))
+        for policy, raw, paths, expected in accepted:
+            with self.subTest(raw=raw, policy=policy['kind']):
+                self.assertEqual(_record_operations(raw, paths, policy), expected)
+        refused = ((RECORD_POLICY, b'R049\0old\0new\0', ['new']),
+                   (RECORD_POLICY_V1, b'R099\0old\0new\0', ['new']),
+                   (RECORD_POLICY, b'R101\0old\0new\0', ['new']),
+                   (RECORD_POLICY, b'R50\0old\0new\0', ['new']),
+                   (RECORD_POLICY, b'C100\0old\0new\0', ['new']),
+                   (RECORD_POLICY, b'R100\0old\0new\0extra\0', ['new', 'extra']),
+                   (RECORD_POLICY, b'R100\0old\0', ['old']))
+        for policy, raw, paths in refused:
+            with self.subTest(raw=raw, policy=policy['kind']), self.assertRaises(GenerationError):
+                _record_operations(raw, paths, policy)
+
+
 class SourceProjectionFixture:
     """All command fixtures use actual Git objects and source subprocesses."""
     plan_stem = 'all'
+    seed = {}  # extra base files: path -> text
 
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory()
@@ -202,6 +269,8 @@ class SourceProjectionFixture:
         self.git('config', 'commit.gpgsign', 'false')
         self.write('shared.txt', 'seed\n')
         self.write('delete.txt', 'gone later\n')
+        for path, content in self.seed.items():
+            self.write(path, content)
         self.ranges = []
         self.base = self.commit('base')
         self.ranges.clear()
@@ -399,6 +468,18 @@ class SourceProjectionTest(SourceProjectionFixture, unittest.TestCase):
             self.delivery = copy.deepcopy(original); mutate(self.delivery)
             self.emit(); self.commit('invalid shape')
             self.assert_refused(self.project())
+        # Issue 569: each `old_path` refusal is pinned to its own reason, so the path guard cannot vanish unseen.
+        for mutate, reason in (
+                (lambda d: d['process_records'][0].update(old_path='elsewhere.md'), b'invalid contribution fields'),
+                (lambda d: d['process_records'][0].update(change='rename', old_path=d['process_records'][0]['path']),
+                 b'rename must change its path'),
+                (lambda d: d['process_records'][0].update(change='rename', old_path='../escape'), b'unsafe path')):
+            with self.subTest(reason=reason):
+                self.delivery = copy.deepcopy(original); mutate(self.delivery)
+                self.emit(); self.commit('invalid old_path')
+                refused = self.project()
+                self.assert_refused(refused)
+                self.assertIn(reason, refused.stderr)
 
     def test_duplicate_json_and_ambiguous_sections(self):
         original = (self.repo / 'all.md').read_bytes()

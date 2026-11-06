@@ -93,6 +93,24 @@ class ReplayTest(ControlHarness, unittest.TestCase):
                 self.assertEqual(self.tree_snapshot(), before)
 
 
+class ExplicitRetryTest(ControlHarness, unittest.TestCase):
+    def test_retry_detaches_only_one_attempt_from_a_shared_blocker(self):
+        self.parked((61, X), (62, X))
+        blockers = self.blockers()
+        other = self.attempt(62)
+        done = self.run_cli("retry-verification", "--repo-root", self.root,
+                            "--run-id", self.run_id, "--issue", 61, "--attempt", 1,
+                            "--blocker-id", X_ID, "--now", T(7))
+        self.assertEqual(self.validated_response(done.stdout)["blocked_on"], "human_gate")
+        self.assertEqual(self.blockers(), blockers)
+        self.assertEqual(self.attempt(62), other)
+        self.assertEqual(self.dispatched(self.sweep(8, observed(X), human_directed=False)), [])
+        self.assertEqual(self.dispatched(self.sweep(9, observed(X), human_directed=True)),
+                         [("resume", "61:1:2")])
+        self.assertEqual(self.attempt(62), other)
+        self.assertEqual(self.blockers(), blockers)
+
+
 class ChangeTest(ControlHarness, unittest.TestCase):
     def test_a_selected_change_resumes_only_the_attempts_it_releases(self):
         self.parked((61, X), (62, Y))

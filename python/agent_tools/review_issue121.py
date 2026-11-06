@@ -24,9 +24,9 @@ import tempfile
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import (PACKING_POLICY_SHA256, RECORD_POLICY, RECORD_POLICY_SHA256, FutureCommit,
-                                       GenerationError, _split_diff, actual_inputs, actual_inputs_from_trees,
-                                       git_diff, select_candidate)
+from agent_tools.review_actual import (PACKING_POLICY_V1_SHA256, RECORD_POLICY_V1, RECORD_POLICY_V1_SHA256,
+                                       FutureCommit, GenerationError, _split_diff, actual_inputs,
+                                       actual_inputs_from_trees, git_diff, select_candidate)
 from agent_tools.review_budget import BudgetAuthority
 from agent_tools.review_expansion import Budget
 from agent_tools.review_forecast import ForecastError, canonical_bytes, edge_facts, raw_digest, tree_entry
@@ -46,7 +46,7 @@ _STATES = {"measured": ("result_tree", "record_refs", "measurement"), "projectio
 _VIOLATIONS = ("root_bytes", "member_bytes", "member_count", "aggregate_bytes")
 _REPLAY_CODES = ("owned_root_unproved", "merge_effects_unproved", "whole_path_preimage_unproved",
                  "patch_application_unproved", "whole_path_postimage_unproved")
-_POLICY = {"domain": RECORD_POLICY["kind"], "policy_sha256": RECORD_POLICY_SHA256}
+_POLICY = {"domain": RECORD_POLICY_V1["kind"], "policy_sha256": RECORD_POLICY_V1_SHA256}
 
 
 class ContributionError(Exception):
@@ -222,8 +222,9 @@ def contribution_edges(repo: Path, pins: Issue121Pins, classes: Sequence[dict]) 
         for row, commit in zip(expected, chain):
             if commit.parents != (parent.oid,):
                 raise ContributionError("history_nonlinear")
-            edge = edge_facts(repo, parent.oid, commit.oid, 1)
-            chunks = _split_diff(git_diff(repo, parent.tree, commit.tree, "--binary", "-U10"))
+            edge = edge_facts(repo, parent.oid, commit.oid, 1, record_policy=RECORD_POLICY_V1)
+            chunks = _split_diff(git_diff(repo, parent.tree, commit.tree, "--binary", "-U10",
+                                          record_policy=RECORD_POLICY_V1))
             if [raw_digest(chunk) for chunk in chunks] != [record["record_sha256"] for record in edge["records"]]:
                 raise ContributionError("edge_record_mismatch")
             for record, chunk in zip(edge["records"], chunks):
@@ -329,7 +330,7 @@ def _package(base: str, head: str) -> str:
 def _measured(row: dict, tree: str, inputs: list, authority: BudgetAuthority, records: list[dict],
               transform=None) -> tuple[dict, list]:
     candidate = select_candidate(inputs, authority.limits, transform=transform, measurement_only=True)
-    measurement = {"package_name": inputs[0].package_name, "packing_policy_sha256": PACKING_POLICY_SHA256,
+    measurement = {"package_name": inputs[0].package_name, "packing_policy_sha256": PACKING_POLICY_V1_SHA256,
                    "artifact_policy_sha256": authority.policy_sha256, "metrics": dict(candidate.metrics),
                    "budget_status": candidate.status, "violations": list(candidate.violations)}
     return {**row, "state": "measured", "result_tree": tree, "record_refs": [r["id"] for r in records],
@@ -420,7 +421,8 @@ def _boundary(repo: Path, pins: Issue121Pins, classes, edges, label: str, tasks:
     if commit is None:
         dependency = [edge for edge in edges if edge["owner"] in dependencies]
         try:
-            reconstruct_owned(repo, pins.base, [edge["commit"] for edge in dependency]).close()
+            reconstruct_owned(repo, pins.base, [edge["commit"] for edge in dependency],
+                              record_policy=RECORD_POLICY_V1).close()
         except ReconstructionUnavailable as exc:
             return _failed(row, "prerequisite", "dependency_unavailable",
                            [edge["id"] for edge in dependency if edge["commit"] == exc.commit])
@@ -428,7 +430,8 @@ def _boundary(repo: Path, pins: Issue121Pins, classes, edges, label: str, tasks:
         return _failed(row, "prerequisite", "prerequisite_composition_unsupported",
                        [edge["id"] for edge in edges if edge["commit"] in late])
     try:
-        rebuilt = reconstruct_owned(repo, commit, [edge["commit"] for edge in selected])
+        rebuilt = reconstruct_owned(repo, commit, [edge["commit"] for edge in selected],
+                                    record_policy=RECORD_POLICY_V1)
     except ReconstructionUnavailable as exc:
         return _failed(row, "reconstruction", exc.code,
                        [edge["id"] for edge in selected if edge["commit"] == exc.commit])
@@ -436,7 +439,8 @@ def _boundary(repo: Path, pins: Issue121Pins, classes, edges, label: str, tasks:
         head = selected[-1]["commit"] if selected else commit
         inputs = list(actual_inputs_from_trees(
             rebuilt.repo, rebuilt.prerequisite_tree, rebuilt.result_tree, base=commit, head=head,
-            commits=rebuilt.commits, package_name=_package(commit, head), limits=authority.limits))
+            commits=rebuilt.commits, package_name=_package(commit, head), limits=authority.limits,
+            record_policy=RECORD_POLICY_V1))
         return _measured(row, rebuilt.result_tree, inputs, authority, _actual(label, inputs[0], selected))
 
 
@@ -484,7 +488,8 @@ def _model(repo: Path, pins: Issue121Pins, task7_pins: Task7Pins, authority: Bud
             table, unestimated = None, _estimate_code(exc)
         refs, estimate = ([] if table is None else [telemetry_digest(table)]), unestimated
         base_row = {"prerequisite": {"kind": "delivery-base"}, "edge_ids": [e["id"] for e in edges]}
-        inputs = list(actual_inputs(repo, pins.base, pins.head, _package(pins.base, pins.head), limits))
+        inputs = list(actual_inputs(repo, pins.base, pins.head, _package(pins.base, pins.head), limits,
+                                    record_policy=RECORD_POLICY_V1))
         actual = _measured({"boundary": LABELS[0], **base_row, "estimate_refs": []}, head_tree, inputs,
                            authority, _actual(LABELS[0], inputs[0], edges))
         row = {"boundary": LABELS[1], **base_row, "estimate_refs": refs}
@@ -511,7 +516,7 @@ def _model(repo: Path, pins: Issue121Pins, task7_pins: Task7Pins, authority: Bud
         else:  # future-only: no owned commit, so the prerequisite tree is the result (D5)
             empty = list(actual_inputs_from_trees(repo, head_tree, head_tree, base=pins.head, head=pins.head,
                                                   commits=(), package_name=_package(pins.head, pins.head),
-                                                  limits=limits))
+                                                  limits=limits, record_policy=RECORD_POLICY_V1))
             boundaries.append(_measured(row, head_tree, empty, authority,
                                         *_estimated(LABELS[4], _bounds(table), subjects)))
     outcomes = [actual, projected, *boundaries]
@@ -766,7 +771,7 @@ def _validate_measurement(value, name: str) -> None:
                           "budget_status", "violations")
     metrics = _closed(measurement["metrics"], "root_bytes", "total_bytes", "file_count", "largest_member_bytes")
     violations = measurement["violations"]
-    _require(measurement["package_name"] == name and measurement["packing_policy_sha256"] == PACKING_POLICY_SHA256
+    _require(measurement["package_name"] == name and measurement["packing_policy_sha256"] == PACKING_POLICY_V1_SHA256
              and _digest(measurement["artifact_policy_sha256"]) and all(map(_count, metrics.values()))
              and isinstance(violations, list) and violations == [v for v in _VIOLATIONS if v in violations]
              and measurement["budget_status"] == ("over_budget" if violations else "within_budget"))

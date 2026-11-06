@@ -67,6 +67,8 @@ jobs:
             --raw '.#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath'
       - name: Check oMLX adapter and host settings against pinned upstream
         run: nix build --no-link '.#checks.x86_64-linux.omlx-adapter'
+      - name: Check the global agent corpus is project-agnostic
+        run: nix build --no-link '.#checks.x86_64-linux.agnostic-lint'
 
   agent-workflow-tests:
     name: Agent Workflow Tests (advisory)

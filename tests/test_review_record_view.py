@@ -38,14 +38,15 @@ FROB_OLD = (FROB[0] + FROB[1] + b"        printf(\"Your answer is: \");\n" + FRO
             + FROB[3] % b"fact")
 FROB_NEW = (FROB[0] + b"int fib(int n)\n{\n    if(n > 2)\n    {\n        return fib(n-1) + fib(n-2);\n    }\n"
             b"    return 1;\n}\n\n" + FROB[1] + FROB[2] + FROB[3] % b"fib")
-# Two deleted files and one added near-copy of the first: an inexact rename that a rename limit of 1 skips.
+# Two deleted files and one added near-copy of the first: an inexact rename that the policy pairs and that a
+# rename limit of 1 or `diff.renames=false` would split.
 RENAMED = {name: b"".join(b"%s %d\n" % (name.encode(), n) for n in range(30)) for name in ("r1", "r2")}
 # The policy arguments that neutralise each such row of the spec's table, which its control drops so that the
 # source visibly bites raw Git; CORE keeps the full argv and must still equal the clean run.
 NEUTRALISED_BY = {
     "diff.algorithm": ("--diff-algorithm=myers",),
-    "diff.renames": ("diff.renames=true", "--find-renames=100%"),
-    "diff.renameLimit": ("diff.renameLimit=0", "--find-renames=100%"),
+    "diff.renames": ("diff.renames=true", "--find-renames=50%"),
+    "diff.renameLimit": ("diff.renameLimit=0", "--find-renames=50%"),
     "GIT_EXTERNAL_DIFF": ("--no-ext-diff",),
     "diff.external": ("--no-ext-diff",),
     "diff driver command": ("--no-ext-diff",),
@@ -224,6 +225,17 @@ class RecordViewTest(unittest.TestCase):
             with self.subTest(source=name):
                 repo, owned = self.case(name.replace("/", "-").replace(" ", "-"))
                 self.assert_isolated(repo, setup(repo, owned), dropped=NEUTRALISED_BY.get(name, ()))
+
+    def test_the_inexact_rename_is_one_record_keyed_by_its_new_path(self):
+        """Issue 569: the near-copy pairs with `r1.txt` under the policy's threshold; `r2.txt` stays a deletion."""
+        inputs, _, _ = self.clean
+        records = {record.path: record.payload for record in inputs[0].records}
+        self.assertNotIn("r1.txt", records)
+        self.assertTrue(records["r3.txt"].startswith(
+            b"diff --git a/r1.txt b/r3.txt\nsimilarity index 96%\nrename from r1.txt\nrename to r3.txt\n"),
+            records["r3.txt"][:120])
+        self.assertIn(b"\n+extra\n", records["r3.txt"])
+        self.assertIn(b"deleted file mode 100644\n", records["r2.txt"])
 
     def test_every_hostile_source_at_once(self):
         repo, owned = self.case("combined")

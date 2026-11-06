@@ -408,7 +408,7 @@ def normalized(text):
 
 
 SHARED_POLICY_ENTRIES = {
-    "deliver-direct/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.verification"),
+    "deliver-direct/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.review.code", "bindings.workflow.verification"),
     "design/SKILL.md": ("bindings.paths.artifacts.specs",),
     "doc-grounded-questions/SKILL.md": ("bindings.paths.context", "bindings.paths.standards", "bindings.paths.architecture", "bindings.paths.hints"),
     "from-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
@@ -3311,6 +3311,36 @@ class DirectLaneRoutingTest(unittest.TestCase):
             with self.subTest(form=form):
                 self.assertIn(form, text)
 
+    def test_deliver_direct_review_fixes_from_its_first_runs(self):
+        """#572 PR 600 review: claim before a stale close, one verification after review,
+        needs-verification is an issue label created if missing, required checks from a source."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        claim = text.index("**Claim.**")
+        self.assertNotIn("still applies", text[:claim])
+        self.assertIn("still applies", text[claim:text.index("**Worktree.**")])
+        step3 = text[text.index("**Test first.**"):text.index("**Review.**")]
+        step4 = text[text.index("**Review.**"):text.index("**Ship.**")]
+        self.assertNotIn("workflow.verification", step3)
+        self.assertIn("After review and any fixes, run each `workflow.verification` id once", step4)
+        self.assertNotIn("plus `needs-verification`", text)
+        self.assertIn("add the `needs-verification` label to the issue (create it if missing)", text)
+        self.assertIn("`gh api repos/<slug>/rules/branches/<int>`", text)
+        self.assertIn("if neither source answers, wait for every check", text)
+
+    def test_deliver_direct_review_also_runs_the_configured_code_review(self):
+        """#572: an available workflow.review.code runs beside the fresh reviewer, never skipped."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        step4 = text[text.index("**Review.**"):text.index("**Ship.**")]
+        for rule in (
+            "`reviewer-lite` with `lane: direct`",
+            "When `capabilities.review.code` is `available`, also run `bindings.workflow.review.code`",
+            "`codex-collaboration`'s `diff-review` with no review package",
+            "`blocked`, or it cannot run: stop and report; never skip it",
+            "Fix real Important+ findings from both",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, step4)
+
 
 class HandBuiltTimeContractsTest(unittest.TestCase):
     """#309 D9: no skill document hands workflow-state a time; the helper reads its clock."""
@@ -3482,6 +3512,21 @@ class ExecutionCallerContractsTest(unittest.TestCase):
                 self.assertIn(item, chunked)
         diff_review = normalized(DIFF_REVIEW.read_text(encoding="utf-8"))
         self.assertNotIn("the first 20 entries", diff_review)
+
+    def test_final_review_reuses_a_published_package_instead_of_republishing_it(self):
+        # #528: review-package refuses a range whose package exists (exit 2), and
+        # `sdd-gate next` already published DELIVERY_BASE..DELIVERY_HEAD.
+        review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
+        first = review.split("## First pass", 1)[1].split("Pass both axes", 1)[0]
+        fix = review.split("## Fix wave", 1)[1].split("## Acceptance record", 1)[0]
+        for name, text in (("first pass", first), ("fix wave", fix)):
+            with self.subTest(section=name):
+                self.assertIn("review-<base7>..<head7>.json", text)
+                self.assertIn(".report.json", text)
+                self.assertIn("reuse", text)
+        self.assertIn("review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD", first)
+        self.assertIn("review-package PLAN_FILE FIX_BASE HEAD", fix)
+        self.assertIn("once", fix.split("review-package PLAN_FILE FIX_BASE HEAD", 1)[1].split("Supply", 1)[0])
 
     def test_edited_execution_documents_do_not_grow(self):
         assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "SKILL.md",

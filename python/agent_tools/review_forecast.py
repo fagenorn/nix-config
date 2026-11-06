@@ -12,7 +12,8 @@ import subprocess
 from typing import Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal, telemetry_digest
-from agent_tools.review_actual import (SHA_RE, _run_git, _split_diff, git_diff)
+from agent_tools.review_actual import (RECORD_POLICY, SHA_RE, GenerationError, _run_git, _split_diff, git_diff,
+                                       record_operation)
 from agent_tools.review_budget import BudgetAuthority
 from agent_tools.review_git import (HistoryError, original_commit, original_commits, original_range,
                                     original_ancestor, original_edge)
@@ -309,25 +310,31 @@ def _block(raw: bytes, heading: str) -> dict:
     return value
 
 
-def edge_facts(repo: Path, parent: str, commit: str, ordinal: int) -> dict:
+def edge_facts(repo: Path, parent: str, commit: str, ordinal: int, *,
+               record_policy: Mapping = RECORD_POLICY) -> dict:
     """Bind all original parent edges to independently read tree and record facts."""
     try:
         parent_commit, child_commit = original_edge(repo, parent, commit, ordinal)
     except HistoryError as exc:
         raise ForecastError("invalid original edge") from exc
     parent_tree, commit_tree = parent_commit.tree, child_commit.tree
-    status = git_diff(repo, parent_tree, commit_tree, "--name-status", "-z").split(b"\0")
+    status = git_diff(repo, parent_tree, commit_tree, "--name-status", "-z",
+                      record_policy=record_policy).split(b"\0")
     if status[-1] != b"":
         raise ForecastError("invalid Git status framing")
     status.pop()
-    chunks = _split_diff(git_diff(repo, parent_tree, commit_tree, "--binary", "-U10"))
+    chunks = _split_diff(git_diff(repo, parent_tree, commit_tree, "--binary", "-U10",
+                                  record_policy=record_policy))
     facts = []
     while status:
-        operation = status.pop(0).decode("ascii")
+        try:
+            operation, names = record_operation(status.pop(0), record_policy)
+        except GenerationError as exc:
+            raise ForecastError("unsupported Git record operation") from exc
+        if len(status) < names:
+            raise ForecastError("invalid Git status framing")
         old = path_name(status.pop(0).decode("utf-8"))
-        new = path_name(status.pop(0).decode("utf-8")) if operation == "R100" else old
-        if operation not in {"A", "M", "D", "T", "R100"}:
-            raise ForecastError("unsupported Git record operation")
+        new = path_name(status.pop(0).decode("utf-8")) if names == 2 else old
         facts.append({"operation": operation, "path": new, "old_path": old,
                       "before": tree_entry(repo, parent_tree, old), "after": tree_entry(repo, commit_tree, new)})
     if len(chunks) != len(facts):
@@ -373,18 +380,24 @@ def _records(delivery: dict, tasks: tuple[dict, ...], boundaries: tuple[dict, ..
         if not isinstance(records, list):
             raise ForecastError("invalid contribution list")
         for record in records:
-            closed(record, "id owner path change last_task bounds", "contribution")
+            renamed = isinstance(record, dict) and record.get("change") == "rename"
+            closed(record, "id owner path old_path change last_task bounds" if renamed
+                   else "id owner path change last_task bounds", "contribution")
             record_id = name(record["id"])
             if record_id in seen or type(record["owner"]) is not int or record["owner"] != owner:
                 raise ForecastError("duplicate or incorrect contribution owner")
             seen.add(record_id)
             path_name(record["path"])
+            if renamed:
+                path_name(record["old_path"])
+                if record["old_path"] == record["path"]:
+                    raise ForecastError("rename must change its path")
             horizon = integer(record["last_task"], "contribution horizon", 1)
             if not max(owner, 1) <= horizon <= count:
                 raise ForecastError("invalid contribution horizon")
             if record["change"] not in {"add", "modify", "delete", "rename", "fileless"}:
                 raise ForecastError("unknown contribution operation")
-            if record["change"] in {"rename", "fileless"}:
+            if record["change"] == "fileless":
                 raise ForecastError("projection_unavailable: operation requires retained adapter proof")
             bounds = record["bounds"]
             if not isinstance(bounds, list) or not bounds:

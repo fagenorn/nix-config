@@ -309,6 +309,26 @@ class EvidenceDiscoveryTest(VerifyTestCase):
         self.assertIn("more than one", entry["detail"])
         self.assertIsNone(report["adoption_commit"])
 
+    def test_a_gate_bundle_beside_the_record_is_not_a_second_record(self):
+        root = adopted_repo(self.home)
+        write(root, ".agents/artifacts/evidence/promotion-1-bundle.json",
+              json.dumps({"bundle_id": "sha256:x", "diagnostics": []}) + "\n")
+        write(root, ".agents/artifacts/evidence/promotion-1-trials.json",
+              "[]\n")
+        commit(root, "gate bundle and trials")
+        report = self.report(root)
+        self.assertEqual(report["result"], "adopted", report)
+        self.assertEqual(
+            self.check(report, "adoption-evidence-record")["status"], "passed")
+        self.assertIsNotNone(report["adoption_commit"])
+
+    def test_a_broken_file_beside_a_real_record_is_not_counted(self):
+        root = adopted_repo(self.home)
+        write(root, ".agents/artifacts/evidence/broken.json", "{not json")
+        commit(root, "unrelated broken json")
+        report = self.report(root)
+        self.assertEqual(report["result"], "adopted", report)
+
     def test_an_untracked_record_is_not_the_adoption_record(self):
         root = adopted_repo(self.home, records=False)
         write_adoption_records(root)

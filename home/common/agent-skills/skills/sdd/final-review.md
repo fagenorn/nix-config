@@ -13,9 +13,11 @@ risk lane.
 
 ## First pass
 
-Run `review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD` once, on the full SHAs
-the cumulative delivery gate pinned in the ledger, never a recomputed merge base,
-and apply "`SKILL.md`'s `### Review-package gate`" before either axis is
+Package the full SHAs the cumulative delivery gate pinned in the ledger, never a
+recomputed merge base: `sdd-gate next` already published that range, so reuse
+`<workspace>/review-<base7>..<head7>.json` and its `.report.json` beside it, and
+run `review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD` only when they are
+absent (it refuses an existing range). Apply "`SKILL.md`'s `### Review-package gate`" before either axis is
 dispatched. Those two pins are the report's `base_sha` and `head_sha`
 (`SKILL.md`'s `## Finish`); the fix wave does not move them. An over-budget
 package is reviewed per **Chunked review** below.
@@ -142,7 +144,9 @@ Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-verdict
 
 For either axis, generate a fix-range package with
 `review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head that
-axis's first pass reviewed) and apply "`SKILL.md`'s `### Review-package gate`"
+axis's first pass reviewed) once per distinct range, and reuse an existing
+`review-<base7>..<head7>.json` with its `.report.json` (axes sharing FIX_BASE
+share it); apply "`SKILL.md`'s `### Review-package gate`"
 before dispatch. Supply (1) the axis's findings list verbatim, (2) the
 manifest root path and all four metrics, never shard lists or diff contents, and
 (3) the instruction to validate the manifest and coverage, read each shard once
