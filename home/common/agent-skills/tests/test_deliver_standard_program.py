@@ -984,6 +984,26 @@ class SourceTest(unittest.TestCase):
         meta = text[:text.index("\n}\n")]
         self.assertIsNone(re.search(r"\$\{|\.\.\.", meta))
 
+    def test_skill_frontmatter_args_and_size(self):
+        raw = PROGRAM.with_name("SKILL.md").read_bytes()
+        self.assertLessEqual(len(raw), 1056)
+        text = raw.decode("utf-8")
+        self.assertTrue(text.startswith(
+            "---\nname: deliver-standard\n"
+            "description: Runs the standard-lane Workflow program for one issue. Use for deliver-standard.\n---\n"))
+        start = text.index("`args` `{")
+        workflow_args = text[start:text.index("}`", start)]
+        for key in ("repo_root", "issue", "session_id: ${CLAUDE_SESSION_ID}", "batch_id?", "mode?", "lane?",
+                    "decisions?", "spec?"):
+            with self.subTest(key=key):
+                self.assertIn(key, workflow_args)
+
+    def test_meta_names_the_new_args(self):
+        text = PROGRAM.read_text(encoding="utf-8")
+        meta = text[:text.index("\n}\n")]
+        for arg in ("session_id", "batch_id", "mode?", "lane?"):
+            self.assertIn(arg, meta)
+
 
 if __name__ == "__main__":
     unittest.main()

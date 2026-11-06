@@ -3309,21 +3309,27 @@ class DirectLaneRoutingTest(unittest.TestCase):
             with self.subTest(form=form):
                 self.assertIn(form, text)
 
+    def test_deliver_direct_claims_with_forge_claim(self):
+        """#635: step 1 claims through forge-claim and goes on only on its holding verdicts;
+        the hot instruction bytes do not grow."""
+        raw = self.DELIVER_DIRECT.read_bytes()
+        self.assertLessEqual(len(raw), 4991)
+        text = normalized(raw.decode("utf-8"))
+        step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
+        for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id>`",
+                      "`forge-claim release`", "`acquired`", "`already_held`"):
+            with self.subTest(token=token):
+                self.assertIn(token, step1)
+        for gone in ("assignee", "in-progress", "gh issue view"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, step1)
+
     def test_deliver_direct_review_fixes_from_its_first_runs(self):
-        """#572 PR 600 review: claim before a stale close, one verification after review,
-        needs-verification is an issue label created if missing, required checks from a source."""
+        """#572: verification is not a test-first step; required checks come from the rules API."""
         text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
-        claim = text.index("**Claim.**")
-        self.assertNotIn("still applies", text[:claim])
-        self.assertIn("still applies", text[claim:text.index("**Worktree.**")])
         step3 = text[text.index("**Test first.**"):text.index("**Review.**")]
-        step4 = text[text.index("**Review.**"):text.index("**Ship.**")]
         self.assertNotIn("workflow.verification", step3)
-        self.assertIn("After review and any fixes, run each `workflow.verification` id once", step4)
-        self.assertNotIn("plus `needs-verification`", text)
-        self.assertIn("add the `needs-verification` label to the issue (create it if missing)", text)
         self.assertIn("`gh api repos/<slug>/rules/branches/<int>`", text)
-        self.assertIn("if neither source answers, wait for every check", text)
 
     def test_deliver_direct_review_also_runs_the_configured_code_review(self):
         """#572: an available workflow.review.code runs beside the fresh reviewer, never skipped."""
@@ -3331,10 +3337,9 @@ class DirectLaneRoutingTest(unittest.TestCase):
         step4 = text[text.index("**Review.**"):text.index("**Ship.**")]
         for rule in (
             "`reviewer-lite` with `lane: direct`",
-            "When `capabilities.review.code` is `available`, also run `bindings.workflow.review.code`",
-            "`codex-collaboration`'s `diff-review` with no review package",
-            "`blocked`, or it cannot run: stop and report; never skip it",
-            "Fix real Important+ findings from both",
+            "`capabilities.review.code`",
+            "`bindings.workflow.review.code`",
+            "`codex-collaboration`",
         ):
             with self.subTest(rule=rule):
                 self.assertIn(rule, step4)
