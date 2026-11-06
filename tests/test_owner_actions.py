@@ -1,4 +1,7 @@
 """owner-actions (issue 624): repository identity, refresh against the fake gh, statusline from the cache."""
+import contextlib
+import io
+import json
 import os
 import subprocess
 import tempfile
@@ -152,6 +155,205 @@ class IdentityTest(Scratch):
             self.assertEqual(oa.checkout_slug(self.root / "w"), SLUG)
             self.assertEqual(oa.fleet_slugs(), frozenset({SLUG}))
         self.assertEqual(self.world.calls(), [])
+
+
+OA_CREATE = ["api", "-X", "POST", f"repos/{SLUG}/labels", "-f", "name=owner-action", "-f", "color=D93F0B"]
+
+
+def node(labels, events=(), *, label_total=None, event_total=None):
+    """A search node: its current labels, and (label, createdAt) LabeledEvents in timeline order.
+    The totals default to complete connections."""
+    return {"labels": {"totalCount": len(labels) if label_total is None else label_total,
+                       "nodes": [{"name": n} for n in labels]},
+            "timelineItems": {"totalCount": len(events) if event_total is None else event_total,
+                              "nodes": [{"createdAt": at, "label": {"name": n}} for n, at in events]}}
+
+
+def answer(nodes, label_exists=True, next_cursor=None):
+    return {"data": {"repository": {"label": {"name": "owner-action"} if label_exists else None},
+                     "search": {"pageInfo": {"hasNextPage": next_cursor is not None,
+                                             "endCursor": next_cursor},
+                                "nodes": nodes}}}
+
+
+def run_main(argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = oa.main(argv)
+    return code, out.getvalue(), err.getvalue()
+
+
+class RefreshTest(Scratch):
+    def test_counts_only_owner_action_labels(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([
+            node(["agent:human-required"], [("agent:human-required", "2026-10-27T08:00:00Z")]),
+            node(["owner-action", "in-progress"], [("owner-action", "2026-11-01T00:00:00Z")]),
+            node(["needs-verification"], [("needs-verification", "2026-01-01T00:00:00Z")]),
+            node(["verification-failed", "in-progress"], [("in-progress", "2026-01-02T00:00:00Z")]),
+        ]))
+        self.assertEqual(oa.refresh(SLUG), {"schema_version": 1, "repo": SLUG, "count": 2,
+                                            "oldest": "2026-10-27T08:00:00Z"})
+        self.assertEqual(oa.read_entry(SLUG)["count"], 2)
+        self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG)])
+        self.assertEqual(oa.cache_path(SLUG), self.home / ".agents/state/owner-actions/octo/widgets.json")
+        self.assertEqual(sorted(p.name for p in oa.cache_path(SLUG).parent.iterdir()), ["widgets.json"])
+
+    def test_label_time_is_the_latest_application_of_a_current_label(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([
+            node(["agent:human-required"], [("agent:human-required", "2026-10-01T00:00:00Z"),
+                                            ("agent:human-required", "2026-11-02T00:00:00Z")]),
+            node(["owner-action", "agent:human-required"], [("agent:human-required", "2026-11-04T00:00:00Z"),
+                                                            ("owner-action", "2026-11-03T00:00:00Z")]),
+        ]))
+        self.assertEqual(oa.refresh(SLUG)["oldest"], "2026-11-02T00:00:00Z")
+
+    def test_an_item_without_a_label_event_counts_with_no_time(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"])]))
+        self.assertEqual(oa.refresh(SLUG), {"schema_version": 1, "repo": SLUG, "count": 1, "oldest": None})
+
+    def test_zero_items(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([]))
+        self.assertEqual(oa.refresh(SLUG)["count"], 0)
+
+    def test_creates_the_owner_action_label_when_missing(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([], label_exists=False))
+        self.world.respond_json("gh", OA_CREATE, {"name": "owner-action"})
+        oa.refresh(SLUG)
+        self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG), OA_CREATE])
+
+    def test_search_names_the_repo_and_both_labels(self):
+        argv = oa.search_argv(SLUG)
+        self.assertEqual(argv[:2], ["api", "graphql"])
+        for pair in (["-f", "owner=octo"], ["-f", "name=widgets"],
+                     ["-f", f"search=repo:{SLUG} is:open label:owner-action,agent:human-required"]):
+            self.assertIn(pair[1], argv)
+            self.assertEqual(argv[argv.index(pair[1]) - 1], "-f")
+        self.assertFalse(any(a.startswith("after=") for a in argv))
+        self.assertEqual(oa.search_argv(SLUG, "Y3Vy")[-2:], ["-f", "after=Y3Vy"])
+
+    def test_follows_search_pages_to_a_complete_count(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([
+            node(["owner-action"], [("owner-action", "2026-11-01T00:00:00Z")]),
+            node(["owner-action"], [("owner-action", "2026-11-02T00:00:00Z")]),
+        ], next_cursor="c1"))
+        self.world.respond_json("gh", oa.search_argv(SLUG, "c1"), answer([
+            node(["agent:human-required"], [("agent:human-required", "2026-10-15T00:00:00Z")]),
+        ], label_exists=False))
+        self.assertEqual(oa.refresh(SLUG), {"schema_version": 1, "repo": SLUG, "count": 3,
+                                            "oldest": "2026-10-15T00:00:00Z"})
+        self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG), oa.search_argv(SLUG, "c1")])
+
+    def test_truncated_item_connections_are_incomplete(self):
+        oa.write_entry(SLUG, 3, "2026-10-01T00:00:00Z")
+        before = oa.cache_path(SLUG).read_bytes()
+        for nodes in ([node(["owner-action"], label_total=101)],
+                      [node(["owner-action"], [("in-progress", "2026-11-01T00:00:00Z")], event_total=101)]):
+            self.world.reset()
+            self.world.respond_json("gh", oa.search_argv(SLUG), answer(nodes))
+            code, out, err = run_main(["refresh", "--repo", SLUG])
+            self.assertEqual((code, json.loads(out)["failed"]), (1, [{"repo": SLUG, "error": "payload_incomplete"}]))
+            self.assertIn(f"owner-actions: {SLUG}: payload_incomplete", err)
+            self.assertEqual(oa.cache_path(SLUG).read_bytes(), before)
+
+    def test_a_found_event_needs_no_complete_timeline(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([
+            node(["owner-action"], [("owner-action", "2026-11-01T00:00:00Z")], event_total=500)]))
+        self.assertEqual(oa.refresh(SLUG)["oldest"], "2026-11-01T00:00:00Z")
+
+    def test_a_search_past_the_page_cap_is_incomplete(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"])], next_cursor="c1"))
+        self.world.respond_json("gh", oa.search_argv(SLUG, "c1"), answer([node(["owner-action"])], next_cursor="c2"))
+        with mock.patch.object(oa, "MAX_PAGES", 2), self.assertRaises(oa.forge_markers.ForgeError) as raised:
+            oa.refresh(SLUG)
+        self.assertEqual(raised.exception.code, "payload_incomplete")
+        self.assertIsNone(oa.read_entry(SLUG))
+
+    def test_a_repeated_cursor_is_invalid(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([], next_cursor="c1"))
+        self.world.respond_json("gh", oa.search_argv(SLUG, "c1"), answer([], next_cursor="c1"))
+        with self.assertRaises(oa.forge_markers.ForgeError) as raised:
+            oa.refresh(SLUG)
+        self.assertEqual(raised.exception.code, "payload_invalid")
+
+    def test_a_failed_refresh_keeps_the_entry_and_logs_the_error(self):
+        oa.write_entry(SLUG, 3, "2026-10-01T00:00:00Z")
+        before = oa.cache_path(SLUG).read_bytes()
+        self.world.respond("gh", oa.search_argv(SLUG), exit=1, stderr="gh: Bad Gateway (HTTP 502)")
+        code, out, err = run_main(["refresh", "--repo", SLUG])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out), {"refreshed": [], "failed": [{"repo": SLUG, "error": "gh_failed"}]})
+        self.assertIn(f"owner-actions: {SLUG}: gh_failed: gh: Bad Gateway (HTTP 502)", err)
+        self.assertEqual(oa.cache_path(SLUG).read_bytes(), before)
+
+    def test_an_unexpected_payload_writes_nothing(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), {"data": {"search": None}})
+        code, out, err = run_main(["refresh", "--repo", SLUG])
+        self.assertEqual((code, json.loads(out)["failed"]), (1, [{"repo": SLUG, "error": "payload_invalid"}]))
+        self.assertIsNone(oa.read_entry(SLUG))
+
+    def test_without_repo_refreshes_every_fleet_repo_even_after_a_failure(self):
+        self.register(checkout(self.root / "w", SLUG), checkout(self.root / "g", OTHER))
+        self.world.respond("gh", oa.search_argv(OTHER), exit=1, stderr="gh: Bad Gateway (HTTP 502)")
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"])]))
+        oa.write_entry(OTHER, 0, None)
+        code, out, err = run_main(["refresh"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out), {"refreshed": [SLUG], "failed": [{"repo": OTHER, "error": "gh_failed"}]})
+        self.assertEqual(oa.read_entry(SLUG)["count"], 1)
+        self.assertEqual(oa.read_entry(OTHER)["count"], 0)
+
+    def test_success_exits_zero(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([]))
+        self.assertEqual(run_main(["refresh", "--repo", SLUG]), (0, json.dumps(
+            {"failed": [], "refreshed": [SLUG]}, sort_keys=True) + "\n", ""))
+
+    def test_corrupt_registry(self):
+        agent_platform.registry_path().parent.mkdir(parents=True)
+        agent_platform.registry_path().write_text("{", encoding="utf-8")
+        code, out, err = run_main(["refresh"])
+        self.assertEqual((code, json.loads(out)), (1, {"refreshed": [], "failed": [{"repo": None, "error": "registry"}]}))
+        self.assertIn("owner-actions: registry: ", err)
+
+    def test_bad_repo_is_a_usage_error(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            oa.main(["refresh", "--repo", "../etc"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(self.world.calls(), [])
+
+    def test_write_entry_round_trips_as_bytes(self):
+        oa.write_entry(SLUG, 2, None)
+        self.assertEqual(oa.cache_path(SLUG).read_bytes(), (json.dumps(
+            {"count": 2, "oldest": None, "repo": SLUG, "schema_version": 1}, sort_keys=True) + "\n").encode("utf-8"))
+        self.assertEqual(oa.read_entry(SLUG), {"schema_version": 1, "repo": SLUG, "count": 2, "oldest": None})
+
+    def test_read_entry_rejects_other_shapes(self):
+        path = oa.cache_path(SLUG)
+        path.parent.mkdir(parents=True)
+        for text in ("{", "[]", json.dumps({"schema_version": 1, "repo": OTHER, "count": 1, "oldest": None}),
+                     json.dumps({"schema_version": 1, "repo": SLUG, "count": True, "oldest": None}),
+                     json.dumps({"schema_version": 2, "repo": SLUG, "count": 1, "oldest": None}),
+                     json.dumps({"schema_version": 1, "repo": SLUG, "count": -1, "oldest": None}),
+                     json.dumps({"schema_version": 1, "repo": SLUG, "count": 1, "oldest": None, "x": 1})):
+            path.write_text(text, encoding="utf-8")
+            self.assertIsNone(oa.read_entry(SLUG), text)
+
+
+    def test_an_item_time_is_the_earliest_of_its_counted_labels(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([
+            node(["owner-action", "agent:human-required"], [("owner-action", "2026-11-04T00:00:00Z"),
+                                                            ("agent:human-required", "2026-11-03T00:00:00Z")])]))
+        self.assertEqual(oa.refresh(SLUG)["oldest"], "2026-11-03T00:00:00Z")
+
+    def test_a_boolean_total_or_a_malformed_page_is_invalid(self):
+        for payload in (answer([node(["owner-action"], label_total=True)]),
+                        answer([node(["owner-action"], event_total=True)]),
+                        {"data": {"search": {"nodes": [], "pageInfo": None}}}):
+            self.world.reset()
+            self.world.respond_json("gh", oa.search_argv(SLUG), payload)
+            with self.assertRaises(oa.forge_markers.ForgeError) as raised:
+                oa.refresh(SLUG)
+            self.assertEqual(raised.exception.code, "payload_invalid")
+        self.assertIsNone(oa.read_entry(SLUG))
 
 
 if __name__ == "__main__":
