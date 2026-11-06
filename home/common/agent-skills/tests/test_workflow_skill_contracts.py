@@ -408,7 +408,7 @@ def normalized(text):
 
 
 SHARED_POLICY_ENTRIES = {
-    "deliver-direct/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.verification"),
+    "deliver-direct/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.review.code", "bindings.workflow.verification"),
     "design/SKILL.md": ("bindings.paths.artifacts.specs",),
     "doc-grounded-questions/SKILL.md": ("bindings.paths.context", "bindings.paths.standards", "bindings.paths.architecture", "bindings.paths.hints"),
     "from-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
@@ -3319,6 +3319,20 @@ class DirectLaneRoutingTest(unittest.TestCase):
         self.assertIn("add the `needs-verification` label to the issue (create it if missing)", text)
         self.assertIn("`gh api repos/<slug>/rules/branches/<int>`", text)
         self.assertIn("if neither source answers, wait for every check", text)
+
+    def test_deliver_direct_review_also_runs_the_configured_code_review(self):
+        """#572: an available workflow.review.code runs beside the fresh reviewer, never skipped."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        step4 = text[text.index("**Review.**"):text.index("**Ship.**")]
+        for rule in (
+            "`reviewer-lite` with `lane: direct`",
+            "When `capabilities.review.code` is `available`, also run `bindings.workflow.review.code`",
+            "`codex-collaboration`'s `diff-review` with no review package",
+            "`blocked`, or it cannot run: stop and report; never skip it",
+            "Fix real Important+ findings from both",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, step4)
 
 
 class HandBuiltTimeContractsTest(unittest.TestCase):
