@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools import forge_markers, release_adapter, verify_block, verify_issues
+from agent_tools import actions_health_adapter, forge_markers, release_adapter, verify_block, verify_issues
 from agent_tools.forge_markers import ForgeError, Marker
 from agent_tools.resolve_project import registered_deploy_adapter
 
@@ -189,6 +190,25 @@ def _observed_revision(observation: object) -> str | None:
     return revision.lower() if isinstance(revision, str) and REPORTED.fullmatch(revision) else None
 
 
+def _health_revision(ctx: Context) -> str | None:
+    """The revision the deploy health endpoint reports, or None when it reports none.
+
+    The adapter reads health only after it finds a run for the candidate among the branch's last
+    few runs, so a merge whose run has left that window, or never had one, yields no observed
+    revision although a descendant may be deployed. The same bounded, redirect-free health read
+    answers that case from the watch's own config."""
+    config = ctx.deploy.get("config")
+    if registered_deploy_adapter(ctx.deploy) != "github-actions-health" or not isinstance(config, dict):
+        return None
+    url, field = config.get("health_url"), config.get("health_commit_field")
+    if not isinstance(url, str) or not isinstance(field, str):
+        return None
+    reading = actions_health_adapter._health(
+        url, field, time.monotonic() + actions_health_adapter.COLLECTION_BUDGET_SECONDS)
+    commit = reading.get("commit") if reading.get("status") == "ok" else None
+    return commit.lower() if isinstance(commit, str) and REPORTED.fullmatch(commit) else None
+
+
 def released_includes(ctx: Context, sha: str) -> Reading:
     """Whether what is released contains `sha`.
 
@@ -200,6 +220,8 @@ def released_includes(ctx: Context, sha: str) -> Reading:
         if isinstance(observation, dict) and observation.get("outcome") == "satisfied":
             return Reading("due", {})
         observed = _observed_revision(observation)
+        if observed is None and isinstance(observation, dict) and observation.get("outcome") == "absent":
+            observed = _health_revision(ctx)
         if observed is None:
             return Reading("not_released", {})
         facts = {"rev": observed}

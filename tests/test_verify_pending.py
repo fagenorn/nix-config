@@ -342,6 +342,35 @@ class WhenTest(unittest.TestCase):
         self.assertEqual(due.reason, "deploy_watch_unread")
         self.assertEqual(world.argvs("gh"), [])
 
+    def pushed_out(self, health, git_exit=0):
+        """The bound adapter, with the merge's own run pushed out of its five-run window by newer deploys."""
+        world = world_with(self)
+        deploy = {"adapter": "github-actions-health", "command": None,
+                  "config": {"workflow": "deploy.yaml", "branch": "main", "services": ["web"],
+                             "health_url": "https://health.example.invalid/version",
+                             "health_commit_field": "commit"}}
+        newer = [{"databaseId": 10 + n, "status": "completed", "conclusion": "success", "headSha": f"{n:040x}",
+                  "headBranch": "main", "createdAt": f"2026-11-06T10:0{n}:00Z"} for n in range(1, 6)]
+        world.respond_json("gh", ["run", "list", "--repo", SLUG, "--workflow", "deploy.yaml", "--branch", "main",
+                                  "--limit", "5", "--json", "databaseId,status,conclusion,headSha,headBranch,createdAt"],
+                           newer)
+        ancestry(world, MERGE, REV[:12], git_exit)
+        with mock.patch("agent_tools.actions_health_adapter._health", return_value=health) as read:
+            due = vf.evaluate_when({"released_includes": MERGE}, MERGE, context(world, deploy=deploy))
+        return due, read
+
+    def test_a_descendant_deployed_after_the_merge_run_left_the_window_counts_as_released(self):
+        ok = {"status": "ok", "http_status": 200, "commit": REV[:12], "detail": None}
+        due, read = self.pushed_out(ok)
+        self.assertEqual((due.due, due.facts), (True, {"rev": REV[:12]}))
+        self.assertEqual(read.call_args.args[:2], ("https://health.example.invalid/version", "commit"))
+
+    def test_a_health_commit_lacking_the_merge_or_unread_stays_not_released_when_the_run_left_the_window(self):
+        ok = {"status": "ok", "http_status": 200, "commit": REV[:12], "detail": None}
+        self.assertEqual(self.pushed_out(ok, git_exit=1)[0].reason, "not_released")
+        down = {"status": "health_unreachable", "http_status": None, "commit": None, "detail": "down"}
+        self.assertEqual(self.pushed_out(down)[0].reason, "not_released")
+
     def test_the_bound_adapter_runs_with_no_token_and_the_environment_comes_back(self):
         world = world_with(self)
         deploy = {"adapter": "github-actions-health", "command": None,
