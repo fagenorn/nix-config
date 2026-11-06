@@ -43,6 +43,13 @@ that each answer `HTTP 502` once and change nothing; a created issue can be clos
 and keeps its `state`. `host_clock`
 makes every host-clock read of the named modules return one instant, so a module that reads
 the host clock instead of the server's fails its test.
+
+`ref_store(slug, refs, node_id=..., schedule=(), cas_lies=0)` serves a repository's git refs
+from shared state (issue 629, see REF_HANDLER): the single-ref read, the ref create (HTTP 422
+when it exists), the repository node id and the `updateRefs` compare-and-swap, which applies
+only from the observed oid. `cas_lies=n` makes the next n applied swaps answer failure, the
+spike's observed lie. Schedule entries are the bare op names `get`, `create` and `cas`, with
+the comment store's semantics. `refs()` reads the store, `set_ref(ref, sha)` moves a ref.
 """
 import contextlib
 import json
@@ -68,6 +75,101 @@ FLOOR_PROTECTION = {
         "checks": [{"context": "Nix Eval", "app_id": None},
                    {"context": "Instruction Budget", "app_id": None}]},
     "enforce_admins": {"enabled": True}}
+
+REF_HANDLER = """\
+if tool == "gh" and (state / "refs.json").exists():
+    import fcntl
+    ZERO = "0" * 40
+    LIE = ("Something went wrong while executing your query. "
+           "This may be the result of a timeout, or it could be a GitHub bug.")
+
+    def ref_op(store):
+        slug = store["slug"]
+        one = "repos/" + slug + "/git/ref/"
+        if len(argv) == 2 and argv[0] == "api" and argv[1].startswith(one):
+            return "get", "refs/" + argv[1][len(one):]
+        if (len(argv) == 8 and argv[:4] == ["api", "-X", "POST", "repos/" + slug + "/git/refs"]
+                and argv[4] == "-f" and argv[5].startswith("ref=")
+                and argv[6] == "-f" and argv[7].startswith("sha=")):
+            return "create", (argv[5][4:], argv[7][4:])
+        if argv == ["api", "repos/" + slug, "--jq", ".node_id"]:
+            return "node", None
+        if (len(argv) == 12 and argv[:2] == ["api", "graphql"] and argv[2] == "-f"
+                and argv[3].startswith("query=") and "updateRefs(" in argv[3]
+                and [argv[i] for i in (4, 6, 8, 10)] == ["-f"] * 4
+                and [argv[i].split("=", 1)[0] for i in (5, 7, 9, 11)]
+                == ["repositoryId", "name", "before", "after"]):
+            return "cas", tuple(argv[i].split("=", 1)[1] for i in (5, 7, 9, 11))
+        return None
+
+    def save_refs(store):
+        tmp = state / "refs.json.tmp"
+        tmp.write_text(json.dumps(store), encoding="utf-8")
+        os.replace(tmp, state / "refs.json")
+
+    waiting_for = None
+    deadline = time.monotonic() + 10
+    while True:
+        with open(state / "refs.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            store = json.loads((state / "refs.json").read_text("utf-8"))
+            op = ref_op(store)
+            if op is None:
+                break
+            kind, arg = op
+            cursor = store["cursor"]
+            matches = [i for i, entry in enumerate(store["schedule"]) if i >= cursor and entry == kind]
+            if not matches or matches[0] == cursor:
+                if matches:
+                    store["cursor"] = cursor + 1
+                refs = store["refs"]
+                if kind == "node":
+                    save_refs(store)
+                    sys.stdout.write(store["node_id"] + "\\n")
+                    sys.exit(0)
+                if kind == "get":
+                    save_refs(store)
+                    if arg not in refs:
+                        sys.stderr.write("gh: Not Found (HTTP 404)\\n")
+                        sys.exit(1)
+                    sys.stdout.write(json.dumps({"ref": arg, "node_id": "REF_x",
+                                                 "object": {"sha": refs[arg], "type": "commit"}}))
+                    sys.exit(0)
+                if kind == "create":
+                    name, sha = arg
+                    if name in refs:
+                        save_refs(store)
+                        sys.stdout.write(json.dumps({"message": "Reference already exists", "status": "422"}))
+                        sys.stderr.write("gh: Reference already exists (HTTP 422)\\n")
+                        sys.exit(1)
+                    refs[name] = sha
+                    save_refs(store)
+                    sys.stdout.write(json.dumps({"ref": name, "object": {"sha": sha, "type": "commit"}}))
+                    sys.exit(0)
+                repo_id, name, before, after = arg
+                applied = repo_id == store["node_id"] and before == refs.get(name, ZERO)
+                if applied:
+                    if after == ZERO:
+                        refs.pop(name, None)
+                    else:
+                        refs[name] = after
+                lied = applied and store["cas_lies"] > 0
+                if lied:
+                    store["cas_lies"] -= 1
+                save_refs(store)
+                if applied and not lied:
+                    sys.stdout.write(json.dumps({"data": {"updateRefs": {"clientMutationId": None}}}))
+                    sys.exit(0)
+                sys.stdout.write(json.dumps({"data": {"updateRefs": None}, "errors": [
+                    {"type": "UNPROCESSABLE", "path": ["updateRefs"], "message": LIE}]}))
+                sys.stderr.write("gh: " + LIE + "\\n")
+                sys.exit(1)
+            waiting_for = matches[0]
+        if time.monotonic() > deadline:
+            sys.stderr.write("fake gh: schedule entry " + str(waiting_for) + " never reached\\n")
+            sys.exit(66)
+        time.sleep(0.01)
+"""
 
 STORE_HANDLER = """\
 if tool == "gh" and (state / "store.json").exists():
@@ -283,7 +385,7 @@ class ForgeWorld:
         self.checkout.mkdir()
         for tool in TOOLS + tuple(tools):
             path = self.bin / tool
-            path.write_text(SCRIPT.format(python=sys.executable).replace("# store handler\n", STORE_HANDLER),
+            path.write_text(SCRIPT.format(python=sys.executable).replace("# store handler\n", REF_HANDLER + STORE_HANDLER),
                             encoding="utf-8")
             path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         patch = mock.patch.dict(os.environ, {"PATH": str(self.bin), "GITHUB_TOKEN": "harness-token",
@@ -300,7 +402,7 @@ class ForgeWorld:
         """Forget every registered response and every logged call."""
         (self.state / "responses.json").write_text("{}", encoding="utf-8")
         (self.state / "calls.jsonl").write_text("", encoding="utf-8")
-        for name in ("store.json", "store.lock"):
+        for name in ("store.json", "store.lock", "refs.json", "refs.lock"):
             (self.state / name).unlink(missing_ok=True)
 
     def respond(self, tool: str, argv: list[str], *, exit: int = 0, stdout: str = "",
@@ -336,6 +438,37 @@ class ForgeWorld:
         """The stored issue now: state, state reason, labels and the issues created."""
         store = json.loads((self.state / "store.json").read_text("utf-8"))["issue_state"]
         return {key: store[key] for key in ("state", "state_reason", "labels", "created")}
+
+    def ref_store(self, slug: str, refs: dict[str, str] | None = None, *, node_id: str = "R_kgDOtest",
+                  schedule=(), cas_lies: int = 0) -> None:
+        """Serve one repository's git refs from shared state (see REF_HANDLER)."""
+        (self.state / "refs.json").write_text(json.dumps({
+            "slug": slug, "refs": dict(refs or {}), "node_id": node_id,
+            "schedule": list(schedule), "cursor": 0, "cas_lies": cas_lies}), encoding="utf-8")
+
+    def refs(self) -> dict[str, str]:
+        """The ref store's refs now: full name to sha."""
+        with self._ref_lock():
+            return json.loads((self.state / "refs.json").read_text("utf-8"))["refs"]
+
+    def set_ref(self, ref: str, sha: str | None) -> None:
+        """Move a ref between polls; None removes it."""
+        with self._ref_lock():
+            store = json.loads((self.state / "refs.json").read_text("utf-8"))
+            if sha is None:
+                store["refs"].pop(ref, None)
+            else:
+                store["refs"][ref] = sha
+            tmp = self.state / "refs.json.tmp"
+            tmp.write_text(json.dumps(store), encoding="utf-8")
+            os.replace(tmp, self.state / "refs.json")
+
+    @contextlib.contextmanager
+    def _ref_lock(self):
+        import fcntl
+        with open(self.state / "refs.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
 
     def stored(self) -> list[dict]:
         """The store's comments now, ascending id."""
