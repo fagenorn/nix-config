@@ -231,7 +231,10 @@ class RecordView:
             (view / "config").write_text(config, encoding="utf-8")
             (view / "objects/info/alternates").write_text(objects + "\n", encoding="utf-8")
         except OSError as exc:
-            self._close()
+            try:
+                self._close()
+            except OSError:
+                pass  # the setup failure is the refusal, as when the old view's cleanup failed too
             raise GenerationError("git command failed") from exc
         env.update(HOME=str(view), GIT_CONFIG_NOSYSTEM="1", GIT_ATTR_NOSYSTEM="1")
         self._env = env

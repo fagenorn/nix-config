@@ -333,6 +333,52 @@ class TreeEntriesTest(unittest.TestCase):
                              [self.outcome(lambda: tree_entry(self.repo, self.tree, p)) for p in paths])
             self.assertEqual(self.outcome(lambda: lookup('D/G.TXT')), (ForecastError, 'tree path mismatch'))
 
+    def test_failed_or_oversized_listings_still_answer_per_path(self):
+        from agent_tools import review_actual, review_forecast
+        from agent_tools.review_forecast import tree_entries
+        paths = ('a.txt', 'exec.sh', 'd/g.txt', 'missing')
+        expected = [tree_entry(self.repo, self.tree, p) for p in paths]
+        real = review_forecast._run_git
+        def failing(repo, *args, **kwargs):  # the batched listing alone fails, as an oversized argv would
+            if 'exec.sh' in args and 'a.txt' in args:
+                raise review_actual.GenerationError('git command failed')
+            return real(repo, *args, **kwargs)
+        with patch.object(review_forecast, '_run_git', failing):
+            lookup = tree_entries(self.repo, self.tree, paths)
+            self.assertEqual([lookup(p) for p in paths], expected)
+        with patch.object(review_forecast, 'TREE_BATCH_BYTES', 16):
+            lookup = tree_entries(self.repo, self.tree, paths)
+            answers, runs = self.counted(lambda: [lookup(p) for p in paths])
+        self.assertEqual(answers, expected)
+        self.assertEqual([[a for a in args if a in paths] for args in runs],
+                         [['a.txt', 'exec.sh'], ['d/g.txt', 'missing']])  # 6 + 8 and 8 + 8 bytes
+
+    def test_edge_refusals_keep_the_per_record_order(self):
+        """A lookup refusal on an earlier record still comes before a later record's path refusal."""
+        from agent_tools import review_forecast
+        from agent_tools.review_forecast import edge_facts
+        repo = Path(self.scratch.name) / 'edge'
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1',
+                   GIT_AUTHOR_NAME='F', GIT_AUTHOR_EMAIL='f@e.t', GIT_COMMITTER_NAME='F', GIT_COMMITTER_EMAIL='f@e.t')
+        run = lambda *args: subprocess.run(['git', '-C', str(repo), *args], env=env, check=True,
+                                           capture_output=True, text=True).stdout.strip()
+        repo.mkdir()
+        run('init', '-q')
+        run('commit', '-q', '--allow-empty', '--no-gpg-sign', '-m', 'base')
+        (repo / 'a.txt').write_text('a')
+        (repo / 'z\x01.txt').write_text('z')
+        run('add', '-A')
+        run('commit', '-q', '--no-gpg-sign', '-m', 'two records')
+        parent, head = run('rev-parse', 'HEAD~1'), run('rev-parse', 'HEAD')
+        with self.assertRaises(ForecastError) as caught:
+            edge_facts(repo, parent, head, 1)
+        self.assertEqual(str(caught.exception), 'invalid path')
+        def refusing(repo, tree, path):
+            raise ForecastError('lookup refused ' + path)
+        with patch.object(review_forecast, 'tree_entry', refusing), self.assertRaises(ForecastError) as caught:
+            edge_facts(repo, parent, head, 1)
+        self.assertEqual(str(caught.exception), 'lookup refused a.txt')
+
     def test_refusals_are_the_per_path_refusals(self):
         from agent_tools.review_actual import GenerationError
         from agent_tools.review_forecast import tree_entries

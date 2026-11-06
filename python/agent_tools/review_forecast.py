@@ -241,19 +241,19 @@ def tree_entry(repo: Path, tree: str, path: str) -> dict | None:
     return {"mode": mode, "kind": kind, "oid": identity(oid, "object")}
 
 
-# Paths per batched `ls-tree`, so one call's argv stays far below the platform limit.
-TREE_BATCH = 512
+# Paths and encoded path bytes per batched `ls-tree`, so one call's argv stays far below the platform limit.
+TREE_BATCH, TREE_BATCH_BYTES = 512, 65536
 
 
 def tree_entries(repo: Path, tree: str, paths: Iterable[str]) -> Callable[[str], dict | None]:
     """A lookup that answers `tree_entry(repo, tree, path)` for each of `paths` from one `ls-tree` per
-    `TREE_BATCH` of them (issue 613).
+    `TREE_BATCH` of them or `TREE_BATCH_BYTES` of their encoded names, whichever comes first (issue 613).
 
     Git lists several literal paths of one tree exactly as it lists each alone while every path is plain (no
     empty, `.` or `..` component) and none is a directory prefix of another; for a nested pair the listing
     descends into the directory instead of naming it. Outside that case, and whenever the listing holds
-    anything but one row per requested path at most, the lookup is `tree_entry` itself, so every answer and
-    every refusal is the per-path one. The listing runs on the first lookup, and a path not among `paths`
+    anything but one row per requested path at most, or when a batched listing fails, the lookup is
+    `tree_entry` itself, so every answer and every refusal is the per-path one. The listing runs on the first lookup, and a path not among `paths`
     is looked up alone.
     """
     wanted = tuple(dict.fromkeys(paths))
@@ -268,11 +268,23 @@ def tree_entries(repo: Path, tree: str, paths: Iterable[str]) -> Callable[[str],
         return single
     found: dict[str, dict] | None = None
 
+    batches: list[list[str]] = [[]]
+    size = 0
+    for path in wanted:
+        width = len(path.encode("utf-8", "surrogatepass")) + 1
+        if batches[-1] and (len(batches[-1]) == TREE_BATCH or size + width > TREE_BATCH_BYTES):
+            batches.append([])
+            size = 0
+        batches[-1].append(path)
+        size += width
+
     def listed() -> dict[str, dict] | None:
         entries: dict[str, dict] = {}
-        for start in range(0, len(wanted), TREE_BATCH):
-            raw = _run_git(repo, "--literal-pathspecs", "ls-tree", "-z", tree, "--",
-                           *wanted[start:start + TREE_BATCH], binary=True)
+        for batch in batches:
+            try:
+                raw = _run_git(repo, "--literal-pathspecs", "ls-tree", "-z", tree, "--", *batch, binary=True)
+            except (GenerationError, ValueError):  # each path alone fails, or not, as it would have
+                return None
             rows = raw.split(b"\0")
             if rows.pop() != b"":
                 return None
@@ -389,7 +401,33 @@ def edge_facts(repo: Path, parent: str, commit: str, ordinal: int, *,
         status.pop()
         chunks = _split_diff(git_diff(view, parent_tree, commit_tree, "--binary", "-U10",
                                       record_policy=record_policy))
-    named = []
+    try:
+        named = list(_edge_records(list(status), record_policy))
+    except Exception:  # noqa: BLE001 - the per-record loop below raises it again, in its original order
+        named = None
+    if named is None:
+        # A record fails to check: read record by record, each earlier record looked up before the next is
+        # checked, so the refusal that comes first is the one the per-record reading met first.
+        facts = []
+        for operation, old, new in _edge_records(status, record_policy):
+            facts.append({"operation": operation, "path": new, "old_path": old,
+                          "before": tree_entry(repo, parent_tree, old), "after": tree_entry(repo, commit_tree, new)})
+    else:
+        # One listing per side of the edge, rather than one per record and side (issue 613).
+        before = tree_entries(repo, parent_tree, [old for _, old, _ in named])
+        after = tree_entries(repo, commit_tree, [new for _, _, new in named])
+        facts = [{"operation": operation, "path": new, "old_path": old, "before": before(old),
+                  "after": after(new)} for operation, old, new in named]
+    if len(chunks) != len(facts):
+        raise ForecastError("Git edge record coverage mismatch")
+    for item, chunk in zip(facts, chunks):
+        item.update(record_bytes=len(chunk), record_sha256=raw_digest(chunk))
+    return {"parent": parent, "commit": commit, "parent_ordinal": ordinal, "records": facts}
+
+
+def _edge_records(status: list[bytes], record_policy: Mapping):
+    """`(operation, old path, new path)` per record of a `--name-status -z` listing, consuming `status`; each
+    record is checked as it is read."""
     while status:
         try:
             operation, names = record_operation(status.pop(0), record_policy)
@@ -399,17 +437,7 @@ def edge_facts(repo: Path, parent: str, commit: str, ordinal: int, *,
             raise ForecastError("invalid Git status framing")
         old = path_name(status.pop(0).decode("utf-8"))
         new = path_name(status.pop(0).decode("utf-8")) if names == 2 else old
-        named.append((operation, old, new))
-    # One listing per side of the edge, rather than one per record and side (issue 613).
-    before = tree_entries(repo, parent_tree, [old for _, old, _ in named])
-    after = tree_entries(repo, commit_tree, [new for _, _, new in named])
-    facts = [{"operation": operation, "path": new, "old_path": old, "before": before(old), "after": after(new)}
-             for operation, old, new in named]
-    if len(chunks) != len(facts):
-        raise ForecastError("Git edge record coverage mismatch")
-    for item, chunk in zip(facts, chunks):
-        item.update(record_bytes=len(chunk), record_sha256=raw_digest(chunk))
-    return {"parent": parent, "commit": commit, "parent_ordinal": ordinal, "records": facts}
+        yield operation, old, new
 
 
 @dataclass(frozen=True)
