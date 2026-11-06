@@ -492,6 +492,13 @@ LEGACY_MIGRATION_INPUTS = {
     "tests/fixtures/legacy-skills-config-1722a65d.json": frozenset({
         "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
     }),
+    # Platform 1.1.0 (https://github.com/fagenorn/nix-config/issues/580) deprecates the
+    # legacy store, so the manifest's deprecation entry, its documentation and the
+    # resolver tests that pin that entry must name it.
+    "home/common/agent-skills/platform-manifest.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "python/README.md": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "home/common/agent-skills/tests/test_resolve_platform.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "home/common/agent-skills/tests/test_resolve_platform_status.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
 }
 
 SUPPORT_POLICY_FORBIDDEN = (
