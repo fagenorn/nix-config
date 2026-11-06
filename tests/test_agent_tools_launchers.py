@@ -51,11 +51,11 @@ TIMEOUT_SECONDS = 60
 # `agent_tools.resolve_project` and load `host_admission` from `~/.agents/lib/python`
 # (#177 D6, D13). #178 deletes this entry with them.
 NOT_LAUNCHERS = ("workflow-state",)
-# The commands #175, #179, #177, #249, #264, #279, #353, #403 and #424 accepted as launchers: a floor, not the
+# The commands #175, #179, #177, #249, #264, #279, #353, #403, #424 and #623 accepted as launchers: a floor, not the
 # full set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
                   "context-map-lint", "context-meter", "derive-review-feasibility-fixtures",
-                  "diff-scope", "lane-triage", "orchestrate-control", "replay-retained", "resolve-project",
+                  "diff-scope", "forge-claim", "lane-triage", "orchestrate-control", "replay-retained", "resolve-project",
                   "review-package", "review-range", "sdd-gate",
                   "ship-delivery")
 # The retained commands (#249) and their modules: refusal parity cases below.
