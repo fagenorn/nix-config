@@ -272,8 +272,9 @@ ${RULES}`, { label: `impl-${t.n}`, phase: 'Tasks', agentType: 'implementer', mod
   if (!implDone(impl)) return halt('task', { task: t, impl })
   const taskSpan = span(impl)
   const reviewer = (t.risk === 'mechanical' || t.risk === 'low') ? 'reviewer-lite' : 'reviewer'
+  // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
   let review = await agent(`${start}
-lane: direct. Review the diff of task ${t.n} only: ${taskSpan} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
+${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${taskSpan} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
   if (!review) return halt('task-review', { task: t, review: null })
   let rounds = 0
   while (findingsOf(review).length && rounds < 2) {
@@ -355,7 +356,7 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
   const fix = await agent(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
   if (!implDone(fix)) return stop('verify-fix', { verify, fix })
-  const fr = await agent(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; implementer notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer-lite', schema: FINDINGS })
+  const fr = await agent(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; implementer notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
   if (!fr || findingsOf(fr).length) return stop('verify-fix-review', { review: fr })
   verify = await agent(verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', model: 'sonnet', effort: 'low', schema: VERIFY })
 }
@@ -396,7 +397,7 @@ ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', mo
   expected = sy.merge_commit
   if (sy.conflicted) {
     const sr = await agent(`${CTX}
-Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} show --cc ${sy.merge_commit} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer-lite', schema: FINDINGS })
+Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} show --cc ${sy.merge_commit} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
     if (!sr || findingsOf(sr).length) return stop('sync-review', { pr: PR, review: sr })
   }
 }

@@ -277,6 +277,20 @@ class TaskTest(unittest.TestCase):
         _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(1, "low"))})
         review = [c for c in calls if c["label"] == "review-1"][0]
         self.assertEqual(review["agentType"], "reviewer-lite")
+        self.assertIn("lane: low.", review["prompt"])
+
+    def test_first_pass_reviews_use_reviewer_lite_only_in_a_mode_it_accepts(self):
+        # reviewer-lite accepts a first pass only for a declared mechanical or low lane;
+        # every rereview names the prior findings.
+        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
+        _, calls = run(replies={"review-1": bad})
+        for c in calls:
+            if c["agentType"] == "reviewer-lite":
+                self.assertTrue(c["label"].startswith("rereview-") or "lane: mechanical." in c["prompt"]
+                                or "lane: low." in c["prompt"], c["label"])
+        standard = [c for c in calls if c["label"] == "review-1"][0]
+        self.assertEqual(standard["agentType"], "reviewer")
+        self.assertNotIn("lane:", standard["prompt"])
 
 
 class ResumeTest(unittest.TestCase):
@@ -400,7 +414,7 @@ class ReviewAndVerifyTest(unittest.TestCase):
         bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "weakened test"}]}
         result, calls = run(replies={"verify": fail, "verify-fix-review-1": bad})
         self.assertEqual(result["stage"], "verify-fix-review")
-        self.assertEqual([c["agentType"] for c in calls if c["label"] == "verify-fix-review-1"], ["reviewer-lite"])
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "verify-fix-review-1"], ["reviewer"])
 
     def test_verification_runs_in_each_command_cwd(self):
         _, calls = run(patch={"setup": {"verification": [{"id": "build", "argv": ["npm", "test"], "cwd": "web"}]}})
@@ -438,7 +452,7 @@ class ShipTest(unittest.TestCase):
         _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}},
                        patch={"sync-1": {"conflicted": True, "resolved_files": ["a.py"]}})
         review = [c for c in calls if c["label"] == "sync-review-1"]
-        self.assertEqual(review[0]["agentType"], "reviewer-lite")
+        self.assertEqual(review[0]["agentType"], "reviewer")
 
     def test_conflicted_sync_with_findings_stops(self):
         bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "lost"}]}
