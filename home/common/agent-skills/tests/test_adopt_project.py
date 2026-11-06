@@ -1144,10 +1144,12 @@ class PlanIdentityTest(AdoptTestCase):
 
     def test_platform_block_is_the_three_reproducible_manifest_values(self):
         doc = self.ready_plan(nix_config_shape_repo(self.home))
+        manifest = json.loads(MANIFEST.read_text("utf-8"))
         self.assertEqual(
             doc["plan"]["platform"],
-            {"platform_version": "1.0.0", "project_schema_versions": [1],
-             "resolved_schema_version": 1})
+            {name: manifest[name] for name in (
+                "platform_version", "project_schema_versions",
+                "resolved_schema_version")})
 
     def test_two_runs_on_an_unchanged_fixture_are_byte_identical(self):
         root = nix_config_shape_repo(self.home)
@@ -1185,7 +1187,10 @@ class PlanIdentityTest(AdoptTestCase):
     def test_a_different_platform_version_yields_a_different_id(self):
         root = nix_config_shape_repo(self.home)
         before = self.ready_plan(root)["plan"]["plan_id"]
-        other = make_home(manifest_with([1], [], platform_version="1.1.0"))
+        major, minor, _ = json.loads(MANIFEST.read_text("utf-8"))[
+            "platform_version"].split(".")
+        other = make_home(manifest_with(
+            [1], [], platform_version=f"{major}.{int(minor) + 1}.0"))
         code, doc, err = self.plan(root, home=other)
         self.assertEqual(code, 0, err)
         self.assertNotEqual(before, doc["plan"]["plan_id"])
@@ -1337,8 +1342,10 @@ class TypedOperationTest(AdoptTestCase):
         op = self.only_write(doc, ".agents/project.json")
         contract = json.loads(
             (root / ".agents" / "project.json").read_text("utf-8"))
-        contract["platform"] = {"min_inclusive": "1.0.0",
-                                "max_exclusive": "2.0.0"}
+        version = json.loads(MANIFEST.read_text("utf-8"))["platform_version"]
+        contract["platform"] = {
+            "min_inclusive": version,
+            "max_exclusive": f"{int(version.split('.')[0]) + 1}.0.0"}
         contract["bindings"]["paths"]["artifacts"] = {
             "specs": ".agents/artifacts/specs",
             "plans": ".agents/artifacts/plans"}

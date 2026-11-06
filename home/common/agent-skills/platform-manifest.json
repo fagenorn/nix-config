@@ -1,9 +1,26 @@
 {
   "schema_version": 1,
-  "platform_version": "1.0.0",
+  "platform_version": "1.1.0",
   "project_schema_versions": [1],
   "resolved_schema_version": 1,
   "migrations": [],
-  "deprecations": [],
+  "deprecations": [
+    {
+      "id": "legacy-skills-config",
+      "kind": "project_file",
+      "subject": ".claude/skills.config.json",
+      "since": "1.1.0",
+      "successor": "resolve-project resolve",
+      "migration": "legacy-skills-config.retire"
+    },
+    {
+      "id": "legacy-skills-config-writer",
+      "kind": "platform_behavior",
+      "subject": "adopt-project legacy binding config rewrite",
+      "since": "1.1.0",
+      "successor": "resolve-project resolve",
+      "migration": "legacy-skills-config.retire"
+    }
+  ],
   "removals": []
 }

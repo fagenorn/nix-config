@@ -28,6 +28,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools import agent_platform
+
 from .test_resolve_project import (
     COMMITTED,
     MANIFEST_MEMBERS,
@@ -517,16 +519,42 @@ class CommittedManifestTest(ResolverTestCase):
     """The committed manifest is the one the store installs (D1), so the suite
     checks that file rather than a fixture."""
 
-    def test_it_declares_exactly_the_seven_members_with_the_v1_values(self):
+    BRIDGE_DEPRECATIONS = [
+        {"id": "legacy-skills-config", "kind": "project_file",
+         "subject": ".claude/skills.config.json", "since": "1.1.0",
+         "successor": "resolve-project resolve",
+         "migration": "legacy-skills-config.retire"},
+        {"id": "legacy-skills-config-writer", "kind": "platform_behavior",
+         "subject": "adopt-project legacy binding config rewrite",
+         "since": "1.1.0", "successor": "resolve-project resolve",
+         "migration": "legacy-skills-config.retire"},
+    ]
+
+    def test_it_declares_exactly_the_seven_members(self):
         manifest = committed_manifest()
         self.assertEqual(sorted(manifest), sorted(MANIFEST_MEMBERS))
         self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["platform_version"], "1.0.0")
+        self.assertEqual(manifest["platform_version"], "1.1.0")
         self.assertEqual(manifest["project_schema_versions"], [1])
         self.assertEqual(manifest["resolved_schema_version"], 1)
-        for name in ("migrations", "deprecations", "removals"):
+        for name in ("migrations", "removals"):
             with self.subTest(member=name):
                 self.assertEqual(manifest[name], [])
+
+    def test_it_declares_the_bridge_minor_deprecations(self):
+        """Issue 580 D5: the legacy skills config and its adoption writer."""
+        self.assertEqual(committed_manifest()["deprecations"],
+                         self.BRIDGE_DEPRECATIONS)
+
+    def test_every_deprecation_began_in_this_major(self):
+        """Issue 580 D3: pinned on the committed file, not in the validator."""
+        manifest = committed_manifest()
+        version = agent_platform.parse_semver(manifest["platform_version"])
+        for entry in manifest["deprecations"]:
+            with self.subTest(id=entry["id"]):
+                since = agent_platform.parse_semver(entry["since"])
+                self.assertEqual(since[0], version[0])
+                self.assertLessEqual(since, version)
 
     def test_it_loads_and_validates(self):
         # `setUp` installs this exact file; a subcommand that gets as far as
