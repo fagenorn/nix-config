@@ -31,7 +31,7 @@ FIXTURES = Path(__file__).parent / "fixtures/artifact-budgets"
 sys.path.insert(0, str(SCRIPT.parent))
 import artifact_budget
 
-WORKFLOW_STATE = ROOT / "home/common/agent-skills/scripts/workflow-state.py"
+WORKFLOW_STATE = ROOT / "home/common/agent-skills/scripts/workflow_state.py"
 SKILL_TREES = (ROOT / "home/common/agent-skills/skills", ROOT / "home/common/claude-code/skills",
                ROOT / "home/common/codex/skills")
 # Issue 473 D5: the skill-named subcommands whose stdout is no workflow response.

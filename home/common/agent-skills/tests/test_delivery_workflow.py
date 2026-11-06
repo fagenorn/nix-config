@@ -31,6 +31,8 @@ from .test_resolve_project import git, make_home, make_project_root, run as run_
 ROOT = Path(__file__).parents[4]
 SCRIPTS = ROOT / "home/common/agent-skills/scripts"
 WORKFLOW = SCRIPTS / "workflow-state.py"
+# The module the thin `WORKFLOW` entry point imports (issue 612).
+WORKFLOW_MODULE = SCRIPTS / "workflow_state.py"
 MODEL = SCRIPTS / "delivery_model/__init__.py"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 ARTIFACT_BUDGET = SCRIPTS / "artifact_budget.py"
@@ -90,7 +92,7 @@ LifecycleHarness, recorded_spawns = _LIFECYCLE.LifecycleHarness, _LIFECYCLE.reco
 class DeliveryAdmissionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.workflow = load(WORKFLOW, "workflow_state_admission")
+        cls.workflow = load(WORKFLOW_MODULE, "workflow_state_admission")
         cls.model = load(MODEL, "delivery_model_admission", package=True)
 
     def control_request(self, contract=None):
@@ -398,6 +400,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 store = base / ("toolchain/scripts" if layout == "source" else "store")
                 store.mkdir(parents=True)
                 shutil.copy2(WORKFLOW, store / "workflow-state.py")
+                shutil.copy2(SCRIPTS / "workflow_state.py", store / "workflow_state.py")
                 shutil.copy2(SCRIPTS / "workflow_delivery.py", store / "workflow_delivery.py")
                 shutil.copy2(SCRIPTS / "workflow_delivery_wire.py",
                              store / "workflow_delivery_wire.py")
@@ -421,6 +424,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     cli = binary / "workflow-state"; cli.symlink_to(store / "workflow-state.py")
                     (binary / "artifact-budget").symlink_to(store / "artifact-budget")
                     (library / "artifact_budget.py").symlink_to(store / "artifact_budget.py")
+                    (library / "workflow_state.py").symlink_to(store / "workflow_state.py")
                     (library / "workflow_delivery.py").symlink_to(store / "workflow_delivery.py")
                     (library / "workflow_delivery_wire.py").symlink_to(
                         store / "workflow_delivery_wire.py")
@@ -533,7 +537,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw).resolve(); home = base / "home"; store = base / "store"
             store.mkdir()
-            for name in ("workflow-state.py", "workflow_delivery.py", "workflow_delivery_wire.py",
+            for name in ("workflow-state.py", "workflow_state.py", "workflow_delivery.py",
+                         "workflow_delivery_wire.py",
                          "workflow_delivery_build.py", "artifact_budget.py", "artifact-budget"):
                 shutil.copy2(SCRIPTS / name, store / name)
             shutil.copy2(ROOT / "python/agent_tools/host_admission.py", store / "host_admission.py")
@@ -547,8 +552,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             for directory in (binary, library, share): directory.mkdir(parents=True)
             cli = binary / "workflow-state"; cli.symlink_to(store / "workflow-state.py")
             (binary / "artifact-budget").symlink_to(store / "artifact-budget")
-            links = ("artifact_budget.py", "workflow_delivery.py", "workflow_delivery_wire.py",
-                     "workflow_delivery_build.py", "host_admission.py")
+            links = ("artifact_budget.py", "workflow_state.py", "workflow_delivery.py",
+                     "workflow_delivery_wire.py", "workflow_delivery_build.py", "host_admission.py")
             for name in links:
                 (library / name).symlink_to(store / name)
             (library / "delivery_model").symlink_to(store / "delivery_model", target_is_directory=True)
@@ -2410,7 +2415,7 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
                            owner["run_id"], "--now", LATER), "--summary-file", summary,
                            piped=self.pipe("ship-summary", summary))
 
-        workflow = load(WORKFLOW, "workflow_state_inputs")
+        workflow = load(WORKFLOW_MODULE, "workflow_state_inputs")
         legacy = workflow.new_run_state(
             run_id="orchestrate-151", transaction_id=TRANSACTION, now=NOW, issues={})
         legacy["schema_version"] = 2
@@ -3071,7 +3076,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = load(MODEL, "delivery_model_lifecycle", package=True)
-        cls.workflow = load(WORKFLOW, "workflow_state_lifecycle")
+        cls.workflow = load(WORKFLOW_MODULE, "workflow_state_lifecycle")
 
     def direct(self, *, ok=True, **changes):
         completed = self.cli("direct-owner", "--repo-root", self.root, "--request-file", "-",

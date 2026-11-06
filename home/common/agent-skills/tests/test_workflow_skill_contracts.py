@@ -3260,7 +3260,7 @@ def module_constants(path, *names):
     return found
 
 
-WORKFLOW_STATE = REPO_ROOT / "home/common/agent-skills/scripts/workflow-state.py"
+WORKFLOW_STATE = REPO_ROOT / "home/common/agent-skills/scripts/workflow_state.py"
 # The direct-owner refusal markers acquire-direct.md branches on (issue 475 D10).
 DIRECT_REFUSAL_MARKERS = {"TAKEOVER_REFUSAL": "owner_unavailable refused: live workers:",
                           "HOLD_REFUSAL": " is held by orchestrated run "}

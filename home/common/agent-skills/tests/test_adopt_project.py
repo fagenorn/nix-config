@@ -1,9 +1,12 @@
 """Contract tests for `adopt-project` (`agent_tools.adopt_project`).
 
-Runs `adopt-project` as `python -m agent_tools.adopt_project` under a temporary
-`HOME` holding a fixture manifest. The command consumes the resolver only as a
-child process of its own interpreter, `agent_tools.resolve_project` run through
-`agent_tools.siblings.sibling_argv` (D26, #177 D5).
+Runs `adopt-project`'s command line under a temporary `HOME` holding a fixture
+manifest. The command consumes the resolver only as a child process of its own
+interpreter, `agent_tools.resolve_project` run through
+`agent_tools.siblings.sibling_argv` (D26, #177 D5). `run` runs the command in
+this process and answers that resolver child in process too (issue 612);
+`run_child` runs both as real processes, and `ProcessWiringTest` pins that the
+two agree.
 
 Fixture repositories are real `git init` checkouts with a hermetic identity and
 `commit.gpgsign=false` in the fixture's own local config; nothing here touches
@@ -17,6 +20,7 @@ platform library refuses before the router would see it (#177 D7).
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import io
 import json
@@ -31,6 +35,9 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import adopt_inspection, adopt_links, adopt_planning, adopt_project
+from agent_tools.siblings import sibling_argv
+
+from ._inprocess_cli import run_module
 
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -91,7 +98,30 @@ def install_registry(home: Path, entries: list[dict]) -> None:
         encoding="utf-8")
 
 
+_SUBPROCESS_RUN = subprocess.run
+
+
+def _resolver_in_process(argv, *args, **kwargs):
+    """`subprocess.run`, except that the resolver child `run_resolver` starts runs
+    in this process, with the caller's environment and the same captured bytes."""
+    prefix = sibling_argv("resolve_project")
+    if list(argv[:len(prefix)]) != prefix:
+        return _SUBPROCESS_RUN(argv, *args, **kwargs)
+    done = run_module("agent_tools.resolve_project", argv[len(prefix):],
+                      env=dict(os.environ), text=False)
+    return subprocess.CompletedProcess(list(argv), done.returncode, done.stdout, done.stderr)
+
+
 def run(*args: str, home: Path) -> tuple[int, str, str]:
+    """`adopt-project`'s command line in this process, its resolver child too (issue 612)."""
+    with mock.patch.object(adopt_project.subprocess, "run", _resolver_in_process):
+        proc = run_module("agent_tools.adopt_project", args,
+                          env={**os.environ, "HOME": str(home)})
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def run_child(*args: str, home: Path) -> tuple[int, str, str]:
+    """`adopt-project` as a real child process, with its real resolver child."""
     proc = subprocess.run(
         [sys.executable, "-m", "agent_tools.adopt_project", *args],
         capture_output=True, text=True, timeout=300,
@@ -142,6 +172,37 @@ def source_contract() -> dict:
     return json.loads((REPO_ROOT / ".agents" / "project.json").read_text("utf-8"))
 
 
+# Built fixture repositories, each kept once per process (issue 612, the #500 pattern).
+_TEMPLATES: dict[tuple, Path] = {}
+_TEMPLATE_ROOT = tempfile.TemporaryDirectory()
+
+
+def templated(build):
+    """`build`, run once per process for each set of arguments; every later call gets
+    a copy of that first result at a fresh temporary root (issue 612).
+
+    A `Path` argument, the `home` every builder takes, is not part of the key: what
+    a builder writes does not depend on it. Only builders whose tree holds no
+    absolute path, git worktree or link out of the checkout may be templated.
+    """
+    @functools.wraps(build)
+    def copy(*args, **kwargs):
+        key = (build.__name__, tuple(a for a in args if not isinstance(a, Path)),
+               tuple(sorted(kwargs.items())))
+        template = _TEMPLATES.get(key)
+        if template is None:
+            built = build(*args, **kwargs)
+            template = Path(_TEMPLATE_ROOT.name) / str(len(_TEMPLATES))
+            shutil.copytree(built, template, symlinks=True)
+            _TEMPLATES[key] = template
+            return built
+        root = Path(tempfile.mkdtemp()).resolve()
+        shutil.copytree(template, root, symlinks=True, dirs_exist_ok=True)
+        return root
+    return copy
+
+
+@templated
 def init_repo() -> Path:
     # `.resolve()` because the platform temp dir is reached through a symlink
     # on macOS; the tool always reports the physical path.
@@ -213,17 +274,15 @@ def scaffold(root: Path, contract: dict, home: Path) -> None:
     for standards in contract["bindings"]["paths"]["standards"]:
         (root / standards).mkdir(parents=True, exist_ok=True)
     write(root, ".agents/project.json", json.dumps(contract, indent=2) + "\n")
-    proc = subprocess.run(
-        [sys.executable, "-m", "agent_tools.resolve_project", "write-projections",
-         "--repo-root", str(root)],
-        capture_output=True, text=True, timeout=120,
-        env={**os.environ, "HOME": str(home)},
-    )
+    proc = run_module("agent_tools.resolve_project",
+                      ("write-projections", "--repo-root", str(root)),
+                      env={**os.environ, "HOME": str(home)})
     if proc.returncode != 0:
         raise AssertionError(
             f"fixture projections could not be rendered: {proc.stdout}")
 
 
+@templated
 def bootstrap_repo(home: Path, *, remotes: tuple[str, ...] = ()) -> Path:
     """One unrelated tracked file: no `.agents/`, no `.claude/`."""
     root = init_repo()
@@ -234,6 +293,7 @@ def bootstrap_repo(home: Path, *, remotes: tuple[str, ...] = ()) -> Path:
     return root
 
 
+@templated
 def reconcile_repo(home: Path, *,
                    remotes: tuple[str, ...] = (
                        "git@github.com:fixture/reconcile.git",)) -> Path:
@@ -275,6 +335,7 @@ def write_adoption_records(root: Path, digest: str = "a1" * 32) -> str:
     return migration_map
 
 
+@templated
 def adopted_repo(home: Path, *, records: bool = True) -> Path:
     """A conformant checkout: valid contract, sentinel present, nothing legacy.
 
@@ -296,6 +357,7 @@ def adopted_repo(home: Path, *, records: bool = True) -> Path:
     return root
 
 
+@templated
 def nix_config_shape_repo(home: Path) -> Path:
     """This repository's shape at base: a valid schema-1 contract without
     `platform`, legacy `.claude/specs`, `.claude/plans` and `.out-of-scope`
@@ -328,6 +390,7 @@ def nix_config_shape_repo(home: Path) -> Path:
     return root
 
 
+@templated
 def record_trees_repo(home: Path) -> Path:
     """`nix_config_shape_repo` plus one tracked record under each of
     `.claude/handoffs`, `.claude/notes` and `.claude/research` (#340)."""
@@ -409,6 +472,7 @@ def write_linked_tree(root: Path) -> None:
     commit(root, "link the agent trees")
 
 
+@templated
 def linked_repo(home: Path) -> Path:
     root = nix_config_shape_repo(home)
     write_linked_tree(root)
@@ -480,6 +544,7 @@ def write_reference_tree(root: Path, *, script: bool = True) -> None:
     commit(root, "reference the agent trees")
 
 
+@templated
 def referenced_repo(home: Path, *, script: bool = True) -> Path:
     root = nix_config_shape_repo(home)
     write_reference_tree(root, script=script)
@@ -510,6 +575,7 @@ RESEARCH_TOOL_SUBJECT = ".claude/research/check.py:1:9"
 SPECS_TOOL_SUBJECT = ".claude/specs/check.py:1:9"
 
 
+@templated
 def shared_destination_repo(home: Path) -> Path:
     root = nix_config_shape_repo(home)
     for path, text in SHARED_TOOLS.items():
@@ -614,6 +680,7 @@ def write_policy_tree(root: Path, *, code: bool = True) -> None:
     commit(root, "add a moved tree that holds working code")
 
 
+@templated
 def policy_repo(home: Path, *, code: bool = True) -> Path:
     root = nix_config_shape_repo(home)
     write_policy_tree(root, code=code)
@@ -728,6 +795,7 @@ def write_dissolved_tree(root: Path) -> None:
     commit(root, "link the dissolving agent tree")
 
 
+@templated
 def candidate_repo(home: Path, *paths: str) -> Path:
     """`nix_config_shape_repo` plus tracked agent paths no row classifies."""
     root = nix_config_shape_repo(home)
@@ -965,7 +1033,8 @@ class ProjectIdentityTest(AdoptTestCase):
     def test_recommendation_is_byte_identical_across_runs(self):
         root = reconcile_repo(self.home)
         first = run("plan", "--repo-root", str(root), home=self.home)
-        second = run("plan", "--repo-root", str(root), home=self.home)
+        # A child, so the two runs differ in hash seed as well (issue 612).
+        second = run_child("plan", "--repo-root", str(root), home=self.home)
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(first[1], second[1])
 
@@ -1154,7 +1223,8 @@ class PlanIdentityTest(AdoptTestCase):
     def test_two_runs_on_an_unchanged_fixture_are_byte_identical(self):
         root = nix_config_shape_repo(self.home)
         first = run("plan", "--repo-root", str(root), home=self.home)
-        second = run("plan", "--repo-root", str(root), home=self.home)
+        # A child, so the two runs differ in hash seed as well (issue 612).
+        second = run_child("plan", "--repo-root", str(root), home=self.home)
         self.assertEqual(first[0], 0, first[2])
         self.assertEqual(first[1], second[1])
 
@@ -1795,8 +1865,9 @@ class CandidateAnswerTest(AdoptTestCase):
         second = ("candidate-class", ODD, "archive-history")
         forward = run("plan", "--repo-root", str(root), "--answer", *first,
                       "--answer", *second, home=self.home)
-        backward = run("plan", "--repo-root", str(root), "--answer", *second,
-                       "--answer", *first, home=self.home)
+        # A child, so the two runs differ in hash seed as well (issue 612).
+        backward = run_child("plan", "--repo-root", str(root), "--answer", *second,
+                             "--answer", *first, home=self.home)
         self.assertEqual(forward[0], 0, forward[2])
         self.assertEqual(forward[1], backward[1])
 
@@ -3005,7 +3076,7 @@ class RefusalTest(AdoptTestCase):
         self.assertEqual(doc["error"]["repair_id"], "adopt.manifest.invalid")
 
     def test_an_unknown_subcommand_is_an_argparse_usage_error(self):
-        code, out, _ = run("register", "--plan-id", "x", home=self.home)
+        code, out, _ = run_child("register", "--plan-id", "x", home=self.home)
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
 
@@ -3014,6 +3085,27 @@ class RefusalTest(AdoptTestCase):
         self.assertEqual(code, 0, err)
         choices = re.search(r"usage: adopt-project \[-h\] \{([^}]*)\}", out)
         self.assertEqual(choices.group(1), "plan,apply,verify")
+
+
+class ProcessWiringTest(AdoptTestCase):
+    """The real `python -m agent_tools.adopt_project` child, with its real resolver
+    child (D26), answers exactly what the in-process `run` answers: argv parsing,
+    the exit code and both streams (issue 612)."""
+
+    def test_a_child_process_matches_the_in_process_run(self):
+        root = bootstrap_repo(self.home)
+        plain = Path(tempfile.mkdtemp()).resolve()
+        rows = (
+            ("plan", ("plan", "--repo-root", str(root)), 0),
+            ("refusal", ("plan", "--repo-root", str(plain)), 2),
+            ("usage error", ("register", "--plan-id", "x"), 2),
+            ("help", ("--help",), 0),
+        )
+        for name, args, expected in rows:
+            with self.subTest(name):
+                child = run_child(*args, home=self.home)
+                self.assertEqual(child[0], expected, child[2])
+                self.assertEqual(run(*args, home=self.home), child)
 
 
 class AdoptFailureWrapperTest(unittest.TestCase):

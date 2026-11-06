@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unittest
 
-from .test_workflow_state import DEFAULT_NOW, SCRIPT, LifecycleHarness, load_source_module
+from .test_workflow_state import DEFAULT_NOW, MODULE, SCRIPT, LifecycleHarness, load_source_module
 
 REPO = Path(__file__).resolve().parents[4]
 SCRIPTS = REPO / "home/common/agent-skills/scripts"
@@ -147,7 +147,7 @@ class ClaimLedgerTest(LifecycleHarness, unittest.TestCase):
     def admitted(self):
         """A v4 run: contractless issue 14 active, its launch and the controller claimed."""
         self.init_run()
-        workflow = load_source_module(SCRIPT, "host_admission_ledger")
+        workflow = load_source_module(MODULE, "host_admission_ledger")
         state = self.read_state()
         attempt = workflow.new_control_attempt(
             issue=14, attempt_number=1, worktree=str(self.root / "wt-14"),
