@@ -76,6 +76,25 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
         self.assertNotIsInstance(caught.exception, ReconstructionUnavailable)
         self.assertEqual(before, self.snapshot())
 
+    def test_repository_virtualized_during_the_walk_is_refused_by_the_post_walk_guard(self):
+        # #606: the guard runs before and after each object walk (#262 D2); a change landing
+        # mid-walk is seen only by the second. Pin it, so removing it cannot pass unnoticed.
+        from agent_tools import review_git
+        first, second = self.seed_owned()
+        graft = self.repo / '.git/info/grafts'
+        real = review_git._identity
+        calls = []
+        def identity(value, algorithm):
+            calls.append(value)
+            if len(calls) == 2:  # first is the tip check; the second is inside the walk
+                graft.write_text(f'{second} {first} {self.base}\n')
+            return real(value, algorithm)
+        with patch.object(review_git, '_identity', identity):
+            with self.assertRaises(review_git.HistoryError) as caught:
+                review_git.original_commit(self.repo, second)
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(str(caught.exception), 'original_history_virtualized')
+
     def test_replacement_and_alternate_graft_environment_are_invalid(self):
         first, second = self.seed_owned()
         self.git('replace', '--graft', second, first, self.base)
