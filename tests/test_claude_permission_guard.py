@@ -2437,8 +2437,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"cd {there.parent} && git -C {there.name} push origin {feature}", here),
             (f"cd {there} && git -C {here} push origin {feature}", foreign),
             (f"cd {there}/ && git push origin {feature}", None),
-            # A backslash-newline continuation joins the words, as in the shell.
-            (f"cd\\\n {there} && git push origin {feature}", here),
             # A mention is not a directory change.
             (f"echo cd {foreign} && git push origin {feature}", here),
             (f'git push origin {feature} && echo "cd {foreign}"', here),
@@ -2454,11 +2452,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"cd {here} && git push origin main", there,
              "unsafe push: refusing to push the default branch main"),
             (f"cd {foreign} && git push origin {feature}", here,
-             "unsafe push: repository someoneelse/tool is outside standing authorization"),
-            # A directory word split by a continuation is still a directory change.
-            (f"c\\\nd {there} && git push origin trunk", here,
-             "unsafe push: refusing to push the default branch trunk"),
-            (f"c\\\nd {foreign} && git push origin {feature}", here,
              "unsafe push: repository someoneelse/tool is outside standing authorization"),
             (f"cd {foreign} && {create}", there,
              "unsafe PR creation: repository someoneelse/tool is outside standing authorization"),
@@ -2487,6 +2480,17 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("push", f"cd ~ && git push origin {feature}"),
             ("push", f"cd && git push origin {feature}"),
             ("push", f"pushd {there} && git push origin {feature}"),
+            # Any backslash-newline continuation leaves the directory unresolved: an
+            # apostrophe in a comment or a here-document body opens no quote in the
+            # shell, so no quote tracking is trusted to join it (review of issue 418).
+            ("push", f"cd\\\n {there} && git push origin {feature}"),
+            ("push", f"c\\\nd {there} && git push origin trunk"),
+            ("push", f"c\\\nd {foreign} && git push origin {feature}"),
+            ("push", f"true # it's\nc\\\nd {there} && git push origin trunk"),
+            ("push", f"cat <<EOF\nit's\nEOF\nc\\\nd {there} && git push origin trunk"),
+            ("PR creation", f"true # it's\nc\\\nd {there} && {create}"),
+            ("PR creation", f"cat <<EOF\nit's\nEOF\nc\\\nd {there} && {create}"),
+            ("PR creation", f"c\\\nd {there} && {create}"),
             ("push", f"pu\\\nshd {there} && git push origin {feature}"),
             ("push", f"cd {there} && c\\\nd {here} && git push origin {feature}"),
             # A quote's span ends where the shell ends it, so a continuation after it

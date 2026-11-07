@@ -1286,43 +1286,16 @@ def cd_prelude_directory(command):
     return word, remainder
 
 
-def join_continuations(command):
-    """`command` with each backslash-newline continuation removed, as the shell
-    does outside single quotes (and inside double quotes), so `c\\<newline>d`
-    reads as `cd` (issue 418). An apostrophe inside double quotes is literal and a
-    double quote inside single quotes is too, so each span ends where the shell
-    ends it; an escaped pair (`\\\\`, `\\"`) is kept whole, so it never pairs with a
-    later newline or quote."""
-    parts = []
-    quote = None
-    index = 0
-    while index < len(command):
-        character = command[index]
-        if quote == "'":
-            if character == "'":
-                quote = None
-        elif character == "\\" and index + 1 < len(command):
-            following = command[index + 1]
-            if following != "\n" and (quote is None or following in '$`"\\'):
-                parts.append(command[index:index + 2])
-                index += 2
-                continue
-            if following == "\n":
-                index += 2
-                continue
-        elif character == '"':
-            quote = None if quote == '"' else '"'
-        elif character == "'" and quote is None:
-            quote = "'"
-        parts.append(character)
-        index += 1
-    return "".join(parts)
-
-
 def shell_directory(command):
     """(directory, problem): the directory a leading `cd` moves a push or PR
-    creation to, or the problem with any other directory change (issue 418)."""
-    command = join_continuations(command)
+    creation to, or the problem with any other directory change (issue 418).
+
+    Any backslash-newline leaves the directory unresolved: whether the shell
+    joins it depends on quoting, comments and here-document bodies, which no
+    quote tracking here reproduces, so a continuation can split a directory word
+    out of sight."""
+    if "\\\n" in command:
+        return None, CD_PRELUDE_PROBLEM
     prelude = cd_prelude_directory(command)
     if prelude is not None:
         if not directory_change(prelude[1]):

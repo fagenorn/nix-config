@@ -126,7 +126,13 @@
     {"id": "pr-create.eval-expansion-cd", "template": "eval '${CMD:-cd <repository-root>}' && gh pr create --repo <resolved-repository> --base main --head <branch> --title \"x\" --body \"y\"",
      "label": "PR creation", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}},
     {"id": "push.env-chdir", "template": "env -C <repository-root> git push origin <branch>",
-     "label": "push", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}}
+     "label": "push", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}},
+    {"id": "push.comment-apostrophe-continuation-cd", "template": "true # it's\nc\\\nd <repository-root> && git push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}},
+    {"id": "push.heredoc-apostrophe-continuation-cd", "template": "cat <<EOF\nit's\nEOF\nc\\\nd <repository-root> && git push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}},
+    {"id": "pr-create.comment-apostrophe-continuation-cd", "template": "true # it's\nc\\\nd <repository-root> && gh pr create --repo <resolved-repository> --base main --head <branch> --title \"x\" --body \"y\"",
+     "label": "PR creation", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}}
   ],
   "form_values": {
     "<n>": "402",
