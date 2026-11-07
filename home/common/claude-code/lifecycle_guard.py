@@ -1033,6 +1033,9 @@ ATTACHED_REDIRECTION = re.compile(r"^(\d+|&)?(>>?|<<?<?|<>|>&|<&)")
 # A segment cut at the `&` of `2>&1` ends in an unescaped `>` or `<`. Only then
 # does the next segment continue the same simple command.
 DANGLING_REDIRECTION = re.compile(r"(?:^|[^\\])(?:\\\\)*[<>]$")
+# A word that ends in a redirection operator (`>/dev/null>`, `X=>`) leaves that
+# operator without a target: the next word is it.
+TRAILING_OPERATOR = re.compile(r"[<>]&?$")
 
 
 def split_redirection(value):
@@ -1075,7 +1078,7 @@ def wrapper_option(wrapper, option):
 
 
 def detaching_command_flags(tokens, state=(True, None, (), False),
-                            embedded_targets=True):
+                            embedded_targets=True, assignments=None):
     """Per token: is it a word at which the shell may start a simple command?
 
     Returns (flags, payloads, state). `payloads` is the command text handed to
@@ -1094,6 +1097,10 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
     operator token ends any pending option argument. The verb pass keeps
     `command_position_flags`; this pass has no such fail-closed backstop, hence
     the extra stepping.
+
+    When `assignments` is a list, the index of every assignment word standing
+    where a command could start (`X=1`, before the command word) is appended to
+    it: such a word is not flagged, as it is not the command.
     """
     flags = [False] * len(tokens)
     payloads = []
@@ -1112,15 +1119,20 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
             target = True
             continue
         if ATTACHED_REDIRECTION.match(value) is not None:
+            # `>/dev/null>` is an attached redirection that ends in a bare one.
+            target = (embedded_targets
+                      and TRAILING_OPERATOR.search(value) is not None)
             continue
         word, redirection = split_redirection(value)
         target = (embedded_targets
-                  and BARE_REDIRECTION.match(redirection) is not None)
+                  and TRAILING_OPERATOR.search(redirection) is not None)
         if pending:
             if pending.pop(0) == "payload":
                 payloads.append(value)
             continue
         if ASSIGNMENT_PREFIX.match(word) is not None:
+            if assignments is not None:
+                assignments.append(index)
             continue
         if word in COMMAND_KEYWORDS or word in COMMAND_WRAPPERS:
             wrapper = word
@@ -1301,9 +1313,11 @@ def directory_change(text):
                for index, token in enumerate(tokens)):
             return True
         flags = [False] * len(tokens)
+        assigned = []
         for reading in readings:
             read_flags, _payloads, after = detaching_command_flags(
-                tokens, states[reading], embedded_targets=reading)
+                tokens, states[reading], embedded_targets=reading,
+                assignments=assigned)
             dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
             states[reading] = after if dangling else fresh
             flags = [a or b for a, b in zip(flags, read_flags)]
@@ -1313,7 +1327,10 @@ def directory_change(text):
             if operator:
                 continue
             word = split_redirection(value)[0]
-            if ZSH_SPECIAL_ASSIGNMENT.match(word) is not None:
+            # Only where an assignment or command word can stand: the same text
+            # in an argument (`--title "options=fast"`) is data.
+            if ((flag or index in assigned)
+                    and ZSH_SPECIAL_ASSIGNMENT.match(word) is not None):
                 return True
             if flag and ("$" in word or "`" in word or "=" in word
                          or (word in SHELL_BUILTINS and word not in INERT_BUILTINS)):

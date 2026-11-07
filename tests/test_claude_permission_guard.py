@@ -2445,6 +2445,13 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f'git push origin {feature} && echo "cd {foreign}"', here),
             # No repository-bound verb: nothing to judge.
             (f"cd {foreign} && ls", here),
+            # A word that merely looks like a zsh special assignment, in argument
+            # position, is data (final review of issue 418).
+            ('gh pr create --repo fagenorn/nix-config --base main --head topic '
+             '--title "options=fast" --body "y"', here),
+            ('gh pr create --repo fagenorn/nix-config --base main --head topic '
+             '--title "x" --body "functions=y"', here),
+            (f"echo aliases=x && git push origin {feature}", here),
         ):
             with self.subTest(command=command, cwd=cwd):
                 result = self.run_guard(command, cwd=cwd)
@@ -2549,6 +2556,19 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("push", f"cd>/dev/null {there} && git push origin trunk"),
             ("push", f"cd {there} >/dev/null && git push origin {feature}"),
             ("push", f"cd {there} 2>&1 && git push origin {feature}"),
+            # Chained redirections: a trailing operator takes the next word as its
+            # target, so the directory word is still at a command position (final
+            # review of issue 418).
+            ("push", f">/dev/null> /dev/null cd {there} && git push origin trunk"),
+            ("push", f">/dev/null>/dev/null cd {there} && git push origin trunk"),
+            ("push", f">/dev/null>> /dev/null cd {there} && git push origin trunk"),
+            ("push", f"X=1>/dev/null> /dev/null cd {there} && git push origin trunk"),
+            ("PR creation", f">/dev/null> /dev/null cd {there} && {create}"),
+            # A special-hash assignment at a command position still refuses.
+            ("push", f"options[autocd]=on; git push origin {feature}"),
+            ("push", f"X=1 options[autocd]=on; git push origin {feature}"),
+            ("push", f"options=on; git push origin {feature}"),
+            ("push", f"X=1 aliases=x; git push origin {feature}"),
             # Expansions that run a directory word (review R2).
             ("push", f"eval '${{CMD:-cd {there}}}' && git push origin trunk"),
             ("push", f"${{CMD:-cd}} {there} && git push origin trunk"),
