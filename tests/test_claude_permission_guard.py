@@ -2949,6 +2949,18 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"export PAGER='{force}'; git log", f"the assignment PAGER= {assigns}"),
             ("EDITOR=/tmp/p.sh; git commit", f"the assignment EDITOR= {assigns}"),
             ("sh -c 'GIT_PAGER=/tmp/p.sh git log'", evaluator),
+            # The append spelling `NAME+=value` is an assignment too.
+            (f"GIT_SEQUENCE_EDITOR+='{force}; true' git rebase -i HEAD~1",
+             f"the assignment GIT_SEQUENCE_EDITOR= {assigns}"),
+            (f"export GIT_PAGER+='{force}'; git log",
+             f"the assignment GIT_PAGER= {assigns}"),
+            ("GIT_SSH_COMMAND+=/tmp/p.sh git fetch origin",
+             f"the assignment GIT_SSH_COMMAND= {assigns}"),
+            ("env GIT_SSH_COMMAND+=/tmp/p.sh git fetch origin",
+             f"the assignment GIT_SSH_COMMAND= {assigns}"),
+            ("sh -c 'GIT_PAGER+=x git log'", evaluator),
+            ("bash -c \"export GIT_SEQUENCE_EDITOR+=x; git rebase -i HEAD~1\"",
+             evaluator),
             ("echo \"$(GIT_PAGER=/tmp/p.sh git log)\"",
              "a command substitution inside a quoted word cannot be validated"),
         ):
@@ -2972,6 +2984,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "LC_ALL=C git log -1",
             "env -u GITHUB_TOKEN git status",
             "export FOO=1; git status",
+            "GIT_TRACE+=1 git status",
+            "LC_ALL+=C git log -1",
             "echo $GIT_PAGER",
             "PYTHONPATH=python python3 -c pass",
         ):

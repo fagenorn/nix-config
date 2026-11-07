@@ -193,7 +193,10 @@ DETACHING_ROUTES = (
 # Characters that end a word and re-open the command position: subshells,
 # groups, `case` arms and command substitution all start a command after one.
 OPERATOR_CHARS = "(){}`"
-ASSIGNMENT_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# `NAME=` and the append form `NAME+=`, which bash also treats as an
+# assignment (and which equals `NAME=` when NAME is unset); `name` is the bare
+# variable name.
+ASSIGNMENT_PREFIX = re.compile(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\+?=")
 SLUG_PATTERN = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 REF_NAME_PATTERN = re.compile(r"[A-Za-z0-9._/-]+")
 # Path components that make a token a namespaced ref rather than a branch
@@ -974,7 +977,7 @@ def git_assigned_names(token_lists):
                 GIT_RAW_WORD.fullmatch(assigned) is not None
                 or dashed_git_program(program_name(assigned))
             ):
-                names.add(match.group(0)[:-1])
+                names.add(match.group("name"))
     return names
 
 
@@ -1121,7 +1124,7 @@ def git_prefix_assignments(tokens, index):
     for value, is_operator in tokens[start:index]:
         match = None if is_operator else ASSIGNMENT_PREFIX.match(value)
         if match is not None:
-            names.append(match.group()[:-1])
+            names.append(match.group("name"))
     return names
 
 
@@ -1204,7 +1207,7 @@ def transmit_in_raw_text(text):
                     return True
                 match = ASSIGNMENT_PREFIX.match(word)
                 if match is not None and git_assignment_problem(
-                        [match.group()[:-1]], False) is not None:
+                        [match.group("name")], False) is not None:
                     return True
                 if (GIT_RAW_WORD.fullmatch(word) is not None
                         and git_transmit_problem(
@@ -1438,7 +1441,7 @@ def guarded_operations(command):
             match = None if is_operator else ASSIGNMENT_PREFIX.match(value)
             if match is None:
                 continue
-            problem = git_assignment_problem([match.group()[:-1]], False)
+            problem = git_assignment_problem([match.group("name")], False)
             if problem is not None:
                 found.append((
                     "transmit", segment,
