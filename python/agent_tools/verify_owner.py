@@ -16,7 +16,10 @@ from agent_tools.forge_markers import Marker
 
 KIND = forge_claim.OWNER_ACTION_KIND
 LABEL = forge_claim.OWNER_ACTION
-ASK, APPROVE, ACT, DECISION, STALE = "ask", "approve", "act", "decision", "stale-check"
+# Every reason carries the `verify-` prefix so it never names an `owner-action` reason of another writer
+# (`forge_owner_action.REASONS`, issue 636, posts `decision` markers with no `block` or `check`).
+ASK, APPROVE, ACT = "verify-ask", "verify-approve", "verify-act"
+DECISION, STALE = "verify-decision", "verify-stale-check"
 REASONS = (ASK, APPROVE, ACT, DECISION, STALE)
 ACCEPT, REJECT = "Accept", "Reject"
 RUN_IT = "Run it"

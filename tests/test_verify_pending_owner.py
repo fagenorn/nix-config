@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import forge_markers as fm
+from agent_tools import forge_owner_action as foa
 from agent_tools import verify_owner as vo
 from agent_tools import verify_pending
 from agent_tools import verify_run as vr
@@ -97,8 +98,9 @@ class PromptOnceTest(OwnerBase):
 
     def test_ask(self):
         self.hold(ask_check())
-        prompt = self.three_passes("ask", lambda p: self.tick(p.comment_id, "Accept"))
-        self.assertEqual(prompt.fields, {"reason": "ask", "block": bkey(ask_check()), "check": "0", "host": "mbp"})
+        prompt = self.three_passes("verify-ask", lambda p: self.tick(p.comment_id, "Accept"))
+        self.assertEqual(prompt.fields,
+                         {"reason": "verify-ask", "block": bkey(ask_check()), "check": "0", "host": "mbp"})
         self.assertIn("Is the dock icon bright?", prompt.body)
         self.assertEqual(self.results(), ["pass"])
         self.assertEqual(self.markers("verify-result")[0].fields["owner"], str(prompt.comment_id))
@@ -106,10 +108,10 @@ class PromptOnceTest(OwnerBase):
 
     def test_approve(self):
         self.hold(ok_check(effects="live"))
-        prompt = self.three_passes("approve", lambda p: self.tick(p.comment_id, "Run it"))
+        prompt = self.three_passes("verify-approve", lambda p: self.tick(p.comment_id, "Run it"))
         digest = vo.run_digest({"command": "check-ok"}, {"argv": ["verify-ok"], "cwd": ".", "env": []})
-        self.assertEqual(prompt.fields, {"reason": "approve", "block": bkey(ok_check(effects="live")), "check": "0",
-                                         "host": "mbp", "effects": "live", "round": "1", "run": digest})
+        self.assertEqual(prompt.fields, {"reason": "verify-approve", "block": bkey(ok_check(effects="live")),
+                                         "check": "0", "host": "mbp", "effects": "live", "round": "1", "run": digest})
         self.assertIn('Command: ["verify-ok"]', prompt.body)
         self.assertEqual((self.spawned("verify-ok"), self.results()), (1, ["pass"]))
 
@@ -119,7 +121,7 @@ class PromptOnceTest(OwnerBase):
         self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
         self.assertEqual(self.spawned("verify-later"), 0)  # `then` waits for a later pass
         prompt = self.three_passes_after_first(
-            "act", lambda p: self.world.respond("verify-later", [], exit=0, stdout="verify-later ran\n"))
+            "verify-act", lambda p: self.world.respond("verify-later", [], exit=0, stdout="verify-later ran\n"))
         self.assertIn("Plug the dock in", prompt.body)
         self.assertIn('Then: ["verify-later"]', prompt.body)
         self.assertEqual(self.results(), ["pass"])
@@ -128,8 +130,8 @@ class PromptOnceTest(OwnerBase):
         offline = ok_check(host="eleven-m5")
         self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(offline)), at="2026-10-20T10:00:00Z")],
                                  labels=["needs-verification"])
-        prompt = self.three_passes("stale-check", lambda p: self.tick(p.comment_id, "Accept without eleven-m5"))
-        self.assertEqual(prompt.fields, {"reason": "stale-check", "block": bkey(offline), "check": "0",
+        prompt = self.three_passes("verify-stale-check", lambda p: self.tick(p.comment_id, "Accept without eleven-m5"))
+        self.assertEqual(prompt.fields, {"reason": "verify-stale-check", "block": bkey(offline), "check": "0",
                                          "host": "eleven-m5", "cause": "silent", "last": "never"})
         waived, = self.markers("verify-result")
         self.assertEqual((waived.fields["state"], waived.fields["waived"]), ("pass", "eleven-m5"))
@@ -141,12 +143,12 @@ class AskTest(OwnerBase):
     def test_reject_records_a_fail_with_the_failed_label(self):
         self.hold(ask_check())
         self.run_pass()
-        prompt, = self.prompts("ask")
+        prompt, = self.prompts("verify-ask")
         self.tick(prompt.comment_id, "Reject")
         self.assertEqual(self.run_pass(), [line(0, "AC1", "fail", "owner_answered")])
         self.assertEqual(self.results(), ["fail"])
         self.assertIn("verification-failed", self.world.issue()["labels"])
-        self.assertEqual(self.prompts("decision"), [])
+        self.assertEqual(self.prompts("verify-decision"), [])
         mark = len(self.world.argvs("gh"))
         self.run_pass()
         self.assertEqual(self.prompt_posts(mark), [])  # never asked twice for one block version
@@ -155,7 +157,7 @@ class AskTest(OwnerBase):
         self.hold(ask_check())
         self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
         self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_waiting")])
-        prompt, = self.prompts("ask")
+        prompt, = self.prompts("verify-ask")
         self.tick(prompt.comment_id, "Accept")
         self.tick(prompt.comment_id, "Reject")
         self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_ambiguous")])
@@ -165,7 +167,7 @@ class AskTest(OwnerBase):
     def test_another_host_reads_the_answer(self):
         self.hold(ask_check())
         self.run_pass("mbp")
-        prompt, = self.prompts("ask")
+        prompt, = self.prompts("verify-ask")
         self.tick(prompt.comment_id, "Accept")
         self.assertEqual(self.run_pass("eleven-m5")[0], line(0, "AC1", "pass", "owner_answered"))
 
@@ -173,18 +175,18 @@ class AskTest(OwnerBase):
         self.hold(ask_check(host="any"))
         node, = vr.list_held(SLUG)
         self.race(node, "mbp", "eleven-m5")
-        self.assertEqual(len(self.prompts("ask")), 1)
+        self.assertEqual(len(self.prompts("verify-ask")), 1)
 
     def test_a_delayed_pass_never_reposts_an_answered_prompt(self):
         self.hold(ask_check())
         delayed, = vr.list_held(SLUG)  # a listing taken before any prompt exists
         self.run_pass()
-        prompt, = self.prompts("ask")
+        prompt, = self.prompts("verify-ask")
         self.tick(prompt.comment_id, "Accept")
         self.run_pass()  # records the pass, ends the prompt, closes the issue
         mark = len(self.world.argvs("gh"))
         vr.pass_issue(self.project, "mbp", delayed, Refs())
-        self.assertEqual([p.comment_id for p in self.prompts("ask")], [prompt.comment_id])
+        self.assertEqual([p.comment_id for p in self.prompts("verify-ask")], [prompt.comment_id])
         self.assertEqual((self.live_prompts(), self.label_calls(mark)), ([], []))
         self.assertEqual(self.world.issue()["state"], "closed")
 
@@ -193,7 +195,7 @@ class AskTest(OwnerBase):
         old, = vr.list_held(SLUG)
         fm.edit(SLUG, 10, hold(block(ask_check(ac="AC2"))))  # the owner edits the block: a new version
         self.run_pass()
-        new, = self.prompts("ask")
+        new, = self.prompts("verify-ask")
         self.assertEqual(new.fields["block"], bkey(ask_check(ac="AC2")))
         vr.pass_issue(self.project, "mbp", old, Refs())  # a pass that still holds the old version
         self.assertEqual([p.fields["block"] for p in self.live_prompts()], [bkey(ask_check(ac="AC2"))])
@@ -207,12 +209,12 @@ class AskTest(OwnerBase):
 
     def test_an_edited_block_supersedes_the_old_prompt_and_asks_again(self):
         earlier = bkey(ask_check())
-        old = fm.render("owner-action", {"reason": "ask", "block": earlier, "check": "0", "host": "mbp"},
+        old = fm.render("owner-action", {"reason": "verify-ask", "block": earlier, "check": "0", "host": "mbp"},
                         "AC1: the owner's answer is needed.", "Q?\n\n- [ ] Accept\n- [ ] Reject")
         self.hold(ask_check(ac="AC2"), extra=[stored_comment(11, old)])  # same comment 10, edited content
         self.assertEqual(self.run_pass(), [line(0, "AC2", "pending", "owner_asked")])
-        self.assertEqual([p.fields["block"] for p in self.prompts("ask")], [earlier, bkey(ask_check(ac="AC2"))])
-        self.assertEqual([p.comment_id for p in self.live_prompts()], [self.prompts("ask")[1].comment_id])
+        self.assertEqual([p.fields["block"] for p in self.prompts("verify-ask")], [earlier, bkey(ask_check(ac="AC2"))])
+        self.assertEqual([p.comment_id for p in self.live_prompts()], [self.prompts("verify-ask")[1].comment_id])
         self.assertIn(post_end(11, "superseded"), self.world.argvs("gh"))
         self.assertIn("owner-action", self.world.issue()["labels"])
 
@@ -228,12 +230,13 @@ class ApproveConsumeTest(OwnerBase):
         self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
         for _ in range(2):
             self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_waiting")])
-        self.assertEqual((self.spawned("verify-ok"), len(self.prompts("approve")), self.consumptions()), (0, 1, []))
+        self.assertEqual((self.spawned("verify-ok"), len(self.prompts("verify-approve")), self.consumptions()),
+                         (0, 1, []))
 
     def test_only_the_named_host_consumes_a_ticked_box(self):
         self.hold(ok_check(effects="live"))
         self.run_pass("mbp")
-        prompt, = self.prompts("approve")
+        prompt, = self.prompts("verify-approve")
         self.tick(prompt.comment_id, "Run it")
         self.assertEqual(self.run_pass("eleven-m5"), [line(0, "AC1", "pending", "not_this_host")])
         self.assertEqual((self.spawned("verify-ok"), self.consumptions()), (0, []))
@@ -247,14 +250,14 @@ class ApproveConsumeTest(OwnerBase):
         later = check(effects="live", run={"command": "check-later"})
         self.hold(later)
         self.run_pass()
-        first, = self.prompts("approve")
+        first, = self.prompts("verify-approve")
         self.tick(first.comment_id, "Run it")
         node, = vr.list_held(SLUG)
         self.race(node, "mbp", "mbp")
         self.assertEqual((self.spawned("verify-later"), len(self.consumptions())), (1, 1))
         self.run_pass()
         self.assertEqual(self.spawned("verify-later"), 1)
-        rounds = self.prompts("approve")
+        rounds = self.prompts("verify-approve")
         self.assertEqual([p.fields["round"] for p in rounds], ["1", "2"])
         self.assertEqual([p.comment_id for p in self.live_prompts()], [rounds[1].comment_id])
         self.tick(rounds[1].comment_id, "Run it")
@@ -264,14 +267,14 @@ class ApproveConsumeTest(OwnerBase):
     def test_a_command_changed_after_the_prompt_needs_a_new_prompt_and_a_new_tick(self):
         self.hold(ok_check(effects="live"))
         self.run_pass()
-        first, = self.prompts("approve")
+        first, = self.prompts("verify-approve")
         self.tick(first.comment_id, "Run it")
         commands = {**self.project.bindings["commands"],
                     "check-ok": {**self.project.bindings["commands"]["check-ok"], "argv": ["verify-bad"]}}
         self.project = dataclasses.replace(self.project, bindings={**self.project.bindings, "commands": commands})
         self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
         self.assertEqual((self.spawned("verify-ok"), self.spawned("verify-bad"), self.consumptions()), (0, 0, []))
-        rounds = self.prompts("approve")
+        rounds = self.prompts("verify-approve")
         self.assertEqual([p.fields["round"] for p in rounds], ["1", "2"])
         self.assertNotEqual(rounds[0].fields["run"], rounds[1].fields["run"])
         self.assertIn('Command: ["verify-bad"]', rounds[1].body)
@@ -284,20 +287,20 @@ class ApproveConsumeTest(OwnerBase):
     def test_a_tick_survives_a_pass_that_resolves_the_contract_under_a_new_scratch_root(self):
         self.hold(ok_check(effects="live"))
         self.run_pass()
-        first, = self.prompts("approve")
+        first, = self.prompts("verify-approve")
         self.tick(first.comment_id, "Run it")
         scratch = Path("/tmp/scratch-export-two/default")  # every real pass resolves under a fresh export
         moved = {name: {**entry, "cwd": str(scratch)} for name, entry in self.project.bindings["commands"].items()}
         self.project = dataclasses.replace(self.project, root=scratch, contract_root=scratch,
                                            bindings={**self.project.bindings, "commands": moved})
         self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))
-        self.assertEqual((self.spawned("verify-ok"), len(self.prompts("approve"))), (1, 1))
+        self.assertEqual((self.spawned("verify-ok"), len(self.prompts("verify-approve"))), (1, 1))
         self.assertEqual([m.fields["consumed"] for m in self.consumptions()], [str(first.comment_id)])
 
     def test_a_ticked_approval_for_a_block_replaced_since_the_listing_never_runs(self):
         self.hold(ok_check(effects="live"))
         self.run_pass()
-        first, = self.prompts("approve")
+        first, = self.prompts("verify-approve")
         self.tick(first.comment_id, "Run it")
         old, = vr.list_held(SLUG)
         fm.edit(SLUG, 10, hold(block(ok_check(effects="live", ac="AC2"))))  # the owner replaces the held block
@@ -313,7 +316,7 @@ class ApproveConsumeTest(OwnerBase):
         live = ok_check(effects="live")
         self.hold(live)
         self.run_pass()
-        prompt, = self.prompts("approve")
+        prompt, = self.prompts("verify-approve")
         self.tick(prompt.comment_id, "Run it")
         self.world.append_comment(stored_comment(300, marker(
             "verify-run", {"consumed": str(prompt.comment_id), "host": "mbp", "run": prompt.fields["run"]})))
@@ -380,8 +383,8 @@ class QuietFailureTest(OwnerBase):
         self.hold(bad)
         self.assertEqual(self.run_pass(), [line(0, "AC1", "fail", "fail_ask")])
         fail, = self.markers("verify-result")
-        decision, = self.prompts("decision")
-        self.assertEqual(decision.fields, {"reason": "decision", "block": bkey(bad), "check": "0", "on": "fail",
+        decision, = self.prompts("verify-decision")
+        self.assertEqual(decision.fields, {"reason": "verify-decision", "block": bkey(bad), "check": "0", "on": "fail",
                                            "result": str(fail.comment_id)})
         self.assertEqual(self.label_calls(), [OA_ADD])
         mark = len(self.world.argvs("gh"))
@@ -401,7 +404,7 @@ class QuietFailureTest(OwnerBase):
         fail, = self.markers("verify-result")
         self.assertEqual((self.prompts(), self.label_calls()), ([], []))
         self.assertEqual(self.run_pass(), [line(0, "AC1", "fail", "unchanged")])
-        decision, = self.prompts("decision")
+        decision, = self.prompts("verify-decision")
         self.assertEqual((decision.fields["on"], decision.fields["result"]), ("fail", str(fail.comment_id)))
         self.assertIn("owner-action", self.world.issue()["labels"])
         mark = len(self.world.argvs("gh"))
@@ -412,10 +415,10 @@ class QuietFailureTest(OwnerBase):
         later = check(run={"command": "check-later"}, on_expire="ask")
         self.hold(later, extra=self.due_long_ago(later))
         self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "not_yet")])
-        decision, = self.prompts("decision")
+        decision, = self.prompts("verify-decision")
         self.assertEqual(decision.fields["on"], "expire")
         self.run_pass()
-        self.assertEqual((len(self.prompts("decision")), self.spawned("verify-later")), (1, 2))
+        self.assertEqual((len(self.prompts("verify-decision")), self.spawned("verify-later")), (1, 2))
         self.tick(decision.comment_id, "Close as not verified")
         self.assertEqual(self.run_pass()[0], line(0, "AC1", "rejected", "owner_answered"))
         self.assertEqual(self.markers("verify-closed")[0].body.split("\n")[1], "Not verified: AC1 rejected.")
@@ -426,7 +429,7 @@ class QuietFailureTest(OwnerBase):
         later = check(run={"command": "check-later"}, on_expire="ask")
         self.hold(later, extra=self.due_long_ago(later))
         self.run_pass()
-        decision, = self.prompts("decision")
+        decision, = self.prompts("verify-decision")
         self.world.respond("verify-later", [], exit=1, stdout="verify-later failed\n")
         self.assertEqual(self.run_pass()[0], line(0, "AC1", "fail", "changed"))
         self.assertEqual([p.comment_id for p in self.live_prompts()], [decision.comment_id])
@@ -446,7 +449,7 @@ class QuietFailureTest(OwnerBase):
 
 class VerifyOwnerTest(unittest.TestCase):
     def test_answer_reads_boxes(self):
-        fields = {"reason": "ask", "block": "10.x", "check": "0", "host": "mbp"}
+        fields = {"reason": "verify-ask", "block": "10.x", "check": "0", "host": "mbp"}
         self.assertIsNone(vo.answer(prompt_marker(1, fields, "Q?\n\n- [ ] Accept\n- [ ] Reject"), "Accept", "Reject"))
         self.assertEqual(vo.answer(prompt_marker(1, fields, "Q?\n\n- [X] Accept\n- [ ] Reject"), "Accept", "Reject"), "yes")
         self.assertEqual(vo.answer(prompt_marker(1, fields, "Q?\n\n* [ ] Accept\n* [x] Reject"), "Accept", "Reject"), "no")
@@ -455,11 +458,11 @@ class VerifyOwnerTest(unittest.TestCase):
 
     def test_prompts_and_settlement(self):
         key = "10.x"
-        ask = prompt_marker(20, {"reason": "ask", "block": key, "check": "0", "host": "mbp"}, "- [ ] Accept")
-        other = prompt_marker(21, {"reason": "ask", "block": "9.y", "check": "0", "host": "mbp"}, "- [ ] Accept")
+        ask = prompt_marker(20, {"reason": "verify-ask", "block": key, "check": "0", "host": "mbp"}, "- [ ] Accept")
+        other = prompt_marker(21, {"reason": "verify-ask", "block": "9.y", "check": "0", "host": "mbp"}, "- [ ] Accept")
         plain = fm.parse({"id": 22, "body": result(key, 0, "fail"), "updated_at": T0})
         owned = fm.parse({"id": 23, "body": result(key, 0, "fail", owner="20"), "updated_at": T0})
-        self.assertEqual(vo.prompts([ask, other, plain], "ask", key, 0), [ask])
+        self.assertEqual(vo.prompts([ask, other, plain], "verify-ask", key, 0), [ask])
         self.assertEqual(vo.settle_reason(other, [ask, other], key, ("pass",)), "superseded")
         self.assertIsNone(vo.settle_reason(other, [ask, other], None, ("pass",)))  # no fresh key: never superseded
         self.assertIsNone(vo.settle_reason(ask, [ask], key, ("pass",)))
@@ -469,13 +472,15 @@ class VerifyOwnerTest(unittest.TestCase):
         self.assertEqual(vo.settle_reason(ask, [ask, passed], key, ("pass",)), "resolved")  # settled by the check's own result
         self.assertIsNone(vo.settle_reason(ask, [ask, passed], key, ("hit",)))
         ended = fm.parse({"id": 24, "body": fm.end_body(20, "answered"), "updated_at": T0})
-        self.assertEqual(vo.live_prompts([ask, ended], ("ask",), key, 0), [])
-        self.assertEqual(vo.prompts([ask, ended], "ask", key, 0), [ask])  # an ended prompt still counts as posted
+        self.assertEqual(vo.live_prompts([ask, ended], ("verify-ask",), key, 0), [])
+        # an ended prompt still counts as posted
+        self.assertEqual(vo.prompts([ask, ended], "verify-ask", key, 0), [ask])
 
     def test_decision_and_act_settlement(self):
         key = "10.x"
-        decision = prompt_marker(30, {"reason": "decision", "block": key, "check": "0", "on": "expire"}, "- [ ] Passed")
-        act = prompt_marker(31, {"reason": "act", "block": key, "check": "0", "host": "mbp"}, "Plug it in")
+        decision = prompt_marker(30, {"reason": "verify-decision", "block": key, "check": "0", "on": "expire"},
+                                 "- [ ] Passed")
+        act = prompt_marker(31, {"reason": "verify-act", "block": key, "check": "0", "host": "mbp"}, "Plug it in")
         plain = fm.parse({"id": 32, "body": result(key, 0, "fail"), "updated_at": T0})
         owned = fm.parse({"id": 33, "body": result(key, 0, "rejected", owner="30"), "updated_at": T0})
         later = fm.parse({"id": 34, "body": result(key, 0, "pass"), "updated_at": T0})
@@ -518,7 +523,7 @@ class StaleTest(OwnerBase):
         due = marker("verify-due", {"block": "9.0000000000000000", "check": "0", "host": "eleven-m5"})
         self.held_since(self.OLD, offline, extra=[stored_comment(11, due, at="2026-10-21T08:00:00Z")])
         self.run_pass()
-        stale, = self.prompts("stale-check")
+        stale, = self.prompts("verify-stale-check")
         self.assertEqual((stale.fields["cause"], stale.fields["last"]), ("silent", "2026-10-21"))
 
     def test_a_reporting_host_whose_check_is_not_due_is_never_stale(self):
@@ -547,7 +552,7 @@ class StaleTest(OwnerBase):
         due = marker("verify-due", {"block": bkey(later), "check": "0", "host": "mbp"})
         self.held_since(self.OLD, later, extra=[stored_comment(11, due, at="2026-10-28T10:00:00Z")])
         self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "not_yet")])
-        stale, = self.prompts("stale-check")
+        stale, = self.prompts("verify-stale-check")
         self.assertEqual((stale.fields["host"], stale.fields["cause"], stale.fields["last"]),
                          ("mbp", "unresolved", "2026-11-06"))
         self.assertIn("since 2026-10-28", stale.body)
@@ -560,18 +565,18 @@ class StaleTest(OwnerBase):
         self.assertEqual(self.prompts(), [])  # every pass took and deleted a lease: none moved the clock
         self.advance("2026-10-29T10:00:00Z")
         self.run_pass()
-        stale, = self.prompts("stale-check")
+        stale, = self.prompts("verify-stale-check")
         self.assertEqual((stale.fields["cause"], stale.fields["last"]), ("unresolved", "2026-10-29"))
         self.assertIn("since 2026-10-21", stale.body)
         self.advance("2026-11-02T10:00:00Z")
         self.run_pass()
-        self.assertEqual((len(self.prompts("stale-check")), self.spawned("verify-later")), (1, 5))
+        self.assertEqual((len(self.prompts("verify-stale-check")), self.spawned("verify-later")), (1, 5))
 
     def test_a_failed_or_prompted_check_is_not_reported_stale(self):
         bad = check(run={"command": "check-bad"})
         self.held_since(self.OLD, bad, check(ac="AC2", kind="human", reason="senses", run={"ask": "Is it bright?"}))
         self.run_pass()
-        self.assertEqual([p.fields["reason"] for p in self.prompts()], ["ask"])
+        self.assertEqual([p.fields["reason"] for p in self.prompts()], ["verify-ask"])
 
     def test_report_posts_nothing(self):
         self.held_since(self.OLD, ok_check(host="eleven-m5"), ok_check(ac="AC2"))
@@ -591,7 +596,7 @@ class StaleTest(OwnerBase):
                    stored_comment(12, result(bkey(*checks), 1, "fail", ac="AC2", host="eleven-m5"), at=self.OLD)]
         self.held_since(self.OLD, *checks, extra=results)
         self.run_pass()
-        stale, = self.prompts("stale-check")
+        stale, = self.prompts("verify-stale-check")
         self.assertEqual(stale.fields["check"], "2")
 
     def test_a_check_asked_this_pass_or_holding_a_live_prompt_is_not_also_reported_stale(self):
@@ -600,30 +605,79 @@ class StaleTest(OwnerBase):
         self.held_since(self.OLD, asking, extra=[stored_comment(11, due, at="2026-10-28T10:00:00Z")])
         self.run_pass()  # asks this pass
         self.run_pass()  # the ask is live
-        self.assertEqual([p.fields["reason"] for p in self.prompts()], ["ask"])
+        self.assertEqual([p.fields["reason"] for p in self.prompts()], ["verify-ask"])
 
     def test_an_ended_stale_prompt_is_never_posted_again(self):
         offline = ok_check(host="eleven-m5")
-        fields = {"reason": "stale-check", "block": bkey(offline), "check": "0", "host": "eleven-m5",
+        fields = {"reason": "verify-stale-check", "block": bkey(offline), "check": "0", "host": "eleven-m5",
                   "cause": "silent", "last": "never"}
         old = fm.render("owner-action", fields, "AC1 waits on eleven-m5, which last reported never.",
                         "- [ ] Accept without eleven-m5")
         ended = fm.end_body(11, "closed")
         self.held_since(self.OLD, offline, extra=[stored_comment(11, old), stored_comment(12, ended)])
         self.run_pass()
-        self.assertEqual([p.comment_id for p in self.prompts("stale-check")], [11])
+        self.assertEqual([p.comment_id for p in self.prompts("verify-stale-check")], [11])
 
     def test_the_waive_box_records_a_pass_whichever_runner_reads_it(self):
         offline = ok_check(host="eleven-m5")
         self.held_since(self.OLD, offline, ok_check(ac="AC2", host="eleven-m5"))
         self.run_pass()
-        prompt = self.prompts("stale-check")[0]
+        prompt = self.prompts("verify-stale-check")[0]
         self.assertIn("AC1 waits on eleven-m5, which last reported never.", prompt.body)
         self.tick(prompt.comment_id, "Accept without eleven-m5")
         self.assertEqual(self.run_pass("anis-desktop")[0], line(0, "AC1", "pass", "owner_waived"))
         waived = self.markers("verify-result")[0]
         self.assertEqual(waived.fields["owner"], str(prompt.comment_id))
         self.assertEqual(list(waived.fields)[-2:], ["waived", "owner"])
+
+
+class ForeignOwnerActionTest(OwnerBase):
+    """An `owner-action` marker a batch posts (issue 636) is not a verify-pending prompt: no pass ends it.
+
+    It carries `issue`, `reason` and `holder` but no `block` or `check`, so the sweep must leave it live
+    whether a block is held or the issue has left the listing, and whatever its reason is named."""
+
+    BATCH_ID = 11
+
+    def batch_marker(self, reason):
+        return fm.render("owner-action", {"issue": str(ISSUE), "reason": reason, "holder": "mbp/session-a"},
+                         "Delivery waits for the owner's answers below.", "- Which flag?")
+
+    def assert_untouched(self):
+        stored = [m for m in (fm.parse(c) for c in self.world.stored()) if m]
+        batch, = [m for m in stored if m.comment_id == self.BATCH_ID]
+        self.assertTrue(fm.is_live(batch, stored))
+        self.assertFalse(any(f"agent:end v1 of={self.BATCH_ID} " in part
+                             for a in self.world.argvs("gh") for part in a))
+
+    def held_block_pass(self, reason):
+        self.hold(ask_check(), extra=[stored_comment(self.BATCH_ID, self.batch_marker(reason))])
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
+        self.assert_untouched()
+        self.assertIn("owner-action", self.world.issue()["labels"])
+
+    def closing_pass(self, reason):
+        self.hold(ask_check(), extra=[stored_comment(self.BATCH_ID, self.batch_marker(reason))])
+        delayed, = vr.list_held(SLUG)
+        fm.remove_label(SLUG, ISSUE, "needs-verification")  # the issue leaves the listing: no held block
+        vr.pass_issue(self.project, "mbp", delayed, Refs())  # must not raise
+        self.assert_untouched()
+        self.assertIn("owner-action", self.world.issue()["labels"])  # the batch marker still stands
+
+    def test_a_batch_decision_survives_a_pass_on_a_held_block(self):
+        self.held_block_pass(foa.REASONS[0])
+
+    def test_a_batch_decision_survives_a_pass_with_no_held_block(self):
+        self.closing_pass(foa.REASONS[0])
+
+    def test_a_marker_without_block_and_check_is_ignored_even_under_a_verify_reason(self):
+        self.held_block_pass(vo.DECISION)
+
+    def test_a_marker_without_block_and_check_is_ignored_on_the_closing_path(self):
+        self.closing_pass(vo.DECISION)
+
+    def test_the_two_reason_sets_are_disjoint(self):
+        self.assertEqual(set(vo.REASONS) & set(foa.REASONS), set())
 
 
 class StaleVocabularyTest(unittest.TestCase):
@@ -636,7 +690,7 @@ class StaleVocabularyTest(unittest.TestCase):
         host = {"host": "eleven-m5"}
         quiet = [self.mark(1, "verify-run", host, "2026-11-01T00:00:00Z"),
                  self.mark(2, "verify-run", {"consumed": "5", **host}, "2026-11-02T00:00:00Z"),
-                 self.mark(3, "owner-action", {"reason": "approve", **host}, "2026-11-03T00:00:00Z"),
+                 self.mark(3, "owner-action", {"reason": "verify-approve", **host}, "2026-11-03T00:00:00Z"),
                  self.mark(4, "verify-result", {"host": "mbp"}, "2026-11-04T00:00:00Z")]
         self.assertEqual((vo.last_seen(quiet, "eleven-m5"), vo.last_report(quiet, "eleven-m5")), (None, "never"))
         kinds = [self.mark(5, "verify-result", host, "2026-10-01T00:00:00Z"),
@@ -652,7 +706,7 @@ class StaleVocabularyTest(unittest.TestCase):
 
     def test_a_stale_prompt_settles_when_answered_or_final(self):
         key = "9.x"
-        prompt = prompt_marker(20, {"reason": "stale-check", "block": key, "check": "0", "host": "eleven-m5",
+        prompt = prompt_marker(20, {"reason": "verify-stale-check", "block": key, "check": "0", "host": "eleven-m5",
                                     "cause": "silent", "last": "never"}, "- [ ] Accept without eleven-m5")
         waived = self.mark(21, "verify-result", {"block": key, "check": "0", "state": "pass", "owner": "20"},
                            T0)
@@ -695,7 +749,7 @@ class ApproveAllLiveTest(OwnerBase):
         paid = check(ac="AC2", effects="paid", run={"command": "check-ok"})
         self.hold(live, paid)
         self.run_pass()
-        prompts = {p.fields["effects"]: p for p in self.prompts("approve")}
+        prompts = {p.fields["effects"]: p for p in self.prompts("verify-approve")}
         mark = len(self.world.argvs("gh"))
         code, lines, _ = self.cli("approve", "--repo", SLUG, "--all-live")
         self.assertEqual(code, 0)
@@ -714,7 +768,7 @@ class ApproveAllLiveTest(OwnerBase):
     def test_every_comment_of_an_issue_beyond_the_last_100_is_read(self):
         self.hold(check(effects="live", run={"command": "check-ok"}))
         self.run_pass()
-        prompt, = self.prompts("approve")
+        prompt, = self.prompts("verify-approve")
         for n in range(101):  # the block and the prompt fall out of the GraphQL `last: 100` window
             self.world.append_comment(stored_comment(1000 + n, f"note {n}"))
         mark = len(self.world.argvs("gh"))
@@ -724,8 +778,8 @@ class ApproveAllLiveTest(OwnerBase):
 
     def test_every_page_of_held_issues_is_read(self):
         live = check(effects="live", run={"command": "check-ok"})
-        prompt = fm.render("owner-action", {"reason": "approve", "block": bkey(live), "check": "0", "host": "mbp",
-                                            "effects": "live", "round": "1", "run": "0123456789abcdef"},
+        prompt = fm.render("owner-action", {"reason": "verify-approve", "block": bkey(live), "check": "0",
+                                            "host": "mbp", "effects": "live", "round": "1", "run": "0123456789abcdef"},
                            "AC1 has live effects.", 'Command: ["verify-ok"]\n\n- [ ] Run it')
 
         def issue(number, comments):
@@ -771,6 +825,6 @@ class ApproveAllLiveTest(OwnerBase):
         self.assertEqual(self.cli("approve", "--repo", SLUG)[0], 2)
 
     def test_tick_rewrites_one_box(self):
-        body = fm.render("owner-action", {"reason": "approve"}, "Run?", "Command: x\n\n- [ ] Run it")
+        body = fm.render("owner-action", {"reason": "verify-approve"}, "Run?", "Command: x\n\n- [ ] Run it")
         self.assertEqual(vo.tick(body, "Run it"), body.replace("- [ ] Run it", "- [x] Run it"))
         self.assertIsNone(vo.tick(body.replace("[ ]", "[x]"), "Run it"))

@@ -18,14 +18,17 @@ next pass skip work, comes after the step it would strand; a `ForgeError` ends t
 `forge_error` line and the next pass finishes the work.
 
 A check only the owner can answer reaches the owner through an `owner-action` prompt (issue 631),
-one comment with check boxes, posted once per identity ever: `ask` (a question for the owner),
-`approve` (a live or paid command awaiting a tick), `act` (something the owner must do), `decision`
-(what to do with a failed or expired check) and `stale-check` (a host-bound check whose host has
-been silent). Contesting a prompt is once-only, so an ended prompt is never posted again. A pass
-records that a host looked at the issue in a `verify-seen` report marker, which is what stale-check
-reads, and sweeps the prompts the freshly read held block no longer needs, keeping the
-`owner-action` label on the issue exactly while one prompt stands. `approve_all_live` is the
-owner's bulk tick of the live approve prompts of a repository, outside any pass.
+one comment with check boxes, posted once per identity ever: `verify-ask` (a question for the
+owner), `verify-approve` (a live or paid command awaiting a tick), `verify-act` (something the owner
+must do), `verify-decision` (what to do with a failed or expired check) and `verify-stale-check` (a
+host-bound check whose host has been silent). Contesting a prompt is once-only, so an ended prompt
+is never posted again. A pass records that a host looked at the issue in a `verify-seen` report
+marker, which is what stale-check reads, and sweeps the prompts the freshly read held block no
+longer needs, keeping the `owner-action` label on the issue exactly while one `owner-action` marker
+stands. The `verify-` prefix keeps these reasons apart from the `owner-action` markers a batch posts
+(issue 636), and the sweep only ends a marker of these reasons that carries `block` and `check`, so
+it never settles another writer's owner-action. `approve_all_live` is the owner's bulk tick of the
+live approve prompts of a repository, outside any pass.
 """
 import json
 import re
@@ -788,8 +791,9 @@ class _Pass:
         gone: set[int] = set()
         for m in fresh:
             if m.kind != verify_owner.KIND or not forge_markers.is_live(m, fresh) \
-                    or m.fields.get("reason") not in verify_owner.REASONS:
-                continue
+                    or m.fields.get("reason") not in verify_owner.REASONS \
+                    or "block" not in m.fields or "check" not in m.fields:
+                continue  # another writer's owner-action (a batch's, issue 636) is never this sweep's to end
             why = verify_owner.settle_reason(m, fresh, held_key, FINAL) or ("closed" if closing else None)
             if why is not None:
                 forge_markers.end(self.slug, self.number, m.comment_id, why)

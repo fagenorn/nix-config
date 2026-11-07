@@ -944,7 +944,7 @@ class PassTransitionsTest(PassBase):
         self.assertEqual([m.fields["state"] for m in self.markers("verify-result")], ["fail"])
         self.assertNotIn("verification-failed", self.world.issue()["labels"])
         self.assertEqual([a for a in self.mutations() if "verification-failed" in " ".join(a)], [])
-        self.assertEqual(len([m for m in self.markers("owner-action") if m.fields["reason"] == "decision"]), 1)
+        self.assertEqual(len([m for m in self.markers("owner-action") if m.fields["reason"] == "verify-decision"]), 1)
         self.second_pass_is_silent()
 
     def test_fail_then_pass_changes_state_and_clears_the_label(self):

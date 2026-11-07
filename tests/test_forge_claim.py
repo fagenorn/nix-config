@@ -375,7 +375,7 @@ class StatusTest(Base):
                 if a[:4] == ["api", "-X", "POST", f"repos/{SLUG}/issues/{ISSUE}/comments"]]
 
     VERIFY_PROMPT = fm.render(
-        "owner-action", {"reason": "ask", "block": "10.0123456789abcdef", "check": "0", "host": "mbp"},
+        "owner-action", {"reason": "verify-ask", "block": "10.0123456789abcdef", "check": "0", "host": "mbp"},
         "AC1: the owner's answer is needed.", "Is the dock icon bright?\n\n- [ ] Accept\n- [ ] Reject")
 
     def test_a_stale_status_leaves_a_verify_pending_prompt_and_its_label(self):
