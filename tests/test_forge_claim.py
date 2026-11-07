@@ -374,6 +374,26 @@ class StatusTest(Base):
         return [a for a in self.world.argvs("gh")
                 if a[:4] == ["api", "-X", "POST", f"repos/{SLUG}/issues/{ISSUE}/comments"]]
 
+    VERIFY_PROMPT = fm.render(
+        "owner-action", {"reason": "verify-ask", "block": "10.0123456789abcdef", "check": "0", "host": "mbp"},
+        "AC1: the owner's answer is needed.", "Is the dock icon bright?\n\n- [ ] Accept\n- [ ] Reject")
+
+    def test_a_stale_status_leaves_a_verify_pending_prompt_and_its_label(self):
+        self.store(comment(5, claim_body(OTHER), OLD), comment(31, self.VERIFY_PROMPT), next_id=40)
+        code, out = run(*common("status"))
+        self.assertEqual((code, out["verdict"]), (0, "stale"))
+        ended = [a for a in self.mutations() if a[:4] == post("")[:4] and "agent:end v1 of=31 " in a[5]]
+        self.assertEqual(ended, [])
+        self.assertNotIn(OA_REMOVE, self.mutations())
+        self.assertIn(31, [m.comment_id for m in self.live("owner-action")])
+
+    def test_a_fresh_status_with_an_obsolete_claim_prompt_keeps_the_label_for_a_verify_prompt(self):
+        self.store(comment(5, claim_body(OTHER, renewed="1")), comment(30, oa_body(5, OTHER)),
+                   comment(31, self.VERIFY_PROMPT))
+        code, out = run(*common("status"))
+        self.assertEqual((code, out["verdict"]), (0, "held_by"))
+        self.assertEqual(self.mutations(), [post(fm.end_body(30, "renewed"))])
+
     def test_the_clock_seam_reaches_both_modules(self):
         for instant in WRONG_CLOCKS:
             with host_clock(instant, forge_claim, fm):
