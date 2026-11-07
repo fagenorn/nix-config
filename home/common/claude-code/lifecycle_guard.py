@@ -1288,22 +1288,32 @@ def cd_prelude_directory(command):
 
 def join_continuations(command):
     """`command` with each backslash-newline continuation removed, as the shell
-    does outside single quotes, so `c\\<newline>d` reads as `cd` (issue 418). An
-    escaped pair (`\\\\`) is kept whole, so it never pairs with a later newline."""
+    does outside single quotes (and inside double quotes), so `c\\<newline>d`
+    reads as `cd` (issue 418). An apostrophe inside double quotes is literal and a
+    double quote inside single quotes is too, so each span ends where the shell
+    ends it; an escaped pair (`\\\\`, `\\"`) is kept whole, so it never pairs with a
+    later newline or quote."""
     parts = []
-    quoted = False
+    quote = None
     index = 0
     while index < len(command):
         character = command[index]
-        if quoted:
-            quoted = character != "'"
-        elif character == "'":
-            quoted = True
+        if quote == "'":
+            if character == "'":
+                quote = None
         elif character == "\\" and index + 1 < len(command):
-            if command[index + 1] != "\n":
+            following = command[index + 1]
+            if following != "\n" and (quote is None or following in '$`"\\'):
                 parts.append(command[index:index + 2])
-            index += 2
-            continue
+                index += 2
+                continue
+            if following == "\n":
+                index += 2
+                continue
+        elif character == '"':
+            quote = None if quote == '"' else '"'
+        elif character == "'" and quote is None:
+            quote = "'"
         parts.append(character)
         index += 1
     return "".join(parts)

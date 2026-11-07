@@ -2489,6 +2489,13 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("push", f"pushd {there} && git push origin {feature}"),
             ("push", f"pu\\\nshd {there} && git push origin {feature}"),
             ("push", f"cd {there} && c\\\nd {here} && git push origin {feature}"),
+            # A quote's span ends where the shell ends it, so a continuation after it
+            # still splits the directory word (final review of issue 418).
+            ("push", "echo \"'\" && c\\\nd " + f"{there} && git push origin trunk"),
+            ("push", "echo \"'\"; c\\\nd " + f"{there} && git push origin trunk"),
+            ("push", "echo \"'\"\nc\\\nd " + f"{there} && git push origin trunk"),
+            ("push", 'echo "a\\\nb" && c\\\nd ' + f"{there} && git push origin trunk"),
+            ("push", 'echo "\\"\'" && c\\\nd ' + f"{there} && git push origin trunk"),
             ("push", f"popd && git push origin {feature}"),
             ("push", f"chdir {there} && git push origin {feature}"),
             ("push", f"builtin cd {there} && git push origin {feature}"),
