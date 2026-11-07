@@ -1,4 +1,5 @@
 import concurrent.futures
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 
 from .guard_policy_world import GuardPolicyWorld
@@ -186,6 +188,28 @@ raise SystemExit(1)
 '''
 
 
+GUARD_SOURCE = Path(__file__).resolve().parents[1] / "home/common/claude-code/lifecycle_guard.py"
+
+FAKE_GIT_SCRIPT = '''
+import os
+import sys
+import time
+
+REAL = @GIT@
+LOOKUP = ["remote", "get-url", "--push", "--all", "origin"]
+mode = os.environ.get("FAKE_PUSH_URL_MODE")
+if mode and sys.argv[-len(LOOKUP):] == LOOKUP:
+    if mode == "timeout":
+        time.sleep(5)
+    elif mode == "nonzero":
+        print("git@github.com:fagenorn/nix-config.git")
+        print("fake push URL failure", file=sys.stderr)
+        raise SystemExit(1)
+    elif mode == "empty":
+        raise SystemExit(0)
+os.execv(REAL, [REAL, *sys.argv[1:]])
+'''
+
 class ClaudePermissionGuardTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -250,6 +274,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         # policy and a fixture compiled policy (`cls.policy`, one row for Nodo) as later
         # arguments.
         cls.base_policy = json.loads(BASE_POLICY_PATH.read_text(encoding="utf-8"))
+        cls.fake_git = Path(cls.fixture_dir.name) / "fake-git"
+        cls.fake_git.write_text(
+            f"#!{sys.executable}\n"
+            + FAKE_GIT_SCRIPT.replace("@GIT@", repr(cls.base_policy["git_bin"])),
+            encoding="utf-8")
+        cls.fake_git.chmod(0o755)
         cls.policy = cls.write_policy(derived_repositories={NODO: NODO_ROW}, derivation={})
 
     @classmethod
@@ -2273,6 +2303,109 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         subprocess.run(shlex.split(command), cwd=work, check=True, capture_output=True)
         self.assertEqual("", git("ls-remote", "--heads", "origin", name))
         self.assertIn(f"refs/tags/{name}", git("ls-remote", "--tags", "origin", name))
+
+    def push_url_repo(self, *config):
+        """A fagenorn/nix-config fixture repository with each (key, value) of `config`
+        added to its local git config, in order (issue 655)."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for key, value in config:
+            subprocess.run(["git", "config", "--add", key, value], cwd=repo, check=True,
+                           capture_output=True)
+        return repo
+
+    def test_a_push_whose_effective_push_url_names_another_repository_is_refused(self):
+        """Issue 655 AC3, D3, D10: every push arm resolves origin's push URLs as git
+        does (pushurl, insteadOf, pushInsteadOf) and refuses unless each names the
+        repository the guard judged."""
+        topic = "issue-655-topic"
+        here = "fagenorn/nix-config"
+        other = "git@github.com:fagenorn/guard-elsewhere.git"
+        refused = {
+            "pushurl": (self.push_url_repo(("remote.origin.pushurl", other)), other),
+            "pushInsteadOf": (
+                self.push_url_repo(("url.git@github.com:someoneelse/.pushInsteadOf",
+                                    "git@github.com:fagenorn/")),
+                "git@github.com:someoneelse/nix-config.git"),
+            "second pushurl": (
+                self.push_url_repo(("remote.origin.pushurl", f"git@github.com:{here}.git"),
+                                   ("remote.origin.pushurl", other)),
+                other),
+            "not github": (self.push_url_repo(("remote.origin.pushurl", "/tmp/elsewhere.git")),
+                           "/tmp/elsewhere.git"),
+        }
+        for name, (repo, url) in refused.items():
+            for command in (f"git push origin {topic}", f"git push -u origin {topic}",
+                            f"git push origin --delete refs/heads/{topic}",
+                            f"git -C {repo} push origin {topic}",
+                            f"cd {repo} && git push origin {topic}"):
+                with self.subTest(case=name, command=command):
+                    result = self.run_guard(command, cwd=repo)
+                    self.assertEqual(2, result.returncode, command)
+                    self.assertIn(
+                        f"lifecycle guard: unsafe push: origin's push URL {url} "
+                        f"does not name {here}", result.stderr)
+                    self.assertNotIn("; accepted: ", result.stderr)
+        # The tag arm, and a push judged in a -C directory from a clean cwd.
+        tagged = self.tagged_repo(here)
+        subprocess.run(["git", "config", "remote.origin.pushurl", other], cwd=tagged,
+                       check=True, capture_output=True)
+        clean = self.make_repo(f"git@github.com:{here}.git")
+        for command, cwd in (("git push origin refs/tags/v1.2.3", tagged),
+                             (f"git -C {refused['pushurl'][0]} push origin {topic}", clean)):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"unsafe push: origin's push URL {other} does not name {here}",
+                              result.stderr)
+        # A text refusal keeps its precedence and its accepted forms.
+        result = self.run_guard(f"git push --force origin {topic}",
+                                cwd=refused["pushurl"][0])
+        self.assertEqual(2, result.returncode)
+        self.assertIn("; accepted: ", result.stderr)
+        self.assertNotIn("push URL", result.stderr)
+        # Push URLs that name this repository in another spelling pass.
+        for name, repo in (
+            ("clean", clean),
+            ("pushurl https", self.push_url_repo(
+                ("remote.origin.pushurl", f"https://github.com/{here}"))),
+            ("pushInsteadOf same repository", self.push_url_repo(
+                ("url.https://github.com/fagenorn/.pushInsteadOf", "git@github.com:fagenorn/"))),
+        ):
+            with self.subTest(case=name):
+                result = self.run_guard(f"git push origin {topic}", cwd=repo)
+                self.assertEqual(0, result.returncode, (name, result.stderr))
+
+    def test_push_url_lookup_failures_are_refused(self):
+        """Issue 655 AC4, D10: a push-URL lookup that times out, exits non-zero,
+        prints nothing, or whose git cannot start refuses the push as a state
+        refusal (no accepted forms); the same fake git passes a lookup it does not
+        disturb."""
+        topic = "issue-655-topic"
+        repo = self.push_url_repo()
+        guard_args = ("--gh-bin", str(self.fake_gh), "--git-bin", str(self.fake_git),
+                      "--child-timeout-seconds", "0.5")
+        for mode, reason in (("timeout", "push URL lookup timed out"),
+                             ("nonzero", "cannot resolve origin's push URL"),
+                             ("empty", "cannot resolve origin's push URL")):
+            for command in (f"git push origin {topic}",
+                            f"git push origin --delete refs/heads/{topic}"):
+                with self.subTest(mode=mode, command=command):
+                    result = self.run_guard(command, cwd=repo, guard_args=guard_args,
+                                            env={"FAKE_PUSH_URL_MODE": mode})
+                    self.assertEqual(2, result.returncode, (mode, result.stderr))
+                    self.assertIn(f"lifecycle guard: unsafe push: {reason}", result.stderr)
+                    self.assertNotIn("; accepted: ", result.stderr)
+        result = self.run_guard(f"git push origin {topic}", cwd=repo, guard_args=guard_args)
+        self.assertEqual(0, result.returncode, result.stderr)
+        # A git that cannot start: no CLI run reaches this branch alone (the same git
+        # resolves the repository first), so the source's function is called directly.
+        spec = importlib.util.spec_from_file_location("lifecycle_guard_source", GUARD_SOURCE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        context = types.SimpleNamespace(
+            git_bin=str(Path(self.fixture_dir.name) / "no-such-git"), cwd=str(repo),
+            timeout=5, repository="fagenorn/nix-config")
+        self.assertEqual("cannot resolve origin's push URL", module.push_url_problem(context))
 
     # Guarded command shapes (#351): the forms ship-issue spells and the dressed
     # shapes agents reach for, from the fixture the shell-example suite also reads.

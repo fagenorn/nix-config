@@ -1957,6 +1957,31 @@ def target_directory(directory, cwd):
     return os.path.join(base, directory)
 
 
+GITHUB_URL_PREFIXES = (
+    "git@github.com:",
+    "ssh://git@github.com/",
+    "https://github.com/",
+    "http://github.com/",
+)
+
+
+def github_slug(url):
+    """The owner/name slug a GitHub remote URL names, or None."""
+    url = url.strip()
+    if url.endswith(".git"):
+        url = url[: -len(".git")]
+    for prefix in GITHUB_URL_PREFIXES:
+        if url.startswith(prefix):
+            slug = url[len(prefix):]
+            break
+    else:
+        return None
+    slug = slug.strip("/")
+    if SLUG_PATTERN.fullmatch(slug) is None:
+        return None
+    return slug
+
+
 def detect_repository(git_bin, cwd, timeout):
     """Return the owner/name slug of cwd's origin remote, or None."""
     if not isinstance(cwd, str) or not cwd:
@@ -1973,24 +1998,40 @@ def detect_repository(git_bin, cwd, timeout):
         return None
     if child.returncode != 0:
         return None
-    url = child.stdout.strip()
-    if url.endswith(".git"):
-        url = url[: -len(".git")]
-    for prefix in (
-        "git@github.com:",
-        "ssh://git@github.com/",
-        "https://github.com/",
-        "http://github.com/",
-    ):
-        if url.startswith(prefix):
-            slug = url[len(prefix):]
-            break
-    else:
-        return None
-    slug = slug.strip("/")
-    if SLUG_PATTERN.fullmatch(slug) is None:
-        return None
-    return slug
+    return github_slug(child.stdout)
+
+
+PUSH_URL_LOOKUP = ("remote", "get-url", "--push", "--all", "origin")
+PUSH_URL_TIMEOUT = "push URL lookup timed out"
+PUSH_URL_UNRESOLVED = "cannot resolve origin's push URL"
+
+
+def push_url_problem(context):
+    """Why origin's effective push URL does not name the judged repository, or None.
+
+    Issue 655 D3/D10. git itself applies `remote.origin.pushurl`,
+    `url.<base>.insteadOf` and `url.<base>.pushInsteadOf`, so the guard asks git
+    for the push URLs and never reimplements the rewriting. `--all` lists every
+    `pushurl` entry, and git pushes to each of them, so each must name the
+    repository. A lookup that times out, cannot start, fails or prints nothing
+    is a problem too.
+    """
+    try:
+        child = subprocess.run(
+            [context.git_bin, "-C", context.cwd, *PUSH_URL_LOOKUP],
+            capture_output=True, text=True, timeout=context.timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return PUSH_URL_TIMEOUT
+    except OSError:
+        return PUSH_URL_UNRESOLVED
+    urls = [line.strip() for line in child.stdout.splitlines() if line.strip()]
+    if child.returncode != 0 or not urls:
+        return PUSH_URL_UNRESOLVED
+    for url in urls:
+        if github_slug(url) != context.repository:
+            return f"origin's push URL {shown_value(url)} does not name {context.repository}"
+    return None
 
 
 def default_branch(git_bin, cwd, timeout):
@@ -2955,6 +2996,9 @@ def validate_push(text, context, compiled):
     if match is None:
         return refuse("push", form_problem("push", compiled, text),
                       accepted_forms(compiled, context))
+    problem = push_url_problem(context)
+    if problem is not None:
+        return refuse("push", problem)
     if match.form.id == "tag":
         return validate_tag_push(match.values["vX.Y.Z"], context, compiled)
     if match.form.id not in ("branch", "delete"):
