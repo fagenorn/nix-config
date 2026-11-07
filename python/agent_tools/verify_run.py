@@ -638,6 +638,18 @@ class _Pass:
         """The contract command entry a `command` run resolves to, else None."""
         return self.project.bindings["commands"][run["command"]] if "command" in run else None
 
+    def command_identity(self, run: Mapping) -> Mapping | None:
+        """The command entry of `run` as every host and pass sees it: the contract is resolved
+        under a fresh scratch export each pass, so `cwd` is taken relative to the contract root."""
+        entry = self.command_entry(run)
+        if entry is None:
+            return None
+        try:
+            cwd = Path(entry["cwd"]).relative_to(self.project.contract_root).as_posix()
+        except ValueError:
+            cwd = entry["cwd"]
+        return {**entry, "cwd": cwd}
+
     def command_text(self, run: Mapping) -> str:
         """The command line an approve prompt shows for `run`."""
         if "command" in run:
@@ -657,7 +669,7 @@ class _Pass:
         if not rest.runnable:
             return self.line(index, ac, "pending", rest.reason)
         run = check["run"]
-        digest = verify_owner.run_digest(run, self.command_entry(run))
+        digest = verify_owner.run_digest(run, self.command_identity(run))
         live = verify_owner.live_prompts(self.markers, (verify_owner.APPROVE,), self.block_key, index)
         for p in live:
             if p.fields.get("run") != digest and not verify_owner.consumed(self.markers, p.comment_id):
@@ -688,6 +700,8 @@ class _Pass:
         try:
             if not self.unchanged_since(index, previous):
                 return self.line(index, ac, "pending", "lost_contest")
+            if not self.current():  # the approval is for the block this pass holds, not a replaced one
+                return self.line(index, ac, "pending", "block_changed")
             again = verify_owner.live_prompts(self.markers, (verify_owner.APPROVE,), self.block_key, index)
             if not any(p.comment_id == ticked.comment_id and p.fields.get("run") == digest
                        and verify_owner.ticked(p, verify_owner.RUN_IT) for p in again) \

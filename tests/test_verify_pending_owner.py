@@ -107,7 +107,7 @@ class PromptOnceTest(OwnerBase):
     def test_approve(self):
         self.hold(ok_check(effects="live"))
         prompt = self.three_passes("approve", lambda p: self.tick(p.comment_id, "Run it"))
-        digest = vo.run_digest({"command": "check-ok"}, self.project.bindings["commands"]["check-ok"])
+        digest = vo.run_digest({"command": "check-ok"}, {"argv": ["verify-ok"], "cwd": ".", "env": []})
         self.assertEqual(prompt.fields, {"reason": "approve", "block": bkey(ok_check(effects="live")), "check": "0",
                                          "host": "mbp", "effects": "live", "round": "1", "run": digest})
         self.assertIn('Command: ["verify-ok"]', prompt.body)
@@ -280,6 +280,29 @@ class ApproveConsumeTest(OwnerBase):
         self.tick(rounds[1].comment_id, "Run it")
         self.run_pass()
         self.assertEqual((self.spawned("verify-ok"), self.spawned("verify-bad")), (0, 1))
+
+    def test_a_tick_survives_a_pass_that_resolves_the_contract_under_a_new_scratch_root(self):
+        self.hold(ok_check(effects="live"))
+        self.run_pass()
+        first, = self.prompts("approve")
+        self.tick(first.comment_id, "Run it")
+        scratch = Path("/tmp/scratch-export-two/default")  # every real pass resolves under a fresh export
+        moved = {name: {**entry, "cwd": str(scratch)} for name, entry in self.project.bindings["commands"].items()}
+        self.project = dataclasses.replace(self.project, root=scratch, contract_root=scratch,
+                                           bindings={**self.project.bindings, "commands": moved})
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))
+        self.assertEqual((self.spawned("verify-ok"), len(self.prompts("approve"))), (1, 1))
+        self.assertEqual([m.fields["consumed"] for m in self.consumptions()], [str(first.comment_id)])
+
+    def test_a_ticked_approval_for_a_block_replaced_since_the_listing_never_runs(self):
+        self.hold(ok_check(effects="live"))
+        self.run_pass()
+        first, = self.prompts("approve")
+        self.tick(first.comment_id, "Run it")
+        old, = vr.list_held(SLUG)
+        fm.edit(SLUG, 10, hold(block(ok_check(effects="live", ac="AC2"))))  # the owner replaces the held block
+        vr.pass_issue(self.project, "mbp", old, Refs())
+        self.assertEqual((self.spawned("verify-ok"), self.consumptions()), (0, []))
 
     def test_an_approved_command_outside_verification_is_still_refused(self):
         self.hold(check(effects="live", run={"command": "nix-activate"}))
