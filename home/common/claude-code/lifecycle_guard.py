@@ -944,6 +944,19 @@ GIT_UNCERTAIN_PROBLEM = (
     "the git invocation continues past a shell substitution or grouping; "
     f"{INVOCATION_FORM_HINT}"
 )
+# Issue 672 D8: the pre-push hook is authoritative only while git runs the
+# managed hook, so the text guard refuses naming the key that repoints it.
+HOOKS_PATH_PROBLEM = (
+    "git config naming core.hooksPath would change which hook judges a push; "
+    "read it with git rev-parse --git-path hooks"
+)
+# Issue 672 D3: the pre-push hook judges a push only in an agent session, which
+# it recognises by this variable, so the text guard refuses clearing it.
+AGENT_SESSION_VARIABLE = "CLAUDECODE"
+SESSION_MARKER_PROBLEM = (
+    f"clearing or unsetting {AGENT_SESSION_VARIABLE} would hide the agent "
+    "session from the pre-push hook"
+)
 GIT_FED_PROBLEM = (
     "a git word with no subcommand reads its subcommand from a pipe or "
     f"redirection; {INVOCATION_FORM_HINT}"
@@ -1357,6 +1370,11 @@ def git_transmit_problem(program, words, truncation, tail=(), fed=False):
             f"an alias, a git-* program or a transport could transmit refs; "
             f"{INVOCATION_FORM_HINT}"
         )
+    if subcommand == "config" and any(
+        word.lower() == "core.hookspath" or word.lower().startswith("core.hookspath=")
+        for word in list(words[index + 1:]) + list(tail)
+    ):
+        return HOOKS_PATH_PROBLEM
     option = git_command_option(subcommand, list(words[index + 1:]) + list(tail))
     if option is not None:
         return (
@@ -1400,13 +1418,71 @@ def raw_git_names(pieces):
     return names
 
 
+def names_session_marker(word):
+    """True when `word` assigns, unsets or names the agent session variable
+    (issue 672 D3): `CLAUDECODE=…`, or exactly `CLAUDECODE`, `-uCLAUDECODE` or
+    `--unset=CLAUDECODE`. A read such as `$CLAUDECODE` never matches."""
+    match = ASSIGNMENT_PREFIX.match(word)
+    if match is not None and match.group("name") == AGENT_SESSION_VARIABLE:
+        return True
+    return word in (
+        AGENT_SESSION_VARIABLE, f"-u{AGENT_SESSION_VARIABLE}",
+        f"--unset={AGENT_SESSION_VARIABLE}",
+    )
+
+
+def session_marker_problem(tokens):
+    """SESSION_MARKER_PROBLEM when a segment's `tokens` clear the agent session
+    variable (issue 672 D3), else None: a word naming it (`names_session_marker`),
+    an `env` whose options empty the environment (`-`, `-i`, a short cluster
+    holding `i`, `--ignore-environment` or an unambiguous prefix of it) or an
+    `exec` whose options hold `c`."""
+    for index, (value, is_operator) in enumerate(tokens):
+        if is_operator:
+            continue
+        if names_session_marker(value):
+            return SESSION_MARKER_PROBLEM
+        wrapper = program_name(value)
+        if wrapper not in ("env", "exec"):
+            continue
+        pending = False
+        for option, option_is_operator in tokens[index + 1:]:
+            if option_is_operator:
+                break
+            if pending:
+                pending = False
+                continue
+            if option == "--" or not option.startswith("-"):
+                break
+            if option == "-":
+                return SESSION_MARKER_PROBLEM
+            kind, attached = wrapper_option(wrapper, option)
+            if option.startswith("--"):
+                name = option.partition("=")[0]
+                if (
+                    wrapper == "env" and len(name) >= 3
+                    and "--ignore-environment".startswith(name)
+                ):
+                    return SESSION_MARKER_PROBLEM
+            else:
+                letters = WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT[wrapper]
+                for letter in option[1:]:
+                    if letter in letters:
+                        break
+                    if letter == ("i" if wrapper == "env" else "c"):
+                        return SESSION_MARKER_PROBLEM
+            if kind is not None and attached is None:
+                pending = True
+    return None
+
+
 def raw_reading_transmits(reading, names, fed):
     """True when a word of `reading` is a git word (or an assigned name, see
     `raw_git_names`) that could transmit refs, or an assignment that hands git a
     command. `fed` is set when the piece may read a pipe or redirection, so a git
     word after the first word that names no subcommand takes it from stdin."""
     for position, word in enumerate(reading):
-        if dashed_git_program(program_name(word)):
+        if dashed_git_program(program_name(word)) or names_session_marker(word):
             return True
         match = ASSIGNMENT_PREFIX.match(word)
         if match is not None and git_assignment_problem(
@@ -1722,6 +1798,14 @@ def guarded_operations(command):
                     "transmit", segment,
                     raw_reason if raw_reason is not None else problem, None,
                 ))
+        # Issue 672 D3: a segment that clears the agent session variable, in
+        # every repository, so the pre-push hook cannot be made to stand down.
+        marker_problem = session_marker_problem(tokens)
+        if marker_problem is not None:
+            found.append((
+                "transmit", segment,
+                raw_reason if raw_reason is not None else marker_problem, None,
+            ))
         operands = set()
         for index in range(len(tokens)):
             if index in operands:
