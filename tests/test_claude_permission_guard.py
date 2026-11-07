@@ -1159,6 +1159,171 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     ]
                     self.assertTrue(caught, (name, list(zip(expected, outcomes))))
 
+    def test_mutants_of_the_transmit_and_push_url_checks_are_caught(self):
+        """Issue 655 AC5: each seam of the transmit recognition, the command-option
+        and assignment checks and the push URL check (each lookup-failure branch
+        included), broken in a copy of the guard source, gives at least one row a
+        different valid outcome (an admission, or an `unsafe push:` refusal), while
+        the unmutated copy gives every row its expected one. A crash or another
+        refusal never counts."""
+        source = GUARD_SOURCE.read_text(encoding="utf-8")
+        anchor = '\nif __name__ == "__main__":'
+        self.assertEqual(1, source.count(anchor))
+        topic = "issue-655-topic"
+        force = "git push --force origin main"
+        other = "git@github.com:fagenorn/guard-elsewhere.git"
+        repos = {
+            None: None,
+            "plain": self.push_url_repo(),
+            "pushurl": self.push_url_repo(("remote.origin.pushurl", other)),
+            "pushInsteadOf": self.push_url_repo(
+                ("url.git@github.com:someoneelse/.pushInsteadOf", "git@github.com:fagenorn/")),
+            "second pushurl": self.push_url_repo(
+                ("remote.origin.pushurl", "git@github.com:fagenorn/nix-config.git"),
+                ("remote.origin.pushurl", other)),
+        }
+        # (command, repository, FAKE_PUSH_URL_MODE or None, expected outcome)
+        rows = (
+            ("git -c core.pager=cat diff", None, None, "refuse"),
+            (f"git p origin {topic}", None, None, "refuse"),
+            (f"git send-pack git@github.com:fagenorn/nix-config.git {topic}", None, None,
+             "refuse"),
+            (f"git subtree push --prefix=x origin {topic}", None, None, "refuse"),
+            (f"git-push origin {topic}", None, None, "refuse"),
+            (f"git $(printf p) origin {topic}", None, None, "refuse"),
+            (f"git add`echo -x` origin {topic}", None, None, "refuse"),
+            (f"xargs git p origin {topic}", None, None, "refuse"),
+            (f"timeout 5 git p origin {topic}", None, None, "refuse"),
+            (f"sh -c 'git p origin {topic}'", None, None, "refuse"),
+            ("git rebase --exec true HEAD~1", None, None, "refuse"),
+            (f"git fetch --upload-pack='{force} #' .", None, None, "refuse"),
+            ("git grep -O'sh /tmp/p.sh' x", None, None, "refuse"),
+            (f"GIT_SEQUENCE_EDITOR='{force}; true' git rebase -i HEAD~1", None, None,
+             "refuse"),
+            ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor "
+             "GIT_CONFIG_VALUE_0=/tmp/p.sh git status", None, None, "refuse"),
+            ("PATH=/tmp/x:$PATH git log", None, None, "refuse"),
+            (f"export PAGER='{force}'; git log", None, None, "refuse"),
+            ("git status --short", None, None, "admit"),
+            ("git --no-pager log --oneline -1", None, None, "admit"),
+            ("git rebase origin/main", None, None, "admit"),
+            ("echo `which git`", None, None, "admit"),
+            ("GIT_TRACE=1 git status", None, None, "admit"),
+            ("sh -c 'git log --oneline'", None, None, "admit"),
+            (f"git push origin {topic}", "plain", None, "admit"),
+            (f"git push origin {topic}", "pushurl", None, "refuse"),
+            (f"git push origin {topic}", "pushInsteadOf", None, "refuse"),
+            (f"git push origin {topic}", "second pushurl", None, "refuse"),
+            (f"git push origin {topic}", "plain", "timeout", "refuse"),
+            (f"git push origin {topic}", "plain", "nonzero", "refuse"),
+            (f"git push origin {topic}", "plain", "empty", "refuse"),
+        )
+        lookup_block = (
+            "    if child.returncode != 0 or not urls:\n"
+            "        return PUSH_URL_UNRESOLVED\n"
+        )
+        mutants = {
+            "control": "",
+            "config-option-admitted": "GIT_GLOBAL_OPTIONS = {**GIT_GLOBAL_OPTIONS, '-c': 1}\n",
+            "alias-admitted": "GIT_LOCAL_SUBCOMMANDS = GIT_LOCAL_SUBCOMMANDS | {'p'}\n",
+            "send-pack-admitted":
+                "GIT_LOCAL_SUBCOMMANDS = GIT_LOCAL_SUBCOMMANDS | {'send-pack'}\n",
+            "subtree-admitted": "GIT_LOCAL_SUBCOMMANDS = GIT_LOCAL_SUBCOMMANDS | {'subtree'}\n",
+            "dashed-admitted": "dashed_git_program = lambda name: False\n",
+            "uncertain-admitted": "GIT_UNCERTAIN_PROBLEM = None\n",
+            "every-operator-opens":
+                "opening_operator = lambda tokens, index, operator: True\n",
+            "no-operator-opens": "opening_operator = lambda tokens, index, operator: False\n",
+            "argument-position-unjudged":
+                "git_argument_problem = lambda program, words, truncation: None\n",
+            "evaluator-text-unjudged": "transmit_in_raw_text = lambda text: False\n",
+            "command-options-unjudged": "git_command_option = lambda subcommand, words: None\n",
+            "short-command-options-dropped": (
+                "GIT_COMMAND_OPTIONS = {k: frozenset(o for o in v if o.startswith('--'))"
+                " for k, v in GIT_COMMAND_OPTIONS.items()}\n"),
+            "upload-pack-dropped": (
+                "GIT_COMMAND_OPTIONS = {k: v - {'--upload-pack'}"
+                " for k, v in GIT_COMMAND_OPTIONS.items()}\n"),
+            "assignments-unjudged": "git_assignment_problem = lambda names, strict: None\n",
+            "prefix-allowlist-loosened":
+                "GIT_ASSIGNMENT_ALLOWED = GIT_ASSIGNMENT_ALLOWED | {'PATH'}\n",
+            "command-variables-dropped": "GIT_COMMAND_VARIABLES = frozenset()\n",
+            "no-push-url-check": "push_url_problem = lambda context: None\n",
+            "first-push-url-only":
+                "PUSH_URL_LOOKUP = tuple(w for w in PUSH_URL_LOOKUP if w != '--all')\n",
+            "fetch-url-only":
+                "PUSH_URL_LOOKUP = tuple(w for w in PUSH_URL_LOOKUP if w != '--push')\n",
+            "lookup-timeout-admitted": "PUSH_URL_TIMEOUT = None\n",
+            "lookup-oserror-admitted": (
+                "    except OSError:\n        return PUSH_URL_UNRESOLVED\n",
+                "    except OSError:\n        return None\n"),
+            "lookup-nonzero-admitted": (
+                lookup_block, "    if not urls:\n        return PUSH_URL_UNRESOLVED\n"),
+            "lookup-empty-admitted": (
+                lookup_block,
+                "    if child.returncode != 0:\n        return PUSH_URL_UNRESOLVED\n"),
+        }
+
+        def outcome(result):
+            if result.returncode == 0:
+                return "admit"
+            if result.returncode == 2 and "lifecycle guard: unsafe push: " in result.stderr:
+                return "refuse"
+            return f"invalid: exit {result.returncode}: {result.stderr[-300:]}"
+
+        def oserror_outcome(text, path):
+            # The one branch no CLI run reaches alone (Task 3): call the copy's function.
+            module = types.ModuleType(f"mutant_{path.stem.replace('-', '_')}")
+            module.__file__ = str(path)
+            exec(compile(text, str(path), "exec"), module.__dict__)
+            context = types.SimpleNamespace(
+                git_bin=str(directory / "no-such-git"), cwd=str(repos["plain"]),
+                timeout=5, repository="fagenorn/nix-config")
+            problem = module.push_url_problem(context)
+            return "admit" if problem is None else "refuse"
+
+        directory = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        expected = [want for *_, want in rows] + ["refuse"]
+        base_env = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
+        for name, mutation in mutants.items():
+            if isinstance(mutation, tuple):
+                old, new = mutation
+                self.assertEqual(1, source.count(old), (name, "replacement must match once"))
+                text = source.replace(old, new, 1)
+            else:
+                text = source.replace(anchor, "\n" + mutation + anchor, 1)
+            path = directory / f"{name}.py"
+            path.write_text(text, encoding="utf-8")
+            outcomes = []
+            for command, repo, mode, _ in rows:
+                payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+                if repos[repo] is not None:
+                    payload["cwd"] = str(repos[repo])
+                argv = [sys.executable, "-I", str(path),
+                        "--base-policy", str(BASE_POLICY_PATH),
+                        "--policy", str(directory / "absent-policy.json"),
+                        "--derive-bin", "/usr/bin/false"]
+                env = dict(base_env)
+                if mode is not None:
+                    argv += ["--git-bin", str(self.fake_git), "--child-timeout-seconds", "0.5"]
+                    env["FAKE_PUSH_URL_MODE"] = mode
+                result = subprocess.run(
+                    argv, input=json.dumps(payload), env=env,
+                    text=True, capture_output=True, timeout=10, check=False,
+                )
+                outcomes.append(outcome(result))
+            outcomes.append(oserror_outcome(text, path))
+            labels = [command for command, *_ in rows] + ["push_url_problem with no git"]
+            with self.subTest(mutant=name):
+                if name == "control":
+                    self.assertEqual(expected, outcomes)
+                else:
+                    caught = [
+                        label for label, want, got in zip(labels, expected, outcomes)
+                        if got in ("admit", "refuse") and got != want
+                    ]
+                    self.assertTrue(caught, (name, list(zip(labels, expected, outcomes))))
+
     def test_detaching_refusal_precedes_the_push_grammar(self):
         # AC3: still refused, now for detaching rather than as a push.
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
