@@ -991,7 +991,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         create = ('gh pr create --repo fagenorn/argus --base main '
                   '--head issue-700-refuse-nohup '
                   '--title "fix: refuse nohup" --body "setsid and disown too"')
-        for command in (create, "unset GITHUB_TOKEN && " + create):
+        draft = create.replace("--repo fagenorn/argus", "--repo fagenorn/argus --draft")
+        for command in (create, "unset GITHUB_TOKEN && " + create,
+                        draft, "unset GITHUB_TOKEN && " + draft):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))

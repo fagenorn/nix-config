@@ -2014,6 +2014,10 @@ def _detaching_gh_roles(contents, kinds):
                 return None
             roles += ["other", "other"]
             index += 2
+        elif kind == "plain" and content == "--draft" \
+                and contents[1] == "pr" and contents[2] == "create":
+            roles.append("other")
+            index += 1
         elif content.startswith("-"):
             return None
         else:
