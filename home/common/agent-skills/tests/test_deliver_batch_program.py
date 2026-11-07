@@ -661,6 +661,62 @@ class LandTest(unittest.TestCase):
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))
 
 
+def blocked_by(*issues):
+    return {"blockers": [{"issue": b, "state": "OPEN"} for b in issues]}
+
+
+class DependencyTest(unittest.TestCase):
+    def test_a_blocker_chain_releases_each_dependent_only_on_closed(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
+                               patch={"facts-2": blocked_by(1), "facts-3": blocked_by(2)})
+        ls = labels(calls)
+        self.assertLess(ls.index("close-out-1"), ls.index("acquire-2"))
+        self.assertLess(ls.index("close-out-2"), ls.index("acquire-3"))
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3)], ["landed"] * 3)
+
+    def test_a_merged_but_open_blocker_does_not_release(self):
+        acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-2": blocked_by(1)},
+                               children={"1": ready(1, acceptance)},
+                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "notes": "held"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed-held")
+        self.assertEqual((row(result, 2)["outcome"], row(result, 2)["blocker"]), ("waits-verification", 1))
+        self.assertNotIn("acquire-2", labels(calls))
+
+    def test_a_blocker_held_for_verification_reports_waits_verification(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]),
+                               patch={"facts-1": {"labels": ["needs-verification"]}, "facts-2": blocked_by(1)})
+        self.assertEqual((row(result, 2)["outcome"], row(result, 2)["blocker"]), ("waits-verification", 1))
+        self.assertNotIn("acquire-2", labels(calls))
+        self.assertNotIn("child-2", labels(calls))
+
+    def test_a_failed_blocker_blocks_its_dependent(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-2": blocked_by(1)},
+                               replies={"land-lock-1-1": {"verdict": "land-contended"}})
+        self.assertEqual((row(result, 2)["outcome"], row(result, 2)["blocker"]), ("blocked", 1))
+        self.assertNotIn("acquire-2", labels(calls))
+        self.assertEqual(result["relaunch"]["issues"], [1, 2])
+
+    def test_an_already_closed_in_batch_blocker_releases_at_once(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]),
+                               patch={"facts-1": {"state": "CLOSED"}, "facts-2": blocked_by(1)})
+        self.assertEqual(row(result, 2)["outcome"], "landed")
+
+    def test_a_cycle_blocks_every_issue_on_it(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
+                               patch={"facts-1": blocked_by(2), "facts-2": blocked_by(1)})
+        for n in (1, 2):
+            self.assertEqual((row(result, n)["outcome"], row(result, n)["detail"]), ("blocked", "cycle"))
+            self.assertNotIn(f"lane-{n}", labels(calls))
+        self.assertEqual(row(result, 3)["outcome"], "landed")
+
+    def test_a_waiting_dependent_holds_no_slot(self):
+        result, _, active = run(args=dict(ARGS, issues=[1, 2, 3]), patch={"setup": {"max_parallel": 1},
+                                                                       "facts-1": blocked_by(3)})
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3)], ["landed"] * 3)
+        self.assertEqual(active, 1)
+
+
 class SourceTest(unittest.TestCase):
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")

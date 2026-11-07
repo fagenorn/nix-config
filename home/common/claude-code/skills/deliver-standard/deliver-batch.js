@@ -201,6 +201,33 @@ for (const n of ISSUES) {
   else eligible.push(n)
 }
 
+// The in-batch blockers of n still open on the tracker, ascending. An outside blocker is decided by eligibility.
+const inBatchBlockers = n => Array.from(new Set(((FACTS[n] || {}).blockers || [])
+  .filter(b => b.state === 'OPEN' && ISSUES.includes(b.issue)).map(b => b.issue))).sort((a, b) => a - b)
+
+// A dependency cycle among the issues still to deliver is found here, right after intake and before any lane agent:
+// an issue is on a cycle when a depth-first walk over in-batch blockers returns to it.
+const onCycle = n => {
+  const seen = new Set()
+  const walk = m => {
+    for (const b of inBatchBlockers(m)) {
+      if (b === n) return true
+      if (eligible.includes(b) && !seen.has(b)) { seen.add(b); if (walk(b)) return true }
+    }
+    return false
+  }
+  return walk(n)
+}
+const cycle = eligible.filter(onCycle)
+for (const n of cycle) rows[n] = { issue: n, outcome: 'blocked', detail: 'cycle' }
+const toDeliver = eligible.filter(n => !cycle.includes(n))
+
+// DONE[n] resolves with the final row of every batch issue; a skipped issue resolves at once with its intake row.
+const DONE = {}
+const settle = {}
+for (const n of ISSUES) DONE[n] = new Promise(resolve => { settle[n] = resolve })
+for (const n of ISSUES) if (!toDeliver.includes(n)) settle[n](rows[n] || { issue: n, outcome: 'stopped', detail: 'no result' })
+
 // --- Deliver ---
 phase('Deliver')
 const LANE_SCHEMA = { type: 'object', properties: { lane: { type: 'string', enum: ['direct', 'standard', 'needs-design'] }, why: { type: 'string' } }, required: ['lane'] }
@@ -552,6 +579,15 @@ ${RULES_FOR(REPO, f.branch || '<branch>')}`, { label: `lane-${n}`, phase: 'Deliv
   }
   rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
 
+  // A dependent waits for each in-batch blocker's final row before it asks for a slot: it holds no slot and no claim meanwhile.
+  for (const blocker of inBatchBlockers(n)) {
+    const b = await DONE[blocker]
+    if (b.outcome === 'landed' || b.outcome === 'closed') continue
+    if (b.outcome === 'landed-held' || b.outcome === 'needs-verification') { rows[n] = { issue: n, outcome: 'waits-verification', blocker }; return }
+    rows[n] = { issue: n, outcome: 'blocked', blocker }
+    return
+  }
+
   // An issue is claimed only once it holds a child slot: a waiting issue holds no claim.
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
   await admit()
@@ -630,7 +666,15 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', model:
     if (admitted) leave()
   }
 }
-await parallel(eligible.map(n => () => deliverOne(n)))
+await parallel(toDeliver.map(n => async () => {
+  try {
+    await deliverOne(n)
+  } catch (e) {
+    rows[n] = { issue: n, outcome: 'stopped', detail: String((e && e.message) || e) }
+  } finally {
+    settle[n](rows[n] || { issue: n, outcome: 'stopped', detail: 'no result' })
+  }
+}))
 
 // --- Result: one table, in ISSUES order ---
 const table = ISSUES.map(n => rows[n] || { issue: n, outcome: 'stopped', detail: 'no result' })
