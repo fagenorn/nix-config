@@ -12,6 +12,9 @@ DIR = Path(__file__).resolve().parents[1] / "home/common/verify-pending"
 STAMP = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
 LIMIT = 1048576
 WAIT = 2
+NOTICE = ("verify-pending-kick: the verify-pending job is not loaded in this session "
+          "(on darwin: nobody is logged in at the console); no pass started now, "
+          "the switch request waits for the job's next run")
 
 
 class Scripts(unittest.TestCase):
@@ -172,30 +175,47 @@ class Pass(Scripts):
 
 
 class Kick(Scripts):
-    def script(self, start_status=0):
+    def script(self, start_status=0, probe_status=0):
         start = self.stub("start", start_status)
-        return self.render("kick.sh", {"@path@": "/usr/bin:/bin", "@start@": f"{start} --no-block job"})
+        # launchctl's own error for a missing domain, which the kick must never show.
+        probe = self.stub("probe", probe_status,
+                          extra='echo "Could not kickstart service: 125: Domain does not support specified action" >&2\n')
+        return self.render("kick.sh", {"@path@": "/usr/bin:/bin", "@start@": f"{start} --no-block job",
+                                       "@probe@": f"{probe} gui/501/job"})
 
     def run_kick(self, *args, home=True, **script):
         return self.run_script(self.script(**script), args, home)
 
     def test_a_kick_with_a_target_writes_the_request_then_starts_the_job(self):
         done = self.run_kick(str(self.system_b))
-        self.assertEqual((done.returncode, done.stdout), (0, ""))
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
         self.assertEqual(self.request.read_text(), f"{self.system_b}\n")
-        self.assertEqual(self.calls_made(), ["start --no-block job"])
+        self.assertEqual(self.calls_made(), ["probe gui/501/job", "start --no-block job"])
         self.assertEqual(sorted(p.name for p in self.state.iterdir()), ["switch-request"])
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o700)
 
     def test_a_kick_without_a_target_writes_an_empty_request(self):
         self.assertEqual(self.run_kick().returncode, 0)
         self.assertEqual(self.request.read_text(), "\n")
-        self.assertEqual(self.calls_made(), ["start --no-block job"])
+        self.assertEqual(self.calls_made(), ["probe gui/501/job", "start --no-block job"])
 
     def test_a_failing_start_never_fails_the_kick(self):
         done = self.run_kick(str(self.system_a), start_status=5)
         self.assertEqual(done.returncode, 0)
         self.assertTrue(self.request.exists())
+
+    def test_a_loaded_job_is_started_without_a_notice(self):
+        done = self.run_kick(str(self.system_b), probe_status=0)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+        self.assertEqual(self.calls_made(), ["probe gui/501/job", "start --no-block job"])
+
+    def test_a_job_not_loaded_prints_one_notice_and_never_starts(self):
+        # The eleven-m5 shape: no gui/<uid> domain, so launchctl print exits 113.
+        done = self.run_kick(str(self.system_b), probe_status=113)
+        self.assertEqual((done.returncode, done.stdout), (0, ""))
+        self.assertEqual(done.stderr, NOTICE + "\n")
+        self.assertEqual(self.calls_made(), ["probe gui/501/job"])
+        self.assertEqual(self.request.read_text(), f"{self.system_b}\n")
 
     def test_a_missing_home_exits_zero_without_starting(self):
         done = self.run_kick(str(self.system_a), home=False)

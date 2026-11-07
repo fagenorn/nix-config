@@ -15,7 +15,7 @@ from agent_tools import verify_owner as vo
 from agent_tools import verify_pending
 from agent_tools import verify_run as vr
 
-from .test_verify_pending import (ISSUE, SLUG, T0, PassBase, Refs, block, bkey, check, gnode, hold, line, marker,
+from .test_verify_pending import (ISSUE, MERGE, SLUG, T0, PassBase, Refs, block, bkey, check, gnode, hold, line, marker,
                                   ok_check, result, stored_comment)
 
 OA_ADD = ["api", "-X", "POST", f"repos/{SLUG}/issues/{ISSUE}/labels", "-f", "labels[]=owner-action"]
@@ -593,6 +593,35 @@ class StaleTest(OwnerBase):
     def held_since(self, at, *checks, extra=()):
         self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(*checks)), at=at), *extra],
                                  labels=["needs-verification"])
+
+    # Issue 668: a Mac nobody is logged in to at the console never loads its verify-pending
+    # agent, so its runner completes no pass; the switch is recorded on the host, not the forge.
+    HEADLESS = dict(host="eleven-m5", when={"deployed_includes": MERGE})
+
+    def test_a_headless_host_that_never_reported_is_reported_silent(self):
+        offline = ok_check(**self.HEADLESS)
+        self.held_since(self.OLD, offline)
+        self.assertEqual(self.run_pass("mbp"), [line(0, "AC1", "pending", "not_this_host")])
+        stale, = self.prompts("verify-stale-check")
+        self.assertEqual(stale.fields, {"reason": "verify-stale-check", "block": bkey(offline), "check": "0",
+                                        "host": "eleven-m5", "cause": "silent", "last": "never"})
+        self.assertEqual(self.spawned("verify-ok"), 0)
+
+    def test_a_headless_host_silent_past_the_window_is_reported_with_its_last_date(self):
+        offline = ok_check(**self.HEADLESS)
+        seen = marker("verify-seen", {"block": bkey(offline), "host": "eleven-m5", "on": "2026-10-22"})
+        self.held_since(self.OLD, offline, extra=[stored_comment(11, seen, at="2026-10-22T08:00:00Z")])
+        self.run_pass("mbp")
+        stale, = self.prompts("verify-stale-check")
+        self.assertEqual((stale.fields["host"], stale.fields["cause"], stale.fields["last"]),
+                         ("eleven-m5", "silent", "2026-10-22"))
+
+    def test_a_headless_host_inside_its_window_is_not_reported(self):
+        offline = ok_check(**self.HEADLESS)
+        seen = marker("verify-seen", {"block": bkey(offline), "host": "eleven-m5", "on": "2026-11-01"})
+        self.held_since(self.OLD, offline, extra=[stored_comment(11, seen, at="2026-11-01T08:00:00Z")])
+        self.run_pass("mbp")
+        self.assertEqual(self.prompts(), [])
 
     def test_a_young_block_is_not_stale(self):
         self.held_since("2026-11-01T10:00:00Z", ok_check(host="eleven-m5"))
