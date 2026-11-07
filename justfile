@@ -213,6 +213,7 @@ agent-workflow-tests *args:
     tests/test_branch_protection.py \
     tests/test_suite_runner.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
+    home/common/agent-skills/tests/test_deliver_batch_program.py \
     tests/test_retained_root_copy.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
