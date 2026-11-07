@@ -12,6 +12,9 @@ if [ -f "$candidate" ] && [ -x "$candidate" ] &&
 fi
 case $name in
   post-checkout|post-commit|post-merge)
-    if [ -n "$lfs" ] && [ -d "$common/lfs" ]; then exec "$lfs" "$name" "$@"; fi ;;
+    if [ -n "$lfs" ] &&
+        { [ -d "$common/lfs" ] || [ -n "$(@git@ config --get lfs.storage)" ]; }; then
+      exec "$lfs" "$name" "$@"
+    fi ;;
 esac
 exit 0

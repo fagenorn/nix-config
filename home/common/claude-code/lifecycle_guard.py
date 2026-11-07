@@ -13,6 +13,7 @@ Standard library only: it imports nothing from the repository's helper package.
 
 import argparse
 from collections import namedtuple
+import errno
 import json
 import os
 import re
@@ -2723,6 +2724,7 @@ class Context:
         return row_check_problem(
             args.derive_bin, self.repository, row,
             min(args.derive_timeout_seconds, remaining),
+            getattr(args, "row_check_dropped_env", ()),
         )
 
 
@@ -2780,21 +2782,24 @@ def _report_mismatch(report, status, repository, row):
     return f"unavailable ({cause['reason_code']})"
 
 
-def row_check_env():
+def row_check_env(dropped=()):
     """os.environ without the shell startup variables and exported bash functions.
 
     A `BASH_ENV` or `ENV` file, or a `BASH_FUNC_<name>%%` function, could make a
-    shell script in the row check print a report the check never derived.
+    shell script in the row check print a report the check never derived. `dropped`
+    names more variables to remove: the pre-push hook passes git's repository-local
+    variables (D10), which would point the check's own `git` at the pushing repository.
     """
     return {
         name: value
         for name, value in os.environ.items()
         if name not in ROW_CHECK_ENV_DROPPED
+        and name not in dropped
         and not name.startswith(ROW_CHECK_ENV_DROPPED_PREFIX)
     }
 
 
-def row_check_problem(derive_bin, repository, row, timeout):
+def row_check_problem(derive_bin, repository, row, timeout, dropped_env=()):
     """Why the row check does not confirm `row` for `repository`, or None when it does.
 
     The check is `derive_bin --repository <repository>`, run once with no stdin,
@@ -2814,7 +2819,7 @@ def row_check_problem(derive_bin, repository, row, timeout):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=row_check_env(),
+            env=row_check_env(dropped_env),
             start_new_session=True,
         )
     except OSError as error:
@@ -3587,6 +3592,19 @@ def hook_exit_status(returncode):
     return returncode if returncode >= 0 else 1
 
 
+def run_chained(program, stdin_bytes, cwd, chain_env):
+    """Run `program` with git's stdin; an executable text file with no `#!` line runs
+    through `/bin/sh`, as git itself retries it (COR-002)."""
+    try:
+        return subprocess.run(program, input=stdin_bytes, cwd=cwd, env=dict(chain_env),
+                              check=False)
+    except OSError as error:
+        if error.errno != errno.ENOEXEC:
+            raise
+    return subprocess.run(["/bin/sh", *program], input=stdin_bytes, cwd=cwd,
+                          env=dict(chain_env), check=False)
+
+
 def chain_pre_push(args, base, stdin_bytes, cwd, chain_env):
     """Run the repository's own pre-push hook, else git-lfs for an LFS repository (D5).
 
@@ -3597,7 +3615,7 @@ def chain_pre_push(args, base, stdin_bytes, cwd, chain_env):
     stdin bytes, the pre-scrub environment, and this process's stdout, stderr and cwd.
     The hooks are located under that same pre-scrub environment, so a push that names
     its repository with `GIT_DIR` or `--git-dir` chains that repository's hooks, as the
-    shim does; only the judgement reads the scrubbed environment.
+    shim does; only the row check reads the scrubbed environment.
     """
     unlocated = f"{PRE_PUSH_LABEL}: cannot locate the repository's own hooks"
     git_bin = args.git_bin or base.git_bin
@@ -3623,13 +3641,26 @@ def chain_pre_push(args, base, stdin_bytes, cwd, chain_env):
             and os.path.realpath(candidate)
             != os.path.realpath(os.path.join(running_hooks, "pre-push"))):
         program = [candidate, *args.hook_args]
-    elif args.git_lfs_bin and os.path.isdir(os.path.join(common, "lfs")):
-        program = [args.git_lfs_bin, "pre-push", *args.hook_args]
+    elif args.git_lfs_bin:
+        # An LFS repository has `<common>/lfs`, or keeps its objects elsewhere through
+        # `lfs.storage` (COR-001); the shim applies the same rule.
+        try:
+            storage = subprocess.run(
+                [git_bin, "config", "--get", "lfs.storage"], cwd=cwd, env=dict(chain_env),
+                capture_output=True, text=True, timeout=args.child_timeout_seconds,
+                check=False)
+        except (subprocess.TimeoutExpired, OSError):
+            print(unlocated, file=sys.stderr)
+            return 1
+        if os.path.isdir(os.path.join(common, "lfs")) or (
+                storage.returncode == 0 and storage.stdout.strip()):
+            program = [args.git_lfs_bin, "pre-push", *args.hook_args]
+        else:
+            return 0
     else:
         return 0
     try:
-        done = subprocess.run(program, input=stdin_bytes, cwd=cwd, env=dict(chain_env),
-                              check=False)
+        done = run_chained(program, stdin_bytes, cwd, chain_env)
     except OSError as error:
         print(f"{PRE_PUSH_LABEL}: cannot run {program[0]}: {error.strerror or error}",
               file=sys.stderr)
@@ -3642,9 +3673,10 @@ def pre_push_main(args, stdin_bytes, environ, cwd):
 
     `args.hook_args` is git's `<remote> <url>`. The base policy loads first in
     every session (D7). Repository-local `GIT_*` variables git exports to hooks
-    are removed from this process before any judgement, so the context and the row
-    check read the repository the hook runs in (D10); the chained hook gets a copy
-    of the original environment.
+    are removed from the row check's environment only (D10): the context's own `git`
+    queries keep them, so the repository git was told to push from, by `GIT_DIR` or
+    `--git-dir`, is the one judged wherever the hook's cwd is. The chained hook gets
+    a copy of the original environment.
     """
     if len(args.hook_args) != 2:
         print(f"{PRE_PUSH_LABEL}: expected <remote> <url> from git", file=sys.stderr)
@@ -3674,8 +3706,7 @@ def pre_push_main(args, stdin_bytes, environ, cwd):
         print(unreadable, file=sys.stderr)
         return 1
     chain_env = dict(environ)
-    for name in local_names:
-        os.environ.pop(name, None)
+    args.row_check_dropped_env = tuple(local_names)
     if environ.get("CLAUDECODE", ""):
         lines = parse_pre_push_lines(stdin_bytes)
         if lines is None:

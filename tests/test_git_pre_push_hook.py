@@ -160,6 +160,36 @@ class PrePushJudgementTest(Refusals, unittest.TestCase):
         result = self.repo.git("push", "origin", "main", extra_env={"CLAUDECODE": ""})
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_a_push_naming_its_repository_from_a_work_tree_without_a_dot_git_is_judged(self):
+        """COR-003: the repository git was told to push from is the one judged."""
+        tree = self.world.tmp / "tree-without-dot-git"
+        tree.mkdir()
+        naming = (f"--git-dir={self.repo.work / '.git'}", f"--work-tree={tree}")
+        head = self.repo.git("rev-parse", "HEAD").stdout.strip()
+        result = self.repo.git(*naming, "push", "origin", "issue-1-topic",
+                               extra_env=AGENT, cwd=tree)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.repo.remote_ref(OWN, "refs/heads/issue-1-topic"), head)
+        self.repo.git("switch", "-q", "main")
+        self.repo.commit("onto main")
+        self.refused(self.repo.git(*naming, "push", "origin", "main",
+                                   extra_env=AGENT, cwd=tree),
+                     "refusing to push the default branch main")
+
+    def test_a_push_naming_its_repository_from_another_checkout_is_judged_in_the_named_one(self):
+        other = self.world.fixture(OTHER)
+        naming = (f"--git-dir={self.repo.work / '.git'}", f"--work-tree={self.repo.work}")
+        head = self.repo.git("rev-parse", "HEAD").stdout.strip()
+        result = self.repo.git(*naming, "push", "origin", "issue-1-topic",
+                               extra_env=AGENT, cwd=other.work)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.repo.remote_ref(OWN, "refs/heads/issue-1-topic"), head)
+        self.repo.git("switch", "-q", "main")
+        self.repo.commit("onto main")
+        self.refused(self.repo.git(*naming, "push", "origin", "main",
+                                   extra_env=AGENT, cwd=other.work),
+                     "refusing to push the default branch main")
+
     def test_a_bad_base_policy_refuses_every_push(self):
         self.world.base_policy.write_text("{}", encoding="utf-8")
         result = self.repo.git("push", "origin", "issue-1-topic", extra_env={"CLAUDECODE": ""})
@@ -250,6 +280,23 @@ class ChainingTest(unittest.TestCase):
         self.repo.commit("onto main")
         self.assertNotEqual(self.repo.git("push", "origin", "main", extra_env=AGENT).returncode, 0)
         self.assertFalse(Path(f"{self.out}.args").exists())
+
+    def test_a_repository_hook_without_a_shebang_runs_as_a_shell_script(self):
+        """COR-002: git retries an executable text file through sh on ENOEXEC."""
+        hook = self.common_hooks / "pre-push"
+        hook.write_text(f'cat > "{self.out}.stdin"\n', encoding="utf-8")
+        hook.chmod(0o755)
+        result = self.repo.git("push", "origin", "issue-1-topic", extra_env=AGENT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("refs/heads/issue-1-topic", Path(f"{self.out}.stdin").read_text())
+
+    def test_a_failing_repository_hook_without_a_shebang_refuses_the_push(self):
+        hook = self.common_hooks / "pre-push"
+        hook.write_text("exit 3\n", encoding="utf-8")
+        hook.chmod(0o755)
+        self.assertNotEqual(self.repo.git("push", "origin", "issue-1-topic",
+                                          extra_env=AGENT).returncode, 0)
+        self.assertIsNone(self.repo.remote_ref(OWN, "refs/heads/issue-1-topic"))
 
     def test_a_linked_worktree_push_runs_the_common_repository_hook(self):
         self.repo_hook("pre-push")
@@ -343,6 +390,19 @@ class LfsFallbackTest(unittest.TestCase):
 
     def test_an_lfs_repository_runs_git_lfs_post_commit_through_the_shim(self):
         self.lfs_repository()
+        self.assertEqual(self.repo.git("commit", "-q", "--allow-empty", "-m", "x").returncode, 0)
+        self.assertEqual(self.calls.read_text().splitlines(), ["post-commit"])
+
+    def test_an_lfs_repository_with_storage_elsewhere_runs_git_lfs_pre_push(self):
+        """COR-001: lfs.storage moves the objects out of <common>/lfs."""
+        self.repo.git("config", "lfs.storage", str(self.world.tmp / "elsewhere"))
+        result = self.repo.git("push", "origin", "issue-1-topic", extra_env=AGENT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(),
+                         [f"pre-push origin git@github.com:{OWN}.git"])
+
+    def test_an_lfs_repository_with_storage_elsewhere_runs_git_lfs_post_commit(self):
+        self.repo.git("config", "lfs.storage", str(self.world.tmp / "elsewhere"))
         self.assertEqual(self.repo.git("commit", "-q", "--allow-empty", "-m", "x").returncode, 0)
         self.assertEqual(self.calls.read_text().splitlines(), ["post-commit"])
 
