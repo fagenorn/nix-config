@@ -980,6 +980,29 @@ class AnsweredDecisionPassTest(OwnerBase):
         self.assertEqual(sorted(self.world.issue()["labels"]), ["needs-verification", "owner-answered"])
         self.no_human_required()
 
+    def label_writes(self):
+        return [a for a in self.world.argvs("gh") if "-X" in a and "/labels" in a[3]]
+
+    def test_a_collaborators_answered_decision_keeps_the_labels_steady_beside_a_verify_prompt(self):
+        """The sweep reads the same trust set reconcile does: no flapping, no label write on a settled issue."""
+        self.hold(ask_check(), labels=["needs-verification", "owner-action", "owner-answered"],
+                  extra=[stored_comment(11, box_body([QUESTIONS[1]], ticks={(0, 0)}), "COLLABORATOR")])
+        vr.pass_repo(self.project, "mbp", Refs())
+        wanted = ["needs-verification", "owner-action", "owner-answered"]
+        self.assertEqual(sorted(self.world.issue()["labels"]), wanted)
+        before = len(self.label_writes())
+        vr.pass_repo(self.project, "mbp", Refs())
+        self.assertEqual(len(self.label_writes()), before)
+        self.assertEqual(sorted(self.world.issue()["labels"]), wanted)
+
+    def test_a_collaborators_unanswered_decision_keeps_owner_action_through_a_sweep(self):
+        """B-001: the sweep must not strip owner-action reconcile needs to find the issue again."""
+        self.hold(check(when={"not_before": "2026-12-01T00:00:00+00:00"}),
+                  labels=["needs-verification", "owner-action"],
+                  extra=[stored_comment(11, box_body([QUESTIONS[1]]), "COLLABORATOR")])
+        vr.pass_repo(self.project, "mbp", Refs())
+        self.assertEqual(sorted(self.world.issue()["labels"]), ["needs-verification", "owner-action"])
+
     def test_a_report_pass_reconciles_nothing(self):
         self.hold(ask_check(), labels=["needs-verification", "owner-action"],
                   extra=[stored_comment(11, box_body([QUESTIONS[1]], ticks={(0, 0)}))])

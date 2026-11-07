@@ -869,8 +869,11 @@ class _Pass:
             if why is not None:
                 forge_markers.end(self.slug, self.number, m.comment_id, why)
                 gone.add(m.comment_id)
+        # The label writer reads the trust set reconcile does (a collaborator's batch may post a decision
+        # prompt), or the two disagree on the same issue and the labels flap or owner-action is stripped.
+        wide = forge_markers.list_markers(self.slug, self.number, forge_owner_action.TRUSTED)
         forge_owner_action.apply_labels(self.slug, self.number,
-                                        [m for m in fresh if m.comment_id not in gone], labels, drop_bare=True)
+                                        [m for m in wide if m.comment_id not in gone], labels, drop_bare=True)
 
     # --- closing (P9) ----------------------------------------------------------
 
