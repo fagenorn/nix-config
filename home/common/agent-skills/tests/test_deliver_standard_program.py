@@ -893,6 +893,27 @@ class MergeRefusedBehindTest(unittest.TestCase):
         self.assertIn("cont", result)
         self.assertNotIn("close-out", labels(calls))
 
+    def test_earlier_syncs_do_not_consume_the_merge_recovery(self):
+        m1, m2, m3 = "1" * 40, "2" * 40, "3" * 40
+        result, calls = run(replies={"merge": [self.STALE, {"merged": True, "merge_commit": MERGE, "notes": "merged"}],
+                                     "checks-1": {"state": "behind", "head": SHA},
+                                     "checks-2": {"state": "behind", "head": m1},
+                                     "checks-3": {"state": "passed", "head": m2},
+                                     "checks-4": {"state": "behind", "head": m2},
+                                     "checks-5": {"state": "passed", "head": m3}},
+                            patch={"sync-1": {"merge_commit": m1}, "sync-2": {"merge_commit": m2},
+                                   "sync-3": {"merge_commit": m3}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([l for l in labels(calls) if l.startswith("sync-")], ["sync-1", "sync-2", "sync-3"])
+        self.assertIn(f"--match-head-commit {m3}", prompt(calls, "merge"))
+        self.assertEqual(result["syncs"], 3)
+
+    def test_a_third_pre_merge_behind_is_still_contention_after_a_recovery(self):
+        behind = {"state": "behind", "head": SHA}
+        result, calls = run(replies={"merge": self.STALE, "checks-2": behind, "checks-3": behind, "checks-4": behind,
+                                     "checks-5": behind})
+        self.assertEqual(result["stage"], "sync-contention")
+
     def test_any_other_refusal_stops_at_once(self):
         result, calls = run(replies={"merge": {"merged": False, "behind": False, "notes": "required check pending"}})
         self.assertEqual(result["stage"], "merge")

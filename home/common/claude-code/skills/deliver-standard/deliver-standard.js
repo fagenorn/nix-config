@@ -736,6 +736,8 @@ let syncs = 0
 let round = 0
 let mg = null
 let mergeRefusals = 0
+let raced = false
+let contended = 0
 // One bounded Ship fix wave: an implementer commits a fix on top of the current head (not pushed), then a fresh reviewer re-reviews it.
 // The repair must start from the head the caller accepted (start_head), or the reviewer would see only its own diff and miss an unreviewed commit beneath it.
 // Returns { fix, ok: false } when the fix failed, started elsewhere, or added no commit (unless rebuttal allows an answer with evidence and no commit),
@@ -782,10 +784,16 @@ Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is tr
 ${RULES}`, { label: 'merge', phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] } })
     if (mg && mg.merged) break
     // Refused as not up to date: the next round's checks step fetches, reports behind and syncs; three refusals, or any other, stop.
+    // That sync is bounded by the refusal budget alone, so syncs made before the first merge attempt never consume it.
     if (!mg || mg.behind !== true || ++mergeRefusals >= 3) return stop('merge', { pr: PR, merge: mg })
+    raced = true
     continue
   }
-  if (syncs >= 2) return stop('sync-contention', { pr: PR, syncs })
+  if (!raced) {
+    if (contended >= 2) return stop('sync-contention', { pr: PR, syncs })
+    contended++
+  }
+  raced = false
   syncs++
   const sy = await call(`${CTX}
 The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, commit the merge, and run only the tests covering the files the resolution touched. Do not push. Return conflicted, merge_commit (full sha), resolved_files and the tests you ran; status blocked with notes if you cannot resolve it safely.
