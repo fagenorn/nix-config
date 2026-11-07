@@ -619,6 +619,43 @@ class LandTest(unittest.TestCase):
         self.assertNotIn("gh issue close", close)
         self.assertIn("needs-verification", close)
 
+    def test_the_pr_step_reuses_only_a_pr_whose_head_is_the_batch_branch(self):
+        text = prompt(run()[1], "land-pr-1")
+        self.assertIn("If an open PR with head issue-1-x exists", text)
+        self.assertIn("Never reuse or edit a PR whose head is another branch", text)
+        self.assertNotIn("or one against dev for this issue", text)
+
+    def test_a_landing_stopped_after_the_merge_is_closed_out_by_the_relaunch(self):
+        first, _, _ = run(replies={"close-out-1": {"issue_state": "OPEN", "released": False, "notes": "release errored"}})
+        self.assertEqual((row(first, 1)["outcome"], row(first, 1)["stage"]), ("stopped", "close-out"))
+        relaunch = first["relaunch"]
+        self.assertEqual(relaunch["issues"], [1])
+        done = {"stage": "done", "pr": 41, "merged": True, "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+                "close_out": {"issue_state": "CLOSED", "released": True}}
+        second, calls, _ = run(args=relaunch,
+                               patch={"facts-1": {"merged_pr": 41, "claim": {"verdict": "held_by", "by": HOLDER}}},
+                               children={"1": done})
+        self.assertEqual((row(second, 1)["outcome"], row(second, 1)["pr"]), ("landed", 41))
+        self.assertIsNone(second["relaunch"])
+        self.assertEqual(child(calls, 1)["args"]["cont"], relaunch["conts"]["1"])
+        end = prompt(calls, "recover-end-1")
+        for reason in ("conflict", "needs-label"):
+            self.assertIn(f"forge-claim owner-action end --repo owner/repo --issue 1 --reason {reason}", end)
+        self.assertNotIn("land-pr-1", labels(calls))
+
+    def test_a_relaunched_merged_landing_with_open_criteria_is_held(self):
+        cont = {"setup": {"holder": HOLDER, "branch": "issue-1-x", "worktree": "/r/.wt/w-issue-1-x"}}
+        done = {"stage": "done", "pr": 41, "merged": True, "acceptance": [{"id": "AC2", "text": "live", "kind": "evidence"}]}
+        result, _, _ = run(args=dict(ARGS, conts={"1": cont}),
+                           patch={"facts-1": {"merged_pr": 41, "claim": {"verdict": "held_by", "by": HOLDER}}},
+                           children={"1": done})
+        self.assertEqual(row(result, 1)["outcome"], "landed-held")
+
+    def test_a_merged_pr_without_a_forwarded_cont_stays_a_duplicate(self):
+        result, calls, _ = run(patch={"facts-1": {"merged_pr": 41, "claim": {"verdict": "held_by", "by": HOLDER}}})
+        self.assertEqual(row(result, 1)["outcome"], "duplicate")
+        self.assertEqual(labels(calls), ["setup", "facts-1"])
+
     def test_a_close_out_that_leaves_the_wrong_state_is_stopped(self):
         result, _, _ = run(replies={"close-out-1": {"issue_state": "OPEN", "released": True, "notes": "x"}})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))

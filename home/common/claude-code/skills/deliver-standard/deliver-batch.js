@@ -164,13 +164,20 @@ await parallel(ISSUES.map(n => async () => {
 }))
 
 // Eligibility is plain JS over the facts, first match wins; null means eligible.
+// A forwarded cont names a landing this batch started; its PR now reads as merged and the claim is still ours (or already released):
+// the merge happened after the cont was forwarded, so the issue is re-adopted for its close-out, never skipped as a duplicate or closed.
+const mergedReadopt = (n, f) => {
+  const claim = f.claim || {}
+  return !!(CONTS[n] && f.merged_pr && (claim.verdict === 'free' || claim.by === HOLDER))
+}
 const eligibility = (n, f) => {
-  if (f.state === 'CLOSED') return { issue: n, outcome: 'closed' }
+  const readopt = mergedReadopt(n, f)
+  if (f.state === 'CLOSED' && !readopt) return { issue: n, outcome: 'closed' }
   const labels = f.labels || []
   for (const [label, outcome] of [['needs-verification', 'needs-verification'], ['parked', 'parked'], ['agent:human-required', 'human-required']]) {
-    if (labels.includes(label)) return { issue: n, outcome }
+    if (labels.includes(label) && !(readopt && label === 'needs-verification')) return { issue: n, outcome }
   }
-  if (f.merged_pr) return { issue: n, outcome: 'duplicate', pr: f.merged_pr }
+  if (f.merged_pr && !readopt) return { issue: n, outcome: 'duplicate', pr: f.merged_pr }
   const claim = f.claim || { verdict: 'error' }
   if (claim.verdict === 'held_by' && claim.by !== HOLDER) return { issue: n, outcome: 'claimed-elsewhere', by: claim.by }
   if (claim.verdict === 'stale' && claim.by !== HOLDER) return { issue: n, outcome: 'stale-claim', by: claim.by }
@@ -421,7 +428,7 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
 
     const prR = await call(`Open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${B} (worktree ${W}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
 1. Push the branch: git -C ${W} push origin ${B}.
-2. If an open PR with head ${B} exists (a re-run), or one against ${INT} for this issue, reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Otherwise open one with the create form above. Title: a short summary of the issue.
+2. If an open PR with head ${B} exists (a re-run), reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
 Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
 Return pr (number) and head (the full sha of the pushed head).
 ${RULES}`, `land-pr-${n}`, { model: 'sonnet', schema: LAND_PR_SCHEMA })
@@ -582,6 +589,16 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `answered-${n}`, phase: 'Deliver', model
     if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `child-${n} returned nothing` }; return }
     if (r.cont) CONTS[n] = r.cont
     if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents }; return }
+    if (r.stage === 'done') {
+      // A re-adopted merged landing: the child closed it out (claim released, worktree and branch removed). End the landing markers the merge resolved.
+      const ended = await ask(agent(`The landing of issue #${n} of ${SLUG} (the git repository at ${REPO}) is merged and closed out. End its landing owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict and then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label. A verdict none is fine.
+Return its verdict and any detail. Run nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `recover-end-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: ENDED_SCHEMA }), `recover-end-${n}`)
+      if (ended === null || ended === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'recover-end', detail: `recover-end-${n} returned nothing`, ...(r.pr ? { pr: r.pr } : {}) }; return }
+      const heldOpen = Array.isArray(r.acceptance) && r.acceptance.some(a => a.kind !== 'code')
+      rows[n] = { issue: n, outcome: heldOpen ? 'landed-held' : 'landed', ...(r.pr ? { pr: r.pr } : {}) }
+      return
+    }
     if (r.stage === 'ready') {
       READY[n] = r
       rows[n] = await enqueue(INT, () => land(n, r))
