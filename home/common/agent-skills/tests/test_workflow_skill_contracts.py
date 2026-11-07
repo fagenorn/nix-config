@@ -3289,21 +3289,52 @@ class DirectLaneRoutingTest(unittest.TestCase):
         """#635: step 1 claims through forge-claim and goes on only on its holding verdicts;
         the hot instruction bytes do not grow."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 4991)
+        self.assertLessEqual(len(raw), 4989)
         text = normalized(raw.decode("utf-8"))
         step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
         for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id> --branch <branch>`",
                       "`forge-claim release`", "`acquired`", "`already_held`"):
             with self.subTest(token=token):
                 self.assertIn(token, step1)
-        # COR-002: the claim records its branch (so branch activity counts) and is renewed before push and merge.
-        step5 = text[text.index("**Ship.**"):text.index("**Wait in-turn.**")]
-        for token in ("`forge-claim renew`", "`renewed`", "before the push", "before the merge"):
+        # COR-002: the claim records its branch (so branch activity counts) and is renewed before each push and the merge.
+        step5 = text[text.index("**Ship.**"):text.index("**Land in order.**")]
+        for token in ("`forge-claim renew`", "`renewed`"):
             with self.subTest(token=token):
                 self.assertIn(token, step5)
         for gone in ("assignee", "in-progress", "gh issue view"):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, step1)
+
+    def test_deliver_direct_fetches_before_judging_whether_the_issue_still_applies(self):
+        """#677: a stale origin/<int> must not close an unresolved issue, so step 1 fetches before it decides."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
+        self.assertIn("Fetch", step1)
+        self.assertLess(step1.index("Fetch"), step1.index("still applies"))
+
+    def test_deliver_direct_holds_the_land_lock_from_sync_through_merge(self):
+        """#677: step 6 carries the consumed forms in ship order: waiting acquire, sync merge, push,
+        required-check wait, the holding verdict before the merge, release; the hot bytes do not grow."""
+        raw = self.DELIVER_DIRECT.read_bytes()
+        self.assertLessEqual(len(raw), 4989)
+        text = normalized(raw.decode("utf-8"))
+        land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
+        at = 0
+        for form in (
+            "`forge-claim land acquire --repo <slug> --branch <int> --sha <head> --wait`",
+            "`origin/<int>`",
+            "`git -C <dir> push origin <branch>`",
+            "`gh pr checks <pr> --repo <slug> --watch`",
+            "`already_held`",
+            "`forge-claim land release --repo <slug> --branch <int> --sha <lock sha>`",
+        ):
+            with self.subTest(form=form):
+                found = land.find(form, at)
+                self.assertGreaterEqual(found, 0, f"{form} missing or out of order")
+                at = found + len(form)
+        for token in ("`acquired`", "`moved`", "`--wait`"):
+            with self.subTest(token=token):
+                self.assertIn(token, land)
 
     def test_deliver_direct_review_fixes_from_its_first_runs(self):
         """#572: verification is not a test-first step; required checks come from the rules API."""

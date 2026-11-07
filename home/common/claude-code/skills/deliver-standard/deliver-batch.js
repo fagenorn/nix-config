@@ -318,8 +318,11 @@ const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boole
 const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
 const MAX_SYNCS = 3
 
-// The landing of one ready issue (D10). Every exit goes through the wrapper at the bottom: a landing
-// that holds the lock releases it exactly once, and a failed landing keeps the claim and its cont (D9).
+// The landing of one ready issue (D10). The order is: renew, open or re-adopt the PR at the ready head,
+// take the land lock with --wait, resync, the checks loop, renew, the one-shot pre-merge acquire, merge,
+// release, close out (#677). Every exit goes through the wrapper at the bottom: a landing that holds the
+// lock releases it exactly once, at the last sha it was held at (P8), and a failed landing keeps the
+// claim and its cont (D9).
 const land = async (n, ready) => {
   const W = ready.worktree, B = ready.branch
   const RULES = RULES_FOR(W, B)
@@ -452,10 +455,13 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
   }
 
   const body = async () => {
+    // The order (#677): the PR opens at the ready head, the land lock is taken waiting (the CLI waits
+    // within its bound, so the acquire is sent once), and only then does the first resync run, so no
+    // resync, check or merge happens outside the lock. A resync that changes the head pushes it and
+    // advance() moves the lock; lockSha changes only on a holding verdict, so the release below always
+    // names the last sha the lock was held at, even when a move fails.
     const lostA = await renew('land')
     if (lostA) return lostA
-    const first = await resync()
-    if (first) return first
 
     const prR = await call(`Open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${B} (worktree ${W}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
 1. Push the branch: git -C ${W} push origin ${B}.
@@ -471,6 +477,9 @@ ${RULES}`, `land-pr-${n}`, { model: 'sonnet', schema: LAND_PR_SCHEMA })
     if (v1 === 'acquired' || v1 === 'already_held' || v1 === 'moved') { lockHeld = true; lockSha = expected }
     else if (v1 === 'land-contended' || v1 === 'held_by' || v1 === 'lost_to') return out('land-contended', { detail: `the land lock is held by another landing (${v1})` })
     else return out('stopped', { stage: 'land-lock', detail: v1 === null ? `land-lock-${n}-1 returned nothing` : v1 })
+
+    const first = await resync()
+    if (first) return first
 
     for (;;) {
       c.checks++

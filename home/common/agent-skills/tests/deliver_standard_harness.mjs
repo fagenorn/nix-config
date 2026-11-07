@@ -29,6 +29,9 @@ const openChecks = prompt => {
 }
 // Ordered: the first matching pattern wins.
 const DEFAULTS = [
+  [/^land-lock-/, { verdict: 'already_held', lock_sha: SHA }],
+  [/^land-push-/, prompt => ({ head: (/at the head ([0-9a-f]+)/.exec(prompt) || [])[1] || SHA })],
+  [/^land-unlock$/, { verdict: 'released' }],
   [/^renew-/, { verdict: 'renewed', comment_id: 7 }],
   [/^acquire$/, { verdict: 'acquired', comment_id: 7 }],
   [/^setup$/, SETUP],
