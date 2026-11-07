@@ -3305,6 +3305,13 @@ class DirectLaneRoutingTest(unittest.TestCase):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, step1)
 
+    def test_deliver_direct_fetches_before_judging_whether_the_issue_still_applies(self):
+        """#677: a stale origin/<int> must not close an unresolved issue, so step 1 fetches before it decides."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
+        self.assertIn("Fetch", step1)
+        self.assertLess(step1.index("Fetch"), step1.index("still applies"))
+
     def test_deliver_direct_holds_the_land_lock_from_sync_through_merge(self):
         """#677: step 6 carries the consumed forms in ship order: waiting acquire, sync merge, push,
         required-check wait, the holding verdict before the merge, release; the hot bytes do not grow."""

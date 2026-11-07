@@ -1087,6 +1087,16 @@ class LandLockTest(unittest.TestCase):
         self.assertEqual(names[names.index("pr"):names.index("checks-1")], ["pr", "land-lock-1", "renew-checks-1"])
         self.assertIn(f"--sha {SHA} --wait\n", prompt(calls, "land-lock-1"))
 
+    def test_a_fix_commit_in_short_form_moves_the_lock_by_its_full_sha(self):
+        short = FIX[:9]
+        result, calls = run(replies={"checks-1": RED, "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]},
+                                     "land-push-2": {"head": FIX}},
+                            patch={"fix-ci": {"start_head": SHA, "commit": short}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX}\n", prompt(calls, "land-lock-2"))
+        self.assertNotIn(f"--sha {short}\n", prompt(calls, "land-lock-2"))
+        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {FIX}", prompt(calls, "land-unlock"))
+
     def test_a_non_holding_wait_answer_stops_with_cont(self):
         for verdict in ("land-contended", "held_by", "lost_to"):
             with self.subTest(verdict=verdict):

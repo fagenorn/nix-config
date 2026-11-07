@@ -826,6 +826,7 @@ Push the branch ${setup.branch} of PR #${PR} at the head ${expected}: run alone 
 ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { head: FULL_SHA, notes: { type: 'string' } }, required: ['head'] } })
       if (!pu) return stop('push', { pr: PR })
       if (!sameSha(pu.head, expected)) return stop('head-moved', { pr: PR, expected, head: pu.head })
+      expected = fuller(expected, pu.head)
       const mv = await lock(false)
       if (!HOLDING.includes(mv)) return stop('land-contended', { pr: PR, lock: mv })
       lockSha = expected
