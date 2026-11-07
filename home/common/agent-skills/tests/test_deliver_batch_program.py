@@ -421,6 +421,209 @@ class ContTest(unittest.TestCase):
         self.assertNotIn("lane", args)
 
 
+B = "b" * 40
+FIX = "c0ffee"
+HAPPY = ["facts-1", "lane-1", "acquire-1", "child-1", "renew-1-land", "land-sync-1-1", "land-pr-1",
+         "land-lock-1-1", "land-checks-1-1", "renew-1-merge", "land-lock-1-2", "land-merge-1",
+         "land-unlock-1", "close-out-1"]
+
+
+def ready(n, acceptance=None, head=SHA):
+    return {"stage": "ready", "head": head, "branch": f"issue-{n}-x", "worktree": f"/r/.wt/w-issue-{n}-x",
+            "verify": [{"id": "build", "status": "pass", "summary": "ok"}], "tasks": [{"n": 1}],
+            "acceptance": acceptance or [{"id": "AC1", "text": "works", "kind": "code"}], "fix_waves": 0,
+            "cont": {"setup": {"holder": HOLDER, "branch": f"issue-{n}-x", "worktree": f"/r/.wt/w-issue-{n}-x"}}}
+
+
+class LandTest(unittest.TestCase):
+    def test_happy_landing_runs_every_step_in_order(self):
+        result, calls, _ = run()
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["pr"]), ("landed", 41))
+        self.assertEqual(of(calls, 1), HAPPY)
+        self.assertIsNone(result["relaunch"])
+
+    def test_landing_commands_are_exact(self):
+        _, calls, _ = run()
+        self.assertIn(f"forge-claim renew --repo owner/repo --issue 1 --holder {HOLDER} --branch issue-1-x",
+                      prompt(calls, "renew-1-land"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait",
+                      prompt(calls, "land-lock-1-1"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}", prompt(calls, "land-lock-1-2"))
+        self.assertNotIn("--wait", prompt(calls, "land-lock-1-2"))
+        self.assertIn(f"gh pr merge 41 --repo owner/repo --merge --match-head-commit {SHA} --delete-branch",
+                      prompt(calls, "land-merge-1"))
+        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}", prompt(calls, "land-unlock-1"))
+        self.assertIn("rules/branches/dev", prompt(calls, "land-checks-1-1"))
+        close = prompt(calls, "close-out-1")
+        for needle in ("deliver-direct", "step 7", f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason done",
+                       "gh issue close 1 --repo owner/repo"):
+            self.assertIn(needle, close)
+
+    def test_pr_body_refs_unless_the_integration_branch_is_the_default(self):
+        _, calls, _ = run()
+        self.assertIn("Refs #1", prompt(calls, "land-pr-1"))
+        _, calls, _ = run(patch={"setup": {"integration_branch": "main"}})
+        self.assertIn("Closes #1", prompt(calls, "land-pr-1"))
+
+    def test_landings_never_interleave(self):
+        _, calls, _ = run(args=dict(ARGS, issues=[1, 2]))
+        land = [c["label"] for c in calls if c["label"].startswith(("renew-", "land-", "close-out-"))]
+        owners = [int(re.search(r"-(\d+)(?:-|$)", label).group(1)) for label in land]
+        self.assertEqual(sum(1 for a, b in zip(owners, owners[1:]) if a != b), 1)
+
+    def test_land_lock_contention_is_reported(self):
+        result, calls, _ = run(replies={"land-lock-1-1": {"verdict": "land-contended", "lock_sha": B}})
+        self.assertEqual(row(result, 1)["outcome"], "land-contended")
+        for label in ("land-checks-1-1", "land-merge-1", "land-unlock-1", "release-1", "close-out-1"):
+            self.assertNotIn(label, labels(calls))
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertEqual(result["relaunch"]["conts"], {"1": ready(1)["cont"]})
+
+    def test_ci_failing_twice_is_reported_and_never_merged(self):
+        result, calls, _ = run(replies={
+            "land-checks-1-1": {"state": "failed", "head": SHA, "failing": ["ci"]},
+            "land-checks-1-2": {"state": "failed", "head": FIX, "failing": ["ci"]}})
+        self.assertEqual(row(result, 1)["outcome"], "ci-failed")
+        self.assertEqual(labels(calls).count("land-fix-1"), 1)
+        self.assertIn("land-fix-review-1", labels(calls))
+        self.assertIn("land-unlock-1", labels(calls))
+        for label in ("land-merge-1", "release-1", "close-out-1"):
+            self.assertNotIn(label, labels(calls))
+
+    def test_ci_failing_once_is_fixed_and_lands_the_fix_head(self):
+        result, calls, _ = run(replies={
+            "land-checks-1-1": {"state": "failed", "head": SHA, "failing": ["ci"]},
+            "land-record-1-1": {"ok": True, "head": FIX},
+            "land-checks-1-2": {"state": "passed", "head": FIX, "passed": ["ci"]}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertIn(f"--sha {FIX}", prompt(calls, "land-lock-1-2"))
+        self.assertIn(f"--match-head-commit {FIX}", prompt(calls, "land-merge-1"))
+        ls = labels(calls)
+        self.assertLess(ls.index("land-fix-review-1"), ls.index("land-record-1-1"))
+        self.assertLess(ls.index("land-record-1-1"), ls.index("land-lock-1-2"))
+        self.assertIn(f"Accepted head: {FIX}", prompt(calls, "land-record-1-1"))
+
+    def test_the_pr_body_records_the_accepted_head(self):
+        _, calls, _ = run()
+        self.assertIn(f"Accepted head: {SHA}", prompt(calls, "land-pr-1"))
+        self.assertNotIn("land-record-1-1", labels(calls))  # no head change after the PR opened
+
+    def test_a_rejected_fix_is_never_recorded_as_accepted(self):
+        result, calls, _ = run(replies={
+            "land-checks-1-1": {"state": "failed", "head": SHA, "failing": ["ci"]},
+            "land-fix-review-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "skipped a test"}]}})
+        self.assertEqual(row(result, 1)["outcome"], "ci-failed")
+        self.assertNotIn("land-record-1-1", labels(calls))
+        self.assertNotIn("land-merge-1", labels(calls))
+        self.assertEqual(result["relaunch"]["conts"], {"1": ready(1)["cont"]})
+
+    def test_a_declared_check_missing_from_a_passed_reply_is_never_merged(self):
+        result, calls, _ = run(patch={"setup": {"required_checks": ["ci", "lint"]}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"], row(result, 1)["missing"]),
+                         ("stopped", "checks", ["lint"]))
+        self.assertIn('["ci","lint"]', prompt(calls, "land-checks-1-1"))  # DECLARED as JSON.stringify writes it
+        self.assertNotIn("land-merge-1", labels(calls))
+        self.assertIn("land-unlock-1", labels(calls))
+
+    def test_every_declared_check_passing_lands(self):
+        result, _, _ = run(patch={"setup": {"required_checks": ["ci", "lint"]},
+                                  "land-checks-1-1": {"passed": ["ci", "lint"]}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+
+    def test_close_out_ends_the_landing_owner_actions(self):
+        _, calls, _ = run()
+        close = prompt(calls, "close-out-1")
+        for reason in ("conflict", "needs-label"):
+            self.assertIn(f"forge-claim owner-action end --repo owner/repo --issue 1 --reason {reason}", close)
+
+    def test_a_conflicting_resync_is_resolved_and_reviewed(self):
+        result, calls, _ = run(replies={
+            "land-sync-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B,
+                              "resolved_files": ["x.py"], "tests": ["t"], "notes": "ok"},
+            "land-pr-1": {"pr": 41, "head": B}, "land-checks-1-1": {"state": "passed", "head": B}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertIn("land-sync-review-1-1", labels(calls))
+        self.assertNotIn("land-ask-1", labels(calls))
+        self.assertIn(f"--match-head-commit {B}", prompt(calls, "land-merge-1"))
+
+    def test_a_rejected_resolution_is_conflict_without_an_owner_action(self):
+        result, calls, _ = run(replies={
+            "land-sync-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
+            "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}})
+        self.assertEqual(row(result, 1)["outcome"], "conflict")
+        for label in ("land-ask-1", "land-pr-1", "release-1"):
+            self.assertNotIn(label, labels(calls))
+
+    def test_a_second_conflict_aborts_and_posts_an_owner_action(self):
+        result, calls, _ = run(replies={
+            "land-sync-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
+            "land-pr-1": {"pr": 41, "head": B},
+            "land-checks-1-1": {"state": "behind", "head": B},
+            "land-sync-1-2": {"status": "blocked", "conflicted": True, "head": B, "notes": "aborted"}})
+        self.assertEqual(row(result, 1)["outcome"], "conflict")
+        self.assertNotIn("land-record-1-1", labels(calls))
+        self.assertIn("git merge --abort", prompt(calls, "land-sync-1-2"))
+        self.assertNotIn("land-sync-review-1-2", labels(calls))
+        self.assertIn(f"--holder {HOLDER} --reason conflict --items-file", prompt(calls, "land-ask-1"))
+        self.assertIn({"issue": 1, "reason": "conflict", "comment_id": 99}, result["owner_actions"])
+        self.assertIn("land-unlock-1", labels(calls))
+
+    def test_needs_label_posts_an_owner_action(self):
+        result, calls, _ = run(replies={"land-checks-1-1": {"state": "needs_label", "head": SHA, "label": "raise-me", "failing": ["gate"]}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["label"]), ("needs-label", "raise-me"))
+        text = prompt(calls, "land-ask-1")
+        self.assertIn("--reason needs-label --items-file", text)
+        self.assertIn("raise-me", text)
+        self.assertIn({"issue": 1, "reason": "needs-label", "comment_id": 99}, result["owner_actions"])
+        self.assertIn("land-unlock-1", labels(calls))
+        self.assertNotIn("land-merge-1", labels(calls))
+
+    def test_behind_three_times_is_contention(self):
+        behind = {"state": "behind", "head": SHA}
+        result, calls, _ = run(replies={f"land-checks-1-{k}": behind for k in (1, 2, 3)})
+        self.assertEqual(row(result, 1)["outcome"], "land-contended")
+        self.assertIn("land-sync-1-3", labels(calls))
+        self.assertNotIn("land-sync-1-4", labels(calls))
+        self.assertIn("land-unlock-1", labels(calls))
+
+    def test_a_lock_retaken_before_the_merge_resyncs_first(self):
+        result, calls, _ = run(replies={"land-lock-1-2": {"verdict": "acquired", "lock_sha": SHA}})
+        # the resync answers current (no head change), so nothing is recorded
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = labels(calls)
+        self.assertLess(ls.index("land-lock-1-2"), ls.index("land-sync-1-2"))
+        self.assertLess(ls.index("land-sync-1-2"), ls.index("land-merge-1"))
+
+    def test_a_lost_claim_stops_the_landing_before_the_pr(self):
+        result, calls, _ = run(replies={"renew-1-land": {"verdict": "not_held", "by": "h2/b9"}})
+        self.assertEqual(row(result, 1)["outcome"], "claim-lost")
+        self.assertNotIn("land-pr-1", labels(calls))
+
+    def test_a_pushed_head_other_than_the_ready_head_stops(self):
+        result, calls, _ = run(replies={"land-pr-1": {"pr": 41, "head": B}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "head-moved"))
+        self.assertNotIn("land-lock-1-1", labels(calls))
+
+    def test_an_unmerged_pr_unlocks_and_stops(self):
+        result, calls, _ = run(replies={"land-merge-1": {"merged": False, "notes": "head mismatch"}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
+        self.assertIn("land-unlock-1", labels(calls))
+        self.assertNotIn("close-out-1", labels(calls))
+
+    def test_non_code_criteria_hold_the_issue_open(self):
+        acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
+        result, calls, _ = run(children={"1": ready(1, acceptance)},
+                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "notes": "held"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed-held")
+        close = prompt(calls, "close-out-1")
+        self.assertNotIn("gh issue close", close)
+        self.assertIn("needs-verification", close)
+
+    def test_a_close_out_that_leaves_the_wrong_state_is_stopped(self):
+        result, _, _ = run(replies={"close-out-1": {"issue_state": "OPEN", "released": True, "notes": "x"}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))
+
+
 class SourceTest(unittest.TestCase):
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")

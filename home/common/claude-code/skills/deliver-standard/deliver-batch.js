@@ -235,6 +235,299 @@ const childArgs = (n, lane) => {
   return a
 }
 
+// --- Land: one serial queue per integration branch, under the cross-host land lock (D2, D10) ---
+// enqueue runs fn after every earlier landing on the branch settled, fulfilled or rejected.
+const QUEUES = {}
+const enqueue = (branch, fn) => {
+  const run = (QUEUES[branch] || Promise.resolve()).then(() => fn())
+  QUEUES[branch] = run.then(() => undefined, () => undefined)
+  return run
+}
+const LAND_OA = [] // owner-actions the landings posted
+const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
+const FINDINGS = {
+  type: 'object',
+  properties: {
+    verdict: { type: 'string', enum: ['pass', 'findings'] },
+    findings: { type: 'array', items: { type: 'object', properties: { severity: SEV, file: { type: 'string' }, summary: { type: 'string' }, failing_input: { type: 'string' } }, required: ['severity', 'summary'] } },
+  },
+  required: ['verdict', 'findings'],
+}
+const IMPL = {
+  type: 'object',
+  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: { type: 'string' }, commit: { type: 'string' }, tests: STRS, mutation_checked: { type: 'boolean' }, notes: { type: 'string' } },
+  required: ['status', 'notes'],
+}
+const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
+const findingsOf = r => (r.findings || []).filter(f => f.severity !== 'minor')
+const RENEW_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
+const LOCK_SCHEMA = {
+  type: 'object',
+  properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'moved', 'held_by', 'lost_to', 'land-contended', 'error'] }, lock_sha: { type: 'string' }, pr: { type: 'integer' }, by: { type: 'string' }, detail: { type: 'string' } },
+  required: ['verdict'],
+}
+const LAND_PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head: { type: 'string' }, notes: { type: 'string' } }, required: ['pr', 'head'] }
+const LAND_CHECKS_SCHEMA = {
+  type: 'object',
+  properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind', 'needs_label'] }, head: { type: 'string' }, required: STRS, passed: STRS, failing: STRS, label: { type: 'string' }, details: { type: 'string' } },
+  required: ['state', 'head'],
+}
+const RECORD_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' }, head: { type: 'string' }, detail: { type: 'string' } }, required: ['ok'] }
+const LAND_SYNC_SCHEMA = {
+  type: 'object',
+  properties: { status: { type: 'string', enum: ['current', 'done', 'blocked'] }, conflicted: { type: 'boolean' }, head: { type: 'string' }, merge_commit: { type: 'string' }, resolved_files: STRS, tests: STRS, notes: { type: 'string' } },
+  required: ['status'],
+}
+const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
+const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
+const MAX_SYNCS = 3
+
+// The landing of one ready issue (D10). Every exit goes through the wrapper at the bottom: a landing
+// that holds the lock releases it exactly once, and a failed landing keeps the claim and its cont (D9).
+const land = async (n, ready) => {
+  const W = ready.worktree, B = ready.branch
+  const RULES = RULES_FOR(W, B)
+  const ACS = JSON.stringify(ready.acceptance)
+  const allCode = ready.acceptance.every(a => a.kind === 'code')
+  const closesLine = allCode && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
+  let expected = ready.head
+  let pr = null
+  let lockHeld = false
+  let lockSha = null
+  const c = { sync: 0, syncReview: 0, lock: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0 }
+  const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(extra || {}) })
+  const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
+  const cheap = { model: 'sonnet', effort: 'low' }
+
+  const renew = async at => {
+    const label = `renew-${n}-${at}`
+    const r = await call(`Renew the claim of issue #${n} of ${SLUG} (the git repository at ${REPO}) before the landing step ${at}.
+Run alone and exactly: forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B}
+Return its verdict (renewed, not_held, or error on any other exit), by and detail. Run nothing else.
+${RULES}`, label, { ...cheap, schema: RENEW_SCHEMA })
+    if (!r) return out('stopped', { stage: 'renew', detail: `${label} returned nothing` })
+    if (r.verdict === 'renewed') return null
+    if (r.verdict === 'not_held') return out('claim-lost', { by: r.by })
+    return out('stopped', { stage: 'renew', detail: r.detail || r.verdict })
+  }
+
+  // The land lock; the verdict string, or null when the agent returned nothing.
+  const lock = async wait => {
+    c.lock++
+    const label = `land-lock-${n}-${c.lock}`
+    const r = await call(`Take the cross-host landing lock of the branch ${INT} for PR #${pr} of issue #${n} of ${SLUG} at the head ${expected}.
+Run alone and exactly: forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${expected}${wait ? ' --wait' : ''}
+Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. Run nothing else.
+${RULES}`, label, { ...cheap, schema: LOCK_SCHEMA })
+    return r ? r.verdict : null
+  }
+
+  const unlock = async () => {
+    if (!lockHeld) return
+    lockHeld = false
+    await call(`Release the cross-host landing lock of the branch ${INT} held for issue #${n} of ${SLUG}.
+Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}
+released and not_held are both fine. Return its verdict and any detail. Run nothing else.
+${RULES}`, `land-unlock-${n}`, { ...cheap, schema: RELEASE_SCHEMA })
+  }
+
+  const ownerAction = async (reason, items, outcome, extra) => {
+    const posted = await call(`The landing of issue #${n} of ${SLUG} (the git repository at ${REPO}) needs the owner (${reason}). Post the marker; the claim stays held.
+1. Make a fresh directory with mktemp -d and write exactly this JSON array to a file in it: ${JSON.stringify(items)}
+2. Run alone and exactly: forge-claim owner-action post --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason ${reason} --items-file <that file>
+Return its verdict (posted, already_posted, or error on any other exit) and comment_id. Change nothing else.
+${RULES}`, `land-ask-${n}`, { ...cheap, schema: ASK_SCHEMA })
+    if (!posted || (posted.verdict !== 'posted' && posted.verdict !== 'already_posted')) {
+      return out('stopped', { stage: 'owner-action', detail: `land-ask-${n} did not post the ${reason} marker` })
+    }
+    LAND_OA.push({ issue: n, reason, comment_id: posted.comment_id })
+    return out(outcome, extra)
+  }
+
+  // After a head change that passed its gate once the PR exists (D13): record it, then move the lock.
+  const advance = async () => {
+    c.record++
+    const label = `land-record-${n}-${c.record}`
+    const rec = await call(`The head of PR #${pr} of issue #${n} of ${SLUG} changed to ${expected} and passed its gate. Record it in the PR body.
+1. Run gh pr view ${pr} --repo ${SLUG} --json body,headRefOid and confirm headRefOid is ${expected}. If it is not, change nothing and return ok false with the head it shows.
+2. Make a fresh directory with mktemp -d and write the body to a file in it, rewriting only the Accepted head line (the last line of the Evidence section) to exactly this text, everything else unchanged:
+Accepted head: ${expected}
+3. Run gh pr edit ${pr} --repo ${SLUG} --body-file <that file>. When the line already reads exactly so, change nothing.
+Return ok true and head (the headRefOid you read).
+${RULES}`, label, { ...cheap, schema: RECORD_SCHEMA })
+    if (!rec || rec.ok !== true || rec.head !== expected) return out('stopped', { stage: 'land-record', detail: rec ? rec.detail : `${label} returned nothing`, head: rec ? rec.head : undefined })
+    const v = await lock(false)
+    if (v !== 'moved' && v !== 'already_held' && v !== 'acquired') return out('land-contended', { detail: `the lock did not move to ${expected}` })
+    lockHeld = true
+    lockSha = expected
+    return null
+  }
+
+  // One resync of the branch with the integration branch (D10); a row ends the landing, null continues.
+  const resync = async () => {
+    c.sync++
+    const label = `land-sync-${n}-${c.sync}`
+    const second = c.conflicts > 0
+    const sy = await call(`Issue #${n} of ${SLUG} is being landed into ${INT}. Bring the branch ${B} up to date in the worktree ${W}.
+1. git -C ${W} fetch origin. If origin/${INT} is an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD succeeds), change nothing and answer status current with head (git -C ${W} rev-parse HEAD, the full sha).
+2. Otherwise merge it: git -C ${W} merge origin/${INT}. A clean merge: answer status done, conflicted false, head (the full sha of the merge commit).
+3. ${second
+      ? `This landing already resolved one conflict. If the merge conflicts, run git merge --abort inside ${W} and answer status blocked, conflicted true, with head (the full sha of HEAD) and notes. Do not resolve it.`
+      : `If the merge conflicts, resolve each conflict keeping both sides' intent, commit the merge, and run only the tests covering the files the resolution touched; answer status done, conflicted true, with head (the full sha of the merge commit), resolved_files and tests. If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.`}
+${pr ? `4. After a merge you completed, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
+${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
+    if (!sy) return out('stopped', { stage: 'land-sync', detail: `${label} returned nothing` })
+    const conflictOwner = notes => ownerAction('conflict', [`PR #${pr} of issue #${n} conflicts with ${INT} a second time in one landing, so the merge was aborted. ${notes || ''} Resolve the conflict on the branch ${B} or say how.`], 'conflict', { detail: sy.notes })
+    if (sy.status === 'blocked') {
+      if (!sy.conflicted) return out('stopped', { stage: 'land-sync', detail: sy.notes })
+      if (!second) { c.conflicts++; return out('conflict', { detail: sy.notes }) }
+      return await conflictOwner(sy.notes)
+    }
+    const head = sy.head || sy.merge_commit || (sy.status === 'current' ? expected : null)
+    if (!head) return out('stopped', { stage: 'land-sync', detail: 'the resync named no head' })
+    if (sy.status === 'current') {
+      if (head !== expected) return out('stopped', { stage: 'head-moved', expected, head })
+      return null
+    }
+    if (sy.status !== 'done') return out('stopped', { stage: 'land-sync', detail: sy.notes })
+    if (sy.conflicted) {
+      if (second) return await conflictOwner(sy.notes)
+      c.conflicts++
+      c.syncReview++
+      const mc = sy.merge_commit || head
+      const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run. Do not edit anything.
+${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
+      if (!rv || findingsOf(rv).length) return out('conflict', { review: rv })
+    }
+    if (head !== expected) {
+      expected = head
+      if (pr) return await advance()
+    }
+    return null
+  }
+
+  // The behind handling shared by a checks reply and a lock that was lost and retaken.
+  const behind = async () => {
+    if (c.sync >= MAX_SYNCS) return out('land-contended', { detail: `behind ${INT} after ${c.sync} resyncs` })
+    return await resync()
+  }
+
+  const body = async () => {
+    const lostA = await renew('land')
+    if (lostA) return lostA
+    const first = await resync()
+    if (first) return first
+
+    const prR = await call(`Open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${B} (worktree ${W}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
+1. Push the branch: git -C ${W} push origin ${B}.
+2. If an open PR with head ${B} exists (a re-run), or one against ${INT} for this issue, reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Otherwise open one with the create form above. Title: a short summary of the issue.
+Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
+Return pr (number) and head (the full sha of the pushed head).
+${RULES}`, `land-pr-${n}`, { model: 'sonnet', schema: LAND_PR_SCHEMA })
+    if (!prR || !prR.pr) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
+    pr = prR.pr
+    if (prR.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: prR.head })
+
+    const v1 = await lock(true)
+    if (v1 === 'acquired' || v1 === 'already_held' || v1 === 'moved') { lockHeld = true; lockSha = expected }
+    else if (v1 === 'land-contended' || v1 === 'held_by' || v1 === 'lost_to') return out('land-contended', { detail: `the land lock is held by another landing (${v1})` })
+    else return out('stopped', { stage: 'land-lock', detail: v1 === null ? `land-lock-${n}-1 returned nothing` : v1 })
+
+    for (;;) {
+      c.checks++
+      const label = `land-checks-${n}-${c.checks}`
+      const ck = await call(`Wait for the required checks of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head.
+1. git -C ${W} fetch origin; if the local branch is ahead of origin/${B}, push it. head is git -C ${W} rev-parse HEAD (the full sha).
+2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), answer state behind at once with head.
+3. Otherwise wait in this turn for the required checks on head. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection; if neither answers, every check is required. A declared check with no run or status at head yet is pending: keep waiting for it, never treat it as absent or green. gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending) can return early, and its --required list can be partial: never treat a partial list as green.
+4. Answer passed only when every required name has passed on head, with required (the names you used) and passed (the names passing at head). Answer failed with failing (the failing names) and details when a required check failed. Answer needs_label with label and failing when a required check failed only because the PR lacks a label that only a human may apply (do not apply it yourself).
+${RULES}`, label, { ...cheap, schema: LAND_CHECKS_SCHEMA })
+      if (!ck) return out('stopped', { stage: 'checks', detail: `${label} returned nothing` })
+      if (ck.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: ck.head })
+
+      if (ck.state === 'needs_label') {
+        const names = (ck.failing || []).join(', ')
+        return await ownerAction('needs-label', [`PR #${pr} of issue #${n} needs the label ${ck.label || '(unnamed)'}, which only the owner applies; the failing required checks: ${names || 'unnamed'}.`], 'needs-label', { label: ck.label, failing: ck.failing })
+      }
+      if (ck.state === 'failed') {
+        c.ciFails++
+        if (c.ciFails >= 2) return out('ci-failed', { failing: ck.failing })
+        const fix = await call(`Issue #${n} of ${SLUG}: the required checks of PR #${pr} failed at ${expected}: ${JSON.stringify(ck.failing || [])}. Details: ${ck.details || 'none given'}.
+Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing required checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}). Never weaken, skip or delete a test or check to make it pass. ${IMPL_RETURN}
+${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
+        if (!fix || fix.status !== 'done' || !fix.commit || fix.commit === expected) return out('ci-failed', { failing: ck.failing, detail: 'the fix round did not finish' })
+        const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+Review this fix for failing required checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(ck.failing || [])}; the implementer's notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
+${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
+        if (!rv || findingsOf(rv).length) return out('ci-failed', { failing: ck.failing, review: rv })
+        expected = fix.commit
+        const adv = await advance()
+        if (adv) return adv
+        continue
+      }
+      if (ck.state === 'behind') {
+        const r = await behind()
+        if (r) return r
+        continue
+      }
+      if (ck.state !== 'passed') return out('stopped', { stage: 'checks', detail: `unknown checks state ${ck.state}` })
+
+      // D11: a declared check missing from the passed names is never merged.
+      const have = ck.passed || []
+      const missingNames = DECLARED.filter(d => !have.includes(d))
+      if (missingNames.length) return out('stopped', { stage: 'checks', missing: missingNames })
+
+      const lostB = await renew('merge')
+      if (lostB) return lostB
+      const v2 = await lock(false)
+      if (v2 === 'already_held' || v2 === 'moved') break
+      if (v2 === 'acquired') {
+        // The lock was lost and retaken, so the base may have moved: resync first.
+        lockHeld = true
+        lockSha = expected
+        const r = await behind()
+        if (r) return r
+        continue
+      }
+      return out('land-contended', { detail: `the land lock was not held before the merge (${v2})` })
+    }
+
+    const mg = await call(`Merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
+1. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json state,mergeCommit. When state is already MERGED, skip step 2.
+2. Otherwise run, alone and exactly: ${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${expected}${SETUP.delete_branch ? ' --delete-branch' : ''}
+3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
+Return merged, merge_commit and notes.
+${RULES}`, `land-merge-${n}`, { ...cheap, schema: LAND_MERGE_SCHEMA })
+    if (!mg || mg.merged !== true) return out('stopped', { stage: 'merge', detail: mg ? mg.notes : `land-merge-${n} returned nothing` })
+    await unlock()
+
+    const openCriteria = ready.acceptance.filter(a => a.kind !== 'code')
+    const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
+1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
+2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released.
+3. End the landing markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict and then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label. The merge proves both conditions resolved; a verdict none is fine.
+4. ${allCode
+      ? `Every criterion is of kind code. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
+      : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
+Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released and notes.
+${RULES}`, `close-out-${n}`, { ...cheap, schema: CLOSE_SCHEMA })
+    const want = allCode ? 'CLOSED' : 'OPEN'
+    if (!co || co.issue_state !== want || co.released !== true) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
+    return out(allCode ? 'landed' : 'landed-held')
+  }
+
+  let result
+  try {
+    result = await body()
+  } catch (e) {
+    result = out('stopped', { stage: 'land', detail: String((e && e.message) || e) })
+  }
+  try { await unlock() } catch (e) { /* the row stands; a dead unlock agent already tripped the breaker */ }
+  // D9: a landing failure keeps the claim, and CONTS[n] already holds the ready result's cont (set when the child returned), so a relaunch re-adopts both.
+  return result
+}
+
 const deliverOne = async n => {
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
   const f = FACTS[n]
@@ -291,7 +584,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `answered-${n}`, phase: 'Deliver', model
     if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents }; return }
     if (r.stage === 'ready') {
       READY[n] = r
-      rows[n] = { issue: n, outcome: 'ready', lane: laneName, head: r.head }
+      rows[n] = await enqueue(INT, () => land(n, r))
       return
     }
     if (r.stage === 'claimed') { rows[n] = { issue: n, outcome: 'claim-lost', by: r.by }; return }
@@ -341,7 +634,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.detail ? ` (${r.detail}
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })),
+  owner_actions: [...table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }

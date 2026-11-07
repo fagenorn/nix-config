@@ -52,6 +52,8 @@ async function agent(prompt, opts = {}) {
     for (let i = 0; i < num(label) * 3; i++) await new Promise(r => setImmediate(r))
     factsPending--
   }
+  // A landing agent takes a macrotask, so two landings that were not serialised would interleave their calls.
+  if (/^(renew|land|close-out)-/.test(label)) await new Promise(r => setImmediate(r))
   const n = seen[label] = (seen[label] || 0) + 1
   const replies = scenario.replies || {}
   if (Object.prototype.hasOwnProperty.call(replies, label)) {
