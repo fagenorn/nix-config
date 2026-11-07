@@ -23,4 +23,4 @@ project="$REPO/.agents/project.json"
 jq '.bindings.tracker.kind = "github" | .capabilities.tracker.support = "supported"' "$project" >"$project.tmp"
 mv "$project.tmp" "$project"
 git -C "$REPO" commit -qam "chore: track issues on github"
-git -C "$REPO" push -q origin main
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$REPO" push -q origin main

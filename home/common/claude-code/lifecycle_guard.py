@@ -13,6 +13,7 @@ Standard library only: it imports nothing from the repository's helper package.
 
 import argparse
 from collections import namedtuple
+import errno
 import json
 import os
 import re
@@ -944,6 +945,19 @@ GIT_UNCERTAIN_PROBLEM = (
     "the git invocation continues past a shell substitution or grouping; "
     f"{INVOCATION_FORM_HINT}"
 )
+# Issue 672 D8: the pre-push hook is authoritative only while git runs the
+# managed hook, so the text guard refuses naming the key that repoints it.
+HOOKS_PATH_PROBLEM = (
+    "git config naming core.hooksPath would change which hook judges a push; "
+    "read it with git rev-parse --git-path hooks"
+)
+# Issue 672 D3: the pre-push hook judges a push only in an agent session, which
+# it recognises by this variable, so the text guard refuses clearing it.
+AGENT_SESSION_VARIABLE = "CLAUDECODE"
+SESSION_MARKER_PROBLEM = (
+    f"clearing or unsetting {AGENT_SESSION_VARIABLE} would hide the agent "
+    "session from the pre-push hook"
+)
 GIT_FED_PROBLEM = (
     "a git word with no subcommand reads its subcommand from a pipe or "
     f"redirection; {INVOCATION_FORM_HINT}"
@@ -1357,6 +1371,11 @@ def git_transmit_problem(program, words, truncation, tail=(), fed=False):
             f"an alias, a git-* program or a transport could transmit refs; "
             f"{INVOCATION_FORM_HINT}"
         )
+    if subcommand == "config" and any(
+        word.lower() == "core.hookspath" or word.lower().startswith("core.hookspath=")
+        for word in list(words[index + 1:]) + list(tail)
+    ):
+        return HOOKS_PATH_PROBLEM
     option = git_command_option(subcommand, list(words[index + 1:]) + list(tail))
     if option is not None:
         return (
@@ -1400,13 +1419,99 @@ def raw_git_names(pieces):
     return names
 
 
+def names_session_marker(word):
+    """True when `word` assigns, unsets or names the agent session variable
+    (issue 672 D3): `CLAUDECODE=…`, or exactly `CLAUDECODE`, `-uCLAUDECODE` or
+    `--unset=CLAUDECODE`. A read such as `$CLAUDECODE` never matches."""
+    match = ASSIGNMENT_PREFIX.match(word)
+    if match is not None and match.group("name") == AGENT_SESSION_VARIABLE:
+        return True
+    return word in (
+        AGENT_SESSION_VARIABLE, f"-u{AGENT_SESSION_VARIABLE}",
+        f"--unset={AGENT_SESSION_VARIABLE}",
+    )
+
+
+def wrapper_clears_session(wrapper, options):
+    """True when the option words of an `env` or `exec` (`options`, the words
+    after its name) clear the agent session variable (issue 672 D3): `env`
+    options that empty the environment (`-`, `-i`, a short cluster holding `i`,
+    `--ignore-environment` or an unambiguous prefix of it), `env`'s unset
+    option naming it in any spelling (`-u X`, `-uX`, a cluster such as `-vuX`,
+    `--unset X`, `--unset=X` or an abbreviation such as `--unse=X`), or an
+    `exec` option cluster holding `c`. The walk stops at `--` and at the first
+    word that is not an option; the caller cuts `options` at an operator."""
+    pending = None
+    for option in options:
+        if pending is not None:
+            if pending == "unset" and option == AGENT_SESSION_VARIABLE:
+                return True
+            pending = None
+            continue
+        if option == "--" or not option.startswith("-"):
+            break
+        if option == "-":
+            return True
+        kind, attached = wrapper_option(wrapper, option)
+        unsets = False
+        if option.startswith("--"):
+            name, equals, value = option.partition("=")
+            if wrapper == "env" and len(name) >= 3:
+                if "--ignore-environment".startswith(name):
+                    return True
+                if "--unset".startswith(name):
+                    # getopt_long takes any unambiguous prefix, which
+                    # `wrapper_option` does not list for this option
+                    unsets = True
+                    kind, attached = "argument", value if equals else None
+        else:
+            letters = WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT[wrapper]
+            for letter in option[1:]:
+                if letter in letters:
+                    unsets = wrapper == "env" and letter == "u"
+                    break
+                if letter == ("i" if wrapper == "env" else "c"):
+                    return True
+        if unsets and attached == AGENT_SESSION_VARIABLE:
+            return True
+        if kind is not None and attached is None:
+            pending = "unset" if unsets else "skip"
+    return False
+
+
+def session_marker_problem(tokens):
+    """SESSION_MARKER_PROBLEM when a segment's `tokens` clear the agent session
+    variable (issue 672 D3), else None: a word naming it (`names_session_marker`)
+    or an `env` or `exec` whose options clear it (`wrapper_clears_session`)."""
+    for index, (value, is_operator) in enumerate(tokens):
+        if is_operator:
+            continue
+        if names_session_marker(value):
+            return SESSION_MARKER_PROBLEM
+        wrapper = program_name(value)
+        if wrapper not in ("env", "exec"):
+            continue
+        options = []
+        for option, option_is_operator in tokens[index + 1:]:
+            if option_is_operator:
+                break
+            options.append(option)
+        if wrapper_clears_session(wrapper, options):
+            return SESSION_MARKER_PROBLEM
+    return None
+
+
 def raw_reading_transmits(reading, names, fed):
     """True when a word of `reading` is a git word (or an assigned name, see
     `raw_git_names`) that could transmit refs, or an assignment that hands git a
     command. `fed` is set when the piece may read a pipe or redirection, so a git
     word after the first word that names no subcommand takes it from stdin."""
     for position, word in enumerate(reading):
-        if dashed_git_program(program_name(word)):
+        if dashed_git_program(program_name(word)) or names_session_marker(word):
+            return True
+        wrapper = program_name(word)
+        if wrapper in ("env", "exec") and wrapper_clears_session(
+                wrapper, reading[position + 1:]):
             return True
         match = ASSIGNMENT_PREFIX.match(word)
         if match is not None and git_assignment_problem(
@@ -1722,6 +1827,14 @@ def guarded_operations(command):
                     "transmit", segment,
                     raw_reason if raw_reason is not None else problem, None,
                 ))
+        # Issue 672 D3: a segment that clears the agent session variable, in
+        # every repository, so the pre-push hook cannot be made to stand down.
+        marker_problem = session_marker_problem(tokens)
+        if marker_problem is not None:
+            found.append((
+                "transmit", segment,
+                raw_reason if raw_reason is not None else marker_problem, None,
+            ))
         operands = set()
         for index in range(len(tokens)):
             if index in operands:
@@ -2310,6 +2423,18 @@ PUSH_URL_TIMEOUT = "push URL lookup timed out"
 PUSH_URL_UNRESOLVED = "cannot resolve origin's push URL"
 
 
+def push_url_slug_problem(url, repository):
+    """Why the GitHub push URL `url` does not name `repository`, or None.
+
+    The one predicate both modes apply to a push URL: the text mode to each URL
+    git reports for `origin` (`push_url_problem`), the pre-push mode to the URL
+    git hands the hook (issue 672 D2).
+    """
+    if github_slug(url) != repository:
+        return f"push URL {shown_value(url)} does not name {repository}"
+    return None
+
+
 def push_url_problem(context):
     """Why origin's effective push URL does not name the judged repository, or None.
 
@@ -2333,8 +2458,9 @@ def push_url_problem(context):
     if child.returncode != 0 or not urls:
         return PUSH_URL_UNRESOLVED
     for url in urls:
-        if github_slug(url) != context.repository:
-            return f"origin's push URL {shown_value(url)} does not name {context.repository}"
+        problem = push_url_slug_problem(url, context.repository)
+        if problem is not None:
+            return "origin's " + problem
     return None
 
 
@@ -2598,6 +2724,7 @@ class Context:
         return row_check_problem(
             args.derive_bin, self.repository, row,
             min(args.derive_timeout_seconds, remaining),
+            getattr(args, "row_check_dropped_env", ()),
         )
 
 
@@ -2655,21 +2782,24 @@ def _report_mismatch(report, status, repository, row):
     return f"unavailable ({cause['reason_code']})"
 
 
-def row_check_env():
+def row_check_env(dropped=()):
     """os.environ without the shell startup variables and exported bash functions.
 
     A `BASH_ENV` or `ENV` file, or a `BASH_FUNC_<name>%%` function, could make a
-    shell script in the row check print a report the check never derived.
+    shell script in the row check print a report the check never derived. `dropped`
+    names more variables to remove: the pre-push hook passes git's repository-local
+    variables (D10), which would point the check's own `git` at the pushing repository.
     """
     return {
         name: value
         for name, value in os.environ.items()
         if name not in ROW_CHECK_ENV_DROPPED
+        and name not in dropped
         and not name.startswith(ROW_CHECK_ENV_DROPPED_PREFIX)
     }
 
 
-def row_check_problem(derive_bin, repository, row, timeout):
+def row_check_problem(derive_bin, repository, row, timeout, dropped_env=()):
     """Why the row check does not confirm `row` for `repository`, or None when it does.
 
     The check is `derive_bin --repository <repository>`, run once with no stdin,
@@ -2689,7 +2819,7 @@ def row_check_problem(derive_bin, repository, row, timeout):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=row_check_env(),
+            env=row_check_env(dropped_env),
             start_new_session=True,
         )
     except OSError as error:
@@ -3266,19 +3396,33 @@ def tag_problem(tag):
     return None
 
 
-def validate_tag_push(tag, context, compiled):
-    """The tag-push arm: `git push origin refs/tags/<vX.Y.Z>` of an existing annotated tag.
+def branch_target_problem(context, branch, deleting):
+    """Why `branch` may not be the target of a push (or of a remote deletion), or None.
 
-    The caller has judged the owner and the raw characters. The tag must exist
-    locally as an annotated tag object (`git cat-file -t` prints `tag`), so a
-    lightweight tag, a missing one or a branch of the same name never passes.
+    The default branch must resolve; a deletion never names the default branch or
+    the repository's declared integration branch (issue 458 D2); anything else
+    never pushes the default branch.
     """
-    problem = tag_problem(tag)
-    if problem is not None:
-        return refuse("push", problem, accepted_forms(compiled, context))
+    if context.base_branch is None:
+        return "cannot resolve the repository default branch"
+    if deleting:
+        if branch in (context.base_branch, context.integration_bases.get(context.repository)):
+            return f"refusing to delete the permanent branch {branch}"
+        return None
+    if branch == context.base_branch:
+        return f"refusing to push the default branch {branch}"
+    return None
+
+
+def annotated_tag_problem(context, tag, object_name):
+    """Why `object_name` is not an existing annotated tag object, or None.
+
+    `git cat-file -t <object_name>` in the context's directory must print `tag`,
+    so a lightweight tag, a missing one or a branch of the same name never passes.
+    """
     try:
         kind = subprocess.run(
-            [context.git_bin, "cat-file", "-t", TAG_REF_PREFIX + tag],
+            [context.git_bin, "cat-file", "-t", object_name],
             capture_output=True,
             text=True,
             timeout=context.timeout,
@@ -3286,10 +3430,33 @@ def validate_tag_push(tag, context, compiled):
             cwd=context.cwd,
         )
     except subprocess.TimeoutExpired:
-        return refuse("push", "tag lookup timed out")
+        return "tag lookup timed out"
     if kind.returncode != 0 or kind.stdout.strip() != "tag":
-        return refuse("push", f"{tag} is not an existing annotated tag")
-    return 0
+        return f"{tag} is not an existing annotated tag"
+    return None
+
+
+def push_arm_problem(context, form_id, value, tag_object):
+    """Why one arm of the push forms refuses, as (problem or None, offer_forms).
+
+    `form_id` is a `FORM_TABLE["push"]` form id and `value` its tag or branch.
+    `offer_forms` is true when the problem lies in the command's text, so the
+    text mode appends the accepted forms; a state problem offers none. Both modes
+    judge through this one function (issue 672 D2).
+    """
+    if form_id == "tag":
+        problem = tag_problem(value)
+        if problem is not None:
+            return problem, True
+        return annotated_tag_problem(context, value, tag_object), False
+    if form_id in ("branch", "delete"):
+        problem = branch_name_problem(context.git_bin, value, context.timeout)
+        if problem == BRANCH_VALIDATION_TIMEOUT:
+            return problem, False
+        if problem is not None:
+            return problem, True
+        return branch_target_problem(context, value, form_id == "delete"), False
+    raise AssertionError(f"unhandled push form {form_id}")
 
 
 def validate_push(text, context, compiled):
@@ -3303,27 +3470,251 @@ def validate_push(text, context, compiled):
     problem = push_url_problem(context)
     if problem is not None:
         return refuse("push", problem)
-    if match.form.id == "tag":
-        return validate_tag_push(match.values["vX.Y.Z"], context, compiled)
-    if match.form.id not in ("branch", "delete"):
-        raise AssertionError(f"unhandled push form {match.form.id}")
-    branch = match.values["branch"]
-    reason = branch_name_problem(context.git_bin, branch, context.timeout)
-    if reason == BRANCH_VALIDATION_TIMEOUT:
-        return refuse("push", reason)
-    if reason is not None:
-        return refuse("push", reason, accepted_forms(compiled, context))
-    if context.base_branch is None:
-        return refuse("push", "cannot resolve the repository default branch")
-    if match.form.id == "delete":
-        # Issue 458 D2: a remote deletion never names a permanent branch, the
-        # default branch or the repository's declared integration branch.
-        if branch in (context.base_branch, context.integration_bases.get(context.repository)):
-            return refuse("push", f"refusing to delete the permanent branch {branch}")
-        return 0
-    if branch == context.base_branch:
-        return refuse("push", f"refusing to push the default branch {branch}")
+    form_id = match.form.id
+    if form_id == "tag":
+        value = match.values["vX.Y.Z"]
+        tag_object = TAG_REF_PREFIX + value
+    else:
+        value = match.values.get("branch")
+        tag_object = None
+    problem, offer = push_arm_problem(context, form_id, value, tag_object)
+    if problem is not None:
+        return refuse("push", problem, accepted_forms(compiled, context) if offer else ())
     return 0
+
+
+PRE_PUSH_LABEL = "lifecycle guard pre-push"
+PRE_PUSH_FORMS = ("tag", "branch", "delete")
+PRE_PUSH_UNREADABLE = "cannot read the refs git handed the pre-push hook"
+PRE_PUSH_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+
+
+def pre_push_refuse(problem):
+    """Print one refused push on stderr and return 1, which aborts the push (D6)."""
+    print(f"{PRE_PUSH_LABEL}: unsafe push: {problem}", file=sys.stderr)
+    return 1
+
+
+def pre_push_form(remote_ref, local_sha, remote_sha, cwd, context):
+    """One ref update, read as a `FORM_TABLE["push"]` form: (form_id, value, problem).
+
+    The facts git hands the hook decide the form (issue 672 D2): a branch deleted is
+    `delete`, a branch created or fast-forwarded is `branch`, a tag created is `tag`,
+    and everything else (a force, a moved or deleted tag, another namespace) matches
+    no form and carries its problem. An all-zero sha means the ref is absent.
+    """
+    deleting = set(local_sha) == {"0"}
+    creating = set(remote_sha) == {"0"}
+    if remote_ref.startswith("refs/heads/"):
+        branch = remote_ref[len("refs/heads/"):]
+        if deleting:
+            return "delete", branch, None
+        if creating:
+            return "branch", branch, None
+        try:
+            child = subprocess.run(
+                [context.git_bin, "-C", cwd, "merge-base", "--is-ancestor",
+                 remote_sha, local_sha],
+                capture_output=True, text=True, timeout=context.timeout, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            child = None
+        if child is None or child.returncode != 0:
+            return None, branch, f"update of {branch} is not a fast-forward"
+        return "branch", branch, None
+    if remote_ref.startswith(TAG_REF_PREFIX):
+        tag = remote_ref[len(TAG_REF_PREFIX):]
+        if deleting:
+            return None, tag, f"refusing to delete the tag {tag}"
+        if not creating:
+            return None, tag, f"refusing to move the existing tag {tag}"
+        return "tag", tag, None
+    return None, remote_ref, (
+        f"remote ref {shown_value(remote_ref)} is neither a branch nor a release tag")
+
+
+def judge_pre_push(args, base, url, lines, cwd):
+    """Judge one push in `cwd`: 0 when admitted, else the first refusal's status (1).
+
+    The order is the text mode's: standing authorization, the push URL, then each
+    ref line in the order git handed them. `lines` are (local_ref, local_sha,
+    remote_ref, remote_sha) tuples.
+    """
+    deadline = time.monotonic() + INVOCATION_DEADLINE_SECONDS
+    try:
+        context = Context(args, base, cwd, deadline)
+        problem = ownership_problem(context)
+        if problem is None:
+            problem = push_url_slug_problem(url, context.repository)
+        if problem is not None:
+            return pre_push_refuse(problem)
+        for _local_ref, local_sha, remote_ref, remote_sha in lines:
+            form_id, value, problem = pre_push_form(
+                remote_ref, local_sha, remote_sha, cwd, context)
+            if problem is None:
+                problem, _offer = push_arm_problem(context, form_id, value, local_sha)
+            if problem is not None:
+                return pre_push_refuse(problem)
+    except DeadlineExhausted:
+        return pre_push_refuse(DEADLINE_REFUSAL)
+    return 0
+
+
+def parse_pre_push_lines(stdin_bytes):
+    """The ref lines git wrote to the hook, or None when any cannot be read."""
+    try:
+        text = stdin_bytes.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if not text:
+        return []
+    if not text.endswith("\n"):
+        return None
+    lines = []
+    for line in text[:-1].split("\n"):
+        fields = line.split(" ")
+        if len(fields) != 4:
+            return None
+        local_sha, remote_sha = fields[1], fields[3]
+        if (PRE_PUSH_SHA.fullmatch(local_sha) is None
+                or PRE_PUSH_SHA.fullmatch(remote_sha) is None
+                or len(local_sha) != len(remote_sha)):
+            return None
+        lines.append(tuple(fields))
+    return lines
+
+
+PRE_PUSH_LFS_NAMES = ("pre-push", "post-checkout", "post-commit", "post-merge")
+
+
+def hook_exit_status(returncode):
+    """A chained hook's status as the hook's own: a signal death is 1."""
+    return returncode if returncode >= 0 else 1
+
+
+def run_chained(program, stdin_bytes, cwd, chain_env):
+    """Run `program` with git's stdin; an executable text file with no `#!` line runs
+    through `/bin/sh`, as git itself retries it (COR-002)."""
+    try:
+        return subprocess.run(program, input=stdin_bytes, cwd=cwd, env=dict(chain_env),
+                              check=False)
+    except OSError as error:
+        if error.errno != errno.ENOEXEC:
+            raise
+    return subprocess.run(["/bin/sh", *program], input=stdin_bytes, cwd=cwd,
+                          env=dict(chain_env), check=False)
+
+
+def chain_pre_push(args, base, stdin_bytes, cwd, chain_env):
+    """Run the repository's own pre-push hook, else git-lfs for an LFS repository (D5).
+
+    The hook is `<git-common-dir>/hooks/pre-push` when it is an executable regular file
+    that is not the hook git is running now, so a link to the managed hook cannot
+    recurse. A repository hook takes precedence over git-lfs, as git-lfs never
+    overwrites an existing hook. The chained program gets git's argv, the identical
+    stdin bytes, the pre-scrub environment, and this process's stdout, stderr and cwd.
+    The hooks are located under that same pre-scrub environment, so a push that names
+    its repository with `GIT_DIR` or `--git-dir` chains that repository's hooks, as the
+    shim does; only the row check reads the scrubbed environment.
+    """
+    unlocated = f"{PRE_PUSH_LABEL}: cannot locate the repository's own hooks"
+    git_bin = args.git_bin or base.git_bin
+    answers = []
+    for query in ("--git-common-dir", "--git-path"):
+        words = [git_bin, "rev-parse", "--path-format=absolute", query]
+        if query == "--git-path":
+            words.append("hooks")
+        try:
+            done = subprocess.run(words, cwd=cwd, env=dict(chain_env), capture_output=True,
+                                  text=True, timeout=args.child_timeout_seconds, check=False)
+        except (subprocess.TimeoutExpired, OSError):
+            print(unlocated, file=sys.stderr)
+            return 1
+        answer = done.stdout.strip()
+        if done.returncode != 0 or not answer:
+            print(unlocated, file=sys.stderr)
+            return 1
+        answers.append(answer)
+    common, running_hooks = answers
+    candidate = os.path.join(common, "hooks", "pre-push")
+    if (os.path.isfile(candidate) and os.access(candidate, os.X_OK)
+            and os.path.realpath(candidate)
+            != os.path.realpath(os.path.join(running_hooks, "pre-push"))):
+        program = [candidate, *args.hook_args]
+    elif args.git_lfs_bin:
+        # An LFS repository has `<common>/lfs`, or keeps its objects elsewhere through
+        # `lfs.storage` (COR-001); the shim applies the same rule.
+        try:
+            storage = subprocess.run(
+                [git_bin, "config", "--get", "lfs.storage"], cwd=cwd, env=dict(chain_env),
+                capture_output=True, text=True, timeout=args.child_timeout_seconds,
+                check=False)
+        except (subprocess.TimeoutExpired, OSError):
+            print(unlocated, file=sys.stderr)
+            return 1
+        if os.path.isdir(os.path.join(common, "lfs")) or (
+                storage.returncode == 0 and storage.stdout.strip()):
+            program = [args.git_lfs_bin, "pre-push", *args.hook_args]
+        else:
+            return 0
+    else:
+        return 0
+    try:
+        done = run_chained(program, stdin_bytes, cwd, chain_env)
+    except OSError as error:
+        print(f"{PRE_PUSH_LABEL}: cannot run {program[0]}: {error.strerror or error}",
+              file=sys.stderr)
+        return 1
+    return hook_exit_status(done.returncode)
+
+
+def pre_push_main(args, stdin_bytes, environ, cwd):
+    """The git pre-push hook entry (issue 672): judge an agent session's push, then chain.
+
+    `args.hook_args` is git's `<remote> <url>`. The base policy loads first in
+    every session (D7). Repository-local `GIT_*` variables git exports to hooks
+    are removed from the row check's environment only (D10): the context's own `git`
+    queries keep them, so the repository git was told to push from, by `GIT_DIR` or
+    `--git-dir`, is the one judged wherever the hook's cwd is. The chained hook gets
+    a copy of the original environment.
+    """
+    if len(args.hook_args) != 2:
+        print(f"{PRE_PUSH_LABEL}: expected <remote> <url> from git", file=sys.stderr)
+        return 1
+    _remote, url = args.hook_args
+    base, reason = load_base_policy(args.base_policy)
+    if base is None:
+        print(f"{PRE_PUSH_LABEL}: invalid policy: {reason}", file=sys.stderr)
+        return 1
+    if args.git_bin is None:
+        args.git_bin = base.git_bin
+    if args.gh_bin is None:
+        args.gh_bin = base.gh_bin
+    if args.jq_bin is None:
+        args.jq_bin = base.jq_bin
+    unreadable = f"{PRE_PUSH_LABEL}: cannot read git's repository-local variables"
+    try:
+        names = subprocess.run(
+            [base.git_bin, "rev-parse", "--local-env-vars"],
+            capture_output=True, text=True, timeout=args.child_timeout_seconds, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        print(unreadable, file=sys.stderr)
+        return 1
+    local_names = names.stdout.split()
+    if names.returncode != 0 or not local_names:
+        print(unreadable, file=sys.stderr)
+        return 1
+    chain_env = dict(environ)
+    args.row_check_dropped_env = tuple(local_names)
+    if environ.get("CLAUDECODE", ""):
+        lines = parse_pre_push_lines(stdin_bytes)
+        if lines is None:
+            return pre_push_refuse(PRE_PUSH_UNREADABLE)
+        status = judge_pre_push(args, base, url, lines, cwd)
+        if status != 0:
+            return status
+    return chain_pre_push(args, base, stdin_bytes, cwd, chain_env)
 
 
 def worktree_root(git_bin, cwd, timeout):
@@ -3875,7 +4266,15 @@ def main():
     parser.add_argument("--gh-bin", default=None)
     parser.add_argument("--jq-bin", default=None)
     parser.add_argument("--child-timeout-seconds", type=float, default=5)
+    parser.add_argument("--mode", choices=("hook", "pre-push"), default="hook")
+    parser.add_argument("--git-lfs-bin", default=None)
+    parser.add_argument("hook_args", nargs="*")
     args = parser.parse_args()
+
+    if args.mode == "pre-push":
+        return pre_push_main(args, sys.stdin.buffer.read(), os.environ, os.getcwd())
+    if args.hook_args:
+        return block("invalid hook input: unexpected arguments")
 
     try:
         payload = json.load(sys.stdin)

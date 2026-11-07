@@ -341,7 +341,9 @@ run_trial() {
 
   git init -q --bare -b main "$ORIGIN"
   git -C "$REPO" remote add origin "$ORIGIN"
-  git -C "$REPO" push -q -u origin main
+  # The harness seeds its own sandbox remote; the operator's global git config (a managed
+  # pre-push hook) must not judge this push.
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$REPO" push -q -u origin main
   # After the initial commit, before any setup hook stages files: the injected links are
   # never part of the fixture's history.
   [ -n "${EVAL_TREE:-}" ] && inject_tree "$REPO"
@@ -412,7 +414,7 @@ run_trial() {
         git -C "$REPO" merge -q --no-ff -m "Merge branch 'feat/include-done'" feat/include-done ||
         die "setup: could not merge the feature into main"
       git -C "$REPO" branch -q -d feat/include-done &&
-        git -C "$REPO" push -q origin main v0.1.0 || die "setup: could not publish main and v0.1.0"
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$REPO" push -q origin main v0.1.0 || die "setup: could not publish main and v0.1.0"
       echo "setup: release-ready main at $(git -C "$REPO" rev-parse --short main)"
       ;;
     tracked-issue)

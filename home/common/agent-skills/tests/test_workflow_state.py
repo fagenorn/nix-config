@@ -37,6 +37,7 @@ MODEL_FIXTURES = Path(__file__).with_name("_delivery_model_fixtures.py")
 ARTIFACT_BUDGET = Path(__file__).parents[1] / "scripts" / "artifact_budget.py"
 BUDGET_POLICY = Path(__file__).parents[1] / "artifact-budget-policy.json"
 DEFAULT_NOW = "2026-08-13T20:00:00Z"
+HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
 ORCHESTRATED = attempt_identity.RunIdentity("orchestrated", None, None)
 
 BUILDER = Path(__file__).parents[1] / "scripts" / "workflow_delivery_build.py"
@@ -4403,21 +4404,21 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             repo = root / "repo"
             worktree = root / "worktree-issue-73"
             subprocess.run(["git", "init", "--bare", str(origin)], check=True,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env={**os.environ, **HERMETIC_GIT})
             subprocess.run(["git", "clone", str(origin), str(repo)], check=True,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env={**os.environ, **HERMETIC_GIT})
             subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"],
-                           check=True)
+                           check=True, env={**os.environ, **HERMETIC_GIT})
             subprocess.run(["git", "-C", str(repo), "config", "user.email",
-                            "fixture@example.test"], check=True)
+                            "fixture@example.test"], check=True, env={**os.environ, **HERMETIC_GIT})
             subprocess.run(["git", "-C", str(repo), "checkout", "-b", "main"],
-                           check=True, capture_output=True, text=True)
+                           check=True, capture_output=True, text=True, env={**os.environ, **HERMETIC_GIT})
             (repo / "README.md").write_text("fixture\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True, env={**os.environ, **HERMETIC_GIT})
             subprocess.run(["git", "-C", str(repo), "commit", "-m", "fixture"],
-                           check=True, capture_output=True, text=True)
+                           check=True, capture_output=True, text=True, env={**os.environ, **HERMETIC_GIT})
             subprocess.run(["git", "-C", str(repo), "push", "-u", "origin", "main"],
-                           check=True, capture_output=True, text=True)
+                           check=True, capture_output=True, text=True, env={**os.environ, **HERMETIC_GIT})
 
             original_root, original_run_id = self.root, self.run_id
             self.root = repo
@@ -4444,10 +4445,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             subprocess.run([
                 "git", "-C", str(repo), "worktree", "add", "-b", "issue-73-fixture",
                 str(worktree), "origin/main",
-            ], check=True, capture_output=True, text=True)
+            ], check=True, capture_output=True, text=True, env={**os.environ, **HERMETIC_GIT})
             branch = subprocess.run([
                 "git", "-C", str(worktree), "rev-parse", "--abbrev-ref", "HEAD",
-            ], check=True, capture_output=True, text=True).stdout.strip()
+            ], check=True, capture_output=True, text=True, env={**os.environ, **HERMETIC_GIT}).stdout.strip()
             self.assertEqual(branch, "issue-73-fixture")
             progressed = self.progress(
                 issue=73, phase=1, now="2026-08-20T10:03:00Z",

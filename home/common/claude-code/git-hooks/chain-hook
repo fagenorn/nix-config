@@ -1,0 +1,20 @@
+#!/bin/sh
+# Managed pass-through (issue 672): run the repository's own hook of this name, if any,
+# else git-lfs for an LFS repository (git-lfs cannot install into the managed directory).
+name=${0##*/}
+lfs='@gitlfs@'
+common=$(@git@ rev-parse --path-format=absolute --git-common-dir) || exit 1
+self=$(@git@ rev-parse --path-format=absolute --git-path hooks) || exit 1
+candidate=$common/hooks/$name
+if [ -f "$candidate" ] && [ -x "$candidate" ] &&
+    [ "$(realpath "$candidate")" != "$(realpath "$self/$name")" ]; then
+  exec "$candidate" "$@"
+fi
+case $name in
+  post-checkout|post-commit|post-merge)
+    if [ -n "$lfs" ] &&
+        { [ -d "$common/lfs" ] || [ -n "$(@git@ config --get lfs.storage)" ]; }; then
+      exec "$lfs" "$name" "$@"
+    fi ;;
+esac
+exit 0

@@ -196,6 +196,7 @@ agent-workflow-tests *args:
     tests/test_forge_adapter.py \
     tests/test_actions_health_adapter.py \
     tests/test_guard_policy.py \
+    tests/test_git_pre_push_hook.py \
     tests/test_release_adapter_core.py \
     tests/test_codesigned_artifact_adapter.py \
     tests/test_launchd_agent_adapter.py \

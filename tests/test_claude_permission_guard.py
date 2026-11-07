@@ -4771,5 +4771,81 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                                   result.stderr)
 
 
+    def test_push_hooks_cannot_be_skipped_or_redirected_in_plain_form(self):
+        """Issue 672 D8: the pre-push hook is authoritative, so the text guard refuses
+        skipping it (--no-verify) and repointing core.hooksPath in plain form."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "git push --no-verify origin issue-672-topic",
+            "git push origin issue-672-topic --no-verify",
+            "git push -n origin issue-672-topic",
+            "git -C /tmp/x push --no-verify origin issue-672-topic",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn("lifecycle guard: unsafe push: ", result.stderr)
+        for command in (
+            "git config core.hooksPath /dev/null",
+            "git config --global core.hooksPath /tmp/h",
+            "git config --local --unset core.hooksPath",
+            "git -C /tmp/x config CORE.HOOKSPATH /tmp/h",
+            "git config set core.hooksPath /tmp/h",
+            "git config --get core.hooksPath",
+            "true && git config core.hooksPath=/tmp/h",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn("would change which hook judges a push", result.stderr)
+        for command in ("git config user.name x", "git config --get core.hooksPathX",
+                        "git config alias.lg log"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_the_agent_session_marker_cannot_be_cleared_in_plain_form(self):
+        """Issue 672 D3: the pre-push hook judges a push only in an agent session
+        (CLAUDECODE), so the text guard refuses every plain way to clear it."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "unset CLAUDECODE; G=g; H=it; $G$H push origin main",
+            "unset CLAUDECODE", "unset -v CLAUDECODE", "export CLAUDECODE=",
+            "CLAUDECODE= make", "CLAUDECODE=0 make", "export -n CLAUDECODE",
+            "declare +x CLAUDECODE", "typeset +x CLAUDECODE",
+            "env -u CLAUDECODE make", "env -uCLAUDECODE make",
+            "env --unset=CLAUDECODE make", "env -i make", "env - make",
+            "env -vuCLAUDECODE ./push.sh", "env -0uCLAUDECODE ./push.sh",
+            "env --unse=CLAUDECODE ./push.sh", "env -v -u CLAUDECODE make",
+            "env -vu CLAUDECODE make", "env --unset CLAUDECODE make",
+            "env --uns CLAUDECODE make",
+            "env --ignore-environment make", "env -iv make", "exec -c make",
+            "true && unset CLAUDECODE",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn("would hide the agent session from the pre-push hook",
+                              result.stderr)
+        for command in (
+            "sh -c 'unset CLAUDECODE; make'", "sh -c 'env -i ./push.sh'",
+            "bash -c 'exec -c ./push.sh'", "sh -c 'env - make release'",
+            "sh -c 'env --ignore-environment make'",
+            "sh -c 'env -vuCLAUDECODE ./push.sh'",
+            "sh -c 'env --unse=CLAUDECODE ./push.sh'",
+            "sh -c 'true; env -0u CLAUDECODE ./push.sh'",
+        ):
+            with self.subTest(command=command):
+                refused = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, refused.returncode, (command, refused.stderr))
+        for command in ("echo $CLAUDECODE", "env FOO=1 make", "env -u FOO make",
+                        "printenv HOME", "make CLAUDE=1", "env -vu FOO make",
+                        "env --unse=FOO make",
+                        "sh -c 'env -u FOO make'", "sh -c 'env FOO=1 make'"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+
 if __name__ == "__main__":
     unittest.main()

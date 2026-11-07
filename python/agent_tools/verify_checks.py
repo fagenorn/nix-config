@@ -8,19 +8,30 @@ Each check is a pure function plus one `main` subcommand, run through a wrapper 
 after T had every required check pass before its merge, each from the app its protection binds
 it to. It only reads the forge, across every page of each listing, and refuses an incomplete or
 truncated listing rather than judging it.
+
+`managed-pre-push-hook --slug S` (issue 672) is met when the global `core.hooksPath` is the
+managed `-agent-git-hooks` directory and, in a local fixture of S whose own git configuration
+holds only that hooks path, an agent push of `main` is refused by its `pre-push` with the
+remote unchanged while a feature-branch push is admitted. It exits 2 on a fixture error.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
-from collections.abc import Sequence
+import tempfile
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 from agent_tools import forge_markers
 from agent_tools.agent_costs import parse_rfc3339_utc
+from agent_tools.push_fixture import make_push_fixture
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -159,6 +170,68 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
     return (0 if not report["missing"] else 1), report
 
 
+MANAGED_HOOKS_SUFFIX = "-agent-git-hooks"
+PRE_PUSH_REFUSAL = "lifecycle guard pre-push: unsafe push: refusing to push the default branch main"
+CONTROL_BRANCH = "verify-pre-push-control"
+
+
+class FixtureError(Exception):
+    """The check could not build or drive its fixture; the caller exits 2."""
+
+
+def _global_hooks_path(git_bin: str, environ: Mapping[str, str]) -> str | None:
+    done = subprocess.run(
+        [git_bin, "config", "--global", "--get", "core.hooksPath"], env=dict(environ),
+        capture_output=True, text=True, timeout=60, check=False)
+    value = done.stdout.strip() if done.returncode == 0 else ""
+    return value or None
+
+
+def _is_managed(hooks_path: str | None) -> bool:
+    if hooks_path is None:
+        return False
+    hooks = Path(hooks_path)
+    pre_push = hooks / "pre-push"
+    return (hooks.is_dir() and hooks.name.endswith(MANAGED_HOOKS_SUFFIX)
+            and pre_push.is_file() and os.access(pre_push, os.X_OK))
+
+
+def managed_pre_push_hook(slug: str, *, git_bin: str,
+                          environ: Mapping[str, str]) -> tuple[int, dict]:
+    """Met when the global hooks path is the managed one and its pre-push judges a fixture push.
+
+    Raises FixtureError when the fixture cannot be built or driven."""
+    hooks_path = _global_hooks_path(git_bin, environ)
+    report: dict = {"hooks_path": hooks_path, "managed": _is_managed(hooks_path),
+                    "refused": False, "remote_unchanged": False, "control_admitted": False,
+                    "met": False}
+    if not report["managed"]:
+        return 1, report
+    agent = {"CLAUDECODE": "1"}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = make_push_fixture(Path(tmp), slug, git_bin=git_bin, env=environ,
+                                        hooks_path=Path(hooks_path))
+            before = fixture.remote_ref(slug, "refs/heads/main")
+            fixture.commit("verify: a default-branch push")
+            judged = fixture.git("push", "origin", "main", extra_env=agent)
+            report["refused"] = judged.returncode != 0 and PRE_PUSH_REFUSAL in judged.stderr
+            report["remote_unchanged"] = (before is not None
+                                          and fixture.remote_ref(slug, "refs/heads/main") == before)
+            fixture._checked("checkout", "-q", "-b", CONTROL_BRANCH)
+            fixture.commit("verify: a feature-branch push")
+            control = fixture.git("push", "origin", CONTROL_BRANCH, extra_env=agent)
+            report["control_admitted"] = (
+                control.returncode == 0
+                and fixture.remote_ref(slug, f"refs/heads/{CONTROL_BRANCH}") is not None)
+    except (subprocess.SubprocessError, OSError, RuntimeError) as error:
+        raise FixtureError(str(error).strip().splitlines()[0] if str(error).strip()
+                           else type(error).__name__) from error
+    report["met"] = all(report[key] for key in
+                        ("managed", "refused", "remote_unchanged", "control_admitted"))
+    return (0 if report["met"] else 1), report
+
+
 def _repo(value: str) -> str:
     if not REPO.match(value):
         raise argparse.ArgumentTypeError("must be OWNER/NAME")
@@ -180,7 +253,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     required.add_argument("--repo", type=_repo, required=True)
     required.add_argument("--base", required=True)
     required.add_argument("--since", type=_rfc3339, required=True)
+    hook = checks.add_parser(
+        "managed-pre-push-hook",
+        help="issue 672: the managed pre-push hook refuses an agent default-branch push")
+    hook.add_argument("--slug", type=_repo, required=True)
     args = parser.parse_args(argv)
+    if args.check == "managed-pre-push-hook":
+        git_bin = shutil.which("git", path=os.environ.get("PATH"))
+        if git_bin is None:
+            print("verify-checks: fixture_error: git not found", file=sys.stderr)
+            return 2
+        try:
+            code, report = managed_pre_push_hook(args.slug, git_bin=git_bin, environ=os.environ)
+        except FixtureError as error:
+            print(f"verify-checks: fixture_error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
     try:
         code, report = required_checks(args.repo, args.base, args.since)
     except forge_markers.ForgeError as error:
