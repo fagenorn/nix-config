@@ -514,7 +514,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(0, result.returncode, (command, result.stderr))
         # The normalisable spellings keep their inert plain-text bodies.
         for opener in ("cat <<EOF", "cat <<'EOF'", 'cat <<"EOF"', "cat <<-EOF", "cat << 'EOF'"):
-            command = f"{opener}\ngit push origin topic\nnohup x &\nEOF\n"
+            command = f"{opener}\ngit push origin topic\nEOF\n"
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
@@ -543,7 +543,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         # A quoted delimiter expands nothing: the same bodies stay inert.
         for opener in ("cat <<'EOF'", 'cat <<"EOF"'):
             for body in ("$(git push --force origin main)",
-                         "`git push --force origin main`", "$(nohup sleep 9 &)"):
+                         "`git push --force origin main`"):
                 command = f"{opener}\n{body}\nEOF\n"
                 with self.subTest(command=command):
                     result = self.run_guard(command, cwd=repo)
@@ -771,26 +771,363 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assert_detaching_refusal(self.run_guard(command), word, command)
 
-    def test_detaching_word_mentions_pass(self):
+    def test_glued_operator_forms_hide_no_detaching_word(self):
+        """Issue 656: a quoted operator glued to an unquoted one after a wrapper
+        option (`env -u '>'>/dev/null nohup x`) hid the command word from the
+        token scan, while bash and zsh run it. The raw-text check refuses them
+        without reading shell syntax."""
+        for word in ("nohup", "setsid", "disown"):
+            for template in (
+                "env -u '>'>/dev/null W x", "sudo -u '>'>/dev/null W x",
+                "env -u '<'</dev/null W", "sudo -u '<'</dev/null W",
+                "env -u '>'>>log W x &", 'env -u "<"</dev/null W x',
+                "sudo -u '>'>/dev/null env -u '<'</dev/null W x",
+            ):
+                command = template.replace("W", word)
+                with self.subTest(command=command):
+                    self.assert_detaching_refusal(self.run_guard(command), word, command)
+
+    def test_a_detaching_word_anywhere_in_the_raw_text_is_refused(self):
+        """Issue 656 (D2, D3, D5): the check reads text, not shell syntax. A whole
+        word, in any case, is refused wherever it stands, and so is one rebuilt by
+        the deletion copy. The earliest hit in the raw text is named."""
+        for command, word in (
+            # Mentions the token scan let through, refused now (D5).
+            ('echo "nohup"', "nohup"),
+            ('echo "run nohup x & later"', "nohup"),
+            ("cat > notes.md <<'EOF'\nnohup x &\nsetsid y\ndisown\nEOF\n", "nohup"),
+            ("cat <<'EOF'\n$(nohup sleep 9 &)\nEOF\n", "nohup"),
+            ("true # nohup x & disown", "nohup"),
+            ("make > nohup.out 2>&1", "nohup"),
+            ("tail -f nohup.out", "nohup"),
+            ("sudo -u anis ls nohup.out", "nohup"),
+            ("sudo -u >log anis ls nohup", "nohup"),
+            ("make 2>&1 >nohup.out", "nohup"),
+            ("ls >nohup.out", "nohup"),
+            ("X=> nohup.out echo hi", "nohup"),
+            ("env -u '>' echo nohup.out", "nohup"),
+            ("git commit -m 'refuse nohup'", "nohup"),
+            # Argv runners, an accepted residual of the token scan (D5).
+            ("xargs nohup x", "nohup"),
+            ("timeout 5 setsid x", "setsid"),
+            ("find . -exec disown {} +", "disown"),
+            # Rebuilt by the deletion copy (D3).
+            ("no''hup sleep 9 &", "nohup"),
+            ('se"t"sid x', "setsid"),
+            ("dis\\own", "disown"),
+            ("n\\ohup x", "nohup"),
+            ("no\\\nhup x", "nohup"),
+            ("$'nohup' x", "nohup"),
+            ("no$''hup sleep 999 &", "nohup"),
+            ('no$""hup x', "nohup"),
+            ("no{,}hup x", "nohup"),
+            ("{no,}hup x", "nohup"),
+            ("no{h,}up x", "nohup"),
+            ("set{,}sid x", "setsid"),
+            # An attached option value a program runs (D2: `c` or `s` before).
+            ("env -Snohup\\ x", "nohup"),
+            ("env -iSsetsid", "setsid"),
+            ("su -cdisown", "disown"),
+            # Any case (D2): a case-insensitive file system runs /usr/bin/NOHUP.
+            ("NOHUP x &", "nohup"),
+            ("/usr/bin/SetSid x", "setsid"),
+            ("Disown", "disown"),
+            # ASCII bounds (D2): a Unicode case fold is not a letter.
+            ("echo nohup\u0130", "nohup"),
+            ("echo \u212anohup", "nohup"),
+            # Raw text: a quote beside the word bounds it, though the shell would
+            # glue the two (`anohup`); refusing it costs nothing.
+            ("echo 'a'nohup", "nohup"),
+            # Punctuation other than `-` bounds a word.
+            ("echo x=setsid", "setsid"),
+            ("ls dir/nohup.d", "nohup"),
+            # A default-value expansion expands to the literal word when its
+            # variable is unset, though a `-` stands before the word.
+            ("${x:-nohup} sleep 999 &", "nohup"),
+            ("${x-nohup} sleep 999 &", "nohup"),
+            ("${1:-setsid} x", "setsid"),
+            ("${x:-${y-disown}}", "disown"),
+            # The variable may be a special parameter or carry a subscript, and
+            # the default word may be rebuilt by quotes, a backslash or braces.
+            ("${@:-nohup} sleep 999 &", "nohup"),
+            ("${*-nohup} sleep 999 &", "nohup"),
+            ("${a[0]:-nohup} sleep 999 &", "nohup"),
+            ("unset a; ${a[0]:-nohup} sleep 60 &", "nohup"),
+            ("${x:-no''hup} sleep 999 &", "nohup"),
+            ("${x-no\\hup} sleep 999 &", "nohup"),
+            ("${x:-no{,}hup} sleep 999 &", "nohup"),
+            ("${a[i-1]:-nohup} sleep 999 &", "nohup"),
+            ("${x:-no$''hup} sleep 999 &", "nohup"),
+            # ...including before its first letter.
+            ("${x:-'n'ohup} sleep 999 &", "nohup"),
+            ("${x:-\"n\"ohup} sleep 999 &", "nohup"),
+            ("${x:-\\no\\hup} sleep 999 &", "nohup"),
+            ("${x:-''n''ohup} sleep 999 &", "nohup"),
+            ("${@:-'n'ohup} sleep 999 &", "nohup"),
+            ("${x:-'s'etsid} sleep 999 &", "setsid"),
+            ("${x:-\"d\"isown}", "disown"),
+            ("${x:-$\"n\"ohup} sleep 999 &", "nohup"),
+            ("unset a; ${a[0]:-'n'ohup} sleep 60 &", "nohup"),
+            ("${x:-no\\\nhup} sleep 999 &", "nohup"),
+            ("no\\\nhup sleep 999 &", "nohup"),
+            # A positional or empty special parameter glued before the word
+            # expands to nothing in the Bash tool.
+            ("$1nohup sleep 999 &", "nohup"),
+            ("$@setsid x", "setsid"),
+            ("$!disown", "disown"),
+            # The earliest hit is named.
+            ("echo setsid; nohup x", "setsid"),
+            ("echo DISOWN nohup", "disown"),
+        ):
+            with self.subTest(command=command):
+                self.assert_detaching_refusal(self.run_guard(command), word, command)
+
+    def test_text_without_a_whole_detaching_word_passes(self):
+        """Issue 656 (D2): a word only counts when no ASCII letter, digit, `_` or
+        `-` touches it (a `c` or `s` before excepted), so these hold none, and a
+        trailing `&` is not detaching."""
         for command in (
-            'echo "nohup"',
-            "grep nohup log",
-            "rg -n 'setsid|disown' docs/",
-            'echo "run nohup x & later"',
-            "cat > notes.md <<'EOF'\nnohup x &\nsetsid y\ndisown\nEOF\n",
-            "true # nohup x & disown",
             "a & b & wait",
             "sleep 1 &",
-            "make > nohup.out 2>&1",
-            "tail -f nohup.out",
-            "sudo -u anis ls nohup.out",
-            "sudo -u >log anis ls nohup",
-            "make 2>&1 >nohup.out",
-            "ls >nohup.out",
+            "ls nohupx",
+            "echo my_setsid_helper",
+            "cat disown2.txt",
+            "echo unohup",
+            "echo no hup",
+            "echo SETSIDE",
+            "echo Knohup",
+            "ls my-nohup",
+            "echo issue-7-refuse-nohup-x",
+            "echo nohup-",
+            "echo ${x:-my-nohup}",
+            "echo ${x}-nohup-y",
+            "echo $12nohup",
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_slugged_lifecycle_names_pass(self):
+        """Issue 656 (D2, D5): branch and worktree names are slugged from issue
+        titles with `-`, so a title naming a detaching word must not make its
+        branch's push, deletion or worktree calls detaching."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        worktree = "/tmp/x/.worktrees/worktree-issue-700-detect-nohup-assembled-at-run-time"
+        for command in (
+            "git push -u origin issue-700-detect-nohup-assembled-at-run-time",
+            "git push origin issue-701-refuse-setsid-and-disown",
+            "git branch -d issue-702-refuse-nohup",
+            f"git -C {worktree} status --short",
+            f"cd {worktree} && git status --short",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_read_only_mentions_of_a_detaching_word_pass(self):
+        """Issue 656 allowlist (D4): the word is admitted only as the search pattern
+        of one plain grep or rg call whose options are all enumerated, or inside a
+        quoted title or body of one gh issue/pr create/comment call (after the
+        sanctioned scrub prelude or none), read in the issue-418 word grammar."""
+        for command in (
+            "grep nohup log",
+            "grep -n -e nohup -e setsid home/common/claude-code/README.md",
+            "grep -rn --include '*.md' disown docs",
+            "grep --exclude-dir=.git -rn setsid home",
+            "rg -n 'setsid|disown' docs/",
+            "rg -n -g '*.md' nohup docs/",
+            "rg --regexp=nohup -t py .",
+            "rg -- nohup docs",
+            'rg -i "NOHUP" tests',
+            "gh issue comment 656 --repo fagenorn/nix-config "
+            "--body 'never nohup; use run_in_background'",
+            "gh issue create --repo fagenorn/nix-config --title 'setsid refusal' "
+            '--body "disown is refused too"',
+            "gh pr comment 657 --repo fagenorn/nix-config -b 'nohup'",
+            "gh issue create --repo fagenorn/nix-config -t 'nohup' "
+            "-b 'first line\nsetsid on the second'",
+            "unset GITHUB_TOKEN && gh issue comment 700 --repo fagenorn/nix-config "
+            "--body 'nohup refusal notes'",
+            "unset GITHUB_TOKEN GH_TOKEN && gh issue create --repo fagenorn/nix-config "
+            "--title 'detect setsid assembled at run time' --body 'disown too'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        # A PR creation holding the word in its quoted text, with a slugged head
+        # and with or without the ship-issue scrub, is admitted outright: it
+        # clears the detaching check and the lifecycle grammar.
+        repo = self.make_repo("https://github.com/fagenorn/argus.git")
+        create = ('gh pr create --repo fagenorn/argus --base main '
+                  '--head issue-700-refuse-nohup '
+                  '--title "fix: refuse nohup" --body "setsid and disown too"')
+        for command in (create, "unset GITHUB_TOKEN && " + create):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_detaching_mentions_outside_the_allowlist_are_refused(self):
+        """Issue 656 allowlist (D4): near misses of the two admitted forms."""
+        for command, word in (
+            ("grep nohup log; nohup x", "nohup"),
+            ("grep nohup log && nohup x", "nohup"),
+            ("grep nohup log | sh", "nohup"),
+            ("grep nohup $(setsid x)", "nohup"),
+            ("grep x nohup.out", "nohup"),              # a path, not the pattern
+            ("grep -e x nohup", "nohup"),               # a path once -e names the pattern
+            ("rg -e x nohup", "nohup"),
+            ("grep -A nohup x log", "nohup"),           # an option's value
+            ("grep --include=nohup x .", "nohup"),
+            ("grep -f patterns nohup", "nohup"),        # patterns from a file
+            ("grep --file=patterns nohup", "nohup"),
+            ("grep -rf patterns nohup", "nohup"),       # a cluster with an unlisted letter
+            ("grep -esnohup log", "nohup"),             # attached -e is not enumerated
+            ("rg --files nohup", "nohup"),              # no pattern at all
+            ("rg --type-list nohup", "nohup"),
+            ("rg -r nohup x .", "nohup"),               # a replacement, not a pattern
+            ("rg -z nohup x", "nohup"),                 # rg runs decompressors
+            ("grep -e nohup -A", "nohup"),              # a value option missing its value
+            ("grep 'no''hup' log", "nohup"),            # glued quotes leave the grammar
+            ("rg --pre nohup x .", "nohup"),            # rg runs --pre's value
+            ("rg --pre=nohup x .", "nohup"),
+            ("rg --hostname-bin=setsid x", "setsid"),
+            ("rg --pre-glob '*' --pre=disown x", "disown"),
+            ("FOO=1 grep nohup log", "nohup"),
+            ("command grep nohup log", "nohup"),
+            ("/usr/bin/grep nohup log", "nohup"),
+            ("egrep nohup log", "nohup"),
+            ("'grep' nohup log", "nohup"),              # the program word must be plain
+            ("unset GITHUB_TOKEN && grep nohup log", "nohup"),  # no prelude for search
+            ("gh issue comment 1 --body nohup", "nohup"),           # unquoted text
+            ("gh issue comment 1 -- --body 'nohup'", "nohup"),      # options ended
+            ("gh issue comment 1 --body='nohup'", "nohup"),         # not enumerated
+            ("gh issue comment 1 --repo 'nohup/x' --body b", "nohup"),
+            ("gh issue comment 1 --body 'x' --edit-last 'nohup'", "nohup"),
+            ("gh issue edit 1 --body 'nohup'", "nohup"),
+            ("gh issue comment 1 --body-file nohup.md", "nohup"),
+            ("gh issue comment 1 --body 'x'; nohup y", "nohup"),
+            ('gh issue comment 1 --body "$(nohup x)"', "nohup"),
+            ("gh api repos/x/issues -f body='nohup'", "nohup"),
+            ("unset PATH && gh issue comment 1 --body 'nohup'", "nohup"),
+            ("unset GITHUB_TOKEN GITHUB_TOKEN && gh issue comment 1 --body 'nohup'", "nohup"),
+            ("env -u GITHUB_TOKEN gh issue comment 1 --body 'nohup'", "nohup"),
+            ("cd /tmp && gh issue comment 1 --body 'nohup'", "nohup"),
+            ("unset GITHUB_TOKEN && gh issue comment 1 --body 'x' && nohup y", "nohup"),
+            ("echo 'nohup'", "nohup"),
+        ):
+            with self.subTest(command=command):
+                self.assert_detaching_refusal(self.run_guard(command), word, command)
+
+    def test_mutants_of_the_detaching_check_are_caught(self):
+        """Issue 656 mutation check (D8): each seam of the raw-text check, broken in
+        a copy of the guard source, gives at least one row a different valid
+        outcome (an admission, or a detaching refusal), while the unmutated copy
+        gives every row its expected one. A crash or another refusal never counts.
+        The copy runs as the wrapper runs the guard; no row holds a
+        repository-bound verb, so the compiled policy is never opened."""
+        source = (Path(__file__).resolve().parents[1]
+                  / "home/common/claude-code/lifecycle_guard.py").read_text(encoding="utf-8")
+        anchor = '\nif __name__ == "__main__":'
+        self.assertEqual(1, source.count(anchor))
+        rows = (
+            ("nohup x", "refuse"),
+            ("echo 'a'nohup", "refuse"),
+            ("no''hup x", "refuse"),
+            ("no$''hup x", "refuse"),
+            ("no{,}hup x", "refuse"),
+            ("NOHUP x", "refuse"),
+            ("echo \u212anohup", "refuse"),
+            ("env -Snohup\\ x", "refuse"),
+            ("su -cnohup x", "refuse"),
+            ("echo nohup", "refuse"),
+            ("echo issue-7-refuse-nohup-x", "admit"),
+            ("grep nohup log", "admit"),
+            ("unset GITHUB_TOKEN && gh issue comment 1 --repo fagenorn/nix-config "
+             "--body 'nohup'", "admit"),
+            ("sleep 1 &", "admit"),
+            ("${x:-nohup} y", "refuse"),
+            ("${a[0]:-no''hup} y", "refuse"),
+            ("${x:-'n'ohup} y", "refuse"),
+            ("$1nohup y", "refuse"),
+            ("no\\\nhup y", "refuse"),
+            ("echo ${x}-nohup", "admit"),
+        )
+        flags = "re.IGNORECASE | re.ASCII"
+        mutants = {
+            "control": "",
+            "no-normalisation": "detaching_normalised = lambda command: command\n",
+            "no-dollar-quote-deletion":
+                "DETACHING_DELETED = re.compile(DETACHING_DELETED.pattern.split('|', 1)[1])\n",
+            "no-brace-deletion":
+                "DETACHING_DELETED = re.compile("
+                "DETACHING_DELETED.pattern.replace('{},', ''))\n",
+            "normalised-text-only":
+                "detaching_texts = lambda command: (detaching_normalised(command),)\n",
+            "case-sensitive":
+                "DETACHING_PATTERN = re.compile(DETACHING_PATTERN.pattern, re.ASCII)\n",
+            "unicode-bounds":
+                "DETACHING_PATTERN = re.compile(DETACHING_PATTERN.pattern, re.IGNORECASE)\n",
+            "dash-bounds-a-word":
+                "DETACHING_PATTERN = re.compile("
+                f"DETACHING_PATTERN.pattern.replace('_-]', '_]'), {flags})\n",
+            "no-attached-option-bound":
+                "DETACHING_PATTERN = re.compile("
+                f"DETACHING_PATTERN.pattern.replace('|(?<=[cs])', ''), {flags})\n",
+            "no-default-pattern":
+                "DETACHING_DEFAULT_PATTERN = re.compile(r'(?!)')\n",
+            "no-default-word-rebuild":
+                "DETACHING_DEFAULT_PATTERN = re.compile(r'\\$\\{[A-Za-z0-9_]*:?-(' "
+                "+ '|'.join(DETACHING_WORDS) + r')(?![A-Za-z0-9_-])', "
+                f"{flags})\n",
+            "no-default-leading-junk":
+                "DETACHING_DEFAULT_PATTERN = re.compile("
+                "DETACHING_DEFAULT_PATTERN.pattern.replace(':?-(' + DETACHING_JUNK, ':?-(', 1), "
+                f"{flags})\n",
+            "no-positional-bound":
+                "DETACHING_PATTERN = re.compile("
+                f"DETACHING_PATTERN.pattern.replace('|(?<=\\\\$[0-9!@*])', ''), {flags})\n",
+            "no-backslash-newline-deletion":
+                "detaching_normalised = lambda command: "
+                "DETACHING_DELETED.sub('', command)\n",
+            "allow-every-mention": "detaching_mention_allowed = lambda command: True\n",
+            "allow-no-mention": "detaching_mention_allowed = lambda command: False\n",
+        }
+
+        def outcome(result):
+            if result.returncode == 0:
+                return "admit"
+            if (result.returncode == 2
+                    and "lifecycle guard: detaching command `" in result.stderr):
+                return "refuse"
+            return f"invalid: exit {result.returncode}: {result.stderr[-300:]}"
+
+        directory = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        expected = [want for _, want in rows]
+        for name, override in mutants.items():
+            path = directory / f"{name}.py"
+            path.write_text(source.replace(anchor, "\n" + override + anchor, 1),
+                            encoding="utf-8")
+            outcomes = []
+            for command, _ in rows:
+                result = subprocess.run(
+                    [sys.executable, "-I", str(path),
+                     "--base-policy", str(BASE_POLICY_PATH),
+                     "--policy", str(directory / "absent-policy.json"),
+                     "--derive-bin", "/usr/bin/false"],
+                    input=json.dumps({"tool_name": "Bash",
+                                      "tool_input": {"command": command}}),
+                    text=True, capture_output=True, timeout=10, check=False,
+                )
+                outcomes.append(outcome(result))
+            with self.subTest(mutant=name):
+                if name == "control":
+                    self.assertEqual(expected, outcomes)
+                else:
+                    caught = [
+                        command for (command, want), got in zip(rows, outcomes)
+                        if got in ("admit", "refuse") and got != want
+                    ]
+                    self.assertTrue(caught, (name, list(zip(expected, outcomes))))
 
     def test_detaching_refusal_precedes_the_push_grammar(self):
         # AC3: still refused, now for detaching rather than as a push.
@@ -2734,12 +3071,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assert_detaching_refusal(self.run_guard(command), word, command)
-        for command in (
-            "X=> nohup.out echo hi",
-            "env -u '>' echo nohup.out",
-        ):
-            with self.subTest(command=command):
-                self.assertEqual(0, self.run_guard(command).returncode, command)
 
     def test_lifecycle_verbs_are_admitted_only_in_the_allowed_grammar(self):
         """Issue 418 allowlist: a command holding a lifecycle verb is admitted only as
