@@ -284,5 +284,22 @@ class RequiredChecksCommandTest(unittest.TestCase):
         self.assertEqual(committed_mode(f"{CHECKS}/required-checks"), "100755")
 
 
+class PlatformStatusWrapperTest(unittest.TestCase):
+    def test_runs_the_installed_platform_status_and_passes_it_through(self):
+        with tempfile.TemporaryDirectory() as home:
+            bin_dir = Path(home) / ".agents" / "bin"
+            bin_dir.mkdir(parents=True)
+            fake = bin_dir / "resolve-project"
+            fake.write_text('#!/bin/sh\nprintf \'{"argv": "%s", "platform": {"deprecations": [1]}}\\n\' "$*"\n'
+                            "exit 3\n")
+            fake.chmod(0o755)
+            done = run_from_root([str(ROOT / CHECKS / "platform-status")], {"HOME": home})
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["argv"], "platform-status")
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/platform-status"), "100755")
+
+
 if __name__ == "__main__":
     unittest.main()
