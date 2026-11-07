@@ -19,11 +19,13 @@ Read on demand when writing acceptance criteria (`to-issues`), mapping them in a
 | Part | Block field |
 |---|---|
 | trigger | `when`: `deployed_includes`, `released_includes`, `ci_run_includes`, `not_before` or `days_after` |
-| command | `run`: a declared command id, a committed executable script or a built-in probe |
+| command | `run`: a command id that is a member of `workflow.verification`, a committed executable script or a built-in probe |
 | threshold | the run's exit (0 met, 1 not met, 75 not yet) and the optional `expect`; `mode: observe` for metrics (R5) |
 | expiry | `expires_after_days` (default 21) and `on_expire` |
 
 A `human` check uses an `ask` or `act` run and a `reason` (R3).
+
+The unattended runner runs a command check only when its command id is in `workflow.verification`; any other declared command lints as valid but stays pending as `command_not_verification`, so a check that must complete without a person uses a member of that list, a script or a probe.
 
 ## Linting a hold
 

@@ -3080,6 +3080,16 @@ class AcceptancePlanningRulesTest(unittest.TestCase):
             with self.subTest(profile=profile["id"]):
                 self.assertFalse([m for m in profile["hot"] if "acceptance-planning" in m])
 
+    def test_an_unattended_command_check_must_be_a_verification_command(self):
+        """#633 COR-001: the runner runs only a command that is a member of
+        `workflow.verification` and leaves any other pending as `command_not_verification`,
+        so the rules require that membership of a command check, not any declared command."""
+        text = normalized(ACCEPTANCE_RULES.read_text(encoding="utf-8"))
+        row = text[text.index("| command |"):text.index("| threshold |")]
+        self.assertIn("`workflow.verification`", row)
+        self.assertNotIn("a declared command id", row)
+        self.assertIn("`command_not_verification`", text)
+
     def test_three_skills_point_to_the_rules(self):
         """#633 AC2: deliver-direct, writing-plans and to-issues each name the rules file."""
         for path in (DirectLaneRoutingTest.DELIVER_DIRECT, WRITING_PLANS,
