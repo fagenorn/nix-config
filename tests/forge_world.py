@@ -206,7 +206,8 @@ if tool == "gh" and (state / "store.json").exists():
                 return "create_issue", (argv[5][6:], argv[7][5:], [a[len("labels[]="):] for a in argv[9::2]]), None
             if (len(argv) == 4 and argv[:3] == ["api", "--paginate", "--slurp"]
                     and argv[3].startswith("repos/" + slug + "/issues?labels=")):
-                return "list_issues", unquote(argv[3].split("?labels=", 1)[1].split("&", 1)[0]), None
+                query = argv[3].split("?labels=", 1)[1].split("&")
+                return "list_issues", (unquote(query[0]), "state=open" in query[1:]), None
         base = "repos/" + slug + "/issues/" + str(issue) + "/comments"
         one = "repos/" + slug + "/issues/comments/"
         body = argv[5][5:] if len(argv) == 6 and argv[4] == "-f" and argv[5].startswith("body=") else None
@@ -282,8 +283,16 @@ if tool == "gh" and (state / "store.json").exists():
                                   "author_association": "OWNER", "updated_at": store["clock"],
                                   "state": "open", "state_reason": None})
             out = {"number": number}
+        elif target[1]:
+            label = target[0]
+            rows = [{"number": c["number"], "state": "open", "labels": [{"name": n} for n in c["labels"]]}
+                    for c in st["created"] if c["state"] == "open" and label in c["labels"]]
+            if st["state"] == "open" and label in st["labels"]:
+                rows.append({"number": store["issue"], "state": "open",
+                             "labels": [{"name": n} for n in st["labels"]]})
+            out = [rows]
         else:
-            out = [[c for c in st["created"] if target in c["labels"]]]
+            out = [[c for c in st["created"] if target[0] in c["labels"]]]
         save(store)
         if out is not None:
             sys.stdout.write(json.dumps(out))

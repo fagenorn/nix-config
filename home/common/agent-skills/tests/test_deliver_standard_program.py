@@ -103,7 +103,7 @@ class HappyPathTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         self.assertTrue(result["merged"])
         self.assertEqual(labels(calls), [
-            "setup", "acquire", "worktree", "renew-plan", "plan", "plan-codex", "plan-review", "renew-tasks",
+            "setup", "acquire", "worktree", "renew-plan", "owner-answer", "plan", "plan-codex", "plan-review", "renew-tasks",
             "impl-1", "review-1", "renew-final-review", "final-codex", "final-1", "renew-verify", "verify",
             "renew-ship", "pr", "renew-checks-1", "checks-1", "renew-merge", "merge", "hold", "close-out"])
 
@@ -204,7 +204,7 @@ class ContractTest(unittest.TestCase):
                 self.assertTrue(cont["claim_incomplete"])
                 result, calls = run(args=dict(ARGS, cont=cont))
                 self.assertEqual(result["stage"], "done")
-                self.assertEqual(labels(calls)[:5], ["setup", "acquire", "worktree", "renew-plan", "plan"])
+                self.assertEqual(labels(calls)[:6], ["setup", "acquire", "worktree", "renew-plan", "owner-answer", "plan"])
                 self.assertIn("skip a step already done", prompt(calls, "worktree"))
                 self.assertIn("an earlier claim stopped part way", prompt(calls, "setup"))
                 self.assertIn("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x", prompt(calls, "worktree"))
@@ -246,8 +246,90 @@ class ContractTest(unittest.TestCase):
                 self.assertIn(path, text, label)
 
 
+ANSWER = {"verdict": "answered", "comment_id": 30, "decisions": "May the delivery push? Chosen: Approve: push it.",
+          "questions": [{"question": "May the delivery push?", "options": ["Approve: push it."],
+                         "chosen": "Approve: push it.", "comment_id": 30}]}
+ASKED = {"status": "needs_user", "questions": [{"question": "Which host?", "options": ["Host one.", "Host two."]}]}
+
+
+class OwnerAnswerTest(unittest.TestCase):
+    def test_the_answer_is_read_after_the_claim_and_reaches_the_planner(self):
+        result, calls = run(replies={"owner-answer": ANSWER})
+        self.assertEqual(result["stage"], "done")
+        ls = labels(calls)
+        self.assertLess(ls.index("acquire"), ls.index("owner-answer"))
+        self.assertLess(ls.index("renew-plan"), ls.index("owner-answer"))
+        self.assertLess(ls.index("owner-answer"), ls.index("plan"))
+        self.assertIn("forge-claim owner-action status --repo owner/repo --issue 9 --reason decision",
+                      prompt(calls, "owner-answer"))
+        self.assertIn(f"they are binding: {ANSWER['decisions']}", prompt(calls, "plan"))
+
+    def test_decisions_ride_in_cont_and_merge_without_repeats(self):
+        first, _ = run(args=dict(ARGS, decisions="Use the flag."), replies={"owner-answer": ANSWER, "plan": ASKED})
+        self.assertEqual(first["stage"], "plan")
+        self.assertEqual(first["cont"]["decisions"], ["Use the flag.", ANSWER["decisions"]])
+        second, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"owner-answer": ANSWER, "plan": ASKED})
+        self.assertEqual(second["cont"]["decisions"], ["Use the flag.", ANSWER["decisions"]])
+        self.assertEqual(prompt(calls, "plan").count(ANSWER["decisions"]), 1)
+
+    def test_an_open_or_absent_prompt_adds_nothing(self):
+        for verdict in ("none", "open"):
+            with self.subTest(verdict=verdict):
+                result, calls = run(replies={"owner-answer": dict(ANSWER, verdict=verdict, decisions="")})
+                self.assertNotIn("The owner has answered", prompt(calls, "plan"))
+                self.assertNotIn("decisions", result.get("cont") or {})
+
+    def test_an_unreadable_answer_stops_before_planning(self):
+        for reply in (None, {"verdict": "error"}, {"verdict": "answered"}, dict(ANSWER, decisions=""),
+                      dict(ANSWER, decisions="  ")):
+            with self.subTest(reply=reply):
+                result, calls = run(replies={"owner-answer": reply})
+                self.assertEqual(result["stage"], "owner-answer")
+                self.assertIn("cont", result)
+                self.assertNotIn("plan", labels(calls))
+
+    def test_a_plan_in_hand_or_the_direct_lane_reads_no_answer(self):
+        first, _ = run(args=dict(ARGS, mode="plan"))
+        self.assertEqual(first["stage"], "planned")
+        _, calls = run(args=dict(ARGS, cont=first["cont"]))
+        self.assertNotIn("owner-answer", labels(calls))
+        _, calls = run(args=dict(ARGS, lane="direct"))
+        self.assertNotIn("owner-answer", labels(calls))
+
+    def test_a_needs_user_stop_returns_questions_and_posts_nothing(self):
+        result, calls = run(replies={"plan": ASKED})
+        self.assertEqual((result["stage"], result["needs_user"]), ("plan", ASKED["questions"]))
+        self.assertFalse([c["label"] for c in calls if "owner-action post" in c["prompt"]])
+
+    def test_the_planner_asks_in_box_form_and_only_past_r8(self):
+        _, calls = run()
+        text = prompt(calls, "plan")
+        self.assertIn("R8 of ~/.agents/standards/acceptance-planning.md", text)
+        self.assertIn("{question, options}", text)
+        plan_call = next(c for c in calls if c["label"] == "plan")
+        self.assertEqual(plan_call["schema"]["properties"]["questions"]["items"]["required"], ["question", "options"])
+
+    def test_plan_reviews_can_cite_every_rule(self):
+        rules = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
+        ids = re.findall(r"^- \*\*(R\d+)\.", rules.read_text(encoding="utf-8"), re.M)
+        self.assertIn("R8", ids)
+        _, calls = run()
+        review = next(c for c in calls if c["label"] == "plan-review")
+        self.assertEqual(review["schema"]["properties"]["findings"]["items"]["properties"]["rule"]["enum"], ids)
+        text = PROGRAM.read_text(encoding="utf-8")
+        self.assertRegex(text, r"label: 'plan-rules-review'[^}]*schema: PLAN_REVIEW")
+
+    def test_close_out_ends_the_decision_prompt(self):
+        _, calls = run()
+        close = prompt(calls, "close-out")
+        self.assertIn("forge-claim owner-action end --repo owner/repo --issue 9 --reason decision", close)
+        self.assertLess(close.index("--reason decision"), close.index("forge-claim release"))
+        result, _ = run(patch={"close-out": {"decision_ended": False}})
+        self.assertEqual(result["stage"], "close-out")
+
+
 RENEW = f"forge-claim renew --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x"
-BOUNDARIES = [("renew-plan", "plan"), ("renew-tasks", "impl-1"), ("renew-final-review", "final-codex"),
+BOUNDARIES = [("renew-plan", "owner-answer"), ("renew-tasks", "impl-1"), ("renew-final-review", "final-codex"),
               ("renew-verify", "verify"), ("renew-ship", "pr"), ("renew-checks-1", "checks-1"),
               ("renew-merge", "merge")]
 

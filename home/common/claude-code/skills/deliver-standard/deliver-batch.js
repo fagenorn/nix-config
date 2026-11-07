@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
   description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children in ready mode, a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue facts behind one barrier, decide eligibility in code' },
@@ -15,8 +15,14 @@ export const meta = {
 // (the absolute path of deliver-standard.js: this program has no filesystem access, D8), issues
 // (positive integers, distinct) or label (every open issue carrying it; exactly one of the two),
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
-// continuation}, only for listed issues, D9).
+// continuation}, only for listed issues, D9), unattended (boolean, default false: true only for a run
+// no session watches, D12).
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
+// A questions row is {issue, outcome: 'questions', lane?, questions, marker}: marker is the box prompt's
+// comment id when an unattended run posted it, null when nothing was posted (a session-launched run
+// returns the questions to its session). A session-launched conflict or needs-label row carries
+// owner_ask: {reason, items} (what the marker would have held) and nothing is posted for it. The batch
+// never reads or ends a decision prompt outside its land close-out: the child reads the answer itself.
 // The lead runs a non-null relaunch as a NEW run, never with resumeFromRunId (D1): the new run
 // re-reads the tracker (an owner reply, a closed blocker, a released lock) and every side effect
 // re-adopts. Only a run cut off before it returned is resumed with its own original args.
@@ -49,6 +55,7 @@ if (HAS_ISSUES) {
 if (args.decisions !== undefined) {
   if (!isObj(args.decisions) || !Object.values(args.decisions).every(v => typeof v === 'string' && v)) return bad('every decisions value must be a non-empty string')
 }
+if (args.unattended !== undefined && typeof args.unattended !== 'boolean') return bad('unattended must be a boolean')
 if (args.conts !== undefined) {
   if (!isObj(args.conts)) return bad('conts must be an object')
   if (!HAS_ISSUES) return bad('conts requires issues')
@@ -58,6 +65,7 @@ if (args.conts !== undefined) {
   }
 }
 const DECISIONS = args.decisions
+const UNATTENDED = args.unattended === true
 const CONTS = args.conts || {}
 
 const BASE_RULES = `
@@ -146,7 +154,7 @@ const FACTS_SCHEMA = {
     merged_pr: { type: ['integer', 'null'] },
     open_pr: { anyOf: [{ type: 'object', properties: { number: { type: 'integer' }, head_branch: { type: 'string' } } }, { type: 'null' }] },
     blockers: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, state: { type: 'string' } }, required: ['issue', 'state'] } },
-    decision: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, items: { type: 'array', items: {} }, replies: { type: 'array', items: {} } } },
+    decision: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: {} } } },
   },
   required: ['state', 'labels', 'claim', 'blockers'],
 }
@@ -156,7 +164,7 @@ const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git 
 3. claim: run alone and exactly forge-claim status --repo ${SLUG} --issue ${n} --holder ${HOLDER} and return its verdict (free, held_by or stale) and by; on exit 1 or 2 return verdict error.
 4. merged_pr: the number of a merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,body,title), else null. open_pr: {number, head_branch} of an open PR referencing the issue, else null.
 5. blockers: the issues this one is blocked by, from the body's "Blocked by" list and the tracker's issue dependencies, each as {issue, state} with the state from gh issue view.
-6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id, items and replies.
+6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id and questions.
 ${RULES_FOR(REPO, '<branch>')}`
 
 await parallel(ISSUES.map(n => async () => {
@@ -187,7 +195,7 @@ const eligibility = (n, f) => {
   // Only a questioned issue waits: no lane, no claim, no child until the owner answers.
   const decision = f.decision || {}
   if (decision.verdict === 'open' && !(DECISIONS && DECISIONS[String(n)])) {
-    return { issue: n, outcome: 'questions', questions: decision.items || [], marker: decision.comment_id }
+    return { issue: n, outcome: 'questions', questions: decision.questions || [], marker: decision.comment_id }
   }
   return null
 }
@@ -246,18 +254,12 @@ const waiters = []
 const admit = () => new Promise(resolve => { if (inUse < MAX) { inUse++; resolve() } else waiters.push(resolve) })
 const leave = () => { const next = waiters.shift(); if (next) next(); else inUse-- }
 
-// The owner's answer: the relaunch's decisions, else the replies the tracker shows on an answered marker.
-const answerOf = n => {
-  if (DECISIONS && DECISIONS[String(n)]) return DECISIONS[String(n)]
-  const d = (FACTS[n] || {}).decision
-  if (d && d.verdict === 'answered') return (d.replies || []).map(r => r.body).join('\n\n')
-  return null
-}
+// The owner's answer the batch itself carries: the relaunch's decisions only. A ticked decision prompt is read by the child.
+const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
 // D12: a null child, or a stop that names dead agents, ends admission; a null field alone is an ordinary stop.
 const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
 const READY = {}
-const TAKEN = {}
 const readyOf = n => READY[n]
 // The child's whole input (D1): the batch args, the issue's cont, its lane and the owner's answer, nothing else.
 const childArgs = (n, lane) => {
@@ -313,7 +315,7 @@ const LAND_SYNC_SCHEMA = {
   required: ['status'],
 }
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
-const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
+const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
 const MAX_SYNCS = 3
 
 // The landing of one ready issue (D10). Every exit goes through the wrapper at the bottom: a landing
@@ -365,7 +367,9 @@ released and not_held are both fine. Return its verdict and any detail. Run noth
 ${RULES}`, `land-unlock-${n}`, { ...cheap, schema: RELEASE_SCHEMA })
   }
 
+  // D12: only an unattended run posts the marker; a session-launched run returns the same items on its row.
   const ownerAction = async (reason, items, outcome, extra) => {
+    if (!UNATTENDED) return out(outcome, { ...(extra || {}), owner_ask: { reason, items } })
     const posted = await call(`The landing of issue #${n} of ${SLUG} (the git repository at ${REPO}) needs the owner (${reason}). Post the marker; the claim stays held.
 1. Make a fresh directory with mktemp -d and write exactly this JSON array to a file in it: ${JSON.stringify(items)}
 2. Run alone and exactly: forge-claim owner-action post --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason ${reason} --items-file <that file>
@@ -411,7 +415,7 @@ ${RULES}`, label, { ...cheap, schema: RECORD_SCHEMA })
 ${pr ? `4. After a merge you completed, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
 ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
     if (!sy) return out('stopped', { stage: 'land-sync', detail: `${label} returned nothing` })
-    const conflictOwner = notes => ownerAction('conflict', [`PR #${pr} of issue #${n} conflicts with ${INT} a second time in one landing, so the merge was aborted. ${notes || ''} Resolve the conflict on the branch ${B} or say how.`], 'conflict', { detail: sy.notes })
+    const conflictOwner = notes => ownerAction('conflict', [`PR #${pr} of issue #${n} conflicts with ${INT} a second time in one landing, so the merge was aborted. ${notes || ''} Resolve the conflict on the branch ${B}, then relaunch the batch.`], 'conflict', { detail: sy.notes })
     if (sy.status === 'blocked') {
       if (!sy.conflicted) return out('stopped', { stage: 'land-sync', detail: sy.notes })
       if (!second) { c.conflicts++; return out('conflict', { detail: sy.notes }) }
@@ -542,14 +546,14 @@ ${RULES}`, `land-merge-${n}`, { ...cheap, schema: LAND_MERGE_SCHEMA })
     const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
 1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
 2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released.
-3. End the landing markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict and then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label. The merge proves both conditions resolved; a verdict none is fine.
+3. End the owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision. The merge proves the conflict and the label resolved and the decision settled; a verdict none is fine. decision_ended is true only when the decision end exited 0 (verdict ended or none).
 4. ${allCode
       ? `Every criterion is of kind code. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
       : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
-Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released and notes.
+Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended and notes.
 ${RULES}`, `close-out-${n}`, { ...cheap, schema: CLOSE_SCHEMA })
     const want = allCode ? 'CLOSED' : 'OPEN'
-    if (!co || co.issue_state !== want || co.released !== true) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
+    if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
     return out(allCode ? 'landed' : 'landed-held')
   }
 
@@ -670,17 +674,6 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', model:
       }
     }
 
-    const answer = readopt ? null : answerOf(n)
-    if (answer !== null) {
-      // Ending the marker erases the replies from the tracker: a relaunch must carry what was read.
-      if (!(DECISIONS && DECISIONS[String(n)])) TAKEN[n] = answer
-      const ended = await ask(agent(`The owner answered the open decision of issue #${n} of ${SLUG} (the git repository at ${REPO}). End its marker.
-Run alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision
-Return its verdict and any detail. Run nothing else.
-${RULES_FOR(REPO, f.branch)}`, { label: `answered-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: ENDED_SCHEMA }), `answered-${n}`)
-      if (ended === null || ended === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'answered', detail: `answered-${n} returned nothing` }; return }
-    }
-
     let r = null
     try {
       try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
@@ -718,17 +711,22 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `recover-end-${n}`, phase: 'Deliver', mo
     }
     if (r.stage === 'claimed') { rows[n] = { issue: n, outcome: 'claim-lost', by: r.by }; return }
     if (r.stage === 'plan' && Array.isArray(r.needs_user) && r.needs_user.length) {
-      const posted = await ask(agent(`The delivery of issue #${n} of ${SLUG} (the git repository at ${REPO}) needs the owner's answers. Post them as the decision marker, the claim stays held.
+      // D6, D12: only an unattended run posts the box prompt; a session-launched run hands the questions to its session, the claim stays held.
+      let marker = null
+      if (UNATTENDED) {
+        const posted = await ask(agent(`The delivery of issue #${n} of ${SLUG} (the git repository at ${REPO}) needs the owner's answers. Post them as the decision box prompt, the claim stays held.
 The questions, as JSON: ${JSON.stringify(r.needs_user)}
 1. Make a fresh directory with mktemp -d and write exactly that JSON array to a file in it.
-2. Run alone and exactly: forge-claim owner-action post --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason decision --items-file <that file>
+2. Run alone and exactly: forge-claim owner-action post --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason decision --questions-file <that file>
 Return its verdict (posted, already_posted, or error on any other exit) and comment_id. Change nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `ask-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: ASK_SCHEMA }), `ask-${n}`)
-      if (!posted || (posted.verdict !== 'posted' && posted.verdict !== 'already_posted')) {
-        rows[n] = { issue: n, outcome: 'stopped', stage: 'plan', detail: `ask-${n} did not post the questions` }
-        return
+        if (!posted || (posted.verdict !== 'posted' && posted.verdict !== 'already_posted')) {
+          rows[n] = { issue: n, outcome: 'stopped', stage: 'plan', detail: `ask-${n} did not post the questions` }
+          return
+        }
+        marker = posted.comment_id
       }
-      rows[n] = { issue: n, outcome: 'questions', lane: laneName, questions: r.needs_user, marker: posted.comment_id }
+      rows[n] = { issue: n, outcome: 'questions', lane: laneName, questions: r.needs_user, marker }
       return
     }
     if (r.cont) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }; return }
@@ -759,24 +757,21 @@ const open = table.filter(r => !FINAL.includes(r.outcome) && !cycle.includes(r.i
 const rowOf = n => table.find(r => r.issue === n)
 const relaunchArgs = () => {
   const a = { repo_root: REPO, batch_id: BATCH, child_script: CHILD, issues: open }
-  // Answers read from the tracker travel too (the marker they sat on is ended).
-  // An issue whose child asked again carries no answer at all: the old one answered the earlier questions, and the new marker's own reply must reach it.
+  // An issue whose child asked again carries no answer at all: the old one answered the earlier questions, and the new prompt's own ticks are read by the child.
   const decisions = { ...(DECISIONS || {}) }
-  for (const n of open) {
-    if (rowOf(n).outcome === 'questions') delete decisions[String(n)]
-    else if (TAKEN[n] !== undefined && !decisions[String(n)]) decisions[String(n)] = TAKEN[n]
-  }
+  for (const n of open) if (rowOf(n).outcome === 'questions') delete decisions[String(n)]
   if (DECISIONS !== undefined || Object.keys(decisions).length) a.decisions = decisions
   const conts = {}
   for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
   if (Object.keys(conts).length) a.conts = conts
+  if (UNATTENDED) a.unattended = true
   return a
 }
 for (const r of table) log(`#${r.issue}: ${r.outcome}${r.detail ? ` (${r.detail})` : ''}`)
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }

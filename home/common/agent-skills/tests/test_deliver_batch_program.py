@@ -77,7 +77,7 @@ class ArgsTest(unittest.TestCase):
         bad = [without(ARGS, "batch_id"), dict(ARGS, batch_id="b 1"), without(ARGS, "child_script"),
                without(ARGS, "repo_root"), without(ARGS, "issues"), dict(ARGS, label="ready"),
                dict(ARGS, issues=[]), dict(ARGS, issues=[1, 1]), dict(ARGS, issues=[0]),
-               dict(ARGS, decisions={"1": ""}), dict(ARGS, conts={"2": {"setup": {}}}),
+               dict(ARGS, decisions={"1": ""}), dict(ARGS, unattended="yes"), dict(ARGS, conts={"2": {"setup": {}}}),
                dict(ARGS, conts={"1": "x"}),
                dict(without(ARGS, "issues"), label="ready", conts={"1": {"setup": {}}})]
         for args in bad:
@@ -218,8 +218,12 @@ class IntakeTest(unittest.TestCase):
         self.assertIsNone(result["relaunch"])
 
 
-QUESTION = {"stage": "plan", "needs_user": ["Which flag?"], "cont": {"setup": {}}}
-OPEN = {"verdict": "open", "comment_id": 99, "items": ["Which flag?"], "replies": []}
+QS = [{"question": "Which flag?", "options": ["Use the flag.", "Drop the flag."]}]
+QUESTION = {"stage": "plan", "needs_user": QS, "cont": {"setup": {}}}
+OPEN = {"verdict": "open", "comment_id": 99, "decisions": "",
+        "questions": [dict(QS[0], chosen=None, comment_id=99)]}
+ANSWERED = dict(OPEN, verdict="answered", decisions="Which flag? Chosen: Use the flag.",
+                questions=[dict(QS[0], chosen="Use the flag.", comment_id=99)])
 
 
 class ClaimTest(unittest.TestCase):
@@ -292,90 +296,67 @@ class ClaimTest(unittest.TestCase):
 
 
 class QuestionTest(unittest.TestCase):
-    def test_questions_keep_the_claim_post_a_marker_and_return_grouped(self):
-        result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
-                               children={"1": QUESTION, "3": dict(QUESTION, needs_user=["Which host?", "Why?"])})
-        self.assertEqual(result["questions"], [{"issue": 1, "questions": ["Which flag?"], "marker": 99},
-                                               {"issue": 3, "questions": ["Which host?", "Why?"], "marker": 99}])
-        self.assertEqual([row(result, n)["outcome"] for n in (1, 3)], ["questions", "questions"])
+    def test_an_unattended_batch_posts_box_prompts_and_returns_them_grouped(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3], unattended=True),
+                               children={"1": QUESTION, "3": QUESTION})
+        self.assertEqual(result["questions"], [{"issue": 1, "questions": QS, "marker": 99},
+                                               {"issue": 3, "questions": QS, "marker": 99}])
         self.assertIn("child-2", labels(calls))
         self.assertNotIn("release-1", labels(calls))
         text = prompt(calls, "ask-1")
         self.assertIn(f"forge-claim owner-action post --repo owner/repo --issue 1 --holder {HOLDER} "
-                      "--reason decision --items-file", text)
-        self.assertIn("Which flag?", text)
+                      "--reason decision --questions-file", text)
+        self.assertIn(json.dumps(QS, separators=(",", ":")), text)
         self.assertEqual(result["owner_actions"], [{"issue": 1, "reason": "decision", "comment_id": 99},
                                                    {"issue": 3, "reason": "decision", "comment_id": 99}])
-        self.assertIn(1, result["relaunch"]["issues"])
-        self.assertIn(3, result["relaunch"]["issues"])
+        self.assertTrue(result["relaunch"]["unattended"])
+
+    def test_a_session_launched_batch_posts_no_prompt(self):
+        result, calls, _ = run(children={"1": QUESTION})
+        self.assertEqual(row(result, 1)["outcome"], "questions")
+        self.assertEqual(result["questions"], [{"issue": 1, "questions": QS, "marker": None}])
+        self.assertEqual(result["owner_actions"], [])
+        self.assertNotIn("ask-1", labels(calls))
+        self.assertFalse([c["label"] for c in calls if "owner-action post" in c.get("prompt", "")])
+        self.assertNotIn("unattended", result["relaunch"])
 
     def test_open_questions_without_answers_wait_without_lane_claim_or_child(self):
         result, calls, _ = run(patch={"facts-1": {"claim": {"verdict": "held_by", "by": HOLDER}, "decision": OPEN}})
         self.assertEqual(row(result, 1)["outcome"], "questions")
-        self.assertEqual(result["questions"], [{"issue": 1, "questions": ["Which flag?"], "marker": 99}])
+        self.assertEqual(result["questions"], [{"issue": 1, "questions": OPEN["questions"], "marker": 99}])
         self.assertEqual(labels(calls), ["setup", "facts-1"])
 
-    def test_relaunch_decisions_end_the_marker_and_reach_the_child(self):
+    def test_an_answered_prompt_is_eligible_and_the_child_reads_it(self):
+        _, calls, _ = run(patch={"facts-1": {"decision": ANSWERED}})
+        self.assertNotIn("decisions", child(calls, 1)["args"])
+        before_close = calls[:labels(calls).index("close-out-1")]
+        self.assertFalse([c["label"] for c in before_close if "owner-action end" in c.get("prompt", "")])
+        self.assertIn("--reason decision", prompt(calls, "close-out-1"))
+
+    def test_relaunch_decisions_reach_the_child_and_end_nothing_early(self):
         _, calls, _ = run(args=dict(ARGS, decisions={"1": "Use the flag."}), patch={"facts-1": {"decision": OPEN}})
         self.assertEqual(child(calls, 1)["args"]["decisions"], "Use the flag.")
-        self.assertIn("forge-claim owner-action end --repo owner/repo --issue 1 --reason decision",
-                      prompt(calls, "answered-1"))
-        ls = labels(calls)
-        self.assertLess(ls.index("acquire-1"), ls.index("answered-1"))
-        self.assertLess(ls.index("answered-1"), ls.index("child-1"))
-
-    def test_an_owner_reply_on_the_issue_answers_the_questions(self):
-        answered = dict(OPEN, verdict="answered",
-                        replies=[{"comment_id": 120, "author": "owner", "body": "Use the flag."}])
-        _, calls, _ = run(patch={"facts-1": {"decision": answered}})
-        self.assertIn("Use the flag.", child(calls, 1)["args"]["decisions"])
-        self.assertIn("answered-1", labels(calls))
-
-    def test_a_tracker_answer_survives_a_child_that_fails_after_the_marker_ended(self):
-        answered = dict(OPEN, verdict="answered",
-                        replies=[{"comment_id": 120, "author": "owner", "body": "Use the flag."}])
-        held = {"claim": {"verdict": "held_by", "by": HOLDER}}
-        args = dict(ARGS, conts={"1": {"setup": {}}})
-        for child_result in ("throw", {"stage": "plan-review", "dead_agents": ["plan-review"], "cont": {"setup": {}}}):
-            with self.subTest(child=child_result):
-                first, calls, _ = run(args=args, patch={"facts-1": dict(held, decision=answered)},
-                                      children={"1": child_result})
-                self.assertIn("answered-1", labels(calls))
-                self.assertEqual(first["relaunch"]["decisions"], {"1": "Use the flag."})
-                # The marker is ended now: the tracker shows no replies, so only the relaunch holds the answer.
-                _, calls, _ = run(args=first["relaunch"], patch={"facts-1": dict(held, decision={
-                    "verdict": "none", "comment_id": None, "items": [], "replies": []})})
-                self.assertEqual(child(calls, 1)["args"]["decisions"], "Use the flag.")
-
-    def test_a_child_that_asks_again_does_not_carry_the_consumed_answer(self):
-        answered = dict(OPEN, verdict="answered",
-                        replies=[{"comment_id": 120, "author": "owner", "body": "Use the flag."}])
-        result, _, _ = run(args=dict(ARGS, conts={"1": {"setup": {}}}), patch={"facts-1": {"decision": answered}},
-                           children={"1": QUESTION})
-        self.assertEqual(row(result, 1)["outcome"], "questions")
-        self.assertNotIn("decisions", result["relaunch"])
+        self.assertNotIn("answered-1", labels(calls))
 
     def test_a_child_that_asks_again_drops_an_args_decision_from_the_relaunch(self):
         held = {"claim": {"verdict": "held_by", "by": HOLDER}}
         first, _, _ = run(args=dict(ARGS, decisions={"1": "Use the flag."}), patch={"facts-1": {"decision": OPEN}},
-                          children={"1": dict(QUESTION, needs_user=["Which host?"])})
+                          children={"1": QUESTION})
         self.assertEqual(row(first, 1)["outcome"], "questions")
         self.assertEqual(first["relaunch"]["decisions"], {})
         self.assertEqual(first["relaunch"]["conts"], {"1": QUESTION["cont"]})
-        # The new marker is open and unanswered: the relaunch waits, ends nothing and starts no child.
-        new_open = dict(OPEN, comment_id=120, items=["Which host?"])
-        second, calls, _ = run(args=first["relaunch"], patch={"facts-1": dict(held, decision=new_open)})
-        self.assertEqual(row(second, 1)["outcome"], "questions")
-        self.assertEqual(labels(calls), ["setup", "facts-1"])
-        # The owner answers the new questions on the issue: that reply, not the old answer, reaches the child.
-        answered = dict(new_open, verdict="answered", replies=[{"comment_id": 130, "author": "owner", "body": "Use host h9."}])
-        _, calls, _ = run(args=first["relaunch"], patch={"facts-1": dict(held, decision=answered)})
-        self.assertEqual(child(calls, 1)["args"]["decisions"], "Use host h9.")
+        _, calls, _ = run(args=first["relaunch"], patch={"facts-1": dict(held, decision=ANSWERED)})
+        self.assertEqual(child(calls, 1)["args"]["cont"], QUESTION["cont"])
+        self.assertNotIn("decisions", child(calls, 1)["args"])
 
     def test_no_decisions_key_without_an_answer(self):
         _, calls, _ = run()
         self.assertNotIn("decisions", child(calls, 1)["args"])
-        self.assertNotIn("answered-1", labels(calls))
+
+    def test_no_prompt_text_reads_owner_replies(self):
+        text = PROGRAM.read_text(encoding="utf-8")
+        for gone in ("replies", "TAKEN", "answered-"):
+            self.assertNotIn(gone, text)
 
 
 class BreakerTest(unittest.TestCase):
@@ -571,7 +552,7 @@ class LandTest(unittest.TestCase):
     def test_close_out_ends_the_landing_owner_actions(self):
         _, calls, _ = run()
         close = prompt(calls, "close-out-1")
-        for reason in ("conflict", "needs-label"):
+        for reason in ("conflict", "needs-label", "decision"):
             self.assertIn(f"forge-claim owner-action end --repo owner/repo --issue 1 --reason {reason}", close)
 
     def test_a_conflicting_resync_is_resolved_and_reviewed(self):
@@ -593,7 +574,7 @@ class LandTest(unittest.TestCase):
             self.assertNotIn(label, labels(calls))
 
     def test_a_second_conflict_aborts_and_posts_an_owner_action(self):
-        result, calls, _ = run(replies={
+        result, calls, _ = run(args=dict(ARGS, unattended=True), replies={
             "land-sync-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
             "land-pr-1": {"pr": 41, "head": B},
             "land-checks-1-1": {"state": "behind", "head": B},
@@ -607,7 +588,7 @@ class LandTest(unittest.TestCase):
         self.assertIn("land-unlock-1", labels(calls))
 
     def test_needs_label_posts_an_owner_action(self):
-        result, calls, _ = run(replies={"land-checks-1-1": {"state": "needs_label", "head": SHA, "label": "raise-me", "failing": ["gate"]}})
+        result, calls, _ = run(args=dict(ARGS, unattended=True), replies={"land-checks-1-1": {"state": "needs_label", "head": SHA, "label": "raise-me", "failing": ["gate"]}})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["label"]), ("needs-label", "raise-me"))
         text = prompt(calls, "land-ask-1")
         self.assertIn("--reason needs-label --items-file", text)
@@ -615,6 +596,39 @@ class LandTest(unittest.TestCase):
         self.assertIn({"issue": 1, "reason": "needs-label", "comment_id": 99}, result["owner_actions"])
         self.assertIn("land-unlock-1", labels(calls))
         self.assertNotIn("land-merge-1", labels(calls))
+
+    SECOND_CONFLICT = {
+        "land-sync-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
+        "land-pr-1": {"pr": 41, "head": B},
+        "land-checks-1-1": {"state": "behind", "head": B},
+        "land-sync-1-2": {"status": "blocked", "conflicted": True, "head": B, "notes": "aborted"}}
+
+    def test_a_session_landing_returns_its_owner_asks_and_posts_nothing(self):
+        for replies, reason in ((self.SECOND_CONFLICT, "conflict"),
+                                ({"land-checks-1-1": {"state": "needs_label", "head": SHA, "label": "raise-me",
+                                                      "failing": ["gate"]}}, "needs-label")):
+            with self.subTest(reason=reason):
+                result, calls, _ = run(replies=replies)
+                r = row(result, 1)
+                self.assertEqual((r["outcome"], r["owner_ask"]["reason"]), (reason, reason))
+                self.assertTrue(r["owner_ask"]["items"])
+                self.assertNotIn("land-ask-1", labels(calls))
+                self.assertEqual(result["owner_actions"], [])
+                self.assertIn("land-unlock-1", labels(calls))
+                self.assertNotIn("release-1", labels(calls))
+
+    def test_a_close_out_without_the_decision_ended_stays_resumable(self):
+        for reply in ({"issue_state": "CLOSED", "released": True},
+                      {"issue_state": "CLOSED", "released": True, "decision_ended": False}):
+            with self.subTest(reply=reply):
+                result, _, _ = run(replies={"close-out-1": reply})
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))
+                self.assertIn("1", result["relaunch"]["conts"])
+
+    def test_no_owner_item_asks_to_say_how(self):
+        self.assertNotIn("say how", PROGRAM.read_text(encoding="utf-8"))
+        result, calls, _ = run(args=dict(ARGS, unattended=True), replies=self.SECOND_CONFLICT)
+        self.assertIn("then relaunch the batch", prompt(calls, "land-ask-1"))
 
     def test_behind_three_times_is_contention(self):
         behind = {"state": "behind", "head": SHA}
@@ -651,7 +665,7 @@ class LandTest(unittest.TestCase):
     def test_non_code_criteria_hold_the_issue_open(self):
         acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
         result, calls, _ = run(children={"1": ready(1, acceptance)},
-                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "notes": "held"}})
+                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "decision_ended": True, "notes": "held"}})
         self.assertEqual(row(result, 1)["outcome"], "landed-held")
         close = prompt(calls, "close-out-1")
         self.assertNotIn("gh issue close", close)
@@ -747,7 +761,7 @@ class DependencyTest(unittest.TestCase):
         acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
         result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-2": blocked_by(1)},
                                children={"1": ready(1, acceptance)},
-                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "notes": "held"}})
+                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "decision_ended": True, "notes": "held"}})
         self.assertEqual(row(result, 1)["outcome"], "landed-held")
         self.assertEqual((row(result, 2)["outcome"], row(result, 2)["blocker"]), ("waits-verification", 1))
         self.assertNotIn("acquire-2", labels(calls))
@@ -835,7 +849,7 @@ class ReadoptTest(unittest.TestCase):
     def test_the_readopted_acceptance_reaches_the_close_out(self):
         acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
         result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}, "readopt-1": {"acceptance": acceptance}},
-                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "notes": "held"}})
+                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "decision_ended": True, "notes": "held"}})
         self.assertEqual(row(result, 1)["outcome"], "landed-held")
         self.assertNotIn("gh issue close", prompt(calls, "close-out-1"))
 
@@ -884,11 +898,11 @@ class DemoTest(unittest.TestCase):
     def test_three_issue_batch_with_a_dependency_and_a_questioned_issue_returns_one_table(self):
         result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
                                patch={"facts-3": {"blockers": [{"issue": 1, "state": "OPEN"}]}},
-                               children={"2": {"stage": "plan", "needs_user": ["Which flag?"], "cont": {"setup": {}}}})
+                               children={"2": {"stage": "plan", "needs_user": QS, "cont": {"setup": {}}}})
         self.assertEqual(result["stage"], "done")
         self.assertEqual([(r["issue"], r["outcome"]) for r in result["table"]],
                          [(1, "landed"), (2, "questions"), (3, "landed")])
-        self.assertEqual(result["questions"], [{"issue": 2, "questions": ["Which flag?"], "marker": 99}])
+        self.assertEqual(result["questions"], [{"issue": 2, "questions": QS, "marker": None}])
         self.assertEqual(result["relaunch"], dict(ARGS, issues=[2], conts={"2": {"setup": {}}}))
         ls = labels(calls)
         self.assertLess(ls.index("close-out-1"), ls.index("acquire-3"))
