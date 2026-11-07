@@ -8,10 +8,12 @@ Run: just agent-workflow-tests
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -1452,8 +1454,49 @@ class FinalReviewedResumeTest(unittest.TestCase):
         _, calls = run(args=dict(ARGS, mode="ready", cont=ready["cont"]), patch={"setup": {"head": MERGE, "since_reviewed": "moved"}})
         setup = prompt(calls, "setup")
         self.assertIn(f"rev-list --merges {TIP}..HEAD", setup)
-        self.assertIn("show --cc --format=", setup)
+        self.assertIn("merge-tree --write-tree <merge>^1 <merge>^2", setup)
+        self.assertIn("rev-parse <merge>^{tree}", setup)
+        self.assertNotIn("prints nothing); else", setup)
         self.assertIn("final-1", labels(calls))
+
+    def test_the_merge_tree_check_flags_a_one_sided_resolution_that_show_cc_misses(self):
+        """The setup's clean-merge test, run on real git: a conflict resolved by taking one side whole."""
+        def git(*args, ok=(0,)):
+            r = subprocess.run(["git", "-C", repo, "-c", "user.email=a@b", "-c", "user.name=a",
+                                "-c", "commit.gpgsign=false", *args], capture_output=True, text=True)
+            self.assertIn(r.returncode, ok, r.stderr)
+            return r
+
+        def write(text):
+            with open(os.path.join(repo, "foo.js"), "w") as f:
+                f.write(text)
+
+        def clean(merge):
+            r = git("merge-tree", "--write-tree", merge + "^1", merge + "^2", ok=(0, 1))
+            return r.returncode == 0 and r.stdout.strip() == git("rev-parse", merge + "^{tree}").stdout.strip()
+
+        with tempfile.TemporaryDirectory() as repo:
+            git("init", "-q", "-b", "main")
+            write("a\nb\nc\n")
+            git("add", "."), git("commit", "-qm", "base")
+            git("checkout", "-qb", "work")
+            write("a\nB\nc\n")
+            git("commit", "-qam", "delivery change")
+            git("checkout", "-q", "main")
+            write("a\nX\nc\n")
+            git("commit", "-qam", "integration change")
+            git("checkout", "-q", "work")
+            git("merge", "-q", "main", "-m", "sync", ok=(1,))
+            write("a\nX\nc\n")  # takes the integration side verbatim, dropping the delivery change
+            git("add", "."), git("commit", "-qm", "sync")
+            self.assertEqual(git("show", "--cc", "--format=", "HEAD").stdout, "")  # the blind spot
+            self.assertFalse(clean("HEAD"))
+            # a merge git resolves without help passes the same test
+            git("checkout", "-qb", "work2", "main~1")
+            write("a\nb\nc\ne\n")
+            git("commit", "-qam", "tail")
+            git("merge", "-q", "main", "-m", "clean sync")
+            self.assertTrue(clean("HEAD"))
 
     def test_a_review_that_must_run_again_drops_the_stale_marker(self):
         cont = self.stopped_after_review()["cont"]
