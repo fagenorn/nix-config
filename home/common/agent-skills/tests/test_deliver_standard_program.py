@@ -952,6 +952,19 @@ class HoldTest(unittest.TestCase):
         self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
 
 
+    def test_resume_hold_prompt_keeps_lint_and_once_run_when_a_comment_exists(self):
+        # A retry that skips a finished hold must still return fresh lint and verify_run, or every resume stops at hold.
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": with_criteria(EVIDENCE), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
+        _, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}, "close-out": {"issue_state": "OPEN"}})
+        hold = prompt(calls, "hold")
+        self.assertIn("never skip the evidence you return", hold)
+        self.assertIn("take block from the posted verify fence, lint that block, run the once-run, and return all three", hold)
+        self.assertIn("post nothing: write its fence JSON to the file and lint that", hold)
+        self.assertIn("even when an earlier attempt ran it", hold)
+        self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+
 class FixWaveTest(unittest.TestCase):
     """#635 owner comment: a narrowing re-review earns a second wave; a new kind stops; waves are counted."""
 
