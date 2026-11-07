@@ -12,6 +12,8 @@ from unittest import mock
 from agent_tools import forge_markers, verify_checks
 from agent_tools.verify_checks import required_checks
 
+from .pre_push_world import PrePushWorld
+
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = "home/common/verify-pending/checks"
 
@@ -259,6 +261,80 @@ class PlatformStatusWrapperTest(unittest.TestCase):
 
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/platform-status"), "100755")
+
+
+class ManagedPrePushHookTest(unittest.TestCase):
+    SLUG = "fagenorn/pre-push-hook-fixture"
+
+    def setUp(self):
+        self.world = PrePushWorld(self)
+        managed = self.world.tmp / "abc-agent-git-hooks"
+        self.world.hooks.rename(managed)
+        self.world.hooks = managed
+        self.set_user_config(managed)
+
+    def set_user_config(self, hooks, extra=""):
+        Path(self.world.env["GIT_CONFIG_GLOBAL"]).write_text(
+            ("" if hooks is None else f"[core]\n\thooksPath = {hooks}\n") + extra,
+            encoding="utf-8")
+
+    def check(self):
+        return run_from_root(["python3", "-m", "agent_tools.verify_checks",
+                              "managed-pre-push-hook", "--slug", self.SLUG],
+                             env_extra=self.world.env)
+
+    def test_the_managed_hook_refusing_a_default_branch_push_is_met(self):
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         {"hooks_path": str(self.world.hooks), "managed": True,
+                          "refused": True, "remote_unchanged": True,
+                          "control_admitted": True, "met": True})
+
+    def test_a_url_rewrite_in_the_user_config_does_not_move_the_fixture_pushes(self):
+        self.set_user_config(self.world.hooks,
+                             '[url "https://example.invalid/"]\n'
+                             "\tinsteadOf = git@github.com:\n"
+                             "\tpushInsteadOf = git@github.com:\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["met"])
+
+    def test_an_unset_hooks_path_is_not_met(self):
+        self.set_user_config(None)
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["hooks_path"], None)
+
+    def test_an_unmanaged_hooks_directory_is_not_met(self):
+        plain = self.world.tmp / "plain-hooks"
+        self.world.hooks.rename(plain)
+        self.set_user_config(plain)
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["managed"])
+
+    def test_a_managed_hook_that_admits_everything_is_not_met(self):
+        (self.world.hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["refused"])
+        self.assertFalse(report["remote_unchanged"])
+
+    def test_a_managed_hook_that_refuses_a_feature_push_too_is_not_met(self):
+        (self.world.hooks / "pre-push").write_text(
+            "#!/bin/sh\necho lifecycle guard pre-push: unsafe push: refusing to push the "
+            "default branch main >&2\nexit 1\n", encoding="utf-8")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["refused"])
+        self.assertFalse(report["control_admitted"])
+
+    def test_the_check_script_is_committed_executable(self):
+        self.assertEqual(committed_mode("home/common/verify-pending/checks/managed-pre-push-hook"),
+                         "100755")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 672: the global core.hooksPath is the managed agent git hooks,
+# and its pre-push refuses an agent push of a local fixture's default branch.
+# verify-pending runs it from the repository root at the commit the block names.
+PYTHONPATH=python exec python3 -m agent_tools.verify_checks managed-pre-push-hook "$@"
