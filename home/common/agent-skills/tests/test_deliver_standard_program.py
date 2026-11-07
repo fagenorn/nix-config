@@ -8,10 +8,12 @@ Run: just agent-workflow-tests
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -83,6 +85,13 @@ def labels(calls):
 
 def prompt(calls, label):
     found = [c["prompt"] for c in calls if c["label"] == label]
+    if not found:
+        raise AssertionError(f"no call labelled {label}: {labels(calls)}")
+    return found[-1]
+
+
+def schema_of(calls, label):
+    found = [c["schema"] for c in calls if c["label"] == label]
     if not found:
         raise AssertionError(f"no call labelled {label}: {labels(calls)}")
     return found[-1]
@@ -795,7 +804,10 @@ class ShipTest(unittest.TestCase):
         self.assertIn("never treat a partial list as green", checks)
 
     def test_failed_checks_stop_unmerged(self):
-        result, calls = run(replies={"checks-1": {"state": "failed", "head": SHA}})
+        fix = "f" * 40
+        result, calls = run(replies={"checks-1": {"state": "failed", "head": SHA},
+                                     "checks-2": {"state": "failed", "head": fix}},
+                            patch={"fix-ci": {"start_head": SHA, "commit": fix}})
         self.assertEqual(result["stage"], "checks")
         self.assertNotIn("merge", labels(calls))
 
@@ -813,8 +825,10 @@ class ShipTest(unittest.TestCase):
 
     def test_conflicted_sync_with_findings_stops(self):
         bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "lost"}]}
-        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": bad},
-                            patch={"sync-1": {"conflicted": True}})
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": bad,
+                                     "fix-sync-review-1": bad},
+                            patch={"sync-1": {"conflicted": True, "merge_commit": "d" * 40},
+                                   "fix-sync-1": {"start_head": "d" * 40, "commit": "f" * 40}})
         self.assertEqual(result["stage"], "sync-review")
         self.assertNotIn("merge", labels(calls))
 
@@ -849,6 +863,229 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"merge": {"merged": False, "notes": "head moved"}})
         self.assertEqual(result["stage"], "merge")
         self.assertNotIn("close-out", labels(calls))
+
+
+FIX = "f" * 40
+MERGE = "d" * 40
+RED = {"state": "failed", "head": SHA, "failing": ["ci-tests"], "details": "FAIL test_cache: host-installed state"}
+FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped the new call site"}]}
+
+
+class ShipFixWaveTest(unittest.TestCase):
+    """#649 defect 2 and the sync-review decision: one bounded fix wave, then a stop with cont."""
+
+    def red_then(self, second, **patch):
+        return run(replies={"checks-1": RED, "checks-2": second},
+                   patch=dict({"fix-ci": {"start_head": SHA, "commit": FIX}}, **patch))
+
+    def test_failed_check_runs_one_fix_wave_then_merges(self):
+        result, calls = self.red_then({"state": "passed", "head": FIX, "required": ["ci-tests"]})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("checks-1"):], [
+            "checks-1", "fix-ci", "fix-ci-review", "renew-checks-2", "checks-2",
+            "renew-merge", "merge", "hold", "close-out"])
+        fix = prompt(calls, "fix-ci")
+        for needle in ("ci-tests", "FAIL test_cache: host-installed state", "regression test"):
+            self.assertIn(needle, fix)
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-ci"], ["implementer"])
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-ci-review"], ["reviewer"])
+        self.assertIn(f"diff {SHA}..{FIX}", prompt(calls, "fix-ci-review"))
+        self.assertIn(f"--match-head-commit {FIX}", prompt(calls, "merge"))
+
+    def test_a_second_failure_stops_with_cont(self):
+        result, calls = self.red_then(dict(RED, head=FIX))
+        self.assertEqual(result["stage"], "checks")
+        self.assertEqual(result["cont"]["checks_fixes"], 1)
+        self.assertEqual(labels(calls).count("fix-ci"), 1)
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_resume_with_the_wave_spent_stops_at_the_first_failure(self):
+        stopped, _ = self.red_then(dict(RED, head=FIX))
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"checks-1": RED})
+        self.assertEqual(result["stage"], "checks")
+        self.assertNotIn("fix-ci", labels(calls))
+
+    def test_failed_or_unreviewed_fix_stops(self):
+        cases = {
+            "checks-fix": ({}, {"fix-ci": {"status": "blocked", "notes": "no"}}),
+            "checks-fix ": ({}, {"fix-ci": {"start_head": SHA, "commit": SHA}}),
+            "checks-fix-review": ({"fix-ci-review": FINDING}, {}),
+            "checks-fix-review ": ({"fix-ci-review": None}, {}),
+        }
+        for stage, (replies, patch) in cases.items():
+            with self.subTest(case=stage):
+                result, calls = run(replies=dict({"checks-1": RED}, **replies),
+                                    patch=dict({"fix-ci": {"start_head": SHA, "commit": FIX}}, **patch))
+                self.assertEqual(result["stage"], stage.strip())
+                self.assertIn("cont", result)
+                self.assertNotIn("merge", labels(calls))
+
+    def test_failed_check_on_another_head_is_head_moved_not_fixed(self):
+        result, calls = run(replies={"checks-1": dict(RED, head="c" * 40)})
+        self.assertEqual(result["stage"], "head-moved")
+        self.assertNotIn("fix-ci", labels(calls))
+
+    def test_checks_prompt_asks_for_failing_names_and_the_log_tail(self):
+        _, calls = run()
+        checks = prompt(calls, "checks-1")
+        self.assertIn("failing", checks)
+        self.assertIn("--log-failed", checks)
+
+    def test_sync_review_finding_gets_one_fix_wave_then_merges(self):
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING,
+                                     "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
+                            patch={"sync-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
+                                   "fix-sync-1": {"start_head": MERGE, "commit": FIX}})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("sync-1"):names.index("checks-2")],
+                         ["sync-1", "sync-review-1", "fix-sync-1", "fix-sync-review-1", "renew-checks-2"])
+        fix = prompt(calls, "fix-sync-1")
+        self.assertIn(MERGE, fix)
+        self.assertIn("dropped the new call site", fix)
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-sync-review-1"], ["reviewer"])
+        self.assertIn(f"diff {MERGE}..{FIX}", prompt(calls, "fix-sync-review-1"))
+        self.assertIn(f"--match-head-commit {FIX}", prompt(calls, "merge"))
+
+    def test_failed_sync_fix_stops(self):
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING},
+                            patch={"sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "fix-sync-1": {"status": "blocked", "notes": "no"}})
+        self.assertEqual(result["stage"], "sync-fix")
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_second_sync_review_finding_stops_without_a_second_wave(self):
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING,
+                                     "checks-2": {"state": "behind", "head": FIX}, "sync-review-2": FINDING},
+                            patch={"sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "fix-sync-1": {"start_head": MERGE, "commit": FIX},
+                                   "sync-2": {"conflicted": True, "merge_commit": "e" * 40}})
+        self.assertEqual(result["stage"], "sync-review")
+        self.assertEqual(result["cont"]["sync_fixes"], 1)
+        self.assertNotIn("fix-sync-2", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_fix_that_starts_from_another_head_stops_before_review(self):
+        other = "c" * 40
+        result, calls = run(replies={"checks-1": RED}, patch={"fix-ci": {"start_head": other, "commit": FIX}})
+        self.assertEqual(result["stage"], "checks-fix")
+        self.assertNotIn("fix-ci-review", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING},
+                            patch={"sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "fix-sync-1": {"start_head": other, "commit": FIX}})
+        self.assertEqual(result["stage"], "sync-fix")
+        self.assertNotIn("fix-sync-review-1", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_fix_start_head_in_short_form_is_the_same_head(self):
+        result, calls = self.red_then({"state": "passed", "head": FIX, "required": ["ci-tests"]},
+                                      **{"fix-ci": {"start_head": SHA[:9], "commit": FIX}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("fix-ci-review", labels(calls))
+
+    def sync_rebuttal(self, review=None, **fix):
+        replies = {"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING,
+                   "checks-2": {"state": "passed", "head": MERGE, "required": ["ci-tests"]}}
+        replies.update(review or {})
+        return run(replies=replies,
+                   patch={"sync-1": {"conflicted": True, "merge_commit": MERGE},
+                          "fix-sync-1": dict({"start_head": MERGE, "commit": MERGE, "notes": "the call site is on line 12"}, **fix)})
+
+    def test_a_sync_rebuttal_with_evidence_and_no_commit_is_adjudicated_by_the_reviewer(self):
+        result, calls = self.sync_rebuttal()
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("fix-sync-review-1", labels(calls))
+        review = prompt(calls, "fix-sync-review-1")
+        self.assertIn("the call site is on line 12", review)
+        self.assertIn("rebuttal", review)
+        self.assertNotIn(f"diff {MERGE}..{MERGE}", review)
+        self.assertIn(f"--match-head-commit {MERGE}", prompt(calls, "merge"))
+
+    def test_a_sync_rebuttal_the_reviewer_rejects_stops_at_sync_review(self):
+        result, calls = self.sync_rebuttal(review={"fix-sync-review-1": FINDING})
+        self.assertEqual(result["stage"], "sync-review")
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_sync_rebuttal_without_notes_stops_at_sync_fix(self):
+        result, calls = self.sync_rebuttal(notes="")
+        self.assertEqual(result["stage"], "sync-fix")
+        self.assertNotIn("fix-sync-review-1", labels(calls))
+
+    def test_no_fix_wave_keeps_the_cont_shape(self):
+        result, _ = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-1": None})
+        self.assertEqual(result["stage"], "sync")
+        self.assertNotIn("checks_fixes", result["cont"])
+        self.assertNotIn("sync_fixes", result["cont"])
+
+
+class ShaNormalisationTest(unittest.TestCase):
+    """#649 defect 1: a head reported in short form is the same head; a different head still stops."""
+
+    def test_short_checks_head_is_accepted_and_the_merge_uses_the_full_sha(self):
+        for short in (SHA[:7], SHA[:12], SHA.upper()[:10], f" {SHA[:9]}\n"):
+            with self.subTest(short=short):
+                result, calls = run(patch={"checks-1": {"head": short}})
+                self.assertEqual(result["stage"], "done")
+                self.assertIn(f"--match-head-commit {SHA}", prompt(calls, "merge"))
+
+    def test_short_pr_head_is_accepted(self):
+        result, calls = run(patch={"pr": {"head": SHA[:8]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("checks-1", labels(calls))
+
+    def test_a_different_or_too_short_head_still_stops(self):
+        for head in ("c" * 40, "c" * 8, SHA[:6], "", "zzzzzzzzzz"):
+            with self.subTest(head=head):
+                result, calls = run(patch={"checks-1": {"head": head}})
+                self.assertEqual(result["stage"], "head-moved")
+                self.assertNotIn("merge", labels(calls))
+                result, calls = run(patch={"pr": {"head": head}})
+                self.assertEqual(result["stage"], "head-moved")
+                self.assertNotIn("checks-1", labels(calls))
+
+    def test_head_fields_require_a_full_sha_in_the_schema(self):
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}})
+        for label, field in (("pr", "head"), ("checks-1", "head"), ("verify", "head"), ("sync-1", "merge_commit")):
+            with self.subTest(label=label):
+                self.assertEqual(schema_of(calls, label)["properties"][field]["pattern"], "^[0-9a-f]{40}$")
+
+    def test_ready_cont_resumed_on_the_short_form_of_its_head_skips_review_and_verify(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        result, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA[:9]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        self.assertNotIn("verify", labels(calls))
+
+    def test_a_legacy_abbreviated_verify_cache_keeps_the_full_pr_sha(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        cont = dict(ready["cont"], verified=dict(ready["cont"]["verified"], head=SHA[:9]))
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": SHA}, "checks-1": {"head": SHA[:8]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("verify", labels(calls))
+        self.assertIn(f"--match-head-commit {SHA} ", prompt(calls, "merge") + " ")
+        other = SHA[:9] + "0" * 31
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": SHA}, "checks-1": {"head": other}})
+        self.assertEqual(result["stage"], "head-moved")
+        self.assertEqual(result["expected"], SHA)
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_full_checks_head_replaces_an_abbreviated_expected_head(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        cont = dict(ready["cont"], verified=dict(ready["cont"]["verified"], head=SHA[:9]))
+        result, calls = run(args=dict(ARGS, cont=cont),
+                            patch={"setup": {"head": SHA}, "pr": {"head": SHA[:8]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn(f"--match-head-commit {SHA} ", prompt(calls, "merge") + " ")
+
+    def test_direct_resume_on_the_short_form_of_the_reviewed_head_skips_the_review(self):
+        stopped, _ = run(args=dict(ARGS, lane="direct"), replies={"verify": None},
+                         patch={"direct-impl": {"commit": SHA}})
+        self.assertEqual(stopped["cont"]["done"][0]["reviewed_head"], SHA)
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": SHA[:10]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("direct-review", labels(calls))
 
 
 class HoldTest(unittest.TestCase):
@@ -1141,6 +1378,204 @@ class ModeTest(unittest.TestCase):
                 self.assertIn("verify", labels(calls))
                 self.assertNotIn("final-1", labels(calls))
                 self.assertIn(json.dumps(verification, separators=(",", ":")), prompt(calls, "verify"))
+
+
+TIP = "b" * 40
+
+
+class FinalReviewedResumeTest(unittest.TestCase):
+    """#649 defect 3: cont records the head the final review passed at; a resume on it skips the review."""
+
+    FIRST = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "race in acquire"}]}
+
+    @staticmethod
+    def stopped_after_review(**patch):
+        stopped, _ = run(replies={"verify": None}, patch=dict({"impl-1": {"commit": TIP}}, **patch))
+        assert stopped["stage"] == "verify", stopped["stage"]
+        return stopped
+
+    def test_cont_records_the_head_the_final_review_passed_at(self):
+        self.assertEqual(self.stopped_after_review()["cont"]["final_reviewed"], {"head": TIP})
+        stopped, _ = run(replies={"final-1": self.FIRST, "verify": None},
+                         patch={"impl-1": {"commit": TIP}, "fix-wave": {"start_head": TIP, "commit": "d" * 40}})
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": "d" * 40})
+
+    def test_no_marker_before_the_final_review_passes(self):
+        new = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "leak", "relation": "new"}]}
+        for replies in ({"final-1": None}, {"final-1": self.FIRST, "fix-wave-review": new}):
+            with self.subTest(replies=replies):
+                stopped, _ = run(replies=replies)
+                self.assertIn(stopped["stage"], ("final-review", "fix-wave-review"))
+                self.assertNotIn("final_reviewed", stopped["cont"])
+        stopped, _ = run(args=dict(ARGS, lane="direct"), replies={"verify": None})
+        self.assertNotIn("final_reviewed", stopped["cont"])
+
+    def test_resume_on_the_reviewed_head_skips_the_final_review(self):
+        cont = self.stopped_after_review()["cont"]
+        for head in (TIP, TIP[:10]):
+            with self.subTest(head=head):
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": head}})
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(labels(calls), ["setup", "renew-verify", "verify", "renew-ship", "pr",
+                                                 "renew-checks-1", "checks-1", "renew-merge", "merge",
+                                                 "hold", "close-out"])
+
+    def test_resume_after_only_an_integration_merge_skips_the_final_review(self):
+        cont = self.stopped_after_review()["cont"]
+        result, calls = run(args=dict(ARGS, cont=cont),
+                            patch={"setup": {"head": "e" * 40, "since_reviewed": "merge_only"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        self.assertIn("verify", labels(calls))
+        setup = prompt(calls, "setup")
+        self.assertIn(f"rev-list --no-merges {TIP}..HEAD", setup)
+        self.assertIn(f"merge-base --is-ancestor {TIP} HEAD", setup)
+
+    def test_resume_on_a_moved_head_reviews_again_and_records_the_new_head(self):
+        cont = self.stopped_after_review()["cont"]
+        for patch in ({"head": "e" * 40, "since_reviewed": "moved"}, {"head": "e" * 40}, {}):
+            with self.subTest(patch=patch):
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": patch})
+                self.assertEqual(result["stage"], "done")
+                self.assertIn("final-1", labels(calls))
+        stopped, _ = run(args=dict(ARGS, cont=cont), replies={"verify": None}, patch={"setup": {"head": "e" * 40}})
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": "e" * 40})
+
+    def test_resume_with_an_unfinished_task_reviews_again(self):
+        cont = dict(self.stopped_after_review()["cont"], done=[])
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertLess(names.index("impl-1"), names.index("final-1"))
+
+    def test_ready_cont_on_a_merge_only_head_skips_review_but_verifies_again(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        self.assertIn("final_reviewed", ready["cont"])
+        result, calls = run(args=dict(ARGS, cont=ready["cont"]),
+                            patch={"setup": {"head": "e" * 40, "since_reviewed": "merge_only"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        self.assertIn("verify", labels(calls))
+
+    def sync_stop(self, replies, patch):
+        stopped, _ = run(replies=dict({"checks-1": {"state": "behind", "head": SHA}}, **replies),
+                         patch=dict({"impl-1": {"commit": TIP},
+                                     "sync-1": {"conflicted": True, "merge_commit": MERGE}}, **patch))
+        return stopped
+
+    def test_a_stop_inside_the_sync_window_drops_the_marker_and_the_resume_reviews_again(self):
+        cases = {
+            "sync": ({"sync-1": None}, {}),
+            "sync-review": ({"sync-review-1": None}, {}),
+            "sync-review ": ({"sync-review-1": FINDING, "fix-sync-review-1": FINDING},
+                             {"fix-sync-1": {"start_head": MERGE, "commit": FIX}}),
+            "sync-fix": ({"sync-review-1": FINDING}, {"fix-sync-1": {"status": "blocked", "notes": "no"}}),
+        }
+        for stage, (replies, patch) in cases.items():
+            with self.subTest(stage=stage):
+                stopped = self.sync_stop(replies, patch)
+                self.assertEqual(stopped["stage"], stage.strip())
+                self.assertNotIn("final_reviewed", stopped["cont"])
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
+                                    patch={"setup": {"head": MERGE, "since_reviewed": "merge_only"}})
+                self.assertEqual(result["stage"], "done")
+                names = labels(calls)
+                self.assertIn("final-1", names)
+                self.assertLess(names.index("final-1"), names.index("merge"))
+                self.assertNotIn("since_reviewed", prompt(calls, "setup"))
+
+    def test_an_accepted_conflicted_merge_keeps_the_skip(self):
+        stopped = self.sync_stop({"checks-2": None}, {})
+        self.assertEqual(stopped["stage"], "checks")
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "accepted": [MERGE]})
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
+                            patch={"setup": {"head": MERGE, "since_reviewed": "merge_only"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        setup = prompt(calls, "setup")
+        self.assertIn(MERGE, setup)
+        self.assertIn(f"rev-list --merges {TIP}..HEAD", setup)
+
+    def test_the_setup_requires_merges_without_a_hand_made_resolution(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"), patch={"impl-1": {"commit": TIP}})
+        self.assertNotIn("accepted", ready["cont"]["final_reviewed"])
+        _, calls = run(args=dict(ARGS, mode="ready", cont=ready["cont"]), patch={"setup": {"head": MERGE, "since_reviewed": "moved"}})
+        setup = prompt(calls, "setup")
+        self.assertIn(f"rev-list --merges {TIP}..HEAD", setup)
+        self.assertIn("merge-tree --write-tree <merge>^1 <merge>^2", setup)
+        self.assertIn("rev-parse <merge>^{tree}", setup)
+        self.assertNotIn("prints nothing); else", setup)
+        self.assertIn("final-1", labels(calls))
+
+    def test_the_merge_tree_check_flags_a_one_sided_resolution_that_show_cc_misses(self):
+        """The setup's clean-merge test, run on real git: a conflict resolved by taking one side whole."""
+        def git(*args, ok=(0,)):
+            r = subprocess.run(["git", "-C", repo, "-c", "user.email=a@b", "-c", "user.name=a",
+                                "-c", "commit.gpgsign=false", *args], capture_output=True, text=True)
+            self.assertIn(r.returncode, ok, r.stderr)
+            return r
+
+        def write(text):
+            with open(os.path.join(repo, "foo.js"), "w") as f:
+                f.write(text)
+
+        def clean(merge):
+            r = git("merge-tree", "--write-tree", merge + "^1", merge + "^2", ok=(0, 1))
+            return r.returncode == 0 and r.stdout.strip() == git("rev-parse", merge + "^{tree}").stdout.strip()
+
+        with tempfile.TemporaryDirectory() as repo:
+            git("init", "-q", "-b", "main")
+            write("a\nb\nc\n")
+            git("add", "."), git("commit", "-qm", "base")
+            git("checkout", "-qb", "work")
+            write("a\nB\nc\n")
+            git("commit", "-qam", "delivery change")
+            git("checkout", "-q", "main")
+            write("a\nX\nc\n")
+            git("commit", "-qam", "integration change")
+            git("checkout", "-q", "work")
+            git("merge", "-q", "main", "-m", "sync", ok=(1,))
+            write("a\nX\nc\n")  # takes the integration side verbatim, dropping the delivery change
+            git("add", "."), git("commit", "-qm", "sync")
+            self.assertEqual(git("show", "--cc", "--format=", "HEAD").stdout, "")  # the blind spot
+            self.assertFalse(clean("HEAD"))
+            # a merge git resolves without help passes the same test
+            git("checkout", "-qb", "work2", "main~1")
+            write("a\nb\nc\ne\n")
+            git("commit", "-qam", "tail")
+            git("merge", "-q", "main", "-m", "clean sync")
+            self.assertTrue(clean("HEAD"))
+
+    def test_a_review_that_must_run_again_drops_the_stale_marker(self):
+        cont = self.stopped_after_review()["cont"]
+        stopped, _ = run(args=dict(ARGS, cont=cont), replies={"final-1": None}, patch={"setup": {"head": "e" * 40}})
+        self.assertEqual(stopped["stage"], "final-review")
+        self.assertNotIn("final_reviewed", stopped["cont"])
+
+    def test_a_dirty_tree_on_the_reviewed_head_reviews_again(self):
+        cont = dict(self.stopped_after_review()["cont"], partial=1)
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP, "dirty": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("final-1", labels(calls))
+
+    def test_the_direct_lane_never_keeps_a_marker(self):
+        direct = dict(ARGS, lane="direct")
+        stopped, _ = run(args=direct, replies={"verify": None}, patch={"direct-impl": {"commit": TIP}})
+        self.assertEqual(stopped["stage"], "verify")
+        cont = dict(stopped["cont"], final_reviewed={"head": TIP})
+        stopped, _ = run(args=dict(direct, cont=cont), replies={"verify": None}, patch={"setup": {"head": TIP}})
+        self.assertEqual(stopped["stage"], "verify")
+        self.assertNotIn("final_reviewed", stopped["cont"])
+
+    def test_cont_without_the_marker_still_resumes(self):
+        cont = self.stopped_after_review()["cont"]
+        del cont["final_reviewed"]
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("final-1", labels(calls))
+        self.assertNotIn("since_reviewed", prompt(calls, "setup"))
+        _, calls = run()
+        self.assertNotIn("since_reviewed", prompt(calls, "setup"))
 
 
 DIRECT = dict(ARGS, lane="direct")
