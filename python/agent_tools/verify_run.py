@@ -49,7 +49,7 @@ QUERY = (
     'query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) '
     '{ issues(first: 100, states: OPEN, labels: ["needs-verification"], '
     'orderBy: {field: CREATED_AT, direction: ASC}) { nodes { number labels(first: 50) { nodes { name } } '
-    'comments(last: 100) { nodes { fullDatabaseId authorAssociation body createdAt updatedAt } } } } } }'
+    'comments(last: 100) { totalCount nodes { fullDatabaseId authorAssociation body createdAt updatedAt } } } } } }'
 )
 APPROVE_QUERY = (
     'query($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) '
@@ -86,7 +86,25 @@ def list_held(slug: str) -> list[dict]:
         raise ForgeError("payload_invalid", "no issues listing") from None
     if not isinstance(nodes, list) or not all(isinstance(node, dict) for node in nodes):
         raise ForgeError("payload_invalid", "issues are not an array of objects")
-    return nodes
+    return [_with_every_comment(slug, node) for node in nodes]
+
+
+def _with_every_comment(slug: str, node: dict) -> dict:
+    """`node`, its comment listing replaced by every comment when the `last: 100` window cut it short.
+
+    A block or a ticked prompt older than the window would otherwise be invisible to a pass. The
+    REST listing is read only for such an issue, and its comments are given the GraphQL node shape."""
+    listing = node.get("comments")
+    total = listing.get("totalCount") if isinstance(listing, dict) else None
+    window = listing.get("nodes") if isinstance(listing, dict) else None
+    if not _is_int(total) or not isinstance(window, list) or total <= len(window):
+        return node
+    if not _is_int(node.get("number")):
+        raise _invalid("an issue has no integer number")
+    every = _rest_comments(forge_markers.api_pages(f"repos/{slug}/issues/{node['number']}/comments?per_page=100"))
+    return {**node, "comments": {**listing, "nodes": [
+        {"fullDatabaseId": str(c.id), "authorAssociation": c.association, "body": c.body,
+         "createdAt": c.created_at, "updatedAt": c.created_at} for c in every]}}
 
 
 def _invalid(what: str) -> ForgeError:
@@ -411,8 +429,7 @@ class _Pass:
                due: verify_facts.Due) -> None:
         """Run the check and record what changed, under its lease."""
         waiting = self.live(verify_issues.DUE, key)
-        days = check.get("expires_after_days") or DEFAULT_EXPIRY_DAYS
-        lapsed = waiting is not None and self.ctx.now() >= waiting.updated_at + timedelta(days=days)
+        lapsed = waiting is not None and self.lapsed(check, waiting.updated_at)
         on_expire = check.get("on_expire", "close")
         if lapsed and on_expire == "close":
             self.record(index, ac, "expired", None, {}, "", "")
@@ -633,6 +650,8 @@ class _Pass:
             return self.line(index, ac, "pending", "owner_asked" if won else "owner_waiting")
         then_check = {**check, "kind": "evidence", "run": run["then"]}
         gate = verify_exec.gate(then_check, self.project.bindings["workflow"]["verification"])
+        if not gate.runnable and gate.reason in ("effects_live", "effects_paid"):
+            return self.approve(index, then_check, ac, key, previous, prev, due)  # the `then` is approved like any live check
         if not gate.runnable:
             return self.line(index, ac, "pending", gate.reason)
         self.run_leased(index, then_check, ac, key, previous, prev, due)
@@ -682,6 +701,8 @@ class _Pass:
         ticked = next((p for p in waiting if verify_owner.ticked(p, verify_owner.RUN_IT)), None)
         if ticked is not None:
             return self.consume(index, check, ac, key, previous, prev, due, ticked, digest)
+        if self.expire_waiting(index, check, ac, key, previous, waiting):
+            return
         if waiting:
             return self.line(index, ac, "pending", "owner_waiting")
         host = check["host"]
@@ -693,6 +714,42 @@ class _Pass:
             f"{ac} has {check['effects']} effects: tick the box to run it once on {host_text}.",
             f"Command: {self.command_text(run)}\n\n{verify_owner.box(verify_owner.RUN_IT)}", ("round",))
         self.line(index, ac, "pending", "owner_asked" if won else "owner_waiting")
+
+    def expire_waiting(self, index: int, check: Mapping, ac: str, key: Mapping[str, str],
+                       previous: Marker | None, waiting: Sequence[Marker]) -> bool:
+        """Apply `expires_after_days` to a check that waits for a tick; True when it added the check's line.
+
+        The check has waited since the earliest of its `verify-due` marker and its unticked
+        approve prompts. A lapsed check never runs: `on_expire: close` records `expired`, and
+        `ask` posts the decision once and keeps waiting for the answer."""
+        since = [m.updated_at for m in (self.live(verify_issues.DUE, key), *waiting) if m is not None]
+        if not since or not self.lapsed(check, min(since)):
+            return False
+        if check.get("on_expire", "close") != "close":
+            if check.get("on_expire") == "ask" and not any(
+                    p.fields.get("on") == "expire"
+                    for p in verify_owner.prompts(self.markers, verify_owner.DECISION, self.block_key, index)):
+                self.prompt(verify_owner.DECISION, index, {"on": "expire"}, f"{ac} expired: the owner decides.",
+                            self.decision_boxes(), ("on",))
+            return False
+        lease = self.take_lease(ac, key)
+        if lease is None:
+            self.line(index, ac, "pending", "lost_contest")
+            return True
+        try:
+            if not self.unchanged_since(index, previous):
+                self.line(index, ac, "pending", "lost_contest")
+            else:
+                self.record(index, ac, "expired", None, {}, "", "")
+                self.line(index, ac, "expired", "changed")
+        finally:
+            forge_markers.delete(self.slug, lease)
+        return True
+
+    def lapsed(self, check: Mapping, since: datetime) -> bool:
+        """Whether a check that has waited since `since` is past its `expires_after_days`."""
+        days = check.get("expires_after_days") or DEFAULT_EXPIRY_DAYS
+        return self.ctx.now() >= since + timedelta(days=days)
 
     def consume(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
                 prev: str | None, due: verify_facts.Due, ticked: Marker, digest: str) -> None:

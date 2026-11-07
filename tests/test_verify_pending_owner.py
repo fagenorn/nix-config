@@ -447,6 +447,73 @@ class QuietFailureTest(OwnerBase):
         self.assertEqual(self.spawned("verify-ok"), 0)
 
 
+class ApprovalProgressTest(OwnerBase):
+    """Final review: an approval can expire, an act's live `then` is approved, and a deep thread is read whole."""
+
+    def test_an_unticked_approval_expires_once_its_check_has_waited_past_expires_after_days(self):
+        waiting = ok_check(effects="live", expires_after_days=7)
+        self.hold(waiting)
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_waiting")])
+        self.advance("2026-11-20T10:00:00Z")
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "expired", "changed"))
+        self.assertEqual((self.results(), self.spawned("verify-ok")), (["expired"], 0))
+        self.assertEqual(self.world.issue()["state"], "closed")
+        self.assertEqual(self.live_prompts(), [])
+
+    def test_an_approval_unticked_after_a_run_that_was_not_yet_met_expires(self):
+        later = check(effects="live", run={"command": "check-later"}, expires_after_days=7)
+        self.hold(later)
+        self.run_pass()
+        first, = self.prompts("verify-approve")
+        self.tick(first.comment_id, "Run it")
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "not_yet")])
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])  # round 2, left unticked
+        self.advance("2026-11-20T10:00:00Z")
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "expired", "changed"))
+        self.assertEqual((self.results(), self.spawned("verify-later")), (["expired"], 1))
+
+    def test_an_unticked_approval_past_expiry_with_on_expire_ask_posts_one_decision_and_never_runs(self):
+        waiting = ok_check(effects="paid", expires_after_days=7, on_expire="ask")
+        self.hold(waiting)
+        self.run_pass()
+        self.advance("2026-11-20T10:00:00Z")
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_waiting")])
+        decision, = self.prompts("verify-decision")
+        self.assertEqual(decision.fields["on"], "expire")
+        mark = len(self.world.argvs("gh"))
+        self.run_pass()
+        self.assertEqual(self.prompt_posts(mark), [])
+        self.tick(decision.comment_id, "Close as not verified")
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "rejected", "owner_answered"))
+        self.assertEqual(self.spawned("verify-ok"), 0)
+
+    def test_a_live_act_then_is_approved_and_run_once_ticked(self):
+        act = check(kind="human", reason="hands", effects="live",
+                    run={"act": "Plug it in", "then": {"command": "check-ok"}})
+        self.hold(act)
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
+        prompt, = self.prompts("verify-approve")
+        self.assertIn('Command: ["verify-ok"]', prompt.body)
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_waiting")])
+        self.assertEqual(self.spawned("verify-ok"), 0)
+        self.tick(prompt.comment_id, "Run it")
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))
+        self.assertEqual((self.spawned("verify-ok"), self.results()), (1, ["pass"]))
+        self.assertEqual(self.live_prompts(), [])
+
+    def test_the_runner_reads_a_block_and_a_ticked_prompt_buried_under_over_100_comments(self):
+        self.hold(ok_check(effects="live"))
+        self.run_pass()
+        prompt, = self.prompts("verify-approve")
+        self.tick(prompt.comment_id, "Run it")
+        for n in range(101):
+            self.world.append_comment(stored_comment(1000 + n, f"note {n}"))
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))
+        self.assertEqual(self.spawned("verify-ok"), 1)
+
+
 class VerifyOwnerTest(unittest.TestCase):
     def test_answer_reads_boxes(self):
         fields = {"reason": "verify-ask", "block": "10.x", "check": "0", "host": "mbp"}
