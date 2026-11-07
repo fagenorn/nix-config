@@ -4,6 +4,7 @@ Evaluates the flake from this checkout's git tree, so new files must be `git add
 Run: just agent-workflow-tests
 """
 import json
+import plistlib
 import subprocess
 import unittest
 from pathlib import Path
@@ -93,6 +94,11 @@ class DarwinHosts(unittest.TestCase):
           kickScript = u.verifyPending.kick;
           start = u.verifyPending.start;
           homeKick = u.home.activation ? verifyPendingKick;
+          user = u.home.username;
+          agentCommand = c.launchd.user.agents.verify-pending.command;
+          plist = c.environment.userLaunchAgents."org.nixos.verify-pending.plist".text;
+          post = c.system.activationScripts.postActivation.text;
+          activate = c.system.activationScripts.script.text;
         }"""
 
     @classmethod
@@ -112,6 +118,53 @@ class DarwinHosts(unittest.TestCase):
                 self.assertEqual(self.got[host]["start"], f"/bin/launchctl kickstart gui/$(id -u)/{LABEL}")
                 self.assertIs(self.got[host]["homeKick"], False,
                               "on darwin the kick runs from nix-darwin postActivation, not home-manager")
+
+    REPOINT = 'ln -sfn "$(readlink -f "$systemConfig")" /run/current-system'
+
+    def plist(self, host):
+        return plistlib.loads(self.got[host]["plist"].encode())
+
+    def kick_line(self, host):
+        user, kick = self.got[host]["user"], self.got[host]["kickScript"]
+        return f'launchctl asuser "$(id -u {user})" sudo -u {user} --set-home {kick} "$(readlink -f "$systemConfig")" || true'
+
+    def test_the_agent_runs_the_command_through_command_not_program_arguments(self):
+        for host in self.HOSTS:
+            with self.subTest(host=host):
+                command = self.got[host]["command"]
+                self.assertEqual(self.got[host]["agentCommand"], command)
+                plist = self.plist(host)
+                self.assertEqual(plist["ProgramArguments"],
+                                 ["/bin/sh", "-c", f"/bin/wait4path /nix/store && exec {command}"])
+                self.assertTrue(plist["ProgramArguments"][2].endswith(f" {host}"))
+                self.assertNotIn("Program", plist)
+
+    def test_the_agent_runs_every_fifteen_minutes_and_at_load(self):
+        for host in self.HOSTS:
+            with self.subTest(host=host):
+                plist = self.plist(host)
+                self.assertEqual(plist["Label"], LABEL)
+                self.assertEqual(plist["StartInterval"], 900)
+                self.assertIs(plist["RunAtLoad"], True)
+                self.assertEqual(set(plist), {"Label", "ProgramArguments", "StartInterval", "RunAtLoad"})
+
+    def test_the_switch_trigger_is_the_activation_kick_not_watchpaths(self):
+        for host in self.HOSTS:
+            with self.subTest(host=host):
+                self.assertNotIn("WatchPaths", self.plist(host))
+                post, line = self.got[host]["post"], self.kick_line(host)
+                self.assertEqual(post.count(line), 1, post)
+                self.assertLess(post.index("Activating home-manager configuration"), post.index(line))
+
+    def test_the_kick_names_the_new_system_which_is_made_current_after_it(self):
+        # The kick cannot run after the repoint (no hook does), so it hands the pass the
+        # system to wait for; this pins the ordering that makes that wait necessary.
+        for host in self.HOSTS:
+            with self.subTest(host=host):
+                activate, line = self.got[host]["activate"], self.kick_line(host)
+                self.assertIn(self.REPOINT, activate)
+                self.assertLess(activate.index(line), activate.index(self.REPOINT))
+                self.assertLess(activate.rindex(line), activate.index(self.REPOINT))
 
 
 if __name__ == "__main__":
