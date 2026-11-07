@@ -842,7 +842,8 @@ class PassBase(unittest.TestCase):
         self.world = world_with(self, "verify-ok", "verify-bad", "verify-later", "darwin-version")
         for tool, code in (("verify-ok", 0), ("verify-bad", 1), ("verify-later", 75)):
             self.world.respond(tool, [], exit=code, stdout=f"{tool} ran\n")
-        for name, color in (("verification-failed", "B60205"), ("verification-follow-up", "FBCA04")):
+        for name, color in (("verification-failed", "B60205"), ("verification-follow-up", "FBCA04"),
+                            ("owner-action", "D93F0B")):
             self.world.respond("gh", ["api", "-X", "POST", f"repos/{SLUG}/labels", "-f", f"name={name}",
                                       "-f", f"color={color}"])
         script = self.world.checkout / "scripts" / "check.sh"
@@ -1213,7 +1214,7 @@ class NeverRunTest(PassBase):
         self.assert_never_run("effects_paid", ok_check(effects="paid"))
 
     def test_ask_and_act(self):
-        self.assert_never_run("owner_check", check(kind="human", reason="senses", run={"ask": "Is it bright?"}))
+        self.assert_never_run("owner_asked", check(kind="human", reason="senses", run={"ask": "Is it bright?"}))
         self.assert_never_run("owner_check", check(kind="human", reason="hands",
                                                    run={"act": "Plug it in", "then": {"command": "check-ok"}}))
 

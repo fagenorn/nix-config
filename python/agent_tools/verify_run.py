@@ -19,14 +19,14 @@ next pass skip work, comes after the step it would strand; a `ForgeError` ends t
 """
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools import forge_markers, verify_block, verify_exec, verify_facts, verify_issues
+from agent_tools import forge_markers, verify_block, verify_exec, verify_facts, verify_issues, verify_owner
 from agent_tools.forge_markers import ForgeError, Marker
 
 NEEDS = "needs-verification"
@@ -40,6 +40,7 @@ QUERY = (
 )
 FINAL = ("pass", "hit", "miss", "expired")
 PENDING_OUTCOMES = ("not_yet", "timeout", "exit_unexpected")
+OWNER_GATES = ("owner_check",)
 DEFAULT_EXPIRY_DAYS = 21
 LEASE = timedelta(minutes=30)
 TRUSTED = verify_issues.TRUSTED
@@ -146,6 +147,12 @@ class _Pass:
         self.markers: list[Marker] = []
         self.states: list[str | None] = []
         self.followups: dict[int, str] = {}
+        self.owner_posted = False
+        self.prompted: set[int] = set()
+        labels = (node.get("labels") or {}).get("nodes")
+        self.labels: set[str] = {n["name"] for n in labels if isinstance(n, dict)
+                                 and isinstance(n.get("name"), str)} if isinstance(labels, list) else set()
+        self.trusted: list[Marker] = []
 
     def line(self, check: int | None, ac: str | None, state: str, reason: str) -> None:
         self.lines.append({"repo": self.slug, "issue": self.number, "check": check, "ac": ac,
@@ -165,18 +172,24 @@ class _Pass:
         nodes = (self.node.get("comments") or {}).get("nodes")
         if not isinstance(nodes, list):
             raise ForgeError("payload_invalid", "issue node has no comments")
-        held = verify_issues.select(verify_issues.comments_from_graphql(nodes))
+        comments = verify_issues.comments_from_graphql(nodes)
+        held = verify_issues.select(comments)
         if held is None:
             return self.line(None, None, "skipped", "no_block")
         if held.block is None or not verify_block.lint_block(held.block, refs=self.refs)["ok"]:
             return self.line(None, None, "skipped", "block_invalid")
         self.block, self.block_key, self.markers = held.block, held.key, held.markers
         self.block_id = held.block_id
+        parsed = [forge_markers.parse({"id": c.id, "body": c.body, "updated_at": c.created_at})
+                  for c in comments if c.association in TRUSTED]
+        self.trusted = [m for m in parsed if m is not None]
         closed = self.live(verify_issues.CLOSED, {"block": self.block_key})
         if closed is not None and closed.fields.get("outcome") in ("verified", "expired"):
             verified = closed.fields["outcome"] == "verified"
-            if not self.report and not self.conclude(verified):
-                return
+            if not self.report:
+                self.owner_sweep()
+                if not self.conclude(verified):
+                    return
             return self.line(None, None, "closed", "verified" if verified else "not_verified")
         bindings = self.project.bindings
         self.ctx = verify_facts.Context(self.slug, self.project.root, bindings["vcs"]["default_branch"],
@@ -186,6 +199,7 @@ class _Pass:
         for index, check in enumerate(checks):
             self.check(index, check)
         if not self.report:
+            self.owner_sweep()
             self.close()
 
     def check(self, index: int, check: Mapping) -> None:
@@ -202,11 +216,13 @@ class _Pass:
                 elif not self.report:
                     self.follow_up(index, ac, key, previous, _fenced_of(previous.body))
             return
+        if not self.report and self.answer(index, check, ac, key, previous):
+            return
         bound = check["host"]
         if not (bound == self.host or bound == "any" or (isinstance(bound, list) and self.host in bound)):
             return self.line(index, ac, "pending", "not_this_host")
         gate = verify_exec.gate(check, self.project.bindings["workflow"]["verification"])
-        if not gate.runnable:
+        if not gate.runnable and (self.report or gate.reason not in OWNER_GATES):
             return self.line(index, ac, "pending", gate.reason)
         merge = self.block["merge"]
         due = verify_facts.evaluate_when(check["when"], merge, self.ctx)
@@ -219,6 +235,8 @@ class _Pass:
             return self.line(index, ac, "pending", due.reason)
         if self.report:
             return self.line(index, ac, "due", "due")
+        if not gate.runnable:
+            return self.owner_form(index, check, ac, key, previous, prev, due, gate.reason)
         lease = self.take_lease(ac, key)
         if lease is None:
             return self.line(index, ac, "pending", "lost_contest")
@@ -307,10 +325,10 @@ class _Pass:
         return verify_exec.classify(result, expect), result.exit, output, json.dumps(argv), {}
 
     def record(self, index: int, ac: str, state: str, code: int | None, facts: Mapping[str, str],
-               command: str, output: str) -> Marker:
-        """Post one result marker and note the check's new state."""
+               command: str, output: str, **extra: str) -> Marker:
+        """Post one result marker and note the check's new state; `extra` fields follow the host."""
         fields = {"block": self.block_key, "check": str(index), "ac": ac, "state": state,
-                  "host": self.host}
+                  "host": self.host, **extra}
         if code is not None:
             fields["exit"] = str(code)
         for name in ("rev", "tag"):
@@ -372,6 +390,110 @@ class _Pass:
                 found.append(issue["number"])
         return found
 
+    # --- owner prompts (issue 631) ---------------------------------------------
+
+    def prompt(self, reason: str, index: int, fields: Mapping[str, str], sentence: str, extra: str,
+               match_keys: Sequence[str] = ()) -> bool:
+        """Post one prompt unless one of its identity was ever posted, ended ones included.
+
+        The prompt is posted first and the comments re-read after; the smallest comment of the
+        identity wins and a loser deletes its own, so racing runners and a pass holding an old
+        listing leave exactly one prompt. `forge_markers.write` would not do: its contest ignores
+        ended markers, so it would post again once the first prompt was answered and ended."""
+        all_fields = {"reason": reason, "block": self.block_key, "check": str(index), **fields}
+        match = {k: all_fields[k] for k in ("reason", "block", "check", *match_keys)}
+        body = forge_markers.render(verify_owner.KIND, all_fields, sentence, extra)
+        own = forge_markers.post(self.slug, self.number, body)
+        reread = forge_markers.list_markers(self.slug, self.number, TRUSTED)
+        first = min([m.comment_id for m in verify_owner.same_identity(reread, match)] + [own])
+        if first != own:
+            forge_markers.delete(self.slug, own)
+            return False
+        self.owner_posted = True
+        self.prompted.add(index)
+        return True
+
+    def owner_form(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
+                   prev: str | None, due: verify_facts.Due, gate_reason: str) -> None:
+        """What a due check only the owner can answer does this pass: ask once, then wait."""
+        if "ask" in check["run"]:
+            if verify_owner.prompts(self.markers, verify_owner.ASK, self.block_key, index):
+                return self.line(index, ac, "pending", "owner_waiting")
+            won = self.prompt(verify_owner.ASK, index, {"host": self.host}, f"{ac}: the owner's answer is needed.",
+                              f"{check['run']['ask']}\n\n{verify_owner.box(verify_owner.ACCEPT)}\n"
+                              f"{verify_owner.box(verify_owner.REJECT)}")
+            return self.line(index, ac, "pending", "owner_asked" if won else "owner_waiting")
+        self.line(index, ac, "pending", gate_reason)
+
+    def answer(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None) -> bool:
+        """Record the owner's answer to a live ask prompt of this check; True when it added the check's line."""
+        found = verify_owner.live_prompts(self.markers, (verify_owner.ASK,), self.block_key, index)
+        prompt = next((p for p in found if verify_owner.answer(p, verify_owner.ACCEPT, verify_owner.REJECT)), None)
+        if prompt is None:
+            return False
+        verdict = verify_owner.answer(prompt, verify_owner.ACCEPT, verify_owner.REJECT)
+        if verdict == "ambiguous":
+            self.line(index, ac, "pending", "owner_ambiguous")
+            return True
+        met = verdict == "yes"
+        if check.get("mode", "assert") == "assert":
+            state = "pass" if met else "fail"
+        else:
+            state = "hit" if met else "miss"
+        lease = self.take_lease(ac, key)
+        if lease is None:
+            self.line(index, ac, "pending", "lost_contest")
+            return True
+        try:
+            if not self.unchanged_since(index, previous):
+                self.line(index, ac, "pending", "lost_contest")
+                return True
+            again = verify_owner.live_prompts(self.markers, (verify_owner.ASK,), self.block_key, index)
+            if not any(p.comment_id == prompt.comment_id and verify_owner.answer(
+                    p, verify_owner.ACCEPT, verify_owner.REJECT) == verdict for p in again):
+                self.line(index, ac, "pending", "owner_waiting")
+                return True
+            if state == "fail" and check.get("on_fail", "label") == "label":
+                forge_markers.ensure_label(self.slug, *FAILED)
+                forge_markers.add_label(self.slug, self.number, FAILED[0])
+            posted = self.record(index, ac, state, None, {}, "", "", owner=str(prompt.comment_id))
+            forge_markers.end(self.slug, self.number, prompt.comment_id, "answered")
+            self.line(index, ac, state, "owner_answered")
+            if state == "miss":
+                self.follow_up(index, ac, key, posted, "")
+        finally:
+            forge_markers.delete(self.slug, lease)
+        return True
+
+    def owner_sweep(self) -> None:
+        """End the prompts that are settled and keep the `owner-action` label in step with the live ones.
+
+        Settlement is judged against the block held now, never the one this pass ran: a pass
+        that ran an older version must not end a prompt of the version now held."""
+        if not (self.owner_posted or verify_owner.LABEL[0] in self.labels
+                or any(m.kind == verify_owner.KIND for m in self.trusted)):
+            return
+        held_key, labels = self.fresh_held()
+        labels = self.labels if labels is None else labels
+        fresh = forge_markers.list_markers(self.slug, self.number, TRUSTED)
+        gone: set[int] = set()
+        for m in fresh:
+            if m.kind != verify_owner.KIND or not forge_markers.is_live(m, fresh) \
+                    or m.fields.get("reason") not in verify_owner.REASONS:
+                continue
+            why = verify_owner.settle_reason(m, fresh, held_key, FINAL)
+            if why is not None:
+                forge_markers.end(self.slug, self.number, m.comment_id, why)
+                gone.add(m.comment_id)
+        remaining = [m for m in fresh if m.kind == verify_owner.KIND and forge_markers.is_live(m, fresh)
+                     and m.comment_id not in gone]
+        name = verify_owner.LABEL[0]
+        if remaining and name not in labels:
+            forge_markers.ensure_label(self.slug, *verify_owner.LABEL)
+            forge_markers.add_label(self.slug, self.number, name)
+        elif not remaining and name in labels:
+            forge_markers.remove_label(self.slug, self.number, name)
+
     # --- closing (P9) ----------------------------------------------------------
 
     def close(self) -> None:
@@ -396,16 +518,24 @@ class _Pass:
         if self.conclude(outcome == "verified"):
             self.line(None, None, "closed", "verified" if outcome == "verified" else "not_verified")
 
-    def current(self) -> bool:
-        """Whether the block this pass ran is still the issue's held block, read afresh."""
+    def fresh_held(self) -> tuple[str | None, set[str] | None]:
+        """This issue's held block key and label names from a fresh listing, `(None, None)` when
+        the issue is no longer listed."""
         for node in list_held(self.slug):
             if node.get("number") == self.number:
                 nodes = (node.get("comments") or {}).get("nodes")
                 if not isinstance(nodes, list):
                     raise ForgeError("payload_invalid", "issue node has no comments")
                 held = verify_issues.select(verify_issues.comments_from_graphql(nodes))
-                return held is not None and held.key == self.block_key
-        return False
+                labels = (node.get("labels") or {}).get("nodes")
+                names = {n["name"] for n in labels if isinstance(n, dict) and isinstance(n.get("name"), str)} \
+                    if isinstance(labels, list) else set()
+                return (held.key if held is not None else None), names
+        return None, None
+
+    def current(self) -> bool:
+        """Whether the block this pass ran is still the issue's held block, read afresh."""
+        return self.fresh_held()[0] == self.block_key
 
     def conclude(self, verified: bool) -> bool:
         """Finish the issue only if its held block is still the one this pass ran: an owner who
