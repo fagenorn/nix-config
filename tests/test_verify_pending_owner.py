@@ -172,6 +172,38 @@ class AskTest(OwnerBase):
         self.assertIn("owner-action", self.world.issue()["labels"])
 
 
+class ClosingEndsPromptsTest(OwnerBase):
+    """An issue that closes keeps no live prompt and no owner-action label, whichever way it closes."""
+
+    def test_closing_as_not_verified_ends_a_waiting_ask_and_drops_the_label(self):
+        later = check(ac="AC2", run={"command": "check-later"})
+        self.hold(ask_check(), later)
+        self.run_pass()  # the ask is posted and the later check opens its window
+        prompt, = self.live_prompts()
+        self.assertIn("owner-action", self.world.issue()["labels"])
+        self.world.respond("gh", ["api", "--include", "rate_limit"],
+                           stdout="HTTP/2.0 200 OK\r\nDate: Fri, 04 Dec 2026 10:00:00 GMT\r\n\r\n{}")
+        self.run_pass()  # the later check outlives its window; the ask is still unanswered
+        self.assertEqual(self.markers("verify-closed")[0].fields["outcome"], "expired")
+        self.assertEqual(self.world.issue()["state_reason"], "not_planned")
+        self.assertEqual(self.live_prompts(), [])
+        self.assertIn(post_end(prompt.comment_id, "closed"), self.world.argvs("gh"))
+        self.assertNotIn("owner-action", self.world.issue()["labels"])
+        self.no_human_required()
+
+    def test_a_delayed_pass_on_a_closed_issue_leaves_no_prompt_and_no_label(self):
+        self.hold(ask_check())
+        delayed, = vr.list_held(SLUG)  # taken while block A was held
+        fm.edit(SLUG, 10, hold(block(ok_check())))  # the owner replaces A with B
+        self.run_pass()  # another pass verifies B and closes the issue
+        self.assertEqual(self.world.issue()["state"], "closed")
+        vr.pass_issue(self.project, "mbp", delayed, Refs())
+        self.assertEqual(self.live_prompts(), [])
+        self.assertNotIn("owner-action", self.world.issue()["labels"])
+        self.assertEqual(self.label_calls(), [])
+        self.no_human_required()
+
+
 class VerifyOwnerTest(unittest.TestCase):
     def test_answer_reads_boxes(self):
         fields = {"reason": "ask", "block": "10.x", "check": "0", "host": "mbp"}

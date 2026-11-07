@@ -465,15 +465,19 @@ class _Pass:
             forge_markers.delete(self.slug, lease)
         return True
 
-    def owner_sweep(self) -> None:
+    def owner_sweep(self, closing: bool = False) -> None:
         """End the prompts that are settled and keep the `owner-action` label in step with the live ones.
 
         Settlement is judged against the block held now, never the one this pass ran: a pass
-        that ran an older version must not end a prompt of the version now held."""
+        that ran an older version must not end a prompt of the version now held. When the issue
+        is closing, or is no longer listed because another run closed it, no question on it can
+        be answered any more: every live prompt ends as `closed` and the label goes, so a closed
+        issue never keeps an owner-action that no later pass will sweep."""
         if not (self.owner_posted or verify_owner.LABEL[0] in self.labels
                 or any(m.kind == verify_owner.KIND for m in self.trusted)):
             return
         held_key, labels = self.fresh_held()
+        closing = closing or labels is None
         labels = self.labels if labels is None else labels
         fresh = forge_markers.list_markers(self.slug, self.number, TRUSTED)
         gone: set[int] = set()
@@ -481,7 +485,7 @@ class _Pass:
             if m.kind != verify_owner.KIND or not forge_markers.is_live(m, fresh) \
                     or m.fields.get("reason") not in verify_owner.REASONS:
                 continue
-            why = verify_owner.settle_reason(m, fresh, held_key, FINAL)
+            why = verify_owner.settle_reason(m, fresh, held_key, FINAL) or ("closed" if closing else None)
             if why is not None:
                 forge_markers.end(self.slug, self.number, m.comment_id, why)
                 gone.add(m.comment_id)
@@ -543,6 +547,8 @@ class _Pass:
         if not self.current():
             self.line(None, None, "skipped", "block_changed")
             return False
+        if not self.report:
+            self.owner_sweep(closing=True)
         self.finish(verified)
         return True
 
