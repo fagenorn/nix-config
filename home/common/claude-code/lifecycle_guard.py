@@ -3483,6 +3483,9 @@ def chain_pre_push(args, base, stdin_bytes, cwd, chain_env):
     recurse. A repository hook takes precedence over git-lfs, as git-lfs never
     overwrites an existing hook. The chained program gets git's argv, the identical
     stdin bytes, the pre-scrub environment, and this process's stdout, stderr and cwd.
+    The hooks are located under that same pre-scrub environment, so a push that names
+    its repository with `GIT_DIR` or `--git-dir` chains that repository's hooks, as the
+    shim does; only the judgement reads the scrubbed environment.
     """
     unlocated = f"{PRE_PUSH_LABEL}: cannot locate the repository's own hooks"
     git_bin = args.git_bin or base.git_bin
@@ -3492,8 +3495,8 @@ def chain_pre_push(args, base, stdin_bytes, cwd, chain_env):
         if query == "--git-path":
             words.append("hooks")
         try:
-            done = subprocess.run(words, cwd=cwd, capture_output=True, text=True,
-                                  timeout=args.child_timeout_seconds, check=False)
+            done = subprocess.run(words, cwd=cwd, env=dict(chain_env), capture_output=True,
+                                  text=True, timeout=args.child_timeout_seconds, check=False)
         except (subprocess.TimeoutExpired, OSError):
             print(unlocated, file=sys.stderr)
             return 1

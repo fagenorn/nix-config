@@ -279,6 +279,33 @@ class ChainingTest(unittest.TestCase):
             check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_a_push_naming_its_repository_from_a_work_tree_without_a_dot_git_still_chains(self):
+        self.repo_hook("pre-push")
+        bare_tree = self.world.tmp / "tree-without-dot-git"
+        bare_tree.mkdir()
+        gitdir = str(self.repo.work / ".git")
+        result = self.repo.git(f"--git-dir={gitdir}", f"--work-tree={bare_tree}",
+                               "push", "origin", "issue-1-topic", cwd=bare_tree)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("cannot locate", result.stderr)
+        self.assertTrue(Path(f"{self.out}.args").exists())
+
+    def test_a_push_naming_another_repository_chains_that_repositorys_hook(self):
+        self.repo_hook("pre-push")
+        other = self.world.fixture("fagenorn/other")
+        other.git("switch", "-q", "-c", "issue-3-topic")
+        other.commit("other topic")
+        other_out = self.world.tmp / "other-hook"
+        hook = other.work / ".git" / "hooks" / "pre-push"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text(RECORDER.format(out=other_out, status=0), encoding="utf-8")
+        hook.chmod(0o755)
+        result = other.git(f"--git-dir={other.work / '.git'}", "push", "origin",
+                           "issue-3-topic", cwd=self.repo.work)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(Path(f"{other_out}.args").exists())
+        self.assertFalse(Path(f"{self.out}.args").exists())
+
     def test_other_repository_hooks_still_run_through_the_chain_shim(self):
         self.world.install_chain_shims(["pre-commit"])
         self.repo_hook("pre-commit", status=1)
