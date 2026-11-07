@@ -133,6 +133,28 @@ INVOCATION_FORM_HINT = "run git and gh by name, and carry a directory only as gi
 # Words that detach a process from the task that started it (#278). Refused
 # in every repository, before the policy loads.
 DETACHING_WORDS = ("nohup", "setsid", "disown")
+CD_PRELUDE_PROBLEM = (
+    "the directory the verb runs in cannot be resolved: a directory change is "
+    "accepted only as one leading cd <absolute directory> && before a single "
+    "push or PR creation; or carry the directory as git -C <dir>"
+)
+# The allowlist a command holding a lifecycle verb must match as a whole, before
+# any other judgement (issue 418). A plain word takes only these characters and
+# never begins with `=` (zsh's `=cmd` expansion); a single-quoted string is
+# literal; a double-quoted one is literal while it holds none of
+# `DOUBLE_QUOTE_ACTIVE`, the characters the shell still reads there (`!` for
+# history expansion).
+PLAIN_WORD = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
+DOUBLE_QUOTE_ACTIVE = frozenset('"$`\\!')
+LIFECYCLE_VERBS = (
+    ("git", "push"), ("git", "branch", "-d"), ("gh", "pr", "create"),
+    ("gh", "pr", "merge"), ("gh", "release", "create"),
+)
+LIFECYCLE_GRAMMAR = (
+    "a lifecycle verb runs only alone, as [unset GITHUB_TOKEN && ][cd <dir> && ]"
+    "<verb> <args> (git -C <dir> before push or branch -d), every word plain "
+    "([A-Za-z0-9_./:@%+=,-]) or quoted ('...', or \"...\" without $, `, \\ or !)"
+)
 DETACHING_ROUTES = (
     "a detached process outlives the task stop; run it with the Bash tool's "
     "background mode (run_in_background: true), or wrap a lifecycle launch in "
@@ -989,11 +1011,14 @@ WRAPPER_OPTIONS_WITH_ARGUMENT = {
 # command line and runs it. That argument is command text, not a name.
 ENV_SPLIT_STRING = "--split-string"
 # A redirection operator standing alone takes the next word as its target.
-BARE_REDIRECTION = re.compile(r"^(\d*|&)(>>?|<<?<?|<>|>&|<&)$")
-ATTACHED_REDIRECTION = re.compile(r"^(\d+|&)?(>>?|<<?<?|<>|>&|<&)")
+BARE_REDIRECTION = re.compile(r"^(\d*|&)(>>?&?!?|<<?<?|<>|<&)$")
+ATTACHED_REDIRECTION = re.compile(r"^(\d+|&)?(>>?&?!?|<<?<?|<>|<&)")
 # A segment cut at the `&` of `2>&1` ends in an unescaped `>` or `<`. Only then
 # does the next segment continue the same simple command.
 DANGLING_REDIRECTION = re.compile(r"(?:^|[^\\])(?:\\\\)*[<>]$")
+# A word that ends in a redirection operator (`>/dev/null>`, `X=>`, zsh's
+# clobber `>!`) leaves that operator without a target: the next word is it.
+TRAILING_OPERATOR = re.compile(r"[<>]&?!?$")
 
 
 def split_redirection(value):
@@ -1035,19 +1060,21 @@ def wrapper_option(wrapper, option):
     return None, None
 
 
-def detaching_command_flags(tokens, state=(True, None, (), False),
-                            embedded_targets=True):
+def detaching_command_flags(tokens, states=((True, None, (), False),),
+                            bang_closes=False):
     """Per token: is it a word at which the shell may start a simple command?
 
-    Returns (flags, payloads, state). `payloads` is the command text handed to
-    `env -S`. `state` is (open_position, wrapper, pending_arguments,
-    redirection_target) and carries a dangling redirection: `split_segments`
-    cuts at the `&` of `2>&1`, so the next segment opens with its target.
+    Returns (flags, payloads, states). `payloads` is the command text handed to
+    `env -S`. A state is (open_position, wrapper, pending_arguments,
+    redirection_target); `states` holds every state the shell may be in, and
+    carries a dangling redirection: `split_segments` cuts at the `&` of `2>&1`,
+    so the next segment opens with its target.
 
     A word ending in a bare operator inside it (`X=>`, `worker>`) is ambiguous,
     because token values are unquoted: an unquoted `>` takes the next word as
-    its target, a quoted one (`X='>'`) does not. `embedded_targets` picks one
-    reading; `detaching_word` scans both and refuses on either.
+    its target, a quoted one (`X='>'`) does not. The ambiguity is per token, so
+    `X=> /dev/null >'log>' nohup x` has one of each; every state forks into both
+    readings at each such token, and a token is flagged when any state flags it.
 
     Like `command_position_flags`, which also steps over the arguments of
     wrapper options (`sudo -u anis nohup x`), but it also steps over
@@ -1055,51 +1082,85 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
     operator token ends any pending option argument. The verb pass keeps
     `command_position_flags`; this pass has no such fail-closed backstop, hence
     the extra stepping.
+
+    `bang_closes` reads a `!` that opens the segment, glued to the `&` that cut
+    it, as the end of zsh's clobber operator `>&!`, so the target is still the
+    next word. Bash reads that `!` as the target itself, and a spaced
+    `>& ! <word>` is that in both shells, so `detaching_word` scans with and
+    without it, and passes it only when the segment begins with the `!`.
     """
     flags = [False] * len(tokens)
     payloads = []
+    states = frozenset(states)
+    for index, (value, operator) in enumerate(tokens):
+        following = set()
+        for state in states:
+            readings = [(True, False), (False, False)]
+            if (state[2] and not operator and (
+                    BARE_REDIRECTION.match(value) is not None
+                    or ATTACHED_REDIRECTION.match(value) is not None)):
+                # A pending option argument may be this very word, quoted:
+                # `env -u '>' nohup x` unsets `>`, it redirects nothing.
+                readings.append((False, True))
+            for embedded, literal in readings:
+                after, flag, payload = detaching_step(
+                    state, index, value, operator, embedded, bang_closes,
+                    literal)
+                following.add(after)
+                flags[index] = flags[index] or flag
+                if payload is not None and payload not in payloads:
+                    payloads.append(payload)
+        states = frozenset(following)
+    return flags, payloads, states
+
+
+def detaching_step(state, index, value, operator, embedded, bang_closes,
+                   literal=False):
+    """One token of `detaching_command_flags` from one state and one reading:
+    (state after, flagged, `env -S` payload or None). `literal` reads a word
+    that looks like a redirection as the pending wrapper-option argument it may
+    be when quoted."""
     open_position, wrapper, pending, target = state
     pending = list(pending)
-    for index, (value, operator) in enumerate(tokens):
-        if operator:
-            open_position, wrapper, pending, target = True, None, [], False
-            continue
-        if target:
-            target = False
-            continue
-        if not open_position:
-            continue
-        if BARE_REDIRECTION.match(value) is not None:
-            target = True
-            continue
-        if ATTACHED_REDIRECTION.match(value) is not None:
-            continue
-        word, redirection = split_redirection(value)
-        target = (embedded_targets
-                  and BARE_REDIRECTION.match(redirection) is not None)
-        if pending:
-            if pending.pop(0) == "payload":
-                payloads.append(value)
-            continue
-        if ASSIGNMENT_PREFIX.match(word) is not None:
-            continue
-        if word in COMMAND_KEYWORDS or word in COMMAND_WRAPPERS:
-            wrapper = word
-            continue
-        if wrapper is not None and word.startswith("-"):
-            kind, attached = wrapper_option(wrapper, word)
-            if kind == "payload" and attached is not None:
-                payloads.append(value)
-            elif kind == "payload" or (kind == "argument" and attached is None
-                                       and not redirection):
-                # An option word that also carries a redirection may be a quoted
-                # attached argument; taking the next word as the command then
-                # only ever refuses more.
-                pending.append(kind)
-            continue
-        flags[index] = True
-        open_position = False
-    return flags, payloads, (open_position, wrapper, tuple(pending), target)
+    if operator:
+        return (True, None, (), False), False, None
+    if literal and pending and not target:
+        payload = value if pending.pop(0) == "payload" else None
+        return (open_position, wrapper, tuple(pending), False), False, payload
+    if bang_closes and target and index == 0 and value == "!":
+        return state, False, None
+    if target:
+        return (open_position, wrapper, tuple(pending), False), False, None
+    if not open_position:
+        return state, False, None
+    if BARE_REDIRECTION.match(value) is not None:
+        return (open_position, wrapper, tuple(pending), True), False, None
+    if ATTACHED_REDIRECTION.match(value) is not None:
+        # `>/dev/null>` is an attached redirection that ends in a bare one.
+        target = embedded and TRAILING_OPERATOR.search(value) is not None
+        return (open_position, wrapper, tuple(pending), target), False, None
+    word, redirection = split_redirection(value)
+    target = embedded and TRAILING_OPERATOR.search(redirection) is not None
+    if pending:
+        payload = value if pending.pop(0) == "payload" else None
+        return (open_position, wrapper, tuple(pending), target), False, payload
+    if ASSIGNMENT_PREFIX.match(word) is not None:
+        return (open_position, wrapper, tuple(pending), target), False, None
+    if word in COMMAND_KEYWORDS or word in COMMAND_WRAPPERS:
+        return (open_position, word, tuple(pending), target), False, None
+    if wrapper is not None and word.startswith("-"):
+        kind, attached = wrapper_option(wrapper, word)
+        payload = None
+        if kind == "payload" and attached is not None:
+            payload = value
+        elif kind == "payload" or (kind == "argument" and attached is None
+                                   and not redirection):
+            # An option word that also carries a redirection may be a quoted
+            # attached argument; taking the next word as the command then
+            # only ever refuses more.
+            pending.append(kind)
+        return (open_position, wrapper, tuple(pending), target), False, payload
+    return (False, wrapper, tuple(pending), target), True, None
 
 
 def detaching_word(command):
@@ -1114,9 +1175,10 @@ def detaching_word(command):
     names the word that occurs earliest in that text. A word in argument
     position otherwise passes.
     """
+    words = DETACHING_WORDS
 
     def earliest(text):
-        hits = [(text.find(word), word) for word in DETACHING_WORDS if word in text]
+        hits = [(text.find(word), word) for word in words if word in text]
         return min(hits)[1] if hits else None
 
     def name(value):
@@ -1126,27 +1188,30 @@ def detaching_word(command):
     segments = split_segments(command)
     if segments is None:
         return earliest(command)
-    # One scan per reading of a bare operator inside a word: as a redirection
-    # whose target is the next word, and as a quoted character.
+    # One scan per reading of a `!` glued to the `&` that cut a segment: as
+    # closing zsh's `>&!`, or not. Each scan keeps every state a bare operator
+    # inside a word (a redirection, or a quoted character) leads to.
     readings = (True, False)
-    states = dict.fromkeys(readings, fresh)
+    states = dict.fromkeys(readings, frozenset([fresh]))
     for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
-            states = dict.fromkeys(readings, fresh)
+            states = dict.fromkeys(readings, frozenset([fresh]))
             found = earliest(segment)
             if found is not None:
                 return found
             continue
         flags = [False] * len(tokens)
         payloads = []
-        for reading in readings:
+        for bang in readings:
             read_flags, read_payloads, after = detaching_command_flags(
-                tokens, states[reading], embedded_targets=reading)
+                tokens, states[bang],
+                bang_closes=bang and segment.startswith("!"))
             # Only a redirection cut at its `&` (`2>&1`) continues into the next
             # segment; any real separator ends the simple command and its options.
-            dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
-            states[reading] = after if dangling else fresh
+            dangling = DANGLING_REDIRECTION.search(segment) is not None
+            states[bang] = frozenset(
+                [fresh] + [s for s in after if s[3]] if dangling else [fresh])
             flags = [a or b for a, b in zip(flags, read_flags)]
             payloads.extend(read_payloads)
         for payload in payloads:
@@ -1164,12 +1229,122 @@ def detaching_word(command):
         for flag, (value, operator) in zip(flags, tokens):
             if operator:
                 continue
-            if flag and name(value) in DETACHING_WORDS:
+            if flag and name(value) in words:
                 return name(value)
             if "$(" in value or "`" in value:
                 found = earliest(value)
                 if found is not None:
                     return found
+    return None
+
+
+def lifecycle_words(command):
+    """(words, problem): `command` read as the allowlist's words, each (text, kind)
+    with kind `plain`, `quoted` or `and` (a `&&`), split at spaces and tabs; else
+    (None, the first thing outside the grammar)."""
+    words = []
+    index, length = 0, len(command)
+    while index < length:
+        character = command[index]
+        if character in " \t":
+            index += 1
+            continue
+        if command.startswith("&&", index):
+            kind, end = "and", index + 2
+        elif character in "'\"":
+            close = command.find(character, index + 1)
+            if close == -1:
+                return None, f"an unterminated {character} quote"
+            active = next((c for c in command[index + 1:close] if c in DOUBLE_QUOTE_ACTIVE),
+                          None) if character == '"' else None
+            if active is not None:
+                return None, f"`{active}` inside double quotes"
+            kind, end = "quoted", close + 1
+        else:
+            match = PLAIN_WORD.match(command, index)
+            if match is None:
+                return None, f"`{shown_character(character)}` outside quotes"
+            if character == "=":
+                return None, "a word beginning with `=`"
+            kind, end = "plain", match.end()
+        if end < length and command[end] not in " \t":
+            following = command[end]
+            if kind == "quoted" or following in "'\"":
+                return None, "a quoted string glued to another word"
+            return None, f"`{shown_character(following)}` outside quotes"
+        words.append((command[index:end], kind))
+        index = end
+    return words, None
+
+
+def lifecycle_shape(command):
+    """(directory, problem) for a command holding a lifecycle verb (issue 418).
+
+    Admitted only as `[<unset scrub> && ][cd <dir> && ][env -u scrub ]<verb> <args>`,
+    with at most one scrub, `<verb>` one of `LIFECYCLE_VERBS` (`git -C <dir>` before
+    `push` or `branch -d`), `<dir>` a plain word and every word as `lifecycle_words`
+    reads it. `directory` is the cd word, else None; `problem` is None when admitted.
+    The scrub's exact spelling is left to the verb's grammar.
+    """
+    words, problem = lifecycle_words(command)
+    if problem is not None:
+        return None, problem
+    segments = [[]]
+    for text, kind in words:
+        if kind == "and":
+            segments.append([])
+        else:
+            segments[-1].append((text, kind))
+    if any(not segment for segment in segments):
+        return None, "an empty command beside `&&`"
+    *prelude, verb = segments
+    names = set(GH_ENV_TOKEN_NAMES)
+    directory, scrubbed = None, False
+    for segment in prelude:
+        values = [text for text, _ in segment]
+        if (values[0] == "unset" and not scrubbed and directory is None
+                and 2 <= len(values) <= 3 and set(values[1:]) <= names
+                and len(set(values[1:])) == len(values) - 1):
+            scrubbed = True
+        elif values[0] == "cd" and directory is None and len(segment) == 2 \
+                and segment[1][1] == "plain":
+            directory = values[1]
+        else:
+            return None, f"`{shown_value(' '.join(values))} &&` before the verb"
+    values = [text for text, _ in verb]
+    if not scrubbed and values[0] == "env":
+        position = 1
+        unset = []
+        while values[position:position + 1] == ["-u"] and position + 1 < len(values) \
+                and values[position + 1] in names - set(unset):
+            unset.append(values[position + 1])
+            position += 2
+        if unset:
+            values = values[position:]
+    if values[1:2] == ["-C"] and values[:1] == ["git"] and len(verb) > 2 \
+            and PLAIN_WORD.fullmatch(values[2]):
+        values = ["git"] + values[3:]
+    if not any(tuple(values[:len(form)]) == form for form in LIFECYCLE_VERBS):
+        lead = next((index for index, value in enumerate(values) if value in ("git", "gh")), 0)
+        if lead:
+            return None, f"`{shown_value(' '.join(values[:lead]))}` before the verb"
+        return None, f"`{shown_value(' '.join(values[:3]))}` is not a lifecycle verb"
+    return directory, None
+
+
+def cd_directory_problem(command, directory):
+    """Why the leading `cd <directory>` of `command`, which `lifecycle_shape` admitted,
+    leaves the verb's directory unresolved, or None: it is spelled `cd <directory> && `
+    with single spaces, after any `unset` scrub spelling, and `<directory>` is
+    absolute with no `..` component (issue 418 D1)."""
+    rest = command
+    for spelling in SCRUB_PREFIXES:
+        if spelling.startswith("unset ") and strip_spelling(rest, spelling) is not None:
+            rest = strip_spelling(rest, spelling)
+            break
+    if (strip_spelling(rest, f"cd {directory} && ") is None
+            or not os.path.isabs(directory) or ".." in directory.split("/")):
+        return CD_PRELUDE_PROBLEM
     return None
 
 
@@ -1431,30 +1606,54 @@ def load_compiled_policy(path):
     return dict(derived), None
 
 
+def bounded_timeout(deadline, child_timeout):
+    """The bound for the next child, read immediately before it starts.
+
+    A child starts only when its whole bound ends before the deadline: the bound
+    is never clipped to the time left, so a child that starts has the full
+    `child_timeout` and one that cannot is refused before it starts.
+    """
+    if deadline - time.monotonic() < child_timeout:
+        raise DeadlineExhausted()
+    return child_timeout
+
+
 class Context:
-    """Injected dependencies plus one target directory's repository facts,
-    resolved once per directory (issue 400 D8).
+    """Injected dependencies plus one repository's facts, resolved once per
+    directory or per named repository (issue 400 D8, issue 418 D4).
 
     `cwd` is that directory: the payload `cwd`, or a push's `git -C` directory
-    (`target_directory`). Building a context is the one place the compiled
+    (`target_directory`). With `repository` given this is a named-repository
+    context (issue 418 D5): the repository is the slug a PR creation or merge
+    names with `--repo`, no checkout is read for it (`cwd` is None, no `git`
+    child runs), and the base branch is its row's `default_branch` once the row
+    check confirms the row. Building a context is the one place the compiled
     policy is opened and the one place the row check runs, so a command with no
     push, PR creation, merge or release creation never reads the first or
     starts the second.
     """
 
-    def __init__(self, args, base, cwd, deadline):
+    def __init__(self, args, base, cwd, deadline, repository=None):
         self.git_bin = args.git_bin
         self.gh_bin = args.gh_bin
         self.jq_bin = args.jq_bin
         self.deadline = deadline
         self.child_timeout = args.child_timeout_seconds
         self.authorized_owners = base.authorized_owners
-        self.repository = detect_repository(self.git_bin, cwd, self.timeout)
-        self.base_branch = default_branch(self.git_bin, cwd, self.timeout)
-        self.cwd = cwd
+        self.named = repository is not None
+        if self.named:
+            self.repository = repository
+            self.base_branch = None
+            self.cwd = None
+        else:
+            self.repository = detect_repository(self.git_bin, cwd, self.timeout)
+            self.base_branch = default_branch(self.git_bin, cwd, self.timeout)
+            self.cwd = cwd
         rows, self.compiled_problem = load_compiled_policy(args.policy)
         self.derived_row = rows.get(self.repository)
         self.row_problem = self._row_problem(base, args)
+        if self.named and self.derived_row is not None and self.row_problem is None:
+            self.base_branch = self.derived_row["default_branch"]
         # A derived row with two distinct branches declares an integration
         # branch exactly as an `integration_bases` entry does, so every reader
         # of `integration_bases` sees both without knowing where a row came from.
@@ -1474,23 +1673,17 @@ class Context:
 
     @property
     def timeout(self):
-        """The bound for the next child, read immediately before it starts.
-
-        A child starts only when its whole bound ends before the deadline: the
-        bound is never clipped to the time left, so a child that starts has the
-        full `--child-timeout-seconds` and one that cannot is refused before it
-        starts.
-        """
-        if self.deadline - time.monotonic() < self.child_timeout:
-            raise DeadlineExhausted()
-        return self.child_timeout
+        """The bound for the next child (`bounded_timeout`)."""
+        return bounded_timeout(self.deadline, self.child_timeout)
 
     def _row_problem(self, base, args):
         """Why the repository's derived row cannot be used, or None (also None with no row).
 
         Three checks, in this order, and the first to fail is the answer: the
         literal conflict, `origin/HEAD` against the row's default branch, and the
-        row check.
+        row check. A named-repository context has no checkout, so it skips the
+        second: the row check proves the row's default branch against `origin`'s
+        listed default itself (issue 418 D5).
         """
         row = self.derived_row
         if row is None:
@@ -1500,7 +1693,7 @@ class Context:
                 f"repository {self.repository} has both a literal integration base "
                 "and a derived policy row; repair: run claude-guard-policy"
             )
-        if self.base_branch != row["default_branch"]:
+        if not self.named and self.base_branch != row["default_branch"]:
             live = self.base_branch if self.base_branch is not None else "no branch"
             return (
                 f"repository {self.repository}: origin/HEAD names {live}, "
@@ -2742,6 +2935,38 @@ def validate_release_merge(pr_facts, base, integration_base, head_commit, contex
     return 0
 
 
+def repository_context(operation, text, target, contexts, args, base, deadline, compiled):
+    """The context a verb is judged in (issue 418 D4).
+
+    A PR creation or merge whose `--repo` slug differs from its target
+    directory's repository, and which has a row in the compiled policy, is
+    judged in a named-repository context built from that row, and the directory
+    context is not built. Anything else (another verb, a text that matches no
+    form, the directory's own slug, a slug with no row) is judged in the
+    directory context, as before.
+    """
+    requested = None
+    if operation in ("pr-create", "merge"):
+        match = match_form(compiled, text)
+        if match is not None:
+            requested = match.values["slug"]
+    if requested is not None:
+        here = detect_repository(
+            args.git_bin, target, bounded_timeout(deadline, args.child_timeout_seconds))
+        if here != requested:
+            key = ("repository", requested)
+            named = contexts.get(key)
+            if named is None:
+                named = contexts[key] = Context(
+                    args, base, None, deadline, repository=requested)
+            if named.derived_row is not None:
+                return named
+    context = contexts.get(target)
+    if context is None:
+        context = contexts[target] = Context(args, base, target, deadline)
+    return context
+
+
 def main():
     table = compile_form_table(FORM_TABLE)
     started = time.monotonic()
@@ -2789,6 +3014,17 @@ def main():
         if operation == "label":
             return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
 
+    # Issue 418: a command holding a lifecycle verb is admitted only in the
+    # allowlist grammar, so the only directory change left is its one leading cd.
+    lifecycle = [operation for operation, *_ in operations if operation != "label"]
+    shell_dir = shell_problem = None
+    if lifecycle:
+        shell_dir, problem = lifecycle_shape(command)
+        if problem is not None:
+            return refuse(lifecycle[0], f"{problem}; {LIFECYCLE_GRAMMAR}",
+                          accepted_forms(table[lifecycle[0]], None))
+        if shell_dir is not None:
+            shell_problem = cd_directory_problem(command, shell_dir)
     # One context per distinct target directory, all under one deadline.
     contexts = {}
     for operation, segment, problem, directory in operations:
@@ -2796,6 +3032,10 @@ def main():
             return refuse(operation, DEADLINE_REFUSAL)
         if problem is not None:
             return refuse(operation, problem, accepted_forms(table[operation], None))
+        in_shell_directory = operation in ("push", "pr-create")
+        if in_shell_directory and shell_problem is not None:
+            return refuse(operation, shell_problem,
+                          accepted_forms(table[operation], None))
         try:
             # Push and PR creation are judged per segment; the other verbs on the
             # whole command, so they tolerate no chaining.
@@ -2808,13 +3048,13 @@ def main():
                     text, args.git_bin, args.child_timeout_seconds, table[operation]
                 )
             else:
-                target = target_directory(directory, payload.get("cwd"))
-                context = contexts.get(target)
-                if context is None:
-                    context = contexts[target] = Context(
-                        args, base, target,
-                        started + INVOCATION_DEADLINE_SECONDS,
-                    )
+                target = target_directory(
+                    directory,
+                    shell_dir if in_shell_directory and shell_dir is not None
+                    else payload.get("cwd"))
+                context = repository_context(
+                    operation, text, target, contexts, args, base,
+                    started + INVOCATION_DEADLINE_SECONDS, table[operation])
                 if operation == "push":
                     status = validate_push(text, context, table[operation])
                 elif operation == "pr-create":
