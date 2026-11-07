@@ -514,7 +514,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(0, result.returncode, (command, result.stderr))
         # The normalisable spellings keep their inert plain-text bodies.
         for opener in ("cat <<EOF", "cat <<'EOF'", 'cat <<"EOF"', "cat <<-EOF", "cat << 'EOF'"):
-            command = f"{opener}\ngit push origin topic\nnohup x &\nEOF\n"
+            command = f"{opener}\ngit push origin topic\nEOF\n"
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
@@ -543,7 +543,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         # A quoted delimiter expands nothing: the same bodies stay inert.
         for opener in ("cat <<'EOF'", 'cat <<"EOF"'):
             for body in ("$(git push --force origin main)",
-                         "`git push --force origin main`", "$(nohup sleep 9 &)"):
+                         "`git push --force origin main`"):
                 command = f"{opener}\n{body}\nEOF\n"
                 with self.subTest(command=command):
                     result = self.run_guard(command, cwd=repo)
@@ -771,25 +771,122 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assert_detaching_refusal(self.run_guard(command), word, command)
 
-    def test_detaching_word_mentions_pass(self):
+    def test_glued_operator_forms_hide_no_detaching_word(self):
+        """Issue 656: a quoted operator glued to an unquoted one after a wrapper
+        option (`env -u '>'>/dev/null nohup x`) hid the command word from the
+        token scan, while bash and zsh run it. The raw-text check refuses them
+        without reading shell syntax."""
+        for word in ("nohup", "setsid", "disown"):
+            for template in (
+                "env -u '>'>/dev/null W x", "sudo -u '>'>/dev/null W x",
+                "env -u '<'</dev/null W", "sudo -u '<'</dev/null W",
+                "env -u '>'>>log W x &", 'env -u "<"</dev/null W x',
+                "sudo -u '>'>/dev/null env -u '<'</dev/null W x",
+            ):
+                command = template.replace("W", word)
+                with self.subTest(command=command):
+                    self.assert_detaching_refusal(self.run_guard(command), word, command)
+
+    def test_a_detaching_word_anywhere_in_the_raw_text_is_refused(self):
+        """Issue 656 (D2, D3, D5): the check reads text, not shell syntax. A whole
+        word, in any case, is refused wherever it stands, and so is one rebuilt by
+        the deletion copy. The earliest hit in the raw text is named."""
+        for command, word in (
+            # Mentions the token scan let through, refused now (D5).
+            ('echo "nohup"', "nohup"),
+            ('echo "run nohup x & later"', "nohup"),
+            ("cat > notes.md <<'EOF'\nnohup x &\nsetsid y\ndisown\nEOF\n", "nohup"),
+            ("cat <<'EOF'\n$(nohup sleep 9 &)\nEOF\n", "nohup"),
+            ("true # nohup x & disown", "nohup"),
+            ("make > nohup.out 2>&1", "nohup"),
+            ("tail -f nohup.out", "nohup"),
+            ("sudo -u anis ls nohup.out", "nohup"),
+            ("sudo -u >log anis ls nohup", "nohup"),
+            ("make 2>&1 >nohup.out", "nohup"),
+            ("ls >nohup.out", "nohup"),
+            ("X=> nohup.out echo hi", "nohup"),
+            ("env -u '>' echo nohup.out", "nohup"),
+            ("grep nohup log", "nohup"),
+            ("rg -n 'setsid|disown' docs/", "setsid"),
+            ("git commit -m 'refuse nohup'", "nohup"),
+            # Argv runners, an accepted residual of the token scan (D5).
+            ("xargs nohup x", "nohup"),
+            ("timeout 5 setsid x", "setsid"),
+            ("find . -exec disown {} +", "disown"),
+            # Rebuilt by the deletion copy (D3).
+            ("no''hup sleep 9 &", "nohup"),
+            ('se"t"sid x', "setsid"),
+            ("dis\\own", "disown"),
+            ("n\\ohup x", "nohup"),
+            ("no\\\nhup x", "nohup"),
+            ("$'nohup' x", "nohup"),
+            ("no$''hup sleep 999 &", "nohup"),
+            ('no$""hup x', "nohup"),
+            ("no{,}hup x", "nohup"),
+            ("{no,}hup x", "nohup"),
+            ("no{h,}up x", "nohup"),
+            ("set{,}sid x", "setsid"),
+            # An attached option value a program runs (D2: `c` or `s` before).
+            ("env -Snohup\\ x", "nohup"),
+            ("env -iSsetsid", "setsid"),
+            ("su -cdisown", "disown"),
+            # Any case (D2): a case-insensitive file system runs /usr/bin/NOHUP.
+            ("NOHUP x &", "nohup"),
+            ("/usr/bin/SetSid x", "setsid"),
+            ("Disown", "disown"),
+            # ASCII bounds (D2): a Unicode case fold is not a letter.
+            ("echo nohup\u0130", "nohup"),
+            ("echo \u212anohup", "nohup"),
+            # Raw text: a quote beside the word bounds it, though the shell would
+            # glue the two (`anohup`); refusing it costs nothing.
+            ("echo 'a'nohup", "nohup"),
+            # Punctuation other than `-` bounds a word.
+            ("echo x=setsid", "setsid"),
+            ("ls dir/nohup.d", "nohup"),
+            # The earliest hit is named.
+            ("echo setsid; nohup x", "setsid"),
+            ("echo DISOWN nohup", "disown"),
+        ):
+            with self.subTest(command=command):
+                self.assert_detaching_refusal(self.run_guard(command), word, command)
+
+    def test_text_without_a_whole_detaching_word_passes(self):
+        """Issue 656 (D2): a word only counts when no ASCII letter, digit, `_` or
+        `-` touches it (a `c` or `s` before excepted), so these hold none, and a
+        trailing `&` is not detaching."""
         for command in (
-            'echo "nohup"',
-            "grep nohup log",
-            "rg -n 'setsid|disown' docs/",
-            'echo "run nohup x & later"',
-            "cat > notes.md <<'EOF'\nnohup x &\nsetsid y\ndisown\nEOF\n",
-            "true # nohup x & disown",
             "a & b & wait",
             "sleep 1 &",
-            "make > nohup.out 2>&1",
-            "tail -f nohup.out",
-            "sudo -u anis ls nohup.out",
-            "sudo -u >log anis ls nohup",
-            "make 2>&1 >nohup.out",
-            "ls >nohup.out",
+            "ls nohupx",
+            "echo my_setsid_helper",
+            "cat disown2.txt",
+            "echo unohup",
+            "echo no hup",
+            "echo SETSIDE",
+            "echo Knohup",
+            "ls my-nohup",
+            "echo issue-7-refuse-nohup-x",
+            "echo nohup-",
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_slugged_lifecycle_names_pass(self):
+        """Issue 656 (D2, D5): branch and worktree names are slugged from issue
+        titles with `-`, so a title naming a detaching word must not make its
+        branch's push, deletion or worktree calls detaching."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        worktree = "/tmp/x/.worktrees/worktree-issue-700-detect-nohup-assembled-at-run-time"
+        for command in (
+            "git push -u origin issue-700-detect-nohup-assembled-at-run-time",
+            "git push origin issue-701-refuse-setsid-and-disown",
+            "git branch -d issue-702-refuse-nohup",
+            f"git -C {worktree} status --short",
+            f"cd {worktree} && git status --short",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
     def test_detaching_refusal_precedes_the_push_grammar(self):
@@ -2734,12 +2831,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assert_detaching_refusal(self.run_guard(command), word, command)
-        for command in (
-            "X=> nohup.out echo hi",
-            "env -u '>' echo nohup.out",
-        ):
-            with self.subTest(command=command):
-                self.assertEqual(0, self.run_guard(command).returncode, command)
 
     def test_lifecycle_verbs_are_admitted_only_in_the_allowed_grammar(self):
         """Issue 418 allowlist: a command holding a lifecycle verb is admitted only as

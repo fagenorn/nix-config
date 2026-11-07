@@ -14,7 +14,12 @@ Use `just show-claude-settings` to build and print the settings JSON (failing un
 
 ## Detaching words
 
-Before any of that, and before its policy loads, the hook refuses the detaching words `nohup`, `setsid` and `disown` in every repository (#278): wherever a simple command starts (bare, by path, after a redirection or with one attached as in `nohup>log`, or behind a wrapper and its option arguments — `nohup` is no longer a wrapper), anywhere in evaluator source, `env -S` command text or an unparseable command, and inside a quoted `$(…)` or backtick substitution, naming the Bash tool's `run_in_background: true` and `launch-scope exec` as the routes; a mention, a heredoc body the guard reads exactly (issue 651), a comment and a trailing `&` pass, and a word handed to an argv runner such as `xargs` or `timeout` is an accepted residual.
+Before any of that, and before its policy loads, the hook refuses the detaching words `nohup`, `setsid` and `disown` in every repository (#278), naming the Bash tool's `run_in_background: true` and `launch-scope exec` as the routes. Since issue 656 it reads no shell syntax for this. A command is refused when one of the words appears as a whole word in its raw text, in any case. A whole word has no ASCII letter, digit, `_` or `-` after it, and none before it except `c` or `s`, which covers env's attached `-S` and `su -c`. The same test runs on a copy of the text with backslash-newlines deleted, then every `$` before a quote and every `\`, `'`, `"`, `{`, `}` and `,` (`no''hup`, `no$''hup`, `no{,}hup`). The refusal names the earliest hit. So a mention, a heredoc body, a comment, `nohup.out` and a word handed to `xargs` or `timeout` are refused too; a trailing `&` passes, and so does a slugged branch or worktree name such as `issue-7-refuse-nohup`. A commit message that names a word is refused; reword it or use `git commit -F`. Accepted residuals, none of them seen:
+- a word assembled at run time (`${a}hup`, `$(printf …)`, a variable);
+- a glob (`noh?p`);
+- an ANSI-C escape (`$'\x6eohup'`);
+- a brace expansion with a non-empty other alternative (`{no,x}hup`);
+- a word glued to a letter other than `c`/`s` as an attached option value a program runs.
 
 ## Adjudicated verbs
 
