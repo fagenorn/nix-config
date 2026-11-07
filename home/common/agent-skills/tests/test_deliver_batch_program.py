@@ -310,6 +310,30 @@ class QuestionTest(unittest.TestCase):
         self.assertIn("Use the flag.", child(calls, 1)["args"]["decisions"])
         self.assertIn("answered-1", labels(calls))
 
+    def test_a_tracker_answer_survives_a_child_that_fails_after_the_marker_ended(self):
+        answered = dict(OPEN, verdict="answered",
+                        replies=[{"comment_id": 120, "author": "owner", "body": "Use the flag."}])
+        held = {"claim": {"verdict": "held_by", "by": HOLDER}}
+        args = dict(ARGS, conts={"1": {"setup": {}}})
+        for child_result in ("throw", {"stage": "plan-review", "dead_agents": ["plan-review"], "cont": {"setup": {}}}):
+            with self.subTest(child=child_result):
+                first, calls, _ = run(args=args, patch={"facts-1": dict(held, decision=answered)},
+                                      children={"1": child_result})
+                self.assertIn("answered-1", labels(calls))
+                self.assertEqual(first["relaunch"]["decisions"], {"1": "Use the flag."})
+                # The marker is ended now: the tracker shows no replies, so only the relaunch holds the answer.
+                _, calls, _ = run(args=first["relaunch"], patch={"facts-1": dict(held, decision={
+                    "verdict": "none", "comment_id": None, "items": [], "replies": []})})
+                self.assertEqual(child(calls, 1)["args"]["decisions"], "Use the flag.")
+
+    def test_a_child_that_asks_again_does_not_carry_the_consumed_answer(self):
+        answered = dict(OPEN, verdict="answered",
+                        replies=[{"comment_id": 120, "author": "owner", "body": "Use the flag."}])
+        result, _, _ = run(args=dict(ARGS, conts={"1": {"setup": {}}}), patch={"facts-1": {"decision": answered}},
+                           children={"1": QUESTION})
+        self.assertEqual(row(result, 1)["outcome"], "questions")
+        self.assertNotIn("decisions", result["relaunch"])
+
     def test_no_decisions_key_without_an_answer(self):
         _, calls, _ = run()
         self.assertNotIn("decisions", child(calls, 1)["args"])

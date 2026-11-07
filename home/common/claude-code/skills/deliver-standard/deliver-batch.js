@@ -223,6 +223,7 @@ const answerOf = n => {
 const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
 const READY = {}
+const TAKEN = {}
 const readyOf = n => READY[n]
 // The child's whole input (D1): the batch args, the issue's cont, its lane and the owner's answer, nothing else.
 const childArgs = (n, lane) => {
@@ -267,6 +268,8 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', model:
 
     const answer = answerOf(n)
     if (answer !== null) {
+      // Ending the marker erases the replies from the tracker: a relaunch must carry what was read.
+      if (!(DECISIONS && DECISIONS[String(n)])) TAKEN[n] = answer
       const ended = await ask(agent(`The owner answered the open decision of issue #${n} of ${SLUG} (the git repository at ${REPO}). End its marker.
 Run alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision
 Return its verdict and any detail. Run nothing else.
@@ -322,9 +325,13 @@ await parallel(eligible.map(n => () => deliverOne(n)))
 // --- Result: one table, in ISSUES order ---
 const table = ISSUES.map(n => rows[n] || { issue: n, outcome: 'stopped', detail: 'no result' })
 const open = table.filter(r => !FINAL.includes(r.outcome)).map(r => r.issue)
+const rowOf = n => table.find(r => r.issue === n)
 const relaunchArgs = () => {
   const a = { repo_root: REPO, batch_id: BATCH, child_script: CHILD, issues: open }
-  if (DECISIONS !== undefined) a.decisions = DECISIONS
+  // Answers read from the tracker travel too (the marker they sat on is ended), except for an issue that asked again.
+  const decisions = { ...(DECISIONS || {}) }
+  for (const n of open) if (TAKEN[n] !== undefined && !decisions[String(n)] && rowOf(n).outcome !== 'questions') decisions[String(n)] = TAKEN[n]
+  if (DECISIONS !== undefined || Object.keys(decisions).length) a.decisions = decisions
   const conts = {}
   for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
   if (Object.keys(conts).length) a.conts = conts
