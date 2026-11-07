@@ -2437,6 +2437,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"cd {there.parent} && git -C {there.name} push origin {feature}", here),
             (f"cd {there} && git -C {here} push origin {feature}", foreign),
             (f"cd {there}/ && git push origin {feature}", None),
+            # A backslash-newline continuation joins the words, as in the shell.
+            (f"cd\\\n {there} && git push origin {feature}", here),
             # A mention is not a directory change.
             (f"echo cd {foreign} && git push origin {feature}", here),
             (f'git push origin {feature} && echo "cd {foreign}"', here),
@@ -2452,6 +2454,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"cd {here} && git push origin main", there,
              "unsafe push: refusing to push the default branch main"),
             (f"cd {foreign} && git push origin {feature}", here,
+             "unsafe push: repository someoneelse/tool is outside standing authorization"),
+            # A directory word split by a continuation is still a directory change.
+            (f"c\\\nd {there} && git push origin trunk", here,
+             "unsafe push: refusing to push the default branch trunk"),
+            (f"c\\\nd {foreign} && git push origin {feature}", here,
              "unsafe push: repository someoneelse/tool is outside standing authorization"),
             (f"cd {foreign} && {create}", there,
              "unsafe PR creation: repository someoneelse/tool is outside standing authorization"),
@@ -2480,6 +2487,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("push", f"cd ~ && git push origin {feature}"),
             ("push", f"cd && git push origin {feature}"),
             ("push", f"pushd {there} && git push origin {feature}"),
+            ("push", f"pu\\\nshd {there} && git push origin {feature}"),
+            ("push", f"cd {there} && c\\\nd {here} && git push origin {feature}"),
             ("push", f"popd && git push origin {feature}"),
             ("push", f"chdir {there} && git push origin {feature}"),
             ("push", f"builtin cd {there} && git push origin {feature}"),

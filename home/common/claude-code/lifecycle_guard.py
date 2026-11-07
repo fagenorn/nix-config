@@ -1286,9 +1286,33 @@ def cd_prelude_directory(command):
     return word, remainder
 
 
+def join_continuations(command):
+    """`command` with each backslash-newline continuation removed, as the shell
+    does outside single quotes, so `c\\<newline>d` reads as `cd` (issue 418). An
+    escaped pair (`\\\\`) is kept whole, so it never pairs with a later newline."""
+    parts = []
+    quoted = False
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quoted:
+            quoted = character != "'"
+        elif character == "'":
+            quoted = True
+        elif character == "\\" and index + 1 < len(command):
+            if command[index + 1] != "\n":
+                parts.append(command[index:index + 2])
+            index += 2
+            continue
+        parts.append(character)
+        index += 1
+    return "".join(parts)
+
+
 def shell_directory(command):
     """(directory, problem): the directory a leading `cd` moves a push or PR
     creation to, or the problem with any other directory change (issue 418)."""
+    command = join_continuations(command)
     prelude = cd_prelude_directory(command)
     if prelude is not None:
         if not directory_change(prelude[1]):
