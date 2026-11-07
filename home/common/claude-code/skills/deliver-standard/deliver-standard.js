@@ -734,6 +734,10 @@ let expected = fuller(verify.head, prR.head)
 let head = expected
 let syncs = 0
 let round = 0
+let mg = null
+let mergeRefusals = 0
+let raced = false
+let contended = 0
 // One bounded Ship fix wave: an implementer commits a fix on top of the current head (not pushed), then a fresh reviewer re-reviews it.
 // The repair must start from the head the caller accepted (start_head), or the reviewer would see only its own diff and miss an unreviewed commit beneath it.
 // Returns { fix, ok: false } when the fix failed, started elsewhere, or added no commit (unless rebuttal allows an answer with evidence and no commit),
@@ -771,8 +775,25 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', model: 'sonnet', effort: '
     expected = w.fix.commit
     continue
   }
-  if (ck.state === 'passed') break
-  if (syncs >= 2) return stop('sync-contention', { pr: PR, syncs })
+  if (ck.state === 'passed') {
+    const lost = await renew('merge', 'Ship')
+    if (lost) return lost
+    mg = await call(`${CTX}
+Merge PR #${PR}. Run, alone and exactly: ${UNSET}gh pr merge ${PR} --repo ${SLUG} --${STRATEGY} --match-head-commit ${head}${setup.delete_branch ? ' --delete-branch' : ''}
+Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message, and behind true only when the refusal says the head branch is not up to date with the base branch (the integration branch moved), else false.
+${RULES}`, { label: 'merge', phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] } })
+    if (mg && mg.merged) break
+    // Refused as not up to date: the next round's checks step fetches, reports behind and syncs; three refusals, or any other, stop.
+    // That sync is bounded by the refusal budget alone, so syncs made before the first merge attempt never consume it.
+    if (!mg || mg.behind !== true || ++mergeRefusals >= 3) return stop('merge', { pr: PR, merge: mg })
+    raced = true
+    continue
+  }
+  if (!raced) {
+    if (contended >= 2) return stop('sync-contention', { pr: PR, syncs })
+    contended++
+  }
+  raced = false
   syncs++
   const sy = await call(`${CTX}
 The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, commit the merge, and run only the tests covering the files the resolution touched. Do not push. Return conflicted, merge_commit (full sha), resolved_files and the tests you ran; status blocked with notes if you cannot resolve it safely.
@@ -800,16 +821,6 @@ Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} s
     }
   }
 }
-
-{
-  const lost = await renew('merge', 'Ship')
-  if (lost) return lost
-}
-const mg = await call(`${CTX}
-Merge PR #${PR}. Run, alone and exactly: ${UNSET}gh pr merge ${PR} --repo ${SLUG} --${STRATEGY} --match-head-commit ${head}${setup.delete_branch ? ' --delete-branch' : ''}
-Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message.
-${RULES}`, { label: 'merge', phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] } })
-if (!mg || !mg.merged) return stop('merge', { pr: PR, merge: mg })
 
 const finished = await closeOut(PR, mg.merge_commit, W, head)
 return finished.stage === 'done' ? { ...finished, chunked, syncs, verify: verify.results } : finished
