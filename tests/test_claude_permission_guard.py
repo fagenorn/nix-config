@@ -995,6 +995,95 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assert_detaching_refusal(self.run_guard(command), word, command)
 
+    def test_mutants_of_the_detaching_check_are_caught(self):
+        """Issue 656 mutation check (D8): each seam of the raw-text check, broken in
+        a copy of the guard source, gives at least one row a different valid
+        outcome (an admission, or a detaching refusal), while the unmutated copy
+        gives every row its expected one. A crash or another refusal never counts.
+        The copy runs as the wrapper runs the guard; no row holds a
+        repository-bound verb, so the compiled policy is never opened."""
+        source = (Path(__file__).resolve().parents[1]
+                  / "home/common/claude-code/lifecycle_guard.py").read_text(encoding="utf-8")
+        anchor = '\nif __name__ == "__main__":'
+        self.assertEqual(1, source.count(anchor))
+        rows = (
+            ("nohup x", "refuse"),
+            ("echo 'a'nohup", "refuse"),
+            ("no''hup x", "refuse"),
+            ("no$''hup x", "refuse"),
+            ("no{,}hup x", "refuse"),
+            ("NOHUP x", "refuse"),
+            ("echo \u212anohup", "refuse"),
+            ("env -Snohup\\ x", "refuse"),
+            ("su -cnohup x", "refuse"),
+            ("echo nohup", "refuse"),
+            ("echo issue-7-refuse-nohup-x", "admit"),
+            ("grep nohup log", "admit"),
+            ("unset GITHUB_TOKEN && gh issue comment 1 --repo fagenorn/nix-config "
+             "--body 'nohup'", "admit"),
+            ("sleep 1 &", "admit"),
+        )
+        flags = "re.IGNORECASE | re.ASCII"
+        mutants = {
+            "control": "",
+            "no-normalisation": "detaching_normalised = lambda command: command\n",
+            "no-dollar-quote-deletion":
+                "DETACHING_DELETED = re.compile(DETACHING_DELETED.pattern.split('|', 1)[1])\n",
+            "no-brace-deletion":
+                "DETACHING_DELETED = re.compile("
+                "DETACHING_DELETED.pattern.replace('{},', ''))\n",
+            "normalised-text-only":
+                "detaching_texts = lambda command: (detaching_normalised(command),)\n",
+            "case-sensitive":
+                "DETACHING_PATTERN = re.compile(DETACHING_PATTERN.pattern, re.ASCII)\n",
+            "unicode-bounds":
+                "DETACHING_PATTERN = re.compile(DETACHING_PATTERN.pattern, re.IGNORECASE)\n",
+            "dash-bounds-a-word":
+                "DETACHING_PATTERN = re.compile("
+                f"DETACHING_PATTERN.pattern.replace('_-]', '_]'), {flags})\n",
+            "no-attached-option-bound":
+                "DETACHING_PATTERN = re.compile("
+                f"DETACHING_PATTERN.pattern.replace('|(?<=[cs])', ''), {flags})\n",
+            "allow-every-mention": "detaching_mention_allowed = lambda command: True\n",
+            "allow-no-mention": "detaching_mention_allowed = lambda command: False\n",
+        }
+
+        def outcome(result):
+            if result.returncode == 0:
+                return "admit"
+            if (result.returncode == 2
+                    and "lifecycle guard: detaching command `" in result.stderr):
+                return "refuse"
+            return f"invalid: exit {result.returncode}: {result.stderr[-300:]}"
+
+        directory = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        expected = [want for _, want in rows]
+        for name, override in mutants.items():
+            path = directory / f"{name}.py"
+            path.write_text(source.replace(anchor, "\n" + override + anchor, 1),
+                            encoding="utf-8")
+            outcomes = []
+            for command, _ in rows:
+                result = subprocess.run(
+                    [sys.executable, "-I", str(path),
+                     "--base-policy", str(BASE_POLICY_PATH),
+                     "--policy", str(directory / "absent-policy.json"),
+                     "--derive-bin", "/usr/bin/false"],
+                    input=json.dumps({"tool_name": "Bash",
+                                      "tool_input": {"command": command}}),
+                    text=True, capture_output=True, timeout=10, check=False,
+                )
+                outcomes.append(outcome(result))
+            with self.subTest(mutant=name):
+                if name == "control":
+                    self.assertEqual(expected, outcomes)
+                else:
+                    caught = [
+                        command for (command, want), got in zip(rows, outcomes)
+                        if got in ("admit", "refuse") and got != want
+                    ]
+                    self.assertTrue(caught, (name, list(zip(expected, outcomes))))
+
     def test_detaching_refusal_precedes_the_push_grammar(self):
         # AC3: still refused, now for detaching rather than as a push.
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
