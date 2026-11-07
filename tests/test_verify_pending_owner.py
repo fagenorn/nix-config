@@ -17,6 +17,7 @@ from agent_tools import verify_run as vr
 
 from .test_verify_pending import (ISSUE, MERGE, SLUG, T0, PassBase, Refs, block, bkey, check, gnode, hold, line, marker,
                                   ok_check, result, stored_comment)
+from .test_forge_owner_action import QUESTIONS, box_body
 
 OA_ADD = ["api", "-X", "POST", f"repos/{SLUG}/issues/{ISSUE}/labels", "-f", "labels[]=owner-action"]
 OA_REMOVE = ["api", "-X", "DELETE", f"repos/{SLUG}/issues/{ISSUE}/labels/owner-action"]
@@ -944,3 +945,43 @@ class ApproveAllLiveTest(OwnerBase):
         body = fm.render("owner-action", {"reason": "verify-approve"}, "Run?", "Command: x\n\n- [ ] Run it")
         self.assertEqual(vo.tick(body, "Run it"), body.replace("- [ ] Run it", "- [x] Run it"))
         self.assertIsNone(vo.tick(body.replace("[ ]", "[x]"), "Run it"))
+
+
+class AnsweredDecisionPassTest(OwnerBase):
+    """#670: a writing pass reconciles a batch decision prompt beside a live verify prompt."""
+
+    def setUp(self):
+        super().setUp()
+        self.world.respond_json("gh", ["api", "user"], {"login": "octo"})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}"], {"owner": {"login": "octo", "type": "User"}})
+        self.world.respond("gh", ["api", "-X", "POST", f"repos/{SLUG}/labels", "-f", "name=owner-answered",
+                                  "-f", "color=0E8A16"])
+
+    def test_a_pass_adds_owner_answered_and_the_sweep_keeps_owner_action_for_the_verify_prompt(self):
+        self.hold(ask_check(), extra=[stored_comment(11, box_body([QUESTIONS[1]], ticks={(0, 0)}))])
+        lines = vr.pass_repo(self.project, "mbp", Refs())
+        self.assertIn({"repo": SLUG, "issue": ISSUE, "check": None, "ac": None, "state": "open",
+                       "reason": "owner_waiting"}, lines)
+        self.assertEqual(sorted(self.world.issue()["labels"]), ["needs-verification", "owner-action", "owner-answered"])
+        self.no_human_required()
+
+    def test_a_held_issue_whose_only_prompt_is_answered_gets_owner_answered(self):
+        """B-001: a pending check that asks nothing, an answered decision, and `owner-action` from its post."""
+        self.hold(check(when={"not_before": "2026-12-01T00:00:00+00:00"}),  # not yet due: no run, no prompt
+                  labels=["needs-verification", "owner-action"],
+                  extra=[stored_comment(11, box_body([QUESTIONS[1]], ticks={(0, 0)}))])
+        vr.pass_repo(self.project, "mbp", Refs())
+        self.assertEqual(sorted(self.world.issue()["labels"]), ["needs-verification", "owner-answered"])
+        self.assertEqual(self.prompt_posts(), [])
+        label_writes = lambda: [a for a in self.world.argvs("gh") if "-X" in a and "/labels" in a[3]]
+        before = len(label_writes())
+        vr.pass_repo(self.project, "mbp", Refs())
+        self.assertEqual(len(label_writes()), before)  # the second pass writes no label
+        self.assertEqual(sorted(self.world.issue()["labels"]), ["needs-verification", "owner-answered"])
+        self.no_human_required()
+
+    def test_a_report_pass_reconciles_nothing(self):
+        self.hold(ask_check(), labels=["needs-verification", "owner-action"],
+                  extra=[stored_comment(11, box_body([QUESTIONS[1]], ticks={(0, 0)}))])
+        vr.pass_repo(self.project, "mbp", Refs(), report=True)
+        self.assertEqual(sorted(self.world.issue()["labels"]), ["needs-verification", "owner-action"])

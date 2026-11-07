@@ -30,6 +30,7 @@
 """
 import json
 import re
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -166,6 +167,71 @@ def answered(marker: fm.Marker) -> bool:
         return False
     questions = read_questions(marker.body)
     return bool(questions) and all(q["chosen"] is not None for q in questions)
+
+
+def wanted_labels(markers: list[fm.Marker]) -> tuple[bool, bool, set[str]]:
+    """`(owner_action, owner_answered, clears)` the live owner-action markers of a trusted listing want.
+
+    `D` is the live decision prompts, `O` every other live owner-action marker: `owner_answered`
+    when `D` is non-empty and all answered, `owner_action` when `O` is non-empty or `D` is not
+    all answered, and `clears` the labels the answered prompts name."""
+    live = [m for m in markers if m.kind == KIND and fm.is_live(m, markers)]
+    decisions = [m for m in live if m.fields.get("reason") == "decision"]
+    others = [m for m in live if m.fields.get("reason") != "decision"]
+    done = bool(decisions) and all(answered(m) for m in decisions)
+    clears = {m.fields["clears"] for m in decisions if "clears" in m.fields} if done else set()
+    return bool(others) or (bool(decisions) and not done), done, clears
+
+
+def apply_labels(slug: str, issue: int, markers: list[fm.Marker], labels: Collection[str], *,
+                 drop_bare: bool) -> str:
+    """The single writer of `owner-answered` and `owner-action`: write only what differs from the
+    markers (a trusted listing) and the issue's current label names, and return `answered`, `open`
+    or `none`. A bare `owner-action` (no live marker) goes only with `drop_bare` or a live decision."""
+    action, done, clears = wanted_labels(markers)
+    has_decision = any(m.kind == KIND and m.fields.get("reason") == "decision" and fm.is_live(m, markers)
+                       for m in markers)
+    if done and ANSWERED_LABEL[0] not in labels:
+        fm.ensure_label(slug, *ANSWERED_LABEL)
+        fm.add_label(slug, issue, ANSWERED_LABEL[0])
+    if action and LABEL[0] not in labels:
+        fm.ensure_label(slug, *LABEL)
+        fm.add_label(slug, issue, LABEL[0])
+    if not action and LABEL[0] in labels and (has_decision or drop_bare):
+        fm.remove_label(slug, issue, LABEL[0])
+    for name in sorted(clears):
+        if name in labels:
+            fm.remove_label(slug, issue, name)
+    if not done and ANSWERED_LABEL[0] in labels:
+        fm.remove_label(slug, issue, ANSWERED_LABEL[0])
+    return "open" if action else "answered" if done else "none"
+
+
+def reconcile(slug: str, issue: int | None = None) -> list[dict]:
+    """One pass over the open issues carrying `owner-action` or `owner-answered` (only `issue` when
+    given): one report line each. A forge error on one issue skips it; a listing failure raises."""
+    names: dict[int, set[str]] = {}
+    for label in (LABEL[0], ANSWERED_LABEL[0]):
+        for item in fm.open_issues(slug, label):
+            number = item.get("number")
+            if isinstance(number, int) and not isinstance(number, bool):
+                found = item.get("labels")
+                held = names.setdefault(number, set())
+                if isinstance(found, list):
+                    held.update(n["name"] for n in found if isinstance(n, dict) and isinstance(n.get("name"), str))
+    reasons = {"answered": "owner_answered", "open": "owner_waiting", "none": "owner_none"}
+    lines: list[dict] = []
+    for number in sorted(names):
+        if issue is not None and number != issue:
+            continue
+        line: dict[str, Any] = {"repo": slug, "issue": number, "check": None, "ac": None}
+        try:
+            state = apply_labels(slug, number, fm.list_markers(slug, number, TRUSTED), names[number],
+                                 drop_bare=False)
+            lines.append({**line, "state": state, "reason": reasons[state]})
+        except fm.ForgeError:
+            lines.append({**line, "state": "skipped", "reason": "forge_error"})
+    return lines
 
 
 def decisions_text(questions: list[dict]) -> str:

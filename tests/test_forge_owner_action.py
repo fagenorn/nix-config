@@ -397,3 +397,91 @@ class CliTest(Base):
     def test_forge_error_is_exit_1(self):
         code, out = run(*action("status"))  # no comment store: the listing is unregistered and fails
         self.assertEqual((code, out["verdict"], out["action"]), (1, "error", "status"))
+
+
+HR_REMOVE = ["api", "-X", "DELETE", f"repos/{SLUG}/issues/{ISSUE}/labels/agent%3Ahuman-required"]
+ANSWERED = {(0, 0), (1, 0)}
+
+
+class ReconcileTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.world.respond("gh", HR_REMOVE)
+
+    def labelled(self, *comments, labels=("owner-action",), fail_once=()):
+        self.world.comment_store(SLUG, ISSUE, list(comments), next_id=40, labels=list(labels),
+                                 fail_once=list(fail_once))
+
+    def label_writes(self):
+        return [a for a in self.mutations() if "labels" in a[3]]
+
+    def test_a_ticked_approve_box_is_answered_in_one_pass(self):
+        self.labelled(comment(30, box_body([QUESTIONS[1]], ticks={(0, 0)})))
+        self.assertEqual([(l["issue"], l["state"], l["reason"]) for l in foa.reconcile(SLUG)],
+                         [(ISSUE, "answered", "owner_answered")])
+        self.assertEqual(self.world.issue()["labels"], ["owner-answered"])
+        self.assertEqual(self.label_writes(), [OK_ENSURE, OK_ADD, OA_REMOVE])
+
+    def test_a_ticked_option_box_is_answered_in_one_pass(self):
+        self.labelled(comment(30, box_body(ticks={(0, 1), (1, 0)})))
+        foa.reconcile(SLUG)
+        self.assertEqual(self.world.issue()["labels"], ["owner-answered"])
+
+    def test_an_unanswered_prompt_keeps_owner_action(self):
+        for ticks in (set(), {(0, 0)}):
+            with self.subTest(ticks=ticks):
+                self.labelled(comment(30, box_body(ticks=ticks)))
+                self.assertEqual(foa.reconcile(SLUG)[0]["state"], "open")
+                self.assertEqual(self.world.issue()["labels"], ["owner-action"])
+
+    def test_a_second_pass_writes_nothing(self):
+        self.labelled(comment(30, box_body(ticks=ANSWERED)))
+        foa.reconcile(SLUG)
+        before = len(self.mutations())
+        foa.reconcile(SLUG)
+        self.assertEqual(len(self.mutations()), before)
+
+    def test_an_interrupted_label_write_is_repaired_by_the_next_pass(self):
+        self.labelled(comment(30, box_body(ticks=ANSWERED)), fail_once=["remove_label"])
+        self.assertEqual(foa.reconcile(SLUG)[0]["reason"], "forge_error")
+        self.assertEqual(sorted(self.world.issue()["labels"]), ["owner-action", "owner-answered"])
+        foa.reconcile(SLUG)
+        self.assertEqual(self.world.issue()["labels"], ["owner-answered"])
+
+    def test_an_unticked_box_flips_back_to_owner_action(self):
+        self.labelled(comment(30, box_body(ticks={(0, 0)})), labels=("owner-answered",))
+        foa.reconcile(SLUG)
+        self.assertEqual(self.world.issue()["labels"], ["owner-action"])
+
+    def test_an_ended_prompt_drops_owner_answered(self):
+        self.labelled(comment(30, box_body(ticks=ANSWERED)), comment(31, fm.end_body(30, "resolved")),
+                      labels=("owner-answered",))
+        self.assertEqual(foa.reconcile(SLUG)[0]["state"], "none")
+        self.assertEqual(self.world.issue()["labels"], [])
+
+    def test_an_answered_prompt_that_clears_human_required_removes_it(self):
+        self.labelled(comment(30, box_body(ticks=ANSWERED, clears="agent:human-required")),
+                      labels=("owner-action", "agent:human-required"))
+        foa.reconcile(SLUG)
+        self.assertEqual(self.world.issue()["labels"], ["owner-answered"])
+
+    def test_a_prompt_without_clears_keeps_human_required(self):
+        self.labelled(comment(30, box_body(ticks=ANSWERED)), labels=("owner-action", "agent:human-required"))
+        foa.reconcile(SLUG)
+        self.assertEqual(sorted(self.world.issue()["labels"]), ["agent:human-required", "owner-answered"])
+        self.assertNotIn(HR_REMOVE, self.mutations())
+
+    def test_an_untrusted_prompt_counts_for_nothing(self):
+        self.labelled(comment(30, box_body(ticks=ANSWERED), "NONE"))
+        self.assertEqual(foa.reconcile(SLUG)[0]["state"], "none")
+        self.assertEqual(self.world.issue()["labels"], ["owner-action"])
+
+    def test_an_answered_decision_beside_another_live_owner_action_keeps_both(self):
+        self.labelled(comment(30, box_body(ticks=ANSWERED)), comment(31, marker_body("conflict", ("Fix it.",))))
+        self.assertEqual(foa.reconcile(SLUG)[0]["state"], "open")
+        self.assertEqual(sorted(self.world.issue()["labels"]), ["owner-action", "owner-answered"])
+
+    def test_a_later_unanswered_round_keeps_owner_action(self):
+        self.labelled(comment(30, box_body(ticks=ANSWERED)), comment(31, box_body(round_no=2)))
+        self.assertEqual(foa.reconcile(SLUG)[0]["state"], "open")
+        self.assertEqual(self.world.issue()["labels"], ["owner-action"])
