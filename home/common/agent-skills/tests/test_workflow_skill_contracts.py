@@ -10,6 +10,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+from agent_tools import agnostic_lint
+from agent_tools.skill_lint import working_tree
+
 
 REPO_ROOT = Path(__file__).parents[4]
 FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
@@ -3452,6 +3455,30 @@ class ExecutionCallerContractsTest(unittest.TestCase):
     def test_edited_execution_documents_do_not_grow(self):
         assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "SKILL.md",
                                           FROM_ISSUE_DIR / "delegated-owner.md"))
+
+
+class BatchRoutingTest(unittest.TestCase):
+    """#637 AC2: no skill or agent text routes batches to the retired orchestrate-issues."""
+
+    OLD_ROUTE = re.compile(r"orchestrate[- ]issues", re.IGNORECASE)
+
+    def test_no_global_text_names_orchestrate_issues(self):
+        snapshot = working_tree(REPO_ROOT)
+        found = []
+        for root in agnostic_lint.GLOBAL_CORPUS:
+            paths = snapshot.list_files(root) or ([root] if snapshot.read(root) is not None else [])
+            self.assertTrue(paths, f"{root}: no files scanned")
+            for path in paths:
+                if path.endswith((".pyc", ".png", ".jpg", ".pdf")):
+                    continue
+                text = (snapshot.read(path) or b"").decode("utf-8", "replace")
+                found += [f"{path}:{n}" for n, line in enumerate(text.splitlines(), start=1)
+                          if self.OLD_ROUTE.search(line)]
+        self.assertEqual(found, [])
+
+    def test_the_batch_trigger_belongs_to_deliver_batch(self):
+        skill = REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md"
+        self.assertIn('Use for "deliver issues', skill.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -6,8 +6,8 @@
 #   run-eval.sh <eval-id>             shorthand for skill=from-issue
 #
 # Skills are resolved from BOTH skill roots: the shared tree (../skills) and the
-# Claude-only tree (../../claude-code/skills, home of codex-collaboration and
-# orchestrate-issues).
+# Claude-only tree (../../claude-code/skills, home of codex-collaboration,
+# deliver-standard and deliver-batch).
 #
 # Pipeline evals ("mode": "pipeline") copy evals/fixture-repo into a fresh temp dir,
 # give it a real git history and a bare origin, run `claude -p` with the eval's prompt,
