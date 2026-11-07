@@ -57,6 +57,12 @@ class AgnosticTest(unittest.TestCase):
                 with self.subTest(token=token, path=path):
                     self.assertTrue(self.hits({path: f"x {token} y\n".encode()}))
 
+    def test_a_literal_in_a_js_program_is_caught(self):
+        for token in ("nix-config", "Gate One", "origin/main", "just build", "boxen"):
+            with self.subTest(token=token):
+                self.assertTrue(self.hits({"home/common/claude-code/skills/b/prog.js": f"const x = '{token}'\n".encode()}))
+        self.assertEqual(self.hits({"home/common/claude-code/skills/b/prog.js": b"const x = `origin/${INT}`\n"}), [])
+
     def test_exemptions_are_narrow(self):
         retro = "home/common/agent-skills/skills/retro/SKILL.md"
         self.assertEqual(self.hits({retro: b"nix-config at home/common/ fagenorn/nix-config\n"}), [])

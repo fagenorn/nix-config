@@ -798,6 +798,20 @@ class ReadoptTest(unittest.TestCase):
         self.assertNotIn("land-ask-1", labels(calls))
 
 
+class DemoTest(unittest.TestCase):
+    def test_three_issue_batch_with_a_dependency_and_a_questioned_issue_returns_one_table(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
+                               patch={"facts-3": {"blockers": [{"issue": 1, "state": "OPEN"}]}},
+                               children={"2": {"stage": "plan", "needs_user": ["Which flag?"], "cont": {"setup": {}}}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([(r["issue"], r["outcome"]) for r in result["table"]],
+                         [(1, "landed"), (2, "questions"), (3, "landed")])
+        self.assertEqual(result["questions"], [{"issue": 2, "questions": ["Which flag?"], "marker": 99}])
+        self.assertEqual(result["relaunch"], dict(ARGS, issues=[2], conts={"2": {"setup": {}}}))
+        ls = labels(calls)
+        self.assertLess(ls.index("close-out-1"), ls.index("acquire-3"))
+
+
 class SourceTest(unittest.TestCase):
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")
@@ -815,6 +829,15 @@ class SourceTest(unittest.TestCase):
         meta = text[:text.index("\n}\n")]
         for arg in ("repo_root", "batch_id", "child_script", "issues", "label", "decisions"):
             self.assertIn(arg, meta)
+
+    def test_deliver_standard_skill_names_the_batch_program_and_its_args(self):
+        text = PROGRAM.with_name("SKILL.md").read_text(encoding="utf-8")
+        self.assertLessEqual(len(text.encode("utf-8")), 1056)
+        batch = text[text.index("`deliver-batch.js`"):]
+        for key in ("repo_root", "issues", "label", "batch_id", "child_script", "decisions?", "relaunch",
+                    "resumeFromRunId"):
+            with self.subTest(key=key):
+                self.assertIn(key, batch)
 
 
 if __name__ == "__main__":
