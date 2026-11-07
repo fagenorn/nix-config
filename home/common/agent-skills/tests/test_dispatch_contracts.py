@@ -82,10 +82,6 @@ CARRIERS = (
     Carrier("sdd/conformance-reviewer-prompt.md", "shared", "fence"),
     Carrier("from-issue/ship-handoff.md", "shared", "fence"),
     Carrier(
-        "orchestrate-issues/SKILL.md", "claude-only", "blockquote",
-        "launches the issue owner in a fresh context with this entire prompt:",
-    ),
-    Carrier(
         "from-issue/SKILL.md", "shared", "section",
         "## Dispatch, phase-budget and attempt-budget rules",
     ),
@@ -290,7 +286,7 @@ class StrayCopyGuardTest(unittest.TestCase):
 
     def test_the_guard_reads_both_trees_the_agent_definitions_and_the_guidance(self):
         labels = set(guarded_documents())
-        for label in ("shared:worktrees/SKILL.md", "claude-only:orchestrate-issues/SKILL.md",
+        for label in ("shared:worktrees/SKILL.md", "claude-only:deliver-batch/SKILL.md",
                       "agents/reviewer.md", "agent-guidance/AGENTS.md"):
             self.assertIn(label, labels)
         self.assertFalse([label for label in labels if "/evals/" in label])
@@ -516,7 +512,7 @@ class CarrierDeclarationTest(unittest.TestCase):
 
     def test_every_skill_carrier_holds_all_four_clauses(self):
         skill_carriers = [c for c in CARRIERS if c.tree != "agents"]
-        self.assertEqual(len(skill_carriers), 9)
+        self.assertEqual(len(skill_carriers), 8)
         for carrier in skill_carriers:
             with self.subTest(carrier=carrier.relative):
                 self.assertEqual(carrier.contracts, tuple(CONTRACTS))
@@ -581,7 +577,7 @@ class MarkerInventoryTest(unittest.TestCase):
 # Every `<!-- agent-dispatch:` marker across the source skill trees, pinned at
 # #274's base. A change that adds or removes a dispatch site updates this literal
 # in the same commit, which is the point of the pin (#274 D8).
-DISPATCH_MARKER_TOTAL = 39
+DISPATCH_MARKER_TOTAL = 38
 
 
 class DispatchMarkerInventoryTest(unittest.TestCase):

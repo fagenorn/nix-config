@@ -47,12 +47,6 @@ EXPECTED_SUBAGENT_TYPES = {
 }
 
 EXPECTED_OWNER_SITES = {
-    "orchestration-issue-owner": (
-        "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
-        "issue-owner",
-        "opus",
-        "high",
-    ),
     "from-issue-phase-delegate": (
         "home/common/agent-skills/skills/from-issue/SKILL.md",
         "issue-owner",
@@ -141,7 +135,6 @@ EXPECTED_OWNER_SITES = {
 OWNER_ROLES = {"issue-owner", "auto-owner", "ship-owner"}
 OWNER_SKILL_DIRECTORIES = (
     "home/common/agent-skills/skills/from-issue",
-    "home/common/claude-code/skills/orchestrate-issues",
 )
 
 EXPECTED_SDD_SITES = {
@@ -456,9 +449,9 @@ class AgentModelMatrixTest(unittest.TestCase):
             )
             self.assertIn("Agent(", site["call"], site_id)
 
-    def test_from_issue_and_orchestration_owner_sites_launch_issue_owner(self):
-        # Issue 447 (D4, D5): the five owner sites of from-issue and
-        # orchestrate-issues launch the issue-owner type, none general-purpose.
+    def test_from_issue_owner_sites_launch_issue_owner(self):
+        # Issue 447 (D4, D5): the four owner sites of from-issue
+        # launch the issue-owner type, none general-purpose.
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         owner_sites = {
             site["id"]: site
@@ -469,7 +462,6 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertEqual(
             set(owner_sites),
             {
-                "orchestration-issue-owner",
                 "from-issue-phase-delegate",
                 "from-issue-design-grill",
                 "from-issue-planning",
@@ -596,7 +588,7 @@ class AgentModelMatrixTest(unittest.TestCase):
 
         self.assertEqual(
             {event["workflow"] for event in trace},
-            {"orchestration", "from-issue", "sdd", "shipping"},
+            {"from-issue", "sdd", "shipping"},
         )
         self.assertTrue(
             all(
@@ -1045,7 +1037,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertEqual(sites["improve-architecture-scan-owner"], expected_site)
         self.assertEqual(data["scenarios"]["improve-codebase-architecture"], [expected_event])
         self.assertEqual(module.trace(REPO_ROOT, "improve-codebase-architecture"), [{key: expected_event[key] for key in ("workflow", "dispatch", "role", "model", "effort")}])
-        self.assertEqual({event["workflow"] for event in module.trace(REPO_ROOT, "representative")}, {"orchestration", "from-issue", "sdd", "shipping"})
+        self.assertEqual({event["workflow"] for event in module.trace(REPO_ROOT, "representative")}, {"from-issue", "sdd", "shipping"})
 
     def test_a_duplicate_matrix_key_is_refused(self):
         with tempfile.TemporaryDirectory() as temporary:
