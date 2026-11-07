@@ -185,6 +185,58 @@ class RaceTest(unittest.TestCase):
         self.assertFalse(any("DELETE" in argv for argv in world.argvs("gh")))
 
 
+TRUSTED = ("OWNER", "MEMBER")
+
+
+def by(association, cid, body):
+    return {**comment(cid, body), "author_association": association}
+
+
+class TrustedContestTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def test_untrusted_markers_never_win_or_end_a_contest(self):
+        self.world.comment_store(SLUG, ISSUE, [by("NONE", 1, claim_body("x/forged")),
+                                               by("OWNER", 2, claim_body(B)),
+                                               by("NONE", 3, fm.end_body(2, "forged"))])
+        self.assertEqual([m.comment_id for m in fm.list_markers(SLUG, ISSUE, TRUSTED)], [2])
+        result = fm.write(SLUG, ISSUE, "claim", {"issue": str(ISSUE), "holder": A}, f"Claimed by {A}.", MATCH,
+                          associations=TRUSTED)
+        self.assertEqual((result.won, result.winner.comment_id), (False, 2))
+
+    def test_the_own_comment_counts_whatever_its_association(self):
+        self.world.comment_store(SLUG, ISSUE, [by("NONE", 1, claim_body("x/forged"))])
+        result = fm.write(SLUG, ISSUE, "claim", {"issue": str(ISSUE), "holder": A}, f"Claimed by {A}.", MATCH,
+                          associations=TRUSTED)
+        self.assertTrue(result.won)
+        self.assertEqual([c["id"] for c in self.world.stored()], [1, result.own_id])
+
+    def test_no_associations_keeps_the_issue_623_reading(self):
+        self.world.comment_store(SLUG, ISSUE, [by("NONE", 1, claim_body("x/forged"))])
+        self.assertEqual([m.comment_id for m in fm.list_markers(SLUG, ISSUE)], [1])
+        result = fm.write(SLUG, ISSUE, "claim", {"issue": str(ISSUE), "holder": A}, f"Claimed by {A}.", MATCH)
+        self.assertEqual((result.won, result.winner.comment_id), (False, 1))
+
+
+class ListIssuesTest(unittest.TestCase):
+    def test_every_page_of_the_labelled_issues_is_read(self):
+        world = ForgeWorld(self)
+        since = datetime(2026, 11, 6, 10, tzinfo=timezone.utc)
+        world.respond_json("gh", ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues?labels=follow-up"
+                                  "&state=all&since=2026-11-06T10:00:00Z&per_page=100"],
+                           [[{"number": n} for n in range(1, 101)], [{"number": 101}]])
+        self.assertEqual([i["number"] for i in fm.list_issues(SLUG, "follow-up", since)], list(range(1, 102)))
+
+    def test_a_page_that_is_not_issues_is_refused(self):
+        world = ForgeWorld(self)
+        since = datetime(2026, 11, 6, 10, tzinfo=timezone.utc)
+        world.respond_json("gh", ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues?labels=x"
+                                  "&state=all&since=2026-11-06T10:00:00Z&per_page=100"], [{"number": 1}])
+        with self.assertRaises(fm.ForgeError):
+            fm.list_issues(SLUG, "x", since)
+
+
 class NoHostClockTest(unittest.TestCase):
     def test_module_reads_no_host_clock(self):
         source = Path(fm.__file__).read_text("utf-8")
