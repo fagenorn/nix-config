@@ -886,14 +886,30 @@ class SourceTest(unittest.TestCase):
         for arg in ("repo_root", "batch_id", "child_script", "issues", "label", "decisions"):
             self.assertIn(arg, meta)
 
-    def test_deliver_standard_skill_names_the_batch_program_and_its_args(self):
+    def test_deliver_batch_skill_is_small_and_names_the_program_and_its_args(self):
+        # #637 AC1: the skill that replaces orchestrate-issues stays at most 1.5 KB.
+        path = PROGRAM.parent.parent / "deliver-batch" / "SKILL.md"
+        raw = path.read_bytes()
+        self.assertLessEqual(len(raw), 1536)
+        text = raw.decode("utf-8")
+        self.assertTrue(text.startswith("---\nname: deliver-batch\ndescription: "))
+        description = text.split("\n", 3)[2].removeprefix("description: ")
+        self.assertLessEqual(len(description.encode("utf-8")), 147)
+        self.assertIn("Use for", description)
+        self.assertIn("deliver issues", description)
+        self.assertNotIn("resolve-project resolve", text)
+        for key in ("`deliver-batch.js`", "`deliver-standard.js`", "scriptPath", "repo_root", "issues",
+                    "label", "batch_id", "<host>-<yyyymmdd-hhmm>", "child_script", "decisions",
+                    "table", "questions", "owner_actions", "relaunch", "resumeFromRunId",
+                    "`error`", "`result`", "`missing`", "`invalid`", "`holder`", "`breaker`"):
+            with self.subTest(key=key):
+                self.assertIn(key, text)
+
+    def test_deliver_standard_skill_hands_batches_to_deliver_batch(self):
         text = PROGRAM.with_name("SKILL.md").read_text(encoding="utf-8")
         self.assertLessEqual(len(text.encode("utf-8")), 1056)
-        batch = text[text.index("`deliver-batch.js`"):]
-        for key in ("repo_root", "issues", "label", "batch_id", "child_script", "decisions?", "relaunch",
-                    "resumeFromRunId"):
-            with self.subTest(key=key):
-                self.assertIn(key, batch)
+        self.assertIn("`deliver-batch`", text)
+        self.assertNotIn("deliver-batch.js", text)
 
 
 if __name__ == "__main__":

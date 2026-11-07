@@ -452,6 +452,14 @@ in
     recursive = true;
   };
 
+  # Claude-only batch lane: its SKILL.md starts deliver-batch.js (in the
+  # deliver-standard directory) with the Workflow tool, a Claude Code feature
+  # Codex lacks.
+  home.file.".claude/skills/deliver-batch" = {
+    source = ./skills/deliver-batch;
+    recursive = true;
+  };
+
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
   # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
   # subagents dispatch explicitly as reviewer (opus/high), implementer
