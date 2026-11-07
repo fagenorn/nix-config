@@ -88,6 +88,13 @@ def prompt(calls, label):
     return found[-1]
 
 
+def schema_of(calls, label):
+    found = [c["schema"] for c in calls if c["label"] == label]
+    if not found:
+        raise AssertionError(f"no call labelled {label}: {labels(calls)}")
+    return found[-1]
+
+
 class HappyPathTest(unittest.TestCase):
     def test_one_task_runs_every_stage_in_order(self):
         result, calls = run()
@@ -849,6 +856,74 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"merge": {"merged": False, "notes": "head moved"}})
         self.assertEqual(result["stage"], "merge")
         self.assertNotIn("close-out", labels(calls))
+
+
+class ShaNormalisationTest(unittest.TestCase):
+    """#649 defect 1: a head reported in short form is the same head; a different head still stops."""
+
+    def test_short_checks_head_is_accepted_and_the_merge_uses_the_full_sha(self):
+        for short in (SHA[:7], SHA[:12], SHA.upper()[:10], f" {SHA[:9]}\n"):
+            with self.subTest(short=short):
+                result, calls = run(patch={"checks-1": {"head": short}})
+                self.assertEqual(result["stage"], "done")
+                self.assertIn(f"--match-head-commit {SHA}", prompt(calls, "merge"))
+
+    def test_short_pr_head_is_accepted(self):
+        result, calls = run(patch={"pr": {"head": SHA[:8]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("checks-1", labels(calls))
+
+    def test_a_different_or_too_short_head_still_stops(self):
+        for head in ("c" * 40, "c" * 8, SHA[:6], "", "zzzzzzzzzz"):
+            with self.subTest(head=head):
+                result, calls = run(patch={"checks-1": {"head": head}})
+                self.assertEqual(result["stage"], "head-moved")
+                self.assertNotIn("merge", labels(calls))
+                result, calls = run(patch={"pr": {"head": head}})
+                self.assertEqual(result["stage"], "head-moved")
+                self.assertNotIn("checks-1", labels(calls))
+
+    def test_head_fields_require_a_full_sha_in_the_schema(self):
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}})
+        for label, field in (("pr", "head"), ("checks-1", "head"), ("verify", "head"), ("sync-1", "merge_commit")):
+            with self.subTest(label=label):
+                self.assertEqual(schema_of(calls, label)["properties"][field]["pattern"], "^[0-9a-f]{40}$")
+
+    def test_ready_cont_resumed_on_the_short_form_of_its_head_skips_review_and_verify(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        result, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA[:9]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        self.assertNotIn("verify", labels(calls))
+
+    def test_a_legacy_abbreviated_verify_cache_keeps_the_full_pr_sha(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        cont = dict(ready["cont"], verified=dict(ready["cont"]["verified"], head=SHA[:9]))
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": SHA}, "checks-1": {"head": SHA[:8]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("verify", labels(calls))
+        self.assertIn(f"--match-head-commit {SHA} ", prompt(calls, "merge") + " ")
+        other = SHA[:9] + "0" * 31
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": SHA}, "checks-1": {"head": other}})
+        self.assertEqual(result["stage"], "head-moved")
+        self.assertEqual(result["expected"], SHA)
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_full_checks_head_replaces_an_abbreviated_expected_head(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        cont = dict(ready["cont"], verified=dict(ready["cont"]["verified"], head=SHA[:9]))
+        result, calls = run(args=dict(ARGS, cont=cont),
+                            patch={"setup": {"head": SHA}, "pr": {"head": SHA[:8]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn(f"--match-head-commit {SHA} ", prompt(calls, "merge") + " ")
+
+    def test_direct_resume_on_the_short_form_of_the_reviewed_head_skips_the_review(self):
+        stopped, _ = run(args=dict(ARGS, lane="direct"), replies={"verify": None},
+                         patch={"direct-impl": {"commit": SHA}})
+        self.assertEqual(stopped["cont"]["done"][0]["reviewed_head"], SHA)
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": SHA[:10]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("direct-review", labels(calls))
 
 
 class HoldTest(unittest.TestCase):

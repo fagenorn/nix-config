@@ -101,6 +101,18 @@ const IMPL = {
 }
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
 const STRS = { type: 'array', items: { type: 'string' } }
+// A forge or agent may report a short sha; the same head must not read as moved.
+const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }
+const normSha = x => x.trim().toLowerCase()
+const sameSha = (a, b) => {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const x = normSha(a), y = normSha(b)
+  if (x === y) return x !== ''
+  const ok = /^[0-9a-f]{7,40}$/
+  if (!ok.test(x) || !ok.test(y)) return false
+  return x.length >= y.length ? x.startsWith(y) : y.startsWith(x)
+}
+const fuller = (a, b) => { const x = normSha(a), y = normSha(b); return y.length > x.length ? y : x }
 const REVIEW_STATE = { type: 'string', enum: ['available', 'blocked', 'unsupported', 'absent'] }
 const SETUP_SCHEMA = {
   type: 'object',
@@ -421,7 +433,7 @@ const planRefs = () => {
 }
 let chunked = false
 // A ready stop's verified head, unchanged and clean, needs no second review or verify.
-const SKIP_REVIEW = !!(verified && plan && setup.head === verified.head && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)))
+const SKIP_REVIEW = !!(verified && plan && sameSha(setup.head, verified.head) && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)))
 if (!SKIP_REVIEW) verified = null
 // The verification contract as freshly resolved, key order aside: cached results answer only this contract.
 const canon = v => Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v)
@@ -455,7 +467,7 @@ ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', mod
   const d1 = taskLog.find(d => d.n === 1)
   const reviewHead = impl ? impl.commit : setup.head
   // Implementation completion never skips the fresh review: only a head it already passed does.
-  if (!(SKIP_REVIEW || (!impl && present(d1.reviewed_head) && d1.reviewed_head === setup.head))) {
+  if (!(SKIP_REVIEW || (!impl && present(d1.reviewed_head) && sameSha(d1.reviewed_head, setup.head)))) {
     let fix = null
     phase('Final review')
     const lost = await renew('final-review', 'Final review')
@@ -632,7 +644,7 @@ if (finalFindings.length) {
 phase('Verify')
 const VERIFY = {
   type: 'object',
-  properties: { head: { type: 'string' }, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' } }, required: ['id', 'status', 'summary'] } } },
+  properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' } }, required: ['id', 'status', 'summary'] } } },
   required: ['head', 'clean', 'results'],
 }
 const verifyPrompt = `${CTX}
@@ -683,16 +695,16 @@ const closesLine = allCode && INT === setup.default_branch ? `Closes #${ISSUE}` 
 }
 const prR = await call(`${CTX}
 Open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
-${RULES}`, { label: 'pr', phase: 'Ship', model: 'sonnet', schema: { type: 'object', properties: { pr: { type: 'integer' }, head: { type: 'string' }, notes: { type: 'string' } }, required: ['pr', 'head'] } })
+${RULES}`, { label: 'pr', phase: 'Ship', model: 'sonnet', schema: { type: 'object', properties: { pr: { type: 'integer' }, head: FULL_SHA, notes: { type: 'string' } }, required: ['pr', 'head'] } })
 if (!prR || !prR.pr) return stop('pr', { result: prR })
 // The shipped head must be the verified head; after a sync, the reviewed merge commit.
-if (prR.head !== verify.head) return stop('head-moved', { pr: prR.pr, expected: verify.head, head: prR.head })
+if (!sameSha(prR.head, verify.head)) return stop('head-moved', { pr: prR.pr, expected: verify.head, head: prR.head })
 const PR = prR.pr
 
-const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind'] }, head: { type: 'string' }, required: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
-const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: { type: 'string' }, resolved_files: STRS, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
-let head = prR.head
-let expected = verify.head
+const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind'] }, head: FULL_SHA, required: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
+const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, resolved_files: STRS, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
+let expected = fuller(verify.head, prR.head)
+let head = expected
 let syncs = 0
 for (;;) {
   const lost = await renew(`checks-${syncs + 1}`, 'Ship')
@@ -702,8 +714,9 @@ Wait for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local br
 ${RULES}`, { label: `checks-${syncs + 1}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: CHECKS })
   if (!ck) return stop('checks', { pr: PR, checks: null })
   if (ck.state === 'failed') return stop('checks', { pr: PR, checks: ck })
-  if (ck.head !== expected) return stop('head-moved', { pr: PR, expected, head: ck.head })
-  head = ck.head
+  if (!sameSha(ck.head, expected)) return stop('head-moved', { pr: PR, expected, head: ck.head })
+  expected = fuller(expected, ck.head)
+  head = expected
   if (ck.state === 'passed') break
   if (syncs >= 2) return stop('sync-contention', { pr: PR, syncs })
   syncs++
