@@ -1106,6 +1106,171 @@ def detaching_hit(text):
     return min(matches, key=lambda match: match.start(1)).group(1).lower()
 
 
+# The read-only allowlist of issue 656 (D4). Every admitted option is enumerated,
+# so an option that changes where the pattern comes from (`-f`), drops it
+# (`--files`) or runs a program (rg's `--pre`, `--hostname-bin`, `-z`) refuses the
+# admission.
+DETACHING_SEARCH_FLAG_LETTERS = {"grep": "cEFHhiIlLnoqRrsvwx", "rg": "FHiIlLnNoqsSuvwx"}
+DETACHING_SEARCH_FLAGS = {
+    "grep": frozenset({
+        "--count", "--extended-regexp", "--fixed-strings", "--with-filename",
+        "--no-filename", "--ignore-case", "--files-with-matches",
+        "--files-without-match", "--line-number", "--only-matching", "--quiet",
+        "--recursive", "--dereference-recursive", "--no-messages", "--invert-match",
+        "--word-regexp", "--line-regexp",
+    }),
+    "rg": frozenset({
+        "--count", "--fixed-strings", "--ignore-case", "--smart-case",
+        "--case-sensitive", "--files-with-matches", "--line-number",
+        "--no-line-number", "--only-matching", "--quiet", "--hidden", "--no-ignore",
+        "--word-regexp", "--line-regexp", "--invert-match", "--follow",
+        "--with-filename", "--no-filename", "--heading", "--no-heading",
+    }),
+}
+DETACHING_SEARCH_VALUE_OPTIONS = {
+    "grep": frozenset({
+        "-A", "-B", "-C", "-m", "--max-count", "--after-context", "--before-context",
+        "--context", "--include", "--exclude", "--exclude-dir",
+    }),
+    "rg": frozenset({
+        "-A", "-B", "-C", "-m", "--max-count", "--after-context", "--before-context",
+        "--context", "-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not",
+        "-d", "--max-depth",
+    }),
+}
+DETACHING_GH_TEXT_OPTIONS = frozenset({"--title", "-t", "--body", "-b"})
+DETACHING_GH_VALUE_OPTIONS = frozenset({"--repo", "-R", "--base", "-B", "--head", "-H"})
+
+
+def _detaching_content(text, kind):
+    """A word's text with its outer quote pair removed when it is quoted."""
+    return text[1:-1] if kind == "quoted" else text
+
+
+def _detaching_holds_hit(content):
+    return any(detaching_hit(text) is not None for text in detaching_texts(content))
+
+
+def _detaching_search_roles(program, contents, kinds):
+    """The roles of the words after the program of a grep or rg call, or None."""
+    letters = DETACHING_SEARCH_FLAG_LETTERS[program]
+    flags = DETACHING_SEARCH_FLAGS[program]
+    value_options = DETACHING_SEARCH_VALUE_OPTIONS[program]
+    roles = []
+    after_dashdash = False
+    expect = None
+    explicit = False
+    for content, kind in zip(contents, kinds):
+        if kind == "and":
+            return None
+        if expect is not None:
+            roles.append(expect)
+            expect = None
+        elif after_dashdash or not content.startswith("-") or content == "-":
+            roles.append("positional")
+        elif content == "--":
+            roles.append("other")
+            after_dashdash = True
+        elif content in ("-e", "--regexp"):
+            roles.append("other")
+            expect = "pattern"
+            explicit = True
+        elif content.startswith("--regexp="):
+            roles.append("pattern")
+            explicit = True
+        elif content in flags or (
+            content[1:] and not content.startswith("--")
+            and all(letter in letters for letter in content[1:])
+        ):
+            roles.append("other")
+        elif content in value_options:
+            roles.append("other")
+            expect = "other"
+        elif content.startswith("--") and "=" in content \
+                and content.split("=", 1)[0] in value_options:
+            roles.append("other")
+        else:
+            return None
+    if expect is not None:
+        return None
+    if not explicit:
+        if "positional" not in roles:
+            return None
+        roles[roles.index("positional")] = "pattern"
+    return ["other" if role == "positional" else role for role in roles]
+
+
+def _detaching_gh_roles(contents, kinds):
+    """The roles of the words of a gh issue/pr create/comment call, or None."""
+    if any(kind == "and" for kind in kinds):
+        return None
+    if len(contents) < 3 or any(kind != "plain" for kind in kinds[:3]) \
+            or contents[0] != "gh" or contents[1] not in ("issue", "pr") \
+            or contents[2] not in ("create", "comment"):
+        return None
+    roles = ["other"] * 3
+    index = 3
+    while index < len(contents):
+        content, kind = contents[index], kinds[index]
+        if kind == "plain" and content in DETACHING_GH_TEXT_OPTIONS:
+            if index + 1 >= len(contents):
+                return None
+            roles += ["other", "text" if kinds[index + 1] == "quoted" else "other"]
+            index += 2
+        elif kind == "plain" and content in DETACHING_GH_VALUE_OPTIONS:
+            if index + 1 >= len(contents):
+                return None
+            roles += ["other", "other"]
+            index += 2
+        elif content.startswith("-"):
+            return None
+        else:
+            roles.append("other")
+            index += 1
+    return roles
+
+
+def detaching_mention_allowed(command):
+    """True when `command` is one of the two read-only forms that may name a
+    detaching word (issue 656, D4), read with `lifecycle_words`: the word only in
+    the pattern of one enumerated grep or rg call, or only in a quoted title or
+    body of one `gh issue|pr create|comment` call after at most the `unset`
+    credential scrub. Anything not enumerated refuses the admission."""
+    words, problem = lifecycle_words(command)
+    if problem is not None or not words:
+        return False
+    kinds = [kind for _, kind in words]
+    contents = [_detaching_content(text, kind) for text, kind in words]
+    first_content, first_kind = contents[0], kinds[0]
+    if first_kind != "plain":
+        return False
+    if first_content in ("grep", "rg"):
+        rest = _detaching_search_roles(first_content, contents[1:], kinds[1:])
+        roles = None if rest is None else ["other"] + rest
+    elif first_content == "unset":
+        names = []
+        index = 1
+        while (index < len(words) and kinds[index] == "plain"
+               and contents[index] in GH_ENV_TOKEN_NAMES
+               and contents[index] not in names and len(names) < 2):
+            names.append(contents[index])
+            index += 1
+        if not names or index >= len(words) or kinds[index] != "and":
+            return False
+        call = _detaching_gh_roles(contents[index + 1:], kinds[index + 1:])
+        roles = None if call is None else ["other"] * (index + 1) + call
+    elif first_content == "gh":
+        roles = _detaching_gh_roles(contents, kinds)
+    else:
+        return False
+    if roles is None:
+        return False
+    return not any(
+        role == "other" and _detaching_holds_hit(content)
+        for role, content in zip(roles, contents)
+    )
+
+
 def detaching_word(command):
     """The detaching word (`nohup`, `setsid`, `disown`) in `command`, or None.
 
@@ -1113,7 +1278,9 @@ def detaching_word(command):
     matched first, then a copy with the characters that rebuild a word deleted
     (`no''hup`, `no{,}hup`), and the earliest hit of the first text that has one
     is named. So a mention, a heredoc body, a comment, `nohup.out` and a word
-    handed to `xargs` or `timeout` are refused too. A default-value expansion
+    handed to `xargs` or `timeout` are refused too, unless
+    `detaching_mention_allowed` admits the command (the narrow read-only
+    allowlist: a grep or rg pattern, or quoted gh issue/pr text). A default-value expansion
     (`${x:-nohup}`) and a word after `$` and one digit, `!`, `@` or `*` count.
     Accepted residuals: a word assembled at run time, a glob, an ANSI-C escape,
     a brace expansion with a non-empty other alternative, and a word glued to a
@@ -1122,7 +1289,7 @@ def detaching_word(command):
     for text in detaching_texts(command):
         word = detaching_hit(text)
         if word is not None:
-            return word
+            return None if detaching_mention_allowed(command) else word
     return None
 
 

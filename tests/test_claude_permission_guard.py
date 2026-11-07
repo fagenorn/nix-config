@@ -806,8 +806,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("ls >nohup.out", "nohup"),
             ("X=> nohup.out echo hi", "nohup"),
             ("env -u '>' echo nohup.out", "nohup"),
-            ("grep nohup log", "nohup"),
-            ("rg -n 'setsid|disown' docs/", "setsid"),
             ("git commit -m 'refuse nohup'", "nohup"),
             # Argv runners, an accepted residual of the token scan (D5).
             ("xargs nohup x", "nohup"),
@@ -902,6 +900,100 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_read_only_mentions_of_a_detaching_word_pass(self):
+        """Issue 656 allowlist (D4): the word is admitted only as the search pattern
+        of one plain grep or rg call whose options are all enumerated, or inside a
+        quoted title or body of one gh issue/pr create/comment call (after the
+        sanctioned scrub prelude or none), read in the issue-418 word grammar."""
+        for command in (
+            "grep nohup log",
+            "grep -n -e nohup -e setsid home/common/claude-code/README.md",
+            "grep -rn --include '*.md' disown docs",
+            "grep --exclude-dir=.git -rn setsid home",
+            "rg -n 'setsid|disown' docs/",
+            "rg -n -g '*.md' nohup docs/",
+            "rg --regexp=nohup -t py .",
+            "rg -- nohup docs",
+            'rg -i "NOHUP" tests',
+            "gh issue comment 656 --repo fagenorn/nix-config "
+            "--body 'never nohup; use run_in_background'",
+            "gh issue create --repo fagenorn/nix-config --title 'setsid refusal' "
+            '--body "disown is refused too"',
+            "gh pr comment 657 --repo fagenorn/nix-config -b 'nohup'",
+            "gh issue create --repo fagenorn/nix-config -t 'nohup' "
+            "-b 'first line\nsetsid on the second'",
+            "unset GITHUB_TOKEN && gh issue comment 700 --repo fagenorn/nix-config "
+            "--body 'nohup refusal notes'",
+            "unset GITHUB_TOKEN GH_TOKEN && gh issue create --repo fagenorn/nix-config "
+            "--title 'detect setsid assembled at run time' --body 'disown too'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        # A PR creation holding the word in its quoted text, with a slugged head
+        # and with or without the ship-issue scrub, is admitted outright: it
+        # clears the detaching check and the lifecycle grammar.
+        repo = self.make_repo("https://github.com/fagenorn/argus.git")
+        create = ('gh pr create --repo fagenorn/argus --base main '
+                  '--head issue-700-refuse-nohup '
+                  '--title "fix: refuse nohup" --body "setsid and disown too"')
+        for command in (create, "unset GITHUB_TOKEN && " + create):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_detaching_mentions_outside_the_allowlist_are_refused(self):
+        """Issue 656 allowlist (D4): near misses of the two admitted forms."""
+        for command, word in (
+            ("grep nohup log; nohup x", "nohup"),
+            ("grep nohup log && nohup x", "nohup"),
+            ("grep nohup log | sh", "nohup"),
+            ("grep nohup $(setsid x)", "nohup"),
+            ("grep x nohup.out", "nohup"),              # a path, not the pattern
+            ("grep -e x nohup", "nohup"),               # a path once -e names the pattern
+            ("rg -e x nohup", "nohup"),
+            ("grep -A nohup x log", "nohup"),           # an option's value
+            ("grep --include=nohup x .", "nohup"),
+            ("grep -f patterns nohup", "nohup"),        # patterns from a file
+            ("grep --file=patterns nohup", "nohup"),
+            ("grep -rf patterns nohup", "nohup"),       # a cluster with an unlisted letter
+            ("grep -esnohup log", "nohup"),             # attached -e is not enumerated
+            ("rg --files nohup", "nohup"),              # no pattern at all
+            ("rg --type-list nohup", "nohup"),
+            ("rg -r nohup x .", "nohup"),               # a replacement, not a pattern
+            ("rg -z nohup x", "nohup"),                 # rg runs decompressors
+            ("grep -e nohup -A", "nohup"),              # a value option missing its value
+            ("grep 'no''hup' log", "nohup"),            # glued quotes leave the grammar
+            ("rg --pre nohup x .", "nohup"),            # rg runs --pre's value
+            ("rg --pre=nohup x .", "nohup"),
+            ("rg --hostname-bin=setsid x", "setsid"),
+            ("rg --pre-glob '*' --pre=disown x", "disown"),
+            ("FOO=1 grep nohup log", "nohup"),
+            ("command grep nohup log", "nohup"),
+            ("/usr/bin/grep nohup log", "nohup"),
+            ("egrep nohup log", "nohup"),
+            ("'grep' nohup log", "nohup"),              # the program word must be plain
+            ("unset GITHUB_TOKEN && grep nohup log", "nohup"),  # no prelude for search
+            ("gh issue comment 1 --body nohup", "nohup"),           # unquoted text
+            ("gh issue comment 1 -- --body 'nohup'", "nohup"),      # options ended
+            ("gh issue comment 1 --body='nohup'", "nohup"),         # not enumerated
+            ("gh issue comment 1 --repo 'nohup/x' --body b", "nohup"),
+            ("gh issue comment 1 --body 'x' --edit-last 'nohup'", "nohup"),
+            ("gh issue edit 1 --body 'nohup'", "nohup"),
+            ("gh issue comment 1 --body-file nohup.md", "nohup"),
+            ("gh issue comment 1 --body 'x'; nohup y", "nohup"),
+            ('gh issue comment 1 --body "$(nohup x)"', "nohup"),
+            ("gh api repos/x/issues -f body='nohup'", "nohup"),
+            ("unset PATH && gh issue comment 1 --body 'nohup'", "nohup"),
+            ("unset GITHUB_TOKEN GITHUB_TOKEN && gh issue comment 1 --body 'nohup'", "nohup"),
+            ("env -u GITHUB_TOKEN gh issue comment 1 --body 'nohup'", "nohup"),
+            ("cd /tmp && gh issue comment 1 --body 'nohup'", "nohup"),
+            ("unset GITHUB_TOKEN && gh issue comment 1 --body 'x' && nohup y", "nohup"),
+            ("echo 'nohup'", "nohup"),
+        ):
+            with self.subTest(command=command):
+                self.assert_detaching_refusal(self.run_guard(command), word, command)
 
     def test_detaching_refusal_precedes_the_push_grammar(self):
         # AC3: still refused, now for detaching rather than as a push.
