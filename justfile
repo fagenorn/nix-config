@@ -146,8 +146,13 @@ agent-workflow-tests *args:
     tests/test_agent_tools_siblings.py \
     tests/test_lane_triage.py \
     tests/test_verify_block.py \
+    tests/test_verify_pending.py \
+    tests/test_verify_pending_pass.py \
+    tests/test_verify_pending_units.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \
+    tests/test_forge_owner_action.py \
+    tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
     tests/test_skill_sections.py \
     tests/test_phase_budget.py \
@@ -211,6 +216,7 @@ agent-workflow-tests *args:
     tests/test_branch_protection.py \
     tests/test_suite_runner.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
+    home/common/agent-skills/tests/test_deliver_batch_program.py \
     tests/test_retained_root_copy.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
@@ -226,6 +232,10 @@ agent-instruction-load *args:
 # Run the Instruction Budget gate against origin/main; pass --raise-label for a labelled raise (#292 D9).
 agent-instruction-budget *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load check --base origin/main {{args}}
+
+# Run this host's due read-only verification checks and close passing issues (issue 630)
+verify host *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verify_pending run --host {{host}} {{args}}
 
 # Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build

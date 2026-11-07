@@ -39,6 +39,12 @@ The `land` subcommand (`land acquire|release|status`, issue 629) is the cross-ho
 of `agent_tools.forge_land_lock`: `main` routes it there and reports its usage errors in its
 own one-line shape.
 
+The `owner-action` subcommand (`owner-action post|end|status`, issue 636, D6) is
+`agent_tools.forge_owner_action`: the decision, conflict and needs-label markers a batch posts
+for the owner. They carry no `claim` field, and claim retirement (`retire_obsolete`,
+`retire_owner_actions`) ends only owner-action markers that name a claim, so `status`, `renew`
+and `release` never end one of them or remove the label while one lives.
+
 D10, residual window, accepted: an honour reads the server time and the branch activity first,
 then takes a fresh listing and ends the claim right after judging that listing's `updated_at`, so
 a renewal that landed before that listing is never undone. One that lands between that listing
@@ -53,6 +59,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from agent_tools import forge_land_lock
+from agent_tools import forge_owner_action
 from agent_tools import forge_markers as fm
 from agent_tools.forge_markers import ForgeError, Marker
 
@@ -109,6 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--branch", type=BRANCH, default=None)
         elif name == "release":
             sub.add_argument("--reason", type=REASON, default="done")
+    owner = commands.add_parser("owner-action")
+    forge_owner_action.add_actions(owner)
     land = commands.add_parser("land")
     actions = land.add_subparsers(dest="action", required=True)
     for name in forge_land_lock.ACTIONS:
@@ -138,14 +147,15 @@ def _mark_in_progress(args: argparse.Namespace) -> None:
 
 def retire_owner_actions(slug: str, issue: int, markers: list[Marker], claim_id: int | None,
                          reason: str) -> list[int]:
-    """End the live `owner-action` markers naming `claim_id` (all when None) with `reason` (D10).
+    """End the live `owner-action` markers naming `claim_id` (every one naming a claim when None)
+    with `reason` (D10). A marker with no `claim` field is never ended here (issue 636, D6).
 
     When at least one was ended and no live `owner-action` of the issue remains, judged on
     `markers` plus the ids ended here, the `owner-action` label is removed. Returns the ended
     marker ids, ascending."""
     live = [m for m in markers if m.kind == OWNER_ACTION_KIND and fm.is_live(m, markers)]
-    named = sorted(m.comment_id for m in live
-                   if claim_id is None or m.fields.get("claim") == str(claim_id))
+    named = sorted(m.comment_id for m in live if "claim" in m.fields
+                   and (claim_id is None or m.fields["claim"] == str(claim_id)))
     for comment_id in named:
         fm.end(slug, issue, comment_id, reason)
     if named and not any(m.comment_id not in named for m in live):
@@ -255,13 +265,15 @@ def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Mar
 
 
 def retire_obsolete(slug: str, issue: int, markers: list[Marker], keep: int | None) -> list[int]:
-    """End every live `owner-action` of the issue whose claim is not `keep` (D10).
+    """End every live `owner-action` of the issue naming a claim other than `keep` (D10).
 
-    The reason is `renewed` when that claim is live in `markers`, else `released`. When at
+    A marker with no `claim` field is never ended, and still counts as live for the label
+    (issue 636, D6). The reason is `renewed` when that claim is live in `markers`, else `released`. When at
     least one was ended and no live `owner-action` remains, the `owner-action` label goes.
     Returns the ended ids, ascending."""
     live = _live_owner_actions(markers)
-    obsolete = [m for m in live if m.fields.get("claim") != (None if keep is None else str(keep))]
+    obsolete = [m for m in live if "claim" in m.fields
+                and m.fields["claim"] != (None if keep is None else str(keep))]
     for marker in obsolete:
         claim_live = any(c.kind == CLAIM_KIND and str(c.comment_id) == marker.fields.get("claim")
                          and fm.is_live(c, markers) for c in markers)
@@ -426,6 +438,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
     except UsageError as error:
+        if argv[:1] == ["owner-action"]:
+            _emit(forge_owner_action.usage_result(argv, str(error)))
+            return USAGE
         if argv[:1] == ["land"]:
             _emit(forge_land_lock.usage_result(argv, str(error)))
             return USAGE
@@ -437,11 +452,14 @@ def main(argv: list[str] | None = None) -> int:
         return stop.code if isinstance(stop.code, int) else 0
     try:
         code, result = (forge_land_lock.run(args) if args.command == "land"
+                        else forge_owner_action.run(args) if args.command == "owner-action"
                         else COMMANDS[args.command](args))
     except ForgeError as error:
         code, result = FORGE_ERROR, (
             forge_land_lock.result(args, "error", error=error.code, detail=error.detail)
             if args.command == "land"
+            else forge_owner_action.result(args, "error", error=error.code, detail=error.detail)
+            if args.command == "owner-action"
             else _result(args, "error", error=error.code, detail=error.detail))
     _emit(result)
     return code

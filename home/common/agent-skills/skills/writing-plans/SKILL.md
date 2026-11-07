@@ -5,7 +5,7 @@ description: Turns a spec into a task-by-task implementation plan. Use when requ
 
 # Writing Plans
 
-Write for a skilled engineer with no context on this codebase, toolset or domain who reads one task and no other. DRY, YAGNI, test-first, frequent commits.
+Write for a skilled engineer new to this codebase who reads one task and no other. DRY, YAGNI, test-first, frequent commits.
 
 **Resolve once at entry.** Run `resolve-project resolve --repo-root <the checkout you were called in>` and read the absolute `bindings.paths.artifacts.plans` from the snapshot it prints. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Never persist the snapshot or infer a policy value.
 
@@ -13,7 +13,7 @@ Write for a skilled engineer with no context on this codebase, toolset or domain
 
 ## Payload discipline
 
-Move information cheaply: targeted `rg` over whole-file reads; bounded reads; test and build output cut to failing lines; long logs on disk, passed as paths; artifacts (briefs, packages, reports) handed between agents as paths, never inlined. Verification commands print little (quiet flags, tails). Do not build, prototype or run the change while planning; confirming each task's failing test is the only run.
+Move information cheaply: targeted `rg` over whole-file reads; bounded reads; test and build output cut to failing lines; long logs on disk, passed as paths; artifacts (briefs, packages, reports) handed between agents as paths, never inlined. Do not build, prototype or run the change while planning; confirming each task's failing test is the only run.
 
 ## Scope and file structure
 
@@ -86,9 +86,9 @@ holds the single line `None — no acceptance criteria.` Otherwise:
 - `Kind` — the issue's `[code|evidence|human]` tag, never reclassified; an
   untagged criterion gets your judgment, written `<kind> (classified)`.
 - `Task` — the one `Task N` that adds or runs the check.
-- `Check` — `code`: the test, check or CI job; `evidence`: the command, its
-  conditions, the literal threshold and the acceptance-record row `AC<n>` the
-  owning implementer fills in; `human`: the judgment and who makes it.>
+- `Check` — `code`: the test, check or CI job; `evidence`: the verify block's
+  trigger, command, threshold and expiry, and the acceptance-record row `AC<n>`
+  the owning implementer fills in; `human`: the judgment, its judge and why.>
 
 ## Decisions
 
@@ -177,7 +177,7 @@ Reread the finished plan against the spec yourself, no dispatch, and fix inline:
 1. **Spec coverage**: every requirement maps to a task.
 2. **Type consistency**: later tasks use the names earlier tasks define.
 3. **Members**: the whole member template, a scoped falsifiable gate, decision IDs, commit scope.
-4. **The rules above**: no placeholders; an index row per member with matching files and lane (a `mechanical` or `low-risk` lane for excluded work is a bug); a complete acceptance map; no numbered task body in the root.
+4. **The rules above**: no placeholders; an index row per member with matching files and lane (a `mechanical` or `low-risk` lane for excluded work is a bug); an acceptance map complete and within `~/.agents/standards/acceptance-planning.md` R1–R7; no numbered task body in the root.
 5. **Remeasure** the package after the last edit, and the spec after a ledger row.
 
 ## Return control
