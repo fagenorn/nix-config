@@ -2624,6 +2624,27 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assert_detaching_refusal(self.run_guard(command), word, command)
 
+    def test_mixed_quoted_and_unquoted_redirections_hide_no_detaching_word(self):
+        """Final review of issue 418, fourth round: a bare operator at the end of a
+        word is a redirection or a quoted character, and each such word is read on
+        its own. `X=> /dev/null` redirects, `>'log>'` is a quoted target, so in
+        `X=> /dev/null >'log>' nohup x` the word `nohup` is the command."""
+        for command, word in (
+            ("X=> /dev/null >'log>' nohup sleep 999", "nohup"),
+            ("X=> /dev/null >'log>' setsid sleep 999", "setsid"),
+            ("X=> /dev/null >'log>' disown", "disown"),
+            ("X='>' >/dev/null >'log>' nohup sleep 999", "nohup"),
+            ("X=> t Y=> u >'log>' nohup x", "nohup"),
+            ("X=> /dev/null Y='>' nohup x", "nohup"),
+        ):
+            with self.subTest(command=command):
+                self.assert_detaching_refusal(self.run_guard(command), word, command)
+        for command in (
+            "X=> nohup.out echo hi",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(0, self.run_guard(command).returncode, command)
+
     def test_lifecycle_verbs_are_admitted_only_in_the_allowed_grammar(self):
         """Issue 418 allowlist: a command holding a lifecycle verb is admitted only as
         [scrub && ][cd <dir> && ]<verb> <args> (or git -C <dir> push|branch -d), every

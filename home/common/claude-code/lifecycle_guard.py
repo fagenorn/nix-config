@@ -1060,19 +1060,21 @@ def wrapper_option(wrapper, option):
     return None, None
 
 
-def detaching_command_flags(tokens, state=(True, None, (), False),
-                            embedded_targets=True, bang_closes=False):
+def detaching_command_flags(tokens, states=((True, None, (), False),),
+                            bang_closes=False):
     """Per token: is it a word at which the shell may start a simple command?
 
-    Returns (flags, payloads, state). `payloads` is the command text handed to
-    `env -S`. `state` is (open_position, wrapper, pending_arguments,
-    redirection_target) and carries a dangling redirection: `split_segments`
-    cuts at the `&` of `2>&1`, so the next segment opens with its target.
+    Returns (flags, payloads, states). `payloads` is the command text handed to
+    `env -S`. A state is (open_position, wrapper, pending_arguments,
+    redirection_target); `states` holds every state the shell may be in, and
+    carries a dangling redirection: `split_segments` cuts at the `&` of `2>&1`,
+    so the next segment opens with its target.
 
     A word ending in a bare operator inside it (`X=>`, `worker>`) is ambiguous,
     because token values are unquoted: an unquoted `>` takes the next word as
-    its target, a quoted one (`X='>'`) does not. `embedded_targets` picks one
-    reading; `detaching_word` scans both and refuses on either.
+    its target, a quoted one (`X='>'`) does not. The ambiguity is per token, so
+    `X=> /dev/null >'log>' nohup x` has one of each; every state forks into both
+    readings at each such token, and a token is flagged when any state flags it.
 
     Like `command_position_flags`, which also steps over the arguments of
     wrapper options (`sudo -u anis nohup x`), but it also steps over
@@ -1089,53 +1091,62 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
     """
     flags = [False] * len(tokens)
     payloads = []
+    states = frozenset(states)
+    for index, (value, operator) in enumerate(tokens):
+        following = set()
+        for state in states:
+            for embedded in (True, False):
+                after, flag, payload = detaching_step(
+                    state, index, value, operator, embedded, bang_closes)
+                following.add(after)
+                flags[index] = flags[index] or flag
+                if payload is not None and payload not in payloads:
+                    payloads.append(payload)
+        states = frozenset(following)
+    return flags, payloads, states
+
+
+def detaching_step(state, index, value, operator, embedded, bang_closes):
+    """One token of `detaching_command_flags` from one state and one reading:
+    (state after, flagged, `env -S` payload or None)."""
     open_position, wrapper, pending, target = state
     pending = list(pending)
-    for index, (value, operator) in enumerate(tokens):
-        if operator:
-            open_position, wrapper, pending, target = True, None, [], False
-            continue
-        if bang_closes and target and index == 0 and value == "!" and state[3]:
-            continue
-        if target:
-            target = False
-            continue
-        if not open_position:
-            continue
-        if BARE_REDIRECTION.match(value) is not None:
-            target = True
-            continue
-        if ATTACHED_REDIRECTION.match(value) is not None:
-            # `>/dev/null>` is an attached redirection that ends in a bare one.
-            target = (embedded_targets
-                      and TRAILING_OPERATOR.search(value) is not None)
-            continue
-        word, redirection = split_redirection(value)
-        target = (embedded_targets
-                  and TRAILING_OPERATOR.search(redirection) is not None)
-        if pending:
-            if pending.pop(0) == "payload":
-                payloads.append(value)
-            continue
-        if ASSIGNMENT_PREFIX.match(word) is not None:
-            continue
-        if word in COMMAND_KEYWORDS or word in COMMAND_WRAPPERS:
-            wrapper = word
-            continue
-        if wrapper is not None and word.startswith("-"):
-            kind, attached = wrapper_option(wrapper, word)
-            if kind == "payload" and attached is not None:
-                payloads.append(value)
-            elif kind == "payload" or (kind == "argument" and attached is None
-                                       and not redirection):
-                # An option word that also carries a redirection may be a quoted
-                # attached argument; taking the next word as the command then
-                # only ever refuses more.
-                pending.append(kind)
-            continue
-        flags[index] = True
-        open_position = False
-    return flags, payloads, (open_position, wrapper, tuple(pending), target)
+    if operator:
+        return (True, None, (), False), False, None
+    if bang_closes and target and index == 0 and value == "!":
+        return state, False, None
+    if target:
+        return (open_position, wrapper, tuple(pending), False), False, None
+    if not open_position:
+        return state, False, None
+    if BARE_REDIRECTION.match(value) is not None:
+        return (open_position, wrapper, tuple(pending), True), False, None
+    if ATTACHED_REDIRECTION.match(value) is not None:
+        # `>/dev/null>` is an attached redirection that ends in a bare one.
+        target = embedded and TRAILING_OPERATOR.search(value) is not None
+        return (open_position, wrapper, tuple(pending), target), False, None
+    word, redirection = split_redirection(value)
+    target = embedded and TRAILING_OPERATOR.search(redirection) is not None
+    if pending:
+        payload = value if pending.pop(0) == "payload" else None
+        return (open_position, wrapper, tuple(pending), target), False, payload
+    if ASSIGNMENT_PREFIX.match(word) is not None:
+        return (open_position, wrapper, tuple(pending), target), False, None
+    if word in COMMAND_KEYWORDS or word in COMMAND_WRAPPERS:
+        return (open_position, word, tuple(pending), target), False, None
+    if wrapper is not None and word.startswith("-"):
+        kind, attached = wrapper_option(wrapper, word)
+        payload = None
+        if kind == "payload" and attached is not None:
+            payload = value
+        elif kind == "payload" or (kind == "argument" and attached is None
+                                   and not redirection):
+            # An option word that also carries a redirection may be a quoted
+            # attached argument; taking the next word as the command then
+            # only ever refuses more.
+            pending.append(kind)
+        return (open_position, wrapper, tuple(pending), target), False, payload
+    return (False, wrapper, tuple(pending), target), True, None
 
 
 def detaching_word(command):
@@ -1163,30 +1174,30 @@ def detaching_word(command):
     segments = split_segments(command)
     if segments is None:
         return earliest(command)
-    # One scan per pair of readings: a bare operator inside a word as a
-    # redirection whose target is the next word, or as a quoted character; and a
-    # `!` glued to the `&` that cut a segment as closing zsh's `>&!`, or not.
-    readings = [(embedded, bang) for embedded in (True, False) for bang in (True, False)]
-    states = dict.fromkeys(readings, fresh)
+    # One scan per reading of a `!` glued to the `&` that cut a segment: as
+    # closing zsh's `>&!`, or not. Each scan keeps every state a bare operator
+    # inside a word (a redirection, or a quoted character) leads to.
+    readings = (True, False)
+    states = dict.fromkeys(readings, frozenset([fresh]))
     for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
-            states = dict.fromkeys(readings, fresh)
+            states = dict.fromkeys(readings, frozenset([fresh]))
             found = earliest(segment)
             if found is not None:
                 return found
             continue
         flags = [False] * len(tokens)
         payloads = []
-        for reading in readings:
-            embedded, bang = reading
+        for bang in readings:
             read_flags, read_payloads, after = detaching_command_flags(
-                tokens, states[reading], embedded_targets=embedded,
+                tokens, states[bang],
                 bang_closes=bang and segment.startswith("!"))
             # Only a redirection cut at its `&` (`2>&1`) continues into the next
             # segment; any real separator ends the simple command and its options.
-            dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
-            states[reading] = after if dangling else fresh
+            dangling = DANGLING_REDIRECTION.search(segment) is not None
+            states[bang] = frozenset(
+                [fresh] + [s for s in after if s[3]] if dangling else [fresh])
             flags = [a or b for a, b in zip(flags, read_flags)]
             payloads.extend(read_payloads)
         for payload in payloads:
