@@ -148,6 +148,7 @@ agent-workflow-tests *args:
     tests/test_verify_block.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \
+    tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
     tests/test_skill_sections.py \
