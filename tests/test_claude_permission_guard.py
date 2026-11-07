@@ -858,6 +858,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("${x:-no{,}hup} sleep 999 &", "nohup"),
             ("${a[i-1]:-nohup} sleep 999 &", "nohup"),
             ("${x:-no$''hup} sleep 999 &", "nohup"),
+            # ...including before its first letter.
+            ("${x:-'n'ohup} sleep 999 &", "nohup"),
+            ("${x:-\"n\"ohup} sleep 999 &", "nohup"),
+            ("${x:-\\no\\hup} sleep 999 &", "nohup"),
+            ("${x:-''n''ohup} sleep 999 &", "nohup"),
+            ("${@:-'n'ohup} sleep 999 &", "nohup"),
+            ("${x:-'s'etsid} sleep 999 &", "setsid"),
+            ("${x:-\"d\"isown}", "disown"),
+            ("${x:-$\"n\"ohup} sleep 999 &", "nohup"),
+            ("unset a; ${a[0]:-'n'ohup} sleep 60 &", "nohup"),
             ("${x:-no\\\nhup} sleep 999 &", "nohup"),
             ("no\\\nhup sleep 999 &", "nohup"),
             # A positional or empty special parameter glued before the word
@@ -1037,6 +1047,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("sleep 1 &", "admit"),
             ("${x:-nohup} y", "refuse"),
             ("${a[0]:-no''hup} y", "refuse"),
+            ("${x:-'n'ohup} y", "refuse"),
             ("$1nohup y", "refuse"),
             ("no\\\nhup y", "refuse"),
             ("echo ${x}-nohup", "admit"),
@@ -1067,6 +1078,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "no-default-word-rebuild":
                 "DETACHING_DEFAULT_PATTERN = re.compile(r'\\$\\{[A-Za-z0-9_]*:?-(' "
                 "+ '|'.join(DETACHING_WORDS) + r')(?![A-Za-z0-9_-])', "
+                f"{flags})\n",
+            "no-default-leading-junk":
+                "DETACHING_DEFAULT_PATTERN = re.compile("
+                "DETACHING_DEFAULT_PATTERN.pattern.replace(':?-(' + DETACHING_JUNK, ':?-(', 1), "
                 f"{flags})\n",
             "no-positional-bound":
                 "DETACHING_PATTERN = re.compile("

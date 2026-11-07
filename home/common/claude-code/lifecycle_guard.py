@@ -148,13 +148,14 @@ DETACHING_PATTERN = re.compile(
 # `${x-nohup}` expand to the literal word when `x` is unset. Any
 # parameter counts, since it may be a special one or carry a subscript
 # (`${@:-nohup}`, `${a[0]:-nohup}`, `${a[i-1]:-nohup}`), and the word may be
-# rebuilt by the characters `DETACHING_JUNK` matches (`${x:-no''hup}`,
-# `${x-no\hup}`, `${x:-no{,}hup}`), which the deletion copy cannot recover
+# rebuilt by the characters `DETACHING_JUNK` matches, before the first letter
+# and between letters (`${x:-'n'ohup}`, `${x:-no''hup}`, `${x-no\hup}`,
+# `${x:-no{,}hup}`), which the deletion copy cannot recover
 # here because it also deletes the brace that opens the expansion.
 DETACHING_JUNK = r"(?:\\\n|\$(?=['\"])|[\\'\"{},])*"
 DETACHING_DEFAULT_PATTERN = re.compile(
     r"\$\{(?:[^}:\-\[]|\[[^\]]*\])*:?-(" + "|".join(
-        DETACHING_JUNK.join(word) for word in DETACHING_WORDS
+        DETACHING_JUNK + DETACHING_JUNK.join(word) for word in DETACHING_WORDS
     ) + r")(?![A-Za-z0-9_-])",
     re.IGNORECASE | re.ASCII,
 )
