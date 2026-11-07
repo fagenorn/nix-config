@@ -12,9 +12,6 @@ from unittest import mock
 
 
 REPO_ROOT = Path(__file__).parents[4]
-ORCHESTRATE = (
-    REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/SKILL.md"
-)
 FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
 AUTO = REPO_ROOT / "home/common/agent-skills/skills/from-issue/AUTO.md"
 ROLLOVER = REPO_ROOT / "home/common/agent-skills/skills/from-issue/rollover.md"
@@ -75,7 +72,7 @@ SKILL_ROOTS = (
 )
 
 LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-issue").glob("*.md")),
-                  *sorted(SHIP_ISSUE.parent.glob("*.md")), ORCHESTRATE)
+                  *sorted(SHIP_ISSUE.parent.glob("*.md")))
 # The closed capability-gap line ship-issue returns when its Phase-0 probe finds
 # no subagent-launch tool, spelled once for the module (per D4).
 CAPABILITY_GAP_LINE = "capability_gap: agent_dispatch"
@@ -204,33 +201,6 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
         "--artifact-path <specification-directory> --artifact-path <plan-directory>",
         "--format json", "`product.changed_files`", "`files[].path`",
         "`files[].changed_lines`", "`git diff <base>..<head> -- ':(literal)<path>'`",
-    ),
-}
-
-# Machine-consumed text each orchestrate-issues tree must carry (#291 D6):
-# lifecycle helper argv, the `orchestrate-control` step input and the
-# ready-report members the adapter reads (#404 D4), and the observation values
-# the dispatcher sends. No guidance sentence is pinned.
-ORCHESTRATE_MACHINE_TEXT = {
-    ORCHESTRATE: (
-        "orchestrate-control start --repo-root <ledger_repo_root>",
-        "orchestrate-control start --repo-root <ledger_repo_root> <issue> --run-id <run-id>",
-        "orchestrate-control step --repo-root <ledger_repo_root> --input -",
-        "`session`", "`first_sweep`", "`owners`", "`contracts_due`", "`refused_contracts`",
-        "`dispatches`", "`owner_object`", "`resume_pack`", "`contract_refusals`", "`ends_run`",
-        "--boundary workflow-response", "`worktree_fact`",
-        "`recorded_worktree_absent`", "`recorded_worktree_mismatch`",
-        "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--action-id <action_id>",
-        "launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep",
-        "run_in_background=true", "`launch_refused`", "`unavailable`",
-        "workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--action-id <action_id> --stall-minutes <stall_minutes> "
-        "| artifact-budget validate-report --boundary workflow-response --input -",
-        "workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--action-id <action_id> --stall-minutes <stall_minutes> --since <liveness_since>",
-        "`wait_seconds`", "`liveness_since`", "`stalled`", "`past_deadline`",
-        "`not_current`",
     ),
 }
 
@@ -423,7 +393,6 @@ CLAUDE_POLICY_ENTRIES = {
         "bindings.commands", "capabilities.review.plan",
         "capabilities.review.code", "bindings.paths.hints",
     ),
-    "orchestrate-issues/SKILL.md": ("bindings.workflow.orchestration.stall_minutes",),
 }
 
 SHARED_POLICY_SUPPORT = {}
@@ -770,7 +739,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             REPO_ROOT / "home/common/agent-skills/skills/wayfind/evals/evals.json",
             REPO_ROOT / "home/common/agent-skills/skills/writing-plans/evals/evals.json",
             REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/evals/evals.json",
-            REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/evals/evals.json",
         )
         corpus = "\n".join(
             str(json.loads(path.read_text(encoding="utf-8"))) for path in paths
@@ -886,7 +854,6 @@ def json_block(text):
 class WorkflowSkillContractsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.orchestrate = ORCHESTRATE.read_text(encoding="utf-8")
         cls.from_issue = FROM_ISSUE.read_text(encoding="utf-8")
         cls.auto = AUTO.read_text(encoding="utf-8")
         cls.investigate = INVESTIGATE.read_text(encoding="utf-8")
@@ -1150,43 +1117,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         end = text.index(next_heading, start + len(heading))
         return text[start:end]
 
-    def test_dispatcher_calls_no_retired_lifecycle_command(self):
-        # #404 AC1: every control round goes through orchestrate-control, so the
-        # dispatcher spells no lifecycle call that helper makes, and no request.
-        for retired in ("workflow-state launch", "workflow-state reconcile",
-                        "workflow-state host-route", "workflow-state init-run",
-                        "workflow-state control", "workflow-state build-delivery",
-                        "workflow-state resume-pack", "--request-file",
-                        '"interface_version": 3'):
-            with self.subTest(retired=retired):
-                self.assertNotIn(retired, self.orchestrate)
-
-    def test_dispatcher_passes_immutable_ledger_root_separately_from_worktree(self):
-        # The fields of the owner prompt follow its background Agent call.
-        declaration = self.orchestrate.index(
-            'Agent(subagent_type="issue-owner", model="opus", effort="high", '
-            'run_in_background=true)'
-        )
-        fresh_prompt = self.orchestrate[declaration:]
-        for field in (
-            "ledger_repo_root=<ledger_repo_root>",
-            "run_id=<run-id>",
-            "issue=<issue>",
-            "attempt=<attempt>",
-            "owner=<owner-token>",
-            "action_id=<action-id>",
-            "worktree=<absolute-worktree>",
-            "handoff_path=<exact-handoff-path>",
-            "from-issue <num> --auto",
-        ):
-            self.assertIn(f"> `{field}`", fresh_prompt)
-
-    def test_dispatcher_executes_the_closed_control_action_set(self):
-        for kind in ("spawn", "resume", "retry", "delivery_contract", "wait", "finalize"):
-            self.assertIn(f"`{kind}`", self.orchestrate)
-
-    def test_background_dispatch_flag_appears_only_in_orchestrate_issues(self):
-        self.assertIn("run_in_background=true", self.orchestrate)
+    def test_nested_workflow_documents_never_dispatch_in_the_background(self):
         for path, text in nested_workflow_documents():
             with self.subTest(path=str(path)):
                 self.assertNotIn("run_in_background", text)
@@ -1676,13 +1607,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 with self.subTest(path=path.name, item=item):
                     self.assertIn(item, text)
 
-    def test_orchestrate_documents_carry_their_machine_text(self):
-        for path, items in ORCHESTRATE_MACHINE_TEXT.items():
-            text = normalized(path.read_text(encoding="utf-8"))
-            for item in items:
-                with self.subTest(path=path.name, item=item):
-                    self.assertIn(item, text)
-
     def test_ship_issue_documents_carry_their_machine_text(self):
         for path, items in SHIP_ISSUE_MACHINE_TEXT.items():
             text = normalized(path.read_text(encoding="utf-8"))
@@ -1781,7 +1705,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             REPO_ROOT / "home/common/agent-skills/default.nix"
         ).read_text(encoding="utf-8")
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
-        for name, text in (("from-issue", self.from_issue), ("orchestrate", self.orchestrate),
+        for name, text in (("from-issue", self.from_issue),
                            ("ship-issue", self.ship_issue)):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/workflow-state", text)
@@ -2134,10 +2058,6 @@ class SlimBootContractsTest(unittest.TestCase):
     def test_pack_carrying_prompts_name_the_resume_entry(self):
         resume = self.section(self.read(FROM_ISSUE), "### Resume pack", "## The flow")
         self.assertIn(self.ENTRY, resume)
-        orchestrate = self.read(ORCHESTRATE)
-        fresh = orchestrate[orchestrate.index("<!-- agent-dispatch: id=orchestration-issue-owner"):]
-        self.assertLess(fresh.index("Resume pack"), fresh.index(self.ENTRY))
-        self.assertIn("from-issue <num> --auto", fresh[fresh.index(self.ENTRY):])
 
     def test_the_entry_runs_its_checks_before_any_skill_section(self):
         entry = self.read(RESUME_PACK)
@@ -2905,7 +2825,7 @@ path_unchanged_since() { return 0; }
 
 
 class InstalledOrchestrateRoutesTest(unittest.TestCase):
-    """D25, #618: only the Claude tree holds orchestrate-issues."""
+    """#637: orchestrate-issues is retired; the Claude tree holds deliver-batch."""
 
     @classmethod
     def setUpClass(cls):
@@ -2915,12 +2835,14 @@ class InstalledOrchestrateRoutesTest(unittest.TestCase):
                                     "`just agent-installed-skill-tests`")
         cls.root = Path(root)
 
-    def test_only_the_claude_tree_holds_the_adapter(self):
+    def test_the_claude_tree_holds_deliver_batch_and_no_orchestrate_issues(self):
         self.assertFalse((self.root / ".agents/skills/orchestrate-issues").exists())
+        self.assertFalse((self.root / ".claude/skills/orchestrate-issues").exists())
         self.assertTrue((self.root / ".agents/skills/deliver-standard/SKILL.md").is_file())
         self.assertTrue((self.root / ".claude/skills/deliver-standard/deliver-standard.js").is_file())
-        installed = (self.root / ".claude/skills/orchestrate-issues/SKILL.md").read_text(encoding="utf-8")
-        self.assertEqual(installed, ORCHESTRATE.read_text(encoding="utf-8"))
+        installed = (self.root / ".claude/skills/deliver-batch/SKILL.md").read_text(encoding="utf-8")
+        source = REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md"
+        self.assertEqual(installed, source.read_text(encoding="utf-8"))
 
 
 class AcceptanceGradingContractsTest(unittest.TestCase):
@@ -3271,13 +3193,6 @@ class OrchestratedReentryContractsTest(unittest.TestCase):
         self.helper = module_constants(WORKFLOW_STATE, "ORCHESTRATED_RESUME",
                                        *DIRECT_REFUSAL_MARKERS)
 
-    def test_the_final_report_reentry_is_the_helpers_resume_command(self):
-        resume = self.helper["ORCHESTRATED_RESUME"].format(
-            repo_root="<ledger_repo_root>", issue="<issue>", run_id="<run-id>")
-        self.assertIn(resume, ORCHESTRATE_MACHINE_TEXT[ORCHESTRATE])
-        self.assertNotIn("/from-issue <issue> --auto",
-                         normalized(ORCHESTRATE.read_text(encoding="utf-8")))
-
     def test_acquire_direct_names_each_refusal_direct_owner_prints(self):
         text = normalized(ACQUIRE_DIRECT.read_text(encoding="utf-8"))
         for constant, marker in DIRECT_REFUSAL_MARKERS.items():
@@ -3291,11 +3206,10 @@ class DirectLaneRoutingTest(unittest.TestCase):
 
     DELIVER_DIRECT = REPO_ROOT / "home/common/agent-skills/skills/deliver-direct/SKILL.md"
 
-    def test_phase_zero_and_orchestrate_route_to_deliver_direct(self):
+    def test_phase_zero_routes_to_deliver_direct(self):
         text = normalized(FROM_ISSUE.read_text(encoding="utf-8"))
         start = text.index("## Phase 0 — Investigate")
         self.assertIn("`deliver-direct`", text[start:text.index("## Phase 1 — Worktree", start)])
-        self.assertIn("`deliver-direct`", normalized(ORCHESTRATE.read_text(encoding="utf-8")))
 
     def test_deliver_direct_spells_the_guard_accepted_ship_forms(self):
         text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
@@ -3388,7 +3302,6 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
         "home/common/agent-skills/skills/from-issue/ship-handoff.md",
         "home/common/agent-skills/skills/from-issue/SKILL.md",
         "home/common/agent-skills/skills/sdd/SKILL.md",
-        "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
     )
     WAIT_FORMS = ("Monitor with an until-condition", "a background Bash command")
     END_THE_TURN = "a blocker another session owns: end the turn, never poll"

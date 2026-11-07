@@ -21,7 +21,7 @@ SKILL_ROOTS = (
 BUDGET = REPO_ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
 POLICY = REPO_ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 SETUP_KINDS = {"dirty-worktree", "shippable-worktree", "planned-worktree", "release-ready", "tracked-issue"}
-PIPELINE_SKILLS = ("from-issue", "ship-issue", "sdd", "ship-release", "orchestrate-issues")
+PIPELINE_SKILLS = ("from-issue", "ship-issue", "sdd", "ship-release")
 ASSERT_LIB = EVALS_DIR / "assert-lib.sh"
 
 
@@ -342,33 +342,6 @@ class EvalCasesTest(unittest.TestCase):
             root.write_text("# Plan\n\n### Task 1: x\n\nExpected: ok\n", encoding="utf-8")
             with self.subTest(case="a legacy single-file plan"):
                 self.assertEqual(plan_tasks_verifiable(root).returncode, 0)
-
-    def test_orchestrate_ledger_assert_requires_a_ledger_shape(self):
-        shell = case_assert("orchestrate-issues", 7, "a run ledger exists and records no attempt")
-        ledger = {"admission": {"claims": [], "releases": 0, "route": "claude-code"},
-                  "created_at": "2026-10-07T10:09:59Z", "issues": {}, "prior_run": None,
-                  "run_id": "orch-1-3-20261007", "schema_version": 6,
-                  "updated_at": "2026-10-07T10:11:00Z", "workers": []}
-        cases = (
-            ("the kept sandboxes' ledger shape", ledger, True),
-            ("an empty object", {}, False),
-            ("issues that is not an object", {**ledger, "issues": []}, False),
-            ("an issue with an attempt", {**ledger, "issues": {"1": {"attempts": [{"n": 1}]}}}, False),
-            ("an issue without an attempts array", {**ledger, "issues": {"1": {}}}, False),
-            ("an issue with an empty attempts array", {**ledger, "issues": {"1": {"attempts": []}}}, True),
-            ("a claimed role set", {**ledger, "admission": {**ledger["admission"], "claims": [{}]}}, False),
-            ("a registered worker", {**ledger, "workers": [{}]}, False),
-        )
-        for label, state, passes in cases:
-            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
-                run_dir = Path(tmp) / ".superpowers/workflows/run"
-                run_dir.mkdir(parents=True)
-                (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
-                done = run_assert(shell, tmp, REPO=tmp)
-                self.assertEqual(done.returncode == 0, passes, done.stdout + done.stderr)
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.subTest(case="no ledger at all"):
-                self.assertNotEqual(run_assert(shell, tmp, REPO=tmp).returncode, 0)
 
     def test_from_issue_no_artifact_asserts_treat_empty_and_missing_dirs_as_empty(self):
         name = "no spec or plan was written"

@@ -62,7 +62,6 @@ ALLOWED_SUBAGENT_TYPES = {
 }
 CUSTOM_AGENT_ROLES = {"implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic"}
 WORKFLOW_FAMILIES = {
-    "orchestration",
     "from-issue",
     "sdd",
     "shipping",
