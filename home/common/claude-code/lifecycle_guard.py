@@ -135,12 +135,19 @@ DETACHING_WORDS = ("nohup", "setsid", "disown")
 # A whole word, matched in the raw text with no shell parsing (issue 656 D2).
 # Case-insensitive because a case-insensitive file system runs `NOHUP`; `re.ASCII`
 # so a Unicode case fold (KELVIN SIGN, dotted capital I) is no letter. `-` is a
-# word character because no shell makes `x-nohup` a command word and branch
-# slugs use it. A `c` or `s` before still bounds the word, for env's attached
-# `-S` and the attached `-c` of `su` and `script`.
+# word character because branch slugs use it and a `-` before a word is rarely
+# a command word. A `c` or `s` before still bounds the word, for env's attached
+# `-S` and the attached `-c` of `su` and `script`; so does a `$` and one digit,
+# `!`, `@` or `*` (`$1nohup`: the parameter is empty in the Bash tool).
 DETACHING_PATTERN = re.compile(
-    r"(?:(?<![A-Za-z0-9_-])|(?<=[cs]))(" + "|".join(DETACHING_WORDS)
+    r"(?:(?<![A-Za-z0-9_-])|(?<=[cs])|(?<=\$[0-9!@*]))(" + "|".join(DETACHING_WORDS)
     + r")(?![A-Za-z0-9_-])",
+    re.IGNORECASE | re.ASCII,
+)
+# The one place a `-` is an operator, not a word character: `${x:-nohup}` and
+# `${x-nohup}` expand to the literal word when `x` is unset.
+DETACHING_DEFAULT_PATTERN = re.compile(
+    r"\$\{[A-Za-z0-9_]*:?-(" + "|".join(DETACHING_WORDS) + r")(?![A-Za-z0-9_-])",
     re.IGNORECASE | re.ASCII,
 )
 # What the deletion copy of the command drops (issue 656 D3): a `$` before a
@@ -1089,8 +1096,14 @@ def detaching_texts(command):
 
 def detaching_hit(text):
     """The lowercased detaching word of the first match in `text`, or None."""
-    match = DETACHING_PATTERN.search(text)
-    return match.group(1).lower() if match else None
+    matches = [
+        match for match in (
+            DETACHING_PATTERN.search(text), DETACHING_DEFAULT_PATTERN.search(text),
+        ) if match
+    ]
+    if not matches:
+        return None
+    return min(matches, key=lambda match: match.start(1)).group(1).lower()
 
 
 def detaching_word(command):
@@ -1100,10 +1113,11 @@ def detaching_word(command):
     matched first, then a copy with the characters that rebuild a word deleted
     (`no''hup`, `no{,}hup`), and the earliest hit of the first text that has one
     is named. So a mention, a heredoc body, a comment, `nohup.out` and a word
-    handed to `xargs` or `timeout` are refused too. Accepted residuals: a word
-    assembled at run time, a glob, an ANSI-C escape, a brace expansion with a
-    non-empty other alternative, and a word glued to a letter other than `c` or
-    `s` as an attached option value a program runs.
+    handed to `xargs` or `timeout` are refused too. A default-value expansion
+    (`${x:-nohup}`) and a word after `$` and one digit, `!`, `@` or `*` count.
+    Accepted residuals: a word assembled at run time, a glob, an ANSI-C escape,
+    a brace expansion with a non-empty other alternative, and a word glued to a
+    letter other than `c` or `s` as an attached option value a program runs.
     """
     for text in detaching_texts(command):
         word = detaching_hit(text)

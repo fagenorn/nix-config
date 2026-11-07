@@ -843,6 +843,17 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             # Punctuation other than `-` bounds a word.
             ("echo x=setsid", "setsid"),
             ("ls dir/nohup.d", "nohup"),
+            # A default-value expansion expands to the literal word when its
+            # variable is unset, though a `-` stands before the word.
+            ("${x:-nohup} sleep 999 &", "nohup"),
+            ("${x-nohup} sleep 999 &", "nohup"),
+            ("${1:-setsid} x", "setsid"),
+            ("${x:-${y-disown}}", "disown"),
+            # A positional or empty special parameter glued before the word
+            # expands to nothing in the Bash tool.
+            ("$1nohup sleep 999 &", "nohup"),
+            ("$@setsid x", "setsid"),
+            ("$!disown", "disown"),
             # The earliest hit is named.
             ("echo setsid; nohup x", "setsid"),
             ("echo DISOWN nohup", "disown"),
@@ -867,6 +878,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "ls my-nohup",
             "echo issue-7-refuse-nohup-x",
             "echo nohup-",
+            "echo ${x:-my-nohup}",
+            "echo ${x}-nohup-y",
+            "echo $12nohup",
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command)
