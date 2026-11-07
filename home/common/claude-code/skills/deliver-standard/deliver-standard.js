@@ -37,7 +37,8 @@ export const meta = {
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). When the PR
-// is already merged, the re-adopt goes straight to close-out.
+// is already merged, the re-adopt goes straight to close-out. A result also carries dead_agents,
+// the labels of agents that returned nothing or threw, when any did.
 //
 // Lifecycle forms follow the contract (merge strategy, delete_branch, credential
 // unsets). A host guard that accepts fewer forms refuses at that command; the
@@ -137,9 +138,24 @@ const CONTRACT_READ = `Run: hostname -s and return its output as host. Run: reso
 - review: the command ids at bindings.workflow.review.code and .plan (omit an absent one); review_state: for code and plan, the state of the capability review.code and review.plan (available, blocked or unsupported; absent if the capability is missing).
 - knowledge: bindings.paths.standards, bindings.paths.hints and bindings.paths.rejections, each as given (empty when absent).
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason).`
+// Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
+const DEAD = []
+const call = async (prompt, opts) => {
+  let reply
+  try {
+    reply = await agent(prompt, opts)
+  } catch (error) {
+    DEAD.push(opts && opts.label)
+    throw error
+  }
+  if (reply == null) DEAD.push(opts && opts.label)
+  return reply
+}
+const deadOf = () => (DEAD.length ? { dead_agents: DEAD.slice() } : {})
+
 // Shared by the fresh setup and the incomplete-claim resume: the facts the worktree step chooses its command from.
 const EXISTING_READ = (branch, path) => `Read what already exists for the delivery, and change nothing: never reset, clean, restore or stash, and never delete a branch or worktree. Return existing with local_branch (a local branch named ${branch} exists), remote_branch (origin/${branch} exists), worktree (the path ${path} exists and is on branch ${branch}), dirty (git -C ${path} status --porcelain is non-empty), status (that output, its first 40 lines) and head (git -C ${path} rev-parse HEAD, or the branch tip when there is no worktree). Omit existing when there is no such branch and no such path. Refuse with reason worktree-mismatch and the path when ${path} is on another branch or ${branch} is checked out at another path.`
-const setup = await agent(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
+const setup = await call(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
 1. ${CONTRACT_READ}
 2. If a merged PR has head ${CONT.setup && CONT.setup.branch} (gh pr list --repo <slug> --state merged --head ${CONT.setup && CONT.setup.branch}), return ok=true with merged_pr set to its number; the worktree may already be gone.
 3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}`}. If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty. Return head: git -C <worktree> rev-parse HEAD (the full sha).
@@ -152,9 +168,9 @@ ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} bef
 4. Read the issue and the code at origin/<integration_branch>: if the issue no longer applies (already fixed or obsolete), comment the evidence on the issue and refuse with reason no-longer-applies.
 5. Return ok=true with every field above.
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', model: 'sonnet', effort: 'low', schema: SETUP_SCHEMA })
-if (!setup || !setup.ok) return { stage: 'setup', result: setup }
+if (!setup || !setup.ok) return { stage: 'setup', result: setup, ...deadOf() }
 // A fresh run never closes out a merged PR: it is a possible duplicate delivery, for the owner to judge.
-if (!CONT && setup.merged_pr) return { stage: 'setup', result: setup, duplicate: setup.merged_pr }
+if (!CONT && setup.merged_pr) return { stage: 'setup', result: setup, duplicate: setup.merged_pr, ...deadOf() }
 // No policy is defaulted: a field the contract read did not return stops the run (before any claim on a fresh run).
 const missing = ['slug', 'integration_branch', 'default_branch', 'branch', 'merge_strategy', 'delete_branch', 'unset_env', 'verification']
   .concat(CONT ? [] : ['worktree_path'])  // a resume carries it in cont.setup
@@ -166,10 +182,10 @@ for (const k of ['code', 'plan']) {
   if (!present(st)) missing.push(`review_state.${k}`)
   else if (st === 'available' && !(setup.review && present(setup.review[k]))) missing.push(`review.${k}`)
 }
-if (missing.length) return { stage: 'setup', result: setup, missing, ...(CONT ? { cont: CONT } : {}) }
+if (missing.length) return { stage: 'setup', result: setup, missing, ...deadOf(), ...(CONT ? { cont: CONT } : {}) }
 if (CONT) Object.assign(setup, { worktree_path: CONT.setup.worktree_path, worktree: CONT.setup.worktree, base_sha: CONT.setup.base_sha, plan_dir: CONT.setup.plan_dir, ...(CONT.setup.holder ? { holder: CONT.setup.holder } : {}) })
 setup.holder = (CONT && CONT.setup && CONT.setup.holder) || `${setup.host}/${HOLDER_ID}`
-if (!HOLDER_RE.test(setup.holder)) return { stage: 'setup', result: setup, invalid: 'holder', holder: setup.holder, ...(CONT ? { cont: CONT } : {}) }
+if (!HOLDER_RE.test(setup.holder)) return { stage: 'setup', result: setup, invalid: 'holder', holder: setup.holder, ...deadOf(), ...(CONT ? { cont: CONT } : {}) }
 
 let plan = CONT && CONT.plan ? CONT.plan : null
 let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
@@ -181,7 +197,7 @@ let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
 let fixWaves = (CONT && CONT.fix_waves) || 0
 // The verified head, results and verification contract of a ready stop; carried until a resume finds the head moved; its results are reused only under the same contract.
 let verified = (CONT && CONT.verified) || null
-const stop = (stage, extra) => ({ stage, ...extra, cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(verified ? { verified } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
+const stop = (stage, extra) => ({ stage, ...extra, ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(verified ? { verified } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
 
@@ -202,7 +218,7 @@ const closeOut = async (PR, mergeCommit, W) => {
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
   const allCode = acceptance.every(a => a.kind === 'code')
   const openCriteria = acceptance.filter(a => a.kind !== 'code')
-  const co = await agent(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
+  const co = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
 1. ${W ? `If ${W} still exists: git -C ${REPO} worktree remove ${W} (it also removes the plan directory). ` : ''}git -C ${REPO} fetch origin; if the checkout ${REPO} is clean and on ${INT}, git -C ${REPO} merge --ff-only origin/${INT}; then, if the local branch ${setup.branch} exists, git -C ${REPO} branch -d ${setup.branch}. If -d refuses, leave the branch and report it (never -D).
 2. Release the claim: run alone, exactly, forge-claim release --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --reason done. It prints one JSON line and removes the in-progress label when no other claim remains; released is true only for verdict released.
 3. ${allCode ? `Every criterion is of kind code. Read gh issue view ${ISSUE} --repo ${SLUG} --json state; if it is still open (${INT === setup.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run gh issue close ${ISSUE} --repo ${SLUG} --comment 'Delivered by PR ${PR} into ${INT}.'` : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
@@ -230,7 +246,7 @@ const REVIEW_PLAN = RS.plan === 'available' && setup.review && setup.review.plan
 if (CLAIMING) {
   // This run's own setup report, never an earlier run's: a failed worktree step may have left the branch or the worktree behind.
   const EX = setup.existing || null
-  const acq = await agent(`Claim issue #${ISSUE} of ${SLUG} for delivery. Run, alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
+  const acq = await call(`Claim issue #${ISSUE} of ${SLUG} for delivery. Run, alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
 It prints one JSON line and adds the in-progress label itself. Return its verdict (error, with detail, on exit 1 or 2), by and comment_id. Run nothing else and change nothing.
 ${RULES_FOR(setup.worktree_path)}`, { label: 'acquire', phase: 'Setup', model: 'sonnet', effort: 'low', schema: ACQUIRE_SCHEMA })
   // Held by another holder: nothing of ours exists yet, so the stop carries no cont.
@@ -243,7 +259,7 @@ ${RULES_FOR(setup.worktree_path)}`, { label: 'acquire', phase: 'Setup', model: '
       : EX && EX.remote_branch
         ? `git -C ${REPO} fetch origin, then git -C ${REPO} worktree add --no-track -b ${setup.branch} ${setup.worktree_path} origin/${setup.branch} (only the remote branch exists: adopt it). base_sha is git -C ${setup.worktree_path} merge-base origin/${INT} HEAD.`
         : `git -C ${REPO} fetch origin, then git -C ${REPO} worktree add --no-track -b ${setup.branch} ${setup.worktree_path} origin/${INT}. base_sha is the origin/${INT} sha you branched from.`
-  const claim = await agent(`Set up the worktree for issue #${ISSUE} of ${SLUG}, each command in its own Bash call. An earlier attempt may have done part of this: skip a step already done (the worktree already at that path on branch ${setup.branch}; the plan directory already there).
+  const claim = await call(`Set up the worktree for issue #${ISSUE} of ${SLUG}, each command in its own Bash call. An earlier attempt may have done part of this: skip a step already done (the worktree already at that path on branch ${setup.branch}; the plan directory already there).
 1. ${WT} Never reset, clean, restore or stash anything in it.
 2. plan_dir is <git -C ${setup.worktree_path} rev-parse --absolute-git-dir>/deliver-standard; create it. It lives in the worktree's git dir, outside the tree, so the plan never enters a commit.
 Return ok, worktree (${setup.worktree_path}), base_sha (full sha) and plan_dir; on any failure ok=false with the reason and what you already did.
@@ -261,7 +277,7 @@ const W = setup.worktree
 const RULES = RULES_FOR(W)
 // Renews the claim before the step it guards. null = renewed; else the stop to return.
 const renew = async (at, ph) => {
-  const r = await agent(`Renew the claim on issue #${ISSUE} of ${SLUG}. Run, alone and exactly: forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
+  const r = await call(`Renew the claim on issue #${ISSUE} of ${SLUG}. Run, alone and exactly: forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
 It prints one JSON line. Return its verdict (error, with detail, on exit 1 or 2), by and detail. Run nothing else and change nothing.
 ${RULES}`, { label: `renew-${at}`, phase: ph, model: 'sonnet', effort: 'low', schema: RENEW_SCHEMA })
   if (r && r.verdict === 'renewed') return null
@@ -330,7 +346,7 @@ if (LANE === 'direct') {
     phase('Tasks')
     const lost = await renew('tasks', 'Tasks')
     if (lost) return lost
-    impl = await agent(`${CTX}
+    impl = await call(`${CTX}
 Deliver issue #${ISSUE} in the direct lane. Invoke the deliver-direct skill with the Skill tool to read it: it is the single source for this step. Its steps 1 and 2 are done by this program (the claim is held by ${setup.holder}; the worktree is ${W} on branch ${setup.branch}). Check its Eligibility first: if the issue fails it, change nothing and return status blocked with ineligible true and why. Otherwise follow its step 3 exactly and commit. Do not run its steps 4 to 7: review, verification, ship and close-out belong to this program. Return acceptance (the issue's criteria; kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and sensitive (true when the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations). ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
 ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: DIRECT_IMPL })
@@ -352,7 +368,7 @@ ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', mod
     phase('Final review')
     const lost = await renew('final-review', 'Final review')
     if (lost) return lost
-    const codexP = REVIEW_CODE ? agent(`${CTX}
+    const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package; this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
 ${RULES}`, { label: 'direct-codex', phase: 'Final review', model: 'sonnet', schema: CODEX }) : Promise.resolve(null)
@@ -360,10 +376,10 @@ ${RULES}`, { label: 'direct-codex', phase: 'Final review', model: 'sonnet', sche
     const lite = plan.tasks[0].risk !== 'security'
     const reviewPrompt = isLite => `${CTX}
 ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RANGE} for issue #${ISSUE} against its acceptance criteria ${ACS}. ${KNOW} Report Important or Critical correctness defects and unmet criteria only, each with a concrete failing input. ${isLite ? 'If the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations, set escalate true. ' : ''}Do not edit anything.`
-    let review = await agent(reviewPrompt(lite), { label: 'direct-review', phase: 'Final review', agentType: lite ? 'reviewer-lite' : 'reviewer', schema: DIRECT_FINDINGS })
+    let review = await call(reviewPrompt(lite), { label: 'direct-review', phase: 'Final review', agentType: lite ? 'reviewer-lite' : 'reviewer', schema: DIRECT_FINDINGS })
     let passedBy = lite ? 'reviewer-lite' : 'reviewer'
     if (lite && review && review.escalate === true) {
-      review = await agent(reviewPrompt(false), { label: 'direct-review-full', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+      review = await call(reviewPrompt(false), { label: 'direct-review-full', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
       passedBy = 'reviewer'
     }
     const codexR = await codexP
@@ -373,9 +389,9 @@ ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RAN
     if (REVIEW_CODE) log(`codex review: ${findingsOf(codexR).length} blocking findings`)
     if (findings.length) {
       log(`direct review: ${findings.length} blocking findings, one fix round`)
-      fix = await agent(`${CTX}\n${PLAN_REF} Fix these review findings in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findings)}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: 'direct-fix', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+      fix = await call(`${CTX}\n${PLAN_REF} Fix these review findings in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findings)}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: 'direct-fix', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
       if (!implDone(fix)) return stop('direct-fix', { fix })
-      const rereview = await agent(`${CTX}
+      const rereview = await call(`${CTX}
 Re-review only these previously reported findings against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findings)}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'direct-rereview', phase: 'Final review', agentType: 'reviewer-lite', schema: FINDINGS })
       if (!rereview || findingsOf(rereview).length) return stop('direct-review', { review: rereview, findings })
       passedBy = 'reviewer-lite'
@@ -389,16 +405,16 @@ if (!plan || !planReviewed) {
   if (lost) return lost
 }
 if (!plan) {
-  const halted = takePlan(await agent(planPrompt(), { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA }), 'plan')
+  const halted = takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA }), 'plan')
   if (halted) return halted
 }
 if (!planReviewed) {
   const ACS0 = JSON.stringify(plan.acceptance)
-  const planCodexP = REVIEW_PLAN ? agent(`${CTX}
+  const planCodexP = REVIEW_PLAN ? call(`${CTX}
 Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${ACS0}.${SPEC}
 Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}; this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
 ${RULES}`, { label: 'plan-codex', phase: 'Plan', model: 'sonnet', schema: CODEX }) : Promise.resolve(null)
-  const planReviewClaude = await agent(`${CTX}
+  const planReviewClaude = await call(`${CTX}
 Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG}).${SPEC} ${KNOW} Report only Important or Critical defects: an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents. No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: FINDINGS })
   const planCodexR = await planCodexP
   if (!planReviewClaude) return stop('plan-review', { details: 'the plan reviewer returned nothing' })
@@ -410,7 +426,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   }
   if (planFindings.length) {
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
-    const revised = await agent(planPrompt(`\nA reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', schema: PLAN_SCHEMA })
+    const revised = await call(planPrompt(`\nA reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', schema: PLAN_SCHEMA })
     const halted = takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
   }
@@ -432,7 +448,7 @@ for (const t of plan.tasks) {
   }
   const start = `${CTX}\n${PLAN_REF}`
   const halt = (stage, extra) => haltTask(t.n, stage, extra)
-  let impl = await agent(`${start}
+  let impl = await call(`${start}
 Implement task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${FOCUSED} ${IMPL_RETURN} Return status blocked with notes if the task file is wrong or impossible.${CONT && CONT.partial === t.n ? `
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
 ${RULES}`, { label: `impl-${t.n}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: IMPL })
@@ -440,18 +456,18 @@ ${RULES}`, { label: `impl-${t.n}`, phase: 'Tasks', agentType: 'implementer', mod
   const taskSpan = span(impl)
   const reviewer = (t.risk === 'mechanical' || t.risk === 'low') ? 'reviewer-lite' : 'reviewer'
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
-  let review = await agent(`${start}
+  let review = await call(`${start}
 ${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${taskSpan} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
   if (!review) return halt('task-review', { task: t, review: null })
   let rounds = 0
   while (findingsOf(review).length && rounds < 2) {
     rounds++
-    const fix = await agent(`${start}
+    const fix = await call(`${start}
 Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findingsOf(review))}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${IMPL_RETURN}
 ${RULES}`, { label: `fix-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: IMPL })
     if (!implDone(fix)) return halt('task-fix', { task: t, impl: fix })
     impl = fix
-    review = await agent(`${start}
+    review = await call(`${start}
 Re-review only these previously reported findings for task ${t.n} against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: `rereview-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
     if (!review) return halt('task-review', { task: t, review: null })
   }
@@ -471,11 +487,11 @@ if (!SKIP_REVIEW) {
   const lost = await renew('final-review', 'Final review')
   if (lost) return lost
 }
-const codexP = REVIEW_CODE ? agent(`${CTX}
+const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package; this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
 ${RULES}`, { label: 'final-codex', phase: 'Final review', model: 'sonnet', schema: CODEX }) : Promise.resolve(null)
-const finals = await parallel(groups.map((g, gi) => () => agent(`${CTX}
+const finals = await parallel(groups.map((g, gi) => () => call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}. ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is actually met, with the test or command that shows it). Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })))
 const codexR = await codexP
@@ -487,7 +503,7 @@ if (REVIEW_CODE) {
   log(`codex review: ${findingsOf(codexR).length} blocking findings`)
 }
 if (chunked) {
-  const integ = await agent(`${CTX}
+  const integ = await call(`${CTX}
 ${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed. ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
   if (!integ) return stop('final-review', { details: 'the integration reviewer returned nothing' })
   finalFindings = finalFindings.concat(findingsOf(integ))
@@ -500,9 +516,9 @@ if (finalFindings.length) {
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await agent(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
     if (!implDone(fw)) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves })
-    const rv = await agent(`${CTX}\nRe-review these final-review findings against the fix (${span(fw)}); implementer notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}. Report any still unresolved and any new Important or Critical defect. For each finding you still report, set relation: narrowing when it is the same kind of defect as one of the findings above reached on another path, input or call site; new when it is a different kind. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+    const rv = await call(`${CTX}\nRe-review these final-review findings against the fix (${span(fw)}); implementer notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}. Report any still unresolved and any new Important or Critical defect. For each finding you still report, set relation: narrowing when it is the same kind of defect as one of the findings above reached on another path, input or call site; new when it is a different kind. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
     if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
     const next = findingsOf(rv)
     if (!next.length) break
@@ -541,15 +557,15 @@ if (!VERIFY_CACHED) {
   const lost = await renew('verify', 'Verify')
   if (lost) return lost
 }
-verify = await agent(verifyPrompt, { label: 'verify', phase: 'Verify', model: 'sonnet', effort: 'low', schema: VERIFY })
+verify = await call(verifyPrompt, { label: 'verify', phase: 'Verify', model: 'sonnet', effort: 'low', schema: VERIFY })
 let vRounds = 0
 while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
-  const fix = await agent(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+  const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
   if (!implDone(fix)) return stop('verify-fix', { verify, fix })
-  const fr = await agent(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; implementer notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
+  const fr = await call(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; implementer notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
   if (!fr || findingsOf(fr).length) return stop('verify-fix-review', { review: fr })
-  verify = await agent(verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', model: 'sonnet', effort: 'low', schema: VERIFY })
+  verify = await call(verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', model: 'sonnet', effort: 'low', schema: VERIFY })
 }
 }
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
@@ -566,7 +582,7 @@ const closesLine = allCode && INT === setup.default_branch ? `Closes #${ISSUE}` 
   const lost = await renew('ship', 'Ship')
   if (lost) return lost
 }
-const prR = await agent(`${CTX}
+const prR = await call(`${CTX}
 Open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
 ${RULES}`, { label: 'pr', phase: 'Ship', model: 'sonnet', schema: { type: 'object', properties: { pr: { type: 'integer' }, head: { type: 'string' }, notes: { type: 'string' } }, required: ['pr', 'head'] } })
 if (!prR || !prR.pr) return stop('pr', { result: prR })
@@ -582,7 +598,7 @@ let syncs = 0
 for (;;) {
   const lost = await renew(`checks-${syncs + 1}`, 'Ship')
   if (lost) return lost
-  const ck = await agent(`${CTX}
+  const ck = await call(`${CTX}
 Wait for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn for the required checks on head: take the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection; if neither answers, every check is required. gh pr checks ${PR} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending) can return early, and its --required list can be partial: never treat a partial list as green. Return passed only when every required name has passed on head, failed with the failing names and why when any required check failed, and the required names you used.
 ${RULES}`, { label: `checks-${syncs + 1}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: CHECKS })
   if (!ck) return stop('checks', { pr: PR, checks: null })
@@ -592,13 +608,13 @@ ${RULES}`, { label: `checks-${syncs + 1}`, phase: 'Ship', model: 'sonnet', effor
   if (ck.state === 'passed') break
   if (syncs >= 2) return stop('sync-contention', { pr: PR, syncs })
   syncs++
-  const sy = await agent(`${CTX}
+  const sy = await call(`${CTX}
 The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, commit the merge, and run only the tests covering the files the resolution touched. Do not push. Return conflicted, merge_commit (full sha), resolved_files and the tests you ran; status blocked with notes if you cannot resolve it safely.
 ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
   if (!sy || sy.status !== 'done' || !present(sy.merge_commit)) return stop('sync', { pr: PR, sync: sy })
   expected = sy.merge_commit
   if (sy.conflicted) {
-    const sr = await agent(`${CTX}
+    const sr = await call(`${CTX}
 Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} show --cc ${sy.merge_commit} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
     if (!sr || findingsOf(sr).length) return stop('sync-review', { pr: PR, review: sr })
   }
@@ -608,7 +624,7 @@ Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} s
   const lost = await renew('merge', 'Ship')
   if (lost) return lost
 }
-const mg = await agent(`${CTX}
+const mg = await call(`${CTX}
 Merge PR #${PR}. Run, alone and exactly: ${UNSET}gh pr merge ${PR} --repo ${SLUG} --${STRATEGY} --match-head-commit ${head}${setup.delete_branch ? ' --delete-branch' : ''}
 Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message.
 ${RULES}`, { label: 'merge', phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] } })
