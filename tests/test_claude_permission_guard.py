@@ -2893,6 +2893,55 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
+
+    def test_transmit_rule_reads_substitutions_spellings_and_stdin(self):
+        """Issue 655 D2 and D7 review: a git word the shell runs from inside a
+        double-quoted substitution, spelled `$'git'`, `git` plus a line
+        continuation, `${G:-git}` or through an assigned variable, or handed to an
+        evaluator on stdin or in a heredoc, is judged like a plain git word."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        subprocess.run(["git", "config", "alias.p", "push"], cwd=repo, check=True,
+                       capture_output=True)
+        topic = "issue-655-topic"
+        unknown = ("is not a known local git subcommand; an alias, a git-* program "
+                   "or a transport could transmit refs")
+        evaluator = "shell source passed to an evaluator cannot be validated"
+        quoted = "a command substitution inside a quoted word cannot be validated"
+        for command, reason in (
+            (f'echo "$(git p origin {topic})"', quoted),
+            (f'x="$(git p origin {topic})"', quoted),
+            (f'echo "`git p origin {topic}`"', quoted),
+            (f"$'git' p origin {topic}", f"git p {unknown}"),
+            (f"git\\\n p origin {topic}", f"git p {unknown}"),
+            (f"${{G:-git}} p origin {topic}", f"git p {unknown}"),
+            (f"G=git; $G p origin {topic}", f"git p {unknown}"),
+            (f"G=/usr/bin/git; ${{G}} p origin {topic}", f"git p {unknown}"),
+            (f"export G=git; \"$G\" p origin {topic}", f"git p {unknown}"),
+            (f"echo 'git p origin {topic}' | sh", evaluator),
+            (f"sh <<'EOF'\ngit p origin {topic}\nEOF", evaluator),
+            (f"sh -c 'git\\\n p origin {topic}'", evaluator),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe push: {reason}", result.stderr)
+                self.assertNotIn(GRAMMAR, result.stderr)
+        for command in (
+            'echo "$(git status)"',
+            'x="$(git rev-parse HEAD)"',
+            'echo "`git status`"',
+            "$'git' status",
+            "git\\\n status",
+            "${G:-git} status",
+            "G=git; $G status",
+            "G=x; $G p origin t",
+            "echo 'git status' | sh",
+            "sh <<'EOF'\ngit status\nEOF",
+            "sh -c 'git\\\n status'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
     def test_git_dash_c_is_judged_against_its_target_repository(self):
         """Issue 400 AC2, D7, D8: `git -C <dir>` builds the push's repository context
         from <dir> joined to the payload cwd, one context per distinct directory."""

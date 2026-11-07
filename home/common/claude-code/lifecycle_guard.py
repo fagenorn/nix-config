@@ -566,6 +566,11 @@ def tokenize_segment(segment):
                 value.append(character)
             index += 1
             continue
+        if character == "\\" and segment[index + 1:index + 2] == "\n":
+            # A line continuation joins the lines: `git\<newline> push` is
+            # `git push` (issue 655 D2).
+            index += 2
+            continue
         if character == "\\" and index + 1 < length:
             value.append(segment[index + 1])
             started = True
@@ -946,6 +951,65 @@ def opening_operator(tokens, index, operator):
     return before % 2 == 0
 
 
+ASSIGNED_VARIABLE = re.compile(r"\$(\w+)")
+BRACED_VARIABLE = re.compile(r"(\w+)(?::?[-=+?].*)?", re.DOTALL)
+
+
+def git_assigned_names(token_lists):
+    """The names assigned a git word anywhere in the command (`G=git`,
+    `export G=/usr/bin/git`), so `$G` and `${G}` can be read as git (issue 655
+    D2). A value is a git word when its basename is `git` or `git-<name>`, or
+    its raw text satisfies GIT_RAW_WORD."""
+    names = set()
+    for tokens in token_lists:
+        for value, is_operator in tokens:
+            match = None if is_operator else ASSIGNMENT_PREFIX.match(value)
+            if match is None:
+                continue
+            assigned = value[match.end():]
+            if (
+                GIT_RAW_WORD.fullmatch(assigned) is not None
+                or dashed_git_program(program_name(assigned))
+            ):
+                names.add(match.group(0)[:-1])
+    return names
+
+
+def git_spelling(tokens, index, assigned):
+    """(program, run_start) when the non-operator token at `index` is a git word
+    in some spelling, else None (issue 655 D2, D7). `run_start` is where the
+    words that follow it begin.
+
+    Covers a plain `git` or `git-<name>` word by basename, the same word after
+    `$` (`$'git'` tokenises to `$git`), a variable assigned a git word
+    (`$G`, `${G}`) and the braced default `${G:-git}`, whose run starts after
+    its closing `}`.
+    """
+    value = tokens[index][0]
+    name = program_name(value)
+    if name == "git" or dashed_git_program(name):
+        return name, index + 1
+    stripped = program_name(value.lstrip("$"))
+    if value.startswith("$") and (stripped == "git" or dashed_git_program(stripped)):
+        return stripped, index + 1
+    variable = ASSIGNED_VARIABLE.fullmatch(value)
+    if variable is not None and variable.group(1) in assigned:
+        return "git", index + 1
+    if (
+        index >= 2 and tokens[index - 1] == ("{", True)
+        and tokens[index - 2] == ("$", False)
+    ):
+        braced = BRACED_VARIABLE.fullmatch(value)
+        if GIT_RAW_WORD.fullmatch(value) is not None or (
+            braced is not None and braced.group(1) in assigned
+        ):
+            start = index + 1
+            if tokens[start:start + 1] == [("}", True)]:
+                start += 1
+            return "git", start
+    return None
+
+
 def git_transmit_problem(program, words, truncation):
     """The refusal for a git word that could transmit refs and is not a
     lifecycle form, else None (issue 655 D4, D5, D8, D9).
@@ -1009,7 +1073,7 @@ def transmit_in_raw_text(text):
     both quote readings, are walked from every git word with
     `git_transmit_problem`; a `git-<name>` word counts on its own.
     """
-    pieces = [text]
+    pieces = [text.replace("\\\n", "")]
     for separator in SEGMENT_SEPARATORS:
         pieces = [part for piece in pieces for part in piece.split(separator)]
     for piece in pieces:
@@ -1204,6 +1268,9 @@ def guarded_operations(command):
         )
     found = []
     stream = []
+    assigned = git_assigned_names(
+        [tokens for tokens in map(tokenize_segment, segments) if tokens is not None]
+    )
     for position, segment in enumerate(segments):
         tokens = tokenize_segment(segment)
         if tokens is None:
@@ -1235,6 +1302,11 @@ def guarded_operations(command):
             raw_reason = EVALUATOR_REASON
         if raw_reason is not None:
             found.extend(unvalidatable(segment, raw_reason, mentions))
+        if raw_reason == EVALUATOR_REASON and transmit_in_raw_text(command):
+            # An evaluator with no command text of its own reads its source
+            # from stdin (`echo 'git p' | sh`, `sh <<EOF`), which is another
+            # segment or a heredoc body the segments drop (issue 655 D7).
+            found.append(("transmit", segment, raw_reason, None))
         operands = set()
         for index in range(len(tokens)):
             if index in operands:
@@ -1247,14 +1319,15 @@ def guarded_operations(command):
                 # Issue 655: a git word the recognition above did not classify
                 # is refused unless it is a local subcommand (D4-D9), in every
                 # position (D7).
-                value = tokens[index][0]
-                if not tokens[index][1] and (
-                    program_name(value) == "git"
-                    or dashed_git_program(program_name(value))
-                ):
+                spelling = (
+                    None if tokens[index][1]
+                    else git_spelling(tokens, index, assigned)
+                )
+                if spelling is not None:
+                    value, run_start = spelling
                     run = []
                     cut = None
-                    for word, word_is_operator in tokens[index + 1:]:
+                    for word, word_is_operator in tokens[run_start:]:
                         if word_is_operator:
                             cut = word
                             break
@@ -1292,6 +1365,18 @@ def guarded_operations(command):
     ):
         found.append((
             "label", command,
+            "a command substitution inside a quoted word cannot be validated",
+            None,
+        ))
+    # The same holds for a git word the quoted substitution runs (issue 655 D2):
+    # `echo "$(git p origin t)"` reaches the remote with `alias.p=push`.
+    if any(
+        not is_operator and ("$(" in value or "`" in value)
+        and transmit_in_raw_text(value)
+        for value, is_operator in stream
+    ):
+        found.append((
+            "transmit", command,
             "a command substitution inside a quoted word cannot be validated",
             None,
         ))
