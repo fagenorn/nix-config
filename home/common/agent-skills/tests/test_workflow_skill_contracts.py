@@ -3053,6 +3053,13 @@ class AcceptanceMapContractsTest(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertIn(kind, check)
 
+    def test_the_map_and_self_review_apply_the_acceptance_planning_rules(self):
+        """#633 AC2: self-review points to the shared rules; the planning-owner hot file
+        does not grow."""
+        review = normalized(self.section(self.plans, "## Self-review"))
+        self.assertIn(ACCEPTANCE_RULES_POINTER, review)
+        self.assertLessEqual(len(self.WRITING_PLANS.read_bytes()), 10859)
+
 
 class AcceptancePlanningRulesTest(unittest.TestCase):
     """#633 AC2: the acceptance planning rules live once, read on demand, never hot."""
