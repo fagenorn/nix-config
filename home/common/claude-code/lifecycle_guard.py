@@ -1016,15 +1016,18 @@ def bare_git_supplies_command(tokens, index, cut_at, run):
     return following < len(tokens) and not tokens[following][1]
 
 
-def quoted_substitution_runs_git(tokens, index):
+def quoted_substitution_runs_git(tokens, index, fed=False):
     """True when the word at `index` is a quoted command substitution whose last
     word is git and that a word follows (`"$(which git)" push …`): the output
-    runs with those words as its arguments (issue 655 D7 review)."""
+    runs with those words as its arguments (issue 655 D7 review). `fed` is set
+    at an argument position that reads a pipe or redirection, where the words
+    come from there and none need follow (`echo p origin t | xargs "$(which
+    git)"`)."""
     value, is_operator = tokens[index]
     if (
         is_operator or ("$(" not in value and "`" not in value)
         or ASSIGNMENT_PREFIX.match(value) is not None
-        or index + 1 >= len(tokens) or tokens[index + 1][1]
+        or (not fed and (index + 1 >= len(tokens) or tokens[index + 1][1]))
     ):
         return False
     pieces = [value]
@@ -1400,8 +1403,8 @@ def raw_git_names(pieces):
 def raw_reading_transmits(reading, names, fed):
     """True when a word of `reading` is a git word (or an assigned name, see
     `raw_git_names`) that could transmit refs, or an assignment that hands git a
-    command. `fed` is set when the piece reads a pipe, so a git word after the
-    first word that names no subcommand takes it from stdin."""
+    command. `fed` is set when the piece may read a pipe or redirection, so a git
+    word after the first word that names no subcommand takes it from stdin."""
     for position, word in enumerate(reading):
         if dashed_git_program(program_name(word)):
             return True
@@ -1420,7 +1423,12 @@ def raw_reading_transmits(reading, names, fed):
     return False
 
 
-def transmit_in_raw_text(text, names=frozenset(), depth=0):
+def pipe_in(run):
+    """True when the separator `run` holds a pipe (`|` or `|&`, not `||`)."""
+    return "|" in run.replace("||", "")
+
+
+def transmit_in_raw_text(text, names=frozenset(), depth=0, fed=False):
     """True when the raw `text` of an evaluator, `env -S` or unparseable segment
     holds a git word that could transmit refs (issue 655 D7).
 
@@ -1431,12 +1439,17 @@ def transmit_in_raw_text(text, names=frozenset(), depth=0):
     operand (`git -C "/tmp status" p`) is one word, and a word that holds
     several words (`sh -c '…'`) is read again as text. `names` are the names
     already bound to git by the surrounding command; the text binds more
-    (`G=git; $G p`). A piece after a `|` is fed by a pipe.
+    (`G=git; $G p`). A piece is fed when `fed` says the text as a whole is
+    (it follows a pipe, or the command holds a redirection), when a `|`
+    comes before it anywhere in the text, so a compound command that follows a
+    pipe is fed (`echo p | { true; xargs git; }`), or when the text holds a
+    `<` (a redirection of a compound command, `exec <file`).
     """
     text = text.replace("\\\n", "")
     parts = SEPARATOR_RUN.split(text)
+    fed = fed or "<" in text
     pieces = [
-        (piece, position > 0 and "|" in parts[position - 1].replace("||", ""))
+        (piece, fed or any(pipe_in(run) for run in parts[1:position:2]))
         for position, piece in enumerate(parts) if position % 2 == 0
     ]
     names = set(names) | raw_git_names([piece for piece, _ in pieces])
@@ -1448,7 +1461,7 @@ def transmit_in_raw_text(text, names=frozenset(), depth=0):
             if depth < 3:
                 for value, is_operator in tokens:
                     if not is_operator and len(value.split()) > 1 and transmit_in_raw_text(
-                            value, names, depth + 1):
+                            value, names, depth + 1, fed):
                         return True
         if any(raw_reading_transmits(reading, names, fed) for reading in readings):
             return True
@@ -1573,7 +1586,9 @@ def git_option_operands(tokens, index):
     return operands
 
 
-def unvalidatable(segment, reason, mentions_label=False, assigned=frozenset()):
+def unvalidatable(
+    segment, reason, mentions_label=False, assigned=frozenset(), fed=False,
+):
     """Every guarded verb found in `segment`'s raw text, all refused for `reason`.
 
     A verb is found when its words occur in order in either reading of the
@@ -1582,6 +1597,8 @@ def unvalidatable(segment, reason, mentions_label=False, assigned=frozenset()):
     backslashes deleted (issue 400 D17, the base `336d9e05` check): a word such
     as `${CMD:-git` or `-df` has no word equal to the verb's, yet the shell runs
     the verb. When `mentions_label` is set, the raise-label edit is refused too.
+    `fed` is set when the segment may read a pipe or redirection (see
+    `guarded_operations`).
     """
     readings = [raw_words(segment), raw_words(segment, glued=True)]
     texts = [segment, "".join(c for c in segment if c not in RAW_GLUE_CHARS)]
@@ -1591,7 +1608,7 @@ def unvalidatable(segment, reason, mentions_label=False, assigned=frozenset()):
         if any(verb_occurs_in_order(words, verb_words) for words in readings)
         or any(" ".join(verb_words) in text for text in texts)
     ]
-    if transmit_in_raw_text(segment, assigned):
+    if transmit_in_raw_text(segment, assigned, fed=fed):
         found.append(("transmit", segment, reason, None))
     if mentions_label:
         found.append(("label", segment, reason, None))
@@ -1641,21 +1658,28 @@ def guarded_operations(command):
     ]
     assigned = git_assigned_names(token_lists)
     hashed = git_command_names(token_lists)
+    # A redirection anywhere in the command may feed a compound command that
+    # holds a later segment (`{ xargs git; } <<< 'push …'`, `exec <f; xargs
+    # git`), and a pipe before a segment may feed it through a grouping, a loop
+    # or a conditional (`echo p | { true; xargs git; }`): a segment is fed by
+    # either, not only by the pipe or redirection of its own piece (issue 655
+    # final review).
+    redirected = any(
+        not is_operator and value.startswith("<")
+        for tokens in token_lists for value, is_operator in tokens
+    ) or len(token_lists) < len(segments) and "<" in command
     for position, segment in enumerate(segments):
         tokens = tokenize_segment(segment)
         if tokens is None:
             found.extend(unvalidatable(
                 segment, "the segment could not be tokenised",
                 mentions_raise_label([segment]), assigned | hashed,
+                redirected or any(pipe_in(run) for run in runs[:position]),
             ))
             continue
-        # A segment reads a pipe when a `|` separates it from the one before,
-        # or a word of it starts a redirection (`<f`, `<<<x`, `<<EOF`).
-        fed = (
-            position > 0 and "|" in runs[position - 1].replace("||", "")
-        ) or any(
-            not is_operator and value.startswith("<") for value, is_operator in tokens
-        )
+        # A segment may read a pipe when a `|` comes before it anywhere, or
+        # the command holds a redirection (`<f`, `<<<x`, `<<EOF`).
+        fed = redirected or any(pipe_in(run) for run in runs[:position])
         # Every tokenised segment joins the label stream, evaluator segments
         # included: `gh pr edit $(sh -c '…'; true) --add-label …` puts the
         # `gh` word in an evaluator segment and its label in the next one.
@@ -1678,7 +1702,8 @@ def guarded_operations(command):
         ):
             raw_reason = EVALUATOR_REASON
         if raw_reason is not None:
-            found.extend(unvalidatable(segment, raw_reason, mentions, assigned | hashed))
+            found.extend(unvalidatable(
+                segment, raw_reason, mentions, assigned | hashed, fed))
         if raw_reason == EVALUATOR_REASON and transmit_in_raw_text(
                 command, assigned | hashed):
             # An evaluator with no command text of its own reads its source
@@ -1713,7 +1738,7 @@ def guarded_operations(command):
                     None if tokens[index][1]
                     else git_spelling(tokens, index, assigned, hashed)
                 )
-                if quoted_substitution_runs_git(tokens, index):
+                if quoted_substitution_runs_git(tokens, index, fed and not flags[index]):
                     found.append((
                         "transmit", segment,
                         raw_reason if raw_reason is not None else GIT_UNCERTAIN_PROBLEM,
@@ -1741,13 +1766,21 @@ def guarded_operations(command):
                     if truncation is None and bare_git_supplies_command(
                             tokens, index, cut_at, run):
                         truncation = cut if cut is not None else ")"
+                    # A braced default `${G:-git}` tokenises as `$`, `{`, the
+                    # word and `}`: its position is the `$` word's.
+                    word_start = (
+                        index - 2
+                        if index >= 2 and tokens[index - 1] == ("{", True)
+                        and tokens[index - 2] == ("$", False)
+                        else index
+                    )
                     reader = git_transmit_problem if flags[index] else git_argument_problem
                     problem = git_assignment_problem(
                         git_prefix_assignments(tokens, index), True)
                     if problem is None:
                         problem = reader(
                             value, run, truncation, tail=tail,
-                            fed=fed and not flags[index])
+                            fed=fed and not flags[word_start])
                     if problem is not None:
                         found.append((
                             "transmit", segment,

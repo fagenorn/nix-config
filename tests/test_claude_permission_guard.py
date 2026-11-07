@@ -1201,6 +1201,13 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"echo p origin {topic} | xargs git", None, None, "refuse"),
             (f"$(echo git) p origin {topic}", None, None, "refuse"),
             (f'"$(which git)" p origin {topic}', None, None, "refuse"),
+            (f"echo p origin {topic} | {{ true; xargs git; }}", None, None, "refuse"),
+            ("{ xargs git; } <<< 'push --force origin main'", None, None, "refuse"),
+            (f"echo p origin {topic} |\nxargs git", None, None, "refuse"),
+            ("exec < args.txt; xargs git", None, None, "refuse"),
+            (f'echo p origin {topic} | xargs "$(which git)"', None, None, "refuse"),
+            (f"echo p origin {topic} | xargs ${{G:-git}}", None, None, "refuse"),
+            (f"sh -c 'echo p origin {topic} | {{ true; xargs git; }}'", None, None, "refuse"),
             (f"G=$(which git); $G p origin {topic}", None, None, "refuse"),
             ('git rebase "${X:---exec=sh /tmp/p.sh}" HEAD~1', None, None, "refuse"),
             ("git rebase $(echo HEAD) --exec 'sh /tmp/p.sh'", None, None, "refuse"),
@@ -1220,6 +1227,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("echo `which git`", None, None, "admit"),
             ("which git", None, None, "admit"),
             ("echo a | xargs git status", None, None, "admit"),
+            ('echo "$(which git)" | cat', None, None, "admit"),
             ("echo $(git rev-parse HEAD) x", None, None, "admit"),
             ("=git status", None, None, "admit"),
             ("hash g=/usr/bin/git; g status", None, None, "admit"),
@@ -1257,10 +1265,24 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 '    if value.startswith("="):\n        value = value[1:]\n', ""),
             "hashed-names-unread": "git_command_names = lambda token_lists: set()\n",
             "piped-git-admitted": "GIT_FED_PROBLEM = None\n",
+            "pipe-feeds-only-the-next-segment": (
+                "fed = redirected or any(pipe_in(run) for run in runs[:position])",
+                "fed = redirected or (position > 0 and pipe_in(runs[position - 1]))"),
+            "redirection-feeds-only-its-own-segment": (
+                "    redirected = any(",
+                "    redirected = False and any("),
+            "raw-pipe-feeds-only-the-next-piece": (
+                "fed or any(pipe_in(run) for run in parts[1:position:2])",
+                "fed or (position > 0 and pipe_in(parts[position - 1]))"),
+            "braced-default-position-unread": (
+                "fed=fed and not flags[word_start])", "fed=fed and not flags[index])"),
+            "quoted-substitution-needs-a-following-word": (
+                "or (not fed and (index + 1 >= len(tokens) or tokens[index + 1][1]))",
+                "or index + 1 >= len(tokens) or tokens[index + 1][1]"),
             "substitution-output-admitted": (
                 "bare_git_supplies_command = lambda tokens, index, cut_at, run: False\n"),
             "quoted-substitution-admitted":
-                "quoted_substitution_runs_git = lambda tokens, index: False\n",
+                "quoted_substitution_runs_git = lambda tokens, index, fed=False: False\n",
             "substitution-assignment-unread":
                 "substitution_yields_git = lambda tokens, position, assigned: False\n",
             "tail-unscanned": (
@@ -1274,7 +1296,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 "            readings.append([value for value, is_operator in tokens "
                 "if not is_operator])\n", ""),
             "evaluator-text-unjudged":
-                "transmit_in_raw_text = lambda text, names=(), depth=0: False\n",
+                "transmit_in_raw_text = lambda text, names=(), depth=0, fed=False: False\n",
             "command-options-unjudged": "git_command_option = lambda subcommand, words: None\n",
             "short-command-options-dropped": (
                 "GIT_COMMAND_OPTIONS = {k: frozenset(o for o in v if o.startswith('--'))"
@@ -3413,6 +3435,19 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"printf 'p\\0origin\\0{topic}' | xargs -0 git", fed),
             (f"echo p | xargs git -C {repo}", fed),
             (f"xargs <args.txt git", fed),
+            (f"echo p origin {topic} | {{ true; xargs git; }}", fed),
+            (f"{{ xargs git; }} <<< 'push --force origin main'", fed),
+            (f"while read -r a; do xargs git; done <<EOF\nx\np origin {topic}\nEOF", fed),
+            (f"echo p origin {topic} | if true; then xargs git; fi", fed),
+            (f"echo p origin {topic} |\nxargs git", fed),
+            (f"echo p origin {topic} | \\\nxargs git", fed),
+            ("exec < args.txt; xargs git", fed),
+            (f"echo p origin {topic} | xargs ${{G:-git}}", fed),
+            (f"echo p origin {topic} | xargs ${{G-git}}", fed),
+            (f"echo p origin {topic} | xargs ${{G:=git}}", fed),
+            (f'echo p origin {topic} | xargs "$(which git)"', uncertain),
+            (f'echo p origin {topic} | xargs "`which git`"', uncertain),
+            (f'echo p origin {topic} | xargs "$(command -v git)"', uncertain),
             (f"$(echo git) p origin {topic}", uncertain),
             (f"`echo git` p origin {topic}", uncertain),
             (f"xargs $(echo git) p origin {topic}", uncertain),
@@ -3429,6 +3464,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"G=git; sh -c '$G p origin {topic}'", evaluator),
             (f"sh -c 'hash g=/usr/bin/git; g p origin {topic}'", evaluator),
             (f"sh -c 'echo p origin {topic} | xargs git'", evaluator),
+            (f"sh -c 'echo p origin {topic} | {{ true; xargs git; }}'", evaluator),
+            (f"echo p | sh -c 'xargs git'", evaluator),
             (f"sh -c 'git -C \"/tmp status\" p origin {topic}'", evaluator),
             (f"bash -c \"git -C '/tmp status' p origin {topic}\"", evaluator),
         ):
@@ -3456,6 +3493,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "xargs git status",
             "echo a | xargs git status",
             "echo a | xargs git -C /tmp status",
+            "echo a | { true; xargs git status; }",
+            'echo "$(which git)" | cat',
+            "echo $(which git) | cat",
+            "which git | cat",
             "echo a | grep -v b",
             "hash g=/usr/bin/git; g status",
             "G=$(which git); $G status",
