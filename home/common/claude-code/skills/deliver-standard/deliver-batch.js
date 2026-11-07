@@ -562,21 +562,60 @@ ${RULES}`, `close-out-${n}`, { ...cheap, schema: CLOSE_SCHEMA })
   return result
 }
 
+// A readoptable issue: an earlier run of this batch already opened its PR, on the branch this batch derives for the issue (D13).
+// An open PR on another head branch is not readoptable: that issue goes to its child, whose own setup decides.
+const readoptable = n => {
+  const f = FACTS[n] || {}
+  return !!(f.open_pr && f.branch && f.open_pr.head_branch === f.branch)
+}
+const READOPT_SCHEMA = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean' }, reason: { type: 'string', enum: ['unaccepted', 'dirty', 'no-acceptance', 'worktree', 'other'] }, detail: { type: 'string' },
+    worktree: { type: 'string' }, branch: { type: 'string' }, head: { type: 'string' },
+    acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human'] } }, required: ['id', 'text', 'kind'] } },
+  },
+  required: ['ok'],
+}
+const readoptPrompt = n => {
+  const f = FACTS[n], B = f.branch, pr = f.open_pr.number
+  return `Re-adopt the open pull request #${pr} of issue #${n} of ${SLUG} (the git repository at ${REPO}), whose head branch ${B} an earlier run of this batch pushed. Change nothing in this step except a missing worktree: never reset, clean, restore or stash anything.
+1. Run git -C ${REPO} fetch origin.
+2. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid,body. The PR is landed as it stands only at its accepted head: the body's Evidence section ends with a line Accepted head: <sha>. Answer ok false with reason unaccepted (and the head you read in detail) when the body has no Accepted head: line or the line's sha differs from headRefOid, and stop there.
+3. Find the worktree on ${B}: run git -C ${REPO} worktree list --porcelain and take the entry whose branch is refs/heads/${B}. When there is none, resolve the contract once (resolve-project resolve --repo-root ${REPO}) and add one at the path bindings.vcs.worktree.root (resolved against project.root) plus bindings.vcs.worktree.prefix and ${B}: git -C ${REPO} worktree add <path> ${B} when the local branch exists, else git -C ${REPO} worktree add --no-track -b ${B} <path> origin/${B} when only the remote branch exists. When that fails, answer ok false with reason other and the error in detail.
+4. In that worktree: when git -C <worktree> status --porcelain shows any change, answer ok false with reason dirty and the status in detail. When git -C <worktree> rev-parse HEAD differs from headRefOid, answer ok false with reason worktree and both shas in detail.
+5. Read the body's Acceptance table, one row per criterion (id, criterion, kind, and how it is shown). When the body has no Acceptance table, answer ok false with reason no-acceptance. Otherwise answer ok true with worktree (its absolute path), branch ${B}, head (headRefOid, the full sha) and acceptance: one {id, text (the criterion), kind (code, evidence or human, as the table says)} per row.
+${RULES_FOR('<the worktree path>', B)}`
+}
+
 const deliverOne = async n => {
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
   const f = FACTS[n]
+  const readopt = readoptable(n)
   let laneName
-  if (CONTS[n]) {
-    laneName = CONTS[n].lane || 'standard'
-  } else {
+  // The lane step; false when it ended the issue (its row is set). A readoptable issue defers it until its PR is found unaccepted.
+  const chooseLane = async () => {
     const lane = await ask(agent(`You choose the delivery lane of issue #${n} of ${SLUG} (the git repository at ${REPO}). Change nothing in this step.
 Read the issue with its comments (gh issue view ${n} --repo ${SLUG} --comments) and invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is.
 Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
 ${RULES_FOR(REPO, f.branch || '<branch>')}`, { label: `lane-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'medium', schema: LANE_SCHEMA }), `lane-${n}`)
-    if (lane === null || lane === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `lane-${n} returned nothing` }; return }
-    if (lane.lane === 'needs-design') { rows[n] = { issue: n, outcome: 'needs-design', lane: lane.lane }; return }
+    if (lane === null || lane === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `lane-${n} returned nothing` }; return false }
+    if (lane.lane === 'needs-design') {
+      if (readopt) {
+        // The claim is already held: give it back, as the row says nothing is left to resume.
+        await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) needs a design before it can be delivered. Release the batch claim.
+Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
+Return its verdict and any detail. Run nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
+      }
+      rows[n] = { issue: n, outcome: 'needs-design', lane: lane.lane }
+      return false
+    }
     laneName = lane.lane
+    return true
   }
+  if (CONTS[n]) laneName = CONTS[n].lane || 'standard'
+  else if (!readopt && !(await chooseLane())) return
   rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
 
   // A dependent waits for each in-batch blocker's final row before it asks for a slot: it holds no slot and no claim meanwhile.
@@ -602,7 +641,34 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', model:
     if (acq.verdict === 'held_by' || acq.verdict === 'lost_to') { rows[n] = { issue: n, outcome: 'claim-lost', by: acq.by }; return }
     if (acq.verdict !== 'acquired' && acq.verdict !== 'already_held') { rows[n] = { issue: n, outcome: 'stopped', stage: 'acquire', detail: acq.detail || acq.verdict }; return }
 
-    const answer = answerOf(n)
+    if (readopt) {
+      // The plan was settled before the PR existed: an owner answer does not apply on this path.
+      const ro = await ask(agent(readoptPrompt(n), { label: `readopt-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: READOPT_SCHEMA }), `readopt-${n}`)
+      if (ro === null || ro === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: `readopt-${n} returned nothing` }; return }
+      if (ro.ok === true) {
+        if (!ro.head || !ro.branch || !ro.worktree || !Array.isArray(ro.acceptance) || !ro.acceptance.length) {
+          rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: 'readopt reply lacks head, branch, worktree or acceptance' }
+          return
+        }
+        // No child: the slot goes back and the PR lands as it stands, through the same path as a ready child.
+        leave()
+        admitted = false
+        READY[n] = { head: ro.head, branch: ro.branch, worktree: ro.worktree, acceptance: ro.acceptance, verify: [], tasks: [], cont: CONTS[n] }
+        rows[n] = await enqueue(INT, () => land(n, READY[n]))
+        return
+      }
+      if (ro.reason !== 'unaccepted') {
+        rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: ro.reason || 'other', ...(ro.detail ? { note: ro.detail } : {}) }
+        return
+      }
+      // Unaccepted head (D13): the child's final review and verify re-run over the moved head, with the slot and claim kept.
+      if (!CONTS[n]) {
+        if (!(await chooseLane())) return
+        rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
+      }
+    }
+
+    const answer = readopt ? null : answerOf(n)
     if (answer !== null) {
       // Ending the marker erases the replies from the tracker: a relaunch must carry what was read.
       if (!(DECISIONS && DECISIONS[String(n)])) TAKEN[n] = answer

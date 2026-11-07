@@ -717,6 +717,87 @@ class DependencyTest(unittest.TestCase):
         self.assertEqual(active, 1)
 
 
+OPEN_PR = {"number": 41, "head_branch": "issue-1-x"}
+
+
+class ReadoptTest(unittest.TestCase):
+    def test_an_open_pr_of_the_branch_lands_without_lane_or_child(self):
+        result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertEqual(of(calls, 1)[:4], ["facts-1", "acquire-1", "readopt-1", "renew-1-land"])
+        self.assertNotIn("child-1", labels(calls))
+        self.assertNotIn("lane-1", labels(calls))
+        text = prompt(calls, "readopt-1")
+        for needle in ("41", "issue-1-x", "worktree list --porcelain", "headRefOid", "Acceptance"):
+            self.assertIn(needle, text)
+
+    def test_an_open_pr_of_another_branch_goes_to_the_child(self):
+        _, calls, _ = run(patch={"facts-1": {"open_pr": {"number": 41, "head_branch": "someone-else"}}})
+        self.assertIn("child-1", labels(calls))
+        self.assertNotIn("readopt-1", labels(calls))
+
+    def test_a_failed_readopt_keeps_the_claim(self):
+        result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}},
+                               replies={"readopt-1": {"ok": False, "reason": "dirty", "detail": "M a.py"}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "readopt"))
+        self.assertNotIn("child-1", labels(calls))
+        self.assertNotIn("release-1", labels(calls))
+        self.assertNotIn("renew-1-land", labels(calls))
+        self.assertEqual(result["relaunch"]["issues"], [1])
+
+    def test_readopt_claims_before_it_reads(self):
+        _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}})
+        ls = labels(calls)
+        self.assertLess(ls.index("acquire-1"), ls.index("readopt-1"))
+
+    def test_the_readopted_acceptance_reaches_the_close_out(self):
+        acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
+        result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}, "readopt-1": {"acceptance": acceptance}},
+                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "notes": "held"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed-held")
+        self.assertNotIn("gh issue close", prompt(calls, "close-out-1"))
+
+    def test_readopt_reads_the_accepted_head(self):
+        _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}})
+        self.assertIn("Accepted head:", prompt(calls, "readopt-1"))
+
+    def test_a_relaunch_after_a_rejected_fix_review_reruns_the_gates_before_landing(self):
+        # Run 1: CI fails, the fix is pushed, its review rejects it: ci-failed, PR head = the fix.
+        first, _, _ = run(replies={
+            "land-checks-1-1": {"state": "failed", "head": SHA, "failing": ["ci"]},
+            "land-fix-review-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "weakened a test"}]}})
+        self.assertEqual(row(first, 1)["outcome"], "ci-failed")
+        # Run 2: the PR is open at the unaccepted fix head; readopt refuses to land it as it stands.
+        result, calls, _ = run(args=first["relaunch"],
+                               patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}},
+                               replies={"readopt-1": {"ok": False, "reason": "unaccepted", "detail": "head c0ffee"}})
+        ls = labels(calls)
+        self.assertLess(ls.index("readopt-1"), ls.index("child-1"))
+        self.assertNotIn("lane-1", ls)  # the forwarded ready cont keeps its lane
+        self.assertEqual(child(calls, 1)["args"]["cont"], first["relaunch"]["conts"]["1"])
+        self.assertLess(ls.index("child-1"), ls.index("land-merge-1"))
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+
+    def test_an_unaccepted_pr_without_a_cont_gets_a_lane_and_a_fresh_child(self):
+        _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}},
+                          replies={"readopt-1": {"ok": False, "reason": "unaccepted"}})
+        ls = labels(calls)
+        self.assertLess(ls.index("readopt-1"), ls.index("lane-1"))
+        self.assertLess(ls.index("lane-1"), ls.index("child-1"))
+        self.assertNotIn("cont", child(calls, 1)["args"])
+
+    def test_a_relaunch_after_needs_label_lands_and_ends_the_marker(self):
+        first, _, _ = run(replies={"land-checks-1-1": {"state": "needs_label", "head": SHA, "label": "raise-me",
+                                                       "failing": ["gate"]}})
+        self.assertEqual(row(first, 1)["outcome"], "needs-label")
+        result, calls, _ = run(args=first["relaunch"],
+                               patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertIn("forge-claim owner-action end --repo owner/repo --issue 1 --reason needs-label",
+                      prompt(calls, "close-out-1"))
+        self.assertNotIn("land-ask-1", labels(calls))
+
+
 class SourceTest(unittest.TestCase):
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")
