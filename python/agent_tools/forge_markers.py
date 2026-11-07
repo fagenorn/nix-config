@@ -225,17 +225,23 @@ def _comments(slug: str, issue: int) -> str:
     return f"repos/{slug}/issues/{issue}/comments"
 
 
+def list_comments(slug: str, issue: int) -> list[dict]:
+    """Every REST comment object of the issue, ascending comment id."""
+    pages = _json(["api", "--paginate", "--slurp", _comments(slug, issue) + "?per_page=100"])
+    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+        raise ForgeError("payload_invalid", "comment listing is not an array of pages")
+    found = [c for page in pages for c in page if isinstance(c, dict)]
+    return sorted(found, key=lambda c: c.get("id") if isinstance(c.get("id"), int) else -1)
+
+
 def list_markers(slug: str, issue: int,
                  associations: Collection[str] | None = None) -> list[Marker]:
     """Every parseable marker on the issue, ascending comment id.
 
     With `associations`, a comment whose `author_association` is not in it is dropped before
     parsing, `end` markers included; `None` reads every comment."""
-    pages = _json(["api", "--paginate", "--slurp", _comments(slug, issue) + "?per_page=100"])
-    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-        raise ForgeError("payload_invalid", "comment listing is not an array of pages")
-    found = [parse(c) for page in pages for c in page if isinstance(c, dict)
-             and (associations is None or c.get("author_association") in associations)]
+    found = [parse(c) for c in list_comments(slug, issue)
+             if associations is None or c.get("author_association") in associations]
     return sorted((m for m in found if m is not None), key=lambda m: m.comment_id)
 
 
