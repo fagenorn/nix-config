@@ -133,44 +133,27 @@ INVOCATION_FORM_HINT = "run git and gh by name, and carry a directory only as gi
 # Words that detach a process from the task that started it (#278). Refused
 # in every repository, before the policy loads.
 DETACHING_WORDS = ("nohup", "setsid", "disown")
-# Words that change the shell's directory (issue 418): bash's `cd`, `pushd`,
-# `popd` and zsh's `chdir`.
-DIRECTORY_WORDS = ("cd", "chdir", "pushd", "popd")
-# Wrapper options that set the wrapped program's directory, by wrapper.
-CHDIR_SHORT_OPTIONS = {"env": "C", "sudo": "D"}
-CHDIR_LONG_OPTION = "--chdir"
-# The builtins and reserved words of bash and zsh (`compgen -b -k`; zsh's
-# `${(k)builtins} ${(k)reswords}`). They run in the shell itself, so any one of
-# them may move its directory out of sight: `trap 'cd <dir>' DEBUG`, `noglob cd`,
-# `repeat 1 cd`, `mapfile -C`, `source`, `alias`, `emulate -c`. One at a command
-# position leaves the directory of a push or PR creation unresolved, unless it is
-# one of `INERT_BUILTINS`, which only print, test or unset (issue 418).
-SHELL_BUILTINS = frozenset("""
-    - : ! . [ [[ ]] { } alias autoload bg bind bindkey break builtin bye caller
-    case cd chdir command compadd comparguments compcall compctl compdescribe
-    compfiles compgen complete compopt compgroups compquote compset comptags
-    comptry compvalues continue coproc declare dirs disable disown do done echo
-    echotc echoti elif else emulate enable end esac eval exec exit export false fc
-    fg fi float for foreach function functions getln getopts hash help history if
-    in integer jobs kill let limit local log logout mapfile nocorrect noglob popd
-    print printf private pushd pushln pwd r read readarray readonly rehash repeat
-    return sched select set setopt shift shopt source suspend test then time times
-    trap true ttyctl type typeset ulimit umask unalias unfunction unhash unlimit
-    unset unsetopt until vared wait whence where which while zcompile zformat zle
-    zmodload zparseopts zregexparse zstyle
-""".split())
-INERT_BUILTINS = frozenset({"echo", "printf", "print", "true", "false", ":", "unset",
-                            "test", "[", "pwd"})
-# An assignment to a zsh special hash defines a function or alias, or sets an
-# option (`functions[g]='cd <dir>'`, `options[autocd]=on`): a directory change the
-# guard cannot follow (issue 418).
-ZSH_SPECIAL_ASSIGNMENT = re.compile(
-    r"(?:dis_)?(?:functions|functions_source|aliases|galiases|saliases|builtins"
-    r"|reswords|options|modules|commands|nameddirs|userdirs|parameters)(?:\[|\+?=)")
 CD_PRELUDE_PROBLEM = (
     "the directory the verb runs in cannot be resolved: a directory change is "
     "accepted only as one leading cd <absolute directory> && before a single "
     "push or PR creation; or carry the directory as git -C <dir>"
+)
+# The allowlist a command holding a lifecycle verb must match as a whole, before
+# any other judgement (issue 418). A plain word takes only these characters and
+# never begins with `=` (zsh's `=cmd` expansion); a single-quoted string is
+# literal; a double-quoted one is literal while it holds none of
+# `DOUBLE_QUOTE_ACTIVE`, the characters the shell still reads there (`!` for
+# history expansion).
+PLAIN_WORD = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
+DOUBLE_QUOTE_ACTIVE = frozenset('"$`\\!')
+LIFECYCLE_VERBS = (
+    ("git", "push"), ("git", "branch", "-d"), ("gh", "pr", "create"),
+    ("gh", "pr", "merge"), ("gh", "release", "create"),
+)
+LIFECYCLE_GRAMMAR = (
+    "a lifecycle verb runs only alone, as [unset GITHUB_TOKEN && ][cd <dir> && ]"
+    "<verb> <args> (git -C <dir> before push or branch -d), every word plain "
+    "([A-Za-z0-9_./:@%+=,-]) or quoted ('...', or \"...\" without $, `, \\ or !)"
 )
 DETACHING_ROUTES = (
     "a detached process outlives the task stop; run it with the Bash tool's "
@@ -1078,7 +1061,7 @@ def wrapper_option(wrapper, option):
 
 
 def detaching_command_flags(tokens, state=(True, None, (), False),
-                            embedded_targets=True, assignments=None):
+                            embedded_targets=True, bang_closes=False):
     """Per token: is it a word at which the shell may start a simple command?
 
     Returns (flags, payloads, state). `payloads` is the command text handed to
@@ -1098,9 +1081,11 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
     `command_position_flags`; this pass has no such fail-closed backstop, hence
     the extra stepping.
 
-    When `assignments` is a list, the index of every assignment word standing
-    where a command could start (`X=1`, before the command word) is appended to
-    it: such a word is not flagged, as it is not the command.
+    `bang_closes` reads a `!` that opens the segment, glued to the `&` that cut
+    it, as the end of zsh's clobber operator `>&!`, so the target is still the
+    next word. Bash reads that `!` as the target itself, and a spaced
+    `>& ! <word>` is that in both shells, so `detaching_word` passes it on one
+    reading only, and only when the segment begins with the `!`.
     """
     flags = [False] * len(tokens)
     payloads = []
@@ -1110,9 +1095,7 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
         if operator:
             open_position, wrapper, pending, target = True, None, [], False
             continue
-        if target and index == 0 and value == "!" and state[3]:
-            # zsh's `>&!` is cut at its `&`: the `!` closes the operator, and the
-            # target is still the next word.
+        if bang_closes and target and index == 0 and value == "!" and state[3]:
             continue
         if target:
             target = False
@@ -1135,8 +1118,6 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
                 payloads.append(value)
             continue
         if ASSIGNMENT_PREFIX.match(word) is not None:
-            if assignments is not None:
-                assignments.append(index)
             continue
         if word in COMMAND_KEYWORDS or word in COMMAND_WRAPPERS:
             wrapper = word
@@ -1167,15 +1148,9 @@ def detaching_word(command):
     command-position word (or its basename) is an evaluator, a token carrying
     `$(` or a backtick, and the command text handed to `env -S`. A raw-text match
     names the word that occurs earliest in that text. A word in argument
-    position otherwise passes. The scan is `shell_run_word`, shared with the
-    directory pass (issue 418).
+    position otherwise passes.
     """
-    return shell_run_word(command, DETACHING_WORDS)
-
-
-def shell_run_word(command, words):
-    """The member of `words` the shell would run in `command`, or None (see
-    `detaching_word` for the matching rules)."""
+    words = DETACHING_WORDS
 
     def earliest(text):
         hits = [(text.find(word), word) for word in words if word in text]
@@ -1204,7 +1179,8 @@ def shell_run_word(command, words):
         payloads = []
         for reading in readings:
             read_flags, read_payloads, after = detaching_command_flags(
-                tokens, states[reading], embedded_targets=reading)
+                tokens, states[reading], embedded_targets=reading,
+                bang_closes=reading and segment.startswith("!"))
             # Only a redirection cut at its `&` (`2>&1`) continues into the next
             # segment; any real separator ends the simple command and its options.
             dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
@@ -1235,168 +1211,114 @@ def shell_run_word(command, words):
     return None
 
 
-def chdir_option(wrapper, word):
-    """True when `word`, an option of `wrapper`, sets the wrapped directory."""
-    letter = CHDIR_SHORT_OPTIONS.get(wrapper)
-    if letter is None:
-        return False
-    if word.startswith("--"):
-        name = word.partition("=")[0]
-        # getopt_long accepts any unambiguous prefix; reading more as a directory
-        # change only refuses more.
-        return len(name) >= 4 and CHDIR_LONG_OPTION.startswith(name)
-    letters = WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT.get(wrapper, frozenset())
-    for character in word[1:]:
-        if character == letter:
-            return True
-        if character in letters:
-            return False
-    return False
-
-
-def opens_substitution(tokens, index):
-    """Does the `(` or `{` operator at `index` open a `$(`, `${`, `<(` or `>(`
-    substitution (the word before it ends in `$`, `<` or `>`)?"""
-    return (index > 0 and not tokens[index - 1][1]
-            and tokens[index - 1][0].endswith(("$", "<", ">")))
-
-
-def inert_builtin_in_shell(tokens, flags):
-    """Is an inert builtin at a command position that the shell itself runs,
-    outside any `$(`, `${`, `<(`, `>(` or backtick substitution (issue 418)?"""
-    closers = []
-    backtick = False
-    for index, ((value, operator), flag) in enumerate(zip(tokens, flags)):
-        if operator:
-            if value == "`":
-                backtick = not backtick
-            elif value in "({" and opens_substitution(tokens, index):
-                closers.append(")" if value == "(" else "}")
-            elif closers and value == closers[-1]:
-                closers.pop()
+def lifecycle_words(command):
+    """(words, problem): `command` read as the allowlist's words, each (text, kind)
+    with kind `plain`, `quoted` or `and` (a `&&`), split at spaces and tabs; else
+    (None, the first thing outside the grammar)."""
+    words = []
+    index, length = 0, len(command)
+    while index < length:
+        character = command[index]
+        if character in " \t":
+            index += 1
             continue
-        if (flag and not closers and not backtick
-                and split_redirection(value)[0] in INERT_BUILTINS):
-            return True
-    return False
+        if command.startswith("&&", index):
+            kind, end = "and", index + 2
+        elif character in "'\"":
+            close = command.find(character, index + 1)
+            if close == -1:
+                return None, f"an unterminated {character} quote"
+            active = next((c for c in command[index + 1:close] if c in DOUBLE_QUOTE_ACTIVE),
+                          None) if character == '"' else None
+            if active is not None:
+                return None, f"`{active}` inside double quotes"
+            kind, end = "quoted", close + 1
+        else:
+            match = PLAIN_WORD.match(command, index)
+            if match is None:
+                return None, f"`{shown_character(character)}` outside quotes"
+            if character == "=":
+                return None, "a word beginning with `=`"
+            kind, end = "plain", match.end()
+        if end < length and command[end] not in " \t":
+            following = command[end]
+            if kind == "quoted" or following in "'\"":
+                return None, "a quoted string glued to another word"
+            return None, f"`{shown_character(following)}` outside quotes"
+        words.append((command[index:end], kind))
+        index = end
+    return words, None
 
 
-def directory_change(text):
-    """Does the shell running `text` possibly change directory (issue 418)?
+def lifecycle_shape(command):
+    """(directory, problem) for a command holding a lifecycle verb (issue 418).
 
-    A directory word the shell may run anywhere counts, by the shared scan
-    `shell_run_word`: after or attached to a redirection, or named by substring
-    in evaluator, `env -S`, substitution or untokenisable text. So does a word at
-    a command position that carries an expansion (it can be `cd`), a wrapper
-    option that sets the directory (`env -C`, `sudo -D`, `--chdir`), a shell
-    builtin or reserved word at a command position other than an inert one
-    (`SHELL_BUILTINS`), a command word holding `=` (an element assignment such
-    as `functions[g]=...`) and an assignment to a zsh special hash. So do an
-    unquoted `(` that opens no `$(`, `<(` or `>(` substitution, and an
-    expansion in a segment an inert builtin runs:
-    zsh expands a builtin's words in the shell itself, and a glob qualifier
-    (`echo /(e:'cd <dir>':)`, `X=(...)`, or one reached through `${~X}`) runs code
-    there.
+    Admitted only as `[<unset scrub> && ][cd <dir> && ][env -u scrub ]<verb> <args>`,
+    with at most one scrub, `<verb>` one of `LIFECYCLE_VERBS` (`git -C <dir>` before
+    `push` or `branch -d`), `<dir>` a plain word and every word as `lifecycle_words`
+    reads it. `directory` is the cd word, else None; `problem` is None when admitted.
+    The scrub's exact spelling is left to the verb's grammar.
     """
-    if shell_run_word(text, DIRECTORY_WORDS) is not None:
-        return True
-    segments = split_segments(text)
-    if segments is None:
-        return False
-    fresh = (True, None, (), False)
-    readings = (True, False)
-    states = dict.fromkeys(readings, fresh)
-    for segment in segments:
-        tokens = tokenize_segment(segment)
-        if tokens is None:
-            states = dict.fromkeys(readings, fresh)
-            continue
-        # A `$(`, `<(` or `>(` substitution runs in a subshell; any other
-        # unquoted `(` may be a glob qualifier the shell itself runs.
-        if any(token == ("(", True) and not opens_substitution(tokens, index)
-               for index, token in enumerate(tokens)):
-            return True
-        flags = [False] * len(tokens)
-        assigned = []
-        for reading in readings:
-            read_flags, _payloads, after = detaching_command_flags(
-                tokens, states[reading], embedded_targets=reading,
-                assignments=assigned)
-            dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
-            states[reading] = after if dangling else fresh
-            flags = [a or b for a, b in zip(flags, read_flags)]
-        if ("$" in segment or "`" in segment) and inert_builtin_in_shell(tokens, flags):
-            return True
-        for index, (flag, (value, operator)) in enumerate(zip(flags, tokens)):
-            if operator:
-                continue
-            word = split_redirection(value)[0]
-            # Only where an assignment or command word can stand: the same text
-            # in an argument (`--title "options=fast"`) is data.
-            if ((flag or index in assigned)
-                    and ZSH_SPECIAL_ASSIGNMENT.match(word) is not None):
-                return True
-            if flag and ("$" in word or "`" in word or "=" in word
-                         or (word in SHELL_BUILTINS and word not in INERT_BUILTINS)):
-                return True
-            wrapper = program_name(word)
-            if wrapper not in CHDIR_SHORT_OPTIONS:
-                continue
-            for later, later_operator in tokens[index + 1:]:
-                if later_operator or not later.startswith("-"):
-                    break
-                if chdir_option(wrapper, later):
-                    return True
-    return False
+    words, problem = lifecycle_words(command)
+    if problem is not None:
+        return None, problem
+    segments = [[]]
+    for text, kind in words:
+        if kind == "and":
+            segments.append([])
+        else:
+            segments[-1].append((text, kind))
+    if any(not segment for segment in segments):
+        return None, "an empty command beside `&&`"
+    *prelude, verb = segments
+    names = set(GH_ENV_TOKEN_NAMES)
+    directory, scrubbed = None, False
+    for segment in prelude:
+        values = [text for text, _ in segment]
+        if (values[0] == "unset" and not scrubbed and directory is None
+                and 2 <= len(values) <= 3 and set(values[1:]) <= names
+                and len(set(values[1:])) == len(values) - 1):
+            scrubbed = True
+        elif values[0] == "cd" and directory is None and len(segment) == 2 \
+                and segment[1][1] == "plain":
+            directory = values[1]
+        else:
+            return None, f"`{shown_value(' '.join(values))} &&` before the verb"
+    values = [text for text, _ in verb]
+    if not scrubbed and values[0] == "env":
+        position = 1
+        unset = []
+        while values[position:position + 1] == ["-u"] and position + 1 < len(values) \
+                and values[position + 1] in names - set(unset):
+            unset.append(values[position + 1])
+            position += 2
+        if unset:
+            values = values[position:]
+    if values[1:2] == ["-C"] and values[:1] == ["git"] and len(verb) > 2 \
+            and PLAIN_WORD.fullmatch(values[2]):
+        values = ["git"] + values[3:]
+    if not any(tuple(values[:len(form)]) == form for form in LIFECYCLE_VERBS):
+        lead = next((index for index, value in enumerate(values) if value in ("git", "gh")), 0)
+        if lead:
+            return None, f"`{shown_value(' '.join(values[:lead]))}` before the verb"
+        return None, f"`{shown_value(' '.join(values[:3]))}` is not a lifecycle verb"
+    return directory, None
 
 
-def cd_prelude_directory(command):
-    """(directory, remainder) when `command` is one leading `cd <absolute dir> && `
-    (after an optional `unset` scrub spelling) before a single segment, else None
-    (issue 418 D1)."""
+def cd_directory_problem(command, directory):
+    """Why the leading `cd <directory>` of `command`, which `lifecycle_shape` admitted,
+    leaves the verb's directory unresolved, or None: it is spelled `cd <directory> && `
+    with single spaces, after any `unset` scrub spelling, and `<directory>` is
+    absolute with no `..` component (issue 418 D1)."""
     rest = command
     for spelling in SCRUB_PREFIXES:
-        if spelling.startswith("unset "):
-            stripped = strip_spelling(rest, spelling)
-            if stripped is not None:
-                rest = stripped
-                break
-    if not rest.startswith("cd "):
-        return None
-    rest = rest[len("cd "):]
-    word, space, after = rest.partition(" ")
-    if not space or not after.startswith("&& "):
-        return None
-    remainder = after[len("&& "):]
-    if not remainder or remainder[0].isspace():
-        return None
-    if (git_directory_problem(word) or not os.path.isabs(word)
-            or ".." in word.split("/")
-            or any(character in word for character in "<>$`")):
-        return None
-    segments = split_segments(remainder)
-    if segments is None or len(segments) != 1:
-        return None
-    return word, remainder
-
-
-def shell_directory(command):
-    """(directory, problem): the directory a leading `cd` moves a push or PR
-    creation to, or the problem with any other directory change (issue 418).
-
-    Any backslash-newline leaves the directory unresolved: whether the shell
-    joins it depends on quoting, comments and here-document bodies, which no
-    quote tracking here reproduces, so a continuation can split a directory word
-    out of sight."""
-    if "\\\n" in command:
-        return None, CD_PRELUDE_PROBLEM
-    prelude = cd_prelude_directory(command)
-    if prelude is not None:
-        if not directory_change(prelude[1]):
-            return prelude[0], None
-    elif not directory_change(command):
-        return None, None
-    return None, CD_PRELUDE_PROBLEM
+        if spelling.startswith("unset ") and strip_spelling(rest, spelling) is not None:
+            rest = strip_spelling(rest, spelling)
+            break
+    if (strip_spelling(rest, f"cd {directory} && ") is None
+            or not os.path.isabs(directory) or ".." in directory.split("/")):
+        return CD_PRELUDE_PROBLEM
+    return None
 
 
 def strip_spelling(text, spelling):
@@ -3065,7 +2987,17 @@ def main():
         if operation == "label":
             return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
 
-    shell_dir, shell_problem = shell_directory(command)
+    # Issue 418: a command holding a lifecycle verb is admitted only in the
+    # allowlist grammar, so the only directory change left is its one leading cd.
+    lifecycle = [operation for operation, *_ in operations if operation != "label"]
+    shell_dir = shell_problem = None
+    if lifecycle:
+        shell_dir, problem = lifecycle_shape(command)
+        if problem is not None:
+            return refuse(lifecycle[0], f"{problem}; {LIFECYCLE_GRAMMAR}",
+                          accepted_forms(table[lifecycle[0]], None))
+        if shell_dir is not None:
+            shell_problem = cd_directory_problem(command, shell_dir)
     # One context per distinct target directory, all under one deadline.
     contexts = {}
     for operation, segment, problem, directory in operations:
