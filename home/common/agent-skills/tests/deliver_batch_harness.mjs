@@ -18,13 +18,13 @@ const num = label => Number((label.match(/-(\d+)(?:-|$)/) || [])[1])
 // Ordered: the first matching pattern wins. A default gets the label and the prompt.
 const DEFAULTS = [
   [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null })],
-  [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_pr: null, open_pr: null, blockers: [], decision: { verdict: 'none', comment_id: null, items: [], replies: [] } })],
+  [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_pr: null, open_pr: null, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' } })],
   [/^lane-/, () => ({ lane: 'standard', why: 'x' })],
   [/^acquire-/, () => ({ verdict: 'acquired', comment_id: 7 })],
   [/^renew-/, () => ({ verdict: 'renewed' })],
   [/^release-/, () => ({ verdict: 'released' })],
   [/^(ask|land-ask)-/, () => ({ verdict: 'posted', comment_id: 99 })],
-  [/^answered-|^recover-end-/, () => ({ verdict: 'ended' })],
+  [/^recover-end-/, () => ({ verdict: 'ended' })],
   [/^readopt-/, l => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: AC })],
   [/^land-sync-review-|^land-fix-review-/, () => PASS],
   [/^land-record-/, (l, p) => ({ ok: true, head: (p.match(/Accepted head: ([0-9a-f]+)/) || [])[1] || SHA })],
@@ -35,7 +35,7 @@ const DEFAULTS = [
   [/^land-fix-/, () => DONE],
   [/^land-merge-/, () => ({ merged: true, merge_commit: SHA, notes: 'merged' })],
   [/^land-unlock-/, () => ({ verdict: 'released' })],
-  [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, branch_deleted: true, notes: 'ok' })],
+  [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, decision_ended: true, branch_deleted: true, notes: 'ok' })],
 ]
 
 const calls = []
