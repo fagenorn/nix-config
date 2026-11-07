@@ -952,6 +952,9 @@ def opening_operator(tokens, index, operator):
 
 
 ASSIGNED_VARIABLE = re.compile(r"\$(\w+)")
+# A whole-word `${...}` (a double-quoted `"${G}"`, `"${G:-x}"`, `"${X:-git}"`
+# tokenises to one word); its group is the text between the braces.
+WORD_BRACED_VARIABLE = re.compile(r"\$\{(.*)\}", re.DOTALL)
 BRACED_VARIABLE = re.compile(r"(\w+)(?::?[-=+?].*)?", re.DOTALL)
 
 
@@ -982,8 +985,8 @@ def git_spelling(tokens, index, assigned):
 
     Covers a plain `git` or `git-<name>` word by basename, the same word after
     `$` (`$'git'` tokenises to `$git`), a variable assigned a git word
-    (`$G`, `${G}`) and the braced default `${G:-git}`, whose run starts after
-    its closing `}`.
+    (`$G`, `${G}`, and the same inside one word, `"${G}"`) and the braced
+    default `${G:-git}`, whose run starts after its closing `}`.
     """
     value = tokens[index][0]
     name = program_name(value)
@@ -995,6 +998,14 @@ def git_spelling(tokens, index, assigned):
     variable = ASSIGNED_VARIABLE.fullmatch(value)
     if variable is not None and variable.group(1) in assigned:
         return "git", index + 1
+    word_braced = WORD_BRACED_VARIABLE.fullmatch(value)
+    if word_braced is not None:
+        inner = word_braced.group(1)
+        braced = BRACED_VARIABLE.fullmatch(inner)
+        if GIT_RAW_WORD.fullmatch(inner) is not None or (
+            braced is not None and braced.group(1) in assigned
+        ):
+            return "git", index + 1
     if (
         index >= 2 and tokens[index - 1] == ("{", True)
         and tokens[index - 2] == ("$", False)
