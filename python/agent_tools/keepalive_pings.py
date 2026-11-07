@@ -3,15 +3,22 @@
 `read_pings` reads the `ping` lines of one log that `cache-proxy --keepalive` writes (through
 agent_tools.cache_proxy.LineLog) and prices them through agent_tools.model_pricing; the owner
 report matches them to transcripts by conversation handle. python/README.md (agent-costs) holds
-the contract.
+the contract. `end_turn_cap` is the measurement of issue 502's AC2 (no ping after a completed
+`end_turn` reply once its period holds the cap), run as `python -m agent_tools.keepalive_pings
+end-turn-cap` by the verify check home/common/verify-pending/checks/keepalive-end-turn-cap.
 """
 
+import argparse
 import json
 import math
+import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Iterable, Sequence
 
 from agent_tools.agent_costs import parse_rfc3339_utc
+from agent_tools.cache_keepalive import END_TURN_PINGS
 from agent_tools.model_pricing import usage_cost
 
 
@@ -90,3 +97,174 @@ def read_pings(path: str) -> PingLog:
                 else:
                     pings.append(ping)
     return PingLog(path, tuple(pings), skipped)
+
+
+@dataclass(frozen=True)
+class CapReport:
+    end_turn_periods: int  # periods whose conversation's last reply was end_turn when they closed
+    over_cap: int          # of those, periods with a ping sent after that reply held `cap` pings
+    max_pings: int         # the largest total of those periods
+
+
+def _number(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _thread_request(entry, ts):
+    """(conversation, (start, completion, reply)) of a thread `request` object, else None."""
+    conversation = entry.get("conversation")
+    keepalive = entry.get("keepalive")
+    if (not isinstance(conversation, str) or keepalive is None
+            or keepalive in ("untracked", "no_tail_mark")):
+        return None
+    duration = entry.get("duration_ms")
+    if duration is None:
+        duration = 0
+    if not _number(duration):
+        return None
+    try:
+        start = ts - timedelta(milliseconds=duration)
+    except OverflowError:
+        return None
+    status = entry.get("status")
+    reply = None
+    if (isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300
+            and entry.get("outcome") == "complete"):
+        stop = entry.get("stop_reason")
+        reply = stop if isinstance(stop, str) else None
+    return conversation, (start, ts, reply)
+
+
+def _reply_state(threads, conversation, at):
+    """"idle", "streaming", or the reply of the thread request of `conversation` with the
+    greatest start at or before `at` (the later line on a tie)."""
+    chosen = None
+    for request in threads.get(conversation, ()):
+        if request[0] <= at and (chosen is None or request[0] >= chosen[0]):
+            chosen = request
+    if chosen is None:
+        return "idle"
+    return "streaming" if chosen[1] > at else chosen[2]
+
+
+def _segment_periods(segment, closed_at, cap):
+    """(counted periods, over, max pings) of one segment of (event, entry, ts) lines, with
+    still-open periods closed at `closed_at`."""
+    threads = {}
+    for event, entry, ts in segment:
+        if event == "request":
+            found = _thread_request(entry, ts)
+            if found is not None:
+                threads.setdefault(found[0], []).append(found[1])
+    periods = over_cap = max_pings = 0
+    open_count, over = {}, set()
+
+    def close(conversation, pings, at):
+        nonlocal periods, over_cap, max_pings
+        marked = conversation in over
+        open_count.pop(conversation, None)
+        over.discard(conversation)
+        if _reply_state(threads, conversation, at) == "end_turn":
+            periods += 1
+            over_cap += marked
+            max_pings = max(max_pings, pings)
+
+    for event, entry, ts in segment:
+        conversation = entry.get("conversation")
+        if not isinstance(conversation, str):
+            continue
+        if event == "ping":
+            count = open_count.get(conversation, 0)
+            if count >= cap and _reply_state(threads, conversation, ts) == "end_turn":
+                over.add(conversation)
+            open_count[conversation] = count + 1
+        elif event == "keepalive_end":
+            pings = entry.get("pings", 0)
+            close(conversation, pings if _number(pings) else 0, ts)
+    for conversation in list(open_count):
+        close(conversation, open_count[conversation], closed_at)
+    return periods, over_cap, max_pings
+
+
+def end_turn_cap(lines: Iterable[str], start: datetime, end: datetime, cap: int) -> CapReport:
+    """Issue 502's AC2 over the `[start, end)` lines of one cache-proxy log: how many keepalive
+    periods ended after an `end_turn` reply and how many of them sent a ping after that reply
+    completed while already holding `cap` pings. Pings sent while the reply still streams count
+    toward the period's total but never mark it over."""
+    segments, current = [], []
+    for raw in lines:
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        try:
+            ts = parse_rfc3339_utc(entry.get("ts"))
+        except ValueError:
+            continue
+        if not start <= ts < end:
+            continue
+        event = entry.get("event")
+        if event == "listening":
+            segments.append((current, ts))
+            current = []
+        else:
+            current.append((event, entry, ts))
+    segments.append((current, end))
+    periods = over_cap = max_pings = 0
+    for segment, closed_at in segments:
+        found, over, most = _segment_periods(segment, closed_at, cap)
+        periods += found
+        over_cap += over
+        max_pings = max(max_pings, most)
+    return CapReport(periods, over_cap, max_pings)
+
+
+def _days(value):
+    try:
+        days = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer") from None
+    if days < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return days
+
+
+def _instant(value):
+    try:
+        return parse_rfc3339_utc(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="keepalive-pings")
+    commands = parser.add_subparsers(dest="command", required=True)
+    cap = commands.add_parser("end-turn-cap", help="issue 502 AC2: end_turn pings within the cap")
+    cap.add_argument("--log", type=Path,
+                     default=Path.home() / "Library/Logs/claude-cache-proxy.log")
+    cap.add_argument("--days", type=_days, default=7)
+    cap.add_argument("--end", type=_instant, default=None)
+    args = parser.parse_args(argv)
+    end = args.end if args.end is not None else datetime.now(timezone.utc)
+    start = end - timedelta(days=args.days)
+    try:
+        with open(args.log, "r", encoding="utf-8", errors="replace") as handle:
+            report = end_turn_cap(handle, start, end, END_TURN_PINGS)
+    except OSError as error:
+        print(f"keepalive-pings: cannot read {args.log}: {error.strerror or error}",
+              file=sys.stderr)
+        return 2
+    print(json.dumps({"end_turn_periods": report.end_turn_periods, "over_cap": report.over_cap,
+                      "max_pings": report.max_pings, "cap": END_TURN_PINGS,
+                      "start": start.isoformat(), "end": end.isoformat(),
+                      "log": str(args.log)}, sort_keys=True))
+    if report.over_cap > 0:
+        return 1
+    return 0 if report.end_turn_periods >= 1 else 75
+
+
+if __name__ == "__main__":
+    sys.exit(main())
