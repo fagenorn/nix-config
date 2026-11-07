@@ -466,6 +466,94 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "cat <<EOF; true\ngit push --force origin main\nEOF\n", cwd=repo)
         self.assertEqual(0, inert.returncode, inert.stderr)
 
+    def test_unnormalisable_heredoc_delimiter_fails_closed(self):
+        # Issue 651: bash reads `<<$'EOF'` (and `<<$"EOF"`) as ending at the line
+        # `EOF`, while a guard that keeps the `$` waits for `$EOF` and so would skip
+        # every line in between unjudged. Any delimiter the guard cannot normalise
+        # exactly as the shell does makes the whole command unparseable: a lifecycle
+        # verb or a detaching word anywhere in its raw text is refused.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        there = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        create = ("gh pr create --repo fagenorn/nix-config --base main --head topic "
+                  "--title t --body b")
+        openers = ("cat <<$'EOF'", 'cat <<$"EOF"', "cat <<-$'EOF'")
+        for opener in openers:
+            for operation, line in (
+                ("push", "git push origin topic"),
+                ("PR creation", create),
+                ("push", f"cd {there} && git push origin topic"),
+            ):
+                # The shell ends the body at `EOF` and runs `line`; a guard reading
+                # the delimiter as `$EOF` would skip to the last line.
+                command = f"{opener}\nbody\nEOF\n{line}\n$EOF\n"
+                with self.subTest(command=command):
+                    result = self.run_guard(command, cwd=repo)
+                    self.assertEqual(2, result.returncode, (command, result.stderr))
+                    self.assertIn(f"lifecycle guard: unsafe {operation}:", result.stderr)
+                    self.assertIn(GRAMMAR, result.stderr)
+            command = f"{opener}\nbody\nEOF\nnohup sleep 9 &\n$EOF\n"
+            with self.subTest(command=command):
+                self.assert_detaching_refusal(self.run_guard(command), "nohup", command)
+        # Mixed quoting, escapes and a bare `$` are not normalised either (D3).
+        for opener in ("cat <<\\EOF", "cat <<E'OF'", "cat <<'E'\"OF\"", "cat <<\"E\"OF",
+                       'cat <<"E\\OF"', "cat <<$EOF", "cat <<E`x`OF"):
+            command = f"{opener}\nbody\nEOF\ngit push origin topic\n"
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn("lifecycle guard: unsafe push:", result.stderr)
+        # Fail closed (D2): a verb genuinely inside such a body is refused too.
+        command = "cat <<$'EOF'\ngit push origin topic\nEOF\n"
+        result = self.run_guard(command, cwd=repo)
+        self.assertEqual(2, result.returncode, (command, result.stderr))
+        self.assertIn("lifecycle guard: unsafe push:", result.stderr)
+        # With no verb, label or detaching word the command still passes.
+        for command in ("cat <<$'EOF'\nhello\nEOF\n", "cat <<\\EOF\nhello\nEOF\n"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        # The normalisable spellings keep their inert plain-text bodies.
+        for opener in ("cat <<EOF", "cat <<'EOF'", 'cat <<"EOF"', "cat <<-EOF", "cat << 'EOF'"):
+            command = f"{opener}\ngit push origin topic\nnohup x &\nEOF\n"
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_expanding_heredoc_body_fails_closed(self):
+        # Issue 651 (D6): under a bare-word delimiter the shell runs `$(…)` and
+        # backtick substitutions in the body and joins a backslash-newline before
+        # matching the closing line, so such a body is not inert. A body holding
+        # `$`, a backtick or a backslash there makes the command unparseable.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command in (
+            "cat <<EOF\n$(git push --force origin main)\nEOF\n",
+            "cat <<EOF\n`git push --force origin main`\nEOF\n",
+            "cat <<-EOF\n\t$(git push --force origin main)\n\tEOF\n",
+            "cat << EOF\nx ${y:-$(git push --force origin main)}\nEOF\n",
+            # bash joins `EO\` + `F` into the closing line `EOF` and runs the push;
+            # a guard matching raw lines would skip to the last `EOF`.
+            "cat <<EOF\nEO\\\nF\ngit push --force origin main\nEOF\n",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn("lifecycle guard: unsafe push:", result.stderr)
+        command = "cat <<EOF\n$(nohup sleep 9 &)\nEOF\n"
+        self.assert_detaching_refusal(self.run_guard(command), "nohup", command)
+        # A quoted delimiter expands nothing: the same bodies stay inert.
+        for opener in ("cat <<'EOF'", 'cat <<"EOF"'):
+            for body in ("$(git push --force origin main)",
+                         "`git push --force origin main`", "$(nohup sleep 9 &)"):
+                command = f"{opener}\n{body}\nEOF\n"
+                with self.subTest(command=command):
+                    result = self.run_guard(command, cwd=repo)
+                    self.assertEqual(0, result.returncode, (command, result.stderr))
+        # An expanding body with no verb, label or detaching word still passes.
+        for command in ("cat <<EOF\n$HOME and `date`\nEOF\n", "cat <<EOF\na\\\nb\nEOF\n"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
     def test_namespaced_ref_spellings_of_the_default_branch_block(self):
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         for command in (
@@ -564,8 +652,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "eval 'gh pr edit 1 --add-label instruction-budget-raise'",
             "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'",
             "gh pr edit 1 --add-label 'instruction-budget-raise",  # unterminated
-            # split_segments takes `<<"a\"` as a heredoc delimiter, while the
-            # tokeniser reads `\"` as an escaped quote and never closes it.
+            # `<<"a\"` holds a backslash, a delimiter the guard does not normalise
+            # (issue 651), so the whole command is unparseable.
             'gh pr edit 1 --add-label instruction-budget-raise <<"a\\"\nbody\na\\\n',
             "gh pr edit $(gh pr view --json number --jq .number) "
             "--add-label instruction-budget-raise",
@@ -588,7 +676,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'": self.EVALUATOR_REASON,
                 "gh pr edit 1 --add-label 'instruction-budget-raise": self.UNPARSED_REASON,
                 'gh pr edit 1 --add-label instruction-budget-raise <<"a\\"\nbody\na\\\n':
-                    self.UNTOKENISED_REASON,
+                    self.UNPARSED_REASON,
                 'result="$(gh pr edit 1 --add-label instruction-budget-raise)"':
                     self.QUOTED_SUBSTITUTION_REASON,
                 'echo "`gh pr edit 1 --add-label instruction-budget-raise`"':

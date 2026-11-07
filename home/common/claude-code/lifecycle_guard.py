@@ -343,8 +343,14 @@ def gh_lookup_env():
 def read_heredoc_delimiter(command, index):
     """Consume the `<<`/`<<-` redirection starting at `index`.
 
-    Returns (next_index, delimiter, strip_tabs); delimiter is None when the
-    redirection is malformed.
+    Returns (next_index, delimiter, strip_tabs, expands). `expands` says whether
+    the shell expands the body (a bare-word delimiter). The delimiter is None
+    when the redirection is malformed or when its word is not one of the three
+    spellings the guard reads exactly as the shell does: a bare word without
+    quotes, backslashes, `$` or backticks, one single-quoted span, or one
+    double-quoted span without a shell-active character. `split_segments` then
+    refuses to parse the command, so a lifecycle verb or detaching word anywhere
+    in it is refused on its raw text (issue 651).
     """
     length = len(command)
     cursor = index + 2
@@ -354,15 +360,13 @@ def read_heredoc_delimiter(command, index):
         cursor += 1
     while cursor < length and command[cursor] in " \t":
         cursor += 1
-    delimiter = []
+    start = cursor
     quote = None
     while cursor < length:
         character = command[cursor]
         if quote is not None:
             if character == quote:
                 quote = None
-            else:
-                delimiter.append(character)
             cursor += 1
             continue
         if character in "'\"":
@@ -370,22 +374,40 @@ def read_heredoc_delimiter(command, index):
             cursor += 1
             continue
         if character == "\\" and cursor + 1 < length:
-            delimiter.append(command[cursor + 1])
             cursor += 2
             continue
         if character in " \t\n;&|<>()":
             break
-        delimiter.append(character)
         cursor += 1
-    if quote is not None or not delimiter:
-        return cursor, None, False
-    return cursor, "".join(delimiter), strip_tabs
+    if quote is not None:
+        return cursor, None, False, False
+    raw = command[start:cursor]
+    if not raw:
+        return cursor, None, False, False
+    if raw[0] == "'":
+        if len(raw) >= 3 and raw[-1] == "'" and "'" not in raw[1:-1]:
+            return cursor, raw[1:-1], strip_tabs, False
+        return cursor, None, False, False
+    if raw[0] == '"':
+        if (len(raw) >= 3 and raw[-1] == '"'
+                and not any(c in DOUBLE_QUOTE_ACTIVE for c in raw[1:-1])):
+            return cursor, raw[1:-1], strip_tabs, False
+        return cursor, None, False, False
+    if any(c in "'\"\\$`" for c in raw):
+        return cursor, None, False, False
+    return cursor, raw, strip_tabs, True
 
 
 def skip_heredoc_bodies(command, index, pending):
-    """Skip `pending` heredoc bodies. Returns None when one is unterminated."""
+    """Skip `pending` heredoc bodies.
+
+    Returns None when one is unterminated, or when a body the shell expands
+    (bare-word delimiter) holds `$`, a backtick or a backslash: the shell runs
+    substitutions there and joins a backslash-newline before matching the
+    closing line (issue 651).
+    """
     length = len(command)
-    for delimiter, strip_tabs in pending:
+    for delimiter, strip_tabs, expands in pending:
         closed = False
         while index < length:
             end = command.find("\n", index)
@@ -399,6 +421,8 @@ def skip_heredoc_bodies(command, index, pending):
             if candidate == delimiter:
                 closed = True
                 break
+            if expands and any(c in line for c in "$`\\"):
+                return None
         if not closed:
             return None
     return index
@@ -409,8 +433,9 @@ def split_segments(command):
 
     Quoted interiors stay inside their segment; comments and heredoc bodies are
     dropped. Neither can therefore open a command position. Returns None when
-    the string cannot be parsed (unterminated quote or heredoc), which the
-    caller treats as a fail-closed signal.
+    the string cannot be parsed (unterminated quote or heredoc, or a heredoc the
+    guard cannot read exactly), which the caller treats as a fail-closed
+    signal.
     """
     segments = []
     current = []
@@ -451,11 +476,11 @@ def split_segments(command):
                 current.append("<<<")
                 index += 3
                 continue
-            cursor, delimiter, strip_tabs = read_heredoc_delimiter(command, index)
+            cursor, delimiter, strip_tabs, expands = read_heredoc_delimiter(command, index)
             if delimiter is None:
                 return None
             current.append(command[index:cursor])
-            pending.append((delimiter, strip_tabs))
+            pending.append((delimiter, strip_tabs, expands))
             index = cursor
             continue
         if character == "\n":
