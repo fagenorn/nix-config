@@ -332,6 +332,13 @@ class ManagedPrePushHookTest(unittest.TestCase):
         self.assertTrue(report["refused"])
         self.assertFalse(report["control_admitted"])
 
+    def test_the_readme_documents_the_check_and_its_owner_requirement(self):
+        readme = (Path(__file__).resolve().parent.parent / "python" / "README.md").read_text(
+            encoding="utf-8")
+        for needle in ("managed-pre-push-hook --slug S", "verify_checks.managed_pre_push_hook",
+                       "-agent-git-hooks", "ssh:file", "authorized owner"):
+            self.assertIn(needle, readme)
+
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode("home/common/verify-pending/checks/managed-pre-push-hook"),
                          "100755")
