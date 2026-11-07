@@ -27,6 +27,9 @@ let
     else
       "env XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\" ${pkgs.systemd}/bin/systemctl --user start --no-block verify-pending.service";
 
+  # The job is loaded in gui/<uid> only while the user is logged in at the console (issue 668).
+  probe = if pkgs.stdenv.isDarwin then "/bin/launchctl print gui/$(id -u)/${label}" else "true";
+
   path = lib.concatStringsSep ":" [
     (lib.makeBinPath [
       pkgs.gh
@@ -56,9 +59,15 @@ let
       (builtins.readFile ./pass.sh)
   );
 
-  kick = pkgs.writeShellScript "verify-pending-kick" (
-    builtins.replaceStrings [ "@path@" "@start@" ] [ path start ] (builtins.readFile ./kick.sh)
+  kickText = builtins.replaceStrings [ "@path@" "@start@" "@probe@" ] [ path start probe ] (
+    builtins.readFile ./kick.sh
   );
+
+  kick =
+    assert lib.assertMsg (lib.all (line: builtins.match ".*@[a-zA-Z]+@.*" line == null) (
+      lib.splitString "\n" kickText
+    )) "verify-pending: kick.sh keeps a placeholder that default.nix does not substitute";
+    pkgs.writeShellScript "verify-pending-kick" kickText;
 
   command =
     assert lib.assertMsg (
@@ -78,12 +87,14 @@ in
     label = readOnlyStr "The launchd label / unit name of the verify-pending job.";
     kick = readOnlyStr "Store path of the script that asks for one pass after a switch.";
     start = readOnlyStr "The line the kick script runs to start the job without waiting.";
+    probe = readOnlyStr "The line the kick script runs to check the job is loaded before starting it.";
+    kickText = readOnlyStr "The kick script's text after its placeholders are substituted.";
   };
 
   config = lib.mkMerge [
     {
       verifyPending = {
-        inherit command label start;
+        inherit command label start probe kickText;
         kick = "${kick}";
       };
     }

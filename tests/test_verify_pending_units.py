@@ -46,6 +46,14 @@ def check_kick(case, kick):
     case.assertRegex(kick, r"^/nix/store/[0-9a-z]{32}-verify-pending-kick$")
 
 
+def check_kick_text(case, got):
+    """The built kick runs this host's probe, then its start line, and keeps no @placeholder@ (issue 668)."""
+    lines = got["kickText"].splitlines()
+    case.assertIn(f"if {{ {got['probe']}; }} >/dev/null 2>&1; then", lines)
+    case.assertIn(f"  {{ {got['start']}; }} >/dev/null || true", lines)
+    case.assertNotRegex(got["kickText"], r"@[A-Za-z]+@")
+
+
 class LinuxUnits(unittest.TestCase):
     HOST = "anis-desktop"
 
@@ -56,6 +64,8 @@ class LinuxUnits(unittest.TestCase):
           label = u.verifyPending.label;
           kickScript = u.verifyPending.kick;
           start = u.verifyPending.start;
+          probe = u.verifyPending.probe;
+          kickText = u.verifyPending.kickText;
           service = u.systemd.user.services.verify-pending;
           timer = u.systemd.user.timers.verify-pending;
           paths = builtins.attrNames u.systemd.user.paths;
@@ -93,6 +103,11 @@ class LinuxUnits(unittest.TestCase):
         self.assertIn("systemctl --user start --no-block verify-pending.service", self.got["start"])
         self.assertNotIn("launchctl", self.got["start"])
 
+    def test_the_linux_kick_always_starts(self):
+        # NixOS behaviour is unchanged (issue 668 D4): the probe never stops the start line.
+        self.assertEqual(self.got["probe"], "true")
+        check_kick_text(self, self.got)
+
 
 class DarwinHosts(unittest.TestCase):
     HOSTS = ("mbp", "eleven-m5")
@@ -101,6 +116,8 @@ class DarwinHosts(unittest.TestCase):
           label = u.verifyPending.label;
           kickScript = u.verifyPending.kick;
           start = u.verifyPending.start;
+          probe = u.verifyPending.probe;
+          kickText = u.verifyPending.kickText;
           homeKick = u.home.activation ? verifyPendingKick;
           agentCommand = c.launchd.user.agents.verify-pending.command;
           plist = c.environment.userLaunchAgents."org.nixos.verify-pending.plist".text;
@@ -133,6 +150,13 @@ class DarwinHosts(unittest.TestCase):
                 self.assertEqual(self.got[host]["start"], f"/bin/launchctl kickstart gui/$(id -u)/{LABEL}")
                 self.assertIs(self.got[host]["homeKick"], False,
                               "on darwin the kick runs from nix-darwin postActivation, not home-manager")
+
+    def test_the_kick_probes_the_job_in_the_gui_domain(self):
+        # A host with nobody logged in at the console has no gui/<uid> domain (issue 668).
+        for host in self.HOSTS:
+            with self.subTest(host=host):
+                self.assertEqual(self.got[host]["probe"], f"/bin/launchctl print gui/$(id -u)/{LABEL}")
+                check_kick_text(self, self.got[host])
 
     def plist(self, host):
         return plistlib.loads(self.got[host]["plist"].encode())
