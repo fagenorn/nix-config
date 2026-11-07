@@ -1028,14 +1028,14 @@ WRAPPER_OPTIONS_WITH_ARGUMENT = {
 # command line and runs it. That argument is command text, not a name.
 ENV_SPLIT_STRING = "--split-string"
 # A redirection operator standing alone takes the next word as its target.
-BARE_REDIRECTION = re.compile(r"^(\d*|&)(>>?|<<?<?|<>|>&|<&)$")
-ATTACHED_REDIRECTION = re.compile(r"^(\d+|&)?(>>?|<<?<?|<>|>&|<&)")
+BARE_REDIRECTION = re.compile(r"^(\d*|&)(>>?&?!?|<<?<?|<>|<&)$")
+ATTACHED_REDIRECTION = re.compile(r"^(\d+|&)?(>>?&?!?|<<?<?|<>|<&)")
 # A segment cut at the `&` of `2>&1` ends in an unescaped `>` or `<`. Only then
 # does the next segment continue the same simple command.
 DANGLING_REDIRECTION = re.compile(r"(?:^|[^\\])(?:\\\\)*[<>]$")
-# A word that ends in a redirection operator (`>/dev/null>`, `X=>`) leaves that
-# operator without a target: the next word is it.
-TRAILING_OPERATOR = re.compile(r"[<>]&?$")
+# A word that ends in a redirection operator (`>/dev/null>`, `X=>`, zsh's
+# clobber `>!`) leaves that operator without a target: the next word is it.
+TRAILING_OPERATOR = re.compile(r"[<>]&?!?$")
 
 
 def split_redirection(value):
@@ -1109,6 +1109,10 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
     for index, (value, operator) in enumerate(tokens):
         if operator:
             open_position, wrapper, pending, target = True, None, [], False
+            continue
+        if target and index == 0 and value == "!" and state[3]:
+            # zsh's `>&!` is cut at its `&`: the `!` closes the operator, and the
+            # target is still the next word.
             continue
         if target:
             target = False

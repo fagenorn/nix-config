@@ -2564,6 +2564,15 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("push", f">/dev/null>> /dev/null cd {there} && git push origin trunk"),
             ("push", f"X=1>/dev/null> /dev/null cd {there} && git push origin trunk"),
             ("PR creation", f">/dev/null> /dev/null cd {there} && {create}"),
+            # zsh's clobber operators `>!` and `>>!` take a target too (final review
+            # of issue 418, second round).
+            ("push", f">! /dev/null cd {there} && git push origin trunk"),
+            ("push", f">>! /dev/null cd {there} && git push origin trunk"),
+            ("push", f">/dev/null>! /dev/null cd {there} && git push origin trunk"),
+            ("push", f">/dev/null>>! /dev/null cd {there} && git push origin trunk"),
+            ("push", f"X=1>! /dev/null cd {there} && git push origin trunk"),
+            ("push", f">&! /dev/null cd {there} && git push origin trunk"),
+            ("PR creation", f">/dev/null>! /dev/null cd {there} && {create}"),
             # A special-hash assignment at a command position still refuses.
             ("push", f"options[autocd]=on; git push origin {feature}"),
             ("push", f"X=1 options[autocd]=on; git push origin {feature}"),
