@@ -85,7 +85,7 @@ const SETUP_SCHEMA = {
 const setup = await agent(`You read the project contract of the git repository at ${REPO} for a batch delivery. Change nothing in this step.
 1. Run hostname -s and return it as host.
 2. Run resolve-project resolve --repo-root ${REPO}. If it refuses, return ok=false with the resolver's error.code, its repair_id and its ordered violations exactly as given. Otherwise return ok=true and these fields from the resolved snapshot: slug (bindings.tracker.repo_slug), unset_env (bindings.tracker.credential_env.unset_before_invocation), integration_branch and default_branch (bindings.vcs.integration_branch and bindings.vcs.default_branch), merge_strategy and delete_branch (bindings.vcs.merge.strategy and bindings.vcs.merge.delete_branch), max_parallel (bindings.workflow.orchestration.max_parallel), required_checks (bindings.vcs.merge.required_checks exactly as resolved, null when the contract declares none).
-${HAS_LABEL ? `3. Return issues: the numbers from gh issue list --repo <slug> --label ${args.label} --state open --json number --limit 500.` : '3. Do not list issues.'}
+${HAS_LABEL ? `3. Return issues: the numbers from gh issue list --repo <slug> --label ${args.label} --state open --json number --limit 500, run after unsetting exactly the names in bindings.tracker.credential_env.unset_before_invocation (prefix it with unset <those names> && when there are any, nothing else chained).` : '3. Do not list issues.'}
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', model: 'sonnet', effort: 'low', schema: SETUP_SCHEMA })
 if (setup === null || setup === undefined) return { stage: 'setup', result: null }
 if (!setup.ok) return { stage: 'setup', result: setup }
@@ -96,9 +96,9 @@ const CHECKS = {
 }
 const missing = Object.keys(CHECKS).filter(f => !CHECKS[f](setup[f]))
 if (missing.length) return { stage: 'setup', result: setup, missing }
-// required_checks is optional: null when the contract declares none, else a non-empty list of distinct non-empty strings (D11).
+// required_checks must be returned: null when the contract declares none, else a non-empty list of distinct non-empty strings (D11); an absent field is never defaulted.
 const RC = setup.required_checks
-if (RC !== undefined && RC !== null && !(Array.isArray(RC) && RC.length && RC.every(nonEmpty) && new Set(RC).size === RC.length)) {
+if (RC === undefined || (RC !== null && !(Array.isArray(RC) && RC.length && RC.every(nonEmpty) && new Set(RC).size === RC.length))) {
   return { stage: 'setup', result: setup, invalid: 'required_checks' }
 }
 const SETUP = setup

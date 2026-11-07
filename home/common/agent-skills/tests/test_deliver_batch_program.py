@@ -109,6 +109,22 @@ class ArgsTest(unittest.TestCase):
                 self.assertEqual((result["stage"], result["invalid"]), ("setup", "required_checks"))
                 self.assertEqual(labels(calls), ["setup"])
 
+    def test_setup_reply_without_required_checks_stops_the_run(self):
+        reply = {"ok": True, "host": "h1", "slug": "owner/repo", "integration_branch": "dev", "default_branch": "main",
+                 "merge_strategy": "merge", "delete_branch": True, "unset_env": [], "max_parallel": 2}
+        result, calls, _ = run(replies={"setup": reply})
+        self.assertEqual((result["stage"], result["invalid"]), ("setup", "required_checks"))
+        self.assertEqual(labels(calls), ["setup"])
+
+    def test_label_mode_issue_list_runs_after_the_credential_unset(self):
+        args = dict(without(ARGS, "issues"), label="agent:ready")
+        _, calls, _ = run(args=args, patch={"setup": {"issues": []}})
+        text = prompt(calls, "setup")
+        step = next(line for line in text.splitlines() if line.startswith("3."))
+        self.assertIn("gh issue list --repo <slug> --label agent:ready", step)
+        self.assertIn("bindings.tracker.credential_env.unset_before_invocation", step)
+        self.assertRegex(step, r"after unsetting exactly the names in")
+
     def test_label_selects_the_issues_setup_lists(self):
         args = dict(without(ARGS, "issues"), label="agent:ready")
         result, calls, _ = run(args=args, patch={"setup": {"issues": [4, 2, 4]},
