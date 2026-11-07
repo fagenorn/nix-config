@@ -2769,7 +2769,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "git -C /tmp status --short",
             "git -C /tmp/x log --grep push",
             "git --no-pager log --oneline",
-            "git -c core.pager=cat diff",
             "/usr/bin/git status",
             "gh pr view 1 --json mergeable",
             "gh pr list --state merged",
@@ -2780,6 +2779,115 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "gh pr view $(printf 1) --json url",
             "gh -R fagenorn/nix-config pr view $(printf 1)",
             "git log $(sh -c pwd | cat) -1",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_git_invocations_that_could_transmit_refs_are_refused(self):
+        """Issue 655 AC1, D2, D4-D9: a git invocation that could transmit refs and is
+        not an admitted lifecycle form is refused as a push before any repository
+        lookup, in each spelling the issue names and in every position the shell
+        runs it from; local subcommands still pass."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        # A configured alias resolving to push: refused by name, never by reading it.
+        subprocess.run(["git", "config", "alias.p", "push"], cwd=repo, check=True,
+                       capture_output=True)
+        topic = "issue-655-topic"
+        url = "git@github.com:fagenorn/nix-config.git"
+        unknown = ("is not a known local git subcommand; an alias, a git-* program "
+                   "or a transport could transmit refs")
+        evaluator = "shell source passed to an evaluator cannot be validated"
+        split = "command text handed to env -S cannot be validated"
+        uncertain = "the git invocation continues past a shell substitution or grouping"
+        for command, reason in (
+            (f"git -c alias.p=push p origin {topic}", "git global option -c is not accepted"),
+            (f"git --config-env=alias.p=PUSH p origin {topic}",
+             "git global option --config-env=alias.p=PUSH is not accepted"),
+            ("git -c core.pager=cat diff", "git global option -c is not accepted"),
+            ("git --exec-path=/tmp status",
+             "git global option --exec-path=/tmp is not accepted"),
+            (f"git p origin {topic}", f"git p {unknown}"),
+            (f"git -C {repo} p origin {topic}", f"git p {unknown}"),
+            (f"git status; git p origin {topic}", f"git p {unknown}"),
+            (f"x=$(git p origin {topic})", f"git p {unknown}"),
+            (f"git send-pack {url} {topic}", f"git send-pack {unknown}"),
+            (f"git http-push https://example.invalid/x.git {topic}",
+             f"git http-push {unknown}"),
+            (f"git subtree push --prefix=x origin {topic}", f"git subtree {unknown}"),
+            ("git submodule foreach true", f"git submodule {unknown}"),
+            ("git bisect run true", f"git bisect {unknown}"),
+            (f"git-push origin {topic}",
+             "the git program git-push runs a git subcommand directly"),
+            (f"/usr/libexec/git-core/git-push origin {topic}",
+             "the git program git-push runs a git subcommand directly"),
+            (f"/usr/libexec/git-core/git-send-pack {url} {topic}",
+             "the git program git-send-pack runs a git subcommand directly"),
+            (f"git $(printf p) origin {topic}", uncertain),
+            ("git -C $(pwd) status", uncertain),
+            (f"git add`echo -x` origin {topic}", uncertain),
+            # D7: an argument position is judged by the same rule, whatever the runner.
+            (f"xargs git p origin {topic}", f"git p {unknown}"),
+            (f"timeout 5 git p origin {topic}", f"git p {unknown}"),
+            (f"nice git p origin {topic}", f"git p {unknown}"),
+            (f"find . -name x -exec git p origin {topic} +", f"git p {unknown}"),
+            (f"xargs git send-pack {url} {topic}", f"git send-pack {unknown}"),
+            (f"xargs git -c alias.p=push p origin {topic}",
+             "git global option -c is not accepted"),
+            (f"xargs git-push origin {topic}",
+             "the git program git-push runs a git subcommand directly"),
+            # D7: the accepted mention false positives.
+            ("echo git p", f"git p {unknown}"),
+            ("rg -n git README.md", f"git README.md {unknown}"),
+            # D7: evaluator and env -S text, judged on its raw words.
+            (f"eval git p origin {topic}", evaluator),
+            (f"sh -c 'git p origin {topic}'", evaluator),
+            (f"bash -c 'cd /tmp && git p origin {topic}'", evaluator),
+            (f"sh -c '${{G:-git}} p origin {topic}'", evaluator),
+            (f"sh -c \"g''it p origin {topic}\"", evaluator),
+            (f"sh -c 'git send-pack {url} {topic}'", evaluator),
+            (f"bash -c 'git -c alias.p=push p origin {topic}'", evaluator),
+            (f"sh -c 'git-send-pack {url} {topic}'", evaluator),
+            (f"env -S 'git p origin {topic}'", split),
+            # A token-level refusal inside an evaluator segment reports the evaluator.
+            ("eval git -C $(pwd) status", evaluator),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe push: {reason}", result.stderr)
+                self.assertIn("; accepted: git push ", result.stderr)
+                self.assertNotIn(GRAMMAR, result.stderr)
+        for command in (
+            "git status --short",
+            f"git -C {repo} status",
+            "git --no-pager log --oneline -1",
+            "git --git-dir=.git log -1",
+            "git --git-dir .git --work-tree . status",
+            "git log $(printf HEAD) -1",
+            "(git status)",
+            "`git status`",
+            "echo $(git rev-parse HEAD)",
+            "echo $(which git)",
+            "echo `which git`",
+            "which git",
+            "git rebase origin/main",
+            "git rebase -i origin/main",
+            "git fetch origin",
+            "git worktree list",
+            "git branch -D issue-655-old",
+            "git config --get user.name",
+            "git commit -m 'subtree push notes'",
+            "git",
+            "git --version",
+            "/usr/bin/git status",
+            "xargs git status",
+            "timeout 5 git log -1",
+            "echo 'git p'",
+            "rg -n '[g]it' README.md",
+            "grep -rn 'git send-pack' docs",
+            "sh -c 'git status'",
+            "env -S 'git status'",
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
