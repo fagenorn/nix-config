@@ -5,6 +5,8 @@ module names the reasons and box labels, reads the boxes a prompt carries, finds
 identity (an ended prompt still counts as posted) and says why a live prompt is settled. It runs no
 process, reads no clock and calls no forge: every function takes the markers it judges.
 """
+import hashlib
+import json
 import re
 from collections.abc import Collection, Iterable, Mapping
 
@@ -71,6 +73,17 @@ def answered(markers: Iterable[Marker], prompt: Marker) -> bool:
                for m in markers)
 
 
+def run_digest(run: Mapping, command: Mapping | None) -> str:
+    """A short digest of the `run` a check names and the contract command entry it resolves to."""
+    text = json.dumps({"run": run, "command": command}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def consumed(markers: Iterable[Marker], prompt_id: int) -> bool:
+    """Whether a `verify-run` marker, live or ended, records the approve prompt `prompt_id` as consumed."""
+    return any(m.kind == verify_issues.RUN and m.fields.get("consumed") == str(prompt_id) for m in markers)
+
+
 def settle_reason(prompt: Marker, markers: Iterable[Marker], held_key: str | None,
                   final: Collection[str]) -> str | None:
     """Why the live `prompt` is settled, or None while it stands."""
@@ -80,6 +93,12 @@ def settle_reason(prompt: Marker, markers: Iterable[Marker], held_key: str | Non
     if prompt.fields.get("reason") == ASK:
         if answered(markers, prompt):
             return "answered"
+        latest = verify_issues.latest_result(markers, prompt.fields["block"], int(prompt.fields["check"]))
+        if latest is not None and latest.fields.get("state") in final:
+            return "resolved"
+    if prompt.fields.get("reason") == APPROVE:
+        if consumed(markers, prompt.comment_id):
+            return "consumed"
         latest = verify_issues.latest_result(markers, prompt.fields["block"], int(prompt.fields["check"]))
         if latest is not None and latest.fields.get("state") in final:
             return "resolved"

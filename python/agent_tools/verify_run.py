@@ -40,7 +40,7 @@ QUERY = (
 )
 FINAL = ("pass", "hit", "miss", "expired")
 PENDING_OUTCOMES = ("not_yet", "timeout", "exit_unexpected")
-OWNER_GATES = ("owner_check",)
+OWNER_GATES = ("owner_check", "effects_live", "effects_paid")
 DEFAULT_EXPIRY_DAYS = 21
 LEASE = timedelta(minutes=30)
 TRUSTED = verify_issues.TRUSTED
@@ -423,7 +423,78 @@ class _Pass:
                               f"{check['run']['ask']}\n\n{verify_owner.box(verify_owner.ACCEPT)}\n"
                               f"{verify_owner.box(verify_owner.REJECT)}")
             return self.line(index, ac, "pending", "owner_asked" if won else "owner_waiting")
+        if gate_reason in ("effects_live", "effects_paid"):
+            return self.approve(index, check, ac, key, previous, prev, due)
         self.line(index, ac, "pending", gate_reason)
+
+    def command_entry(self, run: Mapping) -> Mapping | None:
+        """The contract command entry a `command` run resolves to, else None."""
+        return self.project.bindings["commands"][run["command"]] if "command" in run else None
+
+    def command_text(self, run: Mapping) -> str:
+        """The command line an approve prompt shows for `run`."""
+        if "command" in run:
+            return json.dumps(list(self.command_entry(run)["argv"]))
+        if "script" in run:
+            return json.dumps([run["script"], *run.get("args", [])]) + f" at {run.get('at') or self.block['merge']}"
+        return f"probe {run['probe']}"
+
+    def approve(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
+                prev: str | None, due: verify_facts.Due) -> None:
+        """A due live or paid check: ask once per round, and run it once for each ticked box.
+
+        The box is bound to the digest of the run and command entry this pass would execute, so a
+        contract edited after the prompt needs a new prompt and a new tick. A tick is consumed
+        by a `verify-run` marker its winner never deletes, under the check's lease."""
+        rest = verify_exec.gate({**check, "effects": "none"}, self.project.bindings["workflow"]["verification"])
+        if not rest.runnable:
+            return self.line(index, ac, "pending", rest.reason)
+        run = check["run"]
+        digest = verify_owner.run_digest(run, self.command_entry(run))
+        live = verify_owner.live_prompts(self.markers, (verify_owner.APPROVE,), self.block_key, index)
+        for p in live:
+            if p.fields.get("run") != digest and not verify_owner.consumed(self.markers, p.comment_id):
+                forge_markers.end(self.slug, self.number, p.comment_id, "changed")
+        waiting = [p for p in live if p.fields.get("run") == digest
+                   and not verify_owner.consumed(self.markers, p.comment_id)]
+        ticked = next((p for p in waiting if verify_owner.ticked(p, verify_owner.RUN_IT)), None)
+        if ticked is not None:
+            return self.consume(index, check, ac, key, previous, prev, due, ticked, digest)
+        if waiting:
+            return self.line(index, ac, "pending", "owner_waiting")
+        host = check["host"]
+        host_text = "+".join(host) if isinstance(host, list) else host
+        round_no = len(verify_owner.prompts(self.markers, verify_owner.APPROVE, self.block_key, index)) + 1
+        won = self.prompt(
+            verify_owner.APPROVE, index,
+            {"host": host_text, "effects": check["effects"], "round": str(round_no), "run": digest},
+            f"{ac} has {check['effects']} effects: tick the box to run it once on {host_text}.",
+            f"Command: {self.command_text(run)}\n\n{verify_owner.box(verify_owner.RUN_IT)}", ("round",))
+        self.line(index, ac, "pending", "owner_asked" if won else "owner_waiting")
+
+    def consume(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
+                prev: str | None, due: verify_facts.Due, ticked: Marker, digest: str) -> None:
+        """Run the check once for the ticked box `ticked`, under the check's lease."""
+        lease = self.take_lease(ac, key)
+        if lease is None:
+            return self.line(index, ac, "pending", "lost_contest")
+        try:
+            if not self.unchanged_since(index, previous):
+                return self.line(index, ac, "pending", "lost_contest")
+            again = verify_owner.live_prompts(self.markers, (verify_owner.APPROVE,), self.block_key, index)
+            if not any(p.comment_id == ticked.comment_id and p.fields.get("run") == digest
+                       and verify_owner.ticked(p, verify_owner.RUN_IT) for p in again) \
+                    or verify_owner.consumed(self.markers, ticked.comment_id):
+                return self.line(index, ac, "pending", "owner_waiting")
+            mark = str(ticked.comment_id)
+            won = self.write(verify_issues.RUN, {"consumed": mark, "host": self.host, "run": digest},
+                             f"{self.host} consumes approval {mark}.", {"consumed": mark})
+            if not won.won:
+                return self.line(index, ac, "pending", "lost_contest")
+            self.settle(index, check, ac, key, prev, due)
+            forge_markers.end(self.slug, self.number, ticked.comment_id, "consumed")
+        finally:
+            forge_markers.delete(self.slug, lease)
 
     def answer(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None) -> bool:
         """Record the owner's answer to a live ask prompt of this check; True when it added the check's line."""

@@ -1210,8 +1210,8 @@ class NeverRunTest(PassBase):
         self.assert_never_run("block_invalid", check(run={"tool": "python3", "args": ["-c", "print(1)"]}))
 
     def test_live_and_paid(self):
-        self.assert_never_run("effects_live", ok_check(effects="live"))
-        self.assert_never_run("effects_paid", ok_check(effects="paid"))
+        self.assert_never_run("owner_asked", ok_check(effects="live"))
+        self.assert_never_run("owner_asked", ok_check(effects="paid"))
 
     def test_ask_and_act(self):
         self.assert_never_run("owner_asked", check(kind="human", reason="senses", run={"ask": "Is it bright?"}))

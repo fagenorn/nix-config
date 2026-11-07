@@ -91,6 +91,15 @@ class PromptOnceTest(OwnerBase):
         self.assertEqual(self.markers("verify-result")[0].fields["owner"], str(prompt.comment_id))
         self.assertEqual(self.world.issue()["state"], "closed")
 
+    def test_approve(self):
+        self.hold(ok_check(effects="live"))
+        prompt = self.three_passes("approve", lambda p: self.tick(p.comment_id, "Run it"))
+        digest = vo.run_digest({"command": "check-ok"}, self.project.bindings["commands"]["check-ok"])
+        self.assertEqual(prompt.fields, {"reason": "approve", "block": bkey(ok_check(effects="live")), "check": "0",
+                                         "host": "mbp", "effects": "live", "round": "1", "run": digest})
+        self.assertIn('Command: ["verify-ok"]', prompt.body)
+        self.assertEqual((self.spawned("verify-ok"), self.results()), (1, ["pass"]))
+
 
 class AskTest(OwnerBase):
     def test_reject_records_a_fail_with_the_failed_label(self):
@@ -170,6 +179,88 @@ class AskTest(OwnerBase):
         self.assertEqual([p.comment_id for p in self.live_prompts()], [self.prompts("ask")[1].comment_id])
         self.assertIn(post_end(11, "superseded"), self.world.argvs("gh"))
         self.assertIn("owner-action", self.world.issue()["labels"])
+
+
+class ApproveConsumeTest(OwnerBase):
+    """AC2: a ticked approve box is consumed exactly once and only by the named host."""
+
+    def consumptions(self):
+        return [m for m in self.markers("verify-run") if "consumed" in m.fields]
+
+    def test_an_unticked_box_never_runs(self):
+        self.hold(ok_check(effects="paid"))
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
+        for _ in range(2):
+            self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_waiting")])
+        self.assertEqual((self.spawned("verify-ok"), len(self.prompts("approve")), self.consumptions()), (0, 1, []))
+
+    def test_only_the_named_host_consumes_a_ticked_box(self):
+        self.hold(ok_check(effects="live"))
+        self.run_pass("mbp")
+        prompt, = self.prompts("approve")
+        self.tick(prompt.comment_id, "Run it")
+        self.assertEqual(self.run_pass("eleven-m5"), [line(0, "AC1", "pending", "not_this_host")])
+        self.assertEqual((self.spawned("verify-ok"), self.consumptions()), (0, []))
+        self.assertEqual(self.run_pass("mbp")[0], line(0, "AC1", "pass", "changed"))
+        self.assertEqual(self.spawned("verify-ok"), 1)
+        self.assertEqual([m.fields for m in self.consumptions()],
+                         [{"consumed": str(prompt.comment_id), "host": "mbp", "run": prompt.fields["run"]}])
+        self.assertEqual(self.world.issue()["state"], "closed")
+
+    def test_two_runs_of_the_named_host_consume_one_tick_once_and_a_rerun_needs_a_new_tick(self):
+        later = check(effects="live", run={"command": "check-later"})
+        self.hold(later)
+        self.run_pass()
+        first, = self.prompts("approve")
+        self.tick(first.comment_id, "Run it")
+        node, = vr.list_held(SLUG)
+        self.race(node, "mbp", "mbp")
+        self.assertEqual((self.spawned("verify-later"), len(self.consumptions())), (1, 1))
+        self.run_pass()
+        self.assertEqual(self.spawned("verify-later"), 1)
+        rounds = self.prompts("approve")
+        self.assertEqual([p.fields["round"] for p in rounds], ["1", "2"])
+        self.assertEqual([p.comment_id for p in self.live_prompts()], [rounds[1].comment_id])
+        self.tick(rounds[1].comment_id, "Run it")
+        self.run_pass()
+        self.assertEqual((self.spawned("verify-later"), len(self.consumptions())), (2, 2))
+
+    def test_a_command_changed_after_the_prompt_needs_a_new_prompt_and_a_new_tick(self):
+        self.hold(ok_check(effects="live"))
+        self.run_pass()
+        first, = self.prompts("approve")
+        self.tick(first.comment_id, "Run it")
+        commands = {**self.project.bindings["commands"],
+                    "check-ok": {**self.project.bindings["commands"]["check-ok"], "argv": ["verify-bad"]}}
+        self.project = dataclasses.replace(self.project, bindings={**self.project.bindings, "commands": commands})
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
+        self.assertEqual((self.spawned("verify-ok"), self.spawned("verify-bad"), self.consumptions()), (0, 0, []))
+        rounds = self.prompts("approve")
+        self.assertEqual([p.fields["round"] for p in rounds], ["1", "2"])
+        self.assertNotEqual(rounds[0].fields["run"], rounds[1].fields["run"])
+        self.assertIn('Command: ["verify-bad"]', rounds[1].body)
+        self.assertIn(post_end(first.comment_id, "changed"), self.world.argvs("gh"))
+        self.assertEqual([p.comment_id for p in self.live_prompts()], [rounds[1].comment_id])
+        self.tick(rounds[1].comment_id, "Run it")
+        self.run_pass()
+        self.assertEqual((self.spawned("verify-ok"), self.spawned("verify-bad")), (0, 1))
+
+    def test_an_approved_command_outside_verification_is_still_refused(self):
+        self.hold(check(effects="live", run={"command": "nix-activate"}))
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "command_not_verification")])
+        self.assertEqual(self.prompts(), [])
+
+    def test_a_consumed_box_left_live_by_a_failed_run_is_never_run_again(self):
+        live = ok_check(effects="live")
+        self.hold(live)
+        self.run_pass()
+        prompt, = self.prompts("approve")
+        self.tick(prompt.comment_id, "Run it")
+        self.world.append_comment(stored_comment(300, marker(
+            "verify-run", {"consumed": str(prompt.comment_id), "host": "mbp", "run": prompt.fields["run"]})))
+        self.run_pass()
+        self.assertEqual(self.spawned("verify-ok"), 0)
+        self.assertNotIn(prompt.comment_id, [p.comment_id for p in self.live_prompts()])
 
 
 class ClosingEndsPromptsTest(OwnerBase):
