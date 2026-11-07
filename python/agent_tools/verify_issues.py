@@ -18,6 +18,7 @@ This module runs no process, reads no clock and touches no file.
 """
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -54,15 +55,23 @@ def block_key(block_id: int, block: object | None) -> str:
     return f"{block_id}.{hashlib.sha256(text.encode()).hexdigest()[:16]}"
 
 
+def comment_id(value: object) -> int:
+    """A comment id from GraphQL's `fullDatabaseId`: a BigInt, so a string of ASCII digits.
+
+    `databaseId` is a 32-bit Int that the forge cannot fill for this repository's comment ids
+    (about 6.7e9), so it is never read; anything but decimal digits is `payload_invalid`."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+", value):
+        raise forge_markers.ForgeError("payload_invalid", f"comment fullDatabaseId {value!r}")
+    return int(value)
+
+
 def comments_from_graphql(nodes: list) -> list[Comment]:
     """The comments of GraphQL nodes, ascending id; ForgeError `payload_invalid` for a bad node."""
     comments = []
     for node in nodes:
         if not isinstance(node, dict):
             raise forge_markers.ForgeError("payload_invalid", f"comment node {node!r} is not an object")
-        cid = node.get("databaseId")
-        if isinstance(cid, bool) or not isinstance(cid, int):
-            raise forge_markers.ForgeError("payload_invalid", f"comment databaseId {cid!r}")
+        cid = comment_id(node.get("fullDatabaseId"))
         for key in ("authorAssociation", "body", "createdAt"):
             if not isinstance(node.get(key), str):
                 raise forge_markers.ForgeError("payload_invalid", f"comment {cid} has no string {key}")
@@ -86,11 +95,17 @@ def select(comments: list[Comment]) -> Held | None:
         return None
     newest = max(blocks, key=lambda c: c.id)
     block, errors = verify_block.parse_block(newest.body)
-    found = [_as_marker(c) for c in comments if c.association in TRUSTED and c.id != newest.id]
-    found = [m for m in found if m is not None and (
-        m.comment_id > newest.id or m.kind in (WINDOW, forge_markers.END_KIND))]
-    markers = sorted(found, key=lambda m: m.comment_id)
+    found = [_as_marker(c) for c in comments if c.association in TRUSTED]
+    markers = visible([m for m in found if m is not None], newest.id)
     return Held(newest.id, block, errors, markers, block_key(newest.id, block))
+
+
+def visible(markers: list[forge_markers.Marker], block_id: int) -> list[forge_markers.Marker]:
+    """The trusted `markers` a run reads for the block comment `block_id`, ascending id: those
+    after it, and the window and `end` markers before it. The caller passes trusted markers only."""
+    found = [m for m in markers if m.comment_id != block_id and (
+        m.comment_id > block_id or m.kind in (WINDOW, forge_markers.END_KIND))]
+    return sorted(found, key=lambda m: m.comment_id)
 
 
 def latest_result(markers: list[forge_markers.Marker], key: str, check: int) -> forge_markers.Marker | None:

@@ -40,7 +40,8 @@ carry `author_association` `OWNER`, and the fake serves the GraphQL listing, lab
 remove, close, issue creation and the labelled issue listing; `fail_once` names operations
 (`graphql`, `add_label`, `remove_label`, `close`, `create_issue`, `list_issues`, `post`, `edit`)
 that each answer `HTTP 502` once and change nothing; a created issue can be closed by number
-and keeps its `state`. `host_clock`
+and keeps its `state`; the GraphQL comment nodes carry `fullDatabaseId` (a BigInt, so a string) and no `databaseId`,
+which is a 32-bit Int the forge cannot fill for today's comment ids. `host_clock`
 makes every host-clock read of the named modules return one instant, so a module that reads
 the host clock instead of the server's fails its test.
 
@@ -248,7 +249,7 @@ if tool == "gh" and (state / "store.json").exists():
             if st["state"] == "open" and "needs-verification" in st["labels"]:
                 nodes = [{"number": store["issue"], "labels": {"nodes": [{"name": n} for n in st["labels"]]},
                           "comments": {"nodes": [
-                              {"databaseId": c["id"], "authorAssociation": c.get("author_association", "OWNER"),
+                              {"fullDatabaseId": str(c["id"]), "authorAssociation": c.get("author_association", "OWNER"),
                                "body": c["body"], "createdAt": c["created_at"], "updatedAt": c["updated_at"]}
                               for c in sorted(store["comments"], key=lambda c: c["id"])]}}]
             out = {"data": {"repository": {"issues": {"nodes": nodes}}}}
@@ -424,15 +425,23 @@ class ForgeWorld:
 
     def comment_store(self, slug: str, issue: int, comments=(), *, next_id: int = 100,
                       clock: str = "2026-11-06T10:00:00Z", schedule=(), labels=None,
-                      next_issue: int = 500, fail_once=()) -> None:
+                      next_issue: int = 500, fail_once=(), created=()) -> None:
         """Serve one issue's comments from shared state (see STORE_HANDLER); `labels` (a list)
-        also gives the issue its state, labels and issue creation and listing."""
+        also gives the issue its state, labels and issue creation and listing, and `created`
+        seeds the issues it already holds (dicts shaped like the ones the fake creates)."""
         store = {"slug": slug, "issue": issue, "comments": list(comments), "next_id": next_id,
                  "clock": clock, "schedule": list(schedule), "cursor": 0, "fail_once": list(fail_once)}
         if labels is not None:
             store["issue_state"] = {"state": "open", "state_reason": None, "labels": list(labels),
-                                    "created": [], "next_issue": next_issue}
+                                    "created": [dict(c) for c in created], "next_issue": next_issue}
         (self.state / "store.json").write_text(json.dumps(store), encoding="utf-8")
+
+    def append_comment(self, comment: dict) -> None:
+        """Add a comment between two calls of the code under test (no `gh` child is running)."""
+        path = self.state / "store.json"
+        store = json.loads(path.read_text("utf-8"))
+        store["comments"].append(comment)
+        path.write_text(json.dumps(store), encoding="utf-8")
 
     def issue(self) -> dict:
         """The stored issue now: state, state reason, labels and the issues created."""

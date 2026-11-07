@@ -8,6 +8,11 @@ miss under a claim (P10) and closes the issue once through a contested `verify-c
 associations, so a marker by any other author neither wins a contest nor ends one (P3). "Now" is
 only `Context.now()`, the forge's clock (P6, P7).
 
+A run of a check holds a lease, a `verify-run` marker it wins and deletes when it is done, so no
+two runs of one check overlap whatever their host (a run that died leaves a claim `LEASE` ends),
+and it re-reads the markers once it holds it. The issue is finished only if the block it ran is
+still the held one.
+
 Every forge write is ordered so that the step that takes the issue out of the listing, or makes the
 next pass skip work, comes after the step it would strand; a `ForgeError` ends the pass with a
 `forge_error` line and the next pass finishes the work.
@@ -31,11 +36,12 @@ QUERY = (
     'query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) '
     '{ issues(first: 100, states: OPEN, labels: ["needs-verification"], '
     'orderBy: {field: CREATED_AT, direction: ASC}) { nodes { number labels(first: 50) { nodes { name } } '
-    'comments(last: 100) { nodes { databaseId authorAssociation body createdAt updatedAt } } } } } }'
+    'comments(last: 100) { nodes { fullDatabaseId authorAssociation body createdAt updatedAt } } } } } }'
 )
 FINAL = ("pass", "hit", "miss", "expired")
 PENDING_OUTCOMES = ("not_yet", "timeout", "exit_unexpected")
 DEFAULT_EXPIRY_DAYS = 21
+LEASE = timedelta(minutes=30)
 TRUSTED = verify_issues.TRUSTED
 
 
@@ -136,6 +142,7 @@ class _Pass:
         self.lines: list[dict] = []
         self.block: dict = {}
         self.block_key = ""
+        self.block_id = 0
         self.markers: list[Marker] = []
         self.states: list[str | None] = []
         self.followups: dict[int, str] = {}
@@ -164,11 +171,12 @@ class _Pass:
         if held.block is None or not verify_block.lint_block(held.block, refs=self.refs)["ok"]:
             return self.line(None, None, "skipped", "block_invalid")
         self.block, self.block_key, self.markers = held.block, held.key, held.markers
+        self.block_id = held.block_id
         closed = self.live(verify_issues.CLOSED, {"block": self.block_key})
         if closed is not None and closed.fields.get("outcome") in ("verified", "expired"):
             verified = closed.fields["outcome"] == "verified"
-            if not self.report:
-                self.finish(verified)
+            if not self.report and not self.conclude(verified):
+                return
             return self.line(None, None, "closed", "verified" if verified else "not_verified")
         bindings = self.project.bindings
         self.ctx = verify_facts.Context(self.slug, self.project.root, bindings["vcs"]["default_branch"],
@@ -195,7 +203,6 @@ class _Pass:
                     self.follow_up(index, ac, key, previous, _fenced_of(previous.body))
             return
         bound = check["host"]
-        shared = bound == "any" or isinstance(bound, list)
         if not (bound == self.host or bound == "any" or (isinstance(bound, list) and self.host in bound)):
             return self.line(index, ac, "pending", "not_this_host")
         gate = verify_exec.gate(check, self.project.bindings["workflow"]["verification"])
@@ -212,14 +219,45 @@ class _Pass:
             return self.line(index, ac, "pending", due.reason)
         if self.report:
             return self.line(index, ac, "due", "due")
-        if shared:
-            claimed = self.live(verify_issues.RUN, key)
-            if claimed is not None:
-                if claimed.fields.get("host") != self.host:
-                    return self.line(index, ac, "pending", "lost_contest")
-            elif not self.write(verify_issues.RUN, {**key, "host": self.host},
-                                f"{self.host} runs {ac}.", key).won:
+        lease = self.take_lease(ac, key)
+        if lease is None:
+            return self.line(index, ac, "pending", "lost_contest")
+        try:
+            if not self.unchanged_since(index, previous):
                 return self.line(index, ac, "pending", "lost_contest")
+            self.settle(index, check, ac, key, prev, due)
+        finally:
+            forge_markers.delete(self.slug, lease)
+
+    def take_lease(self, ac: str, key: Mapping[str, str]) -> int | None:
+        """The comment id of this run's lease on the check, or None when another run holds it.
+
+        A claim older than `LEASE` is a run that died: it is ended (append-only) and does not
+        count. The lease is won by the smallest live `verify-run` comment, this host's own
+        earlier run included, so two runs of one host never overlap either."""
+        now = self.ctx.now()
+        held = False
+        for claim in forge_markers.contest(self.markers, verify_issues.RUN, key):
+            if now >= claim.updated_at + LEASE:
+                forge_markers.end(self.slug, self.number, claim.comment_id, "stale")
+            else:
+                held = True
+        if held:
+            return None
+        won = self.write(verify_issues.RUN, {**key, "host": self.host}, f"{self.host} runs {ac}.", key)
+        return won.own_id if won.won else None
+
+    def unchanged_since(self, index: int, previous: Marker | None) -> bool:
+        """Re-read the markers under the lease: False when a run that held it before recorded a
+        result this one has not seen (it then waits for the next pass). Later reads use the fresh markers."""
+        self.markers = verify_issues.visible(
+            forge_markers.list_markers(self.slug, self.number, TRUSTED), self.block_id)
+        latest = verify_issues.latest_result(self.markers, self.block_key, index)
+        return (latest.comment_id if latest else None) == (previous.comment_id if previous else None)
+
+    def settle(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], prev: str | None,
+               due: verify_facts.Due) -> None:
+        """Run the check and record what changed, under its lease."""
         waiting = self.live(verify_issues.DUE, key)
         days = check.get("expires_after_days") or DEFAULT_EXPIRY_DAYS
         if (waiting is not None and check.get("on_expire", "close") == "close"
@@ -301,9 +339,7 @@ class _Pass:
             claim = won.winner
         tag_fields = {"issue": str(n), "block": self.block_key, "check": str(index)}
         found = self.filed(claim, tag_fields)
-        if found:
-            number = min(found)
-        else:
+        if not found:
             forge_markers.ensure_label(self.slug, *FOLLOW_UP)
             body = forge_markers.render(
                 verify_issues.FOLLOWUP_OF, tag_fields,
@@ -311,11 +347,15 @@ class _Pass:
             created = forge_markers.create_issue(
                 self.slug, f"Follow-up: {ac} of #{n} observed below target", body, (FOLLOW_UP[0],))
             # The claim names a host, not a run, so another run on this host may have listed none
-            # too and filed its own: the lowest number stands and any other is closed, so every
-            # run converges on one open follow-up whatever the interleaving (CR-2).
-            number = min([*self.filed(claim, tag_fields), created])
-            if number != created:
-                forge_markers.close_issue(self.slug, created, "not_planned")
+            # too and filed its own: the lowest number stands (CR-2).
+            found = [*self.filed(claim, tag_fields), created]
+        number = min(found)
+        # Every other follow-up is closed here, not only the one this run created: a run that
+        # stopped before closing its own duplicate leaves it for the next run to close (COR-003).
+        # Closing a closed issue is a no-op, and the result is edited only after, so the follow-up
+        # is never recorded while a duplicate is open.
+        for extra in sorted(set(found) - {number}):
+            forge_markers.close_issue(self.slug, extra, "not_planned")
         forge_markers.edit(self.slug, result.comment_id, forge_markers.with_fields(result, followup=str(number)))
         self.followups[index] = str(number)
 
@@ -353,8 +393,28 @@ class _Pass:
         block = {"block": self.block_key}
         if not self.write(verify_issues.CLOSED, {**block, "outcome": outcome}, sentence, block).won:
             return
-        self.finish(outcome == "verified")
-        self.line(None, None, "closed", "verified" if outcome == "verified" else "not_verified")
+        if self.conclude(outcome == "verified"):
+            self.line(None, None, "closed", "verified" if outcome == "verified" else "not_verified")
+
+    def current(self) -> bool:
+        """Whether the block this pass ran is still the issue's held block, read afresh."""
+        for node in list_held(self.slug):
+            if node.get("number") == self.number:
+                nodes = (node.get("comments") or {}).get("nodes")
+                if not isinstance(nodes, list):
+                    raise ForgeError("payload_invalid", "issue node has no comments")
+                held = verify_issues.select(verify_issues.comments_from_graphql(nodes))
+                return held is not None and held.key == self.block_key
+        return False
+
+    def conclude(self, verified: bool) -> bool:
+        """Finish the issue only if its held block is still the one this pass ran: an owner who
+        replaced or edited the block while a check ran has checks nobody has run yet (COR-002)."""
+        if not self.current():
+            self.line(None, None, "skipped", "block_changed")
+            return False
+        self.finish(verified)
+        return True
 
     def finish(self, verified: bool) -> None:
         """The idempotent finishing steps: the one that unlists the issue comes last."""

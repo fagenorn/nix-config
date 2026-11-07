@@ -35,7 +35,7 @@ T0 = "2026-11-06T10:00:00Z"
 
 def gnode(cid, body, association="OWNER", at=T0):
     """One GraphQL comment node."""
-    return {"databaseId": cid, "authorAssociation": association, "body": body,
+    return {"fullDatabaseId": str(cid), "authorAssociation": association, "body": body,
             "createdAt": at, "updatedAt": at}
 
 
@@ -195,13 +195,28 @@ class SelectTest(unittest.TestCase):
         self.assertEqual([c.id for c in comments], [10, 11, 12])
 
     def test_bad_payload_is_a_forge_error(self):
-        for node in ({"databaseId": "x", "authorAssociation": "OWNER", "body": "", "createdAt": T0},
-                     {"databaseId": True, "authorAssociation": "OWNER", "body": "", "createdAt": T0},
-                     {"databaseId": 1, "authorAssociation": None, "body": "", "createdAt": T0},
+        for node in ({"fullDatabaseId": "x", "authorAssociation": "OWNER", "body": "", "createdAt": T0},
+                     {"fullDatabaseId": True, "authorAssociation": "OWNER", "body": "", "createdAt": T0},
+                     {"fullDatabaseId": 1, "authorAssociation": "OWNER", "body": "", "createdAt": T0},
+                     {"fullDatabaseId": "-1", "authorAssociation": "OWNER", "body": "", "createdAt": T0},
+                     {"fullDatabaseId": " 1", "authorAssociation": "OWNER", "body": "", "createdAt": T0},
+                     {"fullDatabaseId": "\u00b2", "authorAssociation": "OWNER", "body": "", "createdAt": T0},
+                     {"fullDatabaseId": "", "authorAssociation": "OWNER", "body": "", "createdAt": T0},
+                     {"databaseId": 1, "authorAssociation": "OWNER", "body": "", "createdAt": T0},
+                     {"fullDatabaseId": "1", "authorAssociation": None, "body": "", "createdAt": T0},
                      "not an object"):
             with self.assertRaises(fm.ForgeError) as caught:
                 vi.comments_from_graphql([node])
             self.assertEqual(caught.exception.code, "payload_invalid")
+
+    def test_a_comment_id_beyond_a_32_bit_int_is_read_from_the_big_integer_field(self):
+        big = 6_693_579_241  # a real id of this repository: databaseId (a 32-bit Int) cannot hold it
+        comments = vi.comments_from_graphql([gnode(big + 1, "b"), gnode(big, "a"), gnode(2**31, "c")])
+        self.assertEqual([c.id for c in comments], [2**31, big, big + 1])
+
+    def test_the_listing_asks_for_the_big_integer_field_alone(self):
+        self.assertIn("fullDatabaseId", vr.QUERY)
+        self.assertNotRegex(vr.QUERY, r"\bdatabaseId\b")
 
 
 NOW_HEADERS = "HTTP/2.0 200 OK\r\nDate: Fri, 06 Nov 2026 10:00:00 GMT\r\n\r\n{}"
@@ -870,7 +885,16 @@ class PassBase(unittest.TestCase):
         self.assertEqual(errors, [])
 
     def mutations(self, since=0):
-        return [argv for argv in self.world.argvs("gh")[since:] if "-X" in argv]
+        """The forge writes since call `since`, bar the lease: a run's `verify-run` claim and its
+        delete leave nothing behind, so a pass that changes nothing still shows no other write."""
+        def lease(argv):
+            return (argv[2] == "POST" and "agent:verify-run" in argv[-1]) or (
+                argv[2] == "DELETE" and "/issues/comments/" in argv[3])
+        return [argv for argv in self.world.argvs("gh")[since:] if "-X" in argv and not lease(argv)]
+
+    def leases(self):
+        """The `verify-run` claims standing now."""
+        return self.markers("verify-run")
 
     def spawned(self, tool):
         return len([call for call in self.world.calls() if call["tool"] == tool])
@@ -1040,6 +1064,16 @@ class PassTransitionsTest(PassBase):
         self.hold(ok_check())
         self.assertEqual(self.run_pass(report=True), [line(0, "AC1", "due", "due")])
         self.assertEqual((self.mutations(), self.spawned("verify-ok"), self.workspaces), ([], 0, []))
+
+    def test_a_comment_id_beyond_a_32_bit_int_runs_and_closes_the_issue(self):
+        big = 6_693_579_241  # this repository's ids: the block is read, and the run's own markers read back
+        self.world.comment_store(SLUG, ISSUE, [stored_comment(big, hold(block(ok_check())))],
+                                 next_id=big + 40, labels=["needs-verification"])
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pass", "changed"), line(None, None, "closed", "verified")])
+        result_marker, = self.markers("verify-result")
+        self.assertEqual(result_marker.fields["block"], bkey(ok_check(), at=big))
+        self.assertGreater(result_marker.comment_id, 2**32)
+        self.assertEqual(self.world.issue()["state"], "closed")
 
     def test_a_closed_marker_finishes_an_interrupted_close(self):
         closed = marker("verify-closed", {"block": bkey(ok_check()), "outcome": "verified"}, "Verified: AC1.")
@@ -1246,11 +1280,108 @@ class RaceTest(PassBase):
         node, = vr.list_held(SLUG)
         self.race(node, "mbp", "anis-desktop")
         self.assertEqual(len([a for a in self.world.argvs("gh") if a == ["api", runs]]), 1)
-        self.assertEqual(len(self.markers("verify-run")), 1)
+        self.assertEqual(self.leases(), [])  # the winner released its lease
         self.assertEqual(len(self.markers("verify-result")), 1)
         self.assertEqual(len(self.markers("verify-closed")), 1)
         self.assertEqual(self.world.issue()["state"], "closed")
 
+
+
+class LeaseTest(PassBase):
+    """One run of a check at a time, whatever the host: a same-host retry is not exempt (COR-001)."""
+
+    def claim(self, cid, at=T0, host="mbp"):
+        return stored_comment(cid, marker("verify-run", {"block": bkey(ok_check()), "check": "0", "host": host}),
+                              at=at)
+
+    def test_two_overlapping_runs_of_one_host_run_the_check_once(self):
+        self.hold(ok_check(), schedule=["post:agent:verify-run", "post:agent:verify-run", "list", "list"])
+        node, = vr.list_held(SLUG)
+        self.race(node, "mbp", "mbp")
+        self.assertEqual(self.spawned("verify-ok"), 1)
+        self.assertEqual(len(self.markers("verify-result")), 1)
+        self.assertEqual(self.leases(), [])
+        self.assertEqual(self.world.issue()["state"], "closed")
+
+    def test_a_standing_lease_keeps_every_other_run_off_the_check_even_the_same_host(self):
+        self.hold(ok_check(), extra=[self.claim(11, at="2026-11-06T09:45:00Z")])
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "lost_contest")])
+        self.assertEqual((self.spawned("verify-ok"), self.markers("verify-result"), self.workspaces), (0, [], []))
+        self.assertEqual([m.comment_id for m in self.leases()], [11])
+
+    def test_the_claim_of_a_run_that_died_is_ended_and_the_check_runs(self):
+        self.hold(ok_check(), extra=[self.claim(11, at="2026-11-06T09:00:00Z")])
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pass", "changed"), line(None, None, "closed", "verified")])
+        self.assertEqual([m.fields["of"] for m in self.markers("end")], ["11"])
+        self.assertEqual(self.spawned("verify-ok"), 1)
+
+    def test_the_lease_is_released_whatever_the_outcome(self):
+        for held in (ok_check(), check(run={"command": "check-bad"}), check(run={"command": "check-later"})):
+            self.hold(held)
+            self.run_pass()
+            self.assertEqual(self.leases(), [])
+
+    def test_a_run_that_missed_another_runs_result_does_not_run_the_check_again(self):
+        self.hold(ok_check())
+        stale, = vr.list_held(SLUG)  # listed before the first run recorded anything
+        self.run_pass()
+        self.assertEqual(self.spawned("verify-ok"), 1)
+        lines = vr.pass_issue(self.project, "mbp", stale, Refs())
+        self.assertEqual(lines, [line(0, "AC1", "pending", "lost_contest")])
+        self.assertEqual((self.spawned("verify-ok"), len(self.markers("verify-result"))), (1, 1))
+        self.assertEqual(self.leases(), [])
+
+
+class BlockReplacedTest(PassBase):
+    """An owner who replaces the block while a check runs has new checks nobody has run (COR-002)."""
+
+    def test_a_block_replaced_during_the_run_is_not_closed_on_and_is_run_next_pass(self):
+        self.hold(ok_check())
+        replacement = block(check(ac="AC2", run={"command": "check-ok"}))
+        real = vx.execute
+
+        def replace_then_run(argv, cwd):
+            self.world.append_comment(stored_comment(11, hold(replacement)))
+            return real(argv, cwd)
+
+        with mock.patch.object(vx, "execute", replace_then_run):
+            lines = self.run_pass()
+        self.assertEqual(lines, [line(0, "AC1", "pass", "changed"), line(None, None, "skipped", "block_changed")])
+        issue = self.world.issue()
+        self.assertEqual(issue["state"], "open")
+        self.assertIn("needs-verification", issue["labels"])
+        self.assertEqual(self.run_pass(), [line(0, "AC2", "pass", "changed"), line(None, None, "closed", "verified")])
+        self.assertEqual(self.spawned("verify-ok"), 2)
+        self.assertEqual(self.world.issue()["state"], "closed")
+
+
+class DuplicateFollowUpTest(PassBase):
+    """A duplicate follow-up left open by an interrupted close is closed by a later pass (COR-003)."""
+
+    def test_the_next_pass_closes_the_higher_numbered_duplicate_before_recording_the_follow_up(self):
+        observe = check(mode="observe", run={"command": "check-bad"})
+        key = bkey(observe)
+        tag = {"issue": str(ISSUE), "block": key, "check": "0"}
+
+        def filed(number):
+            return {"number": number, "title": "Follow-up", "body": fm.render(vi.FOLLOWUP_OF, tag, "Follow-up."),
+                    "labels": ["verification-follow-up"], "author_association": "OWNER", "updated_at": T0,
+                    "state": "open", "state_reason": None}
+
+        self.world.comment_store(
+            SLUG, ISSUE,
+            [stored_comment(10, hold(block(observe))), stored_comment(11, result(key, 0, "miss")),
+             stored_comment(12, marker(vi.FOLLOWUP, {"block": key, "check": "0", "host": "mbp"}))],
+            labels=["needs-verification"], created=[filed(500), filed(501)], fail_once=["close"])
+        self.assertEqual(self.run_pass()[-1], line(None, None, "skipped", "forge_error"))
+        self.assertEqual([c["state"] for c in self.world.issue()["created"]], ["open", "open"])
+        self.assertNotIn("followup", self.markers("verify-result")[0].fields)
+        self.assertEqual(self.world.issue()["state"], "open")
+        self.assertEqual(self.run_pass()[-1], line(None, None, "closed", "verified"))
+        self.assertEqual([(c["number"], c["state"]) for c in self.world.issue()["created"]],
+                         [(500, "open"), (501, "closed")])
+        self.assertEqual(self.markers("verify-result")[0].fields["followup"], "500")
+        self.assertEqual(self.world.issue()["state"], "closed")
 
 
 class PinnedReferencesTest(GitRepos):
