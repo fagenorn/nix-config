@@ -2636,11 +2636,19 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("X='>' >/dev/null >'log>' nohup sleep 999", "nohup"),
             ("X=> t Y=> u >'log>' nohup x", "nohup"),
             ("X=> /dev/null Y='>' nohup x", "nohup"),
+            # A quoted wrapper-option argument that starts with an operator is
+            # the argument, not a redirection (final review, fifth round).
+            ("env -u '>' nohup sleep 999", "nohup"),
+            ("env -u '>x' nohup sleep 999", "nohup"),
+            ("sudo -u '>' nohup x", "nohup"),
+            ("env -u '>' setsid x", "setsid"),
+            ("env -u '>x' disown", "disown"),
         ):
             with self.subTest(command=command):
                 self.assert_detaching_refusal(self.run_guard(command), word, command)
         for command in (
             "X=> nohup.out echo hi",
+            "env -u '>' echo nohup.out",
         ):
             with self.subTest(command=command):
                 self.assertEqual(0, self.run_guard(command).returncode, command)

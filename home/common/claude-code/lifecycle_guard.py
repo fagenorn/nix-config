@@ -1095,9 +1095,17 @@ def detaching_command_flags(tokens, states=((True, None, (), False),),
     for index, (value, operator) in enumerate(tokens):
         following = set()
         for state in states:
-            for embedded in (True, False):
+            readings = [(True, False), (False, False)]
+            if (state[2] and not operator and (
+                    BARE_REDIRECTION.match(value) is not None
+                    or ATTACHED_REDIRECTION.match(value) is not None)):
+                # A pending option argument may be this very word, quoted:
+                # `env -u '>' nohup x` unsets `>`, it redirects nothing.
+                readings.append((False, True))
+            for embedded, literal in readings:
                 after, flag, payload = detaching_step(
-                    state, index, value, operator, embedded, bang_closes)
+                    state, index, value, operator, embedded, bang_closes,
+                    literal)
                 following.add(after)
                 flags[index] = flags[index] or flag
                 if payload is not None and payload not in payloads:
@@ -1106,13 +1114,19 @@ def detaching_command_flags(tokens, states=((True, None, (), False),),
     return flags, payloads, states
 
 
-def detaching_step(state, index, value, operator, embedded, bang_closes):
+def detaching_step(state, index, value, operator, embedded, bang_closes,
+                   literal=False):
     """One token of `detaching_command_flags` from one state and one reading:
-    (state after, flagged, `env -S` payload or None)."""
+    (state after, flagged, `env -S` payload or None). `literal` reads a word
+    that looks like a redirection as the pending wrapper-option argument it may
+    be when quoted."""
     open_position, wrapper, pending, target = state
     pending = list(pending)
     if operator:
         return (True, None, (), False), False, None
+    if literal and pending and not target:
+        payload = value if pending.pop(0) == "payload" else None
+        return (open_position, wrapper, tuple(pending), False), False, payload
     if bang_closes and target and index == 0 and value == "!":
         return state, False, None
     if target:
