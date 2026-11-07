@@ -239,6 +239,9 @@ const HOLD_SCHEMA = { type: 'object', properties: {
   required: ['merge_commit_local', 'code_unmet', 'issue_state', 'notes'] }
 const STATES = ['OPEN', 'CLOSED']
 
+// The criterion ids no check of the block names: a hold must cover every criterion it leaves open, or the issue would close on a partial check.
+const covers = (checks, ids) => ids.filter(id => !checks.some(c => c && c.ac === id))
+
 const closeOut = async (PR, mergeCommit, W, prHead) => {
   const acceptance = plan ? plan.acceptance : null
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
@@ -266,11 +269,13 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', model: 'sonnet
       const missing = acceptance.filter(a => a.kind === 'human' && !splitIds.includes(a.id)).map(a => a.id)
       if (missing.length) return stop('hold', { pr: PR, hold: held, missing_split: missing })
     }
-    const badSplit = held.split.filter(x => !(x && x.lint && x.lint.ok === true && RUN_OK(x.verify_run) && STATES.includes(x.issue_state) && x.block && Array.isArray(x.block.checks) && !x.block.checks.some(commandOutside))).map(x => (x && x.ac) || null)
+    const badSplit = held.split.filter(x => !(x && x.lint && x.lint.ok === true && RUN_OK(x.verify_run) && STATES.includes(x.issue_state) && x.block && Array.isArray(x.block.checks) && covers(x.block.checks, [x.ac]).length === 0 && !x.block.checks.some(commandOutside))).map(x => (x && x.ac) || null)
     if (badSplit.length) return stop('hold', { pr: PR, hold: held, bad_split: badSplit })
     const remaining = openCriteria.filter(a => !splitIds.includes(a.id))
     if (remaining.length) {
       if (!(held.lint && held.lint.ok === true) || !RUN_OK(held.verify_run) || !held.block || !Array.isArray(held.block.checks)) return stop('hold', { pr: PR, hold: held })
+      const uncovered = covers(held.block.checks, remaining.map(a => a.id))
+      if (uncovered.length) return stop('hold', { pr: PR, hold: held, missing_checks: uncovered })
       const outside = held.block.checks.filter(commandOutside)
       if (outside.length) return stop('hold', { pr: PR, hold: held, unattended: outside.map(c => c.ac) })
     } else if (held.issue_state !== 'CLOSED') return stop('hold', { pr: PR, hold: held })
@@ -521,7 +526,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const rr = await call(`${CTX}
 Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(planFindings)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
     if (!rr) { plan = null; planReviewed = false; return stop('plan-review', { details: 'the rules re-reviewer returned nothing', findings: planFindings }) }
-    const rules = still.concat(findingsOf(rr).filter(f => present(f.rule)))
+    const rules = still.concat(findingsOf(rr))
     if (rules.length) { plan = null; planReviewed = false; return stop('plan-review', { rules, findings: planFindings }) }
   }
   planReviewed = true

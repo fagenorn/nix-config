@@ -587,6 +587,19 @@ class PlanRulesTest(unittest.TestCase):
         self.assertEqual(result["stage"], "plan-review")
         self.assertIsNone(result["cont"]["plan"])
 
+    def test_rules_rereview_finding_without_a_rule_still_blocks(self):
+        plan = with_criteria(HUMAN)
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC3 breaks a rule"}]}
+        result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
+                                     "plan-rules-review": bare})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([r["summary"] for r in result["rules"]], ["AC3 breaks a rule"])
+        self.assertNotIn("impl-1", labels(calls))
+        minor = {"verdict": "findings", "findings": [{"severity": "minor", "summary": "style"}]}
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
+                                "plan-rules-review": minor}, patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertIn("impl-1", labels(calls))
+
     def test_planner_and_reviewer_prompts_point_to_the_rules(self):
         _, calls = run(replies={"plan-review": self.RULE_FINDING})
         plan = prompt(calls, "plan")
@@ -845,13 +858,16 @@ class HoldTest(unittest.TestCase):
     HOLD = {"merge_commit_local": True, "code_unmet": [], "blocks": [], "split": [],
             "block": {"v": 1, "merge": "d" * 40, "checks": []}, "lint": {"ok": True, "errors": []},
             "verify_run": {"ran": True, "exit": 0}, "issue_state": "OPEN", "notes": "n"}
-    CHILD = {"ac": "AC3", "issue": 50, "block": {"v": 1, "merge": "d" * 40, "checks": []},
+    CHILD = {"ac": "AC3", "issue": 50, "block": {"v": 1, "merge": "d" * 40, "checks": [{"ac": "AC3", "kind": "human"}]},
              "lint": {"ok": True, "errors": []}, "verify_run": {"ran": True, "exit": 0}, "issue_state": "OPEN"}
 
     def ship(self, *criteria, hold=None, close="OPEN", **patch):
         replies = {"plan": with_criteria(*criteria)}
         if hold is not None:
-            replies["hold"] = dict(self.HOLD, **hold)
+            moved = [x["ac"] for x in hold.get("split", [])]
+            covering = {"v": 1, "merge": self.MERGE, "checks": [{"ac": c["id"], "kind": c["kind"]} for c in criteria
+                                                                if c["id"] not in moved]}
+            replies["hold"] = dict(self.HOLD, **dict({"block": covering}, **hold))
         return run(replies=replies, patch=dict({"merge": {"merge_commit": self.MERGE},
                                                 "close-out": {"issue_state": close}}, **patch))
 
@@ -939,6 +955,21 @@ class HoldTest(unittest.TestCase):
                 self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
                 self.assertNotIn("close-out", labels(calls))
 
+    def test_hold_block_that_leaves_a_remaining_criterion_unchecked_stops(self):
+        block = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]}
+        result, calls = self.ship(EVIDENCE, HUMAN, hold={"block": block}, close="CLOSED")
+        self.assertEqual((result["stage"], result["missing_checks"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+        covering = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}, {"ac": "AC3", "kind": "human"}]}
+        result, _ = self.ship(EVIDENCE, HUMAN, hold={"block": covering})
+        self.assertEqual(result["stage"], "done")
+
+    def test_split_child_block_that_does_not_check_its_criterion_stops(self):
+        child = dict(self.CHILD, block={"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]})
+        result, calls = self.ship(HUMAN, hold={"blocks": [12], "split": [child], "issue_state": "CLOSED"}, close="CLOSED")
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+
     def test_resume_after_merge_holds_before_close_out(self):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
@@ -952,18 +983,21 @@ class HoldTest(unittest.TestCase):
         self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
 
 
-    def test_resume_hold_prompt_keeps_lint_and_once_run_when_a_comment_exists(self):
-        # A retry that skips a finished hold must still return fresh lint and verify_run, or every resume stops at hold.
+    def test_resume_hold_prompt_asks_for_lint_and_the_once_run(self):
+        # A retry must still return fresh lint and verify_run, so the prompt names both commands and the result is graded on them.
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": with_criteria(EVIDENCE), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
-        _, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}, "close-out": {"issue_state": "OPEN"}})
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}, "close-out": {"issue_state": "OPEN"}})
         hold = prompt(calls, "hold")
-        self.assertIn("never skip the evidence you return", hold)
-        self.assertIn("take block from the posted verify fence, lint that block, run the once-run, and return all three", hold)
-        self.assertIn("post nothing: write its fence JSON to the file and lint that", hold)
-        self.assertIn("even when an earlier attempt ran it", hold)
+        self.assertIn("verify-pending lint --input", hold)
         self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+        self.assertEqual(result["stage"], "done")
+        stale = {"lint": {"ok": False, "errors": [{"code": "unverified_reference"}]}}
+        result, _ = run(args=dict(ARGS, cont=cont), replies={"hold": dict(self.HOLD, **stale)},
+                        patch={"setup": {"merged_pr": 42}})
+        self.assertEqual(result["stage"], "hold")
+
 
 class FixWaveTest(unittest.TestCase):
     """#635 owner comment: a narrowing re-review earns a second wave; a new kind stops; waves are counted."""

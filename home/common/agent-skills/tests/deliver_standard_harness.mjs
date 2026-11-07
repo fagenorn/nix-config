@@ -22,6 +22,11 @@ const PLAN = {
   acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }],
   tasks: [{ n: 1, title: 'one', file: 'task-1.md', risk: 'standard' }],
 }
+// A hold reply covers every non-code criterion the prompt lists, as a real hold block does.
+const openChecks = prompt => {
+  const m = /Criteria: (\[.*\])/.exec(prompt)
+  return (m ? JSON.parse(m[1]) : []).filter(a => a.kind !== 'code').map(a => ({ ac: a.id, kind: a.kind }))
+}
 // Ordered: the first matching pattern wins.
 const DEFAULTS = [
   [/^renew-/, { verdict: 'renewed', comment_id: 7 }],
@@ -40,7 +45,7 @@ const DEFAULTS = [
   [/^pr$/, { pr: 42, head: SHA }],
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'] }],
   [/^merge$/, { merged: true, merge_commit: SHA, notes: 'merged' }],
-  [/^hold$/, { merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: SHA, checks: [] }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held' }],
+  [/^hold$/, prompt => ({ merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: SHA, checks: openChecks(prompt) }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held' })],
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, notes: 'ok' }],
 ]
 
@@ -57,7 +62,8 @@ async function agent(prompt, opts = {}) {
   }
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)
-  return structuredClone({ ...hit[1], ...((scenario.patch || {})[label] || {}) })
+  const base = typeof hit[1] === 'function' ? hit[1](prompt) : hit[1]
+  return structuredClone({ ...base, ...((scenario.patch || {})[label] || {}) })
 }
 const parallel = thunks => Promise.all(thunks.map(t => Promise.resolve().then(t).catch(() => null)))
 const pipeline = () => { throw new Error('pipeline is not stubbed') }
