@@ -1,7 +1,8 @@
 """Owner-action markers a batch posts for the owner (issue 636): `forge-claim owner-action`.
 
 1. A marker's first line is `<!-- agent:owner-action v1 issue=<n> reason=<reason> holder=<holder> -->`
-   (a decision prompt adds `round=<k>` and optionally `clears=<label>`), line 2 is the sentence
+   (a decision prompt adds `round=<k>`, `opts=<digest of its question and option text>` and
+   optionally `clears=<label>`), line 2 is the sentence
    of its reason. A `conflict` or `needs-label` marker follows with one line `- <item>` per item
    with its whitespace collapsed (D1). A `decision` prompt follows with, per question, an empty
    line, `**Q<i>.** <question>` and one line `- [ ] <option>` per option; the owner ticks exactly
@@ -12,7 +13,8 @@
 3. `post` of `conflict` / `needs-label` never posts while a live marker of the same issue and
    reason exists (`already_posted` with the smallest live id). `post` of `decision` posts a new
    round (`round` one above every trusted decision prompt ever posted) unless a live prompt is not
-   yet answered, which it re-adopts (D15, D20). Both always ensure and add the `owner-action`
+   yet answered, which it re-adopts (D15, D20) unless its `opts` digest names other questions, when it
+   is ended (`superseded`) and a new round posted. Both always ensure and add the `owner-action`
    label afterwards; only trusted markers (`TRUSTED`) are read for a decision prompt.
 4. `end` ends every live marker of the reason (end reason `resolved`) and removes the label only
    when no live owner-action of any reason remains; nothing live is `none`, with no mutation. For
@@ -20,7 +22,9 @@
    (when no live trusted owner-action remains), nothing live included, so a retry after an
    interrupted removal repairs both (D21).
 5. `status` only reads. A decision prompt is `answered` when every one of its questions has exactly
-   one ticked box, read from the box lines alone, never from a comment (D1, D15); the verdict is
+   one ticked box, read from the box lines alone, never from a comment (D1, D15), and only while the
+   question and option text still matches its `opts` digest (a prompt the owner edited is open and
+   shows no questions); the verdict is
    `none`, `open` or `answered`.
 6. `--items-file` holds a JSON array of 1 to `MAX_ITEMS` strings, each non-empty once its
    whitespace is collapsed; `--questions-file` holds a JSON array of 1 to `MAX_ITEMS` objects with
@@ -28,6 +32,7 @@
    collapsed and non-empty; anything else is a usage error before any `gh` call.
 7. Every call prints one JSON object on one line; exit 0 success, 1 forge error, 2 usage.
 """
+import hashlib
 import json
 import re
 from collections.abc import Collection
@@ -47,6 +52,7 @@ QUESTION_LINE = re.compile(r"\*\*Q(\d+)\.\*\* (.+)")
 BOX_LINE = re.compile(r"\s*[-*] \[( |x|X)\] (.+?)\s*")
 ACTIONS = ("post", "end", "status")
 RESOLVED = "resolved"
+SUPERSEDED = "superseded"
 USAGE = 2
 SENTENCES = {
     "decision": "Delivery waits for the owner's choice: tick exactly one box under each question.",
@@ -142,6 +148,13 @@ def render_questions(questions: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def options_digest(questions: list[dict]) -> str:
+    """A short digest of the question and option text of a prompt, never of its ticks: the `opts`
+    field of the marker, which `verified_questions` checks against the body as it now reads."""
+    text = json.dumps([[q["question"], list(q["options"])] for q in questions], separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def read_questions(body: str) -> list[dict]:
     """The questions of a decision prompt, read from its header and box lines only."""
     questions: list[dict] = []
@@ -162,10 +175,19 @@ def read_questions(body: str) -> list[dict]:
     return questions
 
 
+def verified_questions(marker: fm.Marker) -> list[dict]:
+    """The questions of a decision prompt, or none when the text of its questions and options is no
+    longer what was posted (D1): a word the owner added beside a box, or a box line the owner wrote,
+    is never read as an answer or shown. A prompt that carries no `opts` digest cannot be verified.
+    Restore the text, or end the prompt."""
+    questions = read_questions(marker.body)
+    return questions if marker.fields.get("opts") == options_digest(questions) else []
+
+
 def answered(marker: fm.Marker) -> bool:
     if marker.kind != KIND or marker.fields.get("reason") != "decision":
         return False
-    questions = read_questions(marker.body)
+    questions = verified_questions(marker)
     return bool(questions) and all(q["chosen"] is not None for q in questions)
 
 
@@ -293,7 +315,13 @@ def _round(marker: fm.Marker) -> int:
 
 def _post_decision(args: Any, questions: list[dict]) -> tuple[int, dict[str, Any]]:
     markers = fm.list_markers(args.repo, args.issue, TRUSTED)
+    digest = options_digest(questions)
     unanswered = [m for m in fm.contest(markers, KIND, _match(args)) if not answered(m)]
+    # An unanswered prompt of other questions (D20) was answered another way, by the session: end it
+    # rather than re-adopt it, or the new questions never reach the forge.
+    for stale in [m for m in unanswered if m.fields.get("opts") not in (None, digest)]:
+        fm.end(args.repo, args.issue, stale.comment_id, SUPERSEDED)
+    unanswered = [m for m in unanswered if m.fields.get("opts") in (None, digest)]
     if unanswered:
         verdict, comment_id = "already_posted", unanswered[0].comment_id
     else:
@@ -301,7 +329,7 @@ def _post_decision(args: Any, questions: list[dict]) -> tuple[int, dict[str, Any
         round_no = 1 + max((_round(m) for m in every), default=0)
         match = {**_match(args), "round": str(round_no)}
         fields = {**_match(args), "holder": args.holder, "round": str(round_no),
-                  **({"clears": args.clears} if args.clears else {})}
+                  "opts": digest, **({"clears": args.clears} if args.clears else {})}
         written = fm.write(args.repo, args.issue, KIND, fields, SENTENCES["decision"], match,
                            render_questions(questions), associations=TRUSTED)
         if written.won:
@@ -335,7 +363,7 @@ def _status_decision(args: Any) -> tuple[int, dict[str, Any]]:
     live = fm.contest(fm.list_markers(args.repo, args.issue, TRUSTED), KIND, _match(args))
     if not live:
         return 0, result(args, "none", questions=[], decisions="")
-    questions = [{**q, "comment_id": m.comment_id} for m in live for q in read_questions(m.body)]
+    questions = [{**q, "comment_id": m.comment_id} for m in live for q in verified_questions(m)]
     done = all(answered(m) for m in live)
     return 0, result(args, "answered" if done else "open", live[0].comment_id, questions=questions,
                      decisions=decisions_text(questions) if done else "")

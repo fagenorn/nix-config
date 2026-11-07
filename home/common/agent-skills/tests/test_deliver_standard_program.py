@@ -280,7 +280,8 @@ class OwnerAnswerTest(unittest.TestCase):
                 self.assertNotIn("decisions", result.get("cont") or {})
 
     def test_an_unreadable_answer_stops_before_planning(self):
-        for reply in (None, {"verdict": "error"}):
+        for reply in (None, {"verdict": "error"}, {"verdict": "answered"}, dict(ANSWER, decisions=""),
+                      dict(ANSWER, decisions="  ")):
             with self.subTest(reply=reply):
                 result, calls = run(replies={"owner-answer": reply})
                 self.assertEqual(result["stage"], "owner-answer")

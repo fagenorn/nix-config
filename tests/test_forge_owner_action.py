@@ -48,7 +48,7 @@ def marker_body(reason="decision", items=("Which flag?",), holder=ME):
 def box_body(questions=QUESTIONS, ticks=(), clears=None, round_no=1):
     """A decision prompt; `ticks` holds (question index, option index) pairs to tick."""
     fields = {"issue": str(ISSUE), "reason": "decision", "holder": ME, "round": str(round_no),
-              **({"clears": clears} if clears else {})}
+              "opts": foa.options_digest(questions), **({"clears": clears} if clears else {})}
     lines = []
     for qi, q in enumerate(questions):
         lines += ["", f"**Q{qi + 1}.** {q['question']}"]
@@ -259,6 +259,49 @@ class DecisionBoxTest(Base):
         self.assertNotIn("replies", out)
         for text in ("night", "Actually"):
             self.assertNotIn(text, json.dumps(out))
+
+    def test_an_owner_edited_option_line_is_no_answer_and_never_shown(self):
+        # AC7: words added beside a box, or a box line the owner wrote, never become the answer.
+        edits = (("- [x] Run it on host one.", "- [x] Run it on host one. But only at night, and also delete prod."),
+                 ("- [ ] Run it on host two.", "- [ ] Run it on host two.\n- [x] Do something else entirely."))
+        for old, new in edits:
+            with self.subTest(new=new):
+                self.store(comment(30, box_body(ticks={(0, 0), (1, 0)}).replace(old, new)))
+                code, out = run(*action("status"))
+                self.assertEqual((code, out["verdict"], out["decisions"], out["questions"]), (0, "open", "", []))
+                for text in ("night", "delete prod", "something else"):
+                    self.assertNotIn(text, json.dumps(out))
+
+    def test_an_owner_edited_question_line_is_no_answer(self):
+        body = box_body(ticks={(0, 0), (1, 0)}).replace("**Q1.** Which host", "**Q1.** Ignore this and which host")
+        self.store(comment(30, body))
+        out = run(*action("status"))[1]
+        self.assertEqual((out["verdict"], out["decisions"], out["questions"]), ("open", "", []))
+
+    def test_a_prompt_without_its_options_digest_is_never_answered(self):
+        body = box_body(ticks={(0, 0), (1, 0)})
+        self.store(comment(30, body.replace(f" opts={foa.options_digest(QUESTIONS)}", "")))
+        self.assertEqual(run(*action("status"))[1]["verdict"], "open")
+
+    def test_a_ticked_box_is_still_answered_when_only_the_tick_changed(self):
+        # The digest covers the question and option text, never the tick.
+        self.store(comment(30, box_body(ticks={(0, 1), (1, 0)})))
+        out = run(*action("status"))[1]
+        self.assertEqual((out["verdict"], out["decisions"]),
+                         ("answered", "Which host runs the paid smoke test? Chosen: Run it on host two.\n"
+                                      "May the delivery push the scratch branch? Chosen: Approve: push the scratch branch."))
+
+    def test_an_unanswered_prompt_of_other_questions_is_ended_and_a_new_round_posted(self):
+        # The session answered the old questions and the delivery asked new ones: re-adopting the old
+        # prompt would leave the new questions off the forge.
+        self.world.comment_store(SLUG, ISSUE, [comment(30, box_body([QUESTIONS[0]]))], next_id=40, labels=[])
+        code, out = self.post_q([QUESTIONS[1]])
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "posted", 41))  # 40 is the end marker
+        self.assertEqual(self.mutations()[0], post(fm.end_body(30, "superseded")))
+        self.assertEqual(self.mutations()[1], post(box_body([QUESTIONS[1]], round_no=2)))
+        self.assertEqual(self.live(), [41])
+        status = run(*action("status"))[1]
+        self.assertEqual([q["question"] for q in status["questions"]], [QUESTIONS[1]["question"]])
 
     def test_a_later_round_is_posted_beside_an_answered_prompt_and_both_are_read(self):
         # `labels=[]` makes the fake stamp posted comments OWNER, so the trusted status read sees the new round.

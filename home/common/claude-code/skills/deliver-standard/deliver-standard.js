@@ -541,7 +541,11 @@ if (!plan) {
   const answer = await call(`${CTX}
 Read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: { type: 'object' } }, decisions: { type: 'string' } }, required: ['verdict'] } })
   if (!answer || !['none', 'open', 'answered'].includes(answer.verdict)) return stop('owner-answer', { result: answer })
-  if (answer.verdict === 'answered') addDecision(answer.decisions)
+  if (answer.verdict === 'answered') {
+    // An answered prompt with no decision text would let planning go on without the owner's choices.
+    if (typeof answer.decisions !== 'string' || !answer.decisions.trim()) return stop('owner-answer', { result: answer })
+    addDecision(answer.decisions)
+  }
   const halted = takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA }), 'plan')
   if (halted) return halted
 }
