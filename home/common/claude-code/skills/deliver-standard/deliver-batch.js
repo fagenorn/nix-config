@@ -706,7 +706,8 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `answered-${n}`, phase: 'Deliver', model
 Return its verdict and any detail. Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `recover-end-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: ENDED_SCHEMA }), `recover-end-${n}`)
       if (ended === null || ended === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'recover-end', detail: `recover-end-${n} returned nothing`, ...(r.pr ? { pr: r.pr } : {}) }; return }
-      const heldOpen = Array.isArray(r.acceptance) && r.acceptance.some(a => a.kind !== 'code')
+      // The hold step may close the issue (its once-run passed, or every row moved to a child issue): read the state it left, never the criterion kinds.
+      const heldOpen = !(r.close_out && r.close_out.issue_state === 'CLOSED')
       rows[n] = { issue: n, outcome: heldOpen ? 'landed-held' : 'landed', ...(r.pr ? { pr: r.pr } : {}) }
       return
     }
