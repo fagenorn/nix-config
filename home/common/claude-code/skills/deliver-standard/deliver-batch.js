@@ -177,6 +177,11 @@ const eligibility = (n, f) => {
   if (claim.verdict === 'error') return { issue: n, outcome: 'stopped', detail: 'claim status' }
   const outside = (f.blockers || []).filter(b => b.state === 'OPEN' && !ISSUES.includes(b.issue)).map(b => b.issue)
   if (outside.length) return { issue: n, outcome: 'blocked', blocker: Math.min(...outside) }
+  // Only a questioned issue waits: no lane, no claim, no child until the owner answers.
+  const decision = f.decision || {}
+  if (decision.verdict === 'open' && !(DECISIONS && DECISIONS[String(n)])) {
+    return { issue: n, outcome: 'questions', questions: decision.items || [], marker: decision.comment_id }
+  }
   return null
 }
 
@@ -192,16 +197,125 @@ for (const n of ISSUES) {
 // --- Deliver ---
 phase('Deliver')
 const LANE_SCHEMA = { type: 'object', properties: { lane: { type: 'string', enum: ['direct', 'standard', 'needs-design'] }, why: { type: 'string' } }, required: ['lane'] }
+const ACQUIRE_SCHEMA = {
+  type: 'object',
+  properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'held_by', 'lost_to', 'error'] }, by: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' } },
+  required: ['verdict'],
+}
+const ASK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['posted', 'already_posted', 'error'] }, comment_id: { type: 'integer' } }, required: ['verdict'] }
+const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
+const ENDED_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
+
+// A FIFO semaphore of MAX child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted.
+let inUse = 0
+const waiters = []
+const admit = () => new Promise(resolve => { if (inUse < MAX) { inUse++; resolve() } else waiters.push(resolve) })
+const leave = () => { const next = waiters.shift(); if (next) next(); else inUse-- }
+
+// The owner's answer: the relaunch's decisions, else the replies the tracker shows on an answered marker.
+const answerOf = n => {
+  if (DECISIONS && DECISIONS[String(n)]) return DECISIONS[String(n)]
+  const d = (FACTS[n] || {}).decision
+  if (d && d.verdict === 'answered') return (d.replies || []).map(r => r.body).join('\n\n')
+  return null
+}
+// D12: a null child, or a stop that names dead agents, ends admission; a null field alone is an ordinary stop.
+const terminalChild = r => r === null || r === undefined ||
+  (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
+const READY = {}
+const readyOf = n => READY[n]
+// The child's whole input (D1): the batch args, the issue's cont, its lane and the owner's answer, nothing else.
+const childArgs = (n, lane) => {
+  const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode: 'ready' }
+  if (CONTS[n]) a.cont = CONTS[n]
+  else a.lane = lane
+  const answer = answerOf(n)
+  if (answer !== null) a.decisions = answer
+  return a
+}
+
 const deliverOne = async n => {
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
   const f = FACTS[n]
-  const lane = await ask(agent(`You choose the delivery lane of issue #${n} of ${SLUG} (the git repository at ${REPO}). Change nothing in this step.
+  let laneName
+  if (CONTS[n]) {
+    laneName = CONTS[n].lane || 'standard'
+  } else {
+    const lane = await ask(agent(`You choose the delivery lane of issue #${n} of ${SLUG} (the git repository at ${REPO}). Change nothing in this step.
 Read the issue with its comments (gh issue view ${n} --repo ${SLUG} --comments) and invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is.
 Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
 ${RULES_FOR(REPO, f.branch || '<branch>')}`, { label: `lane-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'medium', schema: LANE_SCHEMA }), `lane-${n}`)
-  if (lane === null || lane === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `lane-${n} returned nothing` }; return }
-  if (lane.lane === 'needs-design') { rows[n] = { issue: n, outcome: 'needs-design', lane: lane.lane }; return }
-  rows[n] = { issue: n, outcome: 'eligible', lane: lane.lane }
+    if (lane === null || lane === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `lane-${n} returned nothing` }; return }
+    if (lane.lane === 'needs-design') { rows[n] = { issue: n, outcome: 'needs-design', lane: lane.lane }; return }
+    laneName = lane.lane
+  }
+  rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
+
+  // An issue is claimed only once it holds a child slot: a waiting issue holds no claim.
+  if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
+  await admit()
+  let admitted = true
+  try {
+    if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
+    const acq = await ask(agent(`You claim issue #${n} of ${SLUG} (the git repository at ${REPO}) for the batch holder ${HOLDER}.
+Run alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${f.branch}
+Return its verdict (acquired, already_held, held_by, lost_to, or error on any other exit), by and comment_id from its output. Run nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: ACQUIRE_SCHEMA }), `acquire-${n}`)
+    if (acq === null || acq === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'acquire', detail: `acquire-${n} returned nothing` }; return }
+    if (acq.verdict === 'held_by' || acq.verdict === 'lost_to') { rows[n] = { issue: n, outcome: 'claim-lost', by: acq.by }; return }
+    if (acq.verdict !== 'acquired' && acq.verdict !== 'already_held') { rows[n] = { issue: n, outcome: 'stopped', stage: 'acquire', detail: acq.detail || acq.verdict }; return }
+
+    const answer = answerOf(n)
+    if (answer !== null) {
+      const ended = await ask(agent(`The owner answered the open decision of issue #${n} of ${SLUG} (the git repository at ${REPO}). End its marker.
+Run alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision
+Return its verdict and any detail. Run nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `answered-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: ENDED_SCHEMA }), `answered-${n}`)
+      if (ended === null || ended === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'answered', detail: `answered-${n} returned nothing` }; return }
+    }
+
+    let r = null
+    try {
+      try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
+      if (terminalChild(r)) trip(`child-${n}`)
+    } finally {
+      leave()
+      admitted = false
+    }
+
+    if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `child-${n} returned nothing` }; return }
+    if (r.cont) CONTS[n] = r.cont
+    if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents }; return }
+    if (r.stage === 'ready') {
+      READY[n] = r
+      rows[n] = { issue: n, outcome: 'ready', lane: laneName, head: r.head }
+      return
+    }
+    if (r.stage === 'claimed') { rows[n] = { issue: n, outcome: 'claim-lost', by: r.by }; return }
+    if (r.stage === 'plan' && Array.isArray(r.needs_user) && r.needs_user.length) {
+      const posted = await ask(agent(`The delivery of issue #${n} of ${SLUG} (the git repository at ${REPO}) needs the owner's answers. Post them as the decision marker, the claim stays held.
+The questions, as JSON: ${JSON.stringify(r.needs_user)}
+1. Make a fresh directory with mktemp -d and write exactly that JSON array to a file in it.
+2. Run alone and exactly: forge-claim owner-action post --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason decision --items-file <that file>
+Return its verdict (posted, already_posted, or error on any other exit) and comment_id. Change nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `ask-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: ASK_SCHEMA }), `ask-${n}`)
+      if (!posted || (posted.verdict !== 'posted' && posted.verdict !== 'already_posted')) {
+        rows[n] = { issue: n, outcome: 'stopped', stage: 'plan', detail: `ask-${n} did not post the questions` }
+        return
+      }
+      rows[n] = { issue: n, outcome: 'questions', lane: laneName, questions: r.needs_user, marker: posted.comment_id }
+      return
+    }
+    if (r.cont) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }; return }
+    // A stop with nothing to resume: give the claim back.
+    await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) stopped without anything to resume. Release the batch claim.
+Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
+Return its verdict and any detail. Run nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
+    rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }
+  } finally {
+    if (admitted) leave()
+  }
 }
 await parallel(eligible.map(n => () => deliverOne(n)))
 
@@ -218,7 +332,9 @@ const relaunchArgs = () => {
 }
 for (const r of table) log(`#${r.issue}: ${r.outcome}${r.detail ? ` (${r.detail})` : ''}`)
 return {
-  stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table, questions: [], owner_actions: [],
+  stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
+  questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
+  owner_actions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })),
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }
