@@ -1000,11 +1000,35 @@ class DirectLaneTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class DeadAgentTest(unittest.TestCase):
+    """deliver-batch (#636 D12) reads dead_agents to tell an agent that returned nothing from a stop."""
+
+    def test_each_dead_agent_shape_names_its_label(self):
+        for label, stage in (("setup", "setup"), ("plan-review", "plan-review"), ("review-1", "task-review"),
+                             ("final-1", "final-review"), ("verify", "verify")):
+            with self.subTest(label=label):
+                result, _ = run(replies={label: None})
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual(result["dead_agents"], [label])
+
+    def test_a_live_run_and_an_ordinary_stop_carry_no_dead_agents(self):
+        result, _ = run()
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("dead_agents", result)
+        result, _ = run(replies={"plan": {"status": "needs_user", "questions": ["q"]}})
+        self.assertEqual(result["stage"], "plan")
+        self.assertNotIn("dead_agents", result)
+
+
 class SourceTest(unittest.TestCase):
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")
         for banned in ("Date.now(", "Math.random(", "new Date()"):
             self.assertNotIn(banned, text)
+
+    def test_every_agent_call_goes_through_the_dead_agent_wrapper(self):
+        text = PROGRAM.read_text(encoding="utf-8")
+        self.assertEqual(len(re.findall(r"\bagent\(", text)), 1)
 
     def test_meta_is_a_pure_literal_first(self):
         text = PROGRAM.read_text(encoding="utf-8")
