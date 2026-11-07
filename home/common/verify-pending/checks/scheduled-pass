@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify check for issues 630 and 632 (issue 638): passes only inside a pass of the
+# installed verify-pending job on this host (process ancestry), or, with --after-switch,
+# measures the switch-to-pass gap. verify-pending runs it from the repository root at the
+# commit the block names. Exit 0 met, 1 not met, 75 not yet.
+PYTHONPATH=python exec python3 -m agent_tools.verify_checks scheduled-pass "$@"

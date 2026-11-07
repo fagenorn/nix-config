@@ -150,6 +150,7 @@ agent-workflow-tests *args:
     tests/test_verify_pending_owner.py \
     tests/test_verify_pending_pass.py \
     tests/test_verify_pending_units.py \
+    tests/test_verify_checks.py \
     tests/test_keepalive_end_turn_cap.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \
