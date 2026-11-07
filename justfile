@@ -147,8 +147,11 @@ agent-workflow-tests *args:
     tests/test_lane_triage.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
+    tests/test_verify_pending_owner.py \
     tests/test_verify_pending_pass.py \
     tests/test_verify_pending_units.py \
+    tests/test_verify_checks.py \
+    tests/test_keepalive_end_turn_cap.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \
     tests/test_forge_owner_action.py \
@@ -220,7 +223,7 @@ agent-workflow-tests *args:
     tests/test_retained_root_copy.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
-# Validate every explicit pipeline dispatch and print the four-family demo trace.
+# Validate every explicit pipeline dispatch and print the three-family demo trace.
 agent-model-matrix:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix validate
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix trace representative

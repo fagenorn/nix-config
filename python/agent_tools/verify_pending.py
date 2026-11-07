@@ -26,6 +26,16 @@ before any write or run. Exit 1 when any line is a `forge_error` or `runner_untr
 error (a host that is not a hostname, a `--repo` no project registers, a refused registry) and
 otherwise 0, including with no forge credential: that prints `verify-pending: no-forge-credential`
 on stderr, nothing on stdout, and makes no other `gh` call.
+
+`verify-pending approve --repo OWNER/NAME --all-live` (both required; issue 631) ticks the `Run it`
+box of every live, unconsumed `approve` prompt of the repository's open `needs-verification`
+issues whose check has `effects: live`, and never a `paid` one. It reads every page of issues and
+every comment of each before the first edit, and ends with `forge_error` rather than act on an
+incomplete listing. Stdout is one `json.dumps(line, sort_keys=True)` per prompt ticked, each
+`{repo, issue, check, ac, comment, state, reason}`; a second call ticks nothing. Exit 1 when a line
+is a `forge_error` or `runner_untrusted` (the `gh` account could not read its own markers), 2 when
+`--repo` is not `owner/name` or an argument is missing, otherwise 0. Only the host a prompt names
+runs the command, and only when the prompt's digest still matches it.
 """
 
 import argparse
@@ -39,6 +49,7 @@ from pathlib import Path
 
 from agent_tools import agent_platform, forge_markers, verify_exec, verify_run
 from agent_tools.forge_markers import ForgeError
+from agent_tools.owner_actions import SLUG_PATTERN
 from agent_tools.resolve_project import ContractError, resolve
 from agent_tools.verify_block import HOST, SHA, count_after, count_since, lint_block, parse_block
 
@@ -171,6 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--repo", help="only the project whose tracker repository is this owner/name")
     run.add_argument("--issue", type=int, help="only this issue number, in every project the run covers")
     run.add_argument("--report", action="store_true", help="print what is due and run nothing")
+    approve = commands.add_parser("approve", help="tick the live approve prompts of one repository")
+    approve.add_argument("--repo", required=True, help="the tracker repository, owner/name")
+    approve.add_argument("--all-live", action="store_true", required=True, help="tick every live prompt")
     return parser
 
 
@@ -288,10 +302,25 @@ def run_run(args: argparse.Namespace) -> int:
     return 1 if any(line["reason"] in ("forge_error", "runner_untrusted") for line in lines) else 0
 
 
+def run_approve(args: argparse.Namespace) -> int:
+    if not SLUG_PATTERN.fullmatch(args.repo):
+        print(f"verify-pending: --repo {args.repo} is not owner/name", file=sys.stderr)
+        return 2
+    try:
+        lines = verify_run.approve_all_live(args.repo)
+    except ForgeError:
+        lines = [{**skipped(args.repo, "forge_error"), "comment": None}]
+    for line in lines:
+        print(json.dumps(line, sort_keys=True))
+    return 1 if any(line["reason"] in ("forge_error", "runner_untrusted") for line in lines) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "count-since":
         return run_count_since(args)
+    if args.command == "approve":
+        return run_approve(args)
     return run_run(args) if args.command == "run" else run_lint(args)
 
 

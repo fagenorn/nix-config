@@ -842,7 +842,8 @@ class PassBase(unittest.TestCase):
         self.world = world_with(self, "verify-ok", "verify-bad", "verify-later", "darwin-version")
         for tool, code in (("verify-ok", 0), ("verify-bad", 1), ("verify-later", 75)):
             self.world.respond(tool, [], exit=code, stdout=f"{tool} ran\n")
-        for name, color in (("verification-failed", "B60205"), ("verification-follow-up", "FBCA04")):
+        for name, color in (("verification-failed", "B60205"), ("verification-follow-up", "FBCA04"),
+                            ("owner-action", "D93F0B")):
             self.world.respond("gh", ["api", "-X", "POST", f"repos/{SLUG}/labels", "-f", f"name={name}",
                                       "-f", f"color={color}"])
         script = self.world.checkout / "scripts" / "check.sh"
@@ -885,10 +886,11 @@ class PassBase(unittest.TestCase):
         self.assertEqual(errors, [])
 
     def mutations(self, since=0):
-        """The forge writes since call `since`, bar the lease: a run's `verify-run` claim and its
-        delete leave nothing behind, so a pass that changes nothing still shows no other write."""
+        """The forge writes since call `since`, bar the lease and the `verify-seen` report marker: a
+        run's `verify-run` claim and its delete leave nothing behind, and the report marker is
+        bookkeeping, so a pass that changes nothing still shows no other write."""
         def lease(argv):
-            return (argv[2] == "POST" and "agent:verify-run" in argv[-1]) or (
+            return (argv[2] == "POST" and ("agent:verify-run" in argv[-1] or "agent:verify-seen" in argv[-1])) or (
                 argv[2] == "DELETE" and "/issues/comments/" in argv[3])
         return [argv for argv in self.world.argvs("gh")[since:] if "-X" in argv and not lease(argv)]
 
@@ -941,7 +943,8 @@ class PassTransitionsTest(PassBase):
         self.assertEqual(self.run_pass(), [line(0, "AC1", "fail", "fail_ask")])
         self.assertEqual([m.fields["state"] for m in self.markers("verify-result")], ["fail"])
         self.assertNotIn("verification-failed", self.world.issue()["labels"])
-        self.assertEqual([a for a in self.mutations() if "labels" in a[3]], [])
+        self.assertEqual([a for a in self.mutations() if "verification-failed" in " ".join(a)], [])
+        self.assertEqual(len([m for m in self.markers("owner-action") if m.fields["reason"] == "verify-decision"]), 1)
         self.second_pass_is_silent()
 
     def test_fail_then_pass_changes_state_and_clears_the_label(self):
@@ -1209,12 +1212,12 @@ class NeverRunTest(PassBase):
         self.assert_never_run("block_invalid", check(run={"tool": "python3", "args": ["-c", "print(1)"]}))
 
     def test_live_and_paid(self):
-        self.assert_never_run("effects_live", ok_check(effects="live"))
-        self.assert_never_run("effects_paid", ok_check(effects="paid"))
+        self.assert_never_run("owner_asked", ok_check(effects="live"))
+        self.assert_never_run("owner_asked", ok_check(effects="paid"))
 
     def test_ask_and_act(self):
-        self.assert_never_run("owner_check", check(kind="human", reason="senses", run={"ask": "Is it bright?"}))
-        self.assert_never_run("owner_check", check(kind="human", reason="hands",
+        self.assert_never_run("owner_asked", check(kind="human", reason="senses", run={"ask": "Is it bright?"}))
+        self.assert_never_run("owner_asked", check(kind="human", reason="hands",
                                                    run={"act": "Plug it in", "then": {"command": "check-ok"}}))
 
     def test_a_block_naming_nix_activate_is_not_run(self):

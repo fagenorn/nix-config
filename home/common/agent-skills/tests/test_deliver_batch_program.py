@@ -779,6 +779,19 @@ class DependencyTest(unittest.TestCase):
             self.assertNotIn(f"lane-{n}", labels(calls))
         self.assertEqual(row(result, 3)["outcome"], "landed")
 
+    def test_a_cycle_is_an_owner_action_and_never_a_relaunch(self):
+        # A cycle only the owner can break: relaunching it returns the same blocked rows forever.
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
+                           patch={"facts-1": blocked_by(2), "facts-2": blocked_by(1)})
+        self.assertIsNone(result["relaunch"])
+        self.assertEqual([(a["issue"], a["reason"]) for a in result["owner_actions"]], [(1, "cycle"), (2, "cycle")])
+
+    def test_a_cycle_leaves_the_other_open_issues_in_the_relaunch(self):
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
+                           patch={"facts-1": blocked_by(2), "facts-2": blocked_by(1)},
+                           replies={"land-lock-3-1": {"verdict": "land-contended"}})
+        self.assertEqual(result["relaunch"]["issues"], [3])
+
     def test_a_waiting_dependent_holds_no_slot(self):
         result, _, active = run(args=dict(ARGS, issues=[1, 2, 3]), patch={"setup": {"max_parallel": 1},
                                                                        "facts-1": blocked_by(3)})
@@ -899,14 +912,30 @@ class SourceTest(unittest.TestCase):
         for arg in ("repo_root", "batch_id", "child_script", "issues", "label", "decisions"):
             self.assertIn(arg, meta)
 
-    def test_deliver_standard_skill_names_the_batch_program_and_its_args(self):
+    def test_deliver_batch_skill_is_small_and_names_the_program_and_its_args(self):
+        # #637 AC1: the skill that replaces orchestrate-issues stays at most 1.5 KB.
+        path = PROGRAM.parent.parent / "deliver-batch" / "SKILL.md"
+        raw = path.read_bytes()
+        self.assertLessEqual(len(raw), 1536)
+        text = raw.decode("utf-8")
+        self.assertTrue(text.startswith("---\nname: deliver-batch\ndescription: "))
+        description = text.split("\n", 3)[2].removeprefix("description: ")
+        self.assertLessEqual(len(description.encode("utf-8")), 147)
+        self.assertIn("Use for", description)
+        self.assertIn("deliver issues", description)
+        self.assertNotIn("resolve-project resolve", text)
+        for key in ("`deliver-batch.js`", "`deliver-standard.js`", "scriptPath", "repo_root", "issues",
+                    "label", "batch_id", "<host>-<yyyymmdd-hhmm>", "child_script", "decisions",
+                    "table", "questions", "owner_actions", "relaunch", "resumeFromRunId",
+                    "`error`", "`result`", "`missing`", "`invalid`", "`holder`", "`breaker`"):
+            with self.subTest(key=key):
+                self.assertIn(key, text)
+
+    def test_deliver_standard_skill_hands_batches_to_deliver_batch(self):
         text = PROGRAM.with_name("SKILL.md").read_text(encoding="utf-8")
         self.assertLessEqual(len(text.encode("utf-8")), 1056)
-        batch = text[text.index("`deliver-batch.js`"):]
-        for key in ("repo_root", "issues", "label", "batch_id", "child_script", "decisions?", "relaunch",
-                    "resumeFromRunId"):
-            with self.subTest(key=key):
-                self.assertIn(key, batch)
+        self.assertIn("`deliver-batch`", text)
+        self.assertNotIn("deliver-batch.js", text)
 
 
 if __name__ == "__main__":

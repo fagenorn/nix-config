@@ -471,7 +471,6 @@ class ReportCommandTest(unittest.TestCase):
 ROSTER = {
     "from-issue-controller": ["claude", "codex"],
     "orchestration-dispatcher": ["claude"],
-    "orchestrated-issue-owner": ["claude"],
     "design-and-grill-owner": ["claude", "codex"],
     "planning-owner": ["claude", "codex"],
     "implementation-owner": ["claude", "codex"],
@@ -499,6 +498,19 @@ class LiveModelTest(unittest.TestCase):
 
     def test_the_live_model_validates_clean(self):
         self.assertEqual(instruction_load.validate(self.model, self.read), [])
+
+    # orchestrate-issues/SKILL.md, the batch profile's only hot member, measured at d65b64bf (#637).
+    BATCH_BASE_HOT_BYTES = 19463
+
+    def test_the_batch_profile_loads_deliver_batch_and_drops_15_kb(self):
+        # #637 AC1: the batch profile's hot bytes drop by at least 15 KB.
+        profile = self.profile(self.model, "orchestration-dispatcher")
+        self.assertEqual(profile["entry"], "deliver-batch")
+        self.assertEqual(profile["hot"], ["deliver-batch/SKILL.md"])
+        measured = instruction_load.measure(self.model, self.read)
+        hot = measured["profiles"]["orchestration-dispatcher"]["claude"]["hot"]["bytes"]
+        self.assertLessEqual(hot, self.BATCH_BASE_HOT_BYTES - 15 * 1024)
+        self.assertNotIn("orchestrated-issue-owner", {p["id"] for p in self.model["profiles"]})
 
     def test_the_roster_profiles_are_modelled_on_their_hosts(self):
         hosts = {p["id"]: p["hosts"] for p in self.model["profiles"]}
