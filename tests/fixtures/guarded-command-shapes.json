@@ -131,6 +131,10 @@
      "label": "push", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}},
     {"id": "push.heredoc-apostrophe-continuation-cd", "template": "cat <<EOF\nit's\nEOF\nc\\\nd <repository-root> && git push origin <branch>",
      "label": "push", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}},
+    {"id": "push.trap-cd", "template": "trap 'cd <repository-root>' DEBUG; git push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}},
+    {"id": "pr-create.trap-cd", "template": "trap 'cd <repository-root>' DEBUG; gh pr create --repo <resolved-repository> --base main --head <branch> --title \"x\" --body \"y\"",
+     "label": "PR creation", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}},
     {"id": "pr-create.comment-apostrophe-continuation-cd", "template": "true # it's\nc\\\nd <repository-root> && gh pr create --repo <resolved-repository> --base main --head <branch> --title \"x\" --body \"y\"",
      "label": "PR creation", "verdict": {"exit": 2, "reason": "the directory the verb runs in cannot be resolved"}}
   ],

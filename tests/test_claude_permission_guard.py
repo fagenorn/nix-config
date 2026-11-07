@@ -2439,6 +2439,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"cd {there}/ && git push origin {feature}", None),
             # A mention is not a directory change.
             (f"echo cd {foreign} && git push origin {feature}", here),
+            # An inert builtin or an external program runs no directory change.
+            (f"true && echo ok && git push origin {feature}", here),
+            (f"git status && git push origin {feature}", here),
             (f'git push origin {feature} && echo "cd {foreign}"', here),
             # No repository-bound verb: nothing to judge.
             (f"cd {foreign} && ls", here),
@@ -2492,6 +2495,27 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("PR creation", f"cat <<EOF\nit's\nEOF\nc\\\nd {there} && {create}"),
             ("PR creation", f"c\\\nd {there} && {create}"),
             ("push", f"pu\\\nshd {there} && git push origin {feature}"),
+            # A builtin, reserved word or zsh special-hash assignment can run a
+            # directory change in the shell itself (final review of issue 418).
+            ("push", f"trap 'cd {there}' DEBUG; git push origin trunk"),
+            ("push", f"trap 'cd {there}' DEBUG\ngit push origin trunk"),
+            ("push", f"trap 'cd {there}' ERR; false; git push origin trunk"),
+            ("push", f"builtin trap 'cd {there}' DEBUG; git push origin trunk"),
+            ("push", f"\"tr\"ap 'cd {there}' DEBUG; git push origin trunk"),
+            ("push", f"functions[g]='cd {foreign}'; g && git push origin {feature}"),
+            ("push", f"functions=(g 'cd {foreign}'); g && git push origin {feature}"),
+            ("push", f"noglob cd {there} && git push origin trunk"),
+            ("push", f"nocorrect cd {there} && git push origin trunk"),
+            ("push", f"- cd {there} && git push origin trunk"),
+            ("push", f"repeat 1 cd {there}; git push origin trunk"),
+            ("push", f"mapfile -C 'cd {there} #' -c 1 x </dev/null; git push origin trunk"),
+            ("push", f"alias g='cd {there}'; g; git push origin trunk"),
+            ("push", 'eval "$(printf c)d ' + f'{there}"; git push origin trunk'),
+            ("push", f"source {there}/env.sh; git push origin trunk"),
+            ("push", f"emulate zsh -c 'cd {there}'; git push origin trunk"),
+            ("PR creation", f"trap 'cd {there}' DEBUG; {create}"),
+            ("PR creation", f"trap 'cd {there}' ERR; false; {create}"),
+            ("PR creation", f"noglob cd {there} && {create}"),
             ("push", f"cd {there} && c\\\nd {here} && git push origin {feature}"),
             # A quote's span ends where the shell ends it, so a continuation after it
             # still splits the directory word (final review of issue 418).

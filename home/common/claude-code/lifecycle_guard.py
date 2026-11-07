@@ -139,6 +139,34 @@ DIRECTORY_WORDS = ("cd", "chdir", "pushd", "popd")
 # Wrapper options that set the wrapped program's directory, by wrapper.
 CHDIR_SHORT_OPTIONS = {"env": "C", "sudo": "D"}
 CHDIR_LONG_OPTION = "--chdir"
+# The builtins and reserved words of bash and zsh (`compgen -b -k`; zsh's
+# `${(k)builtins} ${(k)reswords}`). They run in the shell itself, so any one of
+# them may move its directory out of sight: `trap 'cd <dir>' DEBUG`, `noglob cd`,
+# `repeat 1 cd`, `mapfile -C`, `source`, `alias`, `emulate -c`. One at a command
+# position leaves the directory of a push or PR creation unresolved, unless it is
+# one of `INERT_BUILTINS`, which only print, test or unset (issue 418).
+SHELL_BUILTINS = frozenset("""
+    - : ! . [ [[ ]] { } alias autoload bg bind bindkey break builtin bye caller
+    case cd chdir command compadd comparguments compcall compctl compdescribe
+    compfiles compgen complete compopt compgroups compquote compset comptags
+    comptry compvalues continue coproc declare dirs disable disown do done echo
+    echotc echoti elif else emulate enable end esac eval exec exit export false fc
+    fg fi float for foreach function functions getln getopts hash help history if
+    in integer jobs kill let limit local log logout mapfile nocorrect noglob popd
+    print printf private pushd pushln pwd r read readarray readonly rehash repeat
+    return sched select set setopt shift shopt source suspend test then time times
+    trap true ttyctl type typeset ulimit umask unalias unfunction unhash unlimit
+    unset unsetopt until vared wait whence where which while zcompile zformat zle
+    zmodload zparseopts zregexparse zstyle
+""".split())
+INERT_BUILTINS = frozenset({"echo", "printf", "print", "true", "false", ":", "unset",
+                            "test", "[", "pwd"})
+# An assignment to a zsh special hash defines a function or alias, or sets an
+# option (`functions[g]='cd <dir>'`, `options[autocd]=on`): a directory change the
+# guard cannot follow (issue 418).
+ZSH_SPECIAL_ASSIGNMENT = re.compile(
+    r"(?:dis_)?(?:functions|functions_source|aliases|galiases|saliases|builtins"
+    r"|reswords|options|modules|commands|nameddirs|userdirs|parameters)(?:\[|\+?=)")
 CD_PRELUDE_PROBLEM = (
     "the directory the verb runs in cannot be resolved: a directory change is "
     "accepted only as one leading cd <absolute directory> && before a single "
@@ -1216,8 +1244,11 @@ def directory_change(text):
     A directory word the shell may run anywhere counts, by the shared scan
     `shell_run_word`: after or attached to a redirection, or named by substring
     in evaluator, `env -S`, substitution or untokenisable text. So does a word at
-    a command position that carries an expansion (it can be `cd`) and a wrapper
-    option that sets the directory (`env -C`, `sudo -D`, `--chdir`).
+    a command position that carries an expansion (it can be `cd`), a wrapper
+    option that sets the directory (`env -C`, `sudo -D`, `--chdir`), a shell
+    builtin or reserved word at a command position other than an inert one
+    (`SHELL_BUILTINS`), a command word holding `=` (an element assignment such
+    as `functions[g]=...`) and an assignment to a zsh special hash.
     """
     if shell_run_word(text, DIRECTORY_WORDS) is not None:
         return True
@@ -1243,7 +1274,10 @@ def directory_change(text):
             if operator:
                 continue
             word = split_redirection(value)[0]
-            if flag and ("$" in word or "`" in word):
+            if ZSH_SPECIAL_ASSIGNMENT.match(word) is not None:
+                return True
+            if flag and ("$" in word or "`" in word or "=" in word
+                         or (word in SHELL_BUILTINS and word not in INERT_BUILTINS)):
                 return True
             wrapper = program_name(word)
             if wrapper not in CHDIR_SHORT_OPTIONS:
