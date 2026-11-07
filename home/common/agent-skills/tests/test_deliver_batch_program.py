@@ -701,11 +701,24 @@ class LandTest(unittest.TestCase):
 
     def test_a_relaunched_merged_landing_with_open_criteria_is_held(self):
         cont = {"setup": {"holder": HOLDER, "branch": "issue-1-x", "worktree": "/r/.wt/w-issue-1-x"}}
-        done = {"stage": "done", "pr": 41, "merged": True, "acceptance": [{"id": "AC2", "text": "live", "kind": "evidence"}]}
+        done = {"stage": "done", "pr": 41, "merged": True, "acceptance": [{"id": "AC2", "text": "live", "kind": "evidence"}],
+                "close_out": {"issue_state": "OPEN", "released": True}}
         result, _, _ = run(args=dict(ARGS, conts={"1": cont}),
                            patch={"facts-1": {"merged_pr": 41, "claim": {"verdict": "held_by", "by": HOLDER}}},
                            children={"1": done})
         self.assertEqual(row(result, 1)["outcome"], "landed-held")
+
+    def test_a_relaunched_merged_landing_whose_hold_closed_the_issue_is_landed_and_releases_dependents(self):
+        cont = {"setup": {"holder": HOLDER, "branch": "issue-1-x", "worktree": "/r/.wt/w-issue-1-x"}}
+        done = {"stage": "done", "pr": 41, "merged": True, "acceptance": [{"id": "AC2", "text": "live", "kind": "evidence"}],
+                "close_out": {"issue_state": "CLOSED", "released": True}}
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2], conts={"1": cont}),
+                               patch={"facts-1": {"merged_pr": 41, "claim": {"verdict": "held_by", "by": HOLDER}},
+                                      "facts-2": blocked_by(1)},
+                               children={"1": done})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertNotEqual(row(result, 2)["outcome"], "waits-verification")
+        self.assertIn("acquire-2", labels(calls))
 
     def test_a_merged_pr_without_a_forwarded_cont_stays_a_duplicate(self):
         result, calls, _ = run(patch={"facts-1": {"merged_pr": 41, "claim": {"verdict": "held_by", "by": HOLDER}}})
