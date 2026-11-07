@@ -766,6 +766,19 @@ class DependencyTest(unittest.TestCase):
             self.assertNotIn(f"lane-{n}", labels(calls))
         self.assertEqual(row(result, 3)["outcome"], "landed")
 
+    def test_a_cycle_is_an_owner_action_and_never_a_relaunch(self):
+        # A cycle only the owner can break: relaunching it returns the same blocked rows forever.
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
+                           patch={"facts-1": blocked_by(2), "facts-2": blocked_by(1)})
+        self.assertIsNone(result["relaunch"])
+        self.assertEqual([(a["issue"], a["reason"]) for a in result["owner_actions"]], [(1, "cycle"), (2, "cycle")])
+
+    def test_a_cycle_leaves_the_other_open_issues_in_the_relaunch(self):
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
+                           patch={"facts-1": blocked_by(2), "facts-2": blocked_by(1)},
+                           replies={"land-lock-3-1": {"verdict": "land-contended"}})
+        self.assertEqual(result["relaunch"]["issues"], [3])
+
     def test_a_waiting_dependent_holds_no_slot(self):
         result, _, active = run(args=dict(ARGS, issues=[1, 2, 3]), patch={"setup": {"max_parallel": 1},
                                                                        "facts-1": blocked_by(3)})

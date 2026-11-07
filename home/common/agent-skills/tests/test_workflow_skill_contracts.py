@@ -3480,6 +3480,10 @@ class BatchRoutingTest(unittest.TestCase):
         skill = REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md"
         self.assertIn('Use for "deliver issues', skill.read_text(encoding="utf-8"))
 
+    def test_the_lead_stops_a_relaunch_that_repeats_the_last_one(self):
+        text = (REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md").read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?s)non-null `relaunch`.*?unless its args equal the previous run.*?stop, reporting")
+
 
 if __name__ == "__main__":
     unittest.main()

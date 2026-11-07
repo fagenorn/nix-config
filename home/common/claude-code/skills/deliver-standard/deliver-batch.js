@@ -753,7 +753,8 @@ await parallel(toDeliver.map(n => async () => {
 
 // --- Result: one table, in ISSUES order ---
 const table = ISSUES.map(n => rows[n] || { issue: n, outcome: 'stopped', detail: 'no result' })
-const open = table.filter(r => !FINAL.includes(r.outcome)).map(r => r.issue)
+// A cycle only the owner can break: relaunching it returns the same blocked rows, so it is an owner action, not an open issue.
+const open = table.filter(r => !FINAL.includes(r.outcome) && !cycle.includes(r.issue)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
 const relaunchArgs = () => {
   const a = { repo_root: REPO, batch_id: BATCH, child_script: CHILD, issues: open }
@@ -774,7 +775,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.detail ? ` (${r.detail}
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }
