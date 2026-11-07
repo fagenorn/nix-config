@@ -90,14 +90,14 @@ def settle_reason(prompt: Marker, markers: Iterable[Marker], held_key: str | Non
     markers = list(markers)
     if held_key is not None and prompt.fields.get("block") != held_key:
         return "superseded"
-    if prompt.fields.get("reason") == ASK:
+    if prompt.fields.get("reason") in (ASK, DECISION):
         if answered(markers, prompt):
             return "answered"
         latest = verify_issues.latest_result(markers, prompt.fields["block"], int(prompt.fields["check"]))
         if latest is not None and latest.fields.get("state") in final:
             return "resolved"
-    if prompt.fields.get("reason") == APPROVE:
-        if consumed(markers, prompt.comment_id):
+    if prompt.fields.get("reason") in (APPROVE, ACT):
+        if prompt.fields.get("reason") == APPROVE and consumed(markers, prompt.comment_id):
             return "consumed"
         latest = verify_issues.latest_result(markers, prompt.fields["block"], int(prompt.fields["check"]))
         if latest is not None and latest.fields.get("state") in final:

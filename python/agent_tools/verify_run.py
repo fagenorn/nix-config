@@ -38,7 +38,7 @@ QUERY = (
     'orderBy: {field: CREATED_AT, direction: ASC}) { nodes { number labels(first: 50) { nodes { name } } '
     'comments(last: 100) { nodes { fullDatabaseId authorAssociation body createdAt updatedAt } } } } } }'
 )
-FINAL = ("pass", "hit", "miss", "expired")
+FINAL = ("pass", "hit", "miss", "expired", "rejected")
 PENDING_OUTCOMES = ("not_yet", "timeout", "exit_unexpected")
 OWNER_GATES = ("owner_check", "effects_live", "effects_paid")
 DEFAULT_EXPIRY_DAYS = 21
@@ -218,6 +218,9 @@ class _Pass:
             return
         if not self.report and self.answer(index, check, ac, key, previous):
             return
+        if (not self.report and check.get("on_fail", "label") == "ask" and prev == "fail"
+                and "owner" not in previous.fields):
+            self.decide_fail(index, ac, previous)
         bound = check["host"]
         if not (bound == self.host or bound == "any" or (isinstance(bound, list) and self.host in bound)):
             return self.line(index, ac, "pending", "not_this_host")
@@ -237,6 +240,11 @@ class _Pass:
             return self.line(index, ac, "due", "due")
         if not gate.runnable:
             return self.owner_form(index, check, ac, key, previous, prev, due, gate.reason)
+        self.run_leased(index, check, ac, key, previous, prev, due)
+
+    def run_leased(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
+                   prev: str | None, due: verify_facts.Due) -> None:
+        """Run `check` and record what changed, under the check's lease."""
         lease = self.take_lease(ac, key)
         if lease is None:
             return self.line(index, ac, "pending", "lost_contest")
@@ -278,10 +286,16 @@ class _Pass:
         """Run the check and record what changed, under its lease."""
         waiting = self.live(verify_issues.DUE, key)
         days = check.get("expires_after_days") or DEFAULT_EXPIRY_DAYS
-        if (waiting is not None and check.get("on_expire", "close") == "close"
-                and self.ctx.now() >= waiting.updated_at + timedelta(days=days)):
+        lapsed = waiting is not None and self.ctx.now() >= waiting.updated_at + timedelta(days=days)
+        on_expire = check.get("on_expire", "close")
+        if lapsed and on_expire == "close":
             self.record(index, ac, "expired", None, {}, "", "")
             return self.line(index, ac, "expired", "changed")
+        if lapsed and on_expire == "ask" and not any(
+                p.fields.get("on") == "expire"
+                for p in verify_owner.prompts(self.markers, verify_owner.DECISION, self.block_key, index)):
+            self.prompt(verify_owner.DECISION, index, {"on": "expire"}, f"{ac} expired: the owner decides.",
+                        self.decision_boxes(), ("on",))
         outcome, code, output, command, facts = self.run(check)
         if outcome in PENDING_OUTCOMES:
             if waiting is None:
@@ -295,7 +309,8 @@ class _Pass:
             return self.line(index, ac, state, "unchanged")
         facts = {**due.facts, **facts}
         if state == "fail" and check.get("on_fail", "label") == "ask":
-            self.record(index, ac, state, code, facts, command, output)
+            posted = self.record(index, ac, state, code, facts, command, output)
+            self.decide_fail(index, ac, posted)
             return self.line(index, ac, state, "fail_ask")
         if state == "fail":
             forge_markers.ensure_label(self.slug, *FAILED)
@@ -423,9 +438,38 @@ class _Pass:
                               f"{check['run']['ask']}\n\n{verify_owner.box(verify_owner.ACCEPT)}\n"
                               f"{verify_owner.box(verify_owner.REJECT)}")
             return self.line(index, ac, "pending", "owner_asked" if won else "owner_waiting")
+        if "act" in check["run"]:
+            return self.act(index, check, ac, key, previous, prev, due)
         if gate_reason in ("effects_live", "effects_paid"):
             return self.approve(index, check, ac, key, previous, prev, due)
         self.line(index, ac, "pending", gate_reason)
+
+    def decision_boxes(self) -> str:
+        return f"{verify_owner.box(verify_owner.PASSED)}\n{verify_owner.box(verify_owner.NOT_VERIFIED)}"
+
+    def decide_fail(self, index: int, ac: str, result: Marker) -> None:
+        """Post the owner's decision on the fail `result` unless one for that result was ever posted."""
+        mark = str(result.comment_id)
+        if any(p.fields.get("on") == "fail" and p.fields.get("result") == mark
+               for p in verify_owner.prompts(self.markers, verify_owner.DECISION, self.block_key, index)):
+            return
+        self.prompt(verify_owner.DECISION, index, {"on": "fail", "result": mark}, f"{ac} failed: the owner decides.",
+                    self.decision_boxes(), ("on", "result"))
+
+    def act(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
+            prev: str | None, due: verify_facts.Due) -> None:
+        """A due act check: ask the owner once to act, and only on a later pass run its `then`."""
+        run = check["run"]
+        if not verify_owner.prompts(self.markers, verify_owner.ACT, self.block_key, index):
+            won = self.prompt(verify_owner.ACT, index, {"host": self.host},
+                              f"{ac} needs the owner to act on {self.host}; the runner then checks it.",
+                              f"{_fence(run['act'])}\n\nThen: {self.command_text(run['then'])}")
+            return self.line(index, ac, "pending", "owner_asked" if won else "owner_waiting")
+        then_check = {**check, "kind": "evidence", "run": run["then"]}
+        gate = verify_exec.gate(then_check, self.project.bindings["workflow"]["verification"])
+        if not gate.runnable:
+            return self.line(index, ac, "pending", gate.reason)
+        self.run_leased(index, then_check, ac, key, previous, prev, due)
 
     def command_entry(self, run: Mapping) -> Mapping | None:
         """The contract command entry a `command` run resolves to, else None."""
@@ -498,19 +542,29 @@ class _Pass:
 
     def answer(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None) -> bool:
         """Record the owner's answer to a live ask prompt of this check; True when it added the check's line."""
-        found = verify_owner.live_prompts(self.markers, (verify_owner.ASK,), self.block_key, index)
-        prompt = next((p for p in found if verify_owner.answer(p, verify_owner.ACCEPT, verify_owner.REJECT)), None)
+        reasons = (verify_owner.ASK, verify_owner.DECISION)
+
+        def verdict_of(p: Marker) -> str | None:
+            boxes = ((verify_owner.PASSED, verify_owner.NOT_VERIFIED) if p.fields.get("reason") == verify_owner.DECISION
+                     else (verify_owner.ACCEPT, verify_owner.REJECT))
+            return verify_owner.answer(p, *boxes)
+
+        found = verify_owner.live_prompts(self.markers, reasons, self.block_key, index)
+        prompt = next((p for p in found if verdict_of(p)), None)
         if prompt is None:
             return False
-        verdict = verify_owner.answer(prompt, verify_owner.ACCEPT, verify_owner.REJECT)
+        verdict = verdict_of(prompt)
         if verdict == "ambiguous":
             self.line(index, ac, "pending", "owner_ambiguous")
             return True
         met = verdict == "yes"
-        if check.get("mode", "assert") == "assert":
-            state = "pass" if met else "fail"
+        decision = prompt.fields.get("reason") == verify_owner.DECISION
+        if met:
+            state = "pass" if check.get("mode", "assert") == "assert" else "hit"
+        elif decision:
+            state = "rejected"
         else:
-            state = "hit" if met else "miss"
+            state = "fail" if check.get("mode", "assert") == "assert" else "miss"
         lease = self.take_lease(ac, key)
         if lease is None:
             self.line(index, ac, "pending", "lost_contest")
@@ -519,9 +573,8 @@ class _Pass:
             if not self.unchanged_since(index, previous):
                 self.line(index, ac, "pending", "lost_contest")
                 return True
-            again = verify_owner.live_prompts(self.markers, (verify_owner.ASK,), self.block_key, index)
-            if not any(p.comment_id == prompt.comment_id and verify_owner.answer(
-                    p, verify_owner.ACCEPT, verify_owner.REJECT) == verdict for p in again):
+            again = verify_owner.live_prompts(self.markers, reasons, self.block_key, index)
+            if not any(p.comment_id == prompt.comment_id and verdict_of(p) == verdict for p in again):
                 self.line(index, ac, "pending", "owner_waiting")
                 return True
             if state == "fail" and check.get("on_fail", "label") == "label":
@@ -575,8 +628,11 @@ class _Pass:
         checks, states = self.block["checks"], self.states
         acs = [check["ac"] for check in checks]
         expired = list(dict.fromkeys(ac for ac, state in zip(acs, states) if state == "expired"))
-        if expired:
-            outcome, sentence = "expired", f"Not verified: {', '.join(expired)} expired."
+        rejected = list(dict.fromkeys(ac for ac, state in zip(acs, states) if state == "rejected"))
+        if expired or rejected:
+            parts = [f"{', '.join(names)} {word}" for names, word in ((expired, "expired"), (rejected, "rejected"))
+                     if names]
+            outcome, sentence = "expired", f"Not verified: {'; '.join(parts)}."
         elif all(state in ("pass", "hit", "miss") for state in states) and all(
                 index in self.followups for index, state in enumerate(states) if state == "miss"):
             verified = [ac for ac in dict.fromkeys(acs)

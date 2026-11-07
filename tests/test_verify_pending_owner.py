@@ -68,6 +68,9 @@ class PromptOnceTest(OwnerBase):
 
     def three_passes(self, reason, answer):
         self.run_pass()
+        return self.three_passes_after_first(reason, answer)
+
+    def three_passes_after_first(self, reason, answer):
         prompt, = self.prompts(reason)
         self.assertIn("owner-action", self.world.issue()["labels"])
         mark = len(self.world.argvs("gh"))
@@ -99,6 +102,17 @@ class PromptOnceTest(OwnerBase):
                                          "host": "mbp", "effects": "live", "round": "1", "run": digest})
         self.assertIn('Command: ["verify-ok"]', prompt.body)
         self.assertEqual((self.spawned("verify-ok"), self.results()), (1, ["pass"]))
+
+    def test_act(self):
+        act = check(kind="human", reason="hands", run={"act": "Plug the dock in", "then": {"command": "check-later"}})
+        self.hold(act)
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
+        self.assertEqual(self.spawned("verify-later"), 0)  # `then` waits for a later pass
+        prompt = self.three_passes_after_first(
+            "act", lambda p: self.world.respond("verify-later", [], exit=0, stdout="verify-later ran\n"))
+        self.assertIn("Plug the dock in", prompt.body)
+        self.assertIn('Then: ["verify-later"]', prompt.body)
+        self.assertEqual(self.results(), ["pass"])
 
 
 class AskTest(OwnerBase):
@@ -295,6 +309,96 @@ class ClosingEndsPromptsTest(OwnerBase):
         self.no_human_required()
 
 
+class QuietFailureTest(OwnerBase):
+    """AC4: without `ask`, a failure and an expiry stay off the owner's list; with it they become decisions."""
+
+    def due_long_ago(self, c):
+        due = marker("verify-due", {"block": bkey(c), "check": "0", "host": "mbp"})
+        return [stored_comment(11, due, at="2026-10-15T10:00:00Z")]
+
+    def test_a_failing_assert_check_without_on_fail_ask_adds_no_owner_action(self):
+        self.hold(check(run={"command": "check-bad"}))
+        for _ in range(3):
+            self.run_pass()
+        self.assertEqual((self.prompts(), self.label_calls()), ([], []))
+        self.assertEqual(self.world.issue()["labels"], ["needs-verification", "verification-failed"])
+
+    def test_an_expired_check_without_on_expire_ask_adds_no_owner_action(self):
+        later = check(run={"command": "check-later"})
+        self.hold(later, extra=self.due_long_ago(later))
+        self.run_pass()
+        self.assertEqual(self.results(), ["expired"])
+        self.assertEqual((self.prompts(), self.label_calls()), ([], []))
+
+    def test_on_fail_ask_posts_one_decision_and_accept_passes(self):
+        bad = check(run={"command": "check-bad"}, on_fail="ask")
+        self.hold(bad)
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "fail", "fail_ask")])
+        fail, = self.markers("verify-result")
+        decision, = self.prompts("decision")
+        self.assertEqual(decision.fields, {"reason": "decision", "block": bkey(bad), "check": "0", "on": "fail",
+                                           "result": str(fail.comment_id)})
+        self.assertEqual(self.label_calls(), [OA_ADD])
+        mark = len(self.world.argvs("gh"))
+        self.run_pass()
+        self.assertEqual(self.prompt_posts(mark), [])
+        self.tick(decision.comment_id, "Accept as passed")
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "owner_answered"))
+        self.assertEqual(self.results(), ["fail", "pass"])
+        self.assertEqual(self.label_calls(), [OA_ADD, OA_REMOVE])
+        self.assertEqual(self.world.issue()["state"], "closed")
+
+    def test_a_fail_decision_lost_after_the_fail_was_recorded_is_posted_by_the_next_pass(self):
+        bad = check(run={"command": "check-bad"}, on_fail="ask")
+        self.hold(bad)
+        with mock.patch.object(vr._Pass, "prompt", side_effect=fm.ForgeError("gh_failed", "HTTP 502")):
+            self.assertEqual(self.run_pass(), [line(None, None, "skipped", "forge_error")])
+        fail, = self.markers("verify-result")
+        self.assertEqual((self.prompts(), self.label_calls()), ([], []))
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "fail", "unchanged")])
+        decision, = self.prompts("decision")
+        self.assertEqual((decision.fields["on"], decision.fields["result"]), ("fail", str(fail.comment_id)))
+        self.assertIn("owner-action", self.world.issue()["labels"])
+        mark = len(self.world.argvs("gh"))
+        self.run_pass()
+        self.assertEqual(self.prompt_posts(mark), [])
+
+    def test_on_expire_ask_posts_one_decision_and_close_rejects(self):
+        later = check(run={"command": "check-later"}, on_expire="ask")
+        self.hold(later, extra=self.due_long_ago(later))
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "not_yet")])
+        decision, = self.prompts("decision")
+        self.assertEqual(decision.fields["on"], "expire")
+        self.run_pass()
+        self.assertEqual((len(self.prompts("decision")), self.spawned("verify-later")), (1, 2))
+        self.tick(decision.comment_id, "Close as not verified")
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "rejected", "owner_answered"))
+        self.assertEqual(self.markers("verify-closed")[0].body.split("\n")[1], "Not verified: AC1 rejected.")
+        self.assertEqual(self.world.issue()["state_reason"], "not_planned")
+        self.assertNotIn("owner-action", self.world.issue()["labels"])
+
+    def test_an_expiry_decision_stays_open_through_a_later_failure(self):
+        later = check(run={"command": "check-later"}, on_expire="ask")
+        self.hold(later, extra=self.due_long_ago(later))
+        self.run_pass()
+        decision, = self.prompts("decision")
+        self.world.respond("verify-later", [], exit=1, stdout="verify-later failed\n")
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "fail", "changed"))
+        self.assertEqual([p.comment_id for p in self.live_prompts()], [decision.comment_id])
+        self.assertNotIn(post_end(decision.comment_id, "answered"), self.world.argvs("gh"))
+        self.assertIn("owner-action", self.world.issue()["labels"])
+        self.tick(decision.comment_id, "Close as not verified")
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "rejected", "owner_answered"))
+        self.assertEqual(self.world.issue()["state"], "closed")
+
+    def test_an_act_then_outside_verification_is_never_run(self):
+        act = check(kind="human", reason="hands", run={"act": "Plug it in", "then": {"command": "nix-activate"}})
+        self.hold(act)
+        self.run_pass()
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "command_not_verification")])
+        self.assertEqual(self.spawned("verify-ok"), 0)
+
+
 class VerifyOwnerTest(unittest.TestCase):
     def test_answer_reads_boxes(self):
         fields = {"reason": "ask", "block": "10.x", "check": "0", "host": "mbp"}
@@ -322,6 +426,22 @@ class VerifyOwnerTest(unittest.TestCase):
         ended = fm.parse({"id": 24, "body": fm.end_body(20, "answered"), "updated_at": T0})
         self.assertEqual(vo.live_prompts([ask, ended], ("ask",), key, 0), [])
         self.assertEqual(vo.prompts([ask, ended], "ask", key, 0), [ask])  # an ended prompt still counts as posted
+
+    def test_decision_and_act_settlement(self):
+        key = "10.x"
+        decision = prompt_marker(30, {"reason": "decision", "block": key, "check": "0", "on": "expire"}, "- [ ] Passed")
+        act = prompt_marker(31, {"reason": "act", "block": key, "check": "0", "host": "mbp"}, "Plug it in")
+        plain = fm.parse({"id": 32, "body": result(key, 0, "fail"), "updated_at": T0})
+        owned = fm.parse({"id": 33, "body": result(key, 0, "rejected", owner="30"), "updated_at": T0})
+        later = fm.parse({"id": 34, "body": result(key, 0, "pass"), "updated_at": T0})
+        for prompt in (decision, act):
+            self.assertIsNone(vo.settle_reason(prompt, [decision, act], key, vr.FINAL))
+            self.assertIsNone(vo.settle_reason(prompt, [decision, act, plain], key, vr.FINAL))  # a fail is not final
+        self.assertEqual(vo.settle_reason(decision, [decision, owned], key, vr.FINAL), "answered")
+        self.assertEqual(vo.settle_reason(decision, [decision, later], key, vr.FINAL), "resolved")
+        self.assertEqual(vo.settle_reason(act, [act, later], key, vr.FINAL), "resolved")
+        rejected = fm.parse({"id": 35, "body": result(key, 0, "rejected"), "updated_at": T0})
+        self.assertEqual(vo.settle_reason(act, [act, rejected], key, vr.FINAL), "resolved")
 
 
 class RecipeTest(unittest.TestCase):

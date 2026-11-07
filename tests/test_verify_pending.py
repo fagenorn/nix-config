@@ -942,7 +942,8 @@ class PassTransitionsTest(PassBase):
         self.assertEqual(self.run_pass(), [line(0, "AC1", "fail", "fail_ask")])
         self.assertEqual([m.fields["state"] for m in self.markers("verify-result")], ["fail"])
         self.assertNotIn("verification-failed", self.world.issue()["labels"])
-        self.assertEqual([a for a in self.mutations() if "labels" in a[3]], [])
+        self.assertEqual([a for a in self.mutations() if "verification-failed" in " ".join(a)], [])
+        self.assertEqual(len([m for m in self.markers("owner-action") if m.fields["reason"] == "decision"]), 1)
         self.second_pass_is_silent()
 
     def test_fail_then_pass_changes_state_and_clears_the_label(self):
@@ -1215,7 +1216,7 @@ class NeverRunTest(PassBase):
 
     def test_ask_and_act(self):
         self.assert_never_run("owner_asked", check(kind="human", reason="senses", run={"ask": "Is it bright?"}))
-        self.assert_never_run("owner_check", check(kind="human", reason="hands",
+        self.assert_never_run("owner_asked", check(kind="human", reason="hands",
                                                    run={"act": "Plug it in", "then": {"command": "check-ok"}}))
 
     def test_a_block_naming_nix_activate_is_not_run(self):
