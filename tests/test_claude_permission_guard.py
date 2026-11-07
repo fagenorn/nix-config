@@ -1196,6 +1196,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"timeout 5 git p origin {topic}", None, None, "refuse"),
             (f"sh -c 'git p origin {topic}'", None, None, "refuse"),
             ("git rebase --exec true HEAD~1", None, None, "refuse"),
+            (f"=git p origin {topic}", None, None, "refuse"),
+            (f"hash g=/usr/bin/git; g p origin {topic}", None, None, "refuse"),
+            (f"echo p origin {topic} | xargs git", None, None, "refuse"),
+            (f"$(echo git) p origin {topic}", None, None, "refuse"),
+            (f'"$(which git)" p origin {topic}', None, None, "refuse"),
+            (f"G=$(which git); $G p origin {topic}", None, None, "refuse"),
+            ('git rebase "${X:---exec=sh /tmp/p.sh}" HEAD~1', None, None, "refuse"),
+            ("git rebase $(echo HEAD) --exec 'sh /tmp/p.sh'", None, None, "refuse"),
+            (f"sh -c 'G=git; $G p origin {topic}'", None, None, "refuse"),
+            (f"sh -c 'git -C \"/tmp status\" p origin {topic}'", None, None, "refuse"),
             (f"git fetch --upload-pack='{force} #' .", None, None, "refuse"),
             ("git grep -O'sh /tmp/p.sh' x", None, None, "refuse"),
             (f"GIT_SEQUENCE_EDITOR='{force}; true' git rebase -i HEAD~1", None, None,
@@ -1208,6 +1218,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("git --no-pager log --oneline -1", None, None, "admit"),
             ("git rebase origin/main", None, None, "admit"),
             ("echo `which git`", None, None, "admit"),
+            ("which git", None, None, "admit"),
+            ("echo a | xargs git status", None, None, "admit"),
+            ("echo $(git rev-parse HEAD) x", None, None, "admit"),
+            ("=git status", None, None, "admit"),
+            ("hash g=/usr/bin/git; g status", None, None, "admit"),
+            ("sh -c 'git -C \"/tmp status\" status'", None, None, "admit"),
             ("GIT_TRACE=1 git status", None, None, "admit"),
             ("sh -c 'git log --oneline'", None, None, "admit"),
             (f"git push origin {topic}", "plain", None, "admit"),
@@ -1234,9 +1250,31 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "every-operator-opens":
                 "opening_operator = lambda tokens, index, operator: True\n",
             "no-operator-opens": "opening_operator = lambda tokens, index, operator: False\n",
-            "argument-position-unjudged":
-                "git_argument_problem = lambda program, words, truncation: None\n",
-            "evaluator-text-unjudged": "transmit_in_raw_text = lambda text: False\n",
+            "argument-position-unjudged": (
+                "git_argument_problem = lambda program, words, truncation, tail=(), "
+                "fed=False: None\n"),
+            "equals-expansion-unread": (
+                '    if value.startswith("="):\n        value = value[1:]\n', ""),
+            "hashed-names-unread": "git_command_names = lambda token_lists: set()\n",
+            "piped-git-admitted": "GIT_FED_PROBLEM = None\n",
+            "substitution-output-admitted": (
+                "bare_git_supplies_command = lambda tokens, index, cut_at, run: False\n"),
+            "quoted-substitution-admitted":
+                "quoted_substitution_runs_git = lambda tokens, index: False\n",
+            "substitution-assignment-unread":
+                "substitution_yields_git = lambda tokens, position, assigned: False\n",
+            "tail-unscanned": (
+                "git_command_option(subcommand, list(words[index + 1:]) + list(tail))",
+                "git_command_option(subcommand, list(words[index + 1:]))"),
+            "embedded-options-unread": (
+                'if word[position] == "-" and word[position - 1] in ":=+?-"',
+                'if False and word[position] == "-" and word[position - 1] in ":=+?-"'),
+            "raw-names-unread": "raw_git_names = lambda pieces: set()\n",
+            "raw-quote-aware-reading-dropped": (
+                "            readings.append([value for value, is_operator in tokens "
+                "if not is_operator])\n", ""),
+            "evaluator-text-unjudged":
+                "transmit_in_raw_text = lambda text, names=(), depth=0: False\n",
             "command-options-unjudged": "git_command_option = lambda subcommand, words: None\n",
             "short-command-options-dropped": (
                 "GIT_COMMAND_OPTIONS = {k: frozenset(o for o in v if o.startswith('--'))"
@@ -3344,6 +3382,93 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
+    def test_transmit_rule_reads_zsh_names_pipes_substitution_output_and_evaluator_text(self):
+        """Issue 655 final review: a git word spelled `=git` (zsh) or by a name
+        `hash`/`alias` binds to git, a git word that takes its subcommand from a pipe
+        or a redirection, a git word that is the output of a substitution, an
+        option hidden in an expansion or after a substitution, and evaluator text
+        that assigns the command word or quotes a global-option operand are judged
+        like a plain git word; the mention forms still pass."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        subprocess.run(["git", "config", "alias.p", "push"], cwd=repo, check=True,
+                       capture_output=True)
+        topic = "issue-655-topic"
+        force = "git push --force origin main"
+        unknown = ("is not a known local git subcommand; an alias, a git-* program "
+                   "or a transport could transmit refs")
+        evaluator = "shell source passed to an evaluator cannot be validated"
+        uncertain = "the git invocation continues past a shell substitution or grouping"
+        fed = "a git word with no subcommand reads its subcommand from a pipe or redirection"
+        option = "can run a command the guard cannot judge"
+        for command, reason in (
+            (f"=git p origin {topic}", f"git p {unknown}"),
+            ("=git push --force origin main", f"git push {unknown}"),
+            (f"xargs =git p origin {topic}", f"git p {unknown}"),
+            ("hash g=/usr/bin/git; g push --force origin main", f"git push {unknown}"),
+            (f"hash g=/usr/bin/git; g p origin {topic}", f"git p {unknown}"),
+            (f"hash -p /usr/bin/git g; g p origin {topic}", f"git g {unknown}"),
+            (f"alias g=git; g p origin {topic}", f"git p {unknown}"),
+            (f"echo p origin {topic} | xargs git", fed),
+            ("echo push --force origin main | xargs git", fed),
+            (f"printf 'p\\0origin\\0{topic}' | xargs -0 git", fed),
+            (f"echo p | xargs git -C {repo}", fed),
+            (f"xargs <args.txt git", fed),
+            (f"$(echo git) p origin {topic}", uncertain),
+            (f"`echo git` p origin {topic}", uncertain),
+            (f"xargs $(echo git) p origin {topic}", uncertain),
+            (f"$(echo git; true) p origin {topic}", uncertain),
+            (f'"$(which git)" push --force origin main', uncertain),
+            (f'"$(which git)" p origin {topic}', uncertain),
+            (f"G=$(which git); $G p origin {topic}", f"git p {unknown}"),
+            (f'G="$(command -v git)"; "$G" p origin {topic}', f"git p {unknown}"),
+            ("git rebase \"${X:---exec=git push --force origin HEAD:main}\" HEAD~1", option),
+            (f"git rebase $(echo HEAD) --exec '{force}'", option),
+            (f"git fetch $(git remote) --upload-pack='{force}'", option),
+            (f"sh -c 'G=git; $G -c alias.p=push p --force origin main'", evaluator),
+            (f"sh -c 'G=git; $G p origin {topic}'", evaluator),
+            (f"G=git; sh -c '$G p origin {topic}'", evaluator),
+            (f"sh -c 'hash g=/usr/bin/git; g p origin {topic}'", evaluator),
+            (f"sh -c 'echo p origin {topic} | xargs git'", evaluator),
+            (f"sh -c 'git -C \"/tmp status\" p origin {topic}'", evaluator),
+            (f"bash -c \"git -C '/tmp status' p origin {topic}\"", evaluator),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn("lifecycle guard: unsafe push: ", result.stderr)
+                self.assertIn(reason, result.stderr)
+                self.assertNotIn(GRAMMAR, result.stderr)
+        for command in (
+            "which git",
+            "brew install git",
+            "echo $(which git)",
+            'echo "$(which git)"',
+            'x="$(which git)" y',
+            "git log $(printf HEAD) -1",
+            "echo $(git rev-parse HEAD) x",
+            'cd "$(git rev-parse --show-toplevel)" && ls',
+            "git rebase origin/main",
+            "git rebase $(git merge-base HEAD origin/main) HEAD~1",
+            "git rebase --onto origin/main HEAD~2 HEAD~1",
+            "git fetch origin --depth=-1",
+            "git clone --depth 1 --quiet . /tmp/x",
+            "=git status",
+            "xargs git status",
+            "echo a | xargs git status",
+            "echo a | xargs git -C /tmp status",
+            "echo a | grep -v b",
+            "hash g=/usr/bin/git; g status",
+            "G=$(which git); $G status",
+            'G="$(which git)"; "$G" status',
+            "sh -c 'G=git; $G status'",
+            "sh -c 'git -C \"/tmp status\" status'",
+            "sh -c 'echo a | xargs git status'",
+            "sh -c 'git log --oneline'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
     def test_git_dash_c_is_judged_against_its_target_repository(self):
         """Issue 400 AC2, D7, D8: `git -C <dir>` builds the push's repository context
         from <dir> joined to the payload cwd, one context per distinct directory."""
