@@ -59,6 +59,16 @@ class OwnerBase(PassBase):
     def results(self):
         return [m.fields["state"] for m in self.markers("verify-result")]
 
+    def advance(self, at):
+        """Move the forge's clock after the store exists: the Date header and new comments' time."""
+        stamp = datetime.fromisoformat(at.replace("Z", "+00:00"))
+        self.world.respond("gh", ["api", "--include", "rate_limit"],
+                           stdout=f"HTTP/2.0 200 OK\r\nDate: {format_datetime(stamp, usegmt=True)}\r\n\r\n{{}}")
+        path = self.world.state / "store.json"
+        store = json.loads(path.read_text("utf-8"))
+        store["clock"] = at
+        path.write_text(json.dumps(store), encoding="utf-8")
+
     def no_human_required(self):
         self.assertFalse(any("human-required" in part for a in self.world.argvs("gh") for part in a))
 
@@ -113,6 +123,18 @@ class PromptOnceTest(OwnerBase):
         self.assertIn("Plug the dock in", prompt.body)
         self.assertIn('Then: ["verify-later"]', prompt.body)
         self.assertEqual(self.results(), ["pass"])
+
+    def test_stale(self):
+        offline = ok_check(host="eleven-m5")
+        self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(offline)), at="2026-10-20T10:00:00Z")],
+                                 labels=["needs-verification"])
+        prompt = self.three_passes("stale-check", lambda p: self.tick(p.comment_id, "Accept without eleven-m5"))
+        self.assertEqual(prompt.fields, {"reason": "stale-check", "block": bkey(offline), "check": "0",
+                                         "host": "eleven-m5", "cause": "silent", "last": "never"})
+        waived, = self.markers("verify-result")
+        self.assertEqual((waived.fields["state"], waived.fields["waived"]), ("pass", "eleven-m5"))
+        self.assertEqual(self.world.issue()["state"], "closed")
+        self.assertEqual(self.spawned("verify-ok"), 0)
 
 
 class AskTest(OwnerBase):
@@ -448,3 +470,170 @@ class RecipeTest(unittest.TestCase):
     def test_the_suite_runs_this_file(self):
         lines = (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines()
         self.assertIn("    tests/test_verify_pending_owner.py \\", lines)
+
+
+class StaleTest(OwnerBase):
+    OLD = "2026-10-20T10:00:00Z"  # server now is 2026-11-06T10:00:00Z unless advanced
+
+    def held_since(self, at, *checks, extra=()):
+        self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(*checks)), at=at), *extra],
+                                 labels=["needs-verification"])
+
+    def test_a_young_block_is_not_stale(self):
+        self.held_since("2026-11-01T10:00:00Z", ok_check(host="eleven-m5"))
+        self.run_pass()
+        self.assertEqual(self.prompts(), [])
+
+    def test_any_and_a_host_list_never_go_stale(self):
+        self.held_since(self.OLD, ok_check(host="any", when={"not_before": "2030-01-01T00:00:00+00:00"}),
+                        ok_check(ac="AC2", host=["eleven-m5", "anis-desktop"]))
+        self.run_pass()
+        self.assertEqual(self.prompts(), [])
+
+    def test_last_names_the_date_the_host_last_reported(self):
+        offline = ok_check(host="eleven-m5")
+        due = marker("verify-due", {"block": "9.0000000000000000", "check": "0", "host": "eleven-m5"})
+        self.held_since(self.OLD, offline, extra=[stored_comment(11, due, at="2026-10-21T08:00:00Z")])
+        self.run_pass()
+        stale, = self.prompts("stale-check")
+        self.assertEqual((stale.fields["cause"], stale.fields["last"]), ("silent", "2026-10-21"))
+
+    def test_a_reporting_host_whose_check_is_not_due_is_never_stale(self):
+        waits = ok_check(when={"not_before": "2030-01-01T00:00:00+00:00"})  # e.g. a release not cut yet
+        self.held_since(self.OLD, waits)
+        self.assertEqual(self.run_pass("mbp"), [line(0, "AC1", "pending", "not_before")])
+        seen, = self.markers("verify-seen")
+        self.assertEqual(seen.fields, {"block": bkey(waits), "host": "mbp", "on": "2026-11-06"})
+        self.assertEqual(self.run_pass("eleven-m5"), [line(0, "AC1", "pending", "not_this_host")])
+        self.assertEqual((self.prompts(), self.label_calls()), ([], []))
+
+    def test_the_report_marker_is_posted_once_and_edited_once_a_day(self):
+        self.held_since(self.OLD, ok_check(when={"not_before": "2030-01-01T00:00:00+00:00"}))
+        self.run_pass()
+        mark = len(self.world.argvs("gh"))
+        self.run_pass()
+        self.assertEqual(self.mutations(mark), [])
+        self.advance("2026-11-07T10:00:00Z")
+        self.run_pass()
+        seen, = self.markers("verify-seen")
+        self.assertEqual(seen.fields["on"], "2026-11-07")
+        self.assertEqual(len([a for a in self.world.argvs("gh") if a[1:3] == ["-X", "PATCH"]]), 1)
+
+    def test_a_due_check_unresolved_past_the_stale_age_is_reported_by_its_own_host(self):
+        later = check(run={"command": "check-later"})
+        due = marker("verify-due", {"block": bkey(later), "check": "0", "host": "mbp"})
+        self.held_since(self.OLD, later, extra=[stored_comment(11, due, at="2026-10-28T10:00:00Z")])
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "not_yet")])
+        stale, = self.prompts("stale-check")
+        self.assertEqual((stale.fields["host"], stale.fields["cause"], stale.fields["last"]),
+                         ("mbp", "unresolved", "2026-11-06"))
+        self.assertIn("since 2026-10-28", stale.body)
+
+    def test_repeated_unresolved_runs_go_stale_once_seven_days_after_the_check_fell_due(self):
+        self.held_since(self.OLD, check(run={"command": "check-later"}))
+        for day in ("2026-10-21", "2026-10-24", "2026-10-27"):
+            self.advance(f"{day}T10:00:00Z")
+            self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "not_yet")])
+        self.assertEqual(self.prompts(), [])  # every pass took and deleted a lease: none moved the clock
+        self.advance("2026-10-29T10:00:00Z")
+        self.run_pass()
+        stale, = self.prompts("stale-check")
+        self.assertEqual((stale.fields["cause"], stale.fields["last"]), ("unresolved", "2026-10-29"))
+        self.assertIn("since 2026-10-21", stale.body)
+        self.advance("2026-11-02T10:00:00Z")
+        self.run_pass()
+        self.assertEqual((len(self.prompts("stale-check")), self.spawned("verify-later")), (1, 5))
+
+    def test_a_failed_or_prompted_check_is_not_reported_stale(self):
+        bad = check(run={"command": "check-bad"})
+        self.held_since(self.OLD, bad, check(ac="AC2", kind="human", reason="senses", run={"ask": "Is it bright?"}))
+        self.run_pass()
+        self.assertEqual([p.fields["reason"] for p in self.prompts()], ["ask"])
+
+    def test_report_posts_nothing(self):
+        self.held_since(self.OLD, ok_check(host="eleven-m5"), ok_check(ac="AC2"))
+        self.run_pass(report=True)
+        self.assertEqual([a for a in self.world.argvs("gh") if "-X" in a], [])
+
+    def test_a_host_with_nothing_unresolved_posts_no_report_marker(self):
+        done, away = ok_check(), ok_check(ac="AC2", host="eleven-m5", when={"not_before": "2030-01-01T00:00:00+00:00"})
+        self.held_since(self.OLD, done, away)
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "pass", "changed"))
+        self.assertEqual(self.markers("verify-seen"), [])
+
+    def test_a_final_or_failed_check_is_not_reported_stale(self):
+        checks = [ok_check(host="eleven-m5"), ok_check(ac="AC2", host="eleven-m5"),
+                  ok_check(ac="AC3", host="eleven-m5")]
+        results = [stored_comment(11, result(bkey(*checks), 0, "pass", host="eleven-m5"), at=self.OLD),
+                   stored_comment(12, result(bkey(*checks), 1, "fail", ac="AC2", host="eleven-m5"), at=self.OLD)]
+        self.held_since(self.OLD, *checks, extra=results)
+        self.run_pass()
+        stale, = self.prompts("stale-check")
+        self.assertEqual(stale.fields["check"], "2")
+
+    def test_a_check_asked_this_pass_or_holding_a_live_prompt_is_not_also_reported_stale(self):
+        asking = ask_check()
+        due = marker("verify-due", {"block": bkey(asking), "check": "0", "host": "mbp"})
+        self.held_since(self.OLD, asking, extra=[stored_comment(11, due, at="2026-10-28T10:00:00Z")])
+        self.run_pass()  # asks this pass
+        self.run_pass()  # the ask is live
+        self.assertEqual([p.fields["reason"] for p in self.prompts()], ["ask"])
+
+    def test_an_ended_stale_prompt_is_never_posted_again(self):
+        offline = ok_check(host="eleven-m5")
+        fields = {"reason": "stale-check", "block": bkey(offline), "check": "0", "host": "eleven-m5",
+                  "cause": "silent", "last": "never"}
+        old = fm.render("owner-action", fields, "AC1 waits on eleven-m5, which last reported never.",
+                        "- [ ] Accept without eleven-m5")
+        ended = fm.end_body(11, "closed")
+        self.held_since(self.OLD, offline, extra=[stored_comment(11, old), stored_comment(12, ended)])
+        self.run_pass()
+        self.assertEqual([p.comment_id for p in self.prompts("stale-check")], [11])
+
+    def test_the_waive_box_records_a_pass_whichever_runner_reads_it(self):
+        offline = ok_check(host="eleven-m5")
+        self.held_since(self.OLD, offline, ok_check(ac="AC2", host="eleven-m5"))
+        self.run_pass()
+        prompt = self.prompts("stale-check")[0]
+        self.assertIn("AC1 waits on eleven-m5, which last reported never.", prompt.body)
+        self.tick(prompt.comment_id, "Accept without eleven-m5")
+        self.assertEqual(self.run_pass("anis-desktop")[0], line(0, "AC1", "pass", "owner_waived"))
+        waived = self.markers("verify-result")[0]
+        self.assertEqual(waived.fields["owner"], str(prompt.comment_id))
+        self.assertEqual(list(waived.fields)[-2:], ["waived", "owner"])
+
+
+class StaleVocabularyTest(unittest.TestCase):
+    """`last_seen` counts report markers of the host only; a prompt of `stale-check` settles like an ask."""
+
+    def mark(self, cid, kind, fields, at):
+        return fm.parse({"id": cid, "body": fm.render(kind, fields, "Recorded."), "updated_at": at})
+
+    def test_only_report_markers_of_the_host_move_its_clock(self):
+        host = {"host": "eleven-m5"}
+        quiet = [self.mark(1, "verify-run", host, "2026-11-01T00:00:00Z"),
+                 self.mark(2, "verify-run", {"consumed": "5", **host}, "2026-11-02T00:00:00Z"),
+                 self.mark(3, "owner-action", {"reason": "approve", **host}, "2026-11-03T00:00:00Z"),
+                 self.mark(4, "verify-result", {"host": "mbp"}, "2026-11-04T00:00:00Z")]
+        self.assertEqual((vo.last_seen(quiet, "eleven-m5"), vo.last_report(quiet, "eleven-m5")), (None, "never"))
+        kinds = [self.mark(5, "verify-result", host, "2026-10-01T00:00:00Z"),
+                 self.mark(6, "verify-due", host, "2026-10-02T00:00:00Z"),
+                 self.mark(7, "window-open", host, "2026-10-03T00:00:00Z")]
+        self.assertEqual(vo.last_report([*quiet, *kinds], "eleven-m5"), "2026-10-03")
+
+    def test_a_seen_marker_counts_the_day_it_names(self):
+        seen = self.mark(1, "verify-seen", {"block": "9.x", "host": "eleven-m5", "on": "2026-11-05"},
+                         "2026-10-01T00:00:00Z")
+        self.assertEqual(vo.last_report([seen], "eleven-m5"), "2026-11-05")
+        self.assertEqual(vo.last_seen([seen], "eleven-m5").isoformat(), "2026-11-05T00:00:00+00:00")
+
+    def test_a_stale_prompt_settles_when_answered_or_final(self):
+        key = "9.x"
+        prompt = prompt_marker(20, {"reason": "stale-check", "block": key, "check": "0", "host": "eleven-m5",
+                                    "cause": "silent", "last": "never"}, "- [ ] Accept without eleven-m5")
+        waived = self.mark(21, "verify-result", {"block": key, "check": "0", "state": "pass", "owner": "20"},
+                           T0)
+        final = self.mark(22, "verify-result", {"block": key, "check": "0", "state": "pass"}, T0)
+        self.assertIsNone(vo.settle_reason(prompt, [prompt], key, vr.FINAL))
+        self.assertEqual(vo.settle_reason(prompt, [prompt, waived], key, vr.FINAL), "answered")
+        self.assertEqual(vo.settle_reason(prompt, [prompt, final], key, vr.FINAL), "resolved")

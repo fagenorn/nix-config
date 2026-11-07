@@ -21,7 +21,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -153,6 +153,7 @@ class _Pass:
         self.labels: set[str] = {n["name"] for n in labels if isinstance(n, dict)
                                  and isinstance(n.get("name"), str)} if isinstance(labels, list) else set()
         self.trusted: list[Marker] = []
+        self.block_at = datetime.min.replace(tzinfo=timezone.utc)
 
     def line(self, check: int | None, ac: str | None, state: str, reason: str) -> None:
         self.lines.append({"repo": self.slug, "issue": self.number, "check": check, "ac": ac,
@@ -180,6 +181,7 @@ class _Pass:
             return self.line(None, None, "skipped", "block_invalid")
         self.block, self.block_key, self.markers = held.block, held.key, held.markers
         self.block_id = held.block_id
+        self.block_at = next(verify_block.parse_time(c.created_at) for c in comments if c.id == held.block_id)
         parsed = [forge_markers.parse({"id": c.id, "body": c.body, "updated_at": c.created_at})
                   for c in comments if c.association in TRUSTED]
         self.trusted = [m for m in parsed if m is not None]
@@ -199,6 +201,9 @@ class _Pass:
         for index, check in enumerate(checks):
             self.check(index, check)
         if not self.report:
+            self.report_seen(checks)
+            for index, check in enumerate(checks):
+                self.stale(index, check)
             self.owner_sweep()
             self.close()
 
@@ -428,6 +433,46 @@ class _Pass:
         self.prompted.add(index)
         return True
 
+    def report_seen(self, checks: Sequence[Mapping]) -> None:
+        """Keep this host's one `verify-seen` marker for the held block: posted once, edited once a day.
+
+        A host with an unresolved check of its own that runs passes is reporting, whether or not
+        the check is due, so it is never called silent."""
+        if not any(check["host"] == self.host and self.states[i] not in FINAL for i, check in enumerate(checks)):
+            return
+        today = f"{self.ctx.now():%Y-%m-%d}"
+        key = {"block": self.block_key, "host": self.host}
+        seen = self.live(verify_owner.SEEN, key)
+        if seen is None:
+            self.write(verify_owner.SEEN, {**key, "on": today}, f"{self.host} is reporting on this block version.", key)
+        elif seen.fields.get("on") != today:
+            forge_markers.edit(self.slug, seen.comment_id, forge_markers.with_fields(seen, on=today))
+
+    def stale(self, index: int, check: Mapping) -> None:
+        """Ask the owner once whether a check bound to one host that has gone quiet may be waived."""
+        host = check["host"]
+        if not isinstance(host, str) or host == "any" or self.states[index] in (*FINAL, "fail") \
+                or index in self.prompted \
+                or verify_owner.live_prompts(self.markers, verify_owner.REASONS, self.block_key, index) \
+                or verify_owner.prompts(self.markers, verify_owner.STALE, self.block_key, index):
+            return
+        now = self.ctx.now()
+        due = self.live(verify_issues.DUE, {"block": self.block_key, "check": str(index)})
+        if due is not None and now >= due.updated_at + verify_owner.STALE_AGE:
+            cause = "unresolved"
+        elif host != self.host and now >= max(
+                self.block_at, verify_owner.last_seen(self.trusted, host) or self.block_at) + verify_owner.STALE_AGE:
+            cause = "silent"
+        else:
+            return
+        last = f"{now:%Y-%m-%d}" if host == self.host else verify_owner.last_report(self.trusted, host)
+        ac = check["ac"]
+        sentence = (f"{ac} has been due on {host} since {due.updated_at:%Y-%m-%d} and is still unresolved; "
+                    f"{host} last reported {last}." if cause == "unresolved"
+                    else f"{ac} waits on {host}, which last reported {last}.")
+        self.prompt(verify_owner.STALE, index, {"host": host, "cause": cause, "last": last}, sentence,
+                    verify_owner.box(verify_owner.waive_label(host)))
+
     def owner_form(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
                    prev: str | None, due: verify_facts.Due, gate_reason: str) -> None:
         """What a due check only the owner can answer does this pass: ask once, then wait."""
@@ -542,9 +587,11 @@ class _Pass:
 
     def answer(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None) -> bool:
         """Record the owner's answer to a live ask prompt of this check; True when it added the check's line."""
-        reasons = (verify_owner.ASK, verify_owner.DECISION)
+        reasons = (verify_owner.ASK, verify_owner.DECISION, verify_owner.STALE)
 
         def verdict_of(p: Marker) -> str | None:
+            if p.fields.get("reason") == verify_owner.STALE:
+                return verify_owner.answer(p, verify_owner.waive_label(p.fields.get("host", "")))
             boxes = ((verify_owner.PASSED, verify_owner.NOT_VERIFIED) if p.fields.get("reason") == verify_owner.DECISION
                      else (verify_owner.ACCEPT, verify_owner.REJECT))
             return verify_owner.answer(p, *boxes)
@@ -559,6 +606,7 @@ class _Pass:
             return True
         met = verdict == "yes"
         decision = prompt.fields.get("reason") == verify_owner.DECISION
+        waived = prompt.fields.get("reason") == verify_owner.STALE
         if met:
             state = "pass" if check.get("mode", "assert") == "assert" else "hit"
         elif decision:
@@ -580,9 +628,10 @@ class _Pass:
             if state == "fail" and check.get("on_fail", "label") == "label":
                 forge_markers.ensure_label(self.slug, *FAILED)
                 forge_markers.add_label(self.slug, self.number, FAILED[0])
-            posted = self.record(index, ac, state, None, {}, "", "", owner=str(prompt.comment_id))
+            posted = self.record(index, ac, state, None, {}, "", "", **(
+                {"waived": prompt.fields["host"]} if waived else {}), owner=str(prompt.comment_id))
             forge_markers.end(self.slug, self.number, prompt.comment_id, "answered")
-            self.line(index, ac, state, "owner_answered")
+            self.line(index, ac, state, "owner_waived" if waived else "owner_answered")
             if state == "miss":
                 self.follow_up(index, ac, key, posted, "")
         finally:

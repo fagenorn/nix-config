@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 from collections.abc import Collection, Iterable, Mapping
+from datetime import datetime, timedelta, timezone
 
 from agent_tools import forge_claim, forge_markers, verify_issues
 from agent_tools.forge_markers import Marker
@@ -20,6 +21,37 @@ REASONS = (ASK, APPROVE, ACT, DECISION, STALE)
 ACCEPT, REJECT = "Accept", "Reject"
 RUN_IT = "Run it"
 PASSED, NOT_VERIFIED = "Accept as passed", "Close as not verified"
+STALE_AGE = timedelta(days=7)
+SEEN = "verify-seen"
+REPORTS = (verify_issues.RESULT, verify_issues.DUE, verify_issues.WINDOW, SEEN)
+
+
+def waive_label(host: str) -> str:
+    """The box of a stale-check prompt that accepts the check without `host`."""
+    return f"Accept without {host}"
+
+
+def last_seen(markers: Iterable[Marker], host: str) -> datetime | None:
+    """When `host` last reported on this issue, or None when no report marker names it.
+
+    Only the report kinds count: a lease, a consumption or an owner action says nothing about the
+    host. A `verify-seen` marker also counts its `on` day, at 00:00 UTC."""
+    seen: list[datetime] = []
+    for m in markers:
+        if m.kind in REPORTS and m.fields.get("host") == host:
+            seen.append(m.updated_at)
+            if m.kind == SEEN:
+                try:
+                    seen.append(datetime.strptime(m.fields.get("on", ""), "%Y-%m-%d").replace(tzinfo=timezone.utc))
+                except ValueError:
+                    pass
+    return max(seen, default=None)
+
+
+def last_report(markers: Iterable[Marker], host: str) -> str:
+    """`last_seen` as a date, or `never`."""
+    seen = last_seen(markers, host)
+    return "never" if seen is None else f"{seen:%Y-%m-%d}"
 
 
 def box(label: str, ticked: bool = False) -> str:
@@ -90,7 +122,7 @@ def settle_reason(prompt: Marker, markers: Iterable[Marker], held_key: str | Non
     markers = list(markers)
     if held_key is not None and prompt.fields.get("block") != held_key:
         return "superseded"
-    if prompt.fields.get("reason") in (ASK, DECISION):
+    if prompt.fields.get("reason") in (ASK, DECISION, STALE):
         if answered(markers, prompt):
             return "answered"
         latest = verify_issues.latest_result(markers, prompt.fields["block"], int(prompt.fields["check"]))

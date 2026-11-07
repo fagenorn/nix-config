@@ -886,10 +886,11 @@ class PassBase(unittest.TestCase):
         self.assertEqual(errors, [])
 
     def mutations(self, since=0):
-        """The forge writes since call `since`, bar the lease: a run's `verify-run` claim and its
-        delete leave nothing behind, so a pass that changes nothing still shows no other write."""
+        """The forge writes since call `since`, bar the lease and the `verify-seen` report marker: a
+        run's `verify-run` claim and its delete leave nothing behind, and the report marker is
+        bookkeeping, so a pass that changes nothing still shows no other write."""
         def lease(argv):
-            return (argv[2] == "POST" and "agent:verify-run" in argv[-1]) or (
+            return (argv[2] == "POST" and ("agent:verify-run" in argv[-1] or "agent:verify-seen" in argv[-1])) or (
                 argv[2] == "DELETE" and "/issues/comments/" in argv[3])
         return [argv for argv in self.world.argvs("gh")[since:] if "-X" in argv and not lease(argv)]
 
