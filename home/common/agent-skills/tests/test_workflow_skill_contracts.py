@@ -57,6 +57,8 @@ SHIP_ISSUE_EVALS = (
     REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json"
 )
 WRITING_PLANS = REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md"
+ACCEPTANCE_RULES = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
+ACCEPTANCE_RULES_POINTER = "`~/.agents/standards/acceptance-planning.md`"
 SDD = SDD_DIR / "SKILL.md"
 PHASE_5_REVIEW_CONTRACT = FROM_ISSUE_DIR / "REVIEW-CONTRACT.md"
 
@@ -3050,6 +3052,19 @@ class AcceptanceMapContractsTest(unittest.TestCase):
         for kind in ("`code`", "`evidence`", "`human`"):
             with self.subTest(kind=kind):
                 self.assertIn(kind, check)
+
+
+class AcceptancePlanningRulesTest(unittest.TestCase):
+    """#633 AC2: the acceptance planning rules live once, read on demand, never hot."""
+
+    def test_the_rules_document_exists_once_and_is_in_no_hot_list(self):
+        found = sorted((REPO_ROOT / "home").rglob("acceptance-planning.md"))
+        self.assertEqual(found, [ACCEPTANCE_RULES])
+        model = json.loads((REPO_ROOT / "home/common/agent-skills/instruction-load.json")
+                           .read_text(encoding="utf-8"))
+        for profile in model["profiles"]:
+            with self.subTest(profile=profile["id"]):
+                self.assertFalse([m for m in profile["hot"] if "acceptance-planning" in m])
 
 
 class AcceptanceMapEvalGradingTest(unittest.TestCase):
