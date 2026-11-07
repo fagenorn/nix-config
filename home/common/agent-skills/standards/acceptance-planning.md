@@ -11,6 +11,7 @@ Read on demand when writing acceptance criteria (`to-issues`), mapping them in a
 - **R5. Metrics are reported, never gates.** A cost, timing or rate threshold is a check with `mode: observe`: a miss files a follow-up issue instead of failing the hold.
 - **R6. No hold over unmet code.** While a `code` criterion is unmet the issue is not held: finish it, or split the rest into a new issue linked as blocked-by.
 - **R7. A human check blocks nothing.** A remaining human check goes into its own issue that blocks no other issue, so dependents wait only for the code.
+- **R8. Do it, do not ask.** An action that stays within the owner's repositories, is reversible and needs no senses, hands, credentials, money or taste is done by the delivery itself and its evidence recorded at ship: creating and deleting refs, scratch branches or pull requests, a ready-mode run, pushing a branch. Ask only for an R3 reason, a change to a production system, or a genuine product or design decision. Evidence on infrastructure that exists for one run only is recorded when observed, never held as a recurring check.
 
 ## Verify block fields
 

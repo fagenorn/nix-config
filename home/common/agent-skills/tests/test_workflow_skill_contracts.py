@@ -3005,6 +3005,19 @@ class AcceptancePlanningRulesTest(unittest.TestCase):
             with self.subTest(profile=profile["id"]):
                 self.assertFalse([m for m in profile["hot"] if "acceptance-planning" in m])
 
+    def test_r8_do_it_do_not_ask(self):
+        """#670 rule 1: a reversible in-repo action needs no ask; asks are only for R3,
+        production or a genuine product or design decision; one-run evidence is not held."""
+        text = normalized(ACCEPTANCE_RULES.read_text(encoding="utf-8"))
+        rules = text[text.index("## Rules"):text.index("## Verify block fields")]
+        self.assertIn("- **R8. Do it, do not ask.**", rules)
+        r8 = rules[rules.index("**R8."):]
+        for needle in ("reversible", "senses, hands, credentials, money or taste", "recorded at ship",
+                       "pushing a branch", "R3", "production system", "product or design decision",
+                       "recorded when observed", "never held as a recurring check"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, r8)
+
     def test_an_unattended_command_check_must_be_a_verification_command(self):
         """#633 COR-001: the runner runs only a command that is a member of
         `workflow.verification` and leaves any other pending as `command_not_verification`,

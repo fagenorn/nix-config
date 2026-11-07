@@ -37,6 +37,7 @@ const DEFAULTS = [
   [/^direct-impl$/, { ...DONE, acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }], sensitive: false, ineligible: false }],
   [/^direct-fix$/, DONE],
   [/-codex$/, { available: true, ...PASS }],
+  [/^owner-answer$/, { verdict: 'none', comment_id: null, questions: [], decisions: '' }],
   [/review|^final-/, PASS],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],
   [/^verify-fix-/, DONE],
@@ -46,7 +47,7 @@ const DEFAULTS = [
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'] }],
   [/^merge$/, { merged: true, merge_commit: SHA, notes: 'merged' }],
   [/^hold$/, prompt => ({ merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: SHA, checks: openChecks(prompt) }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held' })],
-  [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, notes: 'ok' }],
+  [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok' }],
 ]
 
 const calls = []
