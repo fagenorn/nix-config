@@ -157,6 +157,26 @@ def _reply_state(threads, conversation, at, before=None, pingless=False):
     return "streaming" if chosen[1] > at else chosen[2]
 
 
+def _sent_at(entry, ts):
+    """When a line's exchange began: cache_keepalive logs a `ping` after its exchange
+    completes, with `duration_ms`, so the line's time is the completion, not the send. A
+    missing or unusable duration leaves the line's own time."""
+    duration = entry.get("duration_ms")
+    if not _number(duration):
+        return ts
+    try:
+        return ts - timedelta(milliseconds=duration)
+    except OverflowError:
+        return ts
+
+
+def _by_instant(segment):
+    """The lines of a segment in the order they happened: a ping at its send time, any other
+    line at its own time, equal instants keeping log order."""
+    return sorted(segment, key=lambda line: _sent_at(line[1], line[2])
+                  if line[0] == "ping" else line[2])
+
+
 def _segment_periods(segment, closed_at, cap):
     """(counted periods, over, max pings) of one segment of (event, entry, ts) lines, with
     still-open periods closed at `closed_at`."""
@@ -180,16 +200,17 @@ def _segment_periods(segment, closed_at, cap):
             over_cap += marked
             max_pings = max(max_pings, pings)
 
-    for event, entry, ts in segment:
+    for event, entry, ts in _by_instant(segment):
         conversation = entry.get("conversation")
         if not isinstance(conversation, str):
             continue
         if event == "ping":
+            sent = _sent_at(entry, ts)
             count = open_count.get(conversation, 0)
-            if count >= cap and _reply_state(threads, conversation, ts) == "end_turn":
+            if count >= cap and _reply_state(threads, conversation, sent) == "end_turn":
                 over.add(conversation)
             open_count[conversation] = count + 1
-            last_ping[conversation] = ts
+            last_ping[conversation] = sent
         elif event == "keepalive_end":
             pings = entry.get("pings", 0)
             close(conversation, pings if _number(pings) else 0, ts)

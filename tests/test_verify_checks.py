@@ -10,16 +10,10 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import forge_markers, verify_checks
-from agent_tools.verify_checks import (after_switch, job_ancestor, required_checks,
-                                       scheduled_pass)
+from agent_tools.verify_checks import required_checks
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = "home/common/verify-pending/checks"
-PASS = "/nix/store/" + "a" * 32 + "-verify-pending-pass"
-BASH = ("/nix/store/" + "b" * 32 + "-bash/bin/bash",)
-RUNNER = (1300, 1200, ("python3", "-m", "agent_tools.verify_pending", "run", "--host", "mbp"))
-SWITCHED = datetime(2026, 11, 8, 10, 0, 0, 500000, tzinfo=timezone.utc)
-NOW = datetime(2026, 11, 8, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def run_from_root(argv, env_extra=None):
@@ -30,94 +24,6 @@ def run_from_root(argv, env_extra=None):
 def committed_mode(path):
     return subprocess.run(["git", "-C", str(ROOT), "ls-files", "-s", path],
                           capture_output=True, text=True, check=True).stdout.split(" ")[0]
-
-
-class JobAncestorTest(unittest.TestCase):
-    def test_pass_started_by_launchd_is_met(self):
-        chain = [RUNNER, (1200, 1, (*BASH, PASS, "mbp")), (1, 0, ("/sbin/launchd",))]
-        self.assertEqual(scheduled_pass(chain, "mbp"), (0, {"host": "mbp", "job_pid": 1200}))
-
-    def test_pass_started_by_the_systemd_user_manager_is_met(self):
-        chain = [RUNNER, (1200, 900, (*BASH, PASS, "anis-desktop")),
-                 (900, 1, ("/run/current-system/systemd/lib/systemd/systemd", "--user"))]
-        self.assertEqual(job_ancestor(chain, "anis-desktop"), 1200)
-
-    def test_manual_run_while_a_scheduled_pass_runs_is_not_yet(self):
-        # The scheduled pass is a sibling, not an ancestor: only this process's chain counts.
-        chain = [RUNNER, (1200, 800, ("-zsh",)), (800, 1, ("/sbin/launchd",))]
-        self.assertEqual(scheduled_pass(chain, "mbp"), (75, {"host": "mbp", "job_pid": None}))
-
-    def test_pass_script_run_by_hand_from_a_shell_is_not_yet(self):
-        chain = [RUNNER, (1200, 800, (*BASH, PASS, "mbp")), (800, 700, ("-zsh",)), (700, 1, ("login",))]
-        self.assertIsNone(job_ancestor(chain, "mbp"))
-
-    def test_pass_for_another_host_or_outside_the_store_is_not_yet(self):
-        other = [RUNNER, (1200, 1, (*BASH, PASS, "eleven-m5"))]
-        local = [RUNNER, (1200, 1, (*BASH, "/tmp/x-verify-pending-pass", "mbp"))]
-        self.assertIsNone(job_ancestor(other, "mbp"))
-        self.assertIsNone(job_ancestor(local, "mbp"))
-
-
-class AfterSwitchTest(unittest.TestCase):
-    def test_pass_within_60s_of_the_switch_is_met(self):
-        lines = ["2026-11-08T09:45:00Z pass start host=mbp",
-                 "2026-11-08T10:00:01Z switch host=mbp target=/nix/store/a current=yes",
-                 "2026-11-08T10:00:01Z pass start host=mbp"]
-        code, report = after_switch(lines, "mbp", SWITCHED, NOW)
-        self.assertEqual((code, report["gap_s"]), (0, 1))
-
-    def test_request_delayed_behind_a_running_round_is_not_met(self):
-        # A round starts before the switch and runs 5 minutes; pass.sh then logs the
-        # switch line and the next pass start back to back. The gap is from the link.
-        lines = ["2026-11-08T09:59:50Z pass start host=mbp",
-                 "2026-11-08T10:05:00Z pass end host=mbp verify=0 owner_actions=0",
-                 "2026-11-08T10:05:00Z switch host=mbp target=/nix/store/a current=yes",
-                 "2026-11-08T10:05:00Z pass start host=mbp"]
-        code, report = after_switch(lines, "mbp", SWITCHED, NOW)
-        self.assertEqual((code, report["gap_s"]), (1, 300))
-
-    def test_no_pass_yet_is_not_yet_then_not_met(self):
-        soon = datetime(2026, 11, 8, 10, 0, 30, tzinfo=timezone.utc)
-        self.assertEqual(after_switch([], "mbp", SWITCHED, soon)[0], 75)
-        self.assertEqual(after_switch([], "mbp", SWITCHED, NOW)[0], 1)
-
-    def test_other_hosts_never_count(self):
-        lines = ["2026-11-08T10:00:01Z pass start host=eleven-m5"]
-        self.assertEqual(after_switch(lines, "mbp", SWITCHED, NOW)[0], 1)
-
-
-class ScheduledPassCommandTest(unittest.TestCase):
-    def test_wrapper_reads_the_rotated_log_and_the_link_time(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            log = Path(tmp) / "runner.log"
-            Path(f"{log}.1").write_text("2026-11-08T10:00:02Z pass start host=mbp\n")
-            log.write_text("2026-11-08T10:15:00Z pass start host=mbp\n")
-            link = Path(tmp) / "current-system"
-            os.symlink("/nonexistent/system", link)
-            os.utime(link, (SWITCHED.timestamp(), SWITCHED.timestamp()), follow_symlinks=False)
-            done = run_from_root([str(ROOT / CHECKS / "scheduled-pass"), "--host", "mbp",
-                                  "--after-switch", "--log", str(log), "--current-system", str(link),
-                                  "--now", "2026-11-08T12:00:00Z"])
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(json.loads(done.stdout)["gap_s"], 2)
-
-    def test_wrapper_outside_the_job_is_not_yet(self):
-        done = run_from_root([str(ROOT / CHECKS / "scheduled-pass"), "--host", "mbp"])
-        self.assertEqual(done.returncode, 75, done.stderr)
-        self.assertEqual(json.loads(done.stdout), {"host": "mbp", "job_pid": None})
-
-    def test_missing_current_system_is_an_error(self):
-        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "scheduled-pass",
-                              "--host", "mbp", "--after-switch", "--current-system", "/nonexistent/cs"])
-        self.assertEqual((done.returncode, done.stdout), (2, ""))
-
-    def test_bad_host_is_a_usage_error(self):
-        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "scheduled-pass",
-                              "--host", "Bad Host"])
-        self.assertEqual(done.returncode, 2)
-
-    def test_wrapper_is_committed_executable(self):
-        self.assertEqual(committed_mode(f"{CHECKS}/scheduled-pass"), "100755")
 
 
 SINCE = datetime(2026, 11, 6, 17, 37, 11, tzinfo=timezone.utc)
@@ -166,8 +72,12 @@ def world(check_runs, statuses=(), required=("lint",), merged="2026-11-07T10:00:
     return gets, pages
 
 
-def run(name, conclusion="success", completed="2026-11-07T09:50:00Z", status="completed"):
-    return {"name": name, "status": status, "conclusion": conclusion, "completed_at": completed}
+def run(name, conclusion="success", completed="2026-11-07T09:50:00Z", status="completed",
+        app_id=None):
+    found = {"name": name, "status": status, "conclusion": conclusion, "completed_at": completed}
+    if app_id is not None:
+        found["app"] = {"id": app_id}
+    return found
 
 
 class RequiredChecksTest(unittest.TestCase):
@@ -195,6 +105,56 @@ class RequiredChecksTest(unittest.TestCase):
         statuses = [{"context": "lint", "state": "failure", "updated_at": "2026-11-07T09:30:00Z"},
                     {"context": "lint", "state": "success", "updated_at": "2026-11-07T09:00:00Z"}]
         self.assertEqual(self.check(*world([], statuses))[0], 1)
+
+    def test_a_check_from_another_app_than_the_required_one_is_not_met(self):
+        gets, pages = world([run("lint", app_id=999)])
+        gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": 15368}], "contexts": ["lint"]}
+        code, report = self.check(gets, pages)
+        self.assertEqual((code, report["missing"]), (1, ["lint"]))
+
+    def test_a_check_from_the_required_app_is_met(self):
+        gets, pages = world([run("lint", app_id=999), run("lint", app_id=15368)])
+        gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": 15368}], "contexts": ["lint"]}
+        self.assertEqual(self.check(gets, pages)[0], 0)
+
+    def test_a_check_run_without_an_app_does_not_meet_a_bound_requirement(self):
+        gets, pages = world([run("lint")])
+        gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": 15368}]}
+        self.assertEqual(self.check(gets, pages)[0], 1)
+
+    def test_a_commit_status_does_not_meet_a_bound_requirement(self):
+        statuses = [{"context": "lint", "state": "success", "updated_at": "2026-11-07T09:00:00Z"}]
+        gets, pages = world([], statuses)
+        gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": 15368}]}
+        self.assertEqual(self.check(gets, pages)[0], 1)
+
+    def test_an_unbound_requirement_accepts_any_app(self):
+        for entry in ({"context": "lint", "app_id": None}, {"context": "lint", "app_id": -1}):
+            gets, pages = world([run("lint", app_id=999)])
+            gets[PROTECTION] = {"checks": [entry], "contexts": ["lint"]}
+            self.assertEqual(self.check(gets, pages)[0], 0, entry)
+
+    def test_the_legacy_contexts_list_does_not_loosen_a_bound_requirement(self):
+        gets, pages = world([run("lint", app_id=999)])
+        gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": 15368}],
+                            "contexts": ["lint"]}
+        self.assertEqual(self.check(gets, pages)[0], 1)
+
+    def test_each_app_bound_to_the_same_context_must_have_passed(self):
+        gets, pages = world([run("lint", app_id=1)])
+        gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": 1},
+                                       {"context": "lint", "app_id": 2}]}
+        self.assertEqual(self.check(gets, pages)[0], 1)
+        gets, pages = world([run("lint", app_id=1), run("lint", app_id=2)])
+        gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": 1},
+                                       {"context": "lint", "app_id": 2}]}
+        self.assertEqual(self.check(gets, pages)[0], 0)
+
+    def test_a_malformed_app_id_is_refused(self):
+        gets, pages = world([run("lint")])
+        gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": "15368"}]}
+        with self.assertRaises(forge_markers.ForgeError):
+            self.check(gets, pages)
 
     def test_no_required_checks_is_not_met(self):
         self.assertEqual(self.check(*world([run("lint")], required=()))[0], 1)

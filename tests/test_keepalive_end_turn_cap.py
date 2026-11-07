@@ -118,6 +118,43 @@ class EndTurnCapTest(unittest.TestCase):
                  line("keepalive_end", "2026-11-04T00:20:00.000Z", conversation="A", pings=3)]
         self.assertEqual(self.cap(lines), CapReport(1, 1, 3))
 
+    def test_a_ping_logged_after_the_reply_but_sent_while_it_streamed_is_within_the_cap(self):
+        # cache_keepalive logs a ping when its exchange completes, with duration_ms: the
+        # third ping was sent at 00:04:50, during the reply (00:00:00 to 00:05:00), and
+        # logged at 00:05:10, after end_turn.
+        lines = [line("ping", "2026-11-04T00:01:00.000Z", conversation="A", duration_ms=500),
+                 line("ping", "2026-11-04T00:02:00.000Z", conversation="A", duration_ms=500),
+                 request("A", "2026-11-04T00:05:00.000Z", ms=300000),
+                 line("ping", "2026-11-04T00:05:10.000Z", conversation="A", duration_ms=20000),
+                 line("keepalive_end", "2026-11-04T00:06:00.000Z", conversation="A", pings=3)]
+        self.assertEqual(self.cap(lines), CapReport(1, 0, 3))
+
+    def test_a_ping_sent_after_the_reply_completed_is_over_whatever_its_duration(self):
+        lines = [line("ping", "2026-11-04T00:01:00.000Z", conversation="A", duration_ms=500),
+                 line("ping", "2026-11-04T00:02:00.000Z", conversation="A", duration_ms=500),
+                 request("A", "2026-11-04T00:05:00.000Z", ms=300000),
+                 line("ping", "2026-11-04T00:15:10.000Z", conversation="A", duration_ms=20000),
+                 line("keepalive_end", "2026-11-04T00:16:00.000Z", conversation="A", pings=3)]
+        self.assertEqual(self.cap(lines), CapReport(1, 1, 3))
+
+    def test_a_ping_sent_before_the_period_closed_belongs_to_it_though_logged_after(self):
+        # The third ping was sent at 00:19:50 and the resuming request closed the period at
+        # 00:20:00; the ping's exchange finished and was logged at 00:20:10.
+        lines = [request("A", "2026-11-04T00:00:01.000Z"),
+                 line("ping", "2026-11-04T00:10:00.000Z", conversation="A", duration_ms=500),
+                 line("ping", "2026-11-04T00:11:00.000Z", conversation="A", duration_ms=500),
+                 line("keepalive_end", "2026-11-04T00:20:00.000Z", conversation="A",
+                      reason="resumed", pings=3),
+                 line("ping", "2026-11-04T00:20:10.000Z", conversation="A", duration_ms=20000)]
+        self.assertEqual(self.cap(lines), CapReport(1, 1, 3))
+
+    def test_a_ping_without_a_usable_duration_is_judged_at_its_log_time(self):
+        for duration in (None, "slow", True, float("nan")):
+            fields = {} if duration is None else {"duration_ms": duration}
+            lines = [request("A", "2026-11-04T00:00:01.000Z"), *pings("A", 2),
+                     line("ping", "2026-11-04T00:20:00.000Z", conversation="A", **fields)]
+            self.assertEqual(self.cap(lines), CapReport(1, 1, 3), duration)
+
     def test_lines_outside_the_window_and_garbage_are_skipped(self):
         lines = ["not json", "[1]", line("ping", "bad-ts", conversation="A"),
                  request("A", "2026-11-02T23:59:59.000Z"), *pings("A", 3),
