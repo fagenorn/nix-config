@@ -19,7 +19,9 @@ D9, ending is append-only: `release` posts an `end` marker first and then edits 
 released claim cannot come back.
 
 D10, owner-action retirement: `renew` and `release` end every live `owner-action` marker that
-names their claim, and the `owner-action` label goes when none remains live on the issue.
+names their claim, a `status` that finds the issue free or held ends every live stale-claim
+`owner-action` whose claim is not the holder, and the `owner-action` label goes when none of any
+reason remains live on the issue. An `owner-action` of another reason is never ended here.
 
 D4, branch activity: a claim recorded with `--branch` counts the branch's last push and the
 `updated_at` of its pull requests as activity beside its own renewals; a claim with no branch
@@ -255,13 +257,16 @@ def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Mar
 
 
 def retire_obsolete(slug: str, issue: int, markers: list[Marker], keep: int | None) -> list[int]:
-    """End every live `owner-action` of the issue whose claim is not `keep` (D10).
+    """End every live stale-claim `owner-action` of the issue whose claim is not `keep` (D10).
 
-    The reason is `renewed` when that claim is live in `markers`, else `released`. When at
-    least one was ended and no live `owner-action` remains, the `owner-action` label goes.
-    Returns the ended ids, ascending."""
+    An `owner-action` of any other reason (a verify-pending prompt, say) is never ended here
+    but still counts as live. The reason is `renewed` when that claim is live in `markers`,
+    else `released`. When at least one was ended and no live `owner-action` of any reason
+    remains, the `owner-action` label goes. Returns the ended ids, ascending."""
     live = _live_owner_actions(markers)
-    obsolete = [m for m in live if m.fields.get("claim") != (None if keep is None else str(keep))]
+    kept = None if keep is None else str(keep)
+    obsolete = [m for m in live
+                if m.fields.get("reason") == "stale-claim" and m.fields.get("claim") != kept]
     for marker in obsolete:
         claim_live = any(c.kind == CLAIM_KIND and str(c.comment_id) == marker.fields.get("claim")
                          and fm.is_live(c, markers) for c in markers)
