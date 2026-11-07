@@ -240,9 +240,9 @@ FORM_TABLE = {
     },
     "pr-create": {
         "forms": (
-            ("pr-create", 'gh pr create --repo <slug> --base <base> --head <branch> '
+            ("pr-create", 'gh pr create --repo <slug> [--draft] --base <base> --head <branch> '
                           '--title "<title>" --body "<body>"', None),
-            ("pr-create-file", 'gh pr create --repo <slug> --base <base> --head <branch> '
+            ("pr-create-file", 'gh pr create --repo <slug> [--draft] --base <base> --head <branch> '
                                '--title "<title>" --body-file <path>', None),
         ),
         "whole_text_characters": False,
@@ -2014,6 +2014,10 @@ def _detaching_gh_roles(contents, kinds):
                 return None
             roles += ["other", "other"]
             index += 2
+        elif kind == "plain" and content == "--draft" \
+                and contents[1] == "pr" and contents[2] == "create":
+            roles.append("other")
+            index += 1
         elif content.startswith("-"):
             return None
         else:
