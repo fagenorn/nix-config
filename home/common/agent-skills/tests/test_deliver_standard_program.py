@@ -827,7 +827,8 @@ class ShipTest(unittest.TestCase):
         bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "lost"}]}
         result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": bad,
                                      "fix-sync-review-1": bad},
-                            patch={"sync-1": {"conflicted": True}})
+                            patch={"sync-1": {"conflicted": True, "merge_commit": "d" * 40},
+                                   "fix-sync-1": {"start_head": "d" * 40, "commit": "f" * 40}})
         self.assertEqual(result["stage"], "sync-review")
         self.assertNotIn("merge", labels(calls))
 
@@ -964,6 +965,53 @@ class ShipFixWaveTest(unittest.TestCase):
         self.assertEqual(result["cont"]["sync_fixes"], 1)
         self.assertNotIn("fix-sync-2", labels(calls))
         self.assertNotIn("merge", labels(calls))
+
+    def test_a_fix_that_starts_from_another_head_stops_before_review(self):
+        other = "c" * 40
+        result, calls = run(replies={"checks-1": RED}, patch={"fix-ci": {"start_head": other, "commit": FIX}})
+        self.assertEqual(result["stage"], "checks-fix")
+        self.assertNotIn("fix-ci-review", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING},
+                            patch={"sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "fix-sync-1": {"start_head": other, "commit": FIX}})
+        self.assertEqual(result["stage"], "sync-fix")
+        self.assertNotIn("fix-sync-review-1", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_fix_start_head_in_short_form_is_the_same_head(self):
+        result, calls = self.red_then({"state": "passed", "head": FIX, "required": ["ci-tests"]},
+                                      **{"fix-ci": {"start_head": SHA[:9], "commit": FIX}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("fix-ci-review", labels(calls))
+
+    def sync_rebuttal(self, review=None, **fix):
+        replies = {"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING,
+                   "checks-2": {"state": "passed", "head": MERGE, "required": ["ci-tests"]}}
+        replies.update(review or {})
+        return run(replies=replies,
+                   patch={"sync-1": {"conflicted": True, "merge_commit": MERGE},
+                          "fix-sync-1": dict({"start_head": MERGE, "commit": MERGE, "notes": "the call site is on line 12"}, **fix)})
+
+    def test_a_sync_rebuttal_with_evidence_and_no_commit_is_adjudicated_by_the_reviewer(self):
+        result, calls = self.sync_rebuttal()
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("fix-sync-review-1", labels(calls))
+        review = prompt(calls, "fix-sync-review-1")
+        self.assertIn("the call site is on line 12", review)
+        self.assertIn("rebuttal", review)
+        self.assertNotIn(f"diff {MERGE}..{MERGE}", review)
+        self.assertIn(f"--match-head-commit {MERGE}", prompt(calls, "merge"))
+
+    def test_a_sync_rebuttal_the_reviewer_rejects_stops_at_sync_review(self):
+        result, calls = self.sync_rebuttal(review={"fix-sync-review-1": FINDING})
+        self.assertEqual(result["stage"], "sync-review")
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_sync_rebuttal_without_notes_stops_at_sync_fix(self):
+        result, calls = self.sync_rebuttal(notes="")
+        self.assertEqual(result["stage"], "sync-fix")
+        self.assertNotIn("fix-sync-review-1", labels(calls))
 
     def test_no_fix_wave_keeps_the_cont_shape(self):
         result, _ = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-1": None})

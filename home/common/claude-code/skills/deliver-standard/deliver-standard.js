@@ -735,12 +735,16 @@ let head = expected
 let syncs = 0
 let round = 0
 // One bounded Ship fix wave: an implementer commits a fix on top of the current head (not pushed), then a fresh reviewer re-reviews it.
-// Returns { fix, ok: false } when the fix failed or added no commit, else { fix, review } for the caller to grade.
-const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt }) => {
+// The repair must start from the head the caller accepted (start_head), or the reviewer would see only its own diff and miss an unreviewed commit beneath it.
+// Returns { fix, ok: false } when the fix failed, started elsewhere, or added no commit (unless rebuttal allows an answer with evidence and no commit),
+// else { fix, review, moved } for the caller to grade; moved is false for an accepted rebuttal, and the head stays expected.
+const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal = false }) => {
   const fix = await call(fixPrompt, { label, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: IMPL })
-  if (!implDone(fix) || sameSha(fix.commit, expected)) return { fix, ok: false }
-  const review = await call(reviewPrompt(fix), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
-  return { fix, review, ok: true }
+  if (!implDone(fix) || !sameSha(fix.start_head, expected)) return { fix, ok: false }
+  const moved = !sameSha(fix.commit, expected)
+  if (!moved && !(rebuttal && present(fix.notes))) return { fix, ok: false }
+  const review = await call(reviewPrompt(fix, moved), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
+  return { fix, review, moved, ok: true }
 }
 for (;;) {
   round++
@@ -784,12 +788,13 @@ Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} s
       syncFixes++
       const w = await shipFix({
         label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
-        fixPrompt: `${CTX}\nA reviewer found defects in the conflict resolution of merge commit ${sy.merge_commit} (git -C ${W} show --cc ${sy.merge_commit}): ${JSON.stringify(findingsOf(sr))}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, say so with evidence in notes. Do not push. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`,
-        reviewPrompt: fix => `${CTX}\nRe-review these conflict-resolution findings against the fix (${span(fix)}) made on top of merge commit ${sy.merge_commit}: ${JSON.stringify(findingsOf(sr))}; implementer notes: ${fix.notes}. Report any still unresolved and any new Important or Critical defect. Do not edit anything.`,
+        rebuttal: true,
+        fixPrompt: `${CTX}\nA reviewer found defects in the conflict resolution of merge commit ${sy.merge_commit} (git -C ${W} show --cc ${sy.merge_commit}): ${JSON.stringify(findingsOf(sr))}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes. Do not push. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`,
+        reviewPrompt: (fix, moved) => `${CTX}\nRe-review these conflict-resolution findings against ${moved ? `the fix (${span(fix)}) made on top of` : 'the implementer\'s rebuttal (no new commit) of'} merge commit ${sy.merge_commit}: ${JSON.stringify(findingsOf(sr))}; implementer notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${W} show --cc ${sy.merge_commit}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`,
       })
       if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix })
       if (!w.review || findingsOf(w.review).length) return stop('sync-review', { pr: PR, review: w.review, sync_review: sr, fix: w.fix })
-      expected = w.fix.commit
+      if (w.moved) expected = w.fix.commit
     } else if (finalReviewed) {
       finalReviewed = { ...finalReviewed, accepted: [...(finalReviewed.accepted || []), sy.merge_commit] }
     }
