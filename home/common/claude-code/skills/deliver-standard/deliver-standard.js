@@ -32,12 +32,14 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan, plan_reviewed, done, fix_waves, checks_fixes?, sync_fixes?, verified?, partial?, claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan, plan_reviewed, done, fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). When the PR
-// is already merged, the re-adopt goes straight to close-out. A result also carries dead_agents,
+// is already merged, the re-adopt goes straight to close-out. A resume skips the final review when cont.final_reviewed names the head it
+// passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
+// sync merge and its acceptance drops the marker. A result also carries dead_agents,
 // the labels of agents that returned nothing or threw, when any did. A red required check, and a sync-review
 // finding, each get one fix wave per delivery (an implementer with a regression test, then a fresh reviewer); a second one stops with cont.
 //
@@ -122,6 +124,7 @@ const SETUP_SCHEMA = {
     host: { type: 'string' }, slug: { type: 'string' }, integration_branch: { type: 'string' }, default_branch: { type: 'string' },
     branch: { type: 'string' }, worktree_path: { type: 'string' }, head: { type: 'string' },
     merged_pr: { type: 'integer' }, dirty: { type: 'boolean' }, duplicate_pr: { type: 'integer' },
+    since_reviewed: { type: 'string', enum: ['same', 'merge_only', 'moved'] },
     existing: { type: 'object', properties: { local_branch: { type: 'boolean' }, remote_branch: { type: 'boolean' }, worktree: { type: 'boolean' }, dirty: { type: 'boolean' }, status: { type: 'string' }, head: { type: 'string' } } },
     unset_env: STRS,
     merge_strategy: { type: 'string' }, delete_branch: { type: 'boolean' },
@@ -175,10 +178,14 @@ const deadOf = () => (DEAD.length ? { dead_agents: DEAD.slice() } : {})
 
 // Shared by the fresh setup and the incomplete-claim resume: the facts the worktree step chooses its command from.
 const EXISTING_READ = (branch, path) => `Read what already exists for the delivery, and change nothing: never reset, clean, restore or stash, and never delete a branch or worktree. Return existing with local_branch (a local branch named ${branch} exists), remote_branch (origin/${branch} exists), worktree (the path ${path} exists and is on branch ${branch}), dirty (git -C ${path} status --porcelain is non-empty), status (that output, its first 40 lines) and head (git -C ${path} rev-parse HEAD, or the branch tip when there is no worktree). Omit existing when there is no such branch and no such path. Refuse with reason worktree-mismatch and the path when ${path} is on another branch or ${branch} is checked out at another path.`
+// The head the final review passed at, when a resume's cont names one: the setup then reports how HEAD relates to it.
+const FR_HEAD = CONT && CONT.final_reviewed && present(CONT.final_reviewed.head) ? CONT.final_reviewed.head : null
+const FR_ACCEPTED = FR_HEAD && Array.isArray(CONT.final_reviewed.accepted) ? CONT.final_reviewed.accepted.filter(present) : []
+const SINCE_REVIEWED = FR_HEAD ? ` The final review passed at ${FR_HEAD}: after git -C <worktree> fetch origin, return since_reviewed: same when HEAD is ${FR_HEAD}; merge_only when git -C <worktree> merge-base --is-ancestor ${FR_HEAD} HEAD succeeds, git -C <worktree> rev-list --no-merges ${FR_HEAD}..HEAD ^origin/<integration_branch> prints nothing (the head only gained integration-branch merges), and every merge in git -C <worktree> rev-list --merges ${FR_HEAD}..HEAD ${FR_ACCEPTED.length ? `is one of ${FR_ACCEPTED.join(', ')} or ` : ''}has no hand-made conflict resolution (git -C <worktree> show --cc --format= <merge> prints nothing); else moved.` : ''
 const setup = await call(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
 1. ${CONTRACT_READ}
 2. If a merged PR has head ${CONT.setup && CONT.setup.branch} (gh pr list --repo <slug> --state merged --head ${CONT.setup && CONT.setup.branch}), return ok=true with merged_pr set to its number; the worktree may already be gone.
-3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}`}. If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty. Return head: git -C <worktree> rev-parse HEAD (the full sha).
+3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}`}. If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty. Return head: git -C <worktree> rev-parse HEAD (the full sha).${SINCE_REVIEWED}
 ${CONT.claim_incomplete ? `4. After git -C ${REPO} fetch origin: ${EXISTING_READ(CONT.setup && CONT.setup.branch, CONT.setup && CONT.setup.worktree_path)} An earlier worktree step may have created the branch, the worktree or both before it failed, so report existing afresh.
 5.` : '4.'} Return every contract field read fresh, branch as in the earlier setup. Change nothing.
 ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} before delivery. Change nothing in this step except one issue comment named below.
@@ -215,12 +222,19 @@ let claimIncomplete = !!(CONT && CONT.claim_incomplete)
 let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
 // Fix waves already spent, carried through a resume; declared before stop() because early failures call it.
 let fixWaves = (CONT && CONT.fix_waves) || 0
+// The head the final review and its fix waves passed at ({ head, accepted? }), carried so a resume on it skips the review.
+let finalReviewed = (CONT && CONT.final_reviewed) || null
+// The stages between a sync merge and its acceptance: a stop there must not carry a marker over the unreviewed merge.
+const SYNC_WINDOW = ['sync', 'sync-review', 'sync-fix']
 // Ship fix waves already spent (a red required check, a sync-review finding): one each per delivery, carried through a resume.
 let checksFixes = (CONT && CONT.checks_fixes) || 0
 let syncFixes = (CONT && CONT.sync_fixes) || 0
 // The verified head, results and verification contract of a ready stop; carried until a resume finds the head moved; its results are reused only under the same contract.
 let verified = (CONT && CONT.verified) || null
-const stop = (stage, extra) => ({ stage, ...extra, ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
+const stop = (stage, extra) => {
+  const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
+  return { stage, ...extra, ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } }
+}
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
 
@@ -438,7 +452,12 @@ const planRefs = () => {
 let chunked = false
 // A ready stop's verified head, unchanged and clean, needs no second review or verify.
 const SKIP_REVIEW = !!(verified && plan && sameSha(setup.head, verified.head) && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)))
+// A passed final review, on the head it passed at (or one that only gained integration-branch merges), is not run again; verify still is.
+const SKIP_FINAL = !SKIP_REVIEW && LANE === 'standard' && !!finalReviewed && !!plan && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && !setup.dirty && (sameSha(setup.head, finalReviewed.head) || setup.since_reviewed === 'merge_only')
 if (!SKIP_REVIEW) verified = null
+if (!SKIP_REVIEW && !SKIP_FINAL) finalReviewed = null
+// The last commit the final review will cover.
+let tip = setup.head || null
 // The verification contract as freshly resolved, key order aside: cached results answer only this contract.
 const canon = v => Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v)
 const VERIFY_CONTRACT = canon(setup.verification)
@@ -588,6 +607,7 @@ Re-review only these previously reported findings for task ${t.n} against the fi
   }
   if (findingsOf(review).length) return halt('task-review', { task: t, review })
   taskLog.push({ n: t.n, commit: impl.commit, review_rounds: rounds, reviewer })
+  tip = impl.commit
   if (partial === t.n) partial = undefined
 }
 
@@ -597,7 +617,8 @@ const groups = []
 const PER = 3
 for (let i = 0; i < plan.tasks.length; i += PER) groups.push(plan.tasks.slice(i, i + PER))
 chunked = groups.length > 1
-if (!SKIP_REVIEW) {
+if (SKIP_FINAL) log(`final review passed at ${finalReviewed.head}; skipped`)
+if (!SKIP_REVIEW && !SKIP_FINAL) {
 {
   const lost = await renew('final-review', 'Final review')
   if (lost) return lost
@@ -633,6 +654,7 @@ if (finalFindings.length) {
     fixWaves++
     const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
     if (!implDone(fw)) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves })
+    tip = fw.commit
     const rv = await call(`${CTX}\nRe-review these final-review findings against the fix (${span(fw)}); implementer notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}. Report any still unresolved and any new Important or Critical defect. For each finding you still report, set relation: narrowing when it is the same kind of defect as one of the findings above reached on another path, input or call site; new when it is a different kind. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
     if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
     const next = findingsOf(rv)
@@ -641,6 +663,7 @@ if (finalFindings.length) {
     waveFindings = next
   }
 }
+if (present(tip)) finalReviewed = { head: tip }
 }
 }
 
@@ -767,6 +790,8 @@ Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} s
       if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix })
       if (!w.review || findingsOf(w.review).length) return stop('sync-review', { pr: PR, review: w.review, sync_review: sr, fix: w.fix })
       expected = w.fix.commit
+    } else if (finalReviewed) {
+      finalReviewed = { ...finalReviewed, accepted: [...(finalReviewed.accepted || []), sy.merge_commit] }
     }
   }
 }

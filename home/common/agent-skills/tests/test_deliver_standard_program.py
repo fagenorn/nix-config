@@ -1330,6 +1330,163 @@ class ModeTest(unittest.TestCase):
                 self.assertIn(json.dumps(verification, separators=(",", ":")), prompt(calls, "verify"))
 
 
+TIP = "b" * 40
+
+
+class FinalReviewedResumeTest(unittest.TestCase):
+    """#649 defect 3: cont records the head the final review passed at; a resume on it skips the review."""
+
+    FIRST = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "race in acquire"}]}
+
+    @staticmethod
+    def stopped_after_review(**patch):
+        stopped, _ = run(replies={"verify": None}, patch=dict({"impl-1": {"commit": TIP}}, **patch))
+        assert stopped["stage"] == "verify", stopped["stage"]
+        return stopped
+
+    def test_cont_records_the_head_the_final_review_passed_at(self):
+        self.assertEqual(self.stopped_after_review()["cont"]["final_reviewed"], {"head": TIP})
+        stopped, _ = run(replies={"final-1": self.FIRST, "verify": None},
+                         patch={"impl-1": {"commit": TIP}, "fix-wave": {"start_head": TIP, "commit": "d" * 40}})
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": "d" * 40})
+
+    def test_no_marker_before_the_final_review_passes(self):
+        new = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "leak", "relation": "new"}]}
+        for replies in ({"final-1": None}, {"final-1": self.FIRST, "fix-wave-review": new}):
+            with self.subTest(replies=replies):
+                stopped, _ = run(replies=replies)
+                self.assertIn(stopped["stage"], ("final-review", "fix-wave-review"))
+                self.assertNotIn("final_reviewed", stopped["cont"])
+        stopped, _ = run(args=dict(ARGS, lane="direct"), replies={"verify": None})
+        self.assertNotIn("final_reviewed", stopped["cont"])
+
+    def test_resume_on_the_reviewed_head_skips_the_final_review(self):
+        cont = self.stopped_after_review()["cont"]
+        for head in (TIP, TIP[:10]):
+            with self.subTest(head=head):
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": head}})
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(labels(calls), ["setup", "renew-verify", "verify", "renew-ship", "pr",
+                                                 "renew-checks-1", "checks-1", "renew-merge", "merge",
+                                                 "hold", "close-out"])
+
+    def test_resume_after_only_an_integration_merge_skips_the_final_review(self):
+        cont = self.stopped_after_review()["cont"]
+        result, calls = run(args=dict(ARGS, cont=cont),
+                            patch={"setup": {"head": "e" * 40, "since_reviewed": "merge_only"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        self.assertIn("verify", labels(calls))
+        setup = prompt(calls, "setup")
+        self.assertIn(f"rev-list --no-merges {TIP}..HEAD", setup)
+        self.assertIn(f"merge-base --is-ancestor {TIP} HEAD", setup)
+
+    def test_resume_on_a_moved_head_reviews_again_and_records_the_new_head(self):
+        cont = self.stopped_after_review()["cont"]
+        for patch in ({"head": "e" * 40, "since_reviewed": "moved"}, {"head": "e" * 40}, {}):
+            with self.subTest(patch=patch):
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": patch})
+                self.assertEqual(result["stage"], "done")
+                self.assertIn("final-1", labels(calls))
+        stopped, _ = run(args=dict(ARGS, cont=cont), replies={"verify": None}, patch={"setup": {"head": "e" * 40}})
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": "e" * 40})
+
+    def test_resume_with_an_unfinished_task_reviews_again(self):
+        cont = dict(self.stopped_after_review()["cont"], done=[])
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertLess(names.index("impl-1"), names.index("final-1"))
+
+    def test_ready_cont_on_a_merge_only_head_skips_review_but_verifies_again(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        self.assertIn("final_reviewed", ready["cont"])
+        result, calls = run(args=dict(ARGS, cont=ready["cont"]),
+                            patch={"setup": {"head": "e" * 40, "since_reviewed": "merge_only"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        self.assertIn("verify", labels(calls))
+
+    def sync_stop(self, replies, patch):
+        stopped, _ = run(replies=dict({"checks-1": {"state": "behind", "head": SHA}}, **replies),
+                         patch=dict({"impl-1": {"commit": TIP},
+                                     "sync-1": {"conflicted": True, "merge_commit": MERGE}}, **patch))
+        return stopped
+
+    def test_a_stop_inside_the_sync_window_drops_the_marker_and_the_resume_reviews_again(self):
+        cases = {
+            "sync": ({"sync-1": None}, {}),
+            "sync-review": ({"sync-review-1": None}, {}),
+            "sync-review ": ({"sync-review-1": FINDING, "fix-sync-review-1": FINDING},
+                             {"fix-sync-1": {"start_head": MERGE, "commit": FIX}}),
+            "sync-fix": ({"sync-review-1": FINDING}, {"fix-sync-1": {"status": "blocked", "notes": "no"}}),
+        }
+        for stage, (replies, patch) in cases.items():
+            with self.subTest(stage=stage):
+                stopped = self.sync_stop(replies, patch)
+                self.assertEqual(stopped["stage"], stage.strip())
+                self.assertNotIn("final_reviewed", stopped["cont"])
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
+                                    patch={"setup": {"head": MERGE, "since_reviewed": "merge_only"}})
+                self.assertEqual(result["stage"], "done")
+                names = labels(calls)
+                self.assertIn("final-1", names)
+                self.assertLess(names.index("final-1"), names.index("merge"))
+                self.assertNotIn("since_reviewed", prompt(calls, "setup"))
+
+    def test_an_accepted_conflicted_merge_keeps_the_skip(self):
+        stopped = self.sync_stop({"checks-2": None}, {})
+        self.assertEqual(stopped["stage"], "checks")
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "accepted": [MERGE]})
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
+                            patch={"setup": {"head": MERGE, "since_reviewed": "merge_only"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        setup = prompt(calls, "setup")
+        self.assertIn(MERGE, setup)
+        self.assertIn(f"rev-list --merges {TIP}..HEAD", setup)
+
+    def test_the_setup_requires_merges_without_a_hand_made_resolution(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"), patch={"impl-1": {"commit": TIP}})
+        self.assertNotIn("accepted", ready["cont"]["final_reviewed"])
+        _, calls = run(args=dict(ARGS, mode="ready", cont=ready["cont"]), patch={"setup": {"head": MERGE, "since_reviewed": "moved"}})
+        setup = prompt(calls, "setup")
+        self.assertIn(f"rev-list --merges {TIP}..HEAD", setup)
+        self.assertIn("show --cc --format=", setup)
+        self.assertIn("final-1", labels(calls))
+
+    def test_a_review_that_must_run_again_drops_the_stale_marker(self):
+        cont = self.stopped_after_review()["cont"]
+        stopped, _ = run(args=dict(ARGS, cont=cont), replies={"final-1": None}, patch={"setup": {"head": "e" * 40}})
+        self.assertEqual(stopped["stage"], "final-review")
+        self.assertNotIn("final_reviewed", stopped["cont"])
+
+    def test_a_dirty_tree_on_the_reviewed_head_reviews_again(self):
+        cont = dict(self.stopped_after_review()["cont"], partial=1)
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP, "dirty": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("final-1", labels(calls))
+
+    def test_the_direct_lane_never_keeps_a_marker(self):
+        direct = dict(ARGS, lane="direct")
+        stopped, _ = run(args=direct, replies={"verify": None}, patch={"direct-impl": {"commit": TIP}})
+        self.assertEqual(stopped["stage"], "verify")
+        cont = dict(stopped["cont"], final_reviewed={"head": TIP})
+        stopped, _ = run(args=dict(direct, cont=cont), replies={"verify": None}, patch={"setup": {"head": TIP}})
+        self.assertEqual(stopped["stage"], "verify")
+        self.assertNotIn("final_reviewed", stopped["cont"])
+
+    def test_cont_without_the_marker_still_resumes(self):
+        cont = self.stopped_after_review()["cont"]
+        del cont["final_reviewed"]
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("final-1", labels(calls))
+        self.assertNotIn("since_reviewed", prompt(calls, "setup"))
+        _, calls = run()
+        self.assertNotIn("since_reviewed", prompt(calls, "setup"))
+
+
 DIRECT = dict(ARGS, lane="direct")
 BAD = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
 
