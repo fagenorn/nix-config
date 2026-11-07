@@ -4,6 +4,7 @@ Evaluates the flake from this checkout's git tree, so new files must be `git add
 Run: just agent-workflow-tests
 """
 import json
+import platform
 import plistlib
 import subprocess
 import unittest
@@ -15,8 +16,10 @@ LABEL = "org.nixos.verify-pending"
 NIX = ["nix", "--extra-experimental-features", "nix-command flakes", "eval"]
 
 
-def nix(*args):
-    done = subprocess.run([*NIX, *args], cwd=ROOT, capture_output=True, text=True, timeout=EVAL_TIMEOUT)
+def nix(*args, pure=False):
+    """`pure` forbids import-from-derivation, so the evaluation needs no build of another system."""
+    options = ["--option", "allow-import-from-derivation", "false"] if pure else []
+    done = subprocess.run([*NIX, *options, *args], cwd=ROOT, capture_output=True, text=True, timeout=EVAL_TIMEOUT)
     if done.returncode != 0:
         raise AssertionError(f"nix eval {' '.join(args)} failed:\n{done.stderr[-4000:]}")
     return done.stdout
@@ -26,10 +29,10 @@ def username():
     return nix("--raw", "--file", str(ROOT / "vars/default.nix"), "username")
 
 
-def evaluate(output, apply):
+def evaluate(output, apply, pure=False):
     """`apply` is a Nix function of the host's `config` and the user's home-manager config `u`."""
     expression = f"c: let u = c.home-manager.users.{json.dumps(username())}; in ({apply}) c u"
-    return json.loads(nix("--json", f"{ROOT}#{output}.config", "--apply", expression))
+    return json.loads(nix("--json", f"{ROOT}#{output}.config", "--apply", expression, pure=pure))
 
 
 def check_command(case, command, host):
@@ -70,6 +73,11 @@ class LinuxUnits(unittest.TestCase):
                          {"Type": "oneshot", "ExecStart": [self.got["command"]], "Environment": []})
         self.assertEqual(service.get("Install", {}).get("WantedBy", []), [])
 
+    def test_a_switch_leaves_a_running_pass_alone(self):
+        # A pass can outlast sd-switch's two-minute wait; without keep-old, reloadSystemd
+        # restarts the oneshot on a changed store path and waits for it, failing activation.
+        self.assertEqual(self.got["service"]["Unit"].get("X-SwitchMethod"), "keep-old")
+
     def test_the_timer_fires_every_fifteen_minutes(self):
         timer = self.got["timer"]
         self.assertEqual(timer["Timer"], {"OnBootSec": "2min", "OnUnitActiveSec": "15min", "Persistent": True})
@@ -94,16 +102,23 @@ class DarwinHosts(unittest.TestCase):
           kickScript = u.verifyPending.kick;
           start = u.verifyPending.start;
           homeKick = u.home.activation ? verifyPendingKick;
-          user = u.home.username;
           agentCommand = c.launchd.user.agents.verify-pending.command;
           plist = c.environment.userLaunchAgents."org.nixos.verify-pending.plist".text;
+        }"""
+    # The activation scripts embed the home-manager activation package, whose evaluation
+    # imports from a derivation built for darwin (the catppuccin starship theme), so only a
+    # darwin machine can evaluate them. The assertions on them live in DarwinActivation.
+    ACTIVATION_APPLY = """c: u: {
+          user = u.home.username;
+          kickScript = u.verifyPending.kick;
           post = c.system.activationScripts.postActivation.text;
           activate = c.system.activationScripts.script.text;
         }"""
 
     @classmethod
     def setUpClass(cls):
-        cls.got = {host: evaluate(f"darwinConfigurations.{host}", cls.APPLY) for host in cls.HOSTS}
+        # pure: this part must evaluate on any machine, as the required CI job runs on Linux.
+        cls.got = {host: evaluate(f"darwinConfigurations.{host}", cls.APPLY, pure=True) for host in cls.HOSTS}
 
     def test_each_command_carries_its_own_flake_hostname(self):
         for host in self.HOSTS:
@@ -119,14 +134,8 @@ class DarwinHosts(unittest.TestCase):
                 self.assertIs(self.got[host]["homeKick"], False,
                               "on darwin the kick runs from nix-darwin postActivation, not home-manager")
 
-    REPOINT = 'ln -sfn "$(readlink -f "$systemConfig")" /run/current-system'
-
     def plist(self, host):
         return plistlib.loads(self.got[host]["plist"].encode())
-
-    def kick_line(self, host):
-        user, kick = self.got[host]["user"], self.got[host]["kickScript"]
-        return f'launchctl asuser "$(id -u {user})" sudo -u {user} --set-home {kick} "$(readlink -f "$systemConfig")" || true'
 
     def test_the_agent_runs_the_command_through_command_not_program_arguments(self):
         for host in self.HOSTS:
@@ -148,10 +157,30 @@ class DarwinHosts(unittest.TestCase):
                 self.assertIs(plist["RunAtLoad"], True)
                 self.assertEqual(set(plist), {"Label", "ProgramArguments", "StartInterval", "RunAtLoad"})
 
-    def test_the_switch_trigger_is_the_activation_kick_not_watchpaths(self):
+    def test_the_agent_has_no_watch_paths(self):
         for host in self.HOSTS:
             with self.subTest(host=host):
                 self.assertNotIn("WatchPaths", self.plist(host))
+
+
+@unittest.skipUnless(platform.system() == "Darwin", "the darwin activation text needs a darwin builder")
+class DarwinActivation(unittest.TestCase):
+    HOSTS = DarwinHosts.HOSTS
+
+    @classmethod
+    def setUpClass(cls):
+        cls.got = {host: evaluate(f"darwinConfigurations.{host}", DarwinHosts.ACTIVATION_APPLY)
+                   for host in cls.HOSTS}
+
+    REPOINT = 'ln -sfn "$(readlink -f "$systemConfig")" /run/current-system'
+
+    def kick_line(self, host):
+        user, kick = self.got[host]["user"], self.got[host]["kickScript"]
+        return f'launchctl asuser "$(id -u {user})" sudo -u {user} --set-home {kick} "$(readlink -f "$systemConfig")" || true'
+
+    def test_the_switch_trigger_is_the_activation_kick_after_home_manager(self):
+        for host in self.HOSTS:
+            with self.subTest(host=host):
                 post, line = self.got[host]["post"], self.kick_line(host)
                 self.assertEqual(post.count(line), 1, post)
                 self.assertLess(post.index("Activating home-manager configuration"), post.index(line))
