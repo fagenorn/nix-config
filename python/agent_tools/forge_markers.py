@@ -380,6 +380,14 @@ def list_issues(slug: str, label: str, since: datetime) -> list[dict]:
     return [issue for page in pages for issue in page]
 
 
+def open_issues(slug: str, label: str) -> list[dict]:
+    """Every open issue (a pull request is not one) carrying `label`, across all pages."""
+    pages = api_pages(f"repos/{slug}/issues?labels={quote(label)}&state=open&per_page=100")
+    if not all(isinstance(page, list) and all(isinstance(i, dict) for i in page) for page in pages):
+        raise ForgeError("payload_invalid", "issues are not an array of objects")
+    return [issue for page in pages for issue in page if "pull_request" not in issue]
+
+
 def close_issue(slug: str, issue: int, reason: str) -> None:
     """Close the issue with a state reason (`completed` or `not_planned`); closing a closed issue is a no-op."""
     _gh(["api", "-X", "PATCH", f"repos/{slug}/issues/{issue}", "-f", "state=closed",

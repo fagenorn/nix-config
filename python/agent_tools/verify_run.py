@@ -25,7 +25,9 @@ host-bound check whose host has been silent). Contesting a prompt is once-only, 
 is never posted again. A pass records that a host looked at the issue in a `verify-seen` report
 marker, which is what stale-check reads, and sweeps the prompts the freshly read held block no
 longer needs, keeping the `owner-action` label on the issue exactly while one `owner-action` marker
-stands. The `verify-` prefix keeps these reasons apart from the `owner-action` markers a batch posts
+stands. Every writing pass also keeps `owner-answered` in step with the live decision prompts
+(issue 670) through the one label writer, `forge_owner_action.apply_labels`: the sweep calls it
+for each held issue, then `pass_repo` reconciles the open issues carrying either label. The `verify-` prefix keeps these reasons apart from the `owner-action` markers a batch posts
 (issue 636), and the sweep only ends a marker of these reasons that carries `block` and `check`, so
 it never settles another writer's owner-action. `approve_all_live` is the owner's bulk tick of the
 live approve prompts of a repository, outside any pass.
@@ -39,7 +41,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools import forge_markers, verify_block, verify_exec, verify_facts, verify_issues, verify_owner
+from agent_tools import forge_markers, forge_owner_action, verify_block, verify_exec, verify_facts, verify_issues, verify_owner
 from agent_tools.forge_markers import ForgeError, Marker
 
 NEEDS = "needs-verification"
@@ -242,6 +244,12 @@ def pass_repo(project: Project, host: str, refs: verify_block.References, *,
     for node in list_held(project.slug):
         if issue is None or node.get("number") == issue:
             lines.extend(pass_issue(project, host, node, refs, report=report))
+    if not report:
+        try:
+            lines.extend(forge_owner_action.reconcile(project.slug, issue=issue))
+        except ForgeError:
+            lines.append({"repo": project.slug, "issue": None, "check": None, "ac": None,
+                          "state": "skipped", "reason": "forge_error"})
     return lines
 
 
@@ -861,14 +869,11 @@ class _Pass:
             if why is not None:
                 forge_markers.end(self.slug, self.number, m.comment_id, why)
                 gone.add(m.comment_id)
-        remaining = [m for m in fresh if m.kind == verify_owner.KIND and forge_markers.is_live(m, fresh)
-                     and m.comment_id not in gone]
-        name = verify_owner.LABEL[0]
-        if remaining and name not in labels:
-            forge_markers.ensure_label(self.slug, *verify_owner.LABEL)
-            forge_markers.add_label(self.slug, self.number, name)
-        elif not remaining and name in labels:
-            forge_markers.remove_label(self.slug, self.number, name)
+        # The label writer reads the trust set reconcile does (a collaborator's batch may post a decision
+        # prompt), or the two disagree on the same issue and the labels flap or owner-action is stripped.
+        wide = forge_markers.list_markers(self.slug, self.number, forge_owner_action.TRUSTED)
+        forge_owner_action.apply_labels(self.slug, self.number,
+                                        [m for m in wide if m.comment_id not in gone], labels, drop_bare=True)
 
     # --- closing (P9) ----------------------------------------------------------
 

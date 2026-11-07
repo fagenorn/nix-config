@@ -862,9 +862,9 @@ class PassBase(unittest.TestCase):
         self.workspaces.append((root, commit))
         yield self.world.checkout
 
-    def hold(self, *checks, association="OWNER", extra=(), fail_once=(), schedule=()):
+    def hold(self, *checks, association="OWNER", extra=(), fail_once=(), schedule=(), labels=("needs-verification",)):
         self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(*checks)), association), *extra],
-                                 labels=["needs-verification"], fail_once=list(fail_once), schedule=list(schedule))
+                                 labels=list(labels), fail_once=list(fail_once), schedule=list(schedule))
 
     def run_pass(self, host="mbp", report=False):
         return [entry for node in vr.list_held(SLUG)
