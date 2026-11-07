@@ -2516,6 +2516,15 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("PR creation", f"trap 'cd {there}' DEBUG; {create}"),
             ("PR creation", f"trap 'cd {there}' ERR; false; {create}"),
             ("PR creation", f"noglob cd {there} && {create}"),
+            # A zsh glob qualifier runs code while the shell itself expands a
+            # builtin's words or an array assignment (final review of issue 418).
+            ("push", f"echo /(e:'cd {there}':); git push origin trunk"),
+            ("push", f": /(e:'cd {foreign}':); git push origin {feature}"),
+            ("push", f"print /(e{{cd {there}}}); git push origin trunk"),
+            ("push", f"echo /(e.'c\"\"d {there}'.); git push origin trunk"),
+            ("push", f"X=(/(e:'cd {there}':)); git push origin trunk"),
+            ("push", f"X='/(e:cd {there}:)'; echo ${{~X}}; git push origin trunk"),
+            ("PR creation", f"echo /(e:'cd {there}':) && {create}"),
             ("push", f"cd {there} && c\\\nd {here} && git push origin {feature}"),
             # A quote's span ends where the shell ends it, so a continuation after it
             # still splits the directory word (final review of issue 418).

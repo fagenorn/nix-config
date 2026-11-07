@@ -1238,6 +1238,33 @@ def chdir_option(wrapper, word):
     return False
 
 
+def opens_substitution(tokens, index):
+    """Does the `(` or `{` operator at `index` open a `$(`, `${`, `<(` or `>(`
+    substitution (the word before it ends in `$`, `<` or `>`)?"""
+    return (index > 0 and not tokens[index - 1][1]
+            and tokens[index - 1][0].endswith(("$", "<", ">")))
+
+
+def inert_builtin_in_shell(tokens, flags):
+    """Is an inert builtin at a command position that the shell itself runs,
+    outside any `$(`, `${`, `<(`, `>(` or backtick substitution (issue 418)?"""
+    closers = []
+    backtick = False
+    for index, ((value, operator), flag) in enumerate(zip(tokens, flags)):
+        if operator:
+            if value == "`":
+                backtick = not backtick
+            elif value in "({" and opens_substitution(tokens, index):
+                closers.append(")" if value == "(" else "}")
+            elif closers and value == closers[-1]:
+                closers.pop()
+            continue
+        if (flag and not closers and not backtick
+                and split_redirection(value)[0] in INERT_BUILTINS):
+            return True
+    return False
+
+
 def directory_change(text):
     """Does the shell running `text` possibly change directory (issue 418)?
 
@@ -1248,7 +1275,12 @@ def directory_change(text):
     option that sets the directory (`env -C`, `sudo -D`, `--chdir`), a shell
     builtin or reserved word at a command position other than an inert one
     (`SHELL_BUILTINS`), a command word holding `=` (an element assignment such
-    as `functions[g]=...`) and an assignment to a zsh special hash.
+    as `functions[g]=...`) and an assignment to a zsh special hash. So do an
+    unquoted `(` that opens no `$(`, `<(` or `>(` substitution, and an
+    expansion in a segment an inert builtin runs:
+    zsh expands a builtin's words in the shell itself, and a glob qualifier
+    (`echo /(e:'cd <dir>':)`, `X=(...)`, or one reached through `${~X}`) runs code
+    there.
     """
     if shell_run_word(text, DIRECTORY_WORDS) is not None:
         return True
@@ -1263,6 +1295,11 @@ def directory_change(text):
         if tokens is None:
             states = dict.fromkeys(readings, fresh)
             continue
+        # A `$(`, `<(` or `>(` substitution runs in a subshell; any other
+        # unquoted `(` may be a glob qualifier the shell itself runs.
+        if any(token == ("(", True) and not opens_substitution(tokens, index)
+               for index, token in enumerate(tokens)):
+            return True
         flags = [False] * len(tokens)
         for reading in readings:
             read_flags, _payloads, after = detaching_command_flags(
@@ -1270,6 +1307,8 @@ def directory_change(text):
             dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
             states[reading] = after if dangling else fresh
             flags = [a or b for a, b in zip(flags, read_flags)]
+        if ("$" in segment or "`" in segment) and inert_builtin_in_shell(tokens, flags):
+            return True
         for index, (flag, (value, operator)) in enumerate(zip(flags, tokens)):
             if operator:
                 continue
