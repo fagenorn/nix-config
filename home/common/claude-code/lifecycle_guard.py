@@ -2310,6 +2310,18 @@ PUSH_URL_TIMEOUT = "push URL lookup timed out"
 PUSH_URL_UNRESOLVED = "cannot resolve origin's push URL"
 
 
+def push_url_slug_problem(url, repository):
+    """Why the GitHub push URL `url` does not name `repository`, or None.
+
+    The one predicate both modes apply to a push URL: the text mode to each URL
+    git reports for `origin` (`push_url_problem`), the pre-push mode to the URL
+    git hands the hook (issue 672 D2).
+    """
+    if github_slug(url) != repository:
+        return f"push URL {shown_value(url)} does not name {repository}"
+    return None
+
+
 def push_url_problem(context):
     """Why origin's effective push URL does not name the judged repository, or None.
 
@@ -2333,8 +2345,9 @@ def push_url_problem(context):
     if child.returncode != 0 or not urls:
         return PUSH_URL_UNRESOLVED
     for url in urls:
-        if github_slug(url) != context.repository:
-            return f"origin's push URL {shown_value(url)} does not name {context.repository}"
+        problem = push_url_slug_problem(url, context.repository)
+        if problem is not None:
+            return "origin's " + problem
     return None
 
 
@@ -3266,19 +3279,33 @@ def tag_problem(tag):
     return None
 
 
-def validate_tag_push(tag, context, compiled):
-    """The tag-push arm: `git push origin refs/tags/<vX.Y.Z>` of an existing annotated tag.
+def branch_target_problem(context, branch, deleting):
+    """Why `branch` may not be the target of a push (or of a remote deletion), or None.
 
-    The caller has judged the owner and the raw characters. The tag must exist
-    locally as an annotated tag object (`git cat-file -t` prints `tag`), so a
-    lightweight tag, a missing one or a branch of the same name never passes.
+    The default branch must resolve; a deletion never names the default branch or
+    the repository's declared integration branch (issue 458 D2); anything else
+    never pushes the default branch.
     """
-    problem = tag_problem(tag)
-    if problem is not None:
-        return refuse("push", problem, accepted_forms(compiled, context))
+    if context.base_branch is None:
+        return "cannot resolve the repository default branch"
+    if deleting:
+        if branch in (context.base_branch, context.integration_bases.get(context.repository)):
+            return f"refusing to delete the permanent branch {branch}"
+        return None
+    if branch == context.base_branch:
+        return f"refusing to push the default branch {branch}"
+    return None
+
+
+def annotated_tag_problem(context, tag, object_name):
+    """Why `object_name` is not an existing annotated tag object, or None.
+
+    `git cat-file -t <object_name>` in the context's directory must print `tag`,
+    so a lightweight tag, a missing one or a branch of the same name never passes.
+    """
     try:
         kind = subprocess.run(
-            [context.git_bin, "cat-file", "-t", TAG_REF_PREFIX + tag],
+            [context.git_bin, "cat-file", "-t", object_name],
             capture_output=True,
             text=True,
             timeout=context.timeout,
@@ -3286,10 +3313,33 @@ def validate_tag_push(tag, context, compiled):
             cwd=context.cwd,
         )
     except subprocess.TimeoutExpired:
-        return refuse("push", "tag lookup timed out")
+        return "tag lookup timed out"
     if kind.returncode != 0 or kind.stdout.strip() != "tag":
-        return refuse("push", f"{tag} is not an existing annotated tag")
-    return 0
+        return f"{tag} is not an existing annotated tag"
+    return None
+
+
+def push_arm_problem(context, form_id, value, tag_object):
+    """Why one arm of the push forms refuses, as (problem or None, offer_forms).
+
+    `form_id` is a `FORM_TABLE["push"]` form id and `value` its tag or branch.
+    `offer_forms` is true when the problem lies in the command's text, so the
+    text mode appends the accepted forms; a state problem offers none. Both modes
+    judge through this one function (issue 672 D2).
+    """
+    if form_id == "tag":
+        problem = tag_problem(value)
+        if problem is not None:
+            return problem, True
+        return annotated_tag_problem(context, value, tag_object), False
+    if form_id in ("branch", "delete"):
+        problem = branch_name_problem(context.git_bin, value, context.timeout)
+        if problem == BRANCH_VALIDATION_TIMEOUT:
+            return problem, False
+        if problem is not None:
+            return problem, True
+        return branch_target_problem(context, value, form_id == "delete"), False
+    raise AssertionError(f"unhandled push form {form_id}")
 
 
 def validate_push(text, context, compiled):
@@ -3303,27 +3353,172 @@ def validate_push(text, context, compiled):
     problem = push_url_problem(context)
     if problem is not None:
         return refuse("push", problem)
-    if match.form.id == "tag":
-        return validate_tag_push(match.values["vX.Y.Z"], context, compiled)
-    if match.form.id not in ("branch", "delete"):
-        raise AssertionError(f"unhandled push form {match.form.id}")
-    branch = match.values["branch"]
-    reason = branch_name_problem(context.git_bin, branch, context.timeout)
-    if reason == BRANCH_VALIDATION_TIMEOUT:
-        return refuse("push", reason)
-    if reason is not None:
-        return refuse("push", reason, accepted_forms(compiled, context))
-    if context.base_branch is None:
-        return refuse("push", "cannot resolve the repository default branch")
-    if match.form.id == "delete":
-        # Issue 458 D2: a remote deletion never names a permanent branch, the
-        # default branch or the repository's declared integration branch.
-        if branch in (context.base_branch, context.integration_bases.get(context.repository)):
-            return refuse("push", f"refusing to delete the permanent branch {branch}")
-        return 0
-    if branch == context.base_branch:
-        return refuse("push", f"refusing to push the default branch {branch}")
+    form_id = match.form.id
+    if form_id == "tag":
+        value = match.values["vX.Y.Z"]
+        tag_object = TAG_REF_PREFIX + value
+    else:
+        value = match.values.get("branch")
+        tag_object = None
+    problem, offer = push_arm_problem(context, form_id, value, tag_object)
+    if problem is not None:
+        return refuse("push", problem, accepted_forms(compiled, context) if offer else ())
     return 0
+
+
+PRE_PUSH_LABEL = "lifecycle guard pre-push"
+PRE_PUSH_FORMS = ("tag", "branch", "delete")
+PRE_PUSH_UNREADABLE = "cannot read the refs git handed the pre-push hook"
+PRE_PUSH_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+
+
+def pre_push_refuse(problem):
+    """Print one refused push on stderr and return 1, which aborts the push (D6)."""
+    print(f"{PRE_PUSH_LABEL}: unsafe push: {problem}", file=sys.stderr)
+    return 1
+
+
+def pre_push_form(remote_ref, local_sha, remote_sha, cwd, context):
+    """One ref update, read as a `FORM_TABLE["push"]` form: (form_id, value, problem).
+
+    The facts git hands the hook decide the form (issue 672 D2): a branch deleted is
+    `delete`, a branch created or fast-forwarded is `branch`, a tag created is `tag`,
+    and everything else (a force, a moved or deleted tag, another namespace) matches
+    no form and carries its problem. An all-zero sha means the ref is absent.
+    """
+    deleting = set(local_sha) == {"0"}
+    creating = set(remote_sha) == {"0"}
+    if remote_ref.startswith("refs/heads/"):
+        branch = remote_ref[len("refs/heads/"):]
+        if deleting:
+            return "delete", branch, None
+        if creating:
+            return "branch", branch, None
+        try:
+            child = subprocess.run(
+                [context.git_bin, "-C", cwd, "merge-base", "--is-ancestor",
+                 remote_sha, local_sha],
+                capture_output=True, text=True, timeout=context.timeout, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            child = None
+        if child is None or child.returncode != 0:
+            return None, branch, f"update of {branch} is not a fast-forward"
+        return "branch", branch, None
+    if remote_ref.startswith(TAG_REF_PREFIX):
+        tag = remote_ref[len(TAG_REF_PREFIX):]
+        if deleting:
+            return None, tag, f"refusing to delete the tag {tag}"
+        if not creating:
+            return None, tag, f"refusing to move the existing tag {tag}"
+        return "tag", tag, None
+    return None, remote_ref, (
+        f"remote ref {shown_value(remote_ref)} is neither a branch nor a release tag")
+
+
+def judge_pre_push(args, base, url, lines, cwd):
+    """Judge one push in `cwd`: 0 when admitted, else the first refusal's status (1).
+
+    The order is the text mode's: standing authorization, the push URL, then each
+    ref line in the order git handed them. `lines` are (local_ref, local_sha,
+    remote_ref, remote_sha) tuples.
+    """
+    deadline = time.monotonic() + INVOCATION_DEADLINE_SECONDS
+    try:
+        context = Context(args, base, cwd, deadline)
+        problem = ownership_problem(context)
+        if problem is None:
+            problem = push_url_slug_problem(url, context.repository)
+        if problem is not None:
+            return pre_push_refuse(problem)
+        for _local_ref, local_sha, remote_ref, remote_sha in lines:
+            form_id, value, problem = pre_push_form(
+                remote_ref, local_sha, remote_sha, cwd, context)
+            if problem is None:
+                problem, _offer = push_arm_problem(context, form_id, value, local_sha)
+            if problem is not None:
+                return pre_push_refuse(problem)
+    except DeadlineExhausted:
+        return pre_push_refuse(DEADLINE_REFUSAL)
+    return 0
+
+
+def parse_pre_push_lines(stdin_bytes):
+    """The ref lines git wrote to the hook, or None when any cannot be read."""
+    try:
+        text = stdin_bytes.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if not text:
+        return []
+    if not text.endswith("\n"):
+        return None
+    lines = []
+    for line in text[:-1].split("\n"):
+        fields = line.split(" ")
+        if len(fields) != 4:
+            return None
+        local_sha, remote_sha = fields[1], fields[3]
+        if (PRE_PUSH_SHA.fullmatch(local_sha) is None
+                or PRE_PUSH_SHA.fullmatch(remote_sha) is None
+                or len(local_sha) != len(remote_sha)):
+            return None
+        lines.append(tuple(fields))
+    return lines
+
+
+def chain_pre_push(args, base, stdin_bytes, cwd, chain_env):
+    """Run the repository's own pre-push hook; a stub until the chaining task."""
+    return 0
+
+
+def pre_push_main(args, stdin_bytes, environ, cwd):
+    """The git pre-push hook entry (issue 672): judge an agent session's push, then chain.
+
+    `args.hook_args` is git's `<remote> <url>`. The base policy loads first in
+    every session (D7). Repository-local `GIT_*` variables git exports to hooks
+    are removed from this process before any judgement, so the context and the row
+    check read the repository the hook runs in (D10); the chained hook gets a copy
+    of the original environment.
+    """
+    if len(args.hook_args) != 2:
+        print(f"{PRE_PUSH_LABEL}: expected <remote> <url> from git", file=sys.stderr)
+        return 1
+    _remote, url = args.hook_args
+    base, reason = load_base_policy(args.base_policy)
+    if base is None:
+        print(f"{PRE_PUSH_LABEL}: invalid policy: {reason}", file=sys.stderr)
+        return 1
+    if args.git_bin is None:
+        args.git_bin = base.git_bin
+    if args.gh_bin is None:
+        args.gh_bin = base.gh_bin
+    if args.jq_bin is None:
+        args.jq_bin = base.jq_bin
+    unreadable = f"{PRE_PUSH_LABEL}: cannot read git's repository-local variables"
+    try:
+        names = subprocess.run(
+            [base.git_bin, "rev-parse", "--local-env-vars"],
+            capture_output=True, text=True, timeout=args.child_timeout_seconds, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        print(unreadable, file=sys.stderr)
+        return 1
+    local_names = names.stdout.split()
+    if names.returncode != 0 or not local_names:
+        print(unreadable, file=sys.stderr)
+        return 1
+    chain_env = dict(environ)
+    for name in local_names:
+        os.environ.pop(name, None)
+    if environ.get("CLAUDECODE", ""):
+        lines = parse_pre_push_lines(stdin_bytes)
+        if lines is None:
+            return pre_push_refuse(PRE_PUSH_UNREADABLE)
+        status = judge_pre_push(args, base, url, lines, cwd)
+        if status != 0:
+            return status
+    return chain_pre_push(args, base, stdin_bytes, cwd, chain_env)
 
 
 def worktree_root(git_bin, cwd, timeout):
@@ -3875,7 +4070,15 @@ def main():
     parser.add_argument("--gh-bin", default=None)
     parser.add_argument("--jq-bin", default=None)
     parser.add_argument("--child-timeout-seconds", type=float, default=5)
+    parser.add_argument("--mode", choices=("hook", "pre-push"), default="hook")
+    parser.add_argument("--git-lfs-bin", default=None)
+    parser.add_argument("hook_args", nargs="*")
     args = parser.parse_args()
+
+    if args.mode == "pre-push":
+        return pre_push_main(args, sys.stdin.buffer.read(), os.environ, os.getcwd())
+    if args.hook_args:
+        return block("invalid hook input: unexpected arguments")
 
     try:
         payload = json.load(sys.stdin)
