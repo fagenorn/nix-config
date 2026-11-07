@@ -202,3 +202,142 @@ class RegisteredProjectDerivationTest(Refusals, unittest.TestCase):
         result = self.repo.git("push", "origin", "issue-2-topic", extra_env=exported,
                                cwd=self.linked)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+RECORDER = """#!/bin/sh
+printf '%s\\n' "$@" > "{out}.args"
+cat > "{out}.stdin"
+exit {status}
+"""
+
+
+class ChainingTest(unittest.TestCase):
+    def setUp(self):
+        self.world = PrePushWorld(self)
+        self.repo = self.world.fixture(OWN)
+        self.repo.git("switch", "-q", "-c", "issue-1-topic")
+        self.repo.commit("topic")
+        self.common_hooks = self.repo.work / ".git" / "hooks"
+        self.common_hooks.mkdir(exist_ok=True)
+        self.out = self.world.tmp / "repo-hook"
+
+    def repo_hook(self, name, status=0):
+        hook = self.common_hooks / name
+        hook.write_text(RECORDER.format(out=self.out, status=status), encoding="utf-8")
+        hook.chmod(0o755)
+
+    def test_the_repository_pre_push_hook_runs_with_the_same_arguments_and_refs(self):
+        self.repo_hook("pre-push")
+        head = self.repo.git("rev-parse", "HEAD").stdout.strip()
+        result = self.repo.git("push", "origin", "issue-1-topic", extra_env=AGENT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(f"{self.out}.args").read_text().splitlines(),
+                         ["origin", f"git@github.com:{OWN}.git"])
+        self.assertEqual(Path(f"{self.out}.stdin").read_text(),
+                         f"refs/heads/issue-1-topic {head} refs/heads/issue-1-topic "
+                         f"{'0' * 40}\n")
+
+    def test_a_failing_repository_pre_push_hook_refuses_an_admitted_push(self):
+        self.repo_hook("pre-push", status=1)
+        for env in (AGENT, {"CLAUDECODE": ""}):
+            result = self.repo.git("push", "origin", "issue-1-topic", extra_env=env)
+            self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(self.repo.remote_ref(OWN, "refs/heads/issue-1-topic"))
+
+    def test_a_refused_agent_push_never_runs_the_repository_hook(self):
+        self.repo_hook("pre-push")
+        self.repo.git("switch", "-q", "main")
+        self.repo.commit("onto main")
+        self.assertNotEqual(self.repo.git("push", "origin", "main", extra_env=AGENT).returncode, 0)
+        self.assertFalse(Path(f"{self.out}.args").exists())
+
+    def test_a_linked_worktree_push_runs_the_common_repository_hook(self):
+        self.repo_hook("pre-push")
+        linked = self.world.tmp / "linked"
+        self.repo.git("worktree", "add", "-q", "-b", "issue-2-topic", str(linked))
+        result = self.repo.git("push", "origin", "issue-2-topic", extra_env=AGENT, cwd=linked)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(Path(f"{self.out}.args").exists())
+
+    def test_the_repository_hook_sees_the_environment_git_gave_the_managed_hook(self):
+        hook = self.common_hooks / "pre-push"
+        hook.write_text(f'#!/bin/sh\nprintf %s "$GIT_DIR" > "{self.out}.gitdir"\n',
+                        encoding="utf-8")
+        hook.chmod(0o755)
+        gitdir = str(self.repo.work / ".git")
+        result = self.repo.git("push", "origin", "issue-1-topic",
+                               extra_env={**AGENT, "GIT_DIR": gitdir,
+                                          "GIT_WORK_TREE": str(self.repo.work)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(f"{self.out}.gitdir").read_text(), gitdir)
+
+    def test_a_repository_hook_linking_to_the_managed_hook_does_not_recurse(self):
+        (self.common_hooks / "pre-push").symlink_to(self.world.hooks / "pre-push")
+        result = subprocess.run(
+            [self.world.git_bin, "push", "origin", "issue-1-topic"], cwd=self.repo.work,
+            env={**self.repo.env, **AGENT}, capture_output=True, text=True, timeout=30,
+            check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_other_repository_hooks_still_run_through_the_chain_shim(self):
+        self.world.install_chain_shims(["pre-commit"])
+        self.repo_hook("pre-commit", status=1)
+        self.assertNotEqual(self.repo.git("commit", "-q", "--allow-empty", "-m", "x").returncode, 0)
+        (self.common_hooks / "pre-commit").unlink()
+        self.assertEqual(self.repo.git("commit", "-q", "--allow-empty", "-m", "x").returncode, 0)
+
+
+class LfsFallbackTest(unittest.TestCase):
+    """D5: git-lfs cannot install into the store hooks directory, so the managed
+    hooks run git-lfs for an LFS repository that has no hook of its own."""
+
+    def setUp(self):
+        self.world = PrePushWorld(self)
+        self.lfs = self.world.lfs_recorder()
+        self.world.install_chain_shims(["post-commit"], lfs_bin=str(self.lfs))
+        self.repo = self.world.fixture(OWN)
+        self.repo.git("switch", "-q", "-c", "issue-1-topic")
+        self.repo.commit("topic")
+        self.calls = self.world.tmp / "lfs.calls"
+
+    def lfs_repository(self):
+        (self.repo.work / ".git" / "lfs").mkdir()
+
+    def test_an_lfs_repository_runs_git_lfs_pre_push_with_the_refs(self):
+        self.lfs_repository()
+        head = self.repo.git("rev-parse", "HEAD").stdout.strip()
+        result = self.repo.git("push", "origin", "issue-1-topic", extra_env=AGENT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(),
+                         [f"pre-push origin git@github.com:{OWN}.git"])
+        self.assertEqual((self.world.tmp / "lfs.stdin").read_text(),
+                         f"refs/heads/issue-1-topic {head} refs/heads/issue-1-topic "
+                         f"{'0' * 40}\n")
+
+    def test_an_lfs_repository_runs_git_lfs_post_commit_through_the_shim(self):
+        self.lfs_repository()
+        self.assertEqual(self.repo.git("commit", "-q", "--allow-empty", "-m", "x").returncode, 0)
+        self.assertEqual(self.calls.read_text().splitlines(), ["post-commit"])
+
+    def test_a_repository_without_lfs_runs_no_git_lfs(self):
+        self.assertEqual(self.repo.git("push", "origin", "issue-1-topic",
+                                       extra_env=AGENT).returncode, 0)
+        self.repo.git("commit", "-q", "--allow-empty", "-m", "x")
+        self.assertFalse(self.calls.exists())
+
+    def test_the_repository_hook_takes_precedence_over_git_lfs(self):
+        self.lfs_repository()
+        hook = self.repo.work / ".git" / "hooks" / "pre-push"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text("#!/bin/sh\ncat >/dev/null\nexit 0\n", encoding="utf-8")
+        hook.chmod(0o755)
+        self.assertEqual(self.repo.git("push", "origin", "issue-1-topic",
+                                       extra_env=AGENT).returncode, 0)
+        self.assertFalse(self.calls.exists())
+
+    def test_a_refused_agent_push_never_runs_git_lfs(self):
+        self.repo.git("switch", "-q", "main")
+        self.repo.commit("onto main")
+        self.lfs_repository()  # after the commit, which would itself run post-commit
+        self.assertNotEqual(self.repo.git("push", "origin", "main", extra_env=AGENT).returncode, 0)
+        self.assertFalse(self.calls.exists())

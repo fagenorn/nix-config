@@ -3467,9 +3467,59 @@ def parse_pre_push_lines(stdin_bytes):
     return lines
 
 
+PRE_PUSH_LFS_NAMES = ("pre-push", "post-checkout", "post-commit", "post-merge")
+
+
+def hook_exit_status(returncode):
+    """A chained hook's status as the hook's own: a signal death is 1."""
+    return returncode if returncode >= 0 else 1
+
+
 def chain_pre_push(args, base, stdin_bytes, cwd, chain_env):
-    """Run the repository's own pre-push hook; a stub until the chaining task."""
-    return 0
+    """Run the repository's own pre-push hook, else git-lfs for an LFS repository (D5).
+
+    The hook is `<git-common-dir>/hooks/pre-push` when it is an executable regular file
+    that is not the hook git is running now, so a link to the managed hook cannot
+    recurse. A repository hook takes precedence over git-lfs, as git-lfs never
+    overwrites an existing hook. The chained program gets git's argv, the identical
+    stdin bytes, the pre-scrub environment, and this process's stdout, stderr and cwd.
+    """
+    unlocated = f"{PRE_PUSH_LABEL}: cannot locate the repository's own hooks"
+    git_bin = args.git_bin or base.git_bin
+    answers = []
+    for query in ("--git-common-dir", "--git-path"):
+        words = [git_bin, "rev-parse", "--path-format=absolute", query]
+        if query == "--git-path":
+            words.append("hooks")
+        try:
+            done = subprocess.run(words, cwd=cwd, capture_output=True, text=True,
+                                  timeout=args.child_timeout_seconds, check=False)
+        except (subprocess.TimeoutExpired, OSError):
+            print(unlocated, file=sys.stderr)
+            return 1
+        answer = done.stdout.strip()
+        if done.returncode != 0 or not answer:
+            print(unlocated, file=sys.stderr)
+            return 1
+        answers.append(answer)
+    common, running_hooks = answers
+    candidate = os.path.join(common, "hooks", "pre-push")
+    if (os.path.isfile(candidate) and os.access(candidate, os.X_OK)
+            and os.path.realpath(candidate)
+            != os.path.realpath(os.path.join(running_hooks, "pre-push"))):
+        program = [candidate, *args.hook_args]
+    elif args.git_lfs_bin and os.path.isdir(os.path.join(common, "lfs")):
+        program = [args.git_lfs_bin, "pre-push", *args.hook_args]
+    else:
+        return 0
+    try:
+        done = subprocess.run(program, input=stdin_bytes, cwd=cwd, env=dict(chain_env),
+                              check=False)
+    except OSError as error:
+        print(f"{PRE_PUSH_LABEL}: cannot run {program[0]}: {error.strerror or error}",
+              file=sys.stderr)
+        return 1
+    return hook_exit_status(done.returncode)
 
 
 def pre_push_main(args, stdin_bytes, environ, cwd):

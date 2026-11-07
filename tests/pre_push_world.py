@@ -13,12 +13,14 @@ import shutil
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterable
 from itertools import count
 from pathlib import Path
 
 from agent_tools.push_fixture import PushFixture, make_push_fixture
 
 GUARD_SOURCE = Path(__file__).resolve().parents[1] / "home/common/claude-code/lifecycle_guard.py"
+CHAIN_HOOK = Path(__file__).resolve().parents[1] / "home/common/claude-code/git-hooks/chain-hook"
 REAL_GIT = shutil.which("git")
 
 FAKE_DERIVE = """#!{python}
@@ -97,3 +99,24 @@ class PrePushWorld:
     def fixture(self, slug: str) -> PushFixture:
         return make_push_fixture(self.tmp / f"fixture-{next(self._fixtures)}", slug,
                                  git_bin=REAL_GIT, env=self.env, hooks_path=self.hooks)
+
+    def install_chain_shims(self, names: Iterable[str], lfs_bin: str = "") -> None:
+        """Copy the chain shim into `hooks/<name>` for each name, placeholders filled."""
+        source = CHAIN_HOOK.read_text(encoding="utf-8")
+        source = source.replace("@git@", REAL_GIT).replace("@gitlfs@", lfs_bin)
+        for name in names:
+            shim = self.hooks / name
+            shim.write_text(source, encoding="utf-8")
+            shim.chmod(0o755)
+
+    def lfs_recorder(self) -> Path:
+        """Write a fake git-lfs that records its arguments and stdin; point the hook at it."""
+        recorder = self.tmp / "fake-git-lfs"
+        recorder.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> {shlex.quote(str(self.tmp / 'lfs.calls'))}\n"
+            f"cat > {shlex.quote(str(self.tmp / 'lfs.stdin'))}\n", encoding="utf-8")
+        recorder.chmod(0o755)
+        self.lfs_bin = str(recorder)
+        self.write_hook()
+        return recorder
