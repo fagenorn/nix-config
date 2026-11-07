@@ -10,6 +10,22 @@ with neither `--pr-head` nor `--pr-branch`.
 JSON array whose elements are times or objects with a time at `K` (default
 `createdAt`), prints `{"count", "needed"}` and exits 0 when at least N are
 strictly after T, 75 ("not yet", never a failure) when fewer are, and 2 on bad input.
+
+`verify-pending run --host H [--repo SLUG] [--issue N] [--report]` runs, for every project in
+the fleet registry, the read-only checks of the open `needs-verification` issues that are due on
+host H (issue 630). The contract of each project is read at the integration branch commit
+`origin` lists, never the checkout; `--repo` keeps the one project whose tracker repository is
+SLUG and `--issue` keeps one issue number in every project it runs over (the two are
+independent); `--report` prints what is due and runs and writes nothing. Stdout is one
+`json.dumps(line, sort_keys=True)` per line, each `{repo, issue, check, ac, state, reason}`.
+A project that cannot be read is a `skipped` line with reason `project_unresolved`, one whose
+tracker is not GitHub is `tracker_not_github` (both omitted when `--repo` is given), and a forge
+failure while listing is `forge_error`. A write pass whose `gh` account the forge would not label
+`OWNER` or `MEMBER` (it could not read back its own markers) is a `runner_untrusted` line, written
+before any write or run. Exit 1 when any line is a `forge_error` or `runner_untrusted`, 2 on a usage
+error (a host that is not a hostname, a `--repo` no project registers, a refused registry) and
+otherwise 0, including with no forge credential: that prints `verify-pending: no-forge-credential`
+on stderr, nothing on stdout, and makes no other `gh` call.
 """
 
 import argparse
@@ -18,20 +34,27 @@ import os
 import subprocess
 import sys
 
+from collections.abc import Collection
+from pathlib import Path
+
+from agent_tools import agent_platform, forge_markers, verify_exec, verify_run
+from agent_tools.forge_markers import ForgeError
 from agent_tools.resolve_project import ContractError, resolve
-from agent_tools.verify_block import SHA, count_after, count_since, lint_block, parse_block
+from agent_tools.verify_block import HOST, SHA, count_after, count_since, lint_block, parse_block
 
 GIT_TIMEOUT = 60
 
 
 def git_ok(root: str, *args: str) -> bool:
     """True when `git -C root args` exits 0; raises OSError, SubprocessError or ValueError when git cannot run."""
-    return subprocess.run(["git", "-C", root, *args], capture_output=True, timeout=GIT_TIMEOUT).returncode == 0
+    return subprocess.run(["git", "-C", root, *args], capture_output=True, timeout=GIT_TIMEOUT,
+                          env=verify_exec.child_env()).returncode == 0
 
 
 def git_blob(root: str, spec: str) -> bool:
     """True when `spec` names a blob; a directory or a missing path is not one."""
-    result = subprocess.run(["git", "-C", root, "cat-file", "-t", spec], capture_output=True, timeout=GIT_TIMEOUT)
+    result = subprocess.run(["git", "-C", root, "cat-file", "-t", spec], capture_output=True, timeout=GIT_TIMEOUT,
+                            env=verify_exec.child_env())
     return result.returncode == 0 and result.stdout.strip() == b"blob"
 
 
@@ -54,7 +77,7 @@ def git_script(root: str, sha: str, path: str) -> tuple[str, str]:
             return "absent", "unknown"
         result = subprocess.run(
             ["git", "-C", root, "ls-tree", "-z", "--full-tree", sha, "--", path],
-            capture_output=True, timeout=GIT_TIMEOUT,
+            capture_output=True, timeout=GIT_TIMEOUT, env=verify_exec.child_env(),
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return "unknown", "unknown"
@@ -104,6 +127,29 @@ class CliReferences:
         return git_object(self.root, merge, "flake.nix")
 
 
+class PinnedReferences:
+    """The lint's lookups for the runner: the snapshot's commands and git objects at pinned commits.
+
+    It never reads the checkout's working tree or contract file; a commit the checkout lacks is
+    fetched from `origin` first (P17).
+    """
+
+    def __init__(self, root: Path, commands: Collection[str]):
+        self.root = root
+        self.commands = set(commands)
+
+    def command(self, command_id: str) -> str:
+        return "present" if command_id in self.commands else "absent"
+
+    def script(self, path: str, sha: str) -> tuple[str, str]:
+        verify_exec.ensure_commit(self.root, sha)
+        return git_script(str(self.root), sha, path)
+
+    def flake(self, merge: str) -> tuple[str, str] | None:
+        verify_exec.ensure_commit(self.root, merge)
+        return git_object(str(self.root), merge, "flake.nix")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="verify-pending")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -120,6 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
     since.add_argument("--since", required=True, help="the moment, an ISO 8601 time with a UTC offset")
     since.add_argument("--n", required=True, type=int, help="how many times are needed")
     since.add_argument("--key", default="createdAt", help="the member of an object element that holds its time")
+    run = commands.add_parser("run", help="run this host's due read-only checks across the fleet")
+    run.add_argument("--host", required=True, help="the host this run is on")
+    run.add_argument("--repo", help="only the project whose tracker repository is this owner/name")
+    run.add_argument("--issue", type=int, help="only this issue number, in every project the run covers")
+    run.add_argument("--report", action="store_true", help="print what is due and run nothing")
     return parser
 
 
@@ -182,9 +233,66 @@ def run_count_since(args: argparse.Namespace) -> int:
     return code
 
 
+def skipped(repo: str, reason: str) -> dict:
+    return {"repo": repo, "issue": None, "check": None, "ac": None, "state": "skipped", "reason": reason}
+
+
+def run_run(args: argparse.Namespace) -> int:
+    if not HOST.fullmatch(args.host):
+        print(f"verify-pending: --host {args.host} is not a hostname", file=sys.stderr)
+        return 2
+    if not forge_markers.logged_in():
+        print("verify-pending: no-forge-credential", file=sys.stderr)
+        return 0
+    try:
+        registry = agent_platform.read_registry()
+    except agent_platform.PlatformManifestError as error:
+        print(f"verify-pending: the fleet registry is refused: {error.repair_id}", file=sys.stderr)
+        return 2
+    lines: list[dict] = []
+    matched = False
+    for entry in registry:
+        try:
+            with verify_exec.project_source(entry) as source:
+                snapshot = source.snapshot
+                bindings = snapshot["bindings"]
+                tracker = bindings["tracker"]
+                if tracker.get("kind") != "github":
+                    if args.repo is None:
+                        lines.append(skipped(entry["project_id"], "tracker_not_github"))
+                    continue
+                if args.repo is not None and tracker.get("repo_slug") != args.repo:
+                    continue
+                matched = True
+                slug = tracker["repo_slug"]
+                project = verify_run.Project(entry["project_id"], slug, Path(entry["root"]),
+                                             source.contract_root, source.commit, bindings)
+                refs = PinnedReferences(Path(entry["root"]), bindings["commands"])
+                try:
+                    lines.extend(verify_run.pass_repo(project, args.host, refs, issue=args.issue,
+                                                      report=args.report))
+                except ForgeError:
+                    lines.append(skipped(slug, "forge_error"))
+        except verify_exec.SourceError:
+            if args.repo is None:
+                lines.append(skipped(entry["project_id"], "project_unresolved"))
+    if args.repo is not None and not matched:
+        print(f"verify-pending: {args.repo} is not a registered project", file=sys.stderr)
+        return 2
+    for line in lines:
+        print(json.dumps(line, sort_keys=True))
+        if line["reason"] == "runner_untrusted":
+            print(f"verify-pending: {line['repo']}: the gh account is neither the repository owner nor an "
+                  "organization member, so the markers it writes would be invisible to it; "
+                  "run `gh auth login` as one", file=sys.stderr)
+    return 1 if any(line["reason"] in ("forge_error", "runner_untrusted") for line in lines) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return run_count_since(args) if args.command == "count-since" else run_lint(args)
+    if args.command == "count-since":
+        return run_count_since(args)
+    return run_run(args) if args.command == "run" else run_lint(args)
 
 
 if __name__ == "__main__":
