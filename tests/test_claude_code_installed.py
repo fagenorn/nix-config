@@ -19,6 +19,14 @@ from pathlib import Path
 
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 SETTINGS_ENV = "CLAUDE_SETTINGS_PATH"
+INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
+GIT_HOOK_NAMES = (
+    "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit", "pre-merge-commit",
+    "prepare-commit-msg", "commit-msg", "post-commit", "pre-rebase", "post-checkout",
+    "post-merge", "pre-receive", "update", "proc-receive", "post-receive", "post-update",
+    "pre-auto-gc", "post-rewrite", "sendemail-validate", "p4-changelist",
+    "p4-prepare-changelist", "p4-post-changelist", "p4-pre-submit",
+)
 # Hidden from the model's skill listing while /<name> still runs it (issue 425 D1).
 HIDDEN = "user-invocable-only"
 EXPECTED_SKILL_OVERRIDES = {
@@ -132,6 +140,51 @@ class ClaudeLaunchersInstalledTest(unittest.TestCase):
         self.assertEqual(
             orchestrated.get("CLAUDE_CODE_PLUGIN_DIRS"), plain["CLAUDE_CODE_PLUGIN_DIRS"]
         )
+
+
+class GitHooksInstalledTest(unittest.TestCase):
+    """Issue 672: the generated global git config points core.hooksPath at the managed
+    hooks, whose pre-push runs the guard on the very policy inputs of the PreToolUse hook."""
+
+    @classmethod
+    def setUpClass(cls):
+        if INSTALLED_HOME_ENV not in os.environ or SETTINGS_ENV not in os.environ:
+            raise unittest.SkipTest(
+                f"{INSTALLED_HOME_ENV} or {SETTINGS_ENV} is unset; run "
+                f"`{INSTALLED_RECIPE}` to check the hooks the Nix build installs"
+            )
+        home = Path(os.environ[INSTALLED_HOME_ENV])
+        config = subprocess.run(
+            ["git", "config", "--file", str(home / ".config/git/config"), "core.hooksPath"],
+            capture_output=True, text=True, check=True)
+        cls.hooks = Path(config.stdout.strip())
+        settings = json.loads(Path(os.environ[SETTINGS_ENV]).read_text(encoding="utf-8"))
+        guards = [hook["command"] for entry in settings["hooks"]["PreToolUse"]
+                  for hook in entry["hooks"]
+                  if hook.get("command", "").endswith("/bin/claude-bash-lifecycle-guard")]
+        cls.guard_wrapper = Path(guards[0]).read_text(encoding="utf-8")
+
+    def test_hooks_path_is_the_managed_store_directory(self):
+        self.assertTrue(str(self.hooks).startswith("/nix/store/"), self.hooks)
+        self.assertTrue(self.hooks.name.endswith("-agent-git-hooks"), self.hooks)
+        self.assertEqual(sorted(p.name for p in self.hooks.iterdir()),
+                         sorted((*GIT_HOOK_NAMES, "pre-push")))
+        for path in self.hooks.iterdir():
+            self.assertTrue(os.access(path, os.X_OK), path)
+
+    def test_pre_push_reads_the_same_policy_as_the_pretooluse_guard(self):
+        pre_push = (self.hooks / "pre-push").read_text(encoding="utf-8")
+        exec_line = next(l for l in pre_push.splitlines() if l.startswith("exec "))
+        guard_line = next(l for l in self.guard_wrapper.splitlines() if l.startswith("exec "))
+        self.assertTrue(exec_line.startswith(guard_line.removesuffix(' "$@"')
+                                             + " --mode pre-push "), exec_line)
+        self.assertTrue(exec_line.endswith(' -- "$@"'), exec_line)
+
+    def test_the_shims_serve_git_lfs(self):
+        shim = (self.hooks / "post-commit").read_text(encoding="utf-8")
+        self.assertRegex(shim, r"lfs='/nix/store/[^']+/bin/git-lfs'")
+        self.assertIn("--git-lfs-bin /nix/store/",
+                      (self.hooks / "pre-push").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

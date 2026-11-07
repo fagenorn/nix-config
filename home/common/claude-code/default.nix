@@ -220,6 +220,67 @@ let
     '';
   };
 
+  # The managed global git hooks (issue 672). `core.hooksPath` replaces every
+  # per-repository hook directory, so the directory holds the authoritative
+  # `pre-push` guard wrapper and, for every other hook git runs, a shim that
+  # chains to the repository's own hook and serves git-lfs. `agentGitHookNames`
+  # leaves out `push-to-checkout`, `fsmonitor-watchman`, `reference-transaction`
+  # and `post-index-change` (README § Pre-push hook, D5). The `pre-push` text is
+  # the lifecycleGuard exec line plus `--mode pre-push`, the LFS binary and the
+  # hook's own arguments, so both read the same interpreter, source and policy.
+  agentGitHookNames = [
+    "applypatch-msg"
+    "pre-applypatch"
+    "post-applypatch"
+    "pre-commit"
+    "pre-merge-commit"
+    "prepare-commit-msg"
+    "commit-msg"
+    "post-commit"
+    "pre-rebase"
+    "post-checkout"
+    "post-merge"
+    "pre-receive"
+    "update"
+    "proc-receive"
+    "post-receive"
+    "post-update"
+    "pre-auto-gc"
+    "post-rewrite"
+    "sendemail-validate"
+    "p4-changelist"
+    "p4-prepare-changelist"
+    "p4-post-changelist"
+    "p4-pre-submit"
+  ];
+  gitLfsBin = lib.optionalString config.programs.git.lfs.enable "${config.programs.git.lfs.package}/bin/git-lfs";
+  agentGitHooks = pkgs.runCommand "agent-git-hooks" { nativeBuildInputs = [ pkgs.git ]; } ''
+    mkdir -p $out
+    cat > $out/pre-push <<'EOF'
+    #!${pkgs.runtimeShell} -p
+    unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
+    exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} --mode pre-push${lib.optionalString (gitLfsBin != "") " --git-lfs-bin ${gitLfsBin}"} -- "$@"
+    EOF
+    chmod 0555 $out/pre-push
+    for name in ${lib.concatStringsSep " " agentGitHookNames}; do
+      substitute ${./git-hooks/chain-hook} $out/$name \
+        --subst-var-by git ${pkgs.git}/bin/git \
+        --subst-var-by gitlfs '${gitLfsBin}'
+      chmod 0555 $out/$name
+      ${pkgs.stdenv.shellDryRun} $out/$name
+    done
+    for name in pre-push ${lib.concatStringsSep " " agentGitHookNames}; do
+      test -x $out/$name || { echo "agent-git-hooks: missing hook $name" >&2; exit 1; }
+    done
+    export HOME=$TMPDIR GIT_CONFIG_NOSYSTEM=1
+    git init -q $TMPDIR/scratch
+    cd $TMPDIR/scratch
+    if ! env -u CLAUDECODE $out/pre-push origin git@github.com:x/y.git < /dev/null; then
+      echo "agent-git-hooks: pre-push refused an empty push outside an agent session" >&2
+      exit 1
+    fi
+  '';
+
   # Durable, user-authored Claude Code settings (ported from the existing ~/.claude/settings.json).
   # Runtime-mutable noise — the accumulated project-specific permissions.allow list, OAuth,
   # project history, statsig caches — is intentionally NOT frozen here.
@@ -371,6 +432,9 @@ let
   settingsFile = (pkgs.formats.json { }).generate "claude-code-settings.json" settings;
 in
 {
+  # The managed global git hooks, on every host (issue 672 O4); README § Pre-push hook.
+  programs.git.settings.core.hooksPath = "${agentGitHooks}";
+
   programs.claude-code = {
     enable = true;
 
