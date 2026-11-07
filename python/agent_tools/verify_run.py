@@ -779,8 +779,10 @@ class _Pass:
         Settlement is judged against the block held now, never the one this pass ran: a pass
         that ran an older version must not end a prompt of the version now held. When the issue
         is closing, or is no longer listed because another run closed it, no question on it can
-        be answered any more: every live prompt ends as `closed` and the label goes, so a closed
-        issue never keeps an owner-action that no later pass will sweep."""
+        be answered any more: every live prompt ends as `closed`, so a closed issue never keeps a
+        prompt that no later pass will sweep. Another writer's owner-action marker (one without
+        `block` and `check`, such as a batch's) is never ended here, and the label stays while
+        one stands: that writer ends it and drops the label."""
         if not (self.owner_posted or verify_owner.LABEL[0] in self.labels
                 or any(m.kind == verify_owner.KIND for m in self.trusted)):
             return
