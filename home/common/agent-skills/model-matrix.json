@@ -161,16 +161,6 @@
   },
   "dispatch_sites": [
     {
-      "id": "orchestration-issue-owner",
-      "path": "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
-      "marker": "<!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->",
-      "call": "Agent(subagent_type=\"issue-owner\", model=\"opus\", effort=\"high\", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:",
-      "role": "issue-owner",
-      "model": "opus",
-      "effort": "high",
-      "requires": []
-    },
-    {
       "id": "from-issue-phase-delegate",
       "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
       "marker": "<!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->",
@@ -567,16 +557,6 @@
     }
   ],
   "scenarios": {
-    "orchestration": [
-      {
-        "workflow": "orchestration",
-        "dispatch": "orchestration-issue-owner",
-        "role": "issue-owner",
-        "model": "opus",
-        "effort": "high",
-        "requires": []
-      }
-    ],
     "from-issue": [
       {
         "workflow": "from-issue",
@@ -801,14 +781,6 @@
       }
     ],
     "representative": [
-      {
-        "workflow": "orchestration",
-        "dispatch": "orchestration-issue-owner",
-        "role": "issue-owner",
-        "model": "opus",
-        "effort": "high",
-        "requires": []
-      },
       {
         "workflow": "from-issue",
         "dispatch": "from-issue-phase-delegate",

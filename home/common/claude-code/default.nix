@@ -437,18 +437,18 @@ in
     recursive = true;
   };
 
-  # Claude-only dispatcher: fans issues out to independent background
-  # `/from-issue --auto` agents (background agents + task notifications are
-  # Claude-harness features Codex lacks).
-  home.file.".claude/skills/orchestrate-issues" = {
-    source = ./skills/orchestrate-issues;
-    recursive = true;
-  };
-
   # Claude-only standard lane: its SKILL.md starts deliver-standard.js with the
   # Workflow tool, a Claude Code feature Codex lacks.
   home.file.".claude/skills/deliver-standard" = {
     source = ./skills/deliver-standard;
+    recursive = true;
+  };
+
+  # Claude-only batch lane: its SKILL.md starts deliver-batch.js (in the
+  # deliver-standard directory) with the Workflow tool, a Claude Code feature
+  # Codex lacks.
+  home.file.".claude/skills/deliver-batch" = {
+    source = ./skills/deliver-batch;
     recursive = true;
   };
 
@@ -457,8 +457,8 @@ in
   # subagents dispatch explicitly as reviewer (opus/high), implementer
   # (sonnet/high for a planned sdd task and its first fix rounds, opus/high
   # for stuck-task escalation and the final-review fixer), mechanic
-  # (sonnet/high) or reviewer-lite (sonnet/medium). from-issue and
-  # orchestrate-issues launch their issue owners as issue-owner (opus/high,
+  # (sonnet/high) or reviewer-lite (sonnet/medium). from-issue launches its
+  # issue owners as issue-owner (opus/high,
   # xhigh for the autonomous design and planning owners), a definition with
   # no body that blocks the Artifact tools and the claude.ai Docs connector.
   # Skills reference them by name; home/common/agent-skills/model-matrix.json

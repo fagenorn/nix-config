@@ -2023,12 +2023,6 @@ class SkillNamedReplyTest(DeliveredCustody, unittest.TestCase):
         _, action = self.launched()
         return self.cli("current-launch", *self.run_args, "--action-id", action).stdout
 
-    def reply_owner_liveness(self):
-        _, action = self.launched()
-        with mock.patch.dict(os.environ, {"WORKFLOW_STATE_TEST_CLOCK": at(1)}):
-            return self.cli("owner-liveness", *self.run_args, "--action-id", action,
-                            "--stall-minutes", "90").stdout
-
     def reply_register_worker(self):
         _, action = self.launched()
         return self.cli("register-worker", *self.run_args, "--now", at(1),

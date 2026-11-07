@@ -11,4 +11,4 @@ Run the Workflow tool with `scriptPath` `deliver-standard.js` (this skill's dire
 
 Returns `{stage, ...}`. `done`, `planned`, `ready` succeed; keep `cont` for a later `mode`. No `cont`: report it. Else fix the cause (`needs_user`: ask, set `decisions`), rerun with `args.cont`.
 
-Batch: `deliver-batch.js` there, `args` `{repo_root, issues|label, batch_id: <host>-<yyyymmdd-hhmm>, child_script: deliver-standard.js path, decisions?}`. Report its table; continue as a new run on `relaunch` (`resumeFromRunId` only if it was cut off).
+Batch of issues: the `deliver-batch` skill.

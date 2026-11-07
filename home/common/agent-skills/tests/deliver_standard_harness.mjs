@@ -2,7 +2,7 @@
 // Usage: node deliver_standard_harness.mjs <program.js>  with a scenario JSON on stdin:
 //   { "args": {...}, "replies": { "<label>": reply | [reply per call] }, "patch": { "<label>": {...} } }
 // A label with no reply gets the default for its kind (DEFAULTS below); a patch
-// is merged over that default. Prints { result, calls: [{label, agentType, model, prompt}] }.
+// is merged over that default. Prints { result, calls: [{label, agentType, model, schema, prompt}] }.
 import { readFileSync } from 'node:fs'
 
 const program = readFileSync(process.argv[2], 'utf8')
@@ -53,7 +53,7 @@ const calls = []
 const seen = {}
 async function agent(prompt, opts = {}) {
   const label = opts.label
-  calls.push({ label, agentType: opts.agentType || null, model: opts.model || null, prompt })
+  calls.push({ label, agentType: opts.agentType || null, model: opts.model || null, schema: opts.schema || null, prompt })
   const n = seen[label] = (seen[label] || 0) + 1
   const replies = scenario.replies || {}
   if (Object.prototype.hasOwnProperty.call(replies, label)) {

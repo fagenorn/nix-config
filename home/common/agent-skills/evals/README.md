@@ -2,7 +2,7 @@
 
 Measurement harness for the skills in `../skills/` (shared tree) and
 `../../claude-code/skills/` (Claude-only tree — `codex-collaboration`,
-`orchestrate-issues`). Each skill keeps its cases in
+`deliver-standard`, `deliver-batch`). Each skill keeps its cases in
 `<skill-root>/<skill>/evals/evals.json`; everything here is the shared machinery.
 The runner searches the shared tree first, then the Claude-only tree.
 

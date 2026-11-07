@@ -12,7 +12,7 @@ let
   # cleanup removes their links on switch (#238 D6). The step below only
   # reports a retired directory that is still present, because whatever is
   # left in it is not Home Manager's to delete.
-  retiredSkillNames = [ "ui-ux-pro-max" ];
+  retiredSkillNames = [ "ui-ux-pro-max" "orchestrate-issues" ];
 
   # Home Manager's recursive directory mode creates real directories whose
   # individual files are store symlinks. Codex ignores a skill when SKILL.md
