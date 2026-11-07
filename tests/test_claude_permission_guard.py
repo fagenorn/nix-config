@@ -1471,6 +1471,33 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(2, result.returncode, bad)
                 self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
 
+    def test_pr_create_takes_an_optional_draft_flag(self):
+        """Issue 671: `--draft` stands after `--repo <slug>` in both creation forms,
+        with and without the token-scrub prefix; it stays refused anywhere else."""
+        repo = self.make_repo("https://github.com/fagenorn/argus.git")
+        head = "--base main --head issue-7-fix"
+        inline = '--title "fix: guard" --body "Closes #7"'
+        for command in (
+            f"gh pr create --repo fagenorn/argus --draft {head} {inline}",
+            f"unset GITHUB_TOKEN && gh pr create --repo fagenorn/argus --draft {head} {inline}",
+            f"env -u GITHUB_TOKEN gh pr create --repo fagenorn/argus --draft {head} {inline}",
+            f"gh pr create --repo fagenorn/argus --draft {head} --title t --body-file /tmp/n.md",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, result.stderr)
+        for bad in (
+            f"gh pr create --repo fagenorn/argus {head} {inline} --draft",
+            f"gh pr create --repo fagenorn/argus {head} --draft {inline}",
+            f"gh pr create --draft --repo fagenorn/argus {head} {inline}",
+            f"gh pr create --repo fagenorn/argus --draft --draft {head} {inline}",
+            f"gh pr create --repo fagenorn/argus --draft=true {head} {inline}",
+        ):
+            with self.subTest(command=bad):
+                result = self.run_guard(bad, cwd=repo)
+                self.assertEqual(2, result.returncode, bad)
+                self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
+
     def test_pr_create_body_file_must_be_outside_the_working_tree(self):
         """Issue 386: the PR is born with its notes via --body-file, from a path outside the tree."""
         repo = self.make_repo("https://github.com/fagenorn/argus.git")
@@ -2802,9 +2829,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                    "[--match-head-commit <sha>] --delete-branch")
         release = ('gh pr merge <n> --repo {slug} --merge [--subject "<subject>"] '
                    "[--match-head-commit <sha>] (only dev into main)")
-        create = ("gh pr create --repo {slug} --base {base} --head <branch> "
+        create = ("gh pr create --repo {slug} [--draft] --base {base} --head <branch> "
                   '--title "<title>" --body "<body>"')
-        create_file = ("gh pr create --repo {slug} --base {base} --head <branch> "
+        create_file = ("gh pr create --repo {slug} [--draft] --base {base} --head <branch> "
                        '--title "<title>" --body-file <path>')
         push = ("git push origin refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>; "
                 "or git push origin --delete refs/heads/<branch>")
