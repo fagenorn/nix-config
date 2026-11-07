@@ -265,6 +265,27 @@ class ClaimTest(unittest.TestCase):
         self.assertEqual(result["relaunch"]["issues"], [1])
         self.assertEqual(result["relaunch"]["conts"], {"1": {"setup": {}}})
 
+    def test_a_direct_lane_child_that_finds_the_issue_ineligible_is_rerun_in_the_standard_lane(self):
+        ineligible = {"stage": "ineligible", "impl": {"status": "blocked", "ineligible": True},
+                      "cont": {"setup": {}, "lane": "direct"}}
+        ready = {"stage": "ready", "head": SHA, "branch": "issue-1-x", "worktree": "/r/.wt/w-issue-1-x", "verify": [],
+                 "tasks": [{"n": 1}], "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+                 "cont": {"setup": {"holder": HOLDER}, "lane": "standard"}}
+        result, calls, _ = run(replies={"lane-1": {"lane": "direct", "why": "small"}}, children={"1": [ineligible, ready]})
+        runs = [c for c in calls if c["label"] == "child-1"]
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(runs[0]["args"]["lane"], "direct")
+        self.assertEqual(runs[1]["args"], {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready", "lane": "standard"})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertNotIn("conts", result["relaunch"] or {})
+
+    def test_a_standard_rerun_that_stops_again_forwards_only_its_own_cont(self):
+        ineligible = {"stage": "ineligible", "cont": {"setup": {}, "lane": "direct"}}
+        again = {"stage": "task", "task": {"n": 1}, "cont": {"setup": {}, "lane": "standard"}}
+        result, _, _ = run(replies={"lane-1": {"lane": "direct", "why": "small"}},
+                           children={"1": [ineligible, again]})
+        self.assertEqual(result["relaunch"]["conts"], {"1": {"setup": {}, "lane": "standard"}})
+
     def test_a_child_that_lost_its_claim_is_claim_lost(self):
         result, _, _ = run(children={"1": {"stage": "claimed", "verdict": "held_by", "by": "h2/b9"}})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["by"]), ("claim-lost", "h2/b9"))
@@ -333,6 +354,23 @@ class QuestionTest(unittest.TestCase):
                            children={"1": QUESTION})
         self.assertEqual(row(result, 1)["outcome"], "questions")
         self.assertNotIn("decisions", result["relaunch"])
+
+    def test_a_child_that_asks_again_drops_an_args_decision_from_the_relaunch(self):
+        held = {"claim": {"verdict": "held_by", "by": HOLDER}}
+        first, _, _ = run(args=dict(ARGS, decisions={"1": "Use the flag."}), patch={"facts-1": {"decision": OPEN}},
+                          children={"1": dict(QUESTION, needs_user=["Which host?"])})
+        self.assertEqual(row(first, 1)["outcome"], "questions")
+        self.assertEqual(first["relaunch"]["decisions"], {})
+        self.assertEqual(first["relaunch"]["conts"], {"1": QUESTION["cont"]})
+        # The new marker is open and unanswered: the relaunch waits, ends nothing and starts no child.
+        new_open = dict(OPEN, comment_id=120, items=["Which host?"])
+        second, calls, _ = run(args=first["relaunch"], patch={"facts-1": dict(held, decision=new_open)})
+        self.assertEqual(row(second, 1)["outcome"], "questions")
+        self.assertEqual(labels(calls), ["setup", "facts-1"])
+        # The owner answers the new questions on the issue: that reply, not the old answer, reaches the child.
+        answered = dict(new_open, verdict="answered", replies=[{"comment_id": 130, "author": "owner", "body": "Use host h9."}])
+        _, calls, _ = run(args=first["relaunch"], patch={"facts-1": dict(held, decision=answered)})
+        self.assertEqual(child(calls, 1)["args"]["decisions"], "Use host h9.")
 
     def test_no_decisions_key_without_an_answer(self):
         _, calls, _ = run()
@@ -641,6 +679,24 @@ class LandTest(unittest.TestCase):
         end = prompt(calls, "recover-end-1")
         for reason in ("conflict", "needs-label"):
             self.assertIn(f"forge-claim owner-action end --repo owner/repo --issue 1 --reason {reason}", end)
+        self.assertNotIn("land-pr-1", labels(calls))
+
+    def test_an_adopted_pr_merged_then_stopped_at_close_out_is_closed_out_by_the_relaunch(self):
+        first, _, _ = run(patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}},
+                          replies={"close-out-1": {"issue_state": "OPEN", "released": False, "notes": "release errored"}})
+        self.assertEqual((row(first, 1)["outcome"], row(first, 1)["stage"]), ("stopped", "close-out"))
+        cont = first["relaunch"]["conts"]["1"]
+        self.assertEqual(cont["setup"]["holder"], HOLDER)
+        self.assertEqual(cont["setup"]["branch"], "issue-1-x")
+        self.assertEqual(cont["setup"]["worktree"], "/r/.wt/w-issue-1-x")
+        self.assertEqual(cont["plan"]["acceptance"], [{"id": "AC1", "text": "works", "kind": "code"}])
+        done = {"stage": "done", "pr": 41, "merged": True, "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+                "close_out": {"issue_state": "CLOSED", "released": True}}
+        second, calls, _ = run(args=first["relaunch"],
+                               patch={"facts-1": {"merged_pr": 41, "claim": {"verdict": "held_by", "by": HOLDER}}},
+                               children={"1": done})
+        self.assertEqual((row(second, 1)["outcome"], row(second, 1)["pr"]), ("landed", 41))
+        self.assertEqual(child(calls, 1)["args"]["cont"], cont)
         self.assertNotIn("land-pr-1", labels(calls))
 
     def test_a_relaunched_merged_landing_with_open_criteria_is_held(self):

@@ -535,6 +535,8 @@ Return merged, merge_commit and notes.
 ${RULES}`, `land-merge-${n}`, { ...cheap, schema: LAND_MERGE_SCHEMA })
     if (!mg || mg.merged !== true) return out('stopped', { stage: 'merge', detail: mg ? mg.notes : `land-merge-${n} returned nothing` })
     await unlock()
+    // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
+    if (!CONTS[n]) CONTS[n] = { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }
 
     const openCriteria = ready.acceptance.filter(a => a.kind !== 'code')
     const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
@@ -682,6 +684,13 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `answered-${n}`, phase: 'Deliver', model
     let r = null
     try {
       try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
+      if (r && r.stage === 'ineligible' && !terminalChild(r)) {
+        // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
+        delete CONTS[n]
+        laneName = 'standard'
+        rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
+        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
+      }
       if (terminalChild(r)) trip(`child-${n}`)
     } finally {
       leave()
@@ -748,9 +757,13 @@ const open = table.filter(r => !FINAL.includes(r.outcome)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
 const relaunchArgs = () => {
   const a = { repo_root: REPO, batch_id: BATCH, child_script: CHILD, issues: open }
-  // Answers read from the tracker travel too (the marker they sat on is ended), except for an issue that asked again.
+  // Answers read from the tracker travel too (the marker they sat on is ended).
+  // An issue whose child asked again carries no answer at all: the old one answered the earlier questions, and the new marker's own reply must reach it.
   const decisions = { ...(DECISIONS || {}) }
-  for (const n of open) if (TAKEN[n] !== undefined && !decisions[String(n)] && rowOf(n).outcome !== 'questions') decisions[String(n)] = TAKEN[n]
+  for (const n of open) {
+    if (rowOf(n).outcome === 'questions') delete decisions[String(n)]
+    else if (TAKEN[n] !== undefined && !decisions[String(n)]) decisions[String(n)] = TAKEN[n]
+  }
   if (DECISIONS !== undefined || Object.keys(decisions).length) a.decisions = decisions
   const conts = {}
   for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
