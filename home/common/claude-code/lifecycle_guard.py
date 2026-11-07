@@ -1021,6 +1021,110 @@ def git_spelling(tokens, index, assigned):
     return None
 
 
+# Issue 655 D11: per allowlisted git subcommand, the options whose value git
+# runs as a command (a transport program, a hook-like exec, a config entry such
+# as `core.fsmonitor`, a template carrying hooks). The subcommand allowlist
+# alone cannot see them, because the subcommand itself cannot transmit refs.
+GIT_COMMAND_OPTIONS = {
+    "archive": frozenset({"--exec"}),
+    "clone": frozenset({"--upload-pack", "-u", "--config", "-c", "--template"}),
+    "fetch": frozenset({"--upload-pack"}),
+    "grep": frozenset({"--open-files-in-pager", "-O"}),
+    "init": frozenset({"--template"}),
+    "ls-remote": frozenset({"--upload-pack", "-u"}),
+    "pull": frozenset({"--upload-pack"}),
+    "rebase": frozenset({"--exec", "-x"}),
+}
+
+
+def git_command_option(subcommand, words):
+    """The first word of `words` that is a command option of `subcommand`
+    (GIT_COMMAND_OPTIONS), else None (issue 655 D11).
+
+    A `--` word matches by its part before any `=` when that part is at least
+    three characters and a `--` spelling of the subcommand starts with it, since
+    git accepts any unambiguous abbreviation (`--exe`, `--upload`). A `-` word
+    of two or more characters matches when any letter of its cluster is a short
+    spelling (`-ix`, `-Osh`). Every word is scanned, an option value or an
+    operand after `--` included: a word that only looks like an option can only
+    refuse more.
+    """
+    options = GIT_COMMAND_OPTIONS.get(subcommand, frozenset())
+    for word in words:
+        if word.startswith("--"):
+            name = word.partition("=")[0]
+            if len(name) >= 3 and any(
+                spelling.startswith(name)
+                for spelling in options if spelling.startswith("--")
+            ):
+                return word
+        elif word.startswith("-") and len(word) >= 2:
+            if any("-" + letter in options for letter in word[1:]):
+                return word
+    return None
+
+
+# Issue 655 D12: the environment names a git invocation may be given. Anything
+# else under GIT_ can hand git a command or other configuration
+# (`GIT_SEQUENCE_EDITOR`, `GIT_CONFIG_COUNT`, `GIT_SSH_COMMAND`, `GIT_EXEC_PATH`).
+GIT_ASSIGNMENT_ALLOWED = frozenset({
+    "GIT_TRACE", "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF",
+    "GIT_TRACE_CURL", "GIT_TRACE_PACKET", "GIT_TRACE_PERFORMANCE",
+    "GIT_TRACE_SETUP", "GIT_CURL_VERBOSE", "GIT_TERMINAL_PROMPT",
+    "GIT_OPTIONAL_LOCKS", "GIT_ADVICE", "GIT_FLUSH", "GIT_MERGE_VERBOSITY",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+    "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS", "LANG", "LC_ALL", "LC_MESSAGES", "TZ", "NO_COLOR",
+    "TERM", "COLUMNS",
+})
+# Issue 655 D12 (b): variables git runs as a program though they carry no `GIT_`
+# prefix; refused wherever they are assigned.
+GIT_COMMAND_VARIABLES = frozenset({"EDITOR", "VISUAL", "PAGER"})
+
+
+def git_assignment_problem(names, strict):
+    """The refusal for the first assigned name in `names` that can make git run
+    a command or read other configuration, else None (issue 655 D12).
+
+    `strict` judges the prefix of a git word, where only GIT_ASSIGNMENT_ALLOWED
+    passes. Otherwise (an assignment anywhere in the command) a name is refused
+    when it starts with `GIT_` and is not allowlisted, or is in
+    GIT_COMMAND_VARIABLES.
+    """
+    for name in names:
+        if strict:
+            refused = name not in GIT_ASSIGNMENT_ALLOWED
+        else:
+            refused = (
+                name.startswith("GIT_") and name not in GIT_ASSIGNMENT_ALLOWED
+            ) or name in GIT_COMMAND_VARIABLES
+        if refused:
+            return (
+                f"the assignment {shown_value(name)}= can make git run a "
+                f"command or read other configuration; {INVOCATION_FORM_HINT}"
+            )
+    return None
+
+
+def git_prefix_assignments(tokens, index):
+    """The names assigned by the non-operator tokens between the last operator
+    token before `index` (the segment start when none) and `index`, in order
+    (issue 655 D12 a). This covers `X=1 git …`, `env X=1 git …` and
+    `timeout 5 env X=1 git …`."""
+    start = 0
+    for position in range(index - 1, -1, -1):
+        if tokens[position][1]:
+            start = position + 1
+            break
+    names = []
+    for value, is_operator in tokens[start:index]:
+        match = None if is_operator else ASSIGNMENT_PREFIX.match(value)
+        if match is not None:
+            names.append(match.group()[:-1])
+    return names
+
+
 def git_transmit_problem(program, words, truncation):
     """The refusal for a git word that could transmit refs and is not a
     lifecycle form, else None (issue 655 D4, D5, D8, D9).
@@ -1066,6 +1170,12 @@ def git_transmit_problem(program, words, truncation):
             f"an alias, a git-* program or a transport could transmit refs; "
             f"{INVOCATION_FORM_HINT}"
         )
+    option = git_command_option(subcommand, words[index + 1:])
+    if option is not None:
+        return (
+            f"git {shown_value(subcommand)} {shown_value(option)} can run a "
+            f"command the guard cannot judge; {INVOCATION_FORM_HINT}"
+        )
     return None
 
 
@@ -1091,6 +1201,10 @@ def transmit_in_raw_text(text):
         for reading in (raw_words(piece), raw_words(piece, glued=True)):
             for position, word in enumerate(reading):
                 if dashed_git_program(program_name(word)):
+                    return True
+                match = ASSIGNMENT_PREFIX.match(word)
+                if match is not None and git_assignment_problem(
+                        [match.group()[:-1]], False) is not None:
                     return True
                 if (GIT_RAW_WORD.fullmatch(word) is not None
                         and git_transmit_problem(
@@ -1318,6 +1432,18 @@ def guarded_operations(command):
             # from stdin (`echo 'git p' | sh`, `sh <<EOF`), which is another
             # segment or a heredoc body the segments drop (issue 655 D7).
             found.append(("transmit", segment, raw_reason, None))
+        # Issue 655 D12 (b): an assignment that hands git a command or other
+        # configuration, in any position of the command.
+        for value, is_operator in tokens:
+            match = None if is_operator else ASSIGNMENT_PREFIX.match(value)
+            if match is None:
+                continue
+            problem = git_assignment_problem([match.group()[:-1]], False)
+            if problem is not None:
+                found.append((
+                    "transmit", segment,
+                    raw_reason if raw_reason is not None else problem, None,
+                ))
         operands = set()
         for index in range(len(tokens)):
             if index in operands:
@@ -1348,7 +1474,10 @@ def guarded_operations(command):
                         else None
                     )
                     reader = git_transmit_problem if flags[index] else git_argument_problem
-                    problem = reader(value, run, truncation)
+                    problem = git_assignment_problem(
+                        git_prefix_assignments(tokens, index), True)
+                    if problem is None:
+                        problem = reader(value, run, truncation)
                     if problem is not None:
                         found.append((
                             "transmit", segment,

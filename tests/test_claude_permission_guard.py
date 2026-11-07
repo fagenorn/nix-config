@@ -2894,6 +2894,91 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
 
+    def test_command_running_git_options_and_environment_are_refused(self):
+        """Issue 655 AC2, D11, D12: an allowlisted subcommand carrying an option whose
+        value git runs as a command, and an assignment that hands git a command or
+        other configuration, are refused as a push in every position; local
+        spellings still pass."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        runs = "can run a command the guard cannot judge"
+        assigns = "can make git run a command or read other configuration"
+        evaluator = "shell source passed to an evaluator cannot be validated"
+        force = "git push --force origin main"
+        for command, reason in (
+            (f"git fetch --upload-pack='{force} #' .",
+             f"git fetch --upload-pack={force} # {runs}"),
+            ("git fetch --upload=/tmp/p.sh .", f"git fetch --upload=/tmp/p.sh {runs}"),
+            ("git pull --upload-pack=/tmp/p.sh origin main",
+             f"git pull --upload-pack=/tmp/p.sh {runs}"),
+            ("git ls-remote --upload-pack=/tmp/p.sh .",
+             f"git ls-remote --upload-pack=/tmp/p.sh {runs}"),
+            ("git ls-remote -u /tmp/p.sh .", f"git ls-remote -u {runs}"),
+            ("git clone -u /tmp/p.sh . /tmp/x", f"git clone -u {runs}"),
+            ("git clone -c core.fsmonitor=/tmp/p.sh . /tmp/x", f"git clone -c {runs}"),
+            ("git clone --config=core.pager=x . /tmp/x",
+             f"git clone --config=core.pager=x {runs}"),
+            ("git clone --template=/tmp/t . /tmp/x", f"git clone --template=/tmp/t {runs}"),
+            ("git init --template=/tmp/t /tmp/x", f"git init --template=/tmp/t {runs}"),
+            ("git archive --remote=. --exec=/tmp/p.sh HEAD",
+             f"git archive --exec=/tmp/p.sh {runs}"),
+            ("git grep -O'sh /tmp/p.sh' x", f"git grep -Osh /tmp/p.sh {runs}"),
+            ("git rebase --exec true HEAD~1", f"git rebase --exec {runs}"),
+            ("git rebase -ix true HEAD~1", f"git rebase -ix {runs}"),
+            ("git rebase --exe=true HEAD~1", f"git rebase --exe=true {runs}"),
+            ("xargs git fetch --upload-pack=/tmp/p.sh .",
+             f"git fetch --upload-pack=/tmp/p.sh {runs}"),
+            ("sh -c 'git fetch --upload-pack=/tmp/p.sh .'", evaluator),
+            # D12 (a): an assignment prefix of a git word must be allowlisted.
+            (f"GIT_SEQUENCE_EDITOR='{force}; true' git rebase -i HEAD~1",
+             f"the assignment GIT_SEQUENCE_EDITOR= {assigns}"),
+            ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor "
+             "GIT_CONFIG_VALUE_0=/tmp/p.sh git status",
+             f"the assignment GIT_CONFIG_COUNT= {assigns}"),
+            ("GIT_CONFIG_PARAMETERS=\"'core.pager=x'\" git log",
+             f"the assignment GIT_CONFIG_PARAMETERS= {assigns}"),
+            ("env GIT_SSH_COMMAND=/tmp/p.sh git fetch origin",
+             f"the assignment GIT_SSH_COMMAND= {assigns}"),
+            ("GIT_EXEC_PATH=/tmp/x git status", f"the assignment GIT_EXEC_PATH= {assigns}"),
+            ("PATH=/tmp/x:$PATH git log", f"the assignment PATH= {assigns}"),
+            ("HOME=/tmp/h git log", f"the assignment HOME= {assigns}"),
+            ("timeout 5 env GIT_EDITOR=/tmp/p.sh git commit",
+             f"the assignment GIT_EDITOR= {assigns}"),
+            # D12 (b): anywhere in the command.
+            (f"export GIT_PAGER='{force}'; git log",
+             f"the assignment GIT_PAGER= {assigns}"),
+            (f"export PAGER='{force}'; git log", f"the assignment PAGER= {assigns}"),
+            ("EDITOR=/tmp/p.sh; git commit", f"the assignment EDITOR= {assigns}"),
+            ("sh -c 'GIT_PAGER=/tmp/p.sh git log'", evaluator),
+            ("echo \"$(GIT_PAGER=/tmp/p.sh git log)\"",
+             "a command substitution inside a quoted word cannot be validated"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe push: {reason}", result.stderr)
+                self.assertIn("; accepted: git push ", result.stderr)
+        for command in (
+            "git fetch origin",
+            "git pull --ff-only origin main",
+            "git ls-remote --heads origin",
+            "git clone --depth 1 --quiet . /tmp/x",
+            "git init --quiet /tmp/x",
+            "git archive -o /tmp/a.tar HEAD",
+            "git grep -n foo",
+            "git rebase -i origin/main",
+            "git rebase --empty=drop origin/main",
+            "GIT_TRACE=1 git status",
+            "GIT_AUTHOR_DATE=2026-01-01 git commit -m x",
+            "LC_ALL=C git log -1",
+            "env -u GITHUB_TOKEN git status",
+            "export FOO=1; git status",
+            "echo $GIT_PAGER",
+            "PYTHONPATH=python python3 -c pass",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
     def test_transmit_rule_reads_substitutions_spellings_and_stdin(self):
         """Issue 655 D2 and D7 review: a git word the shell runs from inside a
         double-quoted substitution, spelled `$'git'`, `git` plus a line
