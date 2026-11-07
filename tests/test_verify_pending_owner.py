@@ -330,7 +330,7 @@ class ClosingEndsPromptsTest(OwnerBase):
 
     def test_closing_as_not_verified_ends_a_waiting_ask_and_drops_the_label(self):
         later = check(ac="AC2", run={"command": "check-later"})
-        self.hold(ask_check(), later)
+        self.hold(ask_check(expires_after_days=90), later)  # the ask outlives the later check's window
         self.run_pass()  # the ask is posted and the later check opens its window
         prompt, = self.live_prompts()
         self.assertIn("owner-action", self.world.issue()["labels"])
@@ -487,6 +487,26 @@ class ApprovalProgressTest(OwnerBase):
         self.tick(decision.comment_id, "Close as not verified")
         self.assertEqual(self.run_pass()[0], line(0, "AC1", "rejected", "owner_answered"))
         self.assertEqual(self.spawned("verify-ok"), 0)
+
+    def test_an_unanswered_ask_expires_once_its_check_has_waited_past_expires_after_days(self):
+        self.hold(ask_check(expires_after_days=7))
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_asked")])
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_waiting")])
+        self.advance("2026-11-20T10:00:00Z")
+        self.assertEqual(self.run_pass()[0], line(0, "AC1", "expired", "changed"))
+        self.assertEqual(self.results(), ["expired"])
+        self.assertEqual(self.world.issue()["state"], "closed")
+        self.assertEqual(self.live_prompts(), [])
+
+    def test_an_unanswered_ask_past_expiry_with_on_expire_ask_posts_one_decision(self):
+        self.hold(ask_check(expires_after_days=7, on_expire="ask"))
+        self.run_pass()
+        self.advance("2026-11-20T10:00:00Z")
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pending", "owner_waiting")])
+        decision, = self.prompts("verify-decision")
+        self.assertEqual(decision.fields["on"], "expire")
+        self.run_pass()
+        self.assertEqual(len(self.prompts("verify-decision")), 1)
 
     def test_a_live_act_then_is_approved_and_run_once_ticked(self):
         act = check(kind="human", reason="hands", effects="live",

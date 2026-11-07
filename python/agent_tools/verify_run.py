@@ -615,7 +615,11 @@ class _Pass:
                    prev: str | None, due: verify_facts.Due, gate_reason: str) -> None:
         """What a due check only the owner can answer does this pass: ask once, then wait."""
         if "ask" in check["run"]:
-            if verify_owner.prompts(self.markers, verify_owner.ASK, self.block_key, index):
+            asked = verify_owner.prompts(self.markers, verify_owner.ASK, self.block_key, index)
+            if asked:
+                waiting = verify_owner.live_prompts(self.markers, (verify_owner.ASK,), self.block_key, index)
+                if self.expire_waiting(index, check, ac, key, previous, waiting):  # an unanswered ask lapses like an approval
+                    return
                 return self.line(index, ac, "pending", "owner_waiting")
             won = self.prompt(verify_owner.ASK, index, {"host": self.host}, f"{ac}: the owner's answer is needed.",
                               f"{check['run']['ask']}\n\n{verify_owner.box(verify_owner.ACCEPT)}\n"
