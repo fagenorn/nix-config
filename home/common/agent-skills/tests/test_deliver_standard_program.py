@@ -865,6 +865,52 @@ class ShipTest(unittest.TestCase):
         self.assertNotIn("close-out", labels(calls))
 
 
+class MergeRefusedBehindTest(unittest.TestCase):
+    """#662: a merge refused because the integration branch moved syncs and retries, bounded at three refusals."""
+
+    STALE = {"merged": False, "behind": True, "notes": "GraphQL: Head branch is not up to date with the base branch"}
+
+    def test_one_refusal_syncs_then_merges(self):
+        merge = "d" * 40
+        result, calls = run(replies={"merge": [self.STALE, {"merged": True, "merge_commit": merge, "notes": "merged"}],
+                                     "checks-2": {"state": "behind", "head": SHA},
+                                     "checks-3": {"state": "passed", "head": merge}},
+                            patch={"sync-1": {"merge_commit": merge}})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("merge"):], [
+            "merge", "renew-checks-2", "checks-2", "sync-1", "renew-checks-3", "checks-3",
+            "renew-merge", "merge", "hold", "close-out"])
+        self.assertIn(f"--match-head-commit {merge}", prompt(calls, "merge"))
+        self.assertEqual(result["syncs"], 1)
+
+    def test_three_refusals_stop_at_merge_with_cont(self):
+        behind = {"state": "behind", "head": SHA}
+        result, calls = run(replies={"merge": self.STALE, "checks-2": behind, "checks-4": behind})
+        self.assertEqual(result["stage"], "merge")
+        self.assertEqual(labels(calls).count("merge"), 3)
+        self.assertEqual([l for l in labels(calls) if l.startswith("sync-")], ["sync-1", "sync-2"])
+        self.assertIn("cont", result)
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_any_other_refusal_stops_at_once(self):
+        result, calls = run(replies={"merge": {"merged": False, "behind": False, "notes": "required check pending"}})
+        self.assertEqual(result["stage"], "merge")
+        self.assertEqual(labels(calls).count("merge"), 1)
+        self.assertNotIn("sync-1", labels(calls))
+        self.assertIn("cont", result)
+
+    def test_a_refusal_with_no_verdict_stops_at_once(self):
+        result, calls = run(replies={"merge": {"merged": False, "notes": "head moved"}})
+        self.assertEqual(result["stage"], "merge")
+        self.assertEqual(labels(calls).count("merge"), 1)
+
+    def test_merge_prompt_names_the_not_up_to_date_verdict(self):
+        _, calls = run()
+        self.assertIn("behind", schema_of(calls, "merge")["properties"])
+        self.assertIn("not up to date", prompt(calls, "merge"))
+
+
 FIX = "f" * 40
 MERGE = "d" * 40
 RED = {"state": "failed", "head": SHA, "failing": ["ci-tests"], "details": "FAIL test_cache: host-installed state"}
