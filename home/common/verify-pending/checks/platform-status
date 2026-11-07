@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 580 (issue 638): the installed resolve-project platform-status on
+# this host. The block's expect judges its JSON. verify-pending runs it from the repository
+# root at the commit the block names; ~/.agents/bin is not on the runner's PATH.
+PATH="$HOME/.agents/bin:$PATH" exec resolve-project platform-status
