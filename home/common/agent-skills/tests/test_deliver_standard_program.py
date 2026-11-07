@@ -27,6 +27,38 @@ PLAN = {
 }
 
 
+OK_LINT = {"ok": True, "errors": []}
+EVIDENCE = {"id": "AC2", "text": "deployed", "kind": "evidence",
+            "verify": {"ac": "AC2", "kind": "evidence", "host": "h1",
+                       "when": {"deployed_includes": SHA}, "run": {"probe": "deployed_includes", "sha": SHA}},
+            "lint": OK_LINT}
+HUMAN = {"id": "AC3", "text": "looks right", "kind": "human",
+         "verify": {"ac": "AC3", "kind": "human", "host": "h1", "when": {"days_after": {"event": "deployed", "days": 1}},
+                    "run": {"ask": "Does the page render right on the phone"}, "reason": "senses"},
+         "lint": OK_LINT}
+RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
+
+
+def refused(*errors):
+    return {"ok": False, "errors": [{"field": f, "code": c, "message": "m"} for f, c in errors]}
+
+
+def criterion(base, **changes):
+    out = json.loads(json.dumps(base))
+    for key, value in changes.items():
+        if key.startswith("verify_"):
+            out["verify"][key[len("verify_"):]] = value
+        elif value is None:
+            out.pop(key, None)
+        else:
+            out[key] = value
+    return out
+
+
+def with_criteria(*extra, **top):
+    return dict(PLAN, acceptance=PLAN["acceptance"] + list(extra), **top)
+
+
 def tasks(count, risk="standard"):
     return [{"n": n, "title": f"t{n}", "file": f"/g/task-{n}.md", "risk": risk}
             for n in range(1, count + 1)]
@@ -64,7 +96,7 @@ class HappyPathTest(unittest.TestCase):
         self.assertEqual(labels(calls), [
             "setup", "acquire", "worktree", "renew-plan", "plan", "plan-codex", "plan-review", "renew-tasks",
             "impl-1", "review-1", "renew-final-review", "final-codex", "final-1", "renew-verify", "verify",
-            "renew-ship", "pr", "renew-checks-1", "checks-1", "renew-merge", "merge", "close-out"])
+            "renew-ship", "pr", "renew-checks-1", "checks-1", "renew-merge", "merge", "hold", "close-out"])
 
     def test_merge_carries_contract_strategy_and_the_checked_head(self):
         # The contract decides the form; a host guard that accepts fewer forms refuses
@@ -96,12 +128,16 @@ class HappyPathTest(unittest.TestCase):
         self.assertIn("gh issue close 9", prompt(calls, "close-out"))
 
     def test_non_code_criterion_holds_the_issue_open(self):
-        plan = dict(PLAN, acceptance=PLAN["acceptance"] + [{"id": "AC2", "text": "x", "kind": "evidence"}])
-        _, calls = run(replies={"plan": plan}, patch={"setup": {"integration_branch": "main"}})
+        plan = dict(PLAN, acceptance=PLAN["acceptance"] + [EVIDENCE])
+        result, calls = run(replies={"plan": plan}, patch={"setup": {"integration_branch": "main"},
+                                                            "close-out": {"issue_state": "OPEN"}})
+        self.assertEqual(result["stage"], "done")
         self.assertIn("Refs #9", prompt(calls, "pr"))
+        self.assertEqual(labels(calls)[-3:], ["merge", "hold", "close-out"])
         close = prompt(calls, "close-out")
         self.assertNotIn("gh issue close", close)
-        self.assertIn("needs-verification", close)
+        self.assertNotIn("needs-verification", close)
+        self.assertIn("needs-verification", prompt(calls, "hold"))
 
 
 class ContractTest(unittest.TestCase):
@@ -465,6 +501,122 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(labels(calls).count("plan-revise"), 1)
 
 
+class PlanRulesTest(unittest.TestCase):
+    """#634 AC1: plan review rejects each acceptance planning rule's violation and accepts a compliant plan."""
+
+    ROWS = (
+        ("R1", criterion(EVIDENCE, verify_when={"ci_run_includes": {"workflow": "ci", "branch": "issue-9-x", "sha": SHA}},
+                         lint=refused(("checks[0].when", "pre_merge_only")))),
+        ("R2", criterion(HUMAN, verify_run={"ask": "Approve the design"},
+                         lint=refused(("checks[0].run.ask", "approval_ask")))),
+        ("R3", criterion(HUMAN, verify_reason="taste ")),
+        ("R3", criterion(HUMAN, lint=refused(("checks[0].reason", "reason_required")))),
+        ("R4", criterion(EVIDENCE, verify=None)),
+        ("R4", criterion(EVIDENCE, lint=None)),
+        ("R4", criterion(EVIDENCE, verify_run={"command": "deploy-now"},
+                         lint=refused(("checks[0].run.command", "not_declared")))),
+        ("R4", criterion(EVIDENCE, verify_run={"command": "smoke"})),
+        ("R4", criterion(EVIDENCE, verify_ac="AC9")),
+        ("R5", criterion(EVIDENCE, metric=True)),
+        ("R5", dict(PLAN["acceptance"][0], id="AC2", metric=True)),
+    )
+    RULE_FINDING = {"verdict": "findings",
+                    "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
+
+    def gate(self, plan):
+        return run(replies={"plan": plan, "plan-revise": plan})
+
+    def test_each_rule_violation_stops_at_plan_review_naming_the_rule(self):
+        for rule, bad in self.ROWS:
+            with self.subTest(rule=rule, ac=bad["id"]):
+                result, calls = self.gate(with_criteria(bad))
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertIn((rule, bad["id"]), [(r["rule"], r["ac"]) for r in result["rules"]])
+                self.assertIsNone(result["cont"]["plan"])
+                self.assertFalse(result["cont"]["plan_reviewed"])
+                self.assertEqual(labels(calls).count("plan-revise"), 1)
+                self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-revise"))
+                self.assertNotIn("impl-1", labels(calls))
+
+    def test_pre_merge_only_evidence_stops_at_plan_review_naming_r1(self):
+        # The issue's demo: a planner reply with a pre-merge-only evidence criterion.
+        result, _ = self.gate(with_criteria(self.ROWS[0][1]))
+        self.assertEqual((result["stage"], result["rules"][0]["rule"], result["rules"][0]["ac"]), ("plan-review", "R1", "AC2"))
+
+    def test_compliant_plan_passes_without_a_revision(self):
+        metric = criterion(EVIDENCE, id="AC4", metric=True, verify_ac="AC4", verify_mode="observe")
+        build = criterion(EVIDENCE, id="AC5", verify_ac="AC5", verify_run={"command": "build"})
+        result, calls = run(replies={"plan": with_criteria(EVIDENCE, HUMAN, metric, build)},
+                            patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertNotIn("plan-revise", labels(calls))
+        self.assertNotIn("plan-rules-review", labels(calls))
+        self.assertIn("impl-1", labels(calls))
+        self.assertNotEqual(result["stage"], "plan-review")
+
+    def test_script_the_plan_commits_is_tolerated_only_when_listed(self):
+        script = criterion(EVIDENCE, verify_run={"script": "scripts/check-live"},
+                           lint=refused(("checks[0].run.script", "not_committed")))
+        _, calls = run(replies={"plan": with_criteria(script, scripts=["scripts/check-live"])},
+                       patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertNotIn("plan-revise", labels(calls))
+        result, _ = self.gate(with_criteria(script))
+        self.assertEqual(result["rules"][0]["rule"], "R4")
+
+    def test_a_compliant_revision_proceeds(self):
+        bad = with_criteria(self.ROWS[0][1])
+        _, calls = run(replies={"plan": bad, "plan-revise": with_criteria(EVIDENCE)},
+                       patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertEqual(labels(calls).count("plan-revise"), 1)
+        self.assertEqual(labels(calls).count("plan-rules-review"), 1)
+        self.assertIn("impl-1", labels(calls))
+
+    def test_reviewer_rule_violation_surviving_an_unchanged_revision_stops(self):
+        # A violation only a reviewer can see (an approval written as an act run) is re-checked after revision.
+        plan = with_criteria(HUMAN)
+        result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
+                                     "plan-rules-review": self.RULE_FINDING})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([r["rule"] for r in result["rules"]], ["R2"])
+        self.assertIsNone(result["cont"]["plan"])
+        self.assertNotIn("impl-1", labels(calls))
+        self.assertIn('"rule":"R2"', prompt(calls, "plan-rules-review"))
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING},
+                       patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertIn("impl-1", labels(calls))
+        result, _ = run(replies={"plan": plan, "plan-review": self.RULE_FINDING, "plan-rules-review": None})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertIsNone(result["cont"]["plan"])
+
+    def test_rules_rereview_finding_without_a_rule_still_blocks(self):
+        plan = with_criteria(HUMAN)
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC3 breaks a rule"}]}
+        result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
+                                     "plan-rules-review": bare})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([r["summary"] for r in result["rules"]], ["AC3 breaks a rule"])
+        self.assertNotIn("impl-1", labels(calls))
+        minor = {"verdict": "findings", "findings": [{"severity": "minor", "summary": "style"}]}
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
+                                "plan-rules-review": minor}, patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertIn("impl-1", labels(calls))
+
+    def test_planner_and_reviewer_prompts_point_to_the_rules(self):
+        _, calls = run(replies={"plan-review": self.RULE_FINDING})
+        plan = prompt(calls, "plan")
+        for needle in ("~/.agents/standards/acceptance-planning.md", "verify-pending lint --input",
+                       f"--repo-root /r/.wt/w-issue-9-x --pr-branch issue-9-x", "--pr-workflow",
+                       f'"merge": "{SHA}"', "metric", "scripts"):
+            self.assertIn(needle, plan)
+        for label in ("plan-review", "plan-rules-review"):
+            self.assertIn("~/.agents/standards/acceptance-planning.md", prompt(calls, label))
+
+    def test_program_does_not_copy_the_rule_text(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        for line in RULES_FILE.read_text(encoding="utf-8").splitlines():
+            if line.startswith("- **R"):
+                self.assertNotIn(line.split("** ", 1)[1][:40], source)
+
+
 class TaskTest(unittest.TestCase):
     def test_blocked_task_stops_with_cont_marking_it_partial(self):
         result, _ = run(replies={"impl-1": {"status": "blocked", "notes": "no"}})
@@ -547,12 +699,12 @@ class ResumeTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=self.cont()),
                             patch={"setup": {"merged_pr": 42, "review_state": {"code": "blocked", "plan": "blocked"}}})
         self.assertEqual(result["stage"], "done")
-        self.assertEqual(labels(calls), ["setup", "close-out"])
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
 
     def test_resume_after_merge_goes_to_close_out(self):
         result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_pr": 42}})
         self.assertEqual(result["stage"], "done")
-        self.assertEqual(labels(calls), ["setup", "close-out"])
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
         self.assertIn("gh issue close 9", prompt(calls, "close-out"))
 
     def test_cont_without_plan_plans_again(self):
@@ -651,7 +803,7 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[names.index("checks-1"):], ["checks-1", "sync-1", "renew-checks-2", "checks-2", "renew-merge", "merge", "close-out"])
+        self.assertEqual(names[names.index("checks-1"):], ["checks-1", "sync-1", "renew-checks-2", "checks-2", "renew-merge", "merge", "hold", "close-out"])
 
     def test_conflicted_sync_is_rereviewed(self):
         _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}},
@@ -697,6 +849,154 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"merge": {"merged": False, "notes": "head moved"}})
         self.assertEqual(result["stage"], "merge")
         self.assertNotIn("close-out", labels(calls))
+
+
+class HoldTest(unittest.TestCase):
+    """#634 AC2 and AC3: ship regrades, holds only on a lint-accepted block, runs verify-pending once, splits blocking human rows."""
+
+    MERGE = "d" * 40
+    HOLD = {"merge_commit_local": True, "code_unmet": [], "blocks": [], "split": [],
+            "block": {"v": 1, "merge": "d" * 40, "checks": []}, "lint": {"ok": True, "errors": []},
+            "verify_run": {"ran": True, "exit": 0}, "issue_state": "OPEN", "notes": "n"}
+    CHILD = {"ac": "AC3", "issue": 50, "block": {"v": 1, "merge": "d" * 40, "checks": [{"ac": "AC3", "kind": "human"}]},
+             "lint": {"ok": True, "errors": []}, "verify_run": {"ran": True, "exit": 0}, "issue_state": "OPEN"}
+
+    def ship(self, *criteria, hold=None, close="OPEN", **patch):
+        replies = {"plan": with_criteria(*criteria)}
+        if hold is not None:
+            moved = [x["ac"] for x in hold.get("split", [])]
+            covering = {"v": 1, "merge": self.MERGE, "checks": [{"ac": c["id"], "kind": c["kind"]} for c in criteria
+                                                                if c["id"] not in moved]}
+            replies["hold"] = dict(self.HOLD, **dict({"block": covering}, **hold))
+        return run(replies=replies, patch=dict({"merge": {"merge_commit": self.MERGE},
+                                                "close-out": {"issue_state": close}}, **patch))
+
+    def test_hold_fetches_lints_posts_and_runs_verify_pending_once(self):
+        result, calls = self.ship(EVIDENCE)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(result["hold"]["issue_state"], "OPEN")
+        hold = prompt(calls, "hold")
+        for needle in ("verify-pending lint --input", "--repo-root /r", f"--pr-head {SHA}", "--pr-branch issue-9-x",
+                       "--pr-workflow", "gh pr checks 42 --repo owner/repo --json workflow", "--blocks",
+                       "needs-verification", "dependencies/blocking", "~/.agents/standards/acceptance-planning.md",
+                       '["build"]', SHA, self.MERGE, '"deployed_includes"', "git -C /r cat-file -e"):
+            self.assertIn(needle, hold)
+        self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
+        self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+        self.assertLess(labels(calls).index("hold"), labels(calls).index("close-out"))
+
+    def test_passing_verify_run_closes_instead_of_holding(self):
+        result, _ = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(result["close_out"]["issue_state"], "CLOSED")
+        result, _ = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="OPEN")
+        self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
+
+    def test_refused_lint_or_failed_run_stops_without_close_out(self):
+        for hold in ({"lint": {"ok": False, "errors": [{"code": "unverified_reference"}]}},
+                     {"verify_run": {"ran": False, "exit": 0}}, {"verify_run": {"ran": True, "exit": 2}},
+                     {"verify_run": {"ran": True, "exit": 1}}, {"issue_state": "MAYBE"},
+                     {"merge_commit_local": False}):
+            with self.subTest(hold=hold):
+                result, calls = self.ship(EVIDENCE, hold=hold)
+                self.assertEqual(result["stage"], "hold")
+                self.assertNotIn("close-out", labels(calls))
+                self.assertIn("cont", result)
+
+    def test_unmet_code_row_stops_without_a_hold(self):
+        result, calls = self.ship(EVIDENCE, hold={"code_unmet": ["AC1"]})
+        self.assertEqual((result["stage"], result["code_unmet"]), ("code-unmet", ["AC1"]))
+        self.assertNotIn("close-out", labels(calls))
+        self.assertIn("cont", result)
+
+    def test_all_code_plan_regrades_before_close_out(self):
+        result, calls = run()
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[-3:], ["merge", "hold", "close-out"])
+        hold = prompt(calls, "hold")
+        self.assertIn("git -C /r fetch origin", hold)
+        self.assertNotIn("verify-pending run", hold)
+        self.assertIn("gh issue close 9", prompt(calls, "close-out"))
+        result, calls = run(replies={"hold": dict(self.HOLD, code_unmet=["AC1"])})
+        self.assertEqual((result["stage"], result["code_unmet"]), ("code-unmet", ["AC1"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_posted_unattended_command_outside_verification_stops(self):
+        smoke = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence", "run": {"command": "smoke"}}]}
+        result, calls = self.ship(EVIDENCE, hold={"block": smoke})
+        self.assertEqual((result["stage"], result["unattended"]), ("hold", ["AC2"]))
+        self.assertNotIn("close-out", labels(calls))
+        build = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence", "run": {"command": "build"}}]}
+        result, _ = self.ship(EVIDENCE, hold={"block": build})
+        self.assertEqual(result["stage"], "done")
+
+    def test_blocking_issue_moves_its_human_row_to_a_held_child_issue(self):
+        result, _ = self.ship(HUMAN, hold={"blocks": [12], "split": [self.CHILD], "issue_state": "CLOSED",
+                                           "lint": None, "verify_run": None, "block": None}, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([(s["ac"], s["issue"]) for s in result["hold"]["split"]], [("AC3", 50)])
+        result, _ = self.ship(HUMAN, EVIDENCE, hold={"blocks": [12], "split": [self.CHILD]})
+        self.assertEqual(result["stage"], "done")
+
+    def test_blocking_issue_without_split_stops(self):
+        result, calls = self.ship(HUMAN, hold={"blocks": [12]})
+        self.assertEqual((result["stage"], result["missing_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+        result, _ = self.ship(HUMAN, hold={"blocks": [12], "split": [self.CHILD], "issue_state": "OPEN"})
+        self.assertEqual(result["stage"], "hold")
+
+    def test_split_child_without_an_accepted_hold_stops(self):
+        for child in ({"lint": {"ok": False, "errors": [{"code": "reason_required"}]}},
+                      {"verify_run": {"ran": False, "exit": 0}}, {"verify_run": {"ran": True, "exit": 2}},
+                      {"issue_state": "MAYBE"}):
+            with self.subTest(child=child):
+                result, calls = self.ship(HUMAN, hold={"blocks": [12], "split": [dict(self.CHILD, **child)],
+                                                       "issue_state": "CLOSED"}, close="CLOSED")
+                self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+                self.assertNotIn("close-out", labels(calls))
+
+    def test_hold_block_that_leaves_a_remaining_criterion_unchecked_stops(self):
+        block = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]}
+        result, calls = self.ship(EVIDENCE, HUMAN, hold={"block": block}, close="CLOSED")
+        self.assertEqual((result["stage"], result["missing_checks"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+        covering = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}, {"ac": "AC3", "kind": "human"}]}
+        result, _ = self.ship(EVIDENCE, HUMAN, hold={"block": covering})
+        self.assertEqual(result["stage"], "done")
+
+    def test_split_child_block_that_does_not_check_its_criterion_stops(self):
+        child = dict(self.CHILD, block={"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]})
+        result, calls = self.ship(HUMAN, hold={"blocks": [12], "split": [child], "issue_state": "CLOSED"}, close="CLOSED")
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_resume_after_merge_holds_before_close_out(self):
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": with_criteria(EVIDENCE), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42},
+                                                               "close-out": {"issue_state": "OPEN"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
+        hold = prompt(calls, "hold")
+        self.assertIn("gh pr view 42 --repo owner/repo --json mergeCommit,headRefOid", hold)
+        self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
+
+
+    def test_resume_hold_prompt_asks_for_lint_and_the_once_run(self):
+        # A retry must still return fresh lint and verify_run, so the prompt names both commands and the result is graded on them.
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": with_criteria(EVIDENCE), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}, "close-out": {"issue_state": "OPEN"}})
+        hold = prompt(calls, "hold")
+        self.assertIn("verify-pending lint --input", hold)
+        self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+        self.assertEqual(result["stage"], "done")
+        stale = {"lint": {"ok": False, "errors": [{"code": "unverified_reference"}]}}
+        result, _ = run(args=dict(ARGS, cont=cont), replies={"hold": dict(self.HOLD, **stale)},
+                        patch={"setup": {"merged_pr": 42}})
+        self.assertEqual(result["stage"], "hold")
 
 
 class FixWaveTest(unittest.TestCase):
@@ -801,7 +1101,7 @@ class ModeTest(unittest.TestCase):
         done, calls = run(args=dict(ARGS, mode="ship", cont=ready["cont"]), patch={"setup": {"head": SHA}})
         self.assertEqual(done["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "renew-checks-1", "checks-1",
-                                         "renew-merge", "merge", "close-out"])
+                                         "renew-merge", "merge", "hold", "close-out"])
 
     def test_ship_after_ready_reviews_again_when_the_head_moved_or_is_dirty(self):
         ready, _ = run(args=dict(ARGS, mode="ready"))
@@ -934,8 +1234,9 @@ class DirectLaneTest(unittest.TestCase):
 
     def test_close_out_grades_the_implementer_criteria(self):
         acceptance = [{"id": "AC1", "text": "x", "kind": "code"}, {"id": "AC2", "text": "y", "kind": "evidence"}]
-        _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance}})
-        self.assertIn("needs-verification", prompt(calls, "close-out"))
+        _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance},
+                                           "close-out": {"issue_state": "OPEN"}})
+        self.assertIn("needs-verification", prompt(calls, "hold"))
 
     def test_resume_after_the_review_skips_to_verify(self):
         stopped, _ = run(args=DIRECT, replies={"verify": None})
@@ -967,7 +1268,7 @@ class DirectLaneTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA}})
         self.assertEqual(result["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "renew-checks-1", "checks-1",
-                                         "renew-merge", "merge", "close-out"])
+                                         "renew-merge", "merge", "hold", "close-out"])
 
     def test_a_review_stop_resumes_into_the_review_not_the_implementer(self):
         stopped, _ = run(args=DIRECT, replies={"direct-review": None})

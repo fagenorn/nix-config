@@ -23,3 +23,7 @@ A repo's `docs/standards/` is a directory of shards plus a **README index of at 
 - **Deltas only.** Anything that restates Layer 0 or 1 gets deleted, not copied. If a rule is true for every project on this stack, it belongs upstream in `stacks/`.
 - **Case law is written rule-first**: the rule in at most two sentences, plus one issue or ADR link. The narrative lives in the issue. Incident memoirs are what make a standards file grow linearly with project age.
 - **Process content is not a standard.** Deploy checklists go to `.claude/hints/`, review procedure to `REVIEW-CONTRACT.md`, lint commands nowhere — the environment already names them.
+
+## Planning rules
+
+`acceptance-planning.md` is not a layer: it holds the rules for acceptance criteria and verification holds, read on demand by the planning and delivery skills and never pasted into briefs.

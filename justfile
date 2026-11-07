@@ -147,6 +147,8 @@ agent-workflow-tests *args:
     tests/test_lane_triage.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
+    tests/test_verify_pending_pass.py \
+    tests/test_verify_pending_units.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \
     tests/test_forge_owner_action.py \

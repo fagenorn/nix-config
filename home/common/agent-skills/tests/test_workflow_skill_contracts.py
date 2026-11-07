@@ -57,6 +57,8 @@ SHIP_ISSUE_EVALS = (
     REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json"
 )
 WRITING_PLANS = REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md"
+ACCEPTANCE_RULES = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
+ACCEPTANCE_RULES_POINTER = "`~/.agents/standards/acceptance-planning.md`"
 SDD = SDD_DIR / "SKILL.md"
 PHASE_5_REVIEW_CONTRACT = FROM_ISSUE_DIR / "REVIEW-CONTRACT.md"
 
@@ -2906,6 +2908,13 @@ class ToIssuesCriterionLineContractsTest(unittest.TestCase):
             "`- [ ] [code|evidence|human] <observable outcome> — measured: <where>`",
             normalized(self.text))
 
+    def test_the_criterion_format_points_to_the_acceptance_planning_rules(self):
+        """#633 AC2: the criterion line format points to the shared rules; the hot file does not grow."""
+        text = normalized(self.text)
+        rules = text[text.index("Write each criterion as"):text.index("The `measured:` clause")]
+        self.assertIn(ACCEPTANCE_RULES_POINTER, rules)
+        self.assertLessEqual(len(self.TO_ISSUES.read_bytes()), 6487)
+
 
 class ToIssuesStandaloneBodyContractsTest(unittest.TestCase):
     """#495 AC1: the to-issues template puts Problem before What to build, and
@@ -2975,6 +2984,43 @@ class AcceptanceMapContractsTest(unittest.TestCase):
         for kind in ("`code`", "`evidence`", "`human`"):
             with self.subTest(kind=kind):
                 self.assertIn(kind, check)
+
+    def test_the_map_and_self_review_apply_the_acceptance_planning_rules(self):
+        """#633 AC2: self-review points to the shared rules; the planning-owner hot file
+        does not grow."""
+        review = normalized(self.section(self.plans, "## Self-review"))
+        self.assertIn(ACCEPTANCE_RULES_POINTER, review)
+        self.assertLessEqual(len(self.WRITING_PLANS.read_bytes()), 10859)
+
+
+class AcceptancePlanningRulesTest(unittest.TestCase):
+    """#633 AC2: the acceptance planning rules live once, read on demand, never hot."""
+
+    def test_the_rules_document_exists_once_and_is_in_no_hot_list(self):
+        found = sorted((REPO_ROOT / "home").rglob("acceptance-planning.md"))
+        self.assertEqual(found, [ACCEPTANCE_RULES])
+        model = json.loads((REPO_ROOT / "home/common/agent-skills/instruction-load.json")
+                           .read_text(encoding="utf-8"))
+        for profile in model["profiles"]:
+            with self.subTest(profile=profile["id"]):
+                self.assertFalse([m for m in profile["hot"] if "acceptance-planning" in m])
+
+    def test_an_unattended_command_check_must_be_a_verification_command(self):
+        """#633 COR-001: the runner runs only a command that is a member of
+        `workflow.verification` and leaves any other pending as `command_not_verification`,
+        so the rules require that membership of a command check, not any declared command."""
+        text = normalized(ACCEPTANCE_RULES.read_text(encoding="utf-8"))
+        row = text[text.index("| command |"):text.index("| threshold |")]
+        self.assertIn("`workflow.verification`", row)
+        self.assertNotIn("a declared command id", row)
+        self.assertIn("`command_not_verification`", text)
+
+    def test_three_skills_point_to_the_rules(self):
+        """#633 AC2: deliver-direct, writing-plans and to-issues each name the rules file."""
+        for path in (DirectLaneRoutingTest.DELIVER_DIRECT, WRITING_PLANS,
+                     ToIssuesCriterionLineContractsTest.TO_ISSUES):
+            with self.subTest(skill=path.parent.name):
+                self.assertIn(ACCEPTANCE_RULES_POINTER, normalized(path.read_text(encoding="utf-8")))
 
 
 class AcceptanceMapEvalGradingTest(unittest.TestCase):
@@ -3265,6 +3311,21 @@ class DirectLaneRoutingTest(unittest.TestCase):
         ):
             with self.subTest(rule=rule):
                 self.assertIn(rule, step4)
+
+
+    def test_deliver_direct_holds_only_on_a_linted_verify_block(self):
+        """#633 AC1: step 7 regrades code criteria, closes when none is left open, else
+        holds only on a lint-accepted verify block and runs verify-pending once for this
+        repository and issue, pointing to the shared rules."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        step7 = text[text.index("**Close out.**"):text.index("**Report**")]
+        for token in ("regrade", "`code`", "none left: close the issue",
+                      "`verify-pending lint`", "verify block",
+                      "`verify-pending run --host <host> --repo <slug> --issue <n>` once",
+                      "`needs-verification`", ACCEPTANCE_RULES_POINTER):
+            with self.subTest(token=token):
+                self.assertIn(token, step7)
+        self.assertNotIn("comment what remains", text)
 
 
 class HandBuiltTimeContractsTest(unittest.TestCase):

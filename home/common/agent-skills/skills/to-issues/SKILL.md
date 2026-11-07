@@ -76,7 +76,7 @@ One line per decision this slice depends on (ADR, wayfind ticket, spec section) 
 ## Acceptance criteria
 
 - [ ] [code] <observable outcome> — measured: <the test, check or CI job that observes it>
-- [ ] [evidence] <observable outcome> — measured: <command>, <conditions it runs under>, <literal threshold>
+- [ ] [evidence] <observable outcome> — measured: <trigger>, <command>, <threshold>, <expiry>
 - [ ] [human] <observable outcome> — measured: <who judges, in what environment>
 
 ## Blocked by
@@ -90,10 +90,10 @@ Or "None - can start immediately" if no blockers.
 Write each criterion as `- [ ] [code|evidence|human] <observable outcome> — measured: <where>`:
 
 - `code`: a test, the build or a CI job any reviewer reruns at the head.
-- `evidence`: a measurement outside the gating suite: the command, its conditions and a literal threshold, such as `≤ 90 s per module, serial, idle machine`, never "faster".
-- `human`: who judges, in what environment; only when no agent can observe it.
+- `evidence`: what only a deploy, an activation or time shows: a verify block's trigger, command, threshold and expiry, never "faster".
+- `human`: who judges, where, and why no agent can.
 
-Prefer `code`, then `evidence`. The `measured:` clause is the only place the body names a test, file or command.
+Prefer `code`, then `evidence`, per `~/.agents/standards/acceptance-planning.md`. The `measured:` clause is the only place the body names a test, file or command.
 
 The body is the contract, read weeks later by a stranger holding only that page: behavior and outcomes, no line numbers, nothing an implementer needs left only to a comment. Explain each glossary term, decision ID or slice label in a few words, or link it, at first use. Before publishing, reread each body as that stranger and rewrite or link any sentence that needs the spec, the plan or the conversation.
 
