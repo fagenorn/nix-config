@@ -1,4 +1,5 @@
 import concurrent.futures
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 
 from .guard_policy_world import GuardPolicyWorld
@@ -186,6 +188,28 @@ raise SystemExit(1)
 '''
 
 
+GUARD_SOURCE = Path(__file__).resolve().parents[1] / "home/common/claude-code/lifecycle_guard.py"
+
+FAKE_GIT_SCRIPT = '''
+import os
+import sys
+import time
+
+REAL = @GIT@
+LOOKUP = ["remote", "get-url", "--push", "--all", "origin"]
+mode = os.environ.get("FAKE_PUSH_URL_MODE")
+if mode and sys.argv[-len(LOOKUP):] == LOOKUP:
+    if mode == "timeout":
+        time.sleep(5)
+    elif mode == "nonzero":
+        print("git@github.com:fagenorn/nix-config.git")
+        print("fake push URL failure", file=sys.stderr)
+        raise SystemExit(1)
+    elif mode == "empty":
+        raise SystemExit(0)
+os.execv(REAL, [REAL, *sys.argv[1:]])
+'''
+
 class ClaudePermissionGuardTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -250,6 +274,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         # policy and a fixture compiled policy (`cls.policy`, one row for Nodo) as later
         # arguments.
         cls.base_policy = json.loads(BASE_POLICY_PATH.read_text(encoding="utf-8"))
+        cls.fake_git = Path(cls.fixture_dir.name) / "fake-git"
+        cls.fake_git.write_text(
+            f"#!{sys.executable}\n"
+            + FAKE_GIT_SCRIPT.replace("@GIT@", repr(cls.base_policy["git_bin"])),
+            encoding="utf-8")
+        cls.fake_git.chmod(0o755)
         cls.policy = cls.write_policy(derived_repositories={NODO: NODO_ROW}, derivation={})
 
     @classmethod
@@ -961,7 +991,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         create = ('gh pr create --repo fagenorn/argus --base main '
                   '--head issue-700-refuse-nohup '
                   '--title "fix: refuse nohup" --body "setsid and disown too"')
-        for command in (create, "unset GITHUB_TOKEN && " + create):
+        draft = create.replace("--repo fagenorn/argus", "--repo fagenorn/argus --draft")
+        for command in (create, "unset GITHUB_TOKEN && " + create,
+                        draft, "unset GITHUB_TOKEN && " + draft):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
@@ -1129,6 +1161,231 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     ]
                     self.assertTrue(caught, (name, list(zip(expected, outcomes))))
 
+    def test_mutants_of_the_transmit_and_push_url_checks_are_caught(self):
+        """Issue 655 AC5: each seam of the transmit recognition, the command-option
+        and assignment checks and the push URL check (each lookup-failure branch
+        included), broken in a copy of the guard source, gives at least one row a
+        different valid outcome (an admission, or an `unsafe push:` refusal), while
+        the unmutated copy gives every row its expected one. A crash or another
+        refusal never counts."""
+        source = GUARD_SOURCE.read_text(encoding="utf-8")
+        anchor = '\nif __name__ == "__main__":'
+        self.assertEqual(1, source.count(anchor))
+        topic = "issue-655-topic"
+        force = "git push --force origin main"
+        other = "git@github.com:fagenorn/guard-elsewhere.git"
+        repos = {
+            None: None,
+            "plain": self.push_url_repo(),
+            "pushurl": self.push_url_repo(("remote.origin.pushurl", other)),
+            "pushInsteadOf": self.push_url_repo(
+                ("url.git@github.com:someoneelse/.pushInsteadOf", "git@github.com:fagenorn/")),
+            "second pushurl": self.push_url_repo(
+                ("remote.origin.pushurl", "git@github.com:fagenorn/nix-config.git"),
+                ("remote.origin.pushurl", other)),
+        }
+        # (command, repository, FAKE_PUSH_URL_MODE or None, expected outcome)
+        rows = (
+            ("git -c core.pager=cat diff", None, None, "refuse"),
+            (f"git p origin {topic}", None, None, "refuse"),
+            (f"git send-pack git@github.com:fagenorn/nix-config.git {topic}", None, None,
+             "refuse"),
+            (f"git subtree push --prefix=x origin {topic}", None, None, "refuse"),
+            (f"git-push origin {topic}", None, None, "refuse"),
+            (f"git $(printf p) origin {topic}", None, None, "refuse"),
+            (f"git add`echo -x` origin {topic}", None, None, "refuse"),
+            (f"xargs git p origin {topic}", None, None, "refuse"),
+            (f"timeout 5 git p origin {topic}", None, None, "refuse"),
+            (f"sh -c 'git p origin {topic}'", None, None, "refuse"),
+            ("git rebase --exec true HEAD~1", None, None, "refuse"),
+            (f"=git p origin {topic}", None, None, "refuse"),
+            (f"hash g=/usr/bin/git; g p origin {topic}", None, None, "refuse"),
+            (f"echo p origin {topic} | xargs git", None, None, "refuse"),
+            (f"$(echo git) p origin {topic}", None, None, "refuse"),
+            (f'"$(which git)" p origin {topic}', None, None, "refuse"),
+            (f"echo p origin {topic} | {{ true; xargs git; }}", None, None, "refuse"),
+            ("{ xargs git; } <<< 'push --force origin main'", None, None, "refuse"),
+            (f"echo p origin {topic} |\nxargs git", None, None, "refuse"),
+            ("exec < args.txt; xargs git", None, None, "refuse"),
+            (f'echo p origin {topic} | xargs "$(which git)"', None, None, "refuse"),
+            (f"echo p origin {topic} | xargs ${{G:-git}}", None, None, "refuse"),
+            (f"sh -c 'echo p origin {topic} | {{ true; xargs git; }}'", None, None, "refuse"),
+            (f"G=$(which git); $G p origin {topic}", None, None, "refuse"),
+            ('git rebase "${X:---exec=sh /tmp/p.sh}" HEAD~1', None, None, "refuse"),
+            ("git rebase $(echo HEAD) --exec 'sh /tmp/p.sh'", None, None, "refuse"),
+            (f"sh -c 'G=git; $G p origin {topic}'", None, None, "refuse"),
+            (f"sh -c 'git -C \"/tmp status\" p origin {topic}'", None, None, "refuse"),
+            (f"git fetch --upload-pack='{force} #' .", None, None, "refuse"),
+            ("git grep -O'sh /tmp/p.sh' x", None, None, "refuse"),
+            (f"GIT_SEQUENCE_EDITOR='{force}; true' git rebase -i HEAD~1", None, None,
+             "refuse"),
+            ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor "
+             "GIT_CONFIG_VALUE_0=/tmp/p.sh git status", None, None, "refuse"),
+            ("PATH=/tmp/x:$PATH git log", None, None, "refuse"),
+            (f"export PAGER='{force}'; git log", None, None, "refuse"),
+            ("git status --short", None, None, "admit"),
+            ("git --no-pager log --oneline -1", None, None, "admit"),
+            ("git rebase origin/main", None, None, "admit"),
+            ("echo `which git`", None, None, "admit"),
+            ("which git", None, None, "admit"),
+            ("echo a | xargs git status", None, None, "admit"),
+            ('echo "$(which git)" | cat', None, None, "admit"),
+            ("echo $(git rev-parse HEAD) x", None, None, "admit"),
+            ("=git status", None, None, "admit"),
+            ("hash g=/usr/bin/git; g status", None, None, "admit"),
+            ("sh -c 'git -C \"/tmp status\" status'", None, None, "admit"),
+            ("GIT_TRACE=1 git status", None, None, "admit"),
+            ("sh -c 'git log --oneline'", None, None, "admit"),
+            (f"git push origin {topic}", "plain", None, "admit"),
+            (f"git push origin {topic}", "pushurl", None, "refuse"),
+            (f"git push origin {topic}", "pushInsteadOf", None, "refuse"),
+            (f"git push origin {topic}", "second pushurl", None, "refuse"),
+            (f"git push origin {topic}", "plain", "timeout", "refuse"),
+            (f"git push origin {topic}", "plain", "nonzero", "refuse"),
+            (f"git push origin {topic}", "plain", "empty", "refuse"),
+        )
+        lookup_block = (
+            "    if child.returncode != 0 or not urls:\n"
+            "        return PUSH_URL_UNRESOLVED\n"
+        )
+        mutants = {
+            "control": "",
+            "config-option-admitted": "GIT_GLOBAL_OPTIONS = {**GIT_GLOBAL_OPTIONS, '-c': 1}\n",
+            "alias-admitted": "GIT_LOCAL_SUBCOMMANDS = GIT_LOCAL_SUBCOMMANDS | {'p'}\n",
+            "send-pack-admitted":
+                "GIT_LOCAL_SUBCOMMANDS = GIT_LOCAL_SUBCOMMANDS | {'send-pack'}\n",
+            "subtree-admitted": "GIT_LOCAL_SUBCOMMANDS = GIT_LOCAL_SUBCOMMANDS | {'subtree'}\n",
+            "dashed-admitted": "dashed_git_program = lambda name: False\n",
+            "uncertain-admitted": "GIT_UNCERTAIN_PROBLEM = None\n",
+            "every-operator-opens":
+                "opening_operator = lambda tokens, index, operator: True\n",
+            "no-operator-opens": "opening_operator = lambda tokens, index, operator: False\n",
+            "argument-position-unjudged": (
+                "git_argument_problem = lambda program, words, truncation, tail=(), "
+                "fed=False: None\n"),
+            "equals-expansion-unread": (
+                '    if value.startswith("="):\n        value = value[1:]\n', ""),
+            "hashed-names-unread": "git_command_names = lambda token_lists: set()\n",
+            "piped-git-admitted": "GIT_FED_PROBLEM = None\n",
+            "pipe-feeds-only-the-next-segment": (
+                "fed = redirected or any(pipe_in(run) for run in runs[:position])",
+                "fed = redirected or (position > 0 and pipe_in(runs[position - 1]))"),
+            "redirection-feeds-only-its-own-segment": (
+                "    redirected = any(",
+                "    redirected = False and any("),
+            "raw-pipe-feeds-only-the-next-piece": (
+                "fed or any(pipe_in(run) for run in parts[1:position:2])",
+                "fed or (position > 0 and pipe_in(parts[position - 1]))"),
+            "braced-default-position-unread": (
+                "fed=fed and not flags[word_start])", "fed=fed and not flags[index])"),
+            "quoted-substitution-needs-a-following-word": (
+                "or (not fed and (index + 1 >= len(tokens) or tokens[index + 1][1]))",
+                "or index + 1 >= len(tokens) or tokens[index + 1][1]"),
+            "substitution-output-admitted": (
+                "bare_git_supplies_command = lambda tokens, index, cut_at, run: False\n"),
+            "quoted-substitution-admitted":
+                "quoted_substitution_runs_git = lambda tokens, index, fed=False: False\n",
+            "substitution-assignment-unread":
+                "substitution_yields_git = lambda tokens, position, assigned: False\n",
+            "tail-unscanned": (
+                "git_command_option(subcommand, list(words[index + 1:]) + list(tail))",
+                "git_command_option(subcommand, list(words[index + 1:]))"),
+            "embedded-options-unread": (
+                'if word[position] == "-" and word[position - 1] in ":=+?-"',
+                'if False and word[position] == "-" and word[position - 1] in ":=+?-"'),
+            "raw-names-unread": "raw_git_names = lambda pieces: set()\n",
+            "raw-quote-aware-reading-dropped": (
+                "            readings.append([value for value, is_operator in tokens "
+                "if not is_operator])\n", ""),
+            "evaluator-text-unjudged":
+                "transmit_in_raw_text = lambda text, names=(), depth=0, fed=False: False\n",
+            "command-options-unjudged": "git_command_option = lambda subcommand, words: None\n",
+            "short-command-options-dropped": (
+                "GIT_COMMAND_OPTIONS = {k: frozenset(o for o in v if o.startswith('--'))"
+                " for k, v in GIT_COMMAND_OPTIONS.items()}\n"),
+            "upload-pack-dropped": (
+                "GIT_COMMAND_OPTIONS = {k: v - {'--upload-pack'}"
+                " for k, v in GIT_COMMAND_OPTIONS.items()}\n"),
+            "assignments-unjudged": "git_assignment_problem = lambda names, strict: None\n",
+            "prefix-allowlist-loosened":
+                "GIT_ASSIGNMENT_ALLOWED = GIT_ASSIGNMENT_ALLOWED | {'PATH'}\n",
+            "command-variables-dropped": "GIT_COMMAND_VARIABLES = frozenset()\n",
+            "no-push-url-check": "push_url_problem = lambda context: None\n",
+            "first-push-url-only":
+                "PUSH_URL_LOOKUP = tuple(w for w in PUSH_URL_LOOKUP if w != '--all')\n",
+            "fetch-url-only":
+                "PUSH_URL_LOOKUP = tuple(w for w in PUSH_URL_LOOKUP if w != '--push')\n",
+            "lookup-timeout-admitted": "PUSH_URL_TIMEOUT = None\n",
+            "lookup-oserror-admitted": (
+                "    except OSError:\n        return PUSH_URL_UNRESOLVED\n",
+                "    except OSError:\n        return None\n"),
+            "lookup-nonzero-admitted": (
+                lookup_block, "    if not urls:\n        return PUSH_URL_UNRESOLVED\n"),
+            "lookup-empty-admitted": (
+                lookup_block,
+                "    if child.returncode != 0:\n        return PUSH_URL_UNRESOLVED\n"),
+        }
+
+        def outcome(result):
+            if result.returncode == 0:
+                return "admit"
+            if result.returncode == 2 and "lifecycle guard: unsafe push: " in result.stderr:
+                return "refuse"
+            return f"invalid: exit {result.returncode}: {result.stderr[-300:]}"
+
+        def oserror_outcome(text, path):
+            # The one branch no CLI run reaches alone (Task 3): call the copy's function.
+            module = types.ModuleType(f"mutant_{path.stem.replace('-', '_')}")
+            module.__file__ = str(path)
+            exec(compile(text, str(path), "exec"), module.__dict__)
+            context = types.SimpleNamespace(
+                git_bin=str(directory / "no-such-git"), cwd=str(repos["plain"]),
+                timeout=5, repository="fagenorn/nix-config")
+            problem = module.push_url_problem(context)
+            return "admit" if problem is None else "refuse"
+
+        directory = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        expected = [want for *_, want in rows] + ["refuse"]
+        base_env = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
+        for name, mutation in mutants.items():
+            if isinstance(mutation, tuple):
+                old, new = mutation
+                self.assertEqual(1, source.count(old), (name, "replacement must match once"))
+                text = source.replace(old, new, 1)
+            else:
+                text = source.replace(anchor, "\n" + mutation + anchor, 1)
+            path = directory / f"{name}.py"
+            path.write_text(text, encoding="utf-8")
+            outcomes = []
+            for command, repo, mode, _ in rows:
+                payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+                if repos[repo] is not None:
+                    payload["cwd"] = str(repos[repo])
+                argv = [sys.executable, "-I", str(path),
+                        "--base-policy", str(BASE_POLICY_PATH),
+                        "--policy", str(directory / "absent-policy.json"),
+                        "--derive-bin", "/usr/bin/false"]
+                env = dict(base_env)
+                if mode is not None:
+                    argv += ["--git-bin", str(self.fake_git), "--child-timeout-seconds", "0.5"]
+                    env["FAKE_PUSH_URL_MODE"] = mode
+                result = subprocess.run(
+                    argv, input=json.dumps(payload), env=env,
+                    text=True, capture_output=True, timeout=10, check=False,
+                )
+                outcomes.append(outcome(result))
+            outcomes.append(oserror_outcome(text, path))
+            labels = [command for command, *_ in rows] + ["push_url_problem with no git"]
+            with self.subTest(mutant=name):
+                if name == "control":
+                    self.assertEqual(expected, outcomes)
+                else:
+                    caught = [
+                        label for label, want, got in zip(labels, expected, outcomes)
+                        if got in ("admit", "refuse") and got != want
+                    ]
+                    self.assertTrue(caught, (name, list(zip(labels, expected, outcomes))))
+
     def test_detaching_refusal_precedes_the_push_grammar(self):
         # AC3: still refused, now for detaching rather than as a push.
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
@@ -1210,6 +1467,33 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             'gh pr create --repo fagenorn/argus --base main --head t --title "x" --body "y" --draft',
             # flag order
             'gh pr create --base main --repo fagenorn/argus --head t --title "x" --body "y"',
+        ):
+            with self.subTest(command=bad):
+                result = self.run_guard(bad, cwd=repo)
+                self.assertEqual(2, result.returncode, bad)
+                self.assertIn("lifecycle guard: unsafe PR creation:", result.stderr)
+
+    def test_pr_create_takes_an_optional_draft_flag(self):
+        """Issue 671: `--draft` stands after `--repo <slug>` in both creation forms,
+        with and without the token-scrub prefix; it stays refused anywhere else."""
+        repo = self.make_repo("https://github.com/fagenorn/argus.git")
+        head = "--base main --head issue-7-fix"
+        inline = '--title "fix: guard" --body "Closes #7"'
+        for command in (
+            f"gh pr create --repo fagenorn/argus --draft {head} {inline}",
+            f"unset GITHUB_TOKEN && gh pr create --repo fagenorn/argus --draft {head} {inline}",
+            f"env -u GITHUB_TOKEN gh pr create --repo fagenorn/argus --draft {head} {inline}",
+            f"gh pr create --repo fagenorn/argus --draft {head} --title t --body-file /tmp/n.md",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, result.stderr)
+        for bad in (
+            f"gh pr create --repo fagenorn/argus {head} {inline} --draft",
+            f"gh pr create --repo fagenorn/argus {head} --draft {inline}",
+            f"gh pr create --draft --repo fagenorn/argus {head} {inline}",
+            f"gh pr create --repo fagenorn/argus --draft --draft {head} {inline}",
+            f"gh pr create --repo fagenorn/argus --draft=true {head} {inline}",
         ):
             with self.subTest(command=bad):
                 result = self.run_guard(bad, cwd=repo)
@@ -2274,6 +2558,109 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual("", git("ls-remote", "--heads", "origin", name))
         self.assertIn(f"refs/tags/{name}", git("ls-remote", "--tags", "origin", name))
 
+    def push_url_repo(self, *config):
+        """A fagenorn/nix-config fixture repository with each (key, value) of `config`
+        added to its local git config, in order (issue 655)."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for key, value in config:
+            subprocess.run(["git", "config", "--add", key, value], cwd=repo, check=True,
+                           capture_output=True)
+        return repo
+
+    def test_a_push_whose_effective_push_url_names_another_repository_is_refused(self):
+        """Issue 655 AC3, D3, D10: every push arm resolves origin's push URLs as git
+        does (pushurl, insteadOf, pushInsteadOf) and refuses unless each names the
+        repository the guard judged."""
+        topic = "issue-655-topic"
+        here = "fagenorn/nix-config"
+        other = "git@github.com:fagenorn/guard-elsewhere.git"
+        refused = {
+            "pushurl": (self.push_url_repo(("remote.origin.pushurl", other)), other),
+            "pushInsteadOf": (
+                self.push_url_repo(("url.git@github.com:someoneelse/.pushInsteadOf",
+                                    "git@github.com:fagenorn/")),
+                "git@github.com:someoneelse/nix-config.git"),
+            "second pushurl": (
+                self.push_url_repo(("remote.origin.pushurl", f"git@github.com:{here}.git"),
+                                   ("remote.origin.pushurl", other)),
+                other),
+            "not github": (self.push_url_repo(("remote.origin.pushurl", "/tmp/elsewhere.git")),
+                           "/tmp/elsewhere.git"),
+        }
+        for name, (repo, url) in refused.items():
+            for command in (f"git push origin {topic}", f"git push -u origin {topic}",
+                            f"git push origin --delete refs/heads/{topic}",
+                            f"git -C {repo} push origin {topic}",
+                            f"cd {repo} && git push origin {topic}"):
+                with self.subTest(case=name, command=command):
+                    result = self.run_guard(command, cwd=repo)
+                    self.assertEqual(2, result.returncode, command)
+                    self.assertIn(
+                        f"lifecycle guard: unsafe push: origin's push URL {url} "
+                        f"does not name {here}", result.stderr)
+                    self.assertNotIn("; accepted: ", result.stderr)
+        # The tag arm, and a push judged in a -C directory from a clean cwd.
+        tagged = self.tagged_repo(here)
+        subprocess.run(["git", "config", "remote.origin.pushurl", other], cwd=tagged,
+                       check=True, capture_output=True)
+        clean = self.make_repo(f"git@github.com:{here}.git")
+        for command, cwd in (("git push origin refs/tags/v1.2.3", tagged),
+                             (f"git -C {refused['pushurl'][0]} push origin {topic}", clean)):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"unsafe push: origin's push URL {other} does not name {here}",
+                              result.stderr)
+        # A text refusal keeps its precedence and its accepted forms.
+        result = self.run_guard(f"git push --force origin {topic}",
+                                cwd=refused["pushurl"][0])
+        self.assertEqual(2, result.returncode)
+        self.assertIn("; accepted: ", result.stderr)
+        self.assertNotIn("push URL", result.stderr)
+        # Push URLs that name this repository in another spelling pass.
+        for name, repo in (
+            ("clean", clean),
+            ("pushurl https", self.push_url_repo(
+                ("remote.origin.pushurl", f"https://github.com/{here}"))),
+            ("pushInsteadOf same repository", self.push_url_repo(
+                ("url.https://github.com/fagenorn/.pushInsteadOf", "git@github.com:fagenorn/"))),
+        ):
+            with self.subTest(case=name):
+                result = self.run_guard(f"git push origin {topic}", cwd=repo)
+                self.assertEqual(0, result.returncode, (name, result.stderr))
+
+    def test_push_url_lookup_failures_are_refused(self):
+        """Issue 655 AC4, D10: a push-URL lookup that times out, exits non-zero,
+        prints nothing, or whose git cannot start refuses the push as a state
+        refusal (no accepted forms); the same fake git passes a lookup it does not
+        disturb."""
+        topic = "issue-655-topic"
+        repo = self.push_url_repo()
+        guard_args = ("--gh-bin", str(self.fake_gh), "--git-bin", str(self.fake_git),
+                      "--child-timeout-seconds", "0.5")
+        for mode, reason in (("timeout", "push URL lookup timed out"),
+                             ("nonzero", "cannot resolve origin's push URL"),
+                             ("empty", "cannot resolve origin's push URL")):
+            for command in (f"git push origin {topic}",
+                            f"git push origin --delete refs/heads/{topic}"):
+                with self.subTest(mode=mode, command=command):
+                    result = self.run_guard(command, cwd=repo, guard_args=guard_args,
+                                            env={"FAKE_PUSH_URL_MODE": mode})
+                    self.assertEqual(2, result.returncode, (mode, result.stderr))
+                    self.assertIn(f"lifecycle guard: unsafe push: {reason}", result.stderr)
+                    self.assertNotIn("; accepted: ", result.stderr)
+        result = self.run_guard(f"git push origin {topic}", cwd=repo, guard_args=guard_args)
+        self.assertEqual(0, result.returncode, result.stderr)
+        # A git that cannot start: no CLI run reaches this branch alone (the same git
+        # resolves the repository first), so the source's function is called directly.
+        spec = importlib.util.spec_from_file_location("lifecycle_guard_source", GUARD_SOURCE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        context = types.SimpleNamespace(
+            git_bin=str(Path(self.fixture_dir.name) / "no-such-git"), cwd=str(repo),
+            timeout=5, repository="fagenorn/nix-config")
+        self.assertEqual("cannot resolve origin's push URL", module.push_url_problem(context))
+
     # Guarded command shapes (#351): the forms ship-issue spells and the dressed
     # shapes agents reach for, from the fixture the shell-example suite also reads.
     SHAPES = json.loads((Path(__file__).parent / "fixtures/guarded-command-shapes.json")
@@ -2444,9 +2831,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                    "[--match-head-commit <sha>] --delete-branch")
         release = ('gh pr merge <n> --repo {slug} --merge [--subject "<subject>"] '
                    "[--match-head-commit <sha>] (only dev into main)")
-        create = ("gh pr create --repo {slug} --base {base} --head <branch> "
+        create = ("gh pr create --repo {slug} [--draft] --base {base} --head <branch> "
                   '--title "<title>" --body "<body>"')
-        create_file = ("gh pr create --repo {slug} --base {base} --head <branch> "
+        create_file = ("gh pr create --repo {slug} [--draft] --base {base} --head <branch> "
                        '--title "<title>" --body-file <path>')
         push = ("git push origin refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>; "
                 "or git push origin --delete refs/heads/<branch>")
@@ -2769,7 +3156,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "git -C /tmp status --short",
             "git -C /tmp/x log --grep push",
             "git --no-pager log --oneline",
-            "git -c core.pager=cat diff",
             "/usr/bin/git status",
             "gh pr view 1 --json mergeable",
             "gh pr list --state merged",
@@ -2780,6 +3166,374 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "gh pr view $(printf 1) --json url",
             "gh -R fagenorn/nix-config pr view $(printf 1)",
             "git log $(sh -c pwd | cat) -1",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_git_invocations_that_could_transmit_refs_are_refused(self):
+        """Issue 655 AC1, D2, D4-D9: a git invocation that could transmit refs and is
+        not an admitted lifecycle form is refused as a push before any repository
+        lookup, in each spelling the issue names and in every position the shell
+        runs it from; local subcommands still pass."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        # A configured alias resolving to push: refused by name, never by reading it.
+        subprocess.run(["git", "config", "alias.p", "push"], cwd=repo, check=True,
+                       capture_output=True)
+        topic = "issue-655-topic"
+        url = "git@github.com:fagenorn/nix-config.git"
+        unknown = ("is not a known local git subcommand; an alias, a git-* program "
+                   "or a transport could transmit refs")
+        evaluator = "shell source passed to an evaluator cannot be validated"
+        split = "command text handed to env -S cannot be validated"
+        uncertain = "the git invocation continues past a shell substitution or grouping"
+        for command, reason in (
+            (f"git -c alias.p=push p origin {topic}", "git global option -c is not accepted"),
+            (f"git --config-env=alias.p=PUSH p origin {topic}",
+             "git global option --config-env=alias.p=PUSH is not accepted"),
+            ("git -c core.pager=cat diff", "git global option -c is not accepted"),
+            ("git --exec-path=/tmp status",
+             "git global option --exec-path=/tmp is not accepted"),
+            (f"git p origin {topic}", f"git p {unknown}"),
+            (f"git -C {repo} p origin {topic}", f"git p {unknown}"),
+            (f"git status; git p origin {topic}", f"git p {unknown}"),
+            (f"x=$(git p origin {topic})", f"git p {unknown}"),
+            (f"git send-pack {url} {topic}", f"git send-pack {unknown}"),
+            (f"git http-push https://example.invalid/x.git {topic}",
+             f"git http-push {unknown}"),
+            (f"git subtree push --prefix=x origin {topic}", f"git subtree {unknown}"),
+            ("git submodule foreach true", f"git submodule {unknown}"),
+            ("git bisect run true", f"git bisect {unknown}"),
+            (f"git-push origin {topic}",
+             "the git program git-push runs a git subcommand directly"),
+            (f"/usr/libexec/git-core/git-push origin {topic}",
+             "the git program git-push runs a git subcommand directly"),
+            (f"/usr/libexec/git-core/git-send-pack {url} {topic}",
+             "the git program git-send-pack runs a git subcommand directly"),
+            (f"git $(printf p) origin {topic}", uncertain),
+            ("git -C $(pwd) status", uncertain),
+            (f"git add`echo -x` origin {topic}", uncertain),
+            # D7: an argument position is judged by the same rule, whatever the runner.
+            (f"xargs git p origin {topic}", f"git p {unknown}"),
+            (f"timeout 5 git p origin {topic}", f"git p {unknown}"),
+            (f"nice git p origin {topic}", f"git p {unknown}"),
+            (f"find . -name x -exec git p origin {topic} +", f"git p {unknown}"),
+            (f"xargs git send-pack {url} {topic}", f"git send-pack {unknown}"),
+            (f"xargs git -c alias.p=push p origin {topic}",
+             "git global option -c is not accepted"),
+            (f"xargs git-push origin {topic}",
+             "the git program git-push runs a git subcommand directly"),
+            # D7: the accepted mention false positives.
+            ("echo git p", f"git p {unknown}"),
+            ("rg -n git README.md", f"git README.md {unknown}"),
+            # D7: evaluator and env -S text, judged on its raw words.
+            (f"eval git p origin {topic}", evaluator),
+            (f"sh -c 'git p origin {topic}'", evaluator),
+            (f"bash -c 'cd /tmp && git p origin {topic}'", evaluator),
+            (f"sh -c '${{G:-git}} p origin {topic}'", evaluator),
+            (f"sh -c \"g''it p origin {topic}\"", evaluator),
+            (f"sh -c 'git send-pack {url} {topic}'", evaluator),
+            (f"bash -c 'git -c alias.p=push p origin {topic}'", evaluator),
+            (f"sh -c 'git-send-pack {url} {topic}'", evaluator),
+            (f"env -S 'git p origin {topic}'", split),
+            # A token-level refusal inside an evaluator segment reports the evaluator.
+            ("eval git -C $(pwd) status", evaluator),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe push: {reason}", result.stderr)
+                self.assertIn("; accepted: git push ", result.stderr)
+                self.assertNotIn(GRAMMAR, result.stderr)
+        for command in (
+            "git status --short",
+            f"git -C {repo} status",
+            "git --no-pager log --oneline -1",
+            "git --git-dir=.git log -1",
+            "git --git-dir .git --work-tree . status",
+            "git log $(printf HEAD) -1",
+            "(git status)",
+            "`git status`",
+            "echo $(git rev-parse HEAD)",
+            "echo $(which git)",
+            "echo `which git`",
+            "which git",
+            "git rebase origin/main",
+            "git rebase -i origin/main",
+            "git fetch origin",
+            "git worktree list",
+            "git branch -D issue-655-old",
+            "git config --get user.name",
+            "git commit -m 'subtree push notes'",
+            "git",
+            "git --version",
+            "/usr/bin/git status",
+            "xargs git status",
+            "timeout 5 git log -1",
+            "echo 'git p'",
+            "rg -n '[g]it' README.md",
+            "grep -rn 'git send-pack' docs",
+            "sh -c 'git status'",
+            "env -S 'git status'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+
+    def test_command_running_git_options_and_environment_are_refused(self):
+        """Issue 655 AC2, D11, D12: an allowlisted subcommand carrying an option whose
+        value git runs as a command, and an assignment that hands git a command or
+        other configuration, are refused as a push in every position; local
+        spellings still pass."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        runs = "can run a command the guard cannot judge"
+        assigns = "can make git run a command or read other configuration"
+        evaluator = "shell source passed to an evaluator cannot be validated"
+        force = "git push --force origin main"
+        for command, reason in (
+            (f"git fetch --upload-pack='{force} #' .",
+             f"git fetch --upload-pack={force} # {runs}"),
+            ("git fetch --upload=/tmp/p.sh .", f"git fetch --upload=/tmp/p.sh {runs}"),
+            ("git pull --upload-pack=/tmp/p.sh origin main",
+             f"git pull --upload-pack=/tmp/p.sh {runs}"),
+            ("git ls-remote --upload-pack=/tmp/p.sh .",
+             f"git ls-remote --upload-pack=/tmp/p.sh {runs}"),
+            ("git ls-remote -u /tmp/p.sh .", f"git ls-remote -u {runs}"),
+            ("git clone -u /tmp/p.sh . /tmp/x", f"git clone -u {runs}"),
+            ("git clone -c core.fsmonitor=/tmp/p.sh . /tmp/x", f"git clone -c {runs}"),
+            ("git clone --config=core.pager=x . /tmp/x",
+             f"git clone --config=core.pager=x {runs}"),
+            ("git clone --template=/tmp/t . /tmp/x", f"git clone --template=/tmp/t {runs}"),
+            ("git init --template=/tmp/t /tmp/x", f"git init --template=/tmp/t {runs}"),
+            ("git archive --remote=. --exec=/tmp/p.sh HEAD",
+             f"git archive --exec=/tmp/p.sh {runs}"),
+            ("git grep -O'sh /tmp/p.sh' x", f"git grep -Osh /tmp/p.sh {runs}"),
+            ("git rebase --exec true HEAD~1", f"git rebase --exec {runs}"),
+            ("git rebase -ix true HEAD~1", f"git rebase -ix {runs}"),
+            ("git rebase --exe=true HEAD~1", f"git rebase --exe=true {runs}"),
+            ("xargs git fetch --upload-pack=/tmp/p.sh .",
+             f"git fetch --upload-pack=/tmp/p.sh {runs}"),
+            ("sh -c 'git fetch --upload-pack=/tmp/p.sh .'", evaluator),
+            # D12 (a): an assignment prefix of a git word must be allowlisted.
+            (f"GIT_SEQUENCE_EDITOR='{force}; true' git rebase -i HEAD~1",
+             f"the assignment GIT_SEQUENCE_EDITOR= {assigns}"),
+            ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor "
+             "GIT_CONFIG_VALUE_0=/tmp/p.sh git status",
+             f"the assignment GIT_CONFIG_COUNT= {assigns}"),
+            ("GIT_CONFIG_PARAMETERS=\"'core.pager=x'\" git log",
+             f"the assignment GIT_CONFIG_PARAMETERS= {assigns}"),
+            ("env GIT_SSH_COMMAND=/tmp/p.sh git fetch origin",
+             f"the assignment GIT_SSH_COMMAND= {assigns}"),
+            ("GIT_EXEC_PATH=/tmp/x git status", f"the assignment GIT_EXEC_PATH= {assigns}"),
+            ("PATH=/tmp/x:$PATH git log", f"the assignment PATH= {assigns}"),
+            ("HOME=/tmp/h git log", f"the assignment HOME= {assigns}"),
+            ("timeout 5 env GIT_EDITOR=/tmp/p.sh git commit",
+             f"the assignment GIT_EDITOR= {assigns}"),
+            # D12 (b): anywhere in the command.
+            (f"export GIT_PAGER='{force}'; git log",
+             f"the assignment GIT_PAGER= {assigns}"),
+            (f"export PAGER='{force}'; git log", f"the assignment PAGER= {assigns}"),
+            ("EDITOR=/tmp/p.sh; git commit", f"the assignment EDITOR= {assigns}"),
+            ("sh -c 'GIT_PAGER=/tmp/p.sh git log'", evaluator),
+            # The append spelling `NAME+=value` is an assignment too.
+            (f"GIT_SEQUENCE_EDITOR+='{force}; true' git rebase -i HEAD~1",
+             f"the assignment GIT_SEQUENCE_EDITOR= {assigns}"),
+            (f"export GIT_PAGER+='{force}'; git log",
+             f"the assignment GIT_PAGER= {assigns}"),
+            ("GIT_SSH_COMMAND+=/tmp/p.sh git fetch origin",
+             f"the assignment GIT_SSH_COMMAND= {assigns}"),
+            ("env GIT_SSH_COMMAND+=/tmp/p.sh git fetch origin",
+             f"the assignment GIT_SSH_COMMAND= {assigns}"),
+            ("sh -c 'GIT_PAGER+=x git log'", evaluator),
+            ("bash -c \"export GIT_SEQUENCE_EDITOR+=x; git rebase -i HEAD~1\"",
+             evaluator),
+            ("echo \"$(GIT_PAGER=/tmp/p.sh git log)\"",
+             "a command substitution inside a quoted word cannot be validated"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe push: {reason}", result.stderr)
+                self.assertIn("; accepted: git push ", result.stderr)
+        for command in (
+            "git fetch origin",
+            "git pull --ff-only origin main",
+            "git ls-remote --heads origin",
+            "git clone --depth 1 --quiet . /tmp/x",
+            "git init --quiet /tmp/x",
+            "git archive -o /tmp/a.tar HEAD",
+            "git grep -n foo",
+            "git rebase -i origin/main",
+            "git rebase --empty=drop origin/main",
+            "GIT_TRACE=1 git status",
+            "GIT_AUTHOR_DATE=2026-01-01 git commit -m x",
+            "LC_ALL=C git log -1",
+            "env -u GITHUB_TOKEN git status",
+            "export FOO=1; git status",
+            "GIT_TRACE+=1 git status",
+            "LC_ALL+=C git log -1",
+            "echo $GIT_PAGER",
+            "PYTHONPATH=python python3 -c pass",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_transmit_rule_reads_substitutions_spellings_and_stdin(self):
+        """Issue 655 D2 and D7 review: a git word the shell runs from inside a
+        double-quoted substitution, spelled `$'git'`, `git` plus a line
+        continuation, `${G:-git}` or through an assigned variable, or handed to an
+        evaluator on stdin or in a heredoc, is judged like a plain git word."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        subprocess.run(["git", "config", "alias.p", "push"], cwd=repo, check=True,
+                       capture_output=True)
+        topic = "issue-655-topic"
+        unknown = ("is not a known local git subcommand; an alias, a git-* program "
+                   "or a transport could transmit refs")
+        evaluator = "shell source passed to an evaluator cannot be validated"
+        quoted = "a command substitution inside a quoted word cannot be validated"
+        for command, reason in (
+            (f'echo "$(git p origin {topic})"', quoted),
+            (f'x="$(git p origin {topic})"', quoted),
+            (f'echo "`git p origin {topic}`"', quoted),
+            (f"$'git' p origin {topic}", f"git p {unknown}"),
+            (f"git\\\n p origin {topic}", f"git p {unknown}"),
+            (f"${{G:-git}} p origin {topic}", f"git p {unknown}"),
+            (f"G=git; $G p origin {topic}", f"git p {unknown}"),
+            (f"G=/usr/bin/git; ${{G}} p origin {topic}", f"git p {unknown}"),
+            (f"export G=git; \"$G\" p origin {topic}", f"git p {unknown}"),
+            (f"G=git; \"${{G}}\" p origin {topic}", f"git p {unknown}"),
+            (f"G=git; \"${{G:-x}}\" p origin {topic}", f"git p {unknown}"),
+            (f"\"${{X:-git}}\" p origin {topic}", f"git p {unknown}"),
+            (f"echo 'git p origin {topic}' | sh", evaluator),
+            (f"sh <<'EOF'\ngit p origin {topic}\nEOF", evaluator),
+            (f"sh -c 'git\\\n p origin {topic}'", evaluator),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe push: {reason}", result.stderr)
+                self.assertNotIn(GRAMMAR, result.stderr)
+        for command in (
+            'echo "$(git status)"',
+            'x="$(git rev-parse HEAD)"',
+            'echo "`git status`"',
+            "$'git' status",
+            "git\\\n status",
+            "${G:-git} status",
+            "G=git; $G status",
+            "G=x; $G p origin t",
+            "G=x; \"${G}\" p origin t",
+            "G=git; \"${G}\" status",
+            "echo 'git status' | sh",
+            "sh <<'EOF'\ngit status\nEOF",
+            "sh -c 'git\\\n status'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+    def test_transmit_rule_reads_zsh_names_pipes_substitution_output_and_evaluator_text(self):
+        """Issue 655 final review: a git word spelled `=git` (zsh) or by a name
+        `hash`/`alias` binds to git, a git word that takes its subcommand from a pipe
+        or a redirection, a git word that is the output of a substitution, an
+        option hidden in an expansion or after a substitution, and evaluator text
+        that assigns the command word or quotes a global-option operand are judged
+        like a plain git word; the mention forms still pass."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        subprocess.run(["git", "config", "alias.p", "push"], cwd=repo, check=True,
+                       capture_output=True)
+        topic = "issue-655-topic"
+        force = "git push --force origin main"
+        unknown = ("is not a known local git subcommand; an alias, a git-* program "
+                   "or a transport could transmit refs")
+        evaluator = "shell source passed to an evaluator cannot be validated"
+        uncertain = "the git invocation continues past a shell substitution or grouping"
+        fed = "a git word with no subcommand reads its subcommand from a pipe or redirection"
+        option = "can run a command the guard cannot judge"
+        for command, reason in (
+            (f"=git p origin {topic}", f"git p {unknown}"),
+            ("=git push --force origin main", f"git push {unknown}"),
+            (f"xargs =git p origin {topic}", f"git p {unknown}"),
+            ("hash g=/usr/bin/git; g push --force origin main", f"git push {unknown}"),
+            (f"hash g=/usr/bin/git; g p origin {topic}", f"git p {unknown}"),
+            (f"hash -p /usr/bin/git g; g p origin {topic}", f"git g {unknown}"),
+            (f"alias g=git; g p origin {topic}", f"git p {unknown}"),
+            (f"echo p origin {topic} | xargs git", fed),
+            ("echo push --force origin main | xargs git", fed),
+            (f"printf 'p\\0origin\\0{topic}' | xargs -0 git", fed),
+            (f"echo p | xargs git -C {repo}", fed),
+            (f"xargs <args.txt git", fed),
+            (f"echo p origin {topic} | {{ true; xargs git; }}", fed),
+            (f"{{ xargs git; }} <<< 'push --force origin main'", fed),
+            (f"while read -r a; do xargs git; done <<EOF\nx\np origin {topic}\nEOF", fed),
+            (f"echo p origin {topic} | if true; then xargs git; fi", fed),
+            (f"echo p origin {topic} |\nxargs git", fed),
+            (f"echo p origin {topic} | \\\nxargs git", fed),
+            ("exec < args.txt; xargs git", fed),
+            (f"echo p origin {topic} | xargs ${{G:-git}}", fed),
+            (f"echo p origin {topic} | xargs ${{G-git}}", fed),
+            (f"echo p origin {topic} | xargs ${{G:=git}}", fed),
+            (f'echo p origin {topic} | xargs "$(which git)"', uncertain),
+            (f'echo p origin {topic} | xargs "`which git`"', uncertain),
+            (f'echo p origin {topic} | xargs "$(command -v git)"', uncertain),
+            (f"$(echo git) p origin {topic}", uncertain),
+            (f"`echo git` p origin {topic}", uncertain),
+            (f"xargs $(echo git) p origin {topic}", uncertain),
+            (f"$(echo git; true) p origin {topic}", uncertain),
+            (f'"$(which git)" push --force origin main', uncertain),
+            (f'"$(which git)" p origin {topic}', uncertain),
+            (f"G=$(which git); $G p origin {topic}", f"git p {unknown}"),
+            (f'G="$(command -v git)"; "$G" p origin {topic}', f"git p {unknown}"),
+            ("git rebase \"${X:---exec=git push --force origin HEAD:main}\" HEAD~1", option),
+            (f"git rebase $(echo HEAD) --exec '{force}'", option),
+            (f"git fetch $(git remote) --upload-pack='{force}'", option),
+            (f"sh -c 'G=git; $G -c alias.p=push p --force origin main'", evaluator),
+            (f"sh -c 'G=git; $G p origin {topic}'", evaluator),
+            (f"G=git; sh -c '$G p origin {topic}'", evaluator),
+            (f"sh -c 'hash g=/usr/bin/git; g p origin {topic}'", evaluator),
+            (f"sh -c 'echo p origin {topic} | xargs git'", evaluator),
+            (f"sh -c 'echo p origin {topic} | {{ true; xargs git; }}'", evaluator),
+            (f"echo p | sh -c 'xargs git'", evaluator),
+            (f"sh -c 'git -C \"/tmp status\" p origin {topic}'", evaluator),
+            (f"bash -c \"git -C '/tmp status' p origin {topic}\"", evaluator),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn("lifecycle guard: unsafe push: ", result.stderr)
+                self.assertIn(reason, result.stderr)
+                self.assertNotIn(GRAMMAR, result.stderr)
+        for command in (
+            "which git",
+            "brew install git",
+            "echo $(which git)",
+            'echo "$(which git)"',
+            'x="$(which git)" y',
+            "git log $(printf HEAD) -1",
+            "echo $(git rev-parse HEAD) x",
+            'cd "$(git rev-parse --show-toplevel)" && ls',
+            "git rebase origin/main",
+            "git rebase $(git merge-base HEAD origin/main) HEAD~1",
+            "git rebase --onto origin/main HEAD~2 HEAD~1",
+            "git fetch origin --depth=-1",
+            "git clone --depth 1 --quiet . /tmp/x",
+            "=git status",
+            "xargs git status",
+            "echo a | xargs git status",
+            "echo a | xargs git -C /tmp status",
+            "echo a | { true; xargs git status; }",
+            'echo "$(which git)" | cat',
+            "echo $(which git) | cat",
+            "which git | cat",
+            "echo a | grep -v b",
+            "hash g=/usr/bin/git; g status",
+            "G=$(which git); $G status",
+            'G="$(which git)"; "$G" status',
+            "sh -c 'G=git; $G status'",
+            "sh -c 'git -C \"/tmp status\" status'",
+            "sh -c 'echo a | xargs git status'",
+            "sh -c 'git log --oneline'",
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)

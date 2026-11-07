@@ -193,7 +193,10 @@ DETACHING_ROUTES = (
 # Characters that end a word and re-open the command position: subshells,
 # groups, `case` arms and command substitution all start a command after one.
 OPERATOR_CHARS = "(){}`"
-ASSIGNMENT_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# `NAME=` and the append form `NAME+=`, which bash also treats as an
+# assignment (and which equals `NAME=` when NAME is unset); `name` is the bare
+# variable name.
+ASSIGNMENT_PREFIX = re.compile(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\+?=")
 SLUG_PATTERN = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 REF_NAME_PATTERN = re.compile(r"[A-Za-z0-9._/-]+")
 # Path components that make a token a namespaced ref rather than a branch
@@ -237,9 +240,9 @@ FORM_TABLE = {
     },
     "pr-create": {
         "forms": (
-            ("pr-create", 'gh pr create --repo <slug> --base <base> --head <branch> '
+            ("pr-create", 'gh pr create --repo <slug> [--draft] --base <base> --head <branch> '
                           '--title "<title>" --body "<body>"', None),
-            ("pr-create-file", 'gh pr create --repo <slug> --base <base> --head <branch> '
+            ("pr-create-file", 'gh pr create --repo <slug> [--draft] --base <base> --head <branch> '
                                '--title "<title>" --body-file <path>', None),
         ),
         "whole_text_characters": False,
@@ -459,7 +462,16 @@ def skip_heredoc_bodies(command, index, pending):
 
 
 def split_segments(command):
-    """Split a shell command into its top-level segments.
+    """The top-level segments of `command` (`split_segments_with_runs` without
+    the separator runs), or None when it cannot be parsed."""
+    parsed = split_segments_with_runs(command)
+    return None if parsed is None else parsed[0]
+
+
+def split_segments_with_runs(command):
+    """Split a shell command into its top-level segments and the separator run
+    that follows each (`"|"`, `"&&"`, `"\n"`, `""` after the last), so a caller
+    can tell that a segment reads a pipe (issue 655 D7).
 
     Quoted interiors stay inside their segment; comments and heredoc bodies are
     dropped. Neither can therefore open a command position. Returns None when
@@ -468,6 +480,7 @@ def split_segments(command):
     signal.
     """
     segments = []
+    runs = []
     current = []
     pending = []
     quote = None
@@ -517,6 +530,7 @@ def split_segments(command):
             # Heredoc bodies begin after the newline that ends the line which
             # declared them — never at an earlier `;`/`&`/`|` on that line.
             segments.append("".join(current))
+            runs.append("\n")
             current = []
             index += 1
             if pending:
@@ -528,19 +542,22 @@ def split_segments(command):
         if character in SEGMENT_SEPARATORS:
             segments.append("".join(current))
             current = []
+            run_start = index
             while (
                 index < length
                 and command[index] in SEGMENT_SEPARATORS
                 and command[index] != "\n"
             ):
                 index += 1
+            runs.append(command[run_start:index])
             continue
         current.append(character)
         index += 1
     if quote is not None or pending:
         return None
     segments.append("".join(current))
-    return segments
+    runs.append("")
+    return segments, runs
 
 
 def tokenize_segment(segment):
@@ -565,6 +582,11 @@ def tokenize_segment(segment):
             else:
                 value.append(character)
             index += 1
+            continue
+        if character == "\\" and segment[index + 1:index + 2] == "\n":
+            # A line continuation joins the lines: `git\<newline> push` is
+            # `git push` (issue 655 D2).
+            index += 2
             continue
         if character == "\\" and index + 1 < length:
             value.append(segment[index + 1])
@@ -797,6 +819,654 @@ def git_invocation(program, words):
         return operation, None, (directories[0] if directories else None)
     return operation, f"{problem}; {INVOCATION_FORM_HINT}", None
 
+# Issue 655 D5: the git global options the guard walks, each with the number of
+# words it takes. `-c`, `--config-env` and `--exec-path=<dir>` are absent on
+# purpose: their value can run a command from any subcommand.
+GIT_GLOBAL_OPTIONS = {
+    "-C": 1, "--git-dir": 1, "--work-tree": 1, "--namespace": 1,
+    "-p": 0, "--paginate": 0, "-P": 0, "--no-pager": 0, "--bare": 0,
+    "--no-replace-objects": 0, "--literal-pathspecs": 0, "--glob-pathspecs": 0,
+    "--noglob-pathspecs": 0, "--icase-pathspecs": 0, "--no-optional-locks": 0,
+    "--no-advice": 0, "--no-lazy-fetch": 0, "--exec-path": 0, "--html-path": 0,
+    "--man-path": 0, "--info-path": 0, "--version": 0, "-v": 0, "--help": 0,
+    "-h": 0,
+}
+# Issue 655 D4: the closed list of git subcommands that cannot transmit refs.
+# `push` is absent: it is recognised earlier (D6). Every other word is an alias,
+# an external git-<name> program or a transport, and is refused.
+GIT_LOCAL_SUBCOMMANDS = frozenset({
+    "add",
+    "am",
+    "annotate",
+    "apply",
+    "archive",
+    "blame",
+    "branch",
+    "bundle",
+    "cat-file",
+    "check-attr",
+    "check-ignore",
+    "check-mailmap",
+    "check-ref-format",
+    "checkout",
+    "checkout-index",
+    "cherry",
+    "cherry-pick",
+    "clean",
+    "clone",
+    "column",
+    "commit",
+    "commit-graph",
+    "commit-tree",
+    "config",
+    "count-objects",
+    "describe",
+    "diff",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
+    "fetch",
+    "fmt-merge-msg",
+    "for-each-ref",
+    "format-patch",
+    "fsck",
+    "gc",
+    "get-tar-commit-id",
+    "grep",
+    "hash-object",
+    "help",
+    "index-pack",
+    "init",
+    "interpret-trailers",
+    "log",
+    "ls-files",
+    "ls-remote",
+    "ls-tree",
+    "mailinfo",
+    "mailsplit",
+    "maintenance",
+    "merge",
+    "merge-base",
+    "merge-file",
+    "merge-tree",
+    "mktag",
+    "mktree",
+    "multi-pack-index",
+    "mv",
+    "name-rev",
+    "notes",
+    "pack-objects",
+    "pack-refs",
+    "patch-id",
+    "prune",
+    "prune-packed",
+    "pull",
+    "range-diff",
+    "read-tree",
+    "rebase",
+    "reflog",
+    "remote",
+    "repack",
+    "replace",
+    "rerere",
+    "reset",
+    "restore",
+    "rev-list",
+    "rev-parse",
+    "revert",
+    "rm",
+    "shortlog",
+    "show",
+    "show-branch",
+    "show-index",
+    "show-ref",
+    "sparse-checkout",
+    "stash",
+    "status",
+    "stripspace",
+    "switch",
+    "symbolic-ref",
+    "tag",
+    "unpack-file",
+    "unpack-objects",
+    "update-index",
+    "update-ref",
+    "var",
+    "verify-commit",
+    "verify-pack",
+    "verify-tag",
+    "version",
+    "whatchanged",
+    "worktree",
+    "write-tree",
+})
+GIT_UNCERTAIN_PROBLEM = (
+    "the git invocation continues past a shell substitution or grouping; "
+    f"{INVOCATION_FORM_HINT}"
+)
+GIT_FED_PROBLEM = (
+    "a git word with no subcommand reads its subcommand from a pipe or "
+    f"redirection; {INVOCATION_FORM_HINT}"
+)
+# A raw word that ends in `git` after nothing or after one of `/:=+?-`, so
+# `${X:-git}` and `/usr/bin/git` count (issue 655 D7); used with fullmatch.
+GIT_RAW_WORD = re.compile(r"(?:.*[/:=+?-])?git")
+
+
+def dashed_git_program(name):
+    """True when program `name` is a `git-<name>` program, an alias by another
+    spelling (issue 655 D8)."""
+    return name.startswith("git-")
+
+
+def opening_operator(tokens, index, operator):
+    """True when `operator`, the operator token that cuts the run after the git
+    word at `index`, opens a substitution or grouping (issue 655 D9): `(` and
+    `{` always, a backtick when an even number of backtick operator tokens
+    precede `index` (an odd number means it closes one)."""
+    if operator in ("(", "{"):
+        return True
+    if operator != "`":
+        return False
+    before = sum(1 for value, is_operator in tokens[:index] if is_operator and value == "`")
+    return before % 2 == 0
+
+
+def open_substitutions(tokens, index):
+    """Positions of the substitutions still open before `index`: the position of
+    the `$` word of an unglued `$(`, or of an opening backtick (issue 655 D9
+    review). A glued `x=$(` is not one, since its output is assigned."""
+    stack = []
+    for position in range(index):
+        value, is_operator = tokens[position]
+        if not is_operator:
+            continue
+        if value == "(":
+            before = tokens[position - 1] if position else None
+            substitution = before is not None and before == ("$", False)
+            stack.append(("(", position - 1 if substitution else None))
+        elif value == ")":
+            if stack and stack[-1][0] == "(":
+                stack.pop()
+        elif value == "`":
+            if stack and stack[-1][0] == "`":
+                stack.pop()
+            else:
+                stack.append(("`", position))
+    return [position for _kind, position in stack if position is not None]
+
+
+def bare_git_supplies_command(tokens, index, cut_at, run):
+    """True when the git word at `index`, followed by no subcommand in `run`, may
+    be the output of a command substitution whose following words run as its
+    arguments (`$(echo git) p origin t`, a backtick likewise): the run is cut by
+    the substitution's closing `)` or backtick with a word after it, or the
+    segment ends inside the substitution (`$(echo git; true) p`) (issue 655
+    D7 review). `cut_at` is the position of the operator that cut the run, else
+    None."""
+    if git_names_subcommand(run) or not open_substitutions(tokens, index):
+        return False
+    if cut_at is None:
+        return True
+    if tokens[cut_at][0] not in (")", "`"):
+        return False
+    following = cut_at + 1
+    while following < len(tokens) and tokens[following][0] in (")", "`") and tokens[following][1]:
+        following += 1
+    return following < len(tokens) and not tokens[following][1]
+
+
+def quoted_substitution_runs_git(tokens, index, fed=False):
+    """True when the word at `index` is a quoted command substitution whose last
+    word is git and that a word follows (`"$(which git)" push …`): the output
+    runs with those words as its arguments (issue 655 D7 review). `fed` is set
+    at an argument position that reads a pipe or redirection, where the words
+    come from there and none need follow (`echo p origin t | xargs "$(which
+    git)"`)."""
+    value, is_operator = tokens[index]
+    if (
+        is_operator or ("$(" not in value and "`" not in value)
+        or ASSIGNMENT_PREFIX.match(value) is not None
+        or (not fed and (index + 1 >= len(tokens) or tokens[index + 1][1]))
+    ):
+        return False
+    pieces = [value]
+    for separator in SEGMENT_SEPARATORS:
+        pieces = [part for piece in pieces for part in piece.split(separator)]
+    return any(
+        reading and GIT_RAW_WORD.fullmatch(reading[-1]) is not None
+        for piece in pieces
+        for reading in (raw_words(piece), raw_words(piece, glued=True))
+    )
+
+
+ASSIGNED_VARIABLE = re.compile(r"\$(\w+)")
+# A whole-word `${...}` (a double-quoted `"${G}"`, `"${G:-x}"`, `"${X:-git}"`
+# tokenises to one word); its group is the text between the braces.
+WORD_BRACED_VARIABLE = re.compile(r"\$\{(.*)\}", re.DOTALL)
+BRACED_VARIABLE = re.compile(r"(\w+)(?::?[-=+?].*)?", re.DOTALL)
+
+
+def git_assigned_names(token_lists):
+    """The names assigned a git word anywhere in the command (`G=git`,
+    `export G=/usr/bin/git`), so `$G` and `${G}` can be read as git (issue 655
+    D2). A value is a git word when its basename is `git` or `git-<name>`, or
+    its raw text satisfies GIT_RAW_WORD."""
+    names = set()
+    for tokens in token_lists:
+        for position, (value, is_operator) in enumerate(tokens):
+            match = None if is_operator else ASSIGNMENT_PREFIX.match(value)
+            if match is None:
+                continue
+            assigned = value[match.end():]
+            if (
+                GIT_RAW_WORD.fullmatch(assigned) is not None
+                or dashed_git_program(program_name(assigned))
+                or substitution_yields_git(tokens, position, assigned)
+            ):
+                names.add(match.group("name"))
+    return names
+
+
+def raw_has_git_word(text):
+    """True when raw `text` holds a word that is git by `GIT_RAW_WORD` or a
+    `git-<name>` program (the word of `$(which git)` is `git`)."""
+    return any(
+        GIT_RAW_WORD.fullmatch(word) is not None or dashed_git_program(program_name(word))
+        for reading in (raw_words(text), raw_words(text, glued=True))
+        for word in reading
+    )
+
+
+def substitution_yields_git(tokens, position, assigned):
+    """True when the assignment word at `position`, whose value text is
+    `assigned`, takes a command substitution whose text holds a git word
+    (`G=$(which git)`, `G="$(command -v git)"`, `` G=`which git` ``): `$G` may
+    then be git, which the guard cannot resolve (issue 655 D2 review)."""
+    if "$(" in assigned or "`" in assigned:
+        return raw_has_git_word(assigned)
+    if assigned not in ("", "$"):
+        return False
+    following = tokens[position + 1:position + 2]
+    if not following or not following[0][1] or following[0][0] not in ("(", "`"):
+        return False
+    if assigned == "" and following[0][0] == "(":
+        return False
+    body = []
+    for word, word_is_operator in tokens[position + 2:]:
+        if word_is_operator and word in (")", "`"):
+            break
+        if not word_is_operator:
+            body.append(word)
+    return raw_has_git_word(" ".join(body))
+
+
+def git_command_names(token_lists):
+    """The names `hash` or `alias` binds to a git word (`hash g=/usr/bin/git`,
+    `alias g=git`), so the bare command word `g` is read as git (issue 655 D2
+    review). `hash -p /usr/bin/git g` is refused as a mention of git."""
+    names = set()
+    for tokens in token_lists:
+        for position, (value, is_operator) in enumerate(tokens):
+            if is_operator or program_name(value) not in ("hash", "alias"):
+                continue
+            words = []
+            for word, word_is_operator in tokens[position + 1:]:
+                if word_is_operator:
+                    break
+                words.append(word)
+            for word in words:
+                bound, equals, target = word.partition("=")
+                if equals and bound and not bound.startswith("-"):
+                    first = target.split()[0] if target.split() else ""
+                    if (
+                        GIT_RAW_WORD.fullmatch(first) is not None
+                        or dashed_git_program(program_name(first))
+                    ):
+                        names.add(bound)
+    return names
+
+
+def git_spelling(tokens, index, assigned, hashed=frozenset()):
+    """(program, run_start) when the non-operator token at `index` is a git word
+    in some spelling, else None (issue 655 D2, D7). `run_start` is where the
+    words that follow it begin.
+
+    Covers a plain `git` or `git-<name>` word by basename, the same word after
+    `$` (`$'git'` tokenises to `$git`), a variable assigned a git word
+    (`$G`, `${G}`, and the same inside one word, `"${G}"`) and the braced
+    default `${G:-git}`, whose run starts after its closing `}`. A leading `=`
+    is zsh's `=git` expansion of the command's path, and a bare word `hashed`
+    to git (`hash g=/usr/bin/git`) runs git too.
+    """
+    value = tokens[index][0]
+    if value in hashed:
+        return "git", index + 1
+    if value.startswith("="):
+        value = value[1:]
+    name = program_name(value)
+    if name == "git" or dashed_git_program(name):
+        return name, index + 1
+    stripped = program_name(value.lstrip("$"))
+    if value.startswith("$") and (stripped == "git" or dashed_git_program(stripped)):
+        return stripped, index + 1
+    variable = ASSIGNED_VARIABLE.fullmatch(value)
+    if variable is not None and variable.group(1) in assigned:
+        return "git", index + 1
+    word_braced = WORD_BRACED_VARIABLE.fullmatch(value)
+    if word_braced is not None:
+        inner = word_braced.group(1)
+        braced = BRACED_VARIABLE.fullmatch(inner)
+        if GIT_RAW_WORD.fullmatch(inner) is not None or (
+            braced is not None and braced.group(1) in assigned
+        ):
+            return "git", index + 1
+    if (
+        index >= 2 and tokens[index - 1] == ("{", True)
+        and tokens[index - 2] == ("$", False)
+    ):
+        braced = BRACED_VARIABLE.fullmatch(value)
+        if GIT_RAW_WORD.fullmatch(value) is not None or (
+            braced is not None and braced.group(1) in assigned
+        ):
+            start = index + 1
+            if tokens[start:start + 1] == [("}", True)]:
+                start += 1
+            return "git", start
+    return None
+
+
+# Issue 655 D11: per allowlisted git subcommand, the options whose value git
+# runs as a command (a transport program, a hook-like exec, a config entry such
+# as `core.fsmonitor`, a template carrying hooks). The subcommand allowlist
+# alone cannot see them, because the subcommand itself cannot transmit refs.
+GIT_COMMAND_OPTIONS = {
+    "archive": frozenset({"--exec"}),
+    "clone": frozenset({"--upload-pack", "-u", "--config", "-c", "--template"}),
+    "fetch": frozenset({"--upload-pack"}),
+    "grep": frozenset({"--open-files-in-pager", "-O"}),
+    "init": frozenset({"--template"}),
+    "ls-remote": frozenset({"--upload-pack", "-u"}),
+    "pull": frozenset({"--upload-pack"}),
+    "rebase": frozenset({"--exec", "-x"}),
+}
+
+
+def git_command_option(subcommand, words):
+    """The first word of `words` that is a command option of `subcommand`
+    (GIT_COMMAND_OPTIONS), else None (issue 655 D11).
+
+    A `--` word matches by its part before any `=` when that part is at least
+    three characters and a `--` spelling of the subcommand starts with it, since
+    git accepts any unambiguous abbreviation (`--exe`, `--upload`). A `-` word
+    of two or more characters matches when any letter of its cluster is a short
+    spelling (`-ix`, `-Osh`). Every word is scanned, an option value or an
+    operand after `--` included: a word that only looks like an option can only
+    refuse more.
+    """
+    options = GIT_COMMAND_OPTIONS.get(subcommand, frozenset())
+    for word in words:
+        # An option can hide inside a word that carries an expansion
+        # (`"${X:---exec=sh p.sh}"`): in a word that does not start with `-`,
+        # every `-` that follows one of `:=+?-` starts a candidate too.
+        candidates = [word] + ([] if word.startswith("-") else [
+            word[position:] for position in range(1, len(word))
+            if word[position] == "-" and word[position - 1] in ":=+?-"
+        ])
+        for candidate in candidates:
+            if candidate.startswith("--"):
+                name = candidate.partition("=")[0]
+                if len(name) >= 3 and any(
+                    spelling.startswith(name)
+                    for spelling in options if spelling.startswith("--")
+                ):
+                    return word
+            elif candidate.startswith("-") and len(candidate) >= 2:
+                if any("-" + letter in options for letter in candidate[1:]):
+                    return word
+    return None
+
+
+# Issue 655 D12: the environment names a git invocation may be given. Anything
+# else under GIT_ can hand git a command or other configuration
+# (`GIT_SEQUENCE_EDITOR`, `GIT_CONFIG_COUNT`, `GIT_SSH_COMMAND`, `GIT_EXEC_PATH`).
+GIT_ASSIGNMENT_ALLOWED = frozenset({
+    "GIT_TRACE", "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF",
+    "GIT_TRACE_CURL", "GIT_TRACE_PACKET", "GIT_TRACE_PERFORMANCE",
+    "GIT_TRACE_SETUP", "GIT_CURL_VERBOSE", "GIT_TERMINAL_PROMPT",
+    "GIT_OPTIONAL_LOCKS", "GIT_ADVICE", "GIT_FLUSH", "GIT_MERGE_VERBOSITY",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+    "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS", "LANG", "LC_ALL", "LC_MESSAGES", "TZ", "NO_COLOR",
+    "TERM", "COLUMNS",
+})
+# Issue 655 D12 (b): variables git runs as a program though they carry no `GIT_`
+# prefix; refused wherever they are assigned.
+GIT_COMMAND_VARIABLES = frozenset({"EDITOR", "VISUAL", "PAGER"})
+
+
+def git_assignment_problem(names, strict):
+    """The refusal for the first assigned name in `names` that can make git run
+    a command or read other configuration, else None (issue 655 D12).
+
+    `strict` judges the prefix of a git word, where only GIT_ASSIGNMENT_ALLOWED
+    passes. Otherwise (an assignment anywhere in the command) a name is refused
+    when it starts with `GIT_` and is not allowlisted, or is in
+    GIT_COMMAND_VARIABLES.
+    """
+    for name in names:
+        if strict:
+            refused = name not in GIT_ASSIGNMENT_ALLOWED
+        else:
+            refused = (
+                name.startswith("GIT_") and name not in GIT_ASSIGNMENT_ALLOWED
+            ) or name in GIT_COMMAND_VARIABLES
+        if refused:
+            return (
+                f"the assignment {shown_value(name)}= can make git run a "
+                f"command or read other configuration; {INVOCATION_FORM_HINT}"
+            )
+    return None
+
+
+def git_prefix_assignments(tokens, index):
+    """The names assigned by the non-operator tokens between the last operator
+    token before `index` (the segment start when none) and `index`, in order
+    (issue 655 D12 a). This covers `X=1 git …`, `env X=1 git …` and
+    `timeout 5 env X=1 git …`."""
+    start = 0
+    for position in range(index - 1, -1, -1):
+        if tokens[position][1]:
+            start = position + 1
+            break
+    names = []
+    for value, is_operator in tokens[start:index]:
+        match = None if is_operator else ASSIGNMENT_PREFIX.match(value)
+        if match is not None:
+            names.append(match.group("name"))
+    return names
+
+
+def git_names_subcommand(words):
+    """True when a word remains in `words` after git's leading global options
+    (an option the table does not know counts as one: it is refused elsewhere)."""
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        word = words[index]
+        if word in GIT_GLOBAL_OPTIONS:
+            index += 1 + GIT_GLOBAL_OPTIONS[word]
+            continue
+        option, equals, _value = word.partition("=")
+        if equals and option.startswith("--") and GIT_GLOBAL_OPTIONS.get(option) == 1:
+            index += 1
+            continue
+        return True
+    return index < len(words)
+
+
+def git_transmit_problem(program, words, truncation, tail=(), fed=False):
+    """The refusal for a git word that could transmit refs and is not a
+    lifecycle form, else None (issue 655 D4, D5, D8, D9).
+
+    `program` is the word, `words` follow it to the end of its run, `truncation`
+    is the operator that cut the run, else None, and `tail` holds the words that
+    follow that operator in the same segment, which still belong to the git
+    invocation and so are scanned for command options (`git rebase $(x) --exec
+    …`). `fed` is set at an argument position that reads a pipe or redirection
+    (`echo p origin t | xargs git`): a run that names no subcommand then takes
+    it from stdin and is refused. A
+    `git-<name>` program is refused outright. Git itself is walked through
+    GIT_GLOBAL_OPTIONS and must name a subcommand in GIT_LOCAL_SUBCOMMANDS; a
+    run cut by an opening operator before its subcommand is certain is refused.
+    """
+    name = program_name(program)
+    if name != "git":
+        if dashed_git_program(name):
+            return (
+                f"the git program {shown_value(name)} runs a git subcommand "
+                f"directly; {INVOCATION_FORM_HINT}"
+            )
+        return None
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        word = words[index]
+        if word in GIT_GLOBAL_OPTIONS:
+            index += 1 + GIT_GLOBAL_OPTIONS[word]
+            continue
+        option, equals, _value = word.partition("=")
+        if equals and option.startswith("--") and GIT_GLOBAL_OPTIONS.get(option) == 1:
+            index += 1
+            continue
+        return (
+            f"git global option {shown_value(word)} is not accepted; "
+            f"{INVOCATION_FORM_HINT}"
+        )
+    if index >= len(words):
+        if truncation is not None:
+            return GIT_UNCERTAIN_PROBLEM
+        if fed:
+            return GIT_FED_PROBLEM
+        return None
+    subcommand = words[index]
+    if index == len(words) - 1 and truncation is not None:
+        return GIT_UNCERTAIN_PROBLEM
+    if subcommand not in GIT_LOCAL_SUBCOMMANDS:
+        return (
+            f"git {shown_value(subcommand)} is not a known local git subcommand; "
+            f"an alias, a git-* program or a transport could transmit refs; "
+            f"{INVOCATION_FORM_HINT}"
+        )
+    option = git_command_option(subcommand, list(words[index + 1:]) + list(tail))
+    if option is not None:
+        return (
+            f"git {shown_value(subcommand)} {shown_value(option)} can run a "
+            f"command the guard cannot judge; {INVOCATION_FORM_HINT}"
+        )
+    return None
+
+
+def git_argument_problem(program, words, truncation, tail=(), fed=False):
+    """The transmit refusal for a git word at an argument position (`xargs git
+    …`, `timeout 5 git …`, `find -exec git …`): exactly the command-position
+    rule (issue 655 D7). This is the argument-position call site's own seam."""
+    return git_transmit_problem(program, words, truncation, tail, fed)
+
+
+SEPARATOR_RUN = re.compile("([" + re.escape("".join(sorted(SEGMENT_SEPARATORS))) + "]+)")
+
+
+def raw_git_names(pieces):
+    """The names the raw `pieces` bind to a git word: an assignment, `hash` or
+    `alias` target that is a git word (`G=git`, `hash g=/usr/bin/git`), or an
+    empty assignment followed by a substitution holding one (`G=$(which git)`),
+    so `$G`, `${G}` and a bare `g` can be read as git (issue 655 D2 review)."""
+    names = set()
+    for piece in pieces:
+        for reading in (raw_words(piece), raw_words(piece, glued=True)):
+            for position, word in enumerate(reading):
+                match = ASSIGNMENT_PREFIX.match(word)
+                if match is None:
+                    continue
+                value = word[match.end():]
+                if (
+                    GIT_RAW_WORD.fullmatch(value) is not None
+                    or dashed_git_program(program_name(value))
+                    or (value == "" and any(
+                        GIT_RAW_WORD.fullmatch(later) is not None
+                        for later in reading[position + 1:]))
+                ):
+                    names.add(match.group("name"))
+    return names
+
+
+def raw_reading_transmits(reading, names, fed):
+    """True when a word of `reading` is a git word (or an assigned name, see
+    `raw_git_names`) that could transmit refs, or an assignment that hands git a
+    command. `fed` is set when the piece may read a pipe or redirection, so a git
+    word after the first word that names no subcommand takes it from stdin."""
+    for position, word in enumerate(reading):
+        if dashed_git_program(program_name(word)):
+            return True
+        match = ASSIGNMENT_PREFIX.match(word)
+        if match is not None and git_assignment_problem(
+                [match.group("name")], False) is not None:
+            return True
+        variable = None if match is not None else BRACED_VARIABLE.fullmatch(word)
+        if (
+            GIT_RAW_WORD.fullmatch(word) is not None
+            or (variable is not None and variable.group(1) in names)
+        ) and git_transmit_problem(
+                "git", reading[position + 1:], None,
+                fed=fed and position > 0) is not None:
+            return True
+    return False
+
+
+def pipe_in(run):
+    """True when the separator `run` holds a pipe (`|` or `|&`, not `||`)."""
+    return "|" in run.replace("||", "")
+
+
+def transmit_in_raw_text(text, names=frozenset(), depth=0, fed=False):
+    """True when the raw `text` of an evaluator, `env -S` or unparseable segment
+    holds a git word that could transmit refs (issue 655 D7).
+
+    The text is split at every segment separator, and each piece's raw words, in
+    both quote readings, are walked from every git word with
+    `git_transmit_problem`; a `git-<name>` word counts on its own. A third
+    reading splits the piece the way the shell does, so a quoted global-option
+    operand (`git -C "/tmp status" p`) is one word, and a word that holds
+    several words (`sh -c '…'`) is read again as text. `names` are the names
+    already bound to git by the surrounding command; the text binds more
+    (`G=git; $G p`). A piece is fed when `fed` says the text as a whole is
+    (it follows a pipe, or the command holds a redirection), when a `|`
+    comes before it anywhere in the text, so a compound command that follows a
+    pipe is fed (`echo p | { true; xargs git; }`), or when the text holds a
+    `<` (a redirection of a compound command, `exec <file`).
+    """
+    text = text.replace("\\\n", "")
+    parts = SEPARATOR_RUN.split(text)
+    fed = fed or "<" in text
+    pieces = [
+        (piece, fed or any(pipe_in(run) for run in parts[1:position:2]))
+        for position, piece in enumerate(parts) if position % 2 == 0
+    ]
+    names = set(names) | raw_git_names([piece for piece, _ in pieces])
+    for piece, fed in pieces:
+        readings = [raw_words(piece), raw_words(piece, glued=True)]
+        tokens = tokenize_segment(piece)
+        if tokens is not None:
+            readings.append([value for value, is_operator in tokens if not is_operator])
+            if depth < 3:
+                for value, is_operator in tokens:
+                    if not is_operator and len(value.split()) > 1 and transmit_in_raw_text(
+                            value, names, depth + 1, fed):
+                        return True
+        if any(raw_reading_transmits(reading, names, fed) for reading in readings):
+            return True
+    return False
+
 
 def gh_invocation(program, words):
     """(operation, problem, None) for a guarded gh invocation, else None (issue 400 D4).
@@ -916,7 +1586,9 @@ def git_option_operands(tokens, index):
     return operands
 
 
-def unvalidatable(segment, reason, mentions_label=False):
+def unvalidatable(
+    segment, reason, mentions_label=False, assigned=frozenset(), fed=False,
+):
     """Every guarded verb found in `segment`'s raw text, all refused for `reason`.
 
     A verb is found when its words occur in order in either reading of the
@@ -925,6 +1597,8 @@ def unvalidatable(segment, reason, mentions_label=False):
     backslashes deleted (issue 400 D17, the base `336d9e05` check): a word such
     as `${CMD:-git` or `-df` has no word equal to the verb's, yet the shell runs
     the verb. When `mentions_label` is set, the raise-label edit is refused too.
+    `fed` is set when the segment may read a pipe or redirection (see
+    `guarded_operations`).
     """
     readings = [raw_words(segment), raw_words(segment, glued=True)]
     texts = [segment, "".join(c for c in segment if c not in RAW_GLUE_CHARS)]
@@ -934,6 +1608,8 @@ def unvalidatable(segment, reason, mentions_label=False):
         if any(verb_occurs_in_order(words, verb_words) for words in readings)
         or any(" ".join(verb_words) in text for text in texts)
     ]
+    if transmit_in_raw_text(segment, assigned, fed=fed):
+        found.append(("transmit", segment, reason, None))
     if mentions_label:
         found.append(("label", segment, reason, None))
     return found
@@ -968,22 +1644,42 @@ def guarded_operations(command):
     word that mentions the label inside a `$(…)` or backtick substitution is
     refused too, because a quoted substitution still runs.
     """
-    segments = split_segments(command)
-    if segments is None:
+    parsed = split_segments_with_runs(command)
+    if parsed is None:
         return unvalidatable(
             command, "the command could not be parsed",
             mentions_raise_label([command]),
         )
+    segments, runs = parsed
     found = []
     stream = []
+    token_lists = [
+        tokens for tokens in map(tokenize_segment, segments) if tokens is not None
+    ]
+    assigned = git_assigned_names(token_lists)
+    hashed = git_command_names(token_lists)
+    # A redirection anywhere in the command may feed a compound command that
+    # holds a later segment (`{ xargs git; } <<< 'push …'`, `exec <f; xargs
+    # git`), and a pipe before a segment may feed it through a grouping, a loop
+    # or a conditional (`echo p | { true; xargs git; }`): a segment is fed by
+    # either, not only by the pipe or redirection of its own piece (issue 655
+    # final review).
+    redirected = any(
+        not is_operator and value.startswith("<")
+        for tokens in token_lists for value, is_operator in tokens
+    ) or len(token_lists) < len(segments) and "<" in command
     for position, segment in enumerate(segments):
         tokens = tokenize_segment(segment)
         if tokens is None:
             found.extend(unvalidatable(
                 segment, "the segment could not be tokenised",
-                mentions_raise_label([segment]),
+                mentions_raise_label([segment]), assigned | hashed,
+                redirected or any(pipe_in(run) for run in runs[:position]),
             ))
             continue
+        # A segment may read a pipe when a `|` comes before it anywhere, or
+        # the command holds a redirection (`<f`, `<<<x`, `<<EOF`).
+        fed = redirected or any(pipe_in(run) for run in runs[:position])
         # Every tokenised segment joins the label stream, evaluator segments
         # included: `gh pr edit $(sh -c '…'; true) --add-label …` puts the
         # `gh` word in an evaluator segment and its label in the next one.
@@ -1006,7 +1702,26 @@ def guarded_operations(command):
         ):
             raw_reason = EVALUATOR_REASON
         if raw_reason is not None:
-            found.extend(unvalidatable(segment, raw_reason, mentions))
+            found.extend(unvalidatable(
+                segment, raw_reason, mentions, assigned | hashed, fed))
+        if raw_reason == EVALUATOR_REASON and transmit_in_raw_text(
+                command, assigned | hashed):
+            # An evaluator with no command text of its own reads its source
+            # from stdin (`echo 'git p' | sh`, `sh <<EOF`), which is another
+            # segment or a heredoc body the segments drop (issue 655 D7).
+            found.append(("transmit", segment, raw_reason, None))
+        # Issue 655 D12 (b): an assignment that hands git a command or other
+        # configuration, in any position of the command.
+        for value, is_operator in tokens:
+            match = None if is_operator else ASSIGNMENT_PREFIX.match(value)
+            if match is None:
+                continue
+            problem = git_assignment_problem([match.group("name")], False)
+            if problem is not None:
+                found.append((
+                    "transmit", segment,
+                    raw_reason if raw_reason is not None else problem, None,
+                ))
         operands = set()
         for index in range(len(tokens)):
             if index in operands:
@@ -1016,6 +1731,61 @@ def guarded_operations(command):
             invocation = guarded_invocation(
                 tokens, index, "\n".join(segments[position + 1:]))
             if invocation is None:
+                # Issue 655: a git word the recognition above did not classify
+                # is refused unless it is a local subcommand (D4-D9), in every
+                # position (D7).
+                spelling = (
+                    None if tokens[index][1]
+                    else git_spelling(tokens, index, assigned, hashed)
+                )
+                if quoted_substitution_runs_git(tokens, index, fed and not flags[index]):
+                    found.append((
+                        "transmit", segment,
+                        raw_reason if raw_reason is not None else GIT_UNCERTAIN_PROBLEM,
+                        None,
+                    ))
+                if spelling is not None:
+                    value, run_start = spelling
+                    run = []
+                    cut = None
+                    cut_at = None
+                    for offset in range(run_start, len(tokens)):
+                        word, word_is_operator = tokens[offset]
+                        if word_is_operator:
+                            cut, cut_at = word, offset
+                            break
+                        run.append(word)
+                    tail = [
+                        word for word, word_is_operator in tokens[cut_at + 1:]
+                        if not word_is_operator
+                    ] if cut_at is not None else []
+                    truncation = (
+                        cut if cut is not None and opening_operator(tokens, index, cut)
+                        else None
+                    )
+                    if truncation is None and bare_git_supplies_command(
+                            tokens, index, cut_at, run):
+                        truncation = cut if cut is not None else ")"
+                    # A braced default `${G:-git}` tokenises as `$`, `{`, the
+                    # word and `}`: its position is the `$` word's.
+                    word_start = (
+                        index - 2
+                        if index >= 2 and tokens[index - 1] == ("{", True)
+                        and tokens[index - 2] == ("$", False)
+                        else index
+                    )
+                    reader = git_transmit_problem if flags[index] else git_argument_problem
+                    problem = git_assignment_problem(
+                        git_prefix_assignments(tokens, index), True)
+                    if problem is None:
+                        problem = reader(
+                            value, run, truncation, tail=tail,
+                            fed=fed and not flags[word_start])
+                    if problem is not None:
+                        found.append((
+                            "transmit", segment,
+                            raw_reason if raw_reason is not None else problem, None,
+                        ))
                 continue
             operation, problem, directory = invocation
             if not flags[index]:
@@ -1038,6 +1808,18 @@ def guarded_operations(command):
     ):
         found.append((
             "label", command,
+            "a command substitution inside a quoted word cannot be validated",
+            None,
+        ))
+    # The same holds for a git word the quoted substitution runs (issue 655 D2):
+    # `echo "$(git p origin t)"` reaches the remote with `alias.p=push`.
+    if any(
+        not is_operator and ("$(" in value or "`" in value)
+        and transmit_in_raw_text(value, assigned | hashed)
+        for value, is_operator in stream
+    ):
+        found.append((
+            "transmit", command,
             "a command substitution inside a quoted word cannot be validated",
             None,
         ))
@@ -1232,6 +2014,10 @@ def _detaching_gh_roles(contents, kinds):
                 return None
             roles += ["other", "other"]
             index += 2
+        elif kind == "plain" and content == "--draft" \
+                and contents[1] == "pr" and contents[2] == "create":
+            roles.append("other")
+            index += 1
         elif content.startswith("-"):
             return None
         else:
@@ -1475,6 +2261,31 @@ def target_directory(directory, cwd):
     return os.path.join(base, directory)
 
 
+GITHUB_URL_PREFIXES = (
+    "git@github.com:",
+    "ssh://git@github.com/",
+    "https://github.com/",
+    "http://github.com/",
+)
+
+
+def github_slug(url):
+    """The owner/name slug a GitHub remote URL names, or None."""
+    url = url.strip()
+    if url.endswith(".git"):
+        url = url[: -len(".git")]
+    for prefix in GITHUB_URL_PREFIXES:
+        if url.startswith(prefix):
+            slug = url[len(prefix):]
+            break
+    else:
+        return None
+    slug = slug.strip("/")
+    if SLUG_PATTERN.fullmatch(slug) is None:
+        return None
+    return slug
+
+
 def detect_repository(git_bin, cwd, timeout):
     """Return the owner/name slug of cwd's origin remote, or None."""
     if not isinstance(cwd, str) or not cwd:
@@ -1491,24 +2302,40 @@ def detect_repository(git_bin, cwd, timeout):
         return None
     if child.returncode != 0:
         return None
-    url = child.stdout.strip()
-    if url.endswith(".git"):
-        url = url[: -len(".git")]
-    for prefix in (
-        "git@github.com:",
-        "ssh://git@github.com/",
-        "https://github.com/",
-        "http://github.com/",
-    ):
-        if url.startswith(prefix):
-            slug = url[len(prefix):]
-            break
-    else:
-        return None
-    slug = slug.strip("/")
-    if SLUG_PATTERN.fullmatch(slug) is None:
-        return None
-    return slug
+    return github_slug(child.stdout)
+
+
+PUSH_URL_LOOKUP = ("remote", "get-url", "--push", "--all", "origin")
+PUSH_URL_TIMEOUT = "push URL lookup timed out"
+PUSH_URL_UNRESOLVED = "cannot resolve origin's push URL"
+
+
+def push_url_problem(context):
+    """Why origin's effective push URL does not name the judged repository, or None.
+
+    Issue 655 D3/D10. git itself applies `remote.origin.pushurl`,
+    `url.<base>.insteadOf` and `url.<base>.pushInsteadOf`, so the guard asks git
+    for the push URLs and never reimplements the rewriting. `--all` lists every
+    `pushurl` entry, and git pushes to each of them, so each must name the
+    repository. A lookup that times out, cannot start, fails or prints nothing
+    is a problem too.
+    """
+    try:
+        child = subprocess.run(
+            [context.git_bin, "-C", context.cwd, *PUSH_URL_LOOKUP],
+            capture_output=True, text=True, timeout=context.timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return PUSH_URL_TIMEOUT
+    except OSError:
+        return PUSH_URL_UNRESOLVED
+    urls = [line.strip() for line in child.stdout.splitlines() if line.strip()]
+    if child.returncode != 0 or not urls:
+        return PUSH_URL_UNRESOLVED
+    for url in urls:
+        if github_slug(url) != context.repository:
+            return f"origin's push URL {shown_value(url)} does not name {context.repository}"
+    return None
 
 
 def default_branch(git_bin, cwd, timeout):
@@ -2473,6 +3300,9 @@ def validate_push(text, context, compiled):
     if match is None:
         return refuse("push", form_problem("push", compiled, text),
                       accepted_forms(compiled, context))
+    problem = push_url_problem(context)
+    if problem is not None:
+        return refuse("push", problem)
     if match.form.id == "tag":
         return validate_tag_push(match.values["vX.Y.Z"], context, compiled)
     if match.form.id not in ("branch", "delete"):
@@ -3082,7 +3912,10 @@ def main():
 
     # Issue 418: a command holding a lifecycle verb is admitted only in the
     # allowlist grammar, so the only directory change left is its one leading cd.
-    lifecycle = [operation for operation, *_ in operations if operation != "label"]
+    lifecycle = [
+        operation for operation, *_ in operations
+        if operation not in ("label", "transmit")
+    ]
     shell_dir = shell_problem = None
     if lifecycle:
         shell_dir, problem = lifecycle_shape(command)
@@ -3091,6 +3924,12 @@ def main():
                           accepted_forms(table[lifecycle[0]], None))
         if shell_dir is not None:
             shell_problem = cd_directory_problem(command, shell_dir)
+    # Issue 655 D6: a git invocation that could transmit refs and is no lifecycle
+    # form is refused as a push, after the grammar check and before any
+    # repository context is built.
+    for operation, _segment, problem, _directory in operations:
+        if operation == "transmit":
+            return refuse("push", problem, accepted_forms(table["push"], None))
     # One context per distinct target directory, all under one deadline.
     contexts = {}
     for operation, segment, problem, directory in operations:
