@@ -4815,6 +4815,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "declare +x CLAUDECODE", "typeset +x CLAUDECODE",
             "env -u CLAUDECODE make", "env -uCLAUDECODE make",
             "env --unset=CLAUDECODE make", "env -i make", "env - make",
+            "env -vuCLAUDECODE ./push.sh", "env -0uCLAUDECODE ./push.sh",
+            "env --unse=CLAUDECODE ./push.sh", "env -v -u CLAUDECODE make",
+            "env -vu CLAUDECODE make", "env --unset CLAUDECODE make",
+            "env --uns CLAUDECODE make",
             "env --ignore-environment make", "env -iv make", "exec -c make",
             "true && unset CLAUDECODE",
         ):
@@ -4823,10 +4827,21 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(2, result.returncode, command)
                 self.assertIn("would hide the agent session from the pre-push hook",
                               result.stderr)
-        refused = self.run_guard("sh -c 'unset CLAUDECODE; make'", cwd=repo)
-        self.assertEqual(2, refused.returncode, refused.stderr)
+        for command in (
+            "sh -c 'unset CLAUDECODE; make'", "sh -c 'env -i ./push.sh'",
+            "bash -c 'exec -c ./push.sh'", "sh -c 'env - make release'",
+            "sh -c 'env --ignore-environment make'",
+            "sh -c 'env -vuCLAUDECODE ./push.sh'",
+            "sh -c 'env --unse=CLAUDECODE ./push.sh'",
+            "sh -c 'true; env -0u CLAUDECODE ./push.sh'",
+        ):
+            with self.subTest(command=command):
+                refused = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, refused.returncode, (command, refused.stderr))
         for command in ("echo $CLAUDECODE", "env FOO=1 make", "env -u FOO make",
-                        "printenv HOME", "make CLAUDE=1"):
+                        "printenv HOME", "make CLAUDE=1", "env -vu FOO make",
+                        "env --unse=FOO make",
+                        "sh -c 'env -u FOO make'", "sh -c 'env FOO=1 make'"):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))

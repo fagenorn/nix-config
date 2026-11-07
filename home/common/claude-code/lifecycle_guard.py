@@ -1431,12 +1431,57 @@ def names_session_marker(word):
     )
 
 
+def wrapper_clears_session(wrapper, options):
+    """True when the option words of an `env` or `exec` (`options`, the words
+    after its name) clear the agent session variable (issue 672 D3): `env`
+    options that empty the environment (`-`, `-i`, a short cluster holding `i`,
+    `--ignore-environment` or an unambiguous prefix of it), `env`'s unset
+    option naming it in any spelling (`-u X`, `-uX`, a cluster such as `-vuX`,
+    `--unset X`, `--unset=X` or an abbreviation such as `--unse=X`), or an
+    `exec` option cluster holding `c`. The walk stops at `--` and at the first
+    word that is not an option; the caller cuts `options` at an operator."""
+    pending = None
+    for option in options:
+        if pending is not None:
+            if pending == "unset" and option == AGENT_SESSION_VARIABLE:
+                return True
+            pending = None
+            continue
+        if option == "--" or not option.startswith("-"):
+            break
+        if option == "-":
+            return True
+        kind, attached = wrapper_option(wrapper, option)
+        unsets = False
+        if option.startswith("--"):
+            name, equals, value = option.partition("=")
+            if wrapper == "env" and len(name) >= 3:
+                if "--ignore-environment".startswith(name):
+                    return True
+                if "--unset".startswith(name):
+                    # getopt_long takes any unambiguous prefix, which
+                    # `wrapper_option` does not list for this option
+                    unsets = True
+                    kind, attached = "argument", value if equals else None
+        else:
+            letters = WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT[wrapper]
+            for letter in option[1:]:
+                if letter in letters:
+                    unsets = wrapper == "env" and letter == "u"
+                    break
+                if letter == ("i" if wrapper == "env" else "c"):
+                    return True
+        if unsets and attached == AGENT_SESSION_VARIABLE:
+            return True
+        if kind is not None and attached is None:
+            pending = "unset" if unsets else "skip"
+    return False
+
+
 def session_marker_problem(tokens):
     """SESSION_MARKER_PROBLEM when a segment's `tokens` clear the agent session
-    variable (issue 672 D3), else None: a word naming it (`names_session_marker`),
-    an `env` whose options empty the environment (`-`, `-i`, a short cluster
-    holding `i`, `--ignore-environment` or an unambiguous prefix of it) or an
-    `exec` whose options hold `c`."""
+    variable (issue 672 D3), else None: a word naming it (`names_session_marker`)
+    or an `env` or `exec` whose options clear it (`wrapper_clears_session`)."""
     for index, (value, is_operator) in enumerate(tokens):
         if is_operator:
             continue
@@ -1445,34 +1490,13 @@ def session_marker_problem(tokens):
         wrapper = program_name(value)
         if wrapper not in ("env", "exec"):
             continue
-        pending = False
+        options = []
         for option, option_is_operator in tokens[index + 1:]:
             if option_is_operator:
                 break
-            if pending:
-                pending = False
-                continue
-            if option == "--" or not option.startswith("-"):
-                break
-            if option == "-":
-                return SESSION_MARKER_PROBLEM
-            kind, attached = wrapper_option(wrapper, option)
-            if option.startswith("--"):
-                name = option.partition("=")[0]
-                if (
-                    wrapper == "env" and len(name) >= 3
-                    and "--ignore-environment".startswith(name)
-                ):
-                    return SESSION_MARKER_PROBLEM
-            else:
-                letters = WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT[wrapper]
-                for letter in option[1:]:
-                    if letter in letters:
-                        break
-                    if letter == ("i" if wrapper == "env" else "c"):
-                        return SESSION_MARKER_PROBLEM
-            if kind is not None and attached is None:
-                pending = True
+            options.append(option)
+        if wrapper_clears_session(wrapper, options):
+            return SESSION_MARKER_PROBLEM
     return None
 
 
@@ -1483,6 +1507,10 @@ def raw_reading_transmits(reading, names, fed):
     word after the first word that names no subcommand takes it from stdin."""
     for position, word in enumerate(reading):
         if dashed_git_program(program_name(word)) or names_session_marker(word):
+            return True
+        wrapper = program_name(word)
+        if wrapper in ("env", "exec") and wrapper_clears_session(
+                wrapper, reading[position + 1:]):
             return True
         match = ASSIGNMENT_PREFIX.match(word)
         if match is not None and git_assignment_problem(
