@@ -3365,6 +3365,21 @@ class DirectLaneRoutingTest(unittest.TestCase):
                 self.assertIn(rule, step4)
 
 
+    def test_deliver_direct_holds_only_on_a_linted_verify_block(self):
+        """#633 AC1: step 7 regrades code criteria, closes when none is left open, else
+        holds only on a lint-accepted verify block and runs verify-pending once for this
+        repository and issue, pointing to the shared rules."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        step7 = text[text.index("**Close out.**"):text.index("**Report**")]
+        for token in ("regrade", "`code`", "none left: close the issue",
+                      "`verify-pending lint`", "verify block",
+                      "`verify-pending run --host <host> --repo <slug> --issue <n>` once",
+                      "`needs-verification`", ACCEPTANCE_RULES_POINTER):
+            with self.subTest(token=token):
+                self.assertIn(token, step7)
+        self.assertNotIn("comment what remains", text)
+
+
 class HandBuiltTimeContractsTest(unittest.TestCase):
     """#309 D9: no skill document hands workflow-state a time; the helper reads its clock."""
 
