@@ -87,6 +87,7 @@ in
         ../hosts/common/common-packages.nix
         ../hosts/common/darwin-common.nix
         ../hosts/common/darwin-github-runners.nix
+        ../hosts/common/darwin-verify-pending.nix
         customConf
         inputs.home-manager.darwinModules.home-manager
         {
@@ -94,7 +95,7 @@ in
           system.configurationRevision = configurationRevision;
           home-manager.useGlobalPkgs = true;
           home-manager.useUserPackages = true;
-          home-manager.extraSpecialArgs = { inherit inputs libx myvars; };
+          home-manager.extraSpecialArgs = { inherit inputs libx myvars hostname; };
 
           home-manager.sharedModules = [
             inputs.catppuccin.homeModules.catppuccin
@@ -259,6 +260,7 @@ in
               libx
               myvars
               pkgs
+              hostname
               ;
           }; # Pass pkgs for conditional logic
 
