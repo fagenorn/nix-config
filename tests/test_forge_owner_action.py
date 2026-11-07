@@ -323,8 +323,24 @@ class DecisionBoxTest(Base):
     def test_a_live_partly_ticked_prompt_is_re_adopted(self):
         self.re_adopts(box_body(ticks={(0, 0)}))
 
-    def test_a_live_legacy_prompt_is_re_adopted(self):
-        self.re_adopts(marker_body())
+    def supersedes_and_posts(self, body, round_no):
+        # A prompt that carries no options digest can never be answered, so re-adopting it would keep
+        # the new questions off the forge for good: it is ended and a new round posted.
+        self.world.comment_store(SLUG, ISSUE, [comment(30, body)], next_id=40, labels=[])
+        code, out = self.post_q()
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "posted", 41))
+        self.assertEqual(self.mutations()[0], post(fm.end_body(30, "superseded")))
+        self.assertEqual(self.mutations()[1], post(box_body(round_no=round_no)))
+        self.assertEqual(self.live(), [41])
+        status = run(*action("status"))[1]
+        self.assertEqual(status["verdict"], "open")
+        self.assertEqual([q["question"] for q in status["questions"]], [q["question"] for q in QUESTIONS])
+
+    def test_a_live_legacy_prompt_is_superseded_by_a_new_round(self):
+        self.supersedes_and_posts(marker_body(), 1)
+
+    def test_a_live_prompt_without_its_options_digest_is_superseded_by_a_new_round(self):
+        self.supersedes_and_posts(box_body().replace(f" opts={foa.options_digest(QUESTIONS)}", ""), 2)
 
     def test_untrusted_markers_never_suppress_or_round_a_post(self):
         self.store(comment(30, box_body(ticks={(0, 0), (1, 0)})),

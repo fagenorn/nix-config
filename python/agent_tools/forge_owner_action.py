@@ -13,9 +13,9 @@
 3. `post` of `conflict` / `needs-label` never posts while a live marker of the same issue and
    reason exists (`already_posted` with the smallest live id). `post` of `decision` posts a new
    round (`round` one above every trusted decision prompt ever posted) unless a live prompt is not
-   yet answered, which it re-adopts (D15, D20) unless its `opts` digest names other questions, when it
-   is ended (`superseded`) and a new round posted. Both always ensure and add the `owner-action`
-   label afterwards; only trusted markers (`TRUSTED`) are read for a decision prompt.
+   yet answered, which it re-adopts (D15, D20) unless its `opts` digest is absent or names other
+   questions, when it is ended (`superseded`) and a new round posted. Both always ensure and add
+   the `owner-action` label afterwards; only trusted markers (`TRUSTED`) are read for a decision prompt.
 4. `end` ends every live marker of the reason (end reason `resolved`) and removes the label only
    when no live owner-action of any reason remains; nothing live is `none`, with no mutation. For
    `decision` it also always removes the `owner-answered` label and then the `owner-action` label
@@ -317,11 +317,12 @@ def _post_decision(args: Any, questions: list[dict]) -> tuple[int, dict[str, Any
     markers = fm.list_markers(args.repo, args.issue, TRUSTED)
     digest = options_digest(questions)
     unanswered = [m for m in fm.contest(markers, KIND, _match(args)) if not answered(m)]
-    # An unanswered prompt of other questions (D20) was answered another way, by the session: end it
-    # rather than re-adopt it, or the new questions never reach the forge.
-    for stale in [m for m in unanswered if m.fields.get("opts") not in (None, digest)]:
+    # An unanswered prompt that is not this round's questions (D20) was answered another way, by the
+    # session, or can never be answered (no `opts` digest: a legacy prompt): end it rather than
+    # re-adopt it, or the new questions never reach the forge.
+    for stale in [m for m in unanswered if m.fields.get("opts") != digest]:
         fm.end(args.repo, args.issue, stale.comment_id, SUPERSEDED)
-    unanswered = [m for m in unanswered if m.fields.get("opts") in (None, digest)]
+    unanswered = [m for m in unanswered if m.fields.get("opts") == digest]
     if unanswered:
         verdict, comment_id = "already_posted", unanswered[0].comment_id
     else:
