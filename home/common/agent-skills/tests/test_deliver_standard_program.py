@@ -802,7 +802,10 @@ class ShipTest(unittest.TestCase):
         self.assertIn("never treat a partial list as green", checks)
 
     def test_failed_checks_stop_unmerged(self):
-        result, calls = run(replies={"checks-1": {"state": "failed", "head": SHA}})
+        fix = "f" * 40
+        result, calls = run(replies={"checks-1": {"state": "failed", "head": SHA},
+                                     "checks-2": {"state": "failed", "head": fix}},
+                            patch={"fix-ci": {"start_head": SHA, "commit": fix}})
         self.assertEqual(result["stage"], "checks")
         self.assertNotIn("merge", labels(calls))
 
@@ -820,7 +823,8 @@ class ShipTest(unittest.TestCase):
 
     def test_conflicted_sync_with_findings_stops(self):
         bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "lost"}]}
-        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": bad},
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": bad,
+                                     "fix-sync-review-1": bad},
                             patch={"sync-1": {"conflicted": True}})
         self.assertEqual(result["stage"], "sync-review")
         self.assertNotIn("merge", labels(calls))
@@ -856,6 +860,114 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"merge": {"merged": False, "notes": "head moved"}})
         self.assertEqual(result["stage"], "merge")
         self.assertNotIn("close-out", labels(calls))
+
+
+FIX = "f" * 40
+MERGE = "d" * 40
+RED = {"state": "failed", "head": SHA, "failing": ["ci-tests"], "details": "FAIL test_cache: host-installed state"}
+FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped the new call site"}]}
+
+
+class ShipFixWaveTest(unittest.TestCase):
+    """#649 defect 2 and the sync-review decision: one bounded fix wave, then a stop with cont."""
+
+    def red_then(self, second, **patch):
+        return run(replies={"checks-1": RED, "checks-2": second},
+                   patch=dict({"fix-ci": {"start_head": SHA, "commit": FIX}}, **patch))
+
+    def test_failed_check_runs_one_fix_wave_then_merges(self):
+        result, calls = self.red_then({"state": "passed", "head": FIX, "required": ["ci-tests"]})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("checks-1"):], [
+            "checks-1", "fix-ci", "fix-ci-review", "renew-checks-2", "checks-2",
+            "renew-merge", "merge", "hold", "close-out"])
+        fix = prompt(calls, "fix-ci")
+        for needle in ("ci-tests", "FAIL test_cache: host-installed state", "regression test"):
+            self.assertIn(needle, fix)
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-ci"], ["implementer"])
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-ci-review"], ["reviewer"])
+        self.assertIn(f"diff {SHA}..{FIX}", prompt(calls, "fix-ci-review"))
+        self.assertIn(f"--match-head-commit {FIX}", prompt(calls, "merge"))
+
+    def test_a_second_failure_stops_with_cont(self):
+        result, calls = self.red_then(dict(RED, head=FIX))
+        self.assertEqual(result["stage"], "checks")
+        self.assertEqual(result["cont"]["checks_fixes"], 1)
+        self.assertEqual(labels(calls).count("fix-ci"), 1)
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_resume_with_the_wave_spent_stops_at_the_first_failure(self):
+        stopped, _ = self.red_then(dict(RED, head=FIX))
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"checks-1": RED})
+        self.assertEqual(result["stage"], "checks")
+        self.assertNotIn("fix-ci", labels(calls))
+
+    def test_failed_or_unreviewed_fix_stops(self):
+        cases = {
+            "checks-fix": ({}, {"fix-ci": {"status": "blocked", "notes": "no"}}),
+            "checks-fix ": ({}, {"fix-ci": {"start_head": SHA, "commit": SHA}}),
+            "checks-fix-review": ({"fix-ci-review": FINDING}, {}),
+            "checks-fix-review ": ({"fix-ci-review": None}, {}),
+        }
+        for stage, (replies, patch) in cases.items():
+            with self.subTest(case=stage):
+                result, calls = run(replies=dict({"checks-1": RED}, **replies),
+                                    patch=dict({"fix-ci": {"start_head": SHA, "commit": FIX}}, **patch))
+                self.assertEqual(result["stage"], stage.strip())
+                self.assertIn("cont", result)
+                self.assertNotIn("merge", labels(calls))
+
+    def test_failed_check_on_another_head_is_head_moved_not_fixed(self):
+        result, calls = run(replies={"checks-1": dict(RED, head="c" * 40)})
+        self.assertEqual(result["stage"], "head-moved")
+        self.assertNotIn("fix-ci", labels(calls))
+
+    def test_checks_prompt_asks_for_failing_names_and_the_log_tail(self):
+        _, calls = run()
+        checks = prompt(calls, "checks-1")
+        self.assertIn("failing", checks)
+        self.assertIn("--log-failed", checks)
+
+    def test_sync_review_finding_gets_one_fix_wave_then_merges(self):
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING,
+                                     "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
+                            patch={"sync-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
+                                   "fix-sync-1": {"start_head": MERGE, "commit": FIX}})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("sync-1"):names.index("checks-2")],
+                         ["sync-1", "sync-review-1", "fix-sync-1", "fix-sync-review-1", "renew-checks-2"])
+        fix = prompt(calls, "fix-sync-1")
+        self.assertIn(MERGE, fix)
+        self.assertIn("dropped the new call site", fix)
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-sync-review-1"], ["reviewer"])
+        self.assertIn(f"diff {MERGE}..{FIX}", prompt(calls, "fix-sync-review-1"))
+        self.assertIn(f"--match-head-commit {FIX}", prompt(calls, "merge"))
+
+    def test_failed_sync_fix_stops(self):
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING},
+                            patch={"sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "fix-sync-1": {"status": "blocked", "notes": "no"}})
+        self.assertEqual(result["stage"], "sync-fix")
+        self.assertNotIn("merge", labels(calls))
+
+    def test_a_second_sync_review_finding_stops_without_a_second_wave(self):
+        result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING,
+                                     "checks-2": {"state": "behind", "head": FIX}, "sync-review-2": FINDING},
+                            patch={"sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "fix-sync-1": {"start_head": MERGE, "commit": FIX},
+                                   "sync-2": {"conflicted": True, "merge_commit": "e" * 40}})
+        self.assertEqual(result["stage"], "sync-review")
+        self.assertEqual(result["cont"]["sync_fixes"], 1)
+        self.assertNotIn("fix-sync-2", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+
+    def test_no_fix_wave_keeps_the_cont_shape(self):
+        result, _ = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-1": None})
+        self.assertEqual(result["stage"], "sync")
+        self.assertNotIn("checks_fixes", result["cont"])
+        self.assertNotIn("sync_fixes", result["cont"])
 
 
 class ShaNormalisationTest(unittest.TestCase):

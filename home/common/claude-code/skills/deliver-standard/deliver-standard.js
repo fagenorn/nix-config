@@ -32,13 +32,14 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan, plan_reviewed, done, fix_waves, verified?, partial?, claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan, plan_reviewed, done, fix_waves, checks_fixes?, sync_fixes?, verified?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). When the PR
 // is already merged, the re-adopt goes straight to close-out. A result also carries dead_agents,
-// the labels of agents that returned nothing or threw, when any did.
+// the labels of agents that returned nothing or threw, when any did. A red required check, and a sync-review
+// finding, each get one fix wave per delivery (an implementer with a regression test, then a fresh reviewer); a second one stops with cont.
 //
 // Lifecycle forms follow the contract (merge strategy, delete_branch, credential
 // unsets). A host guard that accepts fewer forms refuses at that command; the
@@ -214,9 +215,12 @@ let claimIncomplete = !!(CONT && CONT.claim_incomplete)
 let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
 // Fix waves already spent, carried through a resume; declared before stop() because early failures call it.
 let fixWaves = (CONT && CONT.fix_waves) || 0
+// Ship fix waves already spent (a red required check, a sync-review finding): one each per delivery, carried through a resume.
+let checksFixes = (CONT && CONT.checks_fixes) || 0
+let syncFixes = (CONT && CONT.sync_fixes) || 0
 // The verified head, results and verification contract of a ready stop; carried until a resume finds the head moved; its results are reused only under the same contract.
 let verified = (CONT && CONT.verified) || null
-const stop = (stage, extra) => ({ stage, ...extra, ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(verified ? { verified } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
+const stop = (stage, extra) => ({ stage, ...extra, ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, done: taskLog, fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } })
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
 
@@ -701,22 +705,45 @@ if (!prR || !prR.pr) return stop('pr', { result: prR })
 if (!sameSha(prR.head, verify.head)) return stop('head-moved', { pr: prR.pr, expected: verify.head, head: prR.head })
 const PR = prR.pr
 
-const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind'] }, head: FULL_SHA, required: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
+const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind'] }, head: FULL_SHA, required: STRS, failing: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
 const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, resolved_files: STRS, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 let expected = fuller(verify.head, prR.head)
 let head = expected
 let syncs = 0
+let round = 0
+// One bounded Ship fix wave: an implementer commits a fix on top of the current head (not pushed), then a fresh reviewer re-reviews it.
+// Returns { fix, ok: false } when the fix failed or added no commit, else { fix, review } for the caller to grade.
+const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt }) => {
+  const fix = await call(fixPrompt, { label, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+  if (!implDone(fix) || sameSha(fix.commit, expected)) return { fix, ok: false }
+  const review = await call(reviewPrompt(fix), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
+  return { fix, review, ok: true }
+}
 for (;;) {
-  const lost = await renew(`checks-${syncs + 1}`, 'Ship')
+  round++
+  const lost = await renew(`checks-${round}`, 'Ship')
   if (lost) return lost
   const ck = await call(`${CTX}
-Wait for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn for the required checks on head: take the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection; if neither answers, every check is required. gh pr checks ${PR} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending) can return early, and its --required list can be partial: never treat a partial list as green. Return passed only when every required name has passed on head, failed with the failing names and why when any required check failed, and the required names you used.
-${RULES}`, { label: `checks-${syncs + 1}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: CHECKS })
+Wait for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn for the required checks on head: take the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection; if neither answers, every check is required. gh pr checks ${PR} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending) can return early, and its --required list can be partial: never treat a partial list as green. Return passed only when every required name has passed on head, failed with failing (the failing required names) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed) when any required check failed, and the required names you used.
+${RULES}`, { label: `checks-${round}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: CHECKS })
   if (!ck) return stop('checks', { pr: PR, checks: null })
-  if (ck.state === 'failed') return stop('checks', { pr: PR, checks: ck })
   if (!sameSha(ck.head, expected)) return stop('head-moved', { pr: PR, expected, head: ck.head })
   expected = fuller(expected, ck.head)
   head = expected
+  if (ck.state === 'failed') {
+    if (checksFixes >= 1) return stop('checks', { pr: PR, checks: ck })
+    checksFixes++
+    const failing = JSON.stringify(ck.failing || [])
+    const w = await shipFix({
+      label: 'fix-ci', reviewLabel: 'fix-ci-review',
+      fixPrompt: `${CTX}\n${PLAN_REF} The required checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without the fix, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`,
+      reviewPrompt: fix => `${CTX}\nReview this fix for failing required checks: ${span(fix)}; the failure it answers: ${failing} (${ck.details || 'no log'}); implementer notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check, or a fix with no regression test. Do not edit anything.`,
+    })
+    if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix })
+    if (!w.review || findingsOf(w.review).length) return stop('checks-fix-review', { pr: PR, checks: ck, review: w.review })
+    expected = w.fix.commit
+    continue
+  }
   if (ck.state === 'passed') break
   if (syncs >= 2) return stop('sync-contention', { pr: PR, syncs })
   syncs++
@@ -728,7 +755,19 @@ ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', mo
   if (sy.conflicted) {
     const sr = await call(`${CTX}
 Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} show --cc ${sy.merge_commit} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
-    if (!sr || findingsOf(sr).length) return stop('sync-review', { pr: PR, review: sr })
+    if (!sr) return stop('sync-review', { pr: PR, review: sr })
+    if (findingsOf(sr).length) {
+      if (syncFixes >= 1) return stop('sync-review', { pr: PR, review: sr })
+      syncFixes++
+      const w = await shipFix({
+        label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
+        fixPrompt: `${CTX}\nA reviewer found defects in the conflict resolution of merge commit ${sy.merge_commit} (git -C ${W} show --cc ${sy.merge_commit}): ${JSON.stringify(findingsOf(sr))}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, say so with evidence in notes. Do not push. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`,
+        reviewPrompt: fix => `${CTX}\nRe-review these conflict-resolution findings against the fix (${span(fix)}) made on top of merge commit ${sy.merge_commit}: ${JSON.stringify(findingsOf(sr))}; implementer notes: ${fix.notes}. Report any still unresolved and any new Important or Critical defect. Do not edit anything.`,
+      })
+      if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix })
+      if (!w.review || findingsOf(w.review).length) return stop('sync-review', { pr: PR, review: w.review, sync_review: sr, fix: w.fix })
+      expected = w.fix.commit
+    }
   }
 }
 
