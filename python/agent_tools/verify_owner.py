@@ -65,6 +65,19 @@ def ticked(marker: Marker, label: str) -> bool:
     return any(pattern.fullmatch(text) for text in marker.body.split("\n")[1:])
 
 
+def tick(body: str, label: str) -> str | None:
+    """`body` with the first unticked box `label` after its marker line ticked, or None when there is none.
+
+    Every other character is left as it was."""
+    pattern = re.compile(rf"\s*[-*] \[ \] {re.escape(label)}\s*")
+    lines = body.split("\n")
+    for index in range(1, len(lines)):
+        if pattern.fullmatch(lines[index]):
+            lines[index] = lines[index].replace("[ ]", "[x]", 1)
+            return "\n".join(lines)
+    return None
+
+
 def answer(marker: Marker, yes: str, no: str | None = None) -> str | None:
     """`"ambiguous"` when both boxes are ticked, `"yes"` or `"no"` when exactly one is, else None."""
     said_yes = ticked(marker, yes)

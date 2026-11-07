@@ -16,6 +16,16 @@ still the held one.
 Every forge write is ordered so that the step that takes the issue out of the listing, or makes the
 next pass skip work, comes after the step it would strand; a `ForgeError` ends the pass with a
 `forge_error` line and the next pass finishes the work.
+
+A check only the owner can answer reaches the owner through an `owner-action` prompt (issue 631),
+one comment with check boxes, posted once per identity ever: `ask` (a question for the owner),
+`approve` (a live or paid command awaiting a tick), `act` (something the owner must do), `decision`
+(what to do with a failed or expired check) and `stale-check` (a host-bound check whose host has
+been silent). Contesting a prompt is once-only, so an ended prompt is never posted again. A pass
+records that a host looked at the issue in a `verify-seen` report marker, which is what stale-check
+reads, and sweeps the prompts the freshly read held block no longer needs, keeping the
+`owner-action` label on the issue exactly while one prompt stands. `approve_all_live` is the
+owner's bulk tick of the live approve prompts of a repository, outside any pass.
 """
 import json
 import re
@@ -37,6 +47,13 @@ QUERY = (
     '{ issues(first: 100, states: OPEN, labels: ["needs-verification"], '
     'orderBy: {field: CREATED_AT, direction: ASC}) { nodes { number labels(first: 50) { nodes { name } } '
     'comments(last: 100) { nodes { fullDatabaseId authorAssociation body createdAt updatedAt } } } } } }'
+)
+APPROVE_QUERY = (
+    'query($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) '
+    '{ issues(first: 100, after: $after, states: OPEN, labels: ["needs-verification"], '
+    'orderBy: {field: CREATED_AT, direction: ASC}) { pageInfo { hasNextPage endCursor } '
+    'nodes { number comments(last: 100) { totalCount '
+    'nodes { fullDatabaseId authorAssociation body createdAt updatedAt } } } } } }'
 )
 FINAL = ("pass", "hit", "miss", "expired", "rejected")
 PENDING_OUTCOMES = ("not_yet", "timeout", "exit_unexpected")
@@ -67,6 +84,107 @@ def list_held(slug: str) -> list[dict]:
     if not isinstance(nodes, list) or not all(isinstance(node, dict) for node in nodes):
         raise ForgeError("payload_invalid", "issues are not an array of objects")
     return nodes
+
+
+def _invalid(what: str) -> ForgeError:
+    return ForgeError("payload_invalid", what)
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _rest_comments(pages: Sequence[Any]) -> list[verify_issues.Comment]:
+    """The comments of the pages of a REST listing, ascending id; `payload_invalid` for a bad page or comment."""
+    found = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise _invalid("a comment page is not an array")
+        for item in page:
+            if not isinstance(item, dict) or not _is_int(item.get("id")):
+                raise _invalid("a comment has no integer id")
+            for key in ("author_association", "body", "created_at"):
+                if not isinstance(item.get(key), str):
+                    raise _invalid(f"comment {item['id']} has no string {key}")
+            found.append(verify_issues.Comment(item["id"], item["author_association"], item["body"],
+                                               item["created_at"]))
+    return sorted(found, key=lambda c: c.id)
+
+
+def held_issues(slug: str) -> list[tuple[int, list[verify_issues.Comment]]]:
+    """Every open `needs-verification` issue of the repository with all of its comments.
+
+    Every page of issues is read; an issue with more comments than the listing returned has them
+    read from the REST listing instead. An incomplete or malformed listing is a `ForgeError`, never
+    a partial result."""
+    owner, name = slug.split("/", 1)
+    variables = {"owner": owner, "name": name}
+    held: list[tuple[int, list[verify_issues.Comment]]] = []
+    while True:
+        payload = forge_markers.graphql(APPROVE_QUERY, variables)
+        try:
+            issues = payload["data"]["repository"]["issues"]
+            info, nodes = issues["pageInfo"], issues["nodes"]
+            more = info["hasNextPage"]
+        except (KeyError, TypeError):
+            raise _invalid("no issues page") from None
+        if not isinstance(more, bool) or not isinstance(nodes, list):
+            raise _invalid("issues page is malformed")
+        for node in nodes:
+            if not isinstance(node, dict) or not _is_int(node.get("number")):
+                raise _invalid("an issue has no integer number")
+            listing = node.get("comments")
+            if not isinstance(listing, dict) or not _is_int(listing.get("totalCount")) \
+                    or not isinstance(listing.get("nodes"), list):
+                raise _invalid(f"issue {node['number']} has no comment listing")
+            if listing["totalCount"] > len(listing["nodes"]):
+                comments = _rest_comments(forge_markers.api_pages(
+                    f"repos/{slug}/issues/{node['number']}/comments?per_page=100"))
+            else:
+                comments = verify_issues.comments_from_graphql(listing["nodes"])
+            held.append((node["number"], comments))
+        if not more:
+            return held
+        cursor = info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise _invalid("a next page has no cursor")
+        variables = {"owner": owner, "name": name, "after": cursor}
+
+
+def approve_all_live(slug: str) -> list[dict]:
+    """Tick the `Run it` box of every live, unconsumed approve prompt of a live-effects check in `slug`.
+
+    Only a prompt of its issue's current trusted block version is ticked, and only when the check
+    at its index has `effects: live`: a `paid` prompt is never edited. Every listing is read before
+    the first edit, and a `ForgeError` propagates. The runner still decides, on its own host and
+    against the prompt's digest, whether the tick lets the command run."""
+    if not runner_trusted(slug):
+        return [{"repo": slug, "issue": None, "check": None, "ac": None, "comment": None,
+                 "state": "skipped", "reason": "runner_untrusted"}]
+    edits: list[tuple[dict, str]] = []
+    for number, comments in held_issues(slug):
+        held = verify_issues.select(comments)
+        if held is None or not isinstance(held.block, dict) or not isinstance(held.block.get("checks"), list):
+            continue
+        checks = held.block["checks"]
+        for prompt in held.markers:
+            if (prompt.kind != verify_owner.KIND or prompt.fields.get("reason") != verify_owner.APPROVE
+                    or prompt.fields.get("block") != held.key
+                    or not forge_markers.is_live(prompt, held.markers)):
+                continue
+            index = prompt.fields.get("check", "")
+            if not re.fullmatch(r"[0-9]+", index) or int(index) >= len(checks) \
+                    or not isinstance(checks[int(index)], dict) or checks[int(index)].get("effects") != "live":
+                continue
+            ticked = verify_owner.tick(prompt.body, verify_owner.RUN_IT)
+            if ticked is None or verify_owner.consumed(held.markers, prompt.comment_id):
+                continue
+            edits.append(({"repo": slug, "issue": number, "check": int(index),
+                           "ac": checks[int(index)].get("ac"), "comment": prompt.comment_id,
+                           "state": "approved", "reason": "all_live"}, ticked))
+    for line, body in edits:
+        forge_markers.edit(slug, line["comment"], body)
+    return [line for line, _ in edits]
 
 
 def runner_trusted(slug: str) -> bool:

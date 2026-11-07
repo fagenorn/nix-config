@@ -637,3 +637,117 @@ class StaleVocabularyTest(unittest.TestCase):
         self.assertIsNone(vo.settle_reason(prompt, [prompt], key, vr.FINAL))
         self.assertEqual(vo.settle_reason(prompt, [prompt, waived], key, vr.FINAL), "answered")
         self.assertEqual(vo.settle_reason(prompt, [prompt, final], key, vr.FINAL), "resolved")
+
+
+class ApproveAllLiveTest(OwnerBase):
+    """AC3: `approve --all-live` ticks only live prompts of the given repo."""
+
+    def setUp(self):
+        super().setUp()
+        self.world.respond_json("gh", ["api", "user"], {"login": "octo"})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}"], {"owner": {"login": "octo", "type": "User"}})
+
+    def cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = verify_pending.main(list(argv))
+            except SystemExit as exit:
+                code = exit.code
+        return code, [json.loads(entry) for entry in out.getvalue().splitlines()], err.getvalue()
+
+    def edited(self, since):
+        return [int(a[3].rsplit("/", 1)[1]) for a in self.world.argvs("gh")[since:] if a[1:3] == ["-X", "PATCH"]]
+
+    def other_repo(self, name, pages):
+        """Serve `octo/<name>`: its owner, and each GraphQL page of its held issues, cursor by cursor."""
+        self.world.respond_json("gh", ["api", f"repos/octo/{name}"], {"owner": {"login": "octo", "type": "User"}})
+        base = ["api", "graphql", "-f", f"query={vr.APPROVE_QUERY}", "-f", "owner=octo", "-f", f"name={name}"]
+        for after, page in pages:
+            argv = base if after is None else [*base, "-f", f"after={after}"]
+            self.world.respond_json("gh", argv, {"data": {"repository": {"issues": page}}})
+
+    def test_ticks_only_live_prompts_and_never_paid(self):
+        live = check(effects="live", run={"command": "check-ok"})
+        paid = check(ac="AC2", effects="paid", run={"command": "check-ok"})
+        self.hold(live, paid)
+        self.run_pass()
+        prompts = {p.fields["effects"]: p for p in self.prompts("approve")}
+        mark = len(self.world.argvs("gh"))
+        code, lines, _ = self.cli("approve", "--repo", SLUG, "--all-live")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.edited(mark), [prompts["live"].comment_id])
+        self.assertEqual(lines, [{"repo": SLUG, "issue": ISSUE, "check": 0, "ac": "AC1",
+                                  "comment": prompts["live"].comment_id, "state": "approved", "reason": "all_live"}])
+        bodies = {c["id"]: c["body"] for c in self.world.stored()}
+        self.assertIn("- [x] Run it", bodies[prompts["live"].comment_id])
+        self.assertIn("- [ ] Run it", bodies[prompts["paid"].comment_id])
+        mark = len(self.world.argvs("gh"))
+        self.assertEqual(self.cli("approve", "--repo", SLUG, "--all-live")[:2], (0, []))
+        self.assertEqual(self.edited(mark), [])
+        self.run_pass()
+        self.assertEqual(self.spawned("verify-ok"), 1)  # the live check ran once; the paid one waits
+
+    def test_every_comment_of_an_issue_beyond_the_last_100_is_read(self):
+        self.hold(check(effects="live", run={"command": "check-ok"}))
+        self.run_pass()
+        prompt, = self.prompts("approve")
+        for n in range(101):  # the block and the prompt fall out of the GraphQL `last: 100` window
+            self.world.append_comment(stored_comment(1000 + n, f"note {n}"))
+        mark = len(self.world.argvs("gh"))
+        code, lines, _ = self.cli("approve", "--repo", SLUG, "--all-live")
+        self.assertEqual((code, [entry["comment"] for entry in lines]), (0, [prompt.comment_id]))
+        self.assertEqual(self.edited(mark), [prompt.comment_id])
+
+    def test_every_page_of_held_issues_is_read(self):
+        live = check(effects="live", run={"command": "check-ok"})
+        prompt = fm.render("owner-action", {"reason": "approve", "block": bkey(live), "check": "0", "host": "mbp",
+                                            "effects": "live", "round": "1", "run": "0123456789abcdef"},
+                           "AC1 has live effects.", 'Command: ["verify-ok"]\n\n- [ ] Run it')
+
+        def issue(number, comments):
+            return {"number": number, "comments": {"totalCount": len(comments), "nodes": comments}}
+        self.other_repo("many", [
+            (None, {"pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+                    "nodes": [issue(n, []) for n in range(1, 101)]}),
+            ("c1", {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [issue(101, [gnode(10, hold(block(live))), gnode(20, prompt)])]})])
+        ticked = prompt.replace("- [ ] Run it", "- [x] Run it")
+        self.world.respond_json("gh", ["api", "-X", "PATCH", "repos/octo/many/issues/comments/20",
+                                       "-f", f"body={ticked}"], {})
+        code, lines, _ = self.cli("approve", "--repo", "octo/many", "--all-live")
+        self.assertEqual((code, [(entry["issue"], entry["comment"]) for entry in lines]), (0, [(101, 20)]))
+
+    def test_a_listing_that_cannot_be_completed_ticks_nothing_and_exits_1(self):
+        self.other_repo("broken", [(None, {"pageInfo": {"hasNextPage": True}, "nodes": []})])
+        code, lines, _ = self.cli("approve", "--repo", "octo/broken", "--all-live")
+        self.assertEqual((code, [entry["reason"] for entry in lines]), (1, ["forge_error"]))
+        self.assertEqual(self.edited(0), [])
+
+    def test_another_repo_is_untouched(self):
+        self.hold(check(effects="live", run={"command": "check-ok"}))
+        self.run_pass()
+        self.other_repo("other", [(None, {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []})])
+        mark = len(self.world.argvs("gh"))
+        self.assertEqual(self.cli("approve", "--repo", "octo/other", "--all-live")[:2], (0, []))
+        calls = self.world.argvs("gh")[mark:]
+        self.assertEqual([a for a in calls if "-X" in a], [])
+        self.assertFalse(any(SLUG in part for a in calls for part in a))
+
+    def test_an_untrusted_account_ticks_nothing(self):
+        self.hold(check(effects="live", run={"command": "check-ok"}))
+        self.run_pass()
+        self.world.respond_json("gh", ["api", "user"], {"login": "helper"})
+        mark = len(self.world.argvs("gh"))
+        code, lines, _ = self.cli("approve", "--repo", SLUG, "--all-live")
+        self.assertEqual((code, [entry["reason"] for entry in lines]), (1, ["runner_untrusted"]))
+        self.assertEqual(self.edited(mark), [])
+
+    def test_usage_errors_exit_2(self):
+        self.assertEqual(self.cli("approve", "--repo", "not a slug", "--all-live")[0], 2)
+        self.assertEqual(self.cli("approve", "--repo", SLUG)[0], 2)
+
+    def test_tick_rewrites_one_box(self):
+        body = fm.render("owner-action", {"reason": "approve"}, "Run?", "Command: x\n\n- [ ] Run it")
+        self.assertEqual(vo.tick(body, "Run it"), body.replace("- [ ] Run it", "- [x] Run it"))
+        self.assertIsNone(vo.tick(body.replace("[ ]", "[x]"), "Run it"))
