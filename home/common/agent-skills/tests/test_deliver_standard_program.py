@@ -96,7 +96,7 @@ class HappyPathTest(unittest.TestCase):
         self.assertEqual(labels(calls), [
             "setup", "acquire", "worktree", "renew-plan", "plan", "plan-codex", "plan-review", "renew-tasks",
             "impl-1", "review-1", "renew-final-review", "final-codex", "final-1", "renew-verify", "verify",
-            "renew-ship", "pr", "renew-checks-1", "checks-1", "renew-merge", "merge", "close-out"])
+            "renew-ship", "pr", "renew-checks-1", "checks-1", "renew-merge", "merge", "hold", "close-out"])
 
     def test_merge_carries_contract_strategy_and_the_checked_head(self):
         # The contract decides the form; a host guard that accepts fewer forms refuses
@@ -129,11 +129,15 @@ class HappyPathTest(unittest.TestCase):
 
     def test_non_code_criterion_holds_the_issue_open(self):
         plan = dict(PLAN, acceptance=PLAN["acceptance"] + [EVIDENCE])
-        _, calls = run(replies={"plan": plan}, patch={"setup": {"integration_branch": "main"}})
+        result, calls = run(replies={"plan": plan}, patch={"setup": {"integration_branch": "main"},
+                                                            "close-out": {"issue_state": "OPEN"}})
+        self.assertEqual(result["stage"], "done")
         self.assertIn("Refs #9", prompt(calls, "pr"))
+        self.assertEqual(labels(calls)[-3:], ["merge", "hold", "close-out"])
         close = prompt(calls, "close-out")
         self.assertNotIn("gh issue close", close)
-        self.assertIn("needs-verification", close)
+        self.assertNotIn("needs-verification", close)
+        self.assertIn("needs-verification", prompt(calls, "hold"))
 
 
 class ContractTest(unittest.TestCase):
@@ -682,12 +686,12 @@ class ResumeTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=self.cont()),
                             patch={"setup": {"merged_pr": 42, "review_state": {"code": "blocked", "plan": "blocked"}}})
         self.assertEqual(result["stage"], "done")
-        self.assertEqual(labels(calls), ["setup", "close-out"])
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
 
     def test_resume_after_merge_goes_to_close_out(self):
         result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_pr": 42}})
         self.assertEqual(result["stage"], "done")
-        self.assertEqual(labels(calls), ["setup", "close-out"])
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
         self.assertIn("gh issue close 9", prompt(calls, "close-out"))
 
     def test_cont_without_plan_plans_again(self):
@@ -786,7 +790,7 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[names.index("checks-1"):], ["checks-1", "sync-1", "renew-checks-2", "checks-2", "renew-merge", "merge", "close-out"])
+        self.assertEqual(names[names.index("checks-1"):], ["checks-1", "sync-1", "renew-checks-2", "checks-2", "renew-merge", "merge", "hold", "close-out"])
 
     def test_conflicted_sync_is_rereviewed(self):
         _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}},
@@ -832,6 +836,120 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"merge": {"merged": False, "notes": "head moved"}})
         self.assertEqual(result["stage"], "merge")
         self.assertNotIn("close-out", labels(calls))
+
+
+class HoldTest(unittest.TestCase):
+    """#634 AC2 and AC3: ship regrades, holds only on a lint-accepted block, runs verify-pending once, splits blocking human rows."""
+
+    MERGE = "d" * 40
+    HOLD = {"merge_commit_local": True, "code_unmet": [], "blocks": [], "split": [],
+            "block": {"v": 1, "merge": "d" * 40, "checks": []}, "lint": {"ok": True, "errors": []},
+            "verify_run": {"ran": True, "exit": 0}, "issue_state": "OPEN", "notes": "n"}
+    CHILD = {"ac": "AC3", "issue": 50, "block": {"v": 1, "merge": "d" * 40, "checks": []},
+             "lint": {"ok": True, "errors": []}, "verify_run": {"ran": True, "exit": 0}, "issue_state": "OPEN"}
+
+    def ship(self, *criteria, hold=None, close="OPEN", **patch):
+        replies = {"plan": with_criteria(*criteria)}
+        if hold is not None:
+            replies["hold"] = dict(self.HOLD, **hold)
+        return run(replies=replies, patch=dict({"merge": {"merge_commit": self.MERGE},
+                                                "close-out": {"issue_state": close}}, **patch))
+
+    def test_hold_fetches_lints_posts_and_runs_verify_pending_once(self):
+        result, calls = self.ship(EVIDENCE)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(result["hold"]["issue_state"], "OPEN")
+        hold = prompt(calls, "hold")
+        for needle in ("verify-pending lint --input", "--repo-root /r", f"--pr-head {SHA}", "--pr-branch issue-9-x",
+                       "--pr-workflow", "gh pr checks 42 --repo owner/repo --json workflow", "--blocks",
+                       "needs-verification", "dependencies/blocking", "~/.agents/standards/acceptance-planning.md",
+                       '["build"]', SHA, self.MERGE, '"deployed_includes"', "git -C /r cat-file -e"):
+            self.assertIn(needle, hold)
+        self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
+        self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+        self.assertLess(labels(calls).index("hold"), labels(calls).index("close-out"))
+
+    def test_passing_verify_run_closes_instead_of_holding(self):
+        result, _ = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(result["close_out"]["issue_state"], "CLOSED")
+        result, _ = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="OPEN")
+        self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
+
+    def test_refused_lint_or_failed_run_stops_without_close_out(self):
+        for hold in ({"lint": {"ok": False, "errors": [{"code": "unverified_reference"}]}},
+                     {"verify_run": {"ran": False, "exit": 0}}, {"verify_run": {"ran": True, "exit": 2}},
+                     {"verify_run": {"ran": True, "exit": 1}}, {"issue_state": "MAYBE"},
+                     {"merge_commit_local": False}):
+            with self.subTest(hold=hold):
+                result, calls = self.ship(EVIDENCE, hold=hold)
+                self.assertEqual(result["stage"], "hold")
+                self.assertNotIn("close-out", labels(calls))
+                self.assertIn("cont", result)
+
+    def test_unmet_code_row_stops_without_a_hold(self):
+        result, calls = self.ship(EVIDENCE, hold={"code_unmet": ["AC1"]})
+        self.assertEqual((result["stage"], result["code_unmet"]), ("code-unmet", ["AC1"]))
+        self.assertNotIn("close-out", labels(calls))
+        self.assertIn("cont", result)
+
+    def test_all_code_plan_regrades_before_close_out(self):
+        result, calls = run()
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[-3:], ["merge", "hold", "close-out"])
+        hold = prompt(calls, "hold")
+        self.assertIn("git -C /r fetch origin", hold)
+        self.assertNotIn("verify-pending run", hold)
+        self.assertIn("gh issue close 9", prompt(calls, "close-out"))
+        result, calls = run(replies={"hold": dict(self.HOLD, code_unmet=["AC1"])})
+        self.assertEqual((result["stage"], result["code_unmet"]), ("code-unmet", ["AC1"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_posted_unattended_command_outside_verification_stops(self):
+        smoke = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence", "run": {"command": "smoke"}}]}
+        result, calls = self.ship(EVIDENCE, hold={"block": smoke})
+        self.assertEqual((result["stage"], result["unattended"]), ("hold", ["AC2"]))
+        self.assertNotIn("close-out", labels(calls))
+        build = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence", "run": {"command": "build"}}]}
+        result, _ = self.ship(EVIDENCE, hold={"block": build})
+        self.assertEqual(result["stage"], "done")
+
+    def test_blocking_issue_moves_its_human_row_to_a_held_child_issue(self):
+        result, _ = self.ship(HUMAN, hold={"blocks": [12], "split": [self.CHILD], "issue_state": "CLOSED",
+                                           "lint": None, "verify_run": None, "block": None}, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([(s["ac"], s["issue"]) for s in result["hold"]["split"]], [("AC3", 50)])
+        result, _ = self.ship(HUMAN, EVIDENCE, hold={"blocks": [12], "split": [self.CHILD]})
+        self.assertEqual(result["stage"], "done")
+
+    def test_blocking_issue_without_split_stops(self):
+        result, calls = self.ship(HUMAN, hold={"blocks": [12]})
+        self.assertEqual((result["stage"], result["missing_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+        result, _ = self.ship(HUMAN, hold={"blocks": [12], "split": [self.CHILD], "issue_state": "OPEN"})
+        self.assertEqual(result["stage"], "hold")
+
+    def test_split_child_without_an_accepted_hold_stops(self):
+        for child in ({"lint": {"ok": False, "errors": [{"code": "reason_required"}]}},
+                      {"verify_run": {"ran": False, "exit": 0}}, {"verify_run": {"ran": True, "exit": 2}},
+                      {"issue_state": "MAYBE"}):
+            with self.subTest(child=child):
+                result, calls = self.ship(HUMAN, hold={"blocks": [12], "split": [dict(self.CHILD, **child)],
+                                                       "issue_state": "CLOSED"}, close="CLOSED")
+                self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+                self.assertNotIn("close-out", labels(calls))
+
+    def test_resume_after_merge_holds_before_close_out(self):
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": with_criteria(EVIDENCE), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42},
+                                                               "close-out": {"issue_state": "OPEN"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
+        hold = prompt(calls, "hold")
+        self.assertIn("gh pr view 42 --repo owner/repo --json mergeCommit,headRefOid", hold)
+        self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
 
 
 class FixWaveTest(unittest.TestCase):
@@ -936,7 +1054,7 @@ class ModeTest(unittest.TestCase):
         done, calls = run(args=dict(ARGS, mode="ship", cont=ready["cont"]), patch={"setup": {"head": SHA}})
         self.assertEqual(done["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "renew-checks-1", "checks-1",
-                                         "renew-merge", "merge", "close-out"])
+                                         "renew-merge", "merge", "hold", "close-out"])
 
     def test_ship_after_ready_reviews_again_when_the_head_moved_or_is_dirty(self):
         ready, _ = run(args=dict(ARGS, mode="ready"))
@@ -1069,8 +1187,9 @@ class DirectLaneTest(unittest.TestCase):
 
     def test_close_out_grades_the_implementer_criteria(self):
         acceptance = [{"id": "AC1", "text": "x", "kind": "code"}, {"id": "AC2", "text": "y", "kind": "evidence"}]
-        _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance}})
-        self.assertIn("needs-verification", prompt(calls, "close-out"))
+        _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance},
+                                           "close-out": {"issue_state": "OPEN"}})
+        self.assertIn("needs-verification", prompt(calls, "hold"))
 
     def test_resume_after_the_review_skips_to_verify(self):
         stopped, _ = run(args=DIRECT, replies={"verify": None})
@@ -1102,7 +1221,7 @@ class DirectLaneTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA}})
         self.assertEqual(result["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "renew-checks-1", "checks-1",
-                                         "renew-merge", "merge", "close-out"])
+                                         "renew-merge", "merge", "hold", "close-out"])
 
     def test_a_review_stop_resumes_into_the_review_not_the_implementer(self):
         stopped, _ = run(args=DIRECT, replies={"direct-review": None})

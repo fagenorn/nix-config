@@ -40,6 +40,7 @@ const DEFAULTS = [
   [/^pr$/, { pr: 42, head: SHA }],
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'] }],
   [/^merge$/, { merged: true, merge_commit: SHA, notes: 'merged' }],
+  [/^hold$/, { merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: SHA, checks: [] }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held' }],
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, notes: 'ok' }],
 ]
 

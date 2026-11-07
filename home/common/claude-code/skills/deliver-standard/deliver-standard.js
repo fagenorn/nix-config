@@ -229,26 +229,68 @@ const commandOutside = c => {
   return command !== null && !VERIFY_IDS.includes(command)
 }
 
-const closeOut = async (PR, mergeCommit, W) => {
+const RUN_OK = r => !!(r && r.ran === true && r.exit === 0)
+const LINT_V = { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array' } } }
+const RUN_V = { type: 'object', properties: { ran: { type: 'boolean' }, exit: { type: 'integer' } }, required: ['ran', 'exit'] }
+const HOLD_SCHEMA = { type: 'object', properties: {
+  merge_commit_local: { type: 'boolean' }, code_unmet: STRS, blocks: { type: 'array', items: { type: 'integer' } },
+  split: { type: 'array', items: { type: 'object', properties: { ac: { type: 'string' }, issue: { type: 'integer' }, block: { type: 'object' }, lint: LINT_V, verify_run: RUN_V, issue_state: { type: 'string' } }, required: ['ac', 'issue', 'lint', 'verify_run', 'issue_state'] } },
+  block: { type: 'object' }, lint: LINT_V, verify_run: RUN_V, issue_state: { type: 'string' }, notes: { type: 'string' } },
+  required: ['merge_commit_local', 'code_unmet', 'issue_state', 'notes'] }
+const STATES = ['OPEN', 'CLOSED']
+
+const closeOut = async (PR, mergeCommit, W, prHead) => {
   const acceptance = plan ? plan.acceptance : null
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
   const allCode = acceptance.every(a => a.kind === 'code')
   const openCriteria = acceptance.filter(a => a.kind !== 'code')
+  // Ship regrades the code rows for every plan; a plan with a non-code row is then held by the acceptance-planning rules' "Linting a hold" procedure.
+  const merged = mergeCommit ? mergeCommit : `read from gh pr view ${PR} --repo ${SLUG} --json mergeCommit,headRefOid`
+  const heldBlock = allCode ? '' : `
+4. Read the issues this one blocks: gh api repos/${SLUG}/issues/${ISSUE}/dependencies/blocking (their numbers, returned as blocks).
+5. When blocks is non-empty, move each human criterion into its own new issue that blocks no other issue (gh issue create, linking #${ISSUE}), hold that issue by step 6 with only that criterion's check (no --blocks flag; its once-run uses --issue <child>), and return one split entry per moved criterion with its issue, block, lint, verify_run and issue_state.
+6. For the criteria left (non-code, not split): none left means close #${ISSUE} with a comment naming the evidence and the split issues. Otherwise assemble one hold comment: a line per criterion, then exactly one \`\`\`verify fence holding {"v": 1, "merge": <the merge commit>, "checks": [...]} built from each criterion's verify member with every occurrence of the base sha ${setup.base_sha} replaced by the merge commit (a criterion without a verify member gets one written per ~/.agents/standards/acceptance-planning.md; an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe). Write it to a file outside any work tree and run verify-pending lint --input <file> --repo-root ${REPO} --pr-head ${prHead || '<the headRefOid read in step 1>'} --pr-branch ${setup.branch} plus one --pr-workflow <name> per distinct workflow of gh pr checks ${PR} --repo ${SLUG} --json workflow and one --blocks <n> per blocked issue. On refusal post nothing and return its verdict as lint. Otherwise gh issue comment ${ISSUE} --repo ${SLUG} --body-file <file>, add the needs-verification label (create it if missing), then run alone, once: verify-pending run --host ${setup.host} --repo ${SLUG} --issue ${ISSUE}. Return block (the posted JSON), lint, verify_run (ran, exit) and issue_state read back from the tracker.`
+  const held = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Hold the issue's acceptance after the merge, by ~/.agents/standards/acceptance-planning.md (its "Linting a hold" section is the procedure). Skip any step an earlier attempt already finished (an existing hold comment with a verify fence, the label, a split issue already filed and held for that criterion). Each command in its own Bash call:
+1. Run git -C ${REPO} fetch origin. Merge commit: ${merged}${mergeCommit ? '' : ' (and read headRefOid, the PR head)'}. Confirm git -C ${REPO} cat-file -e <merge commit>^{commit} succeeds and return the result as merge_commit_local; if it fails, stop here. Criteria: ${JSON.stringify(acceptance)}
+2. Regrade each code criterion once against the merge commit and the PR's passed required checks. Return the unmet ids as code_unmet and, if any, stop here: post nothing and add no label.
+3. ${allCode ? 'Every criterion is of kind code: post nothing, add no label; return issue_state read from the tracker.' : 'The criteria left are not of kind code; continue with steps 4 to 6.'}${heldBlock}
+${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', model: 'sonnet', schema: HOLD_SCHEMA })
+  if (!held) return stop('hold', { pr: PR })
+  if (held.merge_commit_local !== true) return stop('hold', { pr: PR, hold: held })
+  if (!Array.isArray(held.code_unmet)) return stop('hold', { pr: PR, hold: held })
+  if (held.code_unmet.length) return stop('code-unmet', { pr: PR, code_unmet: held.code_unmet })
+  if (!allCode) {
+    if (!Array.isArray(held.blocks) || !Array.isArray(held.split)) return stop('hold', { pr: PR, hold: held })
+    const splitIds = held.split.map(x => x && x.ac)
+    if (held.blocks.length) {
+      const missing = acceptance.filter(a => a.kind === 'human' && !splitIds.includes(a.id)).map(a => a.id)
+      if (missing.length) return stop('hold', { pr: PR, hold: held, missing_split: missing })
+    }
+    const badSplit = held.split.filter(x => !(x && x.lint && x.lint.ok === true && RUN_OK(x.verify_run) && STATES.includes(x.issue_state) && x.block && Array.isArray(x.block.checks) && !x.block.checks.some(commandOutside))).map(x => (x && x.ac) || null)
+    if (badSplit.length) return stop('hold', { pr: PR, hold: held, bad_split: badSplit })
+    const remaining = openCriteria.filter(a => !splitIds.includes(a.id))
+    if (remaining.length) {
+      if (!(held.lint && held.lint.ok === true) || !RUN_OK(held.verify_run) || !held.block || !Array.isArray(held.block.checks)) return stop('hold', { pr: PR, hold: held })
+      const outside = held.block.checks.filter(commandOutside)
+      if (outside.length) return stop('hold', { pr: PR, hold: held, unattended: outside.map(c => c.ac) })
+    } else if (held.issue_state !== 'CLOSED') return stop('hold', { pr: PR, hold: held })
+    if (!STATES.includes(held.issue_state)) return stop('hold', { pr: PR, hold: held })
+  }
   const co = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
 1. ${W ? `If ${W} still exists: git -C ${REPO} worktree remove ${W} (it also removes the plan directory). ` : ''}git -C ${REPO} fetch origin; if the checkout ${REPO} is clean and on ${INT}, git -C ${REPO} merge --ff-only origin/${INT}; then, if the local branch ${setup.branch} exists, git -C ${REPO} branch -d ${setup.branch}. If -d refuses, leave the branch and report it (never -D).
 2. Release the claim: run alone, exactly, forge-claim release --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --reason done. It prints one JSON line and removes the in-progress label when no other claim remains; released is true only for verdict released.
-3. ${allCode ? `Every criterion is of kind code. Read gh issue view ${ISSUE} --repo ${SLUG} --json state; if it is still open (${INT === setup.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run gh issue close ${ISSUE} --repo ${SLUG} --comment 'Delivered by PR ${PR} into ${INT}.'` : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
+3. ${allCode ? `Every criterion is of kind code. Read gh issue view ${ISSUE} --repo ${SLUG} --json state; if it is still open (${INT === setup.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run gh issue close ${ISSUE} --repo ${SLUG} --comment 'Delivered by PR ${PR} into ${INT}.'` : 'The hold step settled the issue state and labels; change neither.'}
 Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released and notes.
 ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state', 'notes'] } })
-  const want = allCode ? 'CLOSED' : 'OPEN'
+  const want = allCode ? 'CLOSED' : held.issue_state
   if (!co || co.issue_state !== want || co.released !== true) return stop('close-out', { pr: PR, close_out: co, expected_issue_state: want })
-  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, tasks: taskLog, acceptance, fix_waves: fixWaves }
+  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, tasks: taskLog, acceptance, fix_waves: fixWaves }
 }
 
 if (CONT && setup.merged_pr) {
   phase('Ship')
   log(`PR #${setup.merged_pr} is already merged; closing out`)
-  return await closeOut(setup.merged_pr, null, setup.worktree)
+  return await closeOut(setup.merged_pr, null, setup.worktree, null)
 }
 
 const RS = setup.review_state || {}
@@ -682,5 +724,5 @@ Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is tr
 ${RULES}`, { label: 'merge', phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] } })
 if (!mg || !mg.merged) return stop('merge', { pr: PR, merge: mg })
 
-const finished = await closeOut(PR, mg.merge_commit, W)
+const finished = await closeOut(PR, mg.merge_commit, W, head)
 return finished.stage === 'done' ? { ...finished, chunked, syncs, verify: verify.results } : finished
