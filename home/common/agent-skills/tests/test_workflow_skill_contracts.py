@@ -2983,6 +2983,13 @@ class ToIssuesCriterionLineContractsTest(unittest.TestCase):
             "`- [ ] [code|evidence|human] <observable outcome> — measured: <where>`",
             normalized(self.text))
 
+    def test_the_criterion_format_points_to_the_acceptance_planning_rules(self):
+        """#633 AC2: the criterion line format points to the shared rules; the hot file does not grow."""
+        text = normalized(self.text)
+        rules = text[text.index("Write each criterion as"):text.index("The `measured:` clause")]
+        self.assertIn(ACCEPTANCE_RULES_POINTER, rules)
+        self.assertLessEqual(len(self.TO_ISSUES.read_bytes()), 6487)
+
 
 class ToIssuesStandaloneBodyContractsTest(unittest.TestCase):
     """#495 AC1: the to-issues template puts Problem before What to build, and
@@ -3072,6 +3079,13 @@ class AcceptancePlanningRulesTest(unittest.TestCase):
         for profile in model["profiles"]:
             with self.subTest(profile=profile["id"]):
                 self.assertFalse([m for m in profile["hot"] if "acceptance-planning" in m])
+
+    def test_three_skills_point_to_the_rules(self):
+        """#633 AC2: deliver-direct, writing-plans and to-issues each name the rules file."""
+        for path in (DirectLaneRoutingTest.DELIVER_DIRECT, WRITING_PLANS,
+                     ToIssuesCriterionLineContractsTest.TO_ISSUES):
+            with self.subTest(skill=path.parent.name):
+                self.assertIn(ACCEPTANCE_RULES_POINTER, normalized(path.read_text(encoding="utf-8")))
 
 
 class AcceptanceMapEvalGradingTest(unittest.TestCase):
