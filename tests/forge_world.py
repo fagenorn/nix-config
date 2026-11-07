@@ -41,7 +41,8 @@ remove, close, issue creation and the labelled issue listing; `fail_once` names 
 (`graphql`, `add_label`, `remove_label`, `close`, `create_issue`, `list_issues`, `post`, `edit`)
 that each answer `HTTP 502` once and change nothing; a created issue can be closed by number
 and keeps its `state`; the GraphQL comment nodes carry `fullDatabaseId` (a BigInt, so a string) and no `databaseId`,
-which is a 32-bit Int the forge cannot fill for today's comment ids. `host_clock`
+which is a 32-bit Int the forge cannot fill for today's comment ids. The GraphQL issue node carries `comments.totalCount` (every stored comment) and only the last 100
+comment nodes, as the forge does for `comments(last: 100)`, and the issues object carries a `pageInfo` with no next page. `host_clock`
 makes every host-clock read of the named modules return one instant, so a module that reads
 the host clock instead of the server's fails its test.
 
@@ -247,12 +248,13 @@ if tool == "gh" and (state / "store.json").exists():
         if kind == "graphql":
             nodes = []
             if st["state"] == "open" and "needs-verification" in st["labels"]:
+                every = [{"fullDatabaseId": str(c["id"]), "authorAssociation": c.get("author_association", "OWNER"),
+                          "body": c["body"], "createdAt": c["created_at"], "updatedAt": c["updated_at"]}
+                         for c in sorted(store["comments"], key=lambda c: c["id"])]
                 nodes = [{"number": store["issue"], "labels": {"nodes": [{"name": n} for n in st["labels"]]},
-                          "comments": {"nodes": [
-                              {"fullDatabaseId": str(c["id"]), "authorAssociation": c.get("author_association", "OWNER"),
-                               "body": c["body"], "createdAt": c["created_at"], "updatedAt": c["updated_at"]}
-                              for c in sorted(store["comments"], key=lambda c: c["id"])]}}]
-            out = {"data": {"repository": {"issues": {"nodes": nodes}}}}
+                          "comments": {"totalCount": len(every), "nodes": every[-100:]}}]
+            out = {"data": {"repository": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                                                       "nodes": nodes}}}}
         elif kind == "add_label":
             if target not in st["labels"]:
                 st["labels"].append(target)
