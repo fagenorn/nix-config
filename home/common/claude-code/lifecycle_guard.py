@@ -1084,8 +1084,8 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
     `bang_closes` reads a `!` that opens the segment, glued to the `&` that cut
     it, as the end of zsh's clobber operator `>&!`, so the target is still the
     next word. Bash reads that `!` as the target itself, and a spaced
-    `>& ! <word>` is that in both shells, so `detaching_word` passes it on one
-    reading only, and only when the segment begins with the `!`.
+    `>& ! <word>` is that in both shells, so `detaching_word` scans with and
+    without it, and passes it only when the segment begins with the `!`.
     """
     flags = [False] * len(tokens)
     payloads = []
@@ -1163,9 +1163,10 @@ def detaching_word(command):
     segments = split_segments(command)
     if segments is None:
         return earliest(command)
-    # One scan per reading of a bare operator inside a word: as a redirection
-    # whose target is the next word, and as a quoted character.
-    readings = (True, False)
+    # One scan per pair of readings: a bare operator inside a word as a
+    # redirection whose target is the next word, or as a quoted character; and a
+    # `!` glued to the `&` that cut a segment as closing zsh's `>&!`, or not.
+    readings = [(embedded, bang) for embedded in (True, False) for bang in (True, False)]
     states = dict.fromkeys(readings, fresh)
     for segment in segments:
         tokens = tokenize_segment(segment)
@@ -1178,9 +1179,10 @@ def detaching_word(command):
         flags = [False] * len(tokens)
         payloads = []
         for reading in readings:
+            embedded, bang = reading
             read_flags, read_payloads, after = detaching_command_flags(
-                tokens, states[reading], embedded_targets=reading,
-                bang_closes=reading and segment.startswith("!"))
+                tokens, states[reading], embedded_targets=embedded,
+                bang_closes=bang and segment.startswith("!"))
             # Only a redirection cut at its `&` (`2>&1`) continues into the next
             # segment; any real separator ends the simple command and its options.
             dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None

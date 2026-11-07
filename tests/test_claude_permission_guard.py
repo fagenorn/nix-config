@@ -2615,6 +2615,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (">& ! nohup sleep 999", "nohup"),
             ("2>& ! setsid x", "setsid"),
             (">&! /dev/null nohup x", "nohup"),
+            # A quoted `>` before zsh's glued `>&!`: one reading must take both
+            # (review of the issue 418 allowlist).
+            ("A='>' >&! t nohup sleep 1", "nohup"),
+            ("A='>' 2>&! t setsid sleep 1", "setsid"),
+            ("A='>' >&! t disown", "disown"),
         ):
             with self.subTest(command=command):
                 self.assert_detaching_refusal(self.run_guard(command), word, command)
