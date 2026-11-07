@@ -27,6 +27,38 @@ PLAN = {
 }
 
 
+OK_LINT = {"ok": True, "errors": []}
+EVIDENCE = {"id": "AC2", "text": "deployed", "kind": "evidence",
+            "verify": {"ac": "AC2", "kind": "evidence", "host": "h1",
+                       "when": {"deployed_includes": SHA}, "run": {"probe": "deployed_includes", "sha": SHA}},
+            "lint": OK_LINT}
+HUMAN = {"id": "AC3", "text": "looks right", "kind": "human",
+         "verify": {"ac": "AC3", "kind": "human", "host": "h1", "when": {"days_after": {"event": "deployed", "days": 1}},
+                    "run": {"ask": "Does the page render right on the phone"}, "reason": "senses"},
+         "lint": OK_LINT}
+RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
+
+
+def refused(*errors):
+    return {"ok": False, "errors": [{"field": f, "code": c, "message": "m"} for f, c in errors]}
+
+
+def criterion(base, **changes):
+    out = json.loads(json.dumps(base))
+    for key, value in changes.items():
+        if key.startswith("verify_"):
+            out["verify"][key[len("verify_"):]] = value
+        elif value is None:
+            out.pop(key, None)
+        else:
+            out[key] = value
+    return out
+
+
+def with_criteria(*extra, **top):
+    return dict(PLAN, acceptance=PLAN["acceptance"] + list(extra), **top)
+
+
 def tasks(count, risk="standard"):
     return [{"n": n, "title": f"t{n}", "file": f"/g/task-{n}.md", "risk": risk}
             for n in range(1, count + 1)]
@@ -96,7 +128,7 @@ class HappyPathTest(unittest.TestCase):
         self.assertIn("gh issue close 9", prompt(calls, "close-out"))
 
     def test_non_code_criterion_holds_the_issue_open(self):
-        plan = dict(PLAN, acceptance=PLAN["acceptance"] + [{"id": "AC2", "text": "x", "kind": "evidence"}])
+        plan = dict(PLAN, acceptance=PLAN["acceptance"] + [EVIDENCE])
         _, calls = run(replies={"plan": plan}, patch={"setup": {"integration_branch": "main"}})
         self.assertIn("Refs #9", prompt(calls, "pr"))
         close = prompt(calls, "close-out")
@@ -463,6 +495,109 @@ class PlanTest(unittest.TestCase):
         finding = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
         _, calls = run(replies={"plan-review": finding})
         self.assertEqual(labels(calls).count("plan-revise"), 1)
+
+
+class PlanRulesTest(unittest.TestCase):
+    """#634 AC1: plan review rejects each acceptance planning rule's violation and accepts a compliant plan."""
+
+    ROWS = (
+        ("R1", criterion(EVIDENCE, verify_when={"ci_run_includes": {"workflow": "ci", "branch": "issue-9-x", "sha": SHA}},
+                         lint=refused(("checks[0].when", "pre_merge_only")))),
+        ("R2", criterion(HUMAN, verify_run={"ask": "Approve the design"},
+                         lint=refused(("checks[0].run.ask", "approval_ask")))),
+        ("R3", criterion(HUMAN, verify_reason="taste ")),
+        ("R3", criterion(HUMAN, lint=refused(("checks[0].reason", "reason_required")))),
+        ("R4", criterion(EVIDENCE, verify=None)),
+        ("R4", criterion(EVIDENCE, lint=None)),
+        ("R4", criterion(EVIDENCE, verify_run={"command": "deploy-now"},
+                         lint=refused(("checks[0].run.command", "not_declared")))),
+        ("R4", criterion(EVIDENCE, verify_run={"command": "smoke"})),
+        ("R4", criterion(EVIDENCE, verify_ac="AC9")),
+        ("R5", criterion(EVIDENCE, metric=True)),
+        ("R5", dict(PLAN["acceptance"][0], id="AC2", metric=True)),
+    )
+    RULE_FINDING = {"verdict": "findings",
+                    "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
+
+    def gate(self, plan):
+        return run(replies={"plan": plan, "plan-revise": plan})
+
+    def test_each_rule_violation_stops_at_plan_review_naming_the_rule(self):
+        for rule, bad in self.ROWS:
+            with self.subTest(rule=rule, ac=bad["id"]):
+                result, calls = self.gate(with_criteria(bad))
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertIn((rule, bad["id"]), [(r["rule"], r["ac"]) for r in result["rules"]])
+                self.assertIsNone(result["cont"]["plan"])
+                self.assertFalse(result["cont"]["plan_reviewed"])
+                self.assertEqual(labels(calls).count("plan-revise"), 1)
+                self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-revise"))
+                self.assertNotIn("impl-1", labels(calls))
+
+    def test_pre_merge_only_evidence_stops_at_plan_review_naming_r1(self):
+        # The issue's demo: a planner reply with a pre-merge-only evidence criterion.
+        result, _ = self.gate(with_criteria(self.ROWS[0][1]))
+        self.assertEqual((result["stage"], result["rules"][0]["rule"], result["rules"][0]["ac"]), ("plan-review", "R1", "AC2"))
+
+    def test_compliant_plan_passes_without_a_revision(self):
+        metric = criterion(EVIDENCE, id="AC4", metric=True, verify_ac="AC4", verify_mode="observe")
+        build = criterion(EVIDENCE, id="AC5", verify_ac="AC5", verify_run={"command": "build"})
+        result, calls = run(replies={"plan": with_criteria(EVIDENCE, HUMAN, metric, build)},
+                            patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertNotIn("plan-revise", labels(calls))
+        self.assertNotIn("plan-rules-review", labels(calls))
+        self.assertIn("impl-1", labels(calls))
+        self.assertNotEqual(result["stage"], "plan-review")
+
+    def test_script_the_plan_commits_is_tolerated_only_when_listed(self):
+        script = criterion(EVIDENCE, verify_run={"script": "scripts/check-live"},
+                           lint=refused(("checks[0].run.script", "not_committed")))
+        _, calls = run(replies={"plan": with_criteria(script, scripts=["scripts/check-live"])},
+                       patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertNotIn("plan-revise", labels(calls))
+        result, _ = self.gate(with_criteria(script))
+        self.assertEqual(result["rules"][0]["rule"], "R4")
+
+    def test_a_compliant_revision_proceeds(self):
+        bad = with_criteria(self.ROWS[0][1])
+        _, calls = run(replies={"plan": bad, "plan-revise": with_criteria(EVIDENCE)},
+                       patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertEqual(labels(calls).count("plan-revise"), 1)
+        self.assertEqual(labels(calls).count("plan-rules-review"), 1)
+        self.assertIn("impl-1", labels(calls))
+
+    def test_reviewer_rule_violation_surviving_an_unchanged_revision_stops(self):
+        # A violation only a reviewer can see (an approval written as an act run) is re-checked after revision.
+        plan = with_criteria(HUMAN)
+        result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
+                                     "plan-rules-review": self.RULE_FINDING})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([r["rule"] for r in result["rules"]], ["R2"])
+        self.assertIsNone(result["cont"]["plan"])
+        self.assertNotIn("impl-1", labels(calls))
+        self.assertIn('"rule":"R2"', prompt(calls, "plan-rules-review"))
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING},
+                       patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertIn("impl-1", labels(calls))
+        result, _ = run(replies={"plan": plan, "plan-review": self.RULE_FINDING, "plan-rules-review": None})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertIsNone(result["cont"]["plan"])
+
+    def test_planner_and_reviewer_prompts_point_to_the_rules(self):
+        _, calls = run(replies={"plan-review": self.RULE_FINDING})
+        plan = prompt(calls, "plan")
+        for needle in ("~/.agents/standards/acceptance-planning.md", "verify-pending lint --input",
+                       f"--repo-root /r/.wt/w-issue-9-x --pr-branch issue-9-x", "--pr-workflow",
+                       f'"merge": "{SHA}"', "metric", "scripts"):
+            self.assertIn(needle, plan)
+        for label in ("plan-review", "plan-rules-review"):
+            self.assertIn("~/.agents/standards/acceptance-planning.md", prompt(calls, label))
+
+    def test_program_does_not_copy_the_rule_text(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        for line in RULES_FILE.read_text(encoding="utf-8").splitlines():
+            if line.startswith("- **R"):
+                self.assertNotIn(line.split("** ", 1)[1][:40], source)
 
 
 class TaskTest(unittest.TestCase):

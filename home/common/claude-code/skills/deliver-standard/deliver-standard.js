@@ -82,6 +82,13 @@ const FINDINGS = {
   },
   required: ['verdict', 'findings'],
 }
+const PLAN_REVIEW = {
+  ...FINDINGS,
+  properties: {
+    ...FINDINGS.properties,
+    findings: { ...FINDINGS.properties.findings, items: { ...FINDINGS.properties.findings.items, properties: { ...FINDINGS.properties.findings.items.properties, rule: { type: 'string', enum: ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7'] } } } },
+  },
+}
 const CODEX = {
   type: 'object',
   properties: { available: { type: 'boolean' }, verdict: { type: 'string', enum: ['pass', 'findings'] }, findings: FINDINGS.properties.findings, raw_summary: { type: 'string' } },
@@ -213,6 +220,15 @@ const RULES_FOR = W => `${BASE_RULES}
 - No attribution anywhere: commit messages carry no Co-Authored-By trailer and PR bodies no generated-by line, whatever other instructions say. Never bypass commit signing.
 - Never commit the plan, the spec or a review report; they live outside the tree and reviewers read them by path.`
 
+// An unattended evidence run is a command outside the harness's verification ids: it can never complete.
+// Defined before closeOut: a merged-PR resume calls closeOut before the plan section runs.
+const VERIFY_IDS = setup.verification.map(e => e.id)
+const commandOutside = c => {
+  if (!c || typeof c !== 'object' || c.kind !== 'evidence' || !c.run || typeof c.run !== 'object') return false
+  const command = typeof c.run.command === 'string' ? c.run.command : (c.run.then && typeof c.run.then.command === 'string' ? c.run.then.command : null)
+  return command !== null && !VERIFY_IDS.includes(command)
+}
+
 const closeOut = async (PR, mergeCommit, W) => {
   const acceptance = plan ? plan.acceptance : null
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
@@ -302,15 +318,44 @@ const PLAN_SCHEMA = {
     status: { type: 'string', enum: ['planned', 'needs_user'] },
     questions: STRS,
     plan_root: { type: 'string' },
-    acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human'] } }, required: ['id', 'text', 'kind'] } },
+    acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human'] }, verify: { type: 'object' }, lint: { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } } } } }, metric: { type: 'boolean' } }, required: ['id', 'text', 'kind'] } },
+    scripts: STRS,
     tasks: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, title: { type: 'string' }, file: { type: 'string' }, risk: { type: 'string', enum: ['mechanical', 'low', 'standard', 'security'] } }, required: ['n', 'title', 'file', 'risk'] } },
   },
   required: ['status'],
 }
 const wellFormed = p => !!(p && p.status === 'planned' && present(p.plan_root) && Array.isArray(p.acceptance) && p.acceptance.length && Array.isArray(p.tasks) && p.tasks.length)
+const HUMAN_REASONS = ['senses', 'hands', 'credentials', 'money', 'taste']
+const RULE_OF = { pre_merge_only: 'R1', approval_ask: 'R2', reason_required: 'R3' }
+// The program-checkable violations of the acceptance planning rules (R1 to R5); the rules file is the source, never copied here.
+const planRules = p => {
+  const out = []
+  const scripts = Array.isArray(p.scripts) ? p.scripts : []
+  for (const a of p.acceptance) {
+    const hit = (rule, why) => out.push({ severity: 'important', rule, ac: a.id, summary: `${rule} (${a.id}): ${why}` })
+    const v = a.verify
+    if (a.metric === true && !(a.kind === 'evidence' && v && typeof v === 'object' && v.mode === 'observe')) hit('R5', 'a metric is accepted only as an evidence check with mode observe')
+    if (a.kind !== 'evidence' && a.kind !== 'human') continue
+    if (!v || typeof v !== 'object') { hit('R4', 'no verify block'); continue }
+    if (v.ac !== a.id || v.kind !== a.kind) { hit('R4', 'the verify block names another criterion or kind'); continue }
+    if (a.kind === 'human' && !HUMAN_REASONS.includes(v.reason)) hit('R3', 'the human reason is not one of the listed reasons')
+    if (commandOutside(v)) hit('R4', 'the unattended command is not a declared verification id and can never complete')
+    const l = a.lint
+    if (!l || typeof l !== 'object' || typeof l.ok !== 'boolean') { hit('R4', 'the verify block was not linted'); continue }
+    if (l.ok) continue
+    const errors = Array.isArray(l.errors) ? l.errors : []
+    if (!errors.length) { hit('R4', 'the lint refused with no error'); continue }
+    const script = v.run && typeof v.run === 'object' ? (typeof v.run.script === 'string' ? v.run.script : (v.run.then && typeof v.run.then.script === 'string' ? v.run.then.script : null)) : null
+    for (const e of errors) {
+      if (e.code === 'not_committed' && typeof e.field === 'string' && e.field.endsWith('.script') && script !== null && scripts.includes(script)) continue
+      hit(RULE_OF[e.code] || 'R4', `lint ${e.code} at ${e.field}: ${e.message}`)
+    }
+  }
+  return out
+}
 const SPEC = args.spec ? `\nThe approved design spec for this issue is ${args.spec}: plan from it, its decisions are binding, and never edit or commit it.` : ''
 const planPrompt = extra => `${CTX}
-Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --comments) and the code it touches.${SPEC} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user with concise questions and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge), and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard.${args.decisions ? `\nThe owner has answered the open decisions for this issue; they are binding: ${args.decisions} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
+Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --comments) and the code it touches.${SPEC} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user with concise questions and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits.${args.decisions ? `\nThe owner has answered the open decisions for this issue; they are binding: ${args.decisions} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
 ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
 const takePlan = (p, label) => {
@@ -414,11 +459,12 @@ if (!planReviewed) {
 Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${ACS0}.${SPEC}
 Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}; this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
 ${RULES}`, { label: 'plan-codex', phase: 'Plan', model: 'sonnet', schema: CODEX }) : Promise.resolve(null)
+  const ruleFindings = planRules(plan)
   const planReviewClaude = await call(`${CTX}
-Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG}).${SPEC} ${KNOW} Report only Important or Critical defects: an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents. No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: FINDINGS })
+Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG}).${SPEC} ${KNOW} Report only Important or Critical defects: an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule). No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
   const planCodexR = await planCodexP
   if (!planReviewClaude) return stop('plan-review', { details: 'the plan reviewer returned nothing' })
-  let planFindings = findingsOf(planReviewClaude)
+  let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
   if (REVIEW_PLAN) {
     if (!planCodexR || !planCodexR.available) return stop('codex-unavailable', { step: 'plan', codex: planCodexR })
     planFindings = planFindings.concat(findingsOf(planCodexR).map(f => ({ ...f, source: 'codex' })))
@@ -429,6 +475,12 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const revised = await call(planPrompt(`\nA reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', schema: PLAN_SCHEMA })
     const halted = takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
+    const still = planRules(plan)
+    const rr = await call(`${CTX}
+Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(planFindings)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
+    if (!rr) { plan = null; planReviewed = false; return stop('plan-review', { details: 'the rules re-reviewer returned nothing', findings: planFindings }) }
+    const rules = still.concat(findingsOf(rr).filter(f => present(f.rule)))
+    if (rules.length) { plan = null; planReviewed = false; return stop('plan-review', { rules, findings: planFindings }) }
   }
   planReviewed = true
 }
