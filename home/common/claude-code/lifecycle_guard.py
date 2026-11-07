@@ -145,9 +145,17 @@ DETACHING_PATTERN = re.compile(
     re.IGNORECASE | re.ASCII,
 )
 # The one place a `-` is an operator, not a word character: `${x:-nohup}` and
-# `${x-nohup}` expand to the literal word when `x` is unset.
+# `${x-nohup}` expand to the literal word when `x` is unset. Any
+# parameter counts, since it may be a special one or carry a subscript
+# (`${@:-nohup}`, `${a[0]:-nohup}`, `${a[i-1]:-nohup}`), and the word may be
+# rebuilt by the characters `DETACHING_JUNK` matches (`${x:-no''hup}`,
+# `${x-no\hup}`, `${x:-no{,}hup}`), which the deletion copy cannot recover
+# here because it also deletes the brace that opens the expansion.
+DETACHING_JUNK = r"(?:\\\n|\$(?=['\"])|[\\'\"{},])*"
 DETACHING_DEFAULT_PATTERN = re.compile(
-    r"\$\{[A-Za-z0-9_]*:?-(" + "|".join(DETACHING_WORDS) + r")(?![A-Za-z0-9_-])",
+    r"\$\{(?:[^}:\-\[]|\[[^\]]*\])*:?-(" + "|".join(
+        DETACHING_JUNK.join(word) for word in DETACHING_WORDS
+    ) + r")(?![A-Za-z0-9_-])",
     re.IGNORECASE | re.ASCII,
 )
 # What the deletion copy of the command drops (issue 656 D3): a `$` before a
@@ -1103,7 +1111,8 @@ def detaching_hit(text):
     ]
     if not matches:
         return None
-    return min(matches, key=lambda match: match.start(1)).group(1).lower()
+    first = min(matches, key=lambda match: match.start(1)).group(1)
+    return detaching_normalised(first).lower()
 
 
 # The read-only allowlist of issue 656 (D4). Every admitted option is enumerated,
@@ -1281,7 +1290,8 @@ def detaching_word(command):
     handed to `xargs` or `timeout` are refused too, unless
     `detaching_mention_allowed` admits the command (the narrow read-only
     allowlist: a grep or rg pattern, or quoted gh issue/pr text). A default-value expansion
-    (`${x:-nohup}`) and a word after `$` and one digit, `!`, `@` or `*` count.
+    (`${x:-nohup}`, `${@:-nohup}`, `${a[0]:-no''hup}`) and a word after `$` and one
+    digit, `!`, `@` or `*` count.
     Accepted residuals: a word assembled at run time, a glob, an ANSI-C escape,
     a brace expansion with a non-empty other alternative, and a word glued to a
     letter other than `c` or `s` as an attached option value a program runs.

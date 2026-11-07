@@ -847,6 +847,19 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("${x-nohup} sleep 999 &", "nohup"),
             ("${1:-setsid} x", "setsid"),
             ("${x:-${y-disown}}", "disown"),
+            # The variable may be a special parameter or carry a subscript, and
+            # the default word may be rebuilt by quotes, a backslash or braces.
+            ("${@:-nohup} sleep 999 &", "nohup"),
+            ("${*-nohup} sleep 999 &", "nohup"),
+            ("${a[0]:-nohup} sleep 999 &", "nohup"),
+            ("unset a; ${a[0]:-nohup} sleep 60 &", "nohup"),
+            ("${x:-no''hup} sleep 999 &", "nohup"),
+            ("${x-no\\hup} sleep 999 &", "nohup"),
+            ("${x:-no{,}hup} sleep 999 &", "nohup"),
+            ("${a[i-1]:-nohup} sleep 999 &", "nohup"),
+            ("${x:-no$''hup} sleep 999 &", "nohup"),
+            ("${x:-no\\\nhup} sleep 999 &", "nohup"),
+            ("no\\\nhup sleep 999 &", "nohup"),
             # A positional or empty special parameter glued before the word
             # expands to nothing in the Bash tool.
             ("$1nohup sleep 999 &", "nohup"),
@@ -1022,6 +1035,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("unset GITHUB_TOKEN && gh issue comment 1 --repo fagenorn/nix-config "
              "--body 'nohup'", "admit"),
             ("sleep 1 &", "admit"),
+            ("${x:-nohup} y", "refuse"),
+            ("${a[0]:-no''hup} y", "refuse"),
+            ("$1nohup y", "refuse"),
+            ("no\\\nhup y", "refuse"),
+            ("echo ${x}-nohup", "admit"),
         )
         flags = "re.IGNORECASE | re.ASCII"
         mutants = {
@@ -1044,6 +1062,18 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "no-attached-option-bound":
                 "DETACHING_PATTERN = re.compile("
                 f"DETACHING_PATTERN.pattern.replace('|(?<=[cs])', ''), {flags})\n",
+            "no-default-pattern":
+                "DETACHING_DEFAULT_PATTERN = re.compile(r'(?!)')\n",
+            "no-default-word-rebuild":
+                "DETACHING_DEFAULT_PATTERN = re.compile(r'\\$\\{[A-Za-z0-9_]*:?-(' "
+                "+ '|'.join(DETACHING_WORDS) + r')(?![A-Za-z0-9_-])', "
+                f"{flags})\n",
+            "no-positional-bound":
+                "DETACHING_PATTERN = re.compile("
+                f"DETACHING_PATTERN.pattern.replace('|(?<=\\\\$[0-9!@*])', ''), {flags})\n",
+            "no-backslash-newline-deletion":
+                "detaching_normalised = lambda command: "
+                "DETACHING_DELETED.sub('', command)\n",
             "allow-every-mention": "detaching_mention_allowed = lambda command: True\n",
             "allow-no-mention": "detaching_mention_allowed = lambda command: False\n",
         }
