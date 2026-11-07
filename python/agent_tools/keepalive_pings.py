@@ -136,11 +136,20 @@ def _thread_request(entry, ts):
     return conversation, (start, ts, reply)
 
 
-def _reply_state(threads, conversation, at):
+def _reply_state(threads, conversation, at, before=None, pingless=False):
     """"idle", "streaming", or the reply of the thread request of `conversation` with the
-    greatest start at or before `at` (the later line on a tie)."""
+    greatest start at or before `at` (the later line on a tie). A closing period passes
+    `before`, the instant of its last ping: the request that resumed the conversation starts
+    after it, and cache_proxy writes keepalive_end while that request still streams, so a
+    request starting at or after `before` is not the period's reply. A period without a
+    ping (`pingless`) cannot have had a reply stream during it, so a request still
+    streaming at `at` is that resuming request."""
     chosen = None
     for request in threads.get(conversation, ()):
+        if before is not None and request[0] >= before:
+            continue
+        if pingless and request[1] > at:
+            continue
         if request[0] <= at and (chosen is None or request[0] >= chosen[0]):
             chosen = request
     if chosen is None:
@@ -158,14 +167,15 @@ def _segment_periods(segment, closed_at, cap):
             if found is not None:
                 threads.setdefault(found[0], []).append(found[1])
     periods = over_cap = max_pings = 0
-    open_count, over = {}, set()
+    open_count, over, last_ping = {}, set(), {}
 
     def close(conversation, pings, at):
         nonlocal periods, over_cap, max_pings
         marked = conversation in over
         open_count.pop(conversation, None)
         over.discard(conversation)
-        if _reply_state(threads, conversation, at) == "end_turn":
+        before = last_ping.pop(conversation, None)
+        if _reply_state(threads, conversation, at, before, before is None) == "end_turn":
             periods += 1
             over_cap += marked
             max_pings = max(max_pings, pings)
@@ -179,6 +189,7 @@ def _segment_periods(segment, closed_at, cap):
             if count >= cap and _reply_state(threads, conversation, ts) == "end_turn":
                 over.add(conversation)
             open_count[conversation] = count + 1
+            last_ping[conversation] = ts
         elif event == "keepalive_end":
             pings = entry.get("pings", 0)
             close(conversation, pings if _number(pings) else 0, ts)

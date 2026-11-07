@@ -89,11 +89,27 @@ class EndTurnCapTest(unittest.TestCase):
 
     def test_streaming_pings_of_a_new_turn_after_an_end_turn_period_are_not_over(self):
         lines = [request("A", "2026-11-04T00:00:01.000Z"), *pings("A", 2, minute=1),
-                 line("keepalive_end", "2026-11-04T00:08:00.000Z", conversation="A", pings=2),
+                 line("keepalive_end", "2026-11-04T00:09:00.000Z", conversation="A", pings=2),
                  *pings("A", 3, minute=10),
                  request("A", "2026-11-04T00:14:00.000Z", ms=300000),
                  line("keepalive_end", "2026-11-04T00:14:00.500Z", conversation="A", pings=3)]
         self.assertEqual(self.cap(lines), CapReport(2, 0, 3))
+
+    def test_a_period_ended_by_the_resuming_request_is_judged_before_that_request(self):
+        # cache_proxy starts the new request before keepalive_end is written, so at the
+        # keepalive_end instant the resuming request is still streaming.
+        lines = [request("A", "2026-11-04T00:00:01.000Z"), *pings("A", 3),
+                 line("keepalive_end", "2026-11-04T00:20:00.050Z", conversation="A",
+                      reason="resumed", pings=3),
+                 request("A", "2026-11-04T00:20:30.000Z", stop="tool_use", ms=30000)]
+        self.assertEqual(self.cap(lines), CapReport(1, 1, 3))
+
+    def test_a_pingless_period_ended_by_the_resuming_request_is_counted(self):
+        lines = [request("A", "2026-11-04T00:00:01.000Z"),
+                 line("keepalive_end", "2026-11-04T00:20:00.050Z", conversation="A",
+                      reason="resumed", pings=0),
+                 request("A", "2026-11-04T00:20:30.000Z", stop="tool_use", ms=30000)]
+        self.assertEqual(self.cap(lines), CapReport(1, 0, 0))
 
     def test_a_ping_after_end_turn_completes_at_the_cap_is_over(self):
         lines = [line("ping", "2026-11-04T00:01:00.000Z", conversation="A"),
