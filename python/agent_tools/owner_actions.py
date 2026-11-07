@@ -13,8 +13,11 @@ per-item connection, a search unfinished after `MAX_PAGES`, or one that returned
 `issueCount` (GitHub caps a search at 1,000 results) fails the refresh and writes nothing. Page flags,
 counts and timestamps must be well formed (an offset-bearing ISO 8601 instant, `Z` included) or the
 refresh fails `payload_invalid`; a cache entry with a malformed `oldest` reads as missing.
-P5: items are counted by their current labels, whatever the server returned.
-P6: the first page also reads the `owner-action` label, and a missing one is created.
+P5: items are counted by their current labels, whatever the server returned: an item carrying
+`owner-action` or `agent:human-required` is needs-you (`count`, with its age), an item carrying
+`owner-answered` and neither of those is answered-and-waiting (`answered`, no age), never both, and an
+item carrying none of the three is ignored.
+P6: the first page also reads the `owner-action` label (not `owner-answered`), and a missing one is created.
 P7: a statusline starts a refresh only by holding an exclusive `flock` on `<name>.refresh`, which also
 records the last attempt's time; the child inherits the locked descriptor, and attempts are spaced
 `RETRY_AFTER` apart whatever their outcome.
@@ -45,7 +48,8 @@ from agent_tools.github_remote import github_slug
 SLUG_PATTERN = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/(?!\.{1,2}$)[A-Za-z0-9_.-]+")
 
 COUNTED = ("owner-action", "agent:human-required")
-SCHEMA_VERSION = 1
+ANSWERED = "owner-answered"
+SCHEMA_VERSION = 2
 MAX_PAGES = 10
 STALE_AFTER = 900
 RETRY_AFTER = 120
@@ -251,7 +255,7 @@ QUERY = """query($owner: String!, $name: String!, $search: String!, $after: Stri
 def search_argv(slug: str, after: str | None = None) -> list[str]:
     owner, name = slug.split("/", 1)
     return ["api", "graphql", "-f", f"query={QUERY}", "-f", f"owner={owner}", "-f", f"name={name}",
-            "-f", f"search=repo:{slug} is:open label:{','.join(COUNTED)}",
+            "-f", f"search=repo:{slug} is:open label:{','.join((*COUNTED, ANSWERED))}",
             *(["-f", f"after={after}"] if after else [])]
 
 
@@ -274,11 +278,12 @@ def read_entry(slug: str) -> dict | None:
         entry = json.loads(cache_path(slug).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(entry, dict) or set(entry) != {"schema_version", "repo", "count", "oldest"}:
+    if not isinstance(entry, dict) or set(entry) != {"schema_version", "repo", "count", "oldest", "answered"}:
         return None
-    count = entry["count"]
+    count, answered = entry["count"], entry["answered"]
     if (entry["schema_version"] != SCHEMA_VERSION or entry["repo"] != slug
             or isinstance(count, bool) or not isinstance(count, int) or count < 0
+            or isinstance(answered, bool) or not isinstance(answered, int) or answered < 0
             or not (entry["oldest"] is None or isinstance(entry["oldest"], str))):
         return None
     if entry["oldest"] is not None:
@@ -289,8 +294,9 @@ def read_entry(slug: str) -> dict | None:
     return entry
 
 
-def write_entry(slug: str, count: int, oldest: str | None) -> None:
-    entry = {"schema_version": SCHEMA_VERSION, "repo": slug, "count": count, "oldest": oldest}
+def write_entry(slug: str, count: int, oldest: str | None, answered: int = 0) -> None:
+    entry = {"schema_version": SCHEMA_VERSION, "repo": slug, "count": count, "oldest": oldest,
+             "answered": answered}
     agent_platform.write_atomically(
         cache_path(slug), (json.dumps(entry, sort_keys=True) + "\n").encode("utf-8"))
 
@@ -305,12 +311,18 @@ def log_path(slug: str) -> Path:
 
 def render(entry: dict | None, now: float) -> str:
     """The status-line text for a cache entry, without a newline; `""` when there is nothing to say."""
-    if entry is None or entry["count"] == 0:
+    if entry is None:
         return ""
-    if entry["oldest"] is None:
-        return f"owner {entry['count']}"
-    days = max(0, int((now - _instant(entry["oldest"]).timestamp()) // 86400))
-    return f"owner {entry['count']} (oldest {days}d)"
+    parts = []
+    if entry["count"] > 0:
+        if entry["oldest"] is None:
+            parts.append(f"owner {entry['count']}")
+        else:
+            days = max(0, int((now - _instant(entry["oldest"]).timestamp()) // 86400))
+            parts.append(f"owner {entry['count']} (oldest {days}d)")
+    if entry["answered"] > 0:
+        parts.append(f"answered {entry['answered']}")
+    return ", ".join(parts)
 
 
 def claim_refresh(slug: str, now: float) -> int | None:
@@ -429,8 +441,8 @@ def _page(data: Any) -> tuple[list, dict, int]:
     return search["nodes"], search["pageInfo"], _total(search, "search", "issueCount")
 
 
-def _item(node: dict) -> tuple[bool, str | None]:
-    """Whether the search node carries a counted label, and its time (P4), or raise when truncated."""
+def _item(node: dict) -> tuple[str | None, str | None]:
+    """The search node's class (P5: "needs", "answered" or None) and its time (P4), or raise when truncated."""
     labels, label_nodes = _connection(node, "labels")
     if _total(labels, "labels") > len(label_nodes):
         raise forge_markers.ForgeError("payload_incomplete", "an item's labels are truncated")
@@ -456,7 +468,8 @@ def _item(node: dict) -> tuple[bool, str | None]:
         elif total > len(events):
             raise forge_markers.ForgeError(
                 "payload_incomplete", "an item's label events are truncated")
-    return bool(names & set(COUNTED)), min(times, key=_instant) if times else None
+    kind = "needs" if names & set(COUNTED) else "answered" if ANSWERED in names else None
+    return kind, min(times, key=_instant) if times else None
 
 
 def refresh(slug: str) -> dict:
@@ -485,21 +498,24 @@ def refresh(slug: str) -> dict:
     if len(nodes) < issue_count:
         raise forge_markers.ForgeError(
             "payload_incomplete", f"search returned {len(nodes)} of {issue_count} matches")
-    count = 0
+    count = answered = 0
     oldest: str | None = None
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        counted, time = _item(node)
-        if not counted:
+        kind, time = _item(node)
+        if kind == "answered":
+            answered += 1
+        if kind != "needs":
             continue
         count += 1
         if time is not None and (oldest is None or _instant(time) < _instant(oldest)):
             oldest = time
     if label_missing:
         forge_markers.ensure_label(slug, *forge_claim.OWNER_ACTION)
-    write_entry(slug, count, oldest)
-    return {"schema_version": SCHEMA_VERSION, "repo": slug, "count": count, "oldest": oldest}
+    write_entry(slug, count, oldest, answered)
+    return {"schema_version": SCHEMA_VERSION, "repo": slug, "count": count, "oldest": oldest,
+            "answered": answered}
 
 
 def _slug(text: str) -> str:

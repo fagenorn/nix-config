@@ -202,6 +202,36 @@ def run_main(argv):
     return code, out.getvalue(), err.getvalue()
 
 
+class AnsweredTest(Scratch):
+    def test_answered_items_are_counted_apart_from_needs_you(self):
+        self.world.respond_json("gh", oa.search_argv(SLUG), answer([
+            node(["owner-answered"], [("owner-answered", "2026-11-01T00:00:00Z")]),
+            node(["owner-answered", "needs-verification"]),
+            node(["owner-answered", "agent:human-required"], [("agent:human-required", "2026-10-20T00:00:00Z")]),
+            node(["owner-answered", "owner-action"], [("owner-action", "2026-11-03T00:00:00Z")]),
+        ]))
+        self.assertEqual(oa.refresh(SLUG), {"schema_version": 2, "repo": SLUG, "count": 2,
+                                            "oldest": "2026-10-20T00:00:00Z", "answered": 2})
+        self.assertEqual(oa.read_entry(SLUG)["answered"], 2)
+
+    def test_the_search_asks_for_the_answered_label_too(self):
+        self.assertIn(f"search=repo:{SLUG} is:open label:owner-action,agent:human-required,owner-answered",
+                      oa.search_argv(SLUG))
+
+    def test_a_version_1_entry_reads_as_missing(self):
+        path = oa.cache_path(SLUG)
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"schema_version": 1, "repo": SLUG, "count": 1, "oldest": None}), encoding="utf-8")
+        self.assertIsNone(oa.read_entry(SLUG))
+
+    def test_render(self):
+        now = 1_800_000_000.0
+        for count, answered, text in ((2, 1, "owner 2, answered 1"), (0, 3, "answered 3"), (1, 0, "owner 1"), (0, 0, "")):
+            with self.subTest(count=count, answered=answered):
+                self.assertEqual(oa.render({"schema_version": 2, "repo": SLUG, "count": count, "oldest": None,
+                                            "answered": answered}, now), text)
+
+
 class RefreshTest(Scratch):
     def test_counts_only_owner_action_labels(self):
         self.world.respond_json("gh", oa.search_argv(SLUG), answer([
@@ -210,8 +240,8 @@ class RefreshTest(Scratch):
             node(["needs-verification"], [("needs-verification", "2026-01-01T00:00:00Z")]),
             node(["verification-failed", "in-progress"], [("in-progress", "2026-01-02T00:00:00Z")]),
         ]))
-        self.assertEqual(oa.refresh(SLUG), {"schema_version": 1, "repo": SLUG, "count": 2,
-                                            "oldest": "2026-10-27T08:00:00Z"})
+        self.assertEqual(oa.refresh(SLUG), {"schema_version": 2, "repo": SLUG, "count": 2,
+                                            "oldest": "2026-10-27T08:00:00Z", "answered": 0})
         self.assertEqual(oa.read_entry(SLUG)["count"], 2)
         self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG)])
         self.assertEqual(oa.cache_path(SLUG), self.home / ".agents/state/owner-actions/octo/widgets.json")
@@ -228,7 +258,8 @@ class RefreshTest(Scratch):
 
     def test_an_item_without_a_label_event_counts_with_no_time(self):
         self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"])]))
-        self.assertEqual(oa.refresh(SLUG), {"schema_version": 1, "repo": SLUG, "count": 1, "oldest": None})
+        self.assertEqual(oa.refresh(SLUG), {"schema_version": 2, "repo": SLUG, "count": 1, "oldest": None,
+                                            "answered": 0})
 
     def test_zero_items(self):
         self.world.respond_json("gh", oa.search_argv(SLUG), answer([]))
@@ -240,11 +271,11 @@ class RefreshTest(Scratch):
         oa.refresh(SLUG)
         self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG), OA_CREATE])
 
-    def test_search_names_the_repo_and_both_labels(self):
+    def test_search_names_the_repo_and_the_three_labels(self):
         argv = oa.search_argv(SLUG)
         self.assertEqual(argv[:2], ["api", "graphql"])
         for pair in (["-f", "owner=octo"], ["-f", "name=widgets"],
-                     ["-f", f"search=repo:{SLUG} is:open label:owner-action,agent:human-required"]):
+                     ["-f", f"search=repo:{SLUG} is:open label:owner-action,agent:human-required,owner-answered"]):
             self.assertIn(pair[1], argv)
             self.assertEqual(argv[argv.index(pair[1]) - 1], "-f")
         self.assertFalse(any(a.startswith("after=") for a in argv))
@@ -258,8 +289,8 @@ class RefreshTest(Scratch):
         self.world.respond_json("gh", oa.search_argv(SLUG, "c1"), answer([
             node(["agent:human-required"], [("agent:human-required", "2026-10-15T00:00:00Z")]),
         ], label_exists=False, total=3))
-        self.assertEqual(oa.refresh(SLUG), {"schema_version": 1, "repo": SLUG, "count": 3,
-                                            "oldest": "2026-10-15T00:00:00Z"})
+        self.assertEqual(oa.refresh(SLUG), {"schema_version": 2, "repo": SLUG, "count": 3,
+                                            "oldest": "2026-10-15T00:00:00Z", "answered": 0})
         self.assertEqual(self.world.argvs("gh"), [oa.search_argv(SLUG), oa.search_argv(SLUG, "c1")])
 
     def test_truncated_item_connections_are_incomplete(self):
@@ -386,10 +417,10 @@ class RefreshTest(Scratch):
         self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"])]))
         real = oa.write_entry
 
-        def write(slug, count, oldest):
+        def write(slug, count, oldest, answered):
             if slug == OTHER:
                 raise PermissionError(13, "Permission denied")
-            real(slug, count, oldest)
+            real(slug, count, oldest, answered)
 
         with mock.patch.object(oa, "write_entry", write):
             code, out, err = run_main(["refresh"])
@@ -419,19 +450,24 @@ class RefreshTest(Scratch):
     def test_write_entry_round_trips_as_bytes(self):
         oa.write_entry(SLUG, 2, None)
         self.assertEqual(oa.cache_path(SLUG).read_bytes(), (json.dumps(
-            {"count": 2, "oldest": None, "repo": SLUG, "schema_version": 1}, sort_keys=True) + "\n").encode("utf-8"))
-        self.assertEqual(oa.read_entry(SLUG), {"schema_version": 1, "repo": SLUG, "count": 2, "oldest": None})
+            {"answered": 0, "count": 2, "oldest": None, "repo": SLUG, "schema_version": 2},
+            sort_keys=True) + "\n").encode("utf-8"))
+        self.assertEqual(oa.read_entry(SLUG), {"schema_version": 2, "repo": SLUG, "count": 2, "oldest": None,
+                                               "answered": 0})
 
     def test_read_entry_rejects_other_shapes(self):
         path = oa.cache_path(SLUG)
         path.parent.mkdir(parents=True)
-        for text in ("{", "[]", json.dumps({"schema_version": 1, "repo": OTHER, "count": 1, "oldest": None}),
-                     json.dumps({"schema_version": 1, "repo": SLUG, "count": True, "oldest": None}),
-                     json.dumps({"schema_version": 2, "repo": SLUG, "count": 1, "oldest": None}),
-                     json.dumps({"schema_version": 1, "repo": SLUG, "count": -1, "oldest": None}),
-                     json.dumps({"schema_version": 1, "repo": SLUG, "count": 1, "oldest": None, "x": 1}),
-                     json.dumps({"schema_version": 1, "repo": SLUG, "count": 1, "oldest": "not a date"}),
-                     json.dumps({"schema_version": 1, "repo": SLUG, "count": 1, "oldest": "2026-11-01T00:00:00"})):
+        base = {"schema_version": 2, "repo": SLUG, "count": 1, "oldest": None, "answered": 0}
+        for text in ("{", "[]", json.dumps({**base, "repo": OTHER}),
+                     json.dumps({**base, "count": True}),
+                     json.dumps({**base, "schema_version": 3}),
+                     json.dumps({**base, "count": -1}),
+                     json.dumps({**base, "x": 1}),
+                     json.dumps({**base, "oldest": "not a date"}),
+                     json.dumps({**base, "oldest": "2026-11-01T00:00:00"}),
+                     json.dumps({**base, "answered": -1}),
+                     json.dumps({**base, "answered": True})):
             path.write_text(text, encoding="utf-8")
             self.assertIsNone(oa.read_entry(SLUG), text)
 
@@ -527,6 +563,12 @@ class StatuslineTest(Scratch):
         self.assertEqual(self.line({"workspace": {"current_dir": str(self.widgets)}}), "owner 2 (oldest 3d)\n")
         self.assertEqual(self.err, "")
         self.popen.assert_not_called()
+
+    def test_prints_answered_apart_from_needs_you(self):
+        oa.write_entry(SLUG, 2, iso(3 * DAY + 3600), answered=1)
+        self.assertEqual(self.line({"cwd": str(self.widgets)}), "owner 2 (oldest 3d), answered 1\n")
+        oa.write_entry(SLUG, 0, None, answered=2)
+        self.assertEqual(self.line({"cwd": str(self.widgets)}), "answered 2\n")
 
     def test_count_without_a_label_time(self):
         oa.write_entry(SLUG, 1, None)
@@ -668,10 +710,10 @@ class StatuslineTest(Scratch):
     def test_render(self):
         now = time.time()
         self.assertEqual(oa.render(None, now), "")
-        self.assertEqual(oa.render({"count": 0, "oldest": None}, now), "")
-        self.assertEqual(oa.render({"count": 4, "oldest": iso(DAY - 60)}, now), "owner 4 (oldest 0d)")
-        self.assertEqual(oa.render({"count": 4, "oldest": iso(10 * DAY + 60)}, now), "owner 4 (oldest 10d)")
-        self.assertEqual(oa.render({"count": 4, "oldest": iso(-3600)}, now), "owner 4 (oldest 0d)")
+        self.assertEqual(oa.render({"count": 0, "oldest": None, "answered": 0}, now), "")
+        self.assertEqual(oa.render({"count": 4, "oldest": iso(DAY - 60), "answered": 0}, now), "owner 4 (oldest 0d)")
+        self.assertEqual(oa.render({"count": 4, "oldest": iso(10 * DAY + 60), "answered": 0}, now), "owner 4 (oldest 10d)")
+        self.assertEqual(oa.render({"count": 4, "oldest": iso(-3600), "answered": 0}, now), "owner 4 (oldest 0d)")
 
 
 class StatuslineEndToEndTest(Scratch):
