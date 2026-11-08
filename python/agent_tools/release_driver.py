@@ -505,8 +505,8 @@ class _Router:
     action's node for `inspect` and `invoke`, the collector (an alias) for `observe`. It adds
     no seam: fixture adapters enter only through the driver's `registry` argument. Every
     adapter call runs with the tracker's `credential_env.unset_before_invocation` names removed
-    from this process's environment, as `release deploy inspect` removes them, and restored
-    afterwards: the watch's `gh` child inherits its environment (issue 555).
+    from this process's environment, and restored afterwards: the watch's `gh` child inherits
+    its environment (issue 555).
     """
 
     def __init__(self, compiled: Mapping[str, Any], registry: Mapping[str, Any],

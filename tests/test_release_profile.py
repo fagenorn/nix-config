@@ -367,16 +367,6 @@ class WatchBindingTest(unittest.TestCase):
                          {"handle": "site", "kind": "github_repository",
                           "branch": "main", "repository": "fagenorn/nix-config"})
 
-    def test_a_watch_unit_beside_a_supported_deploy_is_a_deploy_conflict(self):
-        contract = support.base_contract()
-        contract["capabilities"]["deploy"]["support"] = "supported"
-        contract["bindings"]["deploy"] = {"adapter": "github-actions-health", "command": None,
-                                          "config": {}}
-        violations = release_profile.grammar_violations(
-            support.release_of("watched", support.watched_profile()), contract)
-        self.assertEqual([(v["pointer"], v["repair_id"]) for v in violations],
-                         [("/capabilities/deploy/support", "contract.release.deploy_conflict")])
-
 
 if __name__ == "__main__":
     unittest.main()

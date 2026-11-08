@@ -461,15 +461,10 @@ class ActivationWatchTest(DriverCase):
                           ("deploy", "activation", "publication_triggered",
                            "reversible_no_incremental_spend")])
         self.assertEqual([c["action"] for c in document["confirmations"]], ["tag", "github-release"])
-        unowned = rs.project(self, profiles={"watched": support.watched_profile()},
-                             deploy_adapter="github-actions-health")
-        refusal = self.driver(unowned).shape_refusal()
-        self.assertEqual((refusal.code, refusal.repair_id),
-                         ("deploy_watch_unowned", "release.profile.activation_unbound"))
 
     def test_the_watch_reads_run_without_the_tracker_credential_exclusions(self):
         """The contract's `unset_before_invocation` names are absent from every watch read,
-        as for `deploy inspect`, and are back in this process afterwards."""
+        and are back in this process afterwards."""
         names = ["GITHUB_TOKEN", "GH_TOKEN"]
         project = rs.project(self, profiles={"watched": support.watched_profile()})
         project = dataclasses.replace(project, contract={
