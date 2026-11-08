@@ -438,6 +438,22 @@ class ReconcileTest(unittest.TestCase):
         self.assertTrue(wt.is_dir())
         self.assertIn(str(wt), out("worktree", "list", "--porcelain", cwd=f.root))
 
+    def test_a_commit_made_after_the_archive_stops_the_removal(self):
+        f = self.fleet
+        wt = Path(f.worktree("racing-late", detach=True))
+        p = self.plan()
+        real_bundle = worktree_reconcile._make_bundle
+        def late_commit(*a, **kw):
+            out("commit", "-q", "--allow-empty", "-m", "late", cwd=wt)
+            return real_bundle(*a, **kw)
+        with mock.patch.object(worktree_reconcile, "_make_bundle", side_effect=late_commit):
+            r = self.apply(p)["results"][0]
+        self.assertIn(r["outcome"], ("failed", "changed"), r["detail"])
+        self.assertTrue(wt.is_dir())
+        self.assertIn(str(wt), out("worktree", "list", "--porcelain", cwd=f.root))
+        late = out("rev-parse", "HEAD", cwd=wt).strip()
+        self.assertNotEqual(late, self.entry(p, str(wt))["head"])
+
     def test_applying_a_plan_again_keeps_what_the_first_apply_removed(self):
         f = self.fleet
         gone = Path(f.worktree("gone-first"))

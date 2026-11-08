@@ -557,6 +557,11 @@ def _remove(root: Path, d: Path, record: dict, live_cwds: Callable[[], set[str]]
     real = os.path.realpath(path) if os.path.isdir(path) else None
     if _is_live(path, real, live_cwds()):
         return "changed", "live_process_at_removal"
+    # The pin and the bundle name only what the validated entry reached; a commit made while
+    # they were built is in neither, and removing the admin directory would leave it to GC.
+    entry = record["entry"]
+    if fingerprint(path, entry["admin"]) != entry["fingerprint"]:
+        return "changed", "worktree_changed_since_archive"
     tree = d / "tree"
     renamed = False
     try:
