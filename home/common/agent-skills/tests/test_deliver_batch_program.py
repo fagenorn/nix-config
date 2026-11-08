@@ -403,6 +403,7 @@ class ClosedClaimTest(unittest.TestCase):
         # A post-merge stop of a re-adopted merged landing: the issue reads CLOSED, but its close-out is unfinished.
         merged = {"state": "CLOSED", "merged_pr": 41, "claim": {"verdict": "held_by", "by": HOLDER}}
         for c in ({"stage": "close-out", "cont": {"setup": {}}},
+                  {"stage": "setup", "missing": ["host"], "cont": {"setup": {}}},
                   {"stage": "task", "pr": 41, "cont": {"setup": {}}},
                   {"stage": "close-out", "pr": 41, "cont": {"setup": {}}},
                   {"stage": "hold", "pr": 41, "cont": {"setup": {}}},

@@ -765,8 +765,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `ask-${n}`, phase: 'Deliver', model: 'so
       return
     }
     if (r.cont) {
-      if (r.stage !== 'planned' && !postMerge(r)) {
+      if (r.stage !== 'planned' && !postMerge(r) && !mergedReadopt(n, f)) {
         // A stop on an issue closed meanwhile: give the claim back and drop the cont; an open issue keeps both (#714).
+        // A re-adopted merged landing is never settled, whatever stage it stopped at: its close-out is still owed (#714).
         const st = await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) stopped with a continuation. Settle its claim.
 1. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state and return state (OPEN or CLOSED).
 2. Only when state is CLOSED, run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed and return its verdict as release: released (exit 0), not_held (exit 3) when the claim is already gone, or error on any other exit; otherwise return release null. Run nothing else.
