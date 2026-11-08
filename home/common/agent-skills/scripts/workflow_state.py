@@ -3897,20 +3897,20 @@ def direct_terminal(
     }
 
 
-# The orchestrate-control argv that re-enters one run for one issue, and the refusal that names
-# it. orchestrate-issues' final report carries the argv and acquire-direct.md names the refusal's
-# ` is held by orchestrated run ` marker, so both are literals the skill-contract test reads
-# (issue 475 D8, D10).
-ORCHESTRATED_RESUME = "orchestrate-control start --repo-root {repo_root} {issue} --run-id {run_id}"
-HOLD_REFUSAL = ("issue {issue} is held by orchestrated run {run_id}; resume it through "
-                "orchestrate-issues: {resume}")
+# The workflow-state argv that re-bootstraps one held run, and the refusal that names it. The
+# launcher that once resumed these runs is retired (issue 682), so the refusal
+# points at `init-run --run-id`, the surviving re-bootstrap. acquire-direct.md names the
+# refusal's ` is held by orchestrated run ` marker, so both are literals the skill-contract test
+# reads (issue 475 D8, D10).
+HELD_RUN_RESUME = "workflow-state init-run --repo-root {repo_root} --run-id {run_id}"
+HOLD_REFUSAL = ("issue {issue} is held by orchestrated run {run_id}; re-enter it with: "
+                "{resume}")
 
 
-def orchestrated_resume_command(repo_root: str, issue: str, run_id: str) -> str:
-    """The `orchestrate-control start` command line that re-enters run `run_id` for `issue`
-    alone, each value shell-quoted so a repository path with spaces survives a paste."""
-    return ORCHESTRATED_RESUME.format(repo_root=shlex.quote(repo_root),
-                                      issue=shlex.quote(issue), run_id=shlex.quote(run_id))
+def held_run_resume_command(repo_root: str, run_id: str) -> str:
+    """The `workflow-state init-run` command line that re-bootstraps run `run_id`, each value
+    shell-quoted so a repository path with spaces survives a paste."""
+    return HELD_RUN_RESUME.format(repo_root=shlex.quote(repo_root), run_id=shlex.quote(run_id))
 
 
 def refuse_orchestrated_hold(repo_root: Path, issue: int) -> None:
@@ -3935,7 +3935,7 @@ def refuse_orchestrated_hold(repo_root: Path, issue: int) -> None:
                 and not runtime.delivery_complete(entry)):
             raise WorkflowError(HOLD_REFUSAL.format(
                 issue=issue, run_id=handle,
-                resume=orchestrated_resume_command(str(repo_root), str(issue), handle)))
+                resume=held_run_resume_command(str(repo_root), handle)))
 
 
 def refuse_unmigrated_direct(attempts: Path, workflows_dir: Path, issue: int) -> None:
