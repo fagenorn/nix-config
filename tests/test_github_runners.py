@@ -238,5 +238,143 @@ class RunnersTest(unittest.TestCase):
             self.assertFalse(postgres["enable"] and postgres["port"] == 5433, postgres)
 
 
+def recipe_block():
+    """The `register-runners` recipe: its comment, its header line and its indented body."""
+    text = (ROOT / "justfile").read_text(encoding="utf-8")
+    match = re.search(r"((?:^#[^\n]*\n|^\[[^\n]*\]\n)*)^register-runners ([^\n]*):\n((?:  [^\n]*\n)+)",
+                      text, re.M)
+    if match is None:
+        raise AssertionError("no register-runners recipe in justfile")
+    return match.group(1), match.group(2), match.group(3)
+
+
+def recipe_script(host, local):
+    """The recipe body as bash would run it for `host` from `local`: dedented, with
+    `{{target_host}}` and `{{hostname}}` filled in."""
+    _, header, body = recipe_block()
+    if header != "target_host=hostname":
+        raise AssertionError(f"unexpected recipe parameters: {header!r}")
+    lines = [line[2:] for line in body.splitlines()]
+    if lines[0] != "#!/usr/bin/env bash":
+        raise AssertionError("the recipe is not a bash shebang recipe")
+    script = "\n".join(lines).replace("{{target_host}}", host).replace("{{hostname}}", local)
+    if "{{" in script:
+        raise AssertionError("the recipe interpolates something the test does not fill in")
+    return script + "\n"
+
+
+def apply_expression():
+    applies = re.findall(r"--apply '([^']*)'", recipe_block()[2])
+    if len(applies) != 1:
+        raise AssertionError(f"expected one --apply expression, found {len(applies)}")
+    return applies[0]
+
+
+def expected_triples(host):
+    found = [(f"fagenorn/{repo}", f"{TOKENS}/{repo}.token", "_github-runner") for repo in FAGENORN]
+    if host == "eleven-m5":
+        found.append(("elevenyellow/jarbird", f"{JARBIRD_TOKENS}/jarbird.token", JARBIRD_ACCOUNT))
+    return sorted(found)
+
+
+class RegisterRunnersTest(unittest.TestCase):
+    def run_recipe(self, host, local):
+        """Run the recipe body for `host` as if on `local`, with stub gh, sudo and ssh; nix is the
+        real one, in pure mode. The stub ssh runs the remote command as sshd would, joined with
+        spaces under /bin/sh -c, with the same stdin, so the remote half really runs."""
+        real_nix = shutil.which("nix")
+        self.assertIsNotNone(real_nix, "nix is not on PATH")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            stubs, seen = tmp / "bin", tmp / "seen"
+            stubs.mkdir()
+            seen.mkdir()
+            write_exe(stubs / "nix", f'#!/bin/sh\nexec "{real_nix}" {" ".join(repr(a) for a in NIX[1:3])} '
+                                     '--option allow-import-from-derivation false "$@"\n')
+            write_exe(stubs / "gh", f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{seen}/gh"\nprintf "tok:%s\\n" "$4"\n')
+            # [-n] install -m 0440 -o root -g GROUP SRC DST: record the call, refuse a source that
+            # is not a regular file (as install does), and keep what SRC held.
+            write_exe(stubs / "sudo", f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{seen}/sudo"\n'
+                                      '[ "$1" = -n ] && shift\n'
+                                      '[ -f "$8" ] || { echo "install: not a regular file" >&2; exit 9; }\n'
+                                      f'printf "%s\\n" "$8" >> "{seen}/staged"\n'
+                                      f'cat "$8" > "{seen}/token-$(basename "$9")"\n')
+            write_exe(stubs / "ssh", f'#!/bin/sh\nwhile [ "$1" = -o ]; do printf "%s\\n" "$2" >> "{seen}/ssh-opts"; '
+                                     'shift 2; done\n'
+                                     f'printf "%s\\n" "$1" >> "{seen}/ssh-host"\nshift\n'
+                                     f'printf "%s\\n" "$*" >> "{seen}/ssh-command"\n'
+                                     'exec /bin/sh -c "$*"\n')
+            script = tmp / "register-runners.sh"
+            script.write_text(recipe_script(host, local), encoding="utf-8")
+            done = subprocess.run(["bash", str(script)], cwd=ROOT, capture_output=True, text=True,
+                                  timeout=EVAL_TIMEOUT,
+                                  env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"})
+            self.assertEqual(done.returncode, 0, done.stderr[-4000:])
+
+            def lines(name):
+                path = seen / name
+                return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+            sudo = [line.split(" ") for line in lines("sudo")]
+            tokens = {p.name[len("token-"):]: p.read_text(encoding="utf-8") for p in seen.glob("token-*")}
+            left = [path for path in lines("staged") if Path(path).exists()]
+            return {"gh": lines("gh"), "sudo": sudo, "tokens": tokens, "left": left,
+                    "ssh_host": lines("ssh-host"), "ssh_opts": lines("ssh-opts"),
+                    "ssh_command": lines("ssh-command")}
+
+    def assert_tokens(self, host, seen, prefix):
+        triples = expected_triples(host)
+        self.assertEqual(sorted(seen["gh"]), sorted(
+            f"api -X POST repos/{slug}/actions/runners/registration-token -q .token"
+            for slug, _, _ in triples))
+        width = len(prefix) + 7
+        self.assertEqual(sorted((argv[:width], argv[width + 1]) for argv in seen["sudo"]), sorted(
+            ([*prefix, "install", "-m", "0440", "-o", "root", "-g", group], file)
+            for _, file, group in triples))
+        for slug, file, _ in triples:
+            self.assertEqual(seen["tokens"][Path(file).name],
+                             f"tok:repos/{slug}/actions/runners/registration-token")
+        self.assertEqual(seen["left"], [], "a staged token outlived the recipe")
+
+    def test_the_local_host_installs_each_token_with_sudo(self):
+        for host in HOSTS:
+            with self.subTest(host=host):
+                seen = self.run_recipe(host, host)
+                self.assert_tokens(host, seen, [])
+                self.assertEqual(seen["ssh_host"], [], "local mode must not ssh")
+
+    def test_another_host_gets_its_tokens_over_ssh_with_noninteractive_sudo(self):
+        for host, local in (("eleven-m5", "mbp"), ("mbp", "eleven-m5")):
+            with self.subTest(host=host, local=local):
+                seen = self.run_recipe(host, local)
+                self.assert_tokens(host, seen, ["-n"])
+                self.assertEqual(set(seen["ssh_host"]), {host})
+                self.assertEqual(len(seen["ssh_host"]), len(expected_triples(host)))
+                self.assertIn("BatchMode=yes", seen["ssh_opts"])
+                for command in seen["ssh_command"]:
+                    self.assertNotIn("tok:", command, "a token reached the remote command line")
+
+    def test_the_expression_prints_one_triple_per_runner(self):
+        for host in HOSTS:
+            with self.subTest(host=host):
+                out = nix("--raw", f"{ROOT}#darwinConfigurations.{host}.config.services.github-runners",
+                          "--apply", apply_expression())
+                self.assertEqual(sorted(tuple(t.split("=")) for t in out.split()), expected_triples(host))
+
+    def test_the_recipe_names_no_owner_group_or_host(self):
+        comment, _, body = recipe_block()
+        rest = body.replace(apply_expression(), "")
+        for literal in ("fagenorn", "_github-runner", "eleven-m5", "mbp"):
+            with self.subTest(literal=literal):
+                self.assertNotIn(literal, rest)
+                self.assertNotIn(literal, comment)
+
+    def test_the_recipe_keeps_its_token_hygiene(self):
+        body = recipe_block()[2]
+        for needle in ("set -euo pipefail", "umask 077", "tmp=$(mktemp)",
+                       "trap 'rm -f \"$tmp\"' EXIT", "tr -d '\\n'", "BatchMode=yes", "sudo -n install"):
+            self.assertIn(needle, body)
+
+
 if __name__ == "__main__":
     unittest.main()
