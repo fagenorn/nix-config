@@ -534,6 +534,12 @@ def _archive(root: Path, d: Path, run_id: str, entry: dict) -> dict:
     shutil.copytree(admin, d / "admin", symlinks=True)
     if admin_digests(d / "admin") != admin_digests(admin):
         raise ReconcileError("tool_error", "the admin directory changed while it was copied")
+    # The pin names only what the validated entry reached, so the copy must still be that
+    # snapshot: a commit made between the re-check and the copy is in neither the pin nor the
+    # bundle, and removing the admin directory would leave it to GC.
+    if (pin_sources(root, str(d / "admin"), entry["head"]) != entry["pins"]
+            or fingerprint(entry["path"], entry["admin"]) != entry["fingerprint"]):
+        raise ReconcileError("tool_error", "the worktree changed after it was re-checked")
     ref = f"refs/archive/worktree-reconcile/{run_id}/{entry['n']}"
     pin, tree = _make_pin(root, d, entry, ref)
     bundle = _make_bundle(root, d, ref, pin)
@@ -582,6 +588,22 @@ def _differing(fresh: dict, planned: dict) -> str:
     return "differs: " + ", ".join(keys)
 
 
+def _removed_in(manifest: Path, root: Path, run_id: str) -> dict[int, dict]:
+    """The `removed` results an earlier apply of this run left in `manifest`, by entry number."""
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8", errors="surrogateescape"))
+    except (OSError, ValueError):
+        return {}
+    if (not isinstance(data, dict) or data.get("schema") != APPLY_SCHEMA
+            or data.get("root") != str(root) or data.get("run_id") != run_id
+            or not isinstance(data.get("results"), list)):
+        return {}
+    return {item["n"]: item for item in data["results"]
+            if isinstance(item, dict) and item.get("outcome") == "removed"
+            and isinstance(item.get("n"), int) and not isinstance(item["n"], bool)
+            and isinstance(item.get("path"), str) and isinstance(item.get("entry"), dict)}
+
+
 def apply_plan(plan: dict, *, migrate_dry_run: Callable[[], dict],
                live_cwds: Callable[[], set[str]], open_prs: Callable[[Path], dict[str, dict]],
                archive_root: Path, acknowledge_cleanup: bool,
@@ -608,6 +630,7 @@ def apply_plan(plan: dict, *, migrate_dry_run: Callable[[], dict],
     manifest_path = run_dir / "manifest.json"
     results: list[dict] = []
     details: list[dict] = []
+    removed_before = _removed_in(manifest_path, root, run_id)
 
     def flush() -> None:
         _mkdir_private(Path(archive_root), run_dir)
@@ -619,6 +642,13 @@ def apply_plan(plan: dict, *, migrate_dry_run: Callable[[], dict],
                 if r["outcome"] == "removed" else None} for r, e in zip(results, details)]})
 
     for entry in entries:
+        earlier = removed_before.get(entry["n"])
+        if earlier is not None and earlier["path"] == entry["path"]:
+            # Removed by an earlier apply of this plan: its archive fields stay what restore reads.
+            results.append({k: v for k, v in earlier.items() if k not in ("entry", "restore")})
+            details.append(earlier["entry"])
+            flush()
+            continue
         result = {"n": entry["n"], "path": entry["path"], "head": entry.get("head"),
                   "outcome": "kept", "archive_ref": None, "bundle": None, "admin": None,
                   "directory": None, "detail": ""}
@@ -704,11 +734,17 @@ def restore_entry(manifest: Path, n: int) -> dict:
     tree = Path(item["directory"]) if item.get("directory") else None
     _git(root, "worktree", "add", "--no-checkout", "--detach", path, item["archive_ref"] + "^1")
     admin = Path(_git_out(path, "rev-parse", "--absolute-git-dir").strip())
+    if (archived_admin / "modules").is_dir() and os.path.realpath(admin) != os.path.realpath(
+            str(entry.get("admin"))):
+        # A submodule's `.git` file and `core.worktree` point through the old admin directory.
+        _git(root, "worktree", "remove", "--force", path)
+        raise ReconcileError("tool_error", f"the submodule repositories are keyed to {entry.get('admin')}, "
+                                           f"which git did not reuse for {path}")
     try:
         for name in ("index", "ORIG_HEAD", "AUTO_MERGE"):
             if (archived_admin / name).is_file():
                 shutil.copy2(archived_admin / name, admin / name)
-        for name in ("logs", "refs"):
+        for name in ("logs", "refs", "modules"):
             if (archived_admin / name).is_dir():
                 shutil.copytree(archived_admin / name, admin / name, symlinks=True,
                                 dirs_exist_ok=True)

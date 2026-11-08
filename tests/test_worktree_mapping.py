@@ -117,6 +117,27 @@ class ClassifyRootTest(unittest.TestCase):
         f.ledger("L1", short + "-y")
         self.assertEqual(ledger_matches(f.root, short), [])
 
+    def test_a_non_ascii_path_maps_whatever_the_quote_path_setting(self):
+        f = self.fleet
+        wt = f.worktree("caf\u00e9")
+        f.ledger("L1", wt)  # json.dumps escapes the accented letter
+        for quote in ("true", "false"):
+            with self.subTest(quote_path=quote), mock.patch.dict(os.environ, {
+                    **GIT_ENV, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.quotePath",
+                    "GIT_CONFIG_VALUE_0": quote}):
+                got = classify_root(f.root, report(L1="current"))
+                self.assertEqual([(p["path"], p["class"]) for p in got["paths"]], [(wt, "current")])
+                self.assertEqual(ledger_matches(f.root, wt), ["L1"])
+
+    def test_a_raw_utf8_ledger_still_maps(self):
+        f = self.fleet
+        wt = f.worktree("caf\u00e9")
+        d = f.root / ".superpowers" / "workflows" / "L1"
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({"worktrees": [wt]}, ensure_ascii=False),
+                                      encoding="utf-8")
+        self.assertEqual(ledger_matches(f.root, wt), ["L1"])
+
     def test_the_realpath_maps(self):
         f = self.fleet
         real = f.worktree("real")

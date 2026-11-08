@@ -9,9 +9,10 @@ read-only: `git --no-optional-locks`, no writes to a root.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def list_worktrees(root: Path) -> list[Worktree]:
     """The linked worktrees of `root` (the main checkout, listed first, is skipped)."""
     try:
         done = subprocess.run(
-            ["git", "--no-optional-locks", "-C", str(root), "worktree", "list", "--porcelain"],
+            ["git", "--no-optional-locks", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
             stdin=subprocess.DEVNULL, capture_output=True, timeout=GIT_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError) as error:
         raise MappingError(f"{root}: git worktree list failed: {error}") from None
@@ -56,15 +57,18 @@ def list_worktrees(root: Path) -> list[Worktree]:
         detail = _decode(done.stderr).strip() or f"exit {done.returncode}"
         raise MappingError(f"{root}: git worktree list failed: {detail}")
     entries: list[Worktree] = []
-    for block in out.split("\n\n"):
+    # `-z`: fields end in NUL and a worktree's block ends in an empty field, so a path is never
+    # quoted by `core.quotePath` and may hold any byte but NUL.
+    for block in out.split("\0\0"):
         path = head = branch = None
         locked = prunable = False
-        for line in block.split("\n"):
+        for line in block.split("\0"):
             key, _, value = line.partition(" ")
             if key == "worktree":
                 path = value
             elif key == "HEAD":
-                head = value
+                # An unborn branch prints the all-zero id: the worktree has no HEAD commit.
+                head = None if set(value) == {"0"} else value
             elif key == "branch":
                 branch = value
             elif key == "locked":
@@ -99,11 +103,36 @@ def _ledger_bytes(root: Path) -> dict[str, bytes]:
     return found
 
 
+def _strings(node: object) -> Iterator[str]:
+    """Every JSON string of `node`, object keys included."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, list):
+        for item in node:
+            yield from _strings(item)
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            yield key
+            yield from _strings(value)
+
+
+def _names_path(data: bytes, names: set[str]) -> bool:
+    """True when `data` holds one of `names` as a whole JSON string, however it is escaped."""
+    needles = [b'"' + _encode(n) + b'"' for n in names]
+    if any(n in data for n in needles):
+        return True
+    try:
+        doc = json.loads(_decode(data))
+    except ValueError:
+        return False
+    return any(text in names for text in _strings(doc))
+
+
 def _matches(ledgers: Mapping[str, bytes], path: str) -> list[str]:
-    needles = [b'"' + _encode(path) + b'"']
+    names = {path}
     if os.path.isdir(path):
-        needles.append(b'"' + _encode(os.path.realpath(path)) + b'"')
-    return sorted({name for name, data in ledgers.items() if any(n in data for n in needles)})
+        names.add(os.path.realpath(path))
+    return sorted(name for name, data in ledgers.items() if _names_path(data, names))
 
 
 def ledger_matches(root: Path, path: str) -> list[str]:

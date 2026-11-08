@@ -409,6 +409,70 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(out("rev-parse", r["archive_ref"] + "^1", cwd=f.root).strip(), head)
         self.assertNotIn(str(wt), out("worktree", "list", "--porcelain", cwd=f.root))
 
+    # --- final-review regressions --------------------------------------------
+
+    def test_an_unborn_branch_worktree_is_kept_as_a_git_operation(self):
+        f = self.fleet
+        orphan = f.base / "orph"
+        out("worktree", "add", "-q", "--orphan", "-b", "orph", str(orphan), cwd=f.root)
+        p = self.plan()
+        e = self.entry(p, str(orphan))
+        self.assertEqual((e["action"], e["keep"], e["head"]), ("keep", ["git_operation"], None))
+        self.assertFalse(e["pushed"])
+        r = self.apply(p)["results"][0]
+        self.assertEqual(r["outcome"], "kept")
+        self.assertTrue(orphan.is_dir())
+
+    def test_a_commit_made_after_revalidation_stops_the_archive_before_removal(self):
+        f = self.fleet
+        wt = Path(f.worktree("racing", detach=True))
+        p = self.plan()
+        real_copytree = worktree_reconcile.shutil.copytree
+        def late_commit(src, dst, *a, **kw):
+            if str(dst).endswith("/admin"):
+                out("commit", "-q", "--allow-empty", "-m", "late", cwd=wt)
+            return real_copytree(src, dst, *a, **kw)
+        with mock.patch.object(worktree_reconcile.shutil, "copytree", side_effect=late_commit):
+            r = self.apply(p)["results"][0]
+        self.assertEqual(r["outcome"], "failed", r["detail"])
+        self.assertTrue(wt.is_dir())
+        self.assertIn(str(wt), out("worktree", "list", "--porcelain", cwd=f.root))
+
+    def test_applying_a_plan_again_keeps_what_the_first_apply_removed(self):
+        f = self.fleet
+        gone = Path(f.worktree("gone-first"))
+        p = self.plan()
+        first = self.apply(p)
+        later = Path(f.worktree("zz-later"))
+        p2 = dict(p, entries=p["entries"])
+        second = self.apply(p2)
+        self.assertEqual([(r["path"], r["outcome"]) for r in second["results"]],
+                         [(str(gone), "removed")])
+        manifest = json.loads(Path(second["manifest"]).read_text())
+        self.assertEqual(manifest["results"][0]["entry"], first_entry := self.entry(p, str(gone)))
+        self.assertTrue(manifest["results"][0]["restore"])
+        got = restore_entry(Path(second["manifest"]), manifest["results"][0]["n"])
+        self.assertEqual(got["path"], str(gone))
+        self.assertTrue(gone.is_dir())
+        self.assertTrue(later.is_dir())
+
+    def test_restore_brings_back_the_admin_directory_of_an_initialized_submodule(self):
+        f = self.fleet
+        sub = f.base / "subsrc"
+        sub.mkdir()
+        out("init", "-q", "-b", "main", cwd=sub)
+        out("commit", "-q", "--allow-empty", "-m", "s", cwd=sub)
+        wt = Path(f.worktree("with-sub"))
+        out("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "sub", cwd=wt)
+        self.assertEqual(out("rev-parse", "--is-inside-work-tree", cwd=wt / "sub").strip(), "true")
+        result = self.apply(self.plan())
+        r = result["results"][0]
+        self.assertEqual(r["outcome"], "removed", r["detail"])
+        restore_entry(Path(result["manifest"]), r["n"])
+        self.assertEqual(out("rev-parse", "--is-inside-work-tree", cwd=wt / "sub").strip(), "true")
+        self.assertEqual(out("rev-parse", "HEAD", cwd=wt / "sub").strip(),
+                         out("rev-parse", "HEAD", cwd=sub).strip())
+
 
 class CliTest(unittest.TestCase):
     def run_cli(self, *argv):
