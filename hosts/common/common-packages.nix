@@ -60,6 +60,7 @@ in
       # === Development, DevOps & Virtualization ===
       # Version Control & Collaboration
       gh # GitHub official CLI
+      railway # Railway CLI, read by the railway-deploy release watch (issue 582)
 
       # Build & Automation
       hugo # Static site generator
