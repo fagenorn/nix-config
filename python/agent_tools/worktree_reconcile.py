@@ -944,7 +944,7 @@ def audit_root(root: Path, migrate_report: dict, plans: list[dict], applies: lis
         path = hits[-1][1]["path"]
         records: list[tuple[str, Path, dict | None]] = []
         for plan, entry in hits:
-            d = archive_dir(archive_root, plan["run_id"], root, entry["n"], entry["path"])
+            d = archive_dir(archive_root, plan["run_id"], Path(plan["root"]), entry["n"], entry["path"])
             if (d / "record.json").is_file():
                 records.append((plan["run_id"], d, _read_record(d / "record.json")))
         gone = [r for r in records if r[2] is not None and r[2].get("state") in _GONE_STATES]

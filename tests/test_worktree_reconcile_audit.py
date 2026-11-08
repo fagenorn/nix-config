@@ -228,6 +228,29 @@ class AuditTest(unittest.TestCase):
         out("update-ref", "-d", r["archive_ref"], cwd=self.fleet.root)
         self.assertEqual(self.whys(), ["archive_ref_missing"])
 
+    # --- the root's spelling ---------------------------------------------------
+
+    def audit_spelled_by_symlink(self):
+        link = self.fleet.base / "link"
+        os.symlink(self.fleet.base, link)
+        plans, applies = load_run_dir(self.run_dir)
+        root = str(self.fleet.root)
+        return audit_root(link / self.fleet.root.name, report(), plans[root], applies[root],
+                          archive_root=self.archive)
+
+    def test_a_root_spelled_differently_from_the_plan_still_finds_its_archive(self):
+        self.removed_one()
+        got = self.audit_spelled_by_symlink()
+        self.assertEqual(got["unresolved"], [])
+        self.assertEqual([r["path"] for r in got["removed"]], [str(self.fleet.base / "gone")])
+
+    def test_a_lost_pin_is_not_gone_elsewhere_under_another_spelling_of_the_root(self):
+        _, r, _ = self.removed_one()
+        out("update-ref", "-d", r["archive_ref"], cwd=self.fleet.root)
+        got = self.audit_spelled_by_symlink()
+        self.assertEqual([u["why"] for u in got["unresolved"]], ["archive_ref_missing"])
+        self.assertEqual(got["gone_elsewhere"], [])
+
     # --- run directory ---------------------------------------------------------
 
     def test_unrelated_json_is_ignored_and_a_broken_plan_is_refused(self):
