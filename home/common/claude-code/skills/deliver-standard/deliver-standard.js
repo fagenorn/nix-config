@@ -32,10 +32,10 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan, plan_reviewed, decisions?, done, fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan, plan_reviewed, plan_findings?, decisions?, done, fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
-// (reviewing it first unless plan_reviewed), skips the tasks in cont.done, then
+// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when only rule findings were left and none came from Codex, runs one rules-only revise of it, dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). When the PR
 // is already merged, the re-adopt goes straight to close-out. A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
@@ -198,7 +198,7 @@ ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} bef
 1. ${CONTRACT_READ}
 2. Derive branch from bindings.vcs.branch_pattern for this issue (slug from the issue title), and worktree_path as <bindings.vcs.worktree.root resolved against project.root>/<bindings.vcs.worktree.prefix><branch>. Then gh issue view ${ISSUE} --repo <slug> --json state,labels,title and gh pr list --repo <slug> --state all --search ${ISSUE} --json number,state,headRefName. Refuse (ok=false) with reason closed, parked (label needs-verification or parked), duplicate (a merged PR referencing this issue, a possible duplicate delivery: set duplicate_pr to its number) or open-pr (an open PR referencing this issue whose head is not branch).
 3. After git -C ${REPO} fetch origin, re-adopt instead of refusing when the work already exists. ${EXISTING_READ('<branch>', '<worktree_path>')}
-4. Read the issue and the code at origin/<integration_branch>: if the issue no longer applies (already fixed or obsolete), comment the evidence on the issue and refuse with reason no-longer-applies.
+4. Read the issue and the code at origin/<integration_branch>: if the issue no longer applies (already fixed or obsolete), comment the evidence on the issue and refuse with reason no-longer-applies. Otherwise return in details, in a few lines, what still applies, where (files and symbols) and what already exists.
 5. Return ok=true with every field above.
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', model: 'sonnet', effort: 'low', schema: SETUP_SCHEMA })
 if (!setup || !setup.ok) return { stage: 'setup', result: setup, ...deadOf() }
@@ -222,6 +222,9 @@ if (!HOLDER_RE.test(setup.holder)) return { stage: 'setup', result: setup, inval
 
 let plan = CONT && CONT.plan ? CONT.plan : null
 let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
+// A plan-review stop keeps the revised plan and the findings left on it; a resume runs one rules-only revise on it.
+const KEPT = CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules) ? CONT.plan_findings : null
+let planFindingsKept = KEPT ? { rules: KEPT.rules, findings: Array.isArray(KEPT.findings) ? KEPT.findings : [], rounds: Number.isInteger(KEPT.rounds) ? KEPT.rounds : 0 } : null
 const taskLog = CONT && CONT.done ? CONT.done.slice() : []
 let claimIncomplete = !!(CONT && CONT.claim_incomplete)
 // A partial task's edits stay claimed through any stop until that task is done.
@@ -244,7 +247,7 @@ if (CONT && Array.isArray(CONT.decisions)) CONT.decisions.forEach(addDecision)
 addDecision(args.decisions)
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(decisions.length ? { decisions } : {}), done: taskLog, fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } }
+  return { stage, ...extra, ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -443,8 +446,11 @@ const planRules = p => {
   return out
 }
 const SPEC = args.spec ? `\nThe approved design spec for this issue is ${args.spec}: plan from it, its decisions are binding, and never edit or commit it.` : ''
+// The plan reviewer's defect list, shared so the planner checks against the review it will get.
+const PLAN_RUBRIC = `an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents`
+const FACTS = present(setup.details) ? `\nSetup facts: ${setup.details}` : ''
 const planPrompt = extra => `${CTX}
-Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --comments) and the code it touches.${SPEC} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits.${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
+Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule R1-R8 of ~/.agents/standards/acceptance-planning.md (read it).${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
 ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
 const takePlan = (p, label) => {
@@ -543,7 +549,7 @@ if (!plan || !planReviewed) {
   const lost = await renew('plan', 'Plan')
   if (lost) return lost
 }
-if (!plan) {
+const readAnswer = async () => {
   const answer = await call(`${CTX}
 Read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: { type: 'object' } }, decisions: { type: 'string' } }, required: ['verdict'] } })
   if (!answer || !['none', 'open', 'answered'].includes(answer.verdict)) return stop('owner-answer', { result: answer })
@@ -552,8 +558,54 @@ Read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, ex
     if (typeof answer.decisions !== 'string' || !answer.decisions.trim()) return stop('owner-answer', { result: answer })
     addDecision(answer.decisions)
   }
+  return null
+}
+const RULE_IDS = PLAN_REVIEW.properties.findings.items.properties.rule.enum
+// A rules-only revise may settle the findings that triggered it only when none came from Codex: the rules re-reviewer does not
+// preserve source or finding identity, so a Codex finding it re-reports under any rule id needs a Codex review, not a Claude one.
+const rulesOnly = (rules, triggered) => rules.length > 0 && rules.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex') && !triggered.some(f => f.source === 'codex')
+const RESUME_KEPT = !!(plan && !planReviewed && planFindingsKept)
+// Only findings the rules-only revise may touch resume as one. A kept plan with any other finding left has spent its one full
+// revise, so it is dropped and planned again with the owner's answer; the kept state stays in the cont until that answer is read.
+const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules, planFindingsKept.findings)
+if (!plan || RESUME_KEPT) {
+  const stopped = await readAnswer()
+  if (stopped) return stopped
+}
+if (RESUME_KEPT && !RESUME_RULES) { plan = null; planFindingsKept = null }
+if (!plan) {
   const halted = takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA }), 'plan')
   if (halted) return halted
+}
+const rulesReview = async triggered => {
+  return call(`${CTX}
+Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
+}
+// One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
+const rulesRevise = async findings => {
+  const root = plan.plan_root
+  const halted = takePlan(await call(planPrompt(`\nFix only these rule findings in your plan at ${root} in place, change nothing else, and return the full result again: ${JSON.stringify(findings)}`), { label: 'plan-rules-revise', phase: 'Plan', schema: PLAN_SCHEMA }), 'plan-rules-revise')
+  if (halted) return { halted }
+  const still = planRules(plan)
+  const rr = await rulesReview(findings)
+  if (!rr) return { silent: true }
+  return { rules: still.concat(findingsOf(rr)) }
+}
+// A plan-review stop keeps the revised plan unless this was the second failed rules revise (D5).
+const reviewStop = (rules, findings, rounds, extra) => {
+  planReviewed = false
+  if (rounds >= 2) { plan = null; planFindingsKept = null } else planFindingsKept = { rules, findings, rounds }
+  return stop('plan-review', { ...(extra || {}), rules, findings })
+}
+const SILENT = { details: 'the rules re-reviewer returned nothing' }
+if (RESUME_RULES) {
+  const { rules, findings, rounds } = planFindingsKept
+  const r = await rulesRevise(rules)
+  if (r.halted) return { ...r.halted, findings }
+  if (r.silent) return reviewStop(rules, findings, rounds + 1, SILENT)
+  if (r.rules.length) return reviewStop(r.rules, findings, rounds + 1)
+  planFindingsKept = null
+  planReviewed = true
 }
 if (!planReviewed) {
   const ACS0 = JSON.stringify(plan.acceptance)
@@ -563,7 +615,7 @@ Run the project's configured independent plan review: the contract's workflow.re
 ${RULES}`, { label: 'plan-codex', phase: 'Plan', model: 'sonnet', schema: CODEX }) : Promise.resolve(null)
   const ruleFindings = planRules(plan)
   const planReviewClaude = await call(`${CTX}
-Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG}).${SPEC} ${KNOW} Report only Important or Critical defects: an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule). No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
+Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG}).${SPEC} ${KNOW} Report only Important or Critical defects: ${PLAN_RUBRIC}, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule). No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
   const planCodexR = await planCodexP
   if (!planReviewClaude) return stop('plan-review', { details: 'the plan reviewer returned nothing' })
   let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
@@ -578,12 +630,19 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const halted = takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
     const still = planRules(plan)
-    const rr = await call(`${CTX}
-Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(planFindings)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
-    if (!rr) { plan = null; planReviewed = false; return stop('plan-review', { details: 'the rules re-reviewer returned nothing', findings: planFindings }) }
-    const rules = still.concat(findingsOf(rr))
-    if (rules.length) { plan = null; planReviewed = false; return stop('plan-review', { rules, findings: planFindings }) }
+    const rr = await rulesReview(planFindings)
+    if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT)
+    let rules = still.concat(findingsOf(rr)), rounds = 0
+    if (rulesOnly(rules, planFindings)) {
+      rounds++
+      const r = await rulesRevise(rules)
+      if (r.halted) return { ...r.halted, findings: planFindings }
+      if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT)
+      rules = r.rules
+    }
+    if (rules.length) return reviewStop(rules, planFindings, rounds)
   }
+  planFindingsKept = null
   planReviewed = true
 }
 planRefs()
