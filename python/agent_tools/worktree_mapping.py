@@ -6,21 +6,31 @@ dry run: `current` when any naming ledger is current (or migrated), else `migrat
 migratable, else `refused-only` when ledgers name it but all are refused, else `unmapped`.
 Only the verify runner's own temporary worktrees are left out (issue 585). Everything here is
 read-only: `git --no-optional-locks`, no writes to a root.
+
+Issue 710: a fifth class, `forge`, maps a worktree no ledger names. Given an injected reader of
+`ForgeFacts`, a path whose ledger class is `unmapped` and whose short branch is named by an open
+claim comment (`claim`), an open pull request (`open_pr`) or an open declaring issue
+(`declared`) is upgraded to `forge`, and its row carries the branch and those reasons, in that
+order. The upgrade applies only to `unmapped`: `current`, `migrate` and `refused-only` keep their
+ledger class, a detached worktree (no branch) never maps, and `forge` counts as mapped in the
+verdict. Without a reader the document is exactly the ledger-only one.
 """
 from __future__ import annotations
 
 import json
 import os
 import subprocess
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent_tools import verify_exec
 
 GIT_TIMEOUT = 120
 CLASSES = ("current", "migrate", "refused-only", "unmapped")
+FORGE_CLASS = "forge"
 _CURRENT = {"current", "migrated"}
+_HEADS = "refs/heads/"
 
 
 class MappingError(Exception):
@@ -34,6 +44,37 @@ class Worktree:
     branch: str | None
     locked: bool
     prunable: bool
+
+
+@dataclass(frozen=True)
+class ForgeFacts:
+    """What the forge says about branches, keyed by short branch name; empty maps nothing."""
+
+    claims: Mapping[str, Sequence[Mapping]] = field(default_factory=dict)
+    open_prs: Mapping[str, int] = field(default_factory=dict)
+    declared: Mapping[str, int] = field(default_factory=dict)
+
+
+def short_branch(branch: str | None) -> str | None:
+    """`refs/heads/<name>` as `<name>`; `None` stays `None`, any other ref is unchanged."""
+    if branch is None:
+        return None
+    return branch[len(_HEADS):] if branch.startswith(_HEADS) else branch
+
+
+def forge_reasons(branch: str | None, facts: ForgeFacts) -> list[dict]:
+    """Why the forge names `branch`: its claims, then its open PR, then its declaring issue."""
+    short = short_branch(branch)
+    if short is None:
+        return []
+    reasons: list[dict] = [
+        {"reason": "claim", "issue": c["issue"], "comment_id": c["comment_id"],
+         "holder": c["holder"]} for c in facts.claims.get(short, ())]
+    if short in facts.open_prs:
+        reasons.append({"reason": "open_pr", "pr": facts.open_prs[short]})
+    if short in facts.declared:
+        reasons.append({"reason": "declared", "issue": facts.declared[short]})
+    return reasons
 
 
 def _decode(raw: bytes) -> str:
@@ -165,13 +206,15 @@ def verdicts_of(migrate_report: Mapping) -> dict[str, str]:
     return out
 
 
-def classify_root(root: Path, migrate_report: Mapping) -> dict:
+def classify_root(root: Path, migrate_report: Mapping, *,
+                  forge: Callable[[Path], ForgeFacts] | None = None) -> dict:
     verdicts = verdicts_of(migrate_report)
     worktrees = list_worktrees(root)
     ledgers = _ledger_bytes(root)
     excluded: list[str] = []
     counts = {name: 0 for name in CLASSES}
     paths: list[dict] = []
+    unmapped: list[tuple[int, Worktree]] = []
     for wt in worktrees:
         if is_runner_workspace(wt):
             excluded.append(wt.path)
@@ -179,7 +222,20 @@ def classify_root(root: Path, migrate_report: Mapping) -> dict:
         names = _matches(ledgers, wt.path)
         kind = classify(names, verdicts)
         counts[kind] += 1
+        if kind == "unmapped":
+            unmapped.append((len(paths), wt))
         paths.append({"class": kind, "path": wt.path, "ledgers": names})
+    if forge is not None:
+        counts[FORGE_CLASS] = 0
+        if any(short_branch(wt.branch) is not None for _, wt in unmapped):
+            facts = forge(root)
+            for index, wt in unmapped:
+                reasons = forge_reasons(wt.branch, facts)
+                if reasons:
+                    paths[index] = {"class": FORGE_CLASS, "path": wt.path, "ledgers": [],
+                                    "branch": short_branch(wt.branch), "forge": reasons}
+                    counts["unmapped"] -= 1
+                    counts[FORGE_CLASS] += 1
     if counts["unmapped"] or counts["refused-only"]:
         verdict = "red"
     elif counts["migrate"]:

@@ -42,6 +42,16 @@ over each root through `agent_tools.worktree_mapping`, read-only, using the verd
 75 when none is red and one is human-pending, and 2 on a tool error. Under `--red-pending` any
 root that is not green exits 75.
 
+Issue 710 adds the `forge` class (reasons `claim`, `open_pr`, `declared`), read through
+`agent_tools.worktree_forge`: only a path the ledgers leave `unmapped` is upgraded, and only
+when its branch is named by (D5) the winning claim marker of an open `in-progress` issue, whose
+author association is `OWNER` or `MEMBER` (a released or `end`-ed claim and an untrusted
+author's claim map nothing), (D6) an open pull request headed in the same repository (a fork's
+pull request maps nothing), or (D7) a branch of the declared table (`cutover-130-candidate`
+for `fagenorn/nix-config`) whose declaring issue is still open. The forge reads are GET-only,
+and a root without a GitHub `origin` reads no forge. A forge failure or a malformed payload is
+a tool error, exit 2 (`verify-checks: forge_error:`), never an unmapped reading.
+
 `deprecations-retired [--red-pending] [--watch-adapter A] --repo-root R...` (issue 582) states the
 #130 checklist C11 rule over each root, read-only: no deprecated use reported by
 `resolve-project platform-status` (a), no tracked legacy skills config (b), `bindings.deploy.adapter`
@@ -72,6 +82,7 @@ from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver, validate_manifest
 from agent_tools.agent_costs import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
+from agent_tools import worktree_forge
 from agent_tools.worktree_mapping import MappingError, classify_root
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -644,9 +655,11 @@ def worktree_mapping_check(roots: Sequence[Path], environ: Mapping[str, str], *,
     for root in roots:
         report = _migrate_report(root, environ)
         try:
-            rows.append(classify_root(root, report))
+            rows.append(classify_root(root, report, forge=worktree_forge.forge_facts))
         except MappingError as error:
             raise ToolError("mapping_error", str(error)) from None
+        except forge_markers.ForgeError as error:
+            raise ToolError("forge_error", str(error)) from None
     verdicts = [row["verdict"] for row in rows]
     green = all(v == "green" for v in verdicts)
     if green:
@@ -844,7 +857,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     runner.add_argument("--label", type=_nonempty, action="append", required=True)
     mapping = checks.add_parser(
         "worktree-mapping",
-        help="issue 585: every retained worktree has a strict-path ledger mapping (C7)")
+        help="issue 585/710: every retained worktree has a ledger mapping, a live claim, an open PR or a declared branch (C7)")
     mapping.add_argument("--repo-root", type=Path, action="append", required=True)
     mapping.add_argument("--red-pending", action="store_true")
     retired = checks.add_parser(
