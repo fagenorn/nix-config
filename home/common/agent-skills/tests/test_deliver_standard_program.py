@@ -2510,5 +2510,76 @@ class DeclaredBranchTest(unittest.TestCase):
                 self.assertNotIn("final_reviewed", stopped["cont"])
 
 
+    @staticmethod
+    def facts(head, name="cand", **more):
+        return [dict({"name": name, "head": head, "current": name, "toplevel": "/r/.wt/cand"}, **more)]
+
+    def test_resume_where_only_the_declared_branch_changed_reviews_again(self):
+        stopped, _ = run(replies={"plan": bplan(), "verify": None},
+                         patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}})
+        cont = stopped["cont"]
+        same, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP, "branch_heads": self.facts("d" * 40)}})
+        self.assertEqual(same["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        self.assertIn("verify", labels(calls))
+        self.assertIn("cand in /r/.wt/cand", prompt(calls, "setup"))
+        self.assertIn("branch_heads", prompt(calls, "setup"))
+        self.assertIn("branch --show-current", prompt(calls, "setup"))
+        moved, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40)}})
+        self.assertEqual(moved["stage"], "done")
+        self.assertIn("final-1", labels(calls))
+        again, _ = run(args=dict(ARGS, cont=cont), replies={"verify": None},
+                       patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40)}})
+        self.assertEqual(again["cont"]["final_reviewed"], {"head": TIP, "branches": {"cand": "e" * 40}})
+        wrong = {"unread": None, "short head": self.facts("d" * 7),
+                 "on another branch": self.facts("d" * 40, current="issue-9-x"),
+                 "not its own checkout": self.facts("d" * 40, toplevel="/r"),
+                 "another name": self.facts("d" * 40, name="other")}
+        for name, heads in wrong.items():
+            with self.subTest(name=name):
+                patch = {"head": TIP} if heads is None else {"head": TIP, "branch_heads": heads}
+                bad, calls = run(args=dict(ARGS, cont=cont), patch={"setup": patch})
+                self.assertEqual(bad["stage"], "setup")
+                self.assertIn("branch_heads.cand", bad["missing"])
+                self.assertEqual(bad["cont"], cont)
+                self.assertEqual(labels(calls), ["setup"])
+        ready, _ = run(args=dict(ARGS, mode="ready"), replies={"plan": bplan()}, patch={"impl-2": {"commit": "d" * 40}})
+        self.assertEqual(ready["cont"]["verified"]["branches"], {"cand": "d" * 40})
+        _, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA, "branch_heads": self.facts("d" * 40)}})
+        self.assertNotIn("final-1", labels(calls))
+        self.assertNotIn("verify", labels(calls))
+        _, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA, "branch_heads": self.facts("e" * 40)}})
+        self.assertIn("final-1", labels(calls))
+        self.assertIn("verify", labels(calls))
+
+    def test_claim_lost_resume_rereads_the_declared_heads(self):
+        stopped, _ = run(replies={"plan": bplan(), "renew-final-review": {"verdict": "error", "detail": "forge down"}},
+                         patch={"impl-2": {"commit": "d" * 40}})
+        self.assertEqual((stopped["stage"], stopped["at"]), ("claim-lost", "final-review"))
+        cont = stopped["cont"]
+        self.assertTrue(cont["claim_incomplete"])
+        self.assertEqual(cont["plan"]["branches"], [BR])
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"acquire": {"verdict": "already_held", "comment_id": 7}},
+                            patch={"setup": {"branch_heads": self.facts("d" * 40)}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:3], ["setup", "acquire", "worktree"])
+        self.assertIn("branch_heads", prompt(calls, "setup"))
+        self.assertIn(self.RANGE, prompt(calls, "final-1"))
+        unread, calls = run(args=dict(ARGS, cont=cont))
+        self.assertEqual(unread["stage"], "setup")
+        self.assertIn("branch_heads.cand", unread["missing"])
+        self.assertEqual(unread["cont"], cont)
+
+    def test_a_branch_named_like_an_object_key_is_tracked_on_resume(self):
+        odd = dict(BR, name="constructor", current="constructor")
+        stopped, _ = run(replies={"plan": bplan([odd], task_branch="constructor"), "verify": None},
+                         patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}})
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "branches": {"constructor": "d" * 40}})
+        again, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"verify": None},
+                           patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40, name="constructor")}})
+        self.assertIn("final-1", labels(calls))
+        self.assertEqual(again["cont"]["final_reviewed"], {"head": TIP, "branches": {"constructor": "e" * 40}})
+
+
 if __name__ == "__main__":
     unittest.main()
