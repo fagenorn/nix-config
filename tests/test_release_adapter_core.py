@@ -77,13 +77,14 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(descriptor, codesigned_artifact_adapter.describe())
         self.assertIsNone(release_adapter.watch_operation(descriptor))
 
-    def test_the_registry_holds_four_adapters_and_one_deploy_watch(self):
+    def test_the_registry_holds_five_adapters_and_two_deploy_watches(self):
         self.assertIs(release_adapter.REGISTRY["launchd-agent"], launchd_agent_adapter)
         self.assertEqual(release_adapter.DESCRIPTORS["launchd-agent"], launchd_agent_adapter.describe())
         self.assertEqual({name: release_adapter.watch_operation(descriptor)
                           for name, descriptor in release_adapter.DESCRIPTORS.items()},
                          {"codesigned-artifact": None, "github-actions-health": "deploy",
-                          "github-forge": None, "launchd-agent": None})
+                          "github-forge": None, "launchd-agent": None,
+                          "railway-deploy": "deploy"})
 
     def test_no_agent_tools_module_names_argus(self):
         """AC2: the vocabulary is neutral."""

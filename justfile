@@ -213,6 +213,8 @@ agent-workflow-tests *args:
     tests/test_release_verification.py \
     tests/test_forge_adapter.py \
     tests/test_actions_health_adapter.py \
+    tests/test_railway_deploy_adapter.py \
+    tests/test_release_merge.py \
     tests/test_guard_policy.py \
     tests/test_git_pre_push_hook.py \
     tests/test_release_adapter_core.py \

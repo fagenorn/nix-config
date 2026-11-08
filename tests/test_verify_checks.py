@@ -347,6 +347,126 @@ class ManagedPrePushHookTest(unittest.TestCase):
                          "100755")
 
 
+FAKE_RESOLVE = """#!/bin/sh
+# fake resolve-project: answers from $FAKE_RESOLVE_DIR/<subcommand>.json and .exit
+dir="$FAKE_RESOLVE_DIR"
+cat "$dir/$1.json"
+exit "$(cat "$dir/$1.exit" 2>/dev/null || echo 0)"
+"""
+
+
+class DeprecationsRetiredTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        self.root, self.answers, bin_dir = base / "root", base / "answers", base / "bin"
+        for path in (self.root, self.answers, bin_dir):
+            path.mkdir()
+        fake = bin_dir / "resolve-project"
+        fake.write_text(FAKE_RESOLVE)
+        fake.chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "FAKE_RESOLVE_DIR": str(self.answers)}
+        git = ["git", "-C", str(self.root)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        (self.root / "README.md").write_text("nodo\n")
+        subprocess.run([*git, "add", "README.md"], check=True)
+        subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                        "commit.gpgsign=false", "commit", "-qm", "init"], check=True)
+        self.answer(deprecated=[], adapter="none")
+
+    def answer(self, *, deprecated, adapter, targets=(), state="unsupported", resolve_exit=0,
+               project_id="elevenyellow/nodocom"):
+        (self.answers / "platform-status.json").write_text(
+            json.dumps({"project": {"deprecated_uses": deprecated}}))
+        (self.answers / "resolve.json").write_text(json.dumps({
+            "project": {"id": project_id, "root": str(self.root)},
+            "bindings": {"deploy": {"adapter": adapter}},
+            "capabilities": {"release": {"state": state, "reason_code": None, "repair_id": None}},
+            "release": {"targets": [{"adapter": a} for a in targets]}}))
+        (self.answers / "resolve.exit").write_text(str(resolve_exit))
+
+    def check(self, **kwargs):
+        options = {"watch_adapter": None, "red_pending": False, **kwargs}
+        return verify_checks.deprecations_retired_check([self.root], self.env, **options)
+
+    def commit(self, path, text):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        subprocess.run(["git", "-C", str(self.root), "add", path], check=True)
+
+    def test_a_clean_root_is_green(self):
+        code, report = self.check()
+        self.assertEqual((code, report["met"], report["roots"][0]["verdict"]), (0, True, "green"))
+
+    def test_each_reading_turns_the_root_red(self):
+        cases = (
+            lambda: self.answer(deprecated=["legacy-skills-config"], adapter="none"),
+            lambda: self.commit(".claude/skills.config.json", "{}"),
+            lambda: self.answer(deprecated=[], adapter="railway"),
+            lambda: self.answer(deprecated=[], adapter="none", resolve_exit=2),
+            lambda: self.commit("docs/deploy.md", "run release deploy inspect --commit x\n"),
+        )
+        for index, make_red in enumerate(cases):
+            with self.subTest(case=index):
+                self.setUp()
+                make_red()
+                code, report = self.check()
+                self.assertEqual((code, report["roots"][0]["verdict"]), (1, "red"))
+                self.assertEqual(self.check(red_pending=True)[0], 75)
+
+    def test_a_hit_under_the_artifact_directory_is_not_a_user(self):
+        self.commit(".agents/artifacts/evidence/old.md", "release deploy inspect\n")
+        self.assertEqual(self.check()[0], 0)
+
+    def test_the_nix_config_root_is_scoped_to_its_skills(self):
+        self.answer(deprecated=[], adapter="none", project_id="fagenorn/nix-config")
+        self.commit("python/agent_tools/verify_checks.py", 'RETIRED_COMMAND = "release deploy inspect"\n')
+        self.commit("tests/test_verify_checks.py", "release deploy inspect\n")
+        code, report = self.check()
+        self.assertEqual((code, report["roots"][0]["verdict"]), (0, "green"))
+        self.assertEqual(report["roots"][0]["readings"]["d"]["scope"],
+                         ["home/common/agent-skills/skills"])
+        self.commit("home/common/agent-skills/skills/ship-release/SKILL.md",
+                    "run release deploy inspect\n")
+        self.assertEqual(self.check()[0], 1)
+
+    def test_another_root_greps_the_whole_tree(self):
+        self.commit("python/tool.py", "release deploy inspect\n")
+        code, report = self.check()
+        self.assertEqual((code, report["roots"][0]["readings"]["d"]["scope"]),
+                         (1, [".", ":!.agents/artifacts"]))
+
+    def test_the_watch_adapter_is_pending_until_adopted_and_available(self):
+        self.assertEqual(self.check(watch_adapter="railway-deploy")[0], 75)
+        self.answer(deprecated=[], adapter="none", targets=("github-forge", "railway-deploy"),
+                    state="blocked")
+        code, report = self.check(watch_adapter="railway-deploy")
+        self.assertEqual((code, report["roots"][0]["verdict"]), (1, "red"))
+        self.answer(deprecated=[], adapter="none", targets=("github-forge", "railway-deploy"),
+                    state="available")
+        self.assertEqual(self.check(watch_adapter="railway-deploy")[0], 0)
+
+    def test_an_unreadable_platform_status_is_a_tool_error(self):
+        (self.answers / "platform-status.json").write_text("not json")
+        with self.assertRaises(verify_checks.ToolError):
+            self.check()
+
+
+class DeprecationsRetiredWrapperTest(unittest.TestCase):
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/deprecations-retired"), "100755")
+
+    def test_the_command_line_exits_two_on_a_tool_error(self):
+        with tempfile.TemporaryDirectory() as home:
+            done = run_from_root([str(ROOT / CHECKS / "deprecations-retired"),
+                                  "--repo-root", home], {"HOME": home, "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin"})
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("verify-checks: tool_error:", done.stderr)
+
+
 def fleet(version, rows):
     return {"platform": {"platform_version": version}, "fleet": rows}
 
