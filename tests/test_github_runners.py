@@ -75,6 +75,19 @@ class AccountGuardTest(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("gid 701 belongs to com.apple.sharepoint.group.1", done.stderr)
 
+    def test_an_existing_user_with_another_uid_is_refused(self):
+        done = self.guard("_github-runner-jarbird", "534",
+                          users=self.USERS + "_github-runner-jarbird 533\n")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("user _github-runner-jarbird has uid 533, not 534", done.stderr)
+
+    def test_an_existing_group_with_another_gid_is_refused(self):
+        done = self.guard("_github-runner-jarbird", "534",
+                          users=self.USERS + "_github-runner-jarbird 534\n",
+                          groups=self.GROUPS + "_github-runner-jarbird 533\n")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("group _github-runner-jarbird has gid 533, not 534", done.stderr)
+
     def test_an_id_is_not_matched_as_a_prefix(self):
         self.assertEqual(self.guard("_github-runner-jarbird", "53").returncode, 0)
 
