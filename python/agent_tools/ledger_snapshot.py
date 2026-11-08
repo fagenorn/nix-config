@@ -15,7 +15,14 @@ tarball is written the fence re-lists both stores, and a ledger, dot-lock or sto
 appeared or vanished refuses `changed`.
 
 A store that was absent at snapshot time is absent again after `restore --apply`, because
-the live store is moved aside rather than extracted over. Python 3.12 or later is required
+the live store is moved aside rather than extracted over.
+
+A writer blocked on a lock waits on that lock file's inode, so a restore must not replace it:
+the snapshot is extracted into a staging directory first, every lock the fence held is
+hard-linked into the staged tree over the extracted copy, and only then are the live stores
+moved aside and the staged stores renamed into place. A waiter that resumes after the fence
+releases therefore holds the same inode the live path names. A held lock whose directory the
+snapshot does not contain leaves with the moved-aside store. Python 3.12 or later is required
 (`tarfile`'s `filter="data"`).
 """
 
@@ -70,6 +77,7 @@ class Fence(NamedTuple):
     ledgers: tuple[str, ...]
     dot_locks: tuple[str, ...]
     transactions: bool
+    locks: tuple[str, ...] = ()  # the held lock files, relative to `.superpowers`
 
 
 def _now() -> str:
@@ -192,7 +200,7 @@ def fence(superpowers: Path, *, require_workflows: bool) -> Iterator[Fence]:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise SnapshotRefused("busy", f"{relative} is held by a writer") from exc
-        yield Fence(ledgers, dots, tfd_raw is not None)
+        yield Fence(ledgers, dots, tfd_raw is not None, tuple(relative for _, relative in locks))
     finally:
         for fd in reversed(fds):
             with contextlib.suppress(OSError):
@@ -262,6 +270,11 @@ def _add_store(tar: tarfile.TarFile, superpowers: Path, store: str) -> int:
                 info = tar.gettarinfo(str(full), arcname=relative)
                 fd = _open(str(full), os.O_RDONLY | os.O_NOFOLLOW, relative)
                 with os.fdopen(fd, "rb") as handle:
+                    if info.islnk():
+                        # A second name of one inode: store its bytes, not a hard-link member
+                        # (a restore refuses those).
+                        info.type, info.linkname = tarfile.REGTYPE, ""
+                        info.size = os.fstat(handle.fileno()).st_size
                     tar.addfile(info, handle)
             else:
                 raise SnapshotRefused("invalid_store", f"{relative} is a symlink or another "
@@ -302,7 +315,7 @@ def take(root: Path, out: Path, *, now: Callable[[], str],
                 handle.flush()
                 os.fsync(handle.fileno())
             on_written()
-            if _relist(superpowers) != held:
+            if _relist(superpowers) != held._replace(locks=()):
                 raise SnapshotRefused("changed", "a ledger, dot-lock or store appeared or "
                                                  "vanished while the snapshot was written")
             digest = hashlib.sha256()
@@ -401,6 +414,17 @@ def _newer(superpowers: Path, moved: list[str], than_ns: int) -> list[str]:
     return sorted(newer)
 
 
+def _relink_locks(superpowers: Path, staging: Path, locks: tuple[str, ...]) -> None:
+    """Put each held lock's live inode at its staged path, so a waiter keeps a valid lock."""
+    for relative in locks:
+        target = staging / relative
+        if not os.path.isdir(target.parent):
+            continue
+        temporary = target.parent / f".{target.name}.relink"
+        os.link(superpowers / relative, temporary)
+        os.replace(temporary, target)
+
+
 def restore(root: Path, snapshot: Path, *, apply: bool, now: Callable[[], str]) -> dict:
     """Return both stores to a snapshot, moving every live file aside and deleting none."""
     root = _resolve_root(root)
@@ -418,7 +442,7 @@ def restore(root: Path, snapshot: Path, *, apply: bool, now: Callable[[], str]) 
                   "newer": _newer(superpowers, moved, snapshot.stat().st_mtime_ns)}
         if not apply:
             return report
-        with fence(superpowers, require_workflows=False):
+        with fence(superpowers, require_workflows=False) as held:
             moved = _moved(superpowers)
             stem = snapshot.name.removesuffix(".tar.gz")
             stamp = now().replace("-", "").replace(":", "")
@@ -430,9 +454,15 @@ def restore(root: Path, snapshot: Path, *, apply: bool, now: Callable[[], str]) 
             report.update(mode="restore", aside=str(aside), moved=moved,
                           newer=_newer(superpowers, moved, snapshot.stat().st_mtime_ns))
             try:
+                staging = aside / ".incoming"
+                staging.mkdir(mode=0o700)
+                tar.extractall(path=staging, members=members, filter="data")
+                _relink_locks(superpowers, staging, held.locks)
                 for relative in moved:
                     os.rename(superpowers / relative, aside / ASIDE_NAMES[relative])
-                tar.extractall(path=superpowers, members=members, filter="data")
+                for store in restored:
+                    os.rename(staging / store, superpowers / store)
+                os.rmdir(staging)
                 for directory in (superpowers, superpowers / "archive"):
                     fd = os.open(directory, _DIR_FLAGS)
                     try:

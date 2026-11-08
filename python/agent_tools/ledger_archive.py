@@ -14,6 +14,7 @@ left in place.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import fcntl
 import hashlib
@@ -213,20 +214,23 @@ def _fsync_dir(path: Path | int) -> None:
             os.close(fd)
 
 
-def _write_record(destination_dir: Path, name: str, record: dict) -> None:
+def _prepare_record(destination_dir: Path, record: dict) -> Path:
+    """Write `record` durably to a temporary file beside its final name; return the temporary.
+
+    Every byte that can fail for lack of space is written here, before the ledger moves, so
+    publishing the record afterwards is one rename and needs no new space.
+    """
     fd, temporary = tempfile.mkstemp(dir=destination_dir, prefix=".record-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, destination_dir / name)
     except BaseException:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary)
-        except FileNotFoundError:
-            pass
         raise
+    return Path(temporary)
 
 
 def _skip(row: dict, reason: str) -> None:
@@ -319,9 +323,8 @@ def apply_rows(root: Path, superpowers: Path, rows: list[dict], *,
             elif _state_hash(lfd) != first[ledger]:
                 _skip(row, "changed")
             else:
-                os.rename(workflows / ledger, destination)
                 current = entry["current"]
-                _write_record(archive, f"{ledger}.archived.json", {
+                temporary = _prepare_record(archive, {
                     "schema": RECORD_SCHEMA, "ledger": ledger,
                     "run_id": current.get("run_id"),
                     "schema_version": current.get("schema_version"),
@@ -330,6 +333,20 @@ def apply_rows(root: Path, superpowers: Path, rows: list[dict], *,
                     "destination": str(destination), "disposition": row["disposition"],
                     "redeliver": row["redeliver"], "archived_at": now(),
                     "state_sha256": first[ledger]})
+                moved = False
+                try:
+                    os.rename(workflows / ledger, destination)
+                    moved = True
+                    os.replace(temporary, _record_path(superpowers, ledger))
+                except BaseException:
+                    # A ledger is archived only together with its record: put it back, so
+                    # a rerun still finds it in the inventory.
+                    with contextlib.suppress(OSError):
+                        if moved:
+                            os.rename(destination, workflows / ledger)
+                    with contextlib.suppress(OSError):
+                        os.unlink(temporary)
+                    raise
                 _fsync_dir(wfd)
                 _fsync_dir(archive)
                 row["verdict"] = "archived"

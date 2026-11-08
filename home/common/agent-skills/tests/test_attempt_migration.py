@@ -3,6 +3,8 @@
 Run: just agent-workflow-tests
 """
 
+import contextlib
+import errno
 import fcntl
 import hashlib
 import io
@@ -16,6 +18,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools import attempt_identity as ai
 from agent_tools.transaction_core import TransactionStore
@@ -988,6 +991,51 @@ class LedgerArchiveTest(MigrationFixtures, unittest.TestCase):
                 self.assertEqual(self.shim_calls(), 0)
                 self.assert_nothing_moved(before)
 
+    def apply_in_process(self):
+        from agent_tools import ledger_archive
+        with mock.patch.dict(os.environ, self.archive_env), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return ledger_archive.main(["--repo-root", str(self.root), "--apply",
+                                        "--labels", str(self.labels_path)])
+
+    def assert_every_refused_ledger_in_place_and_none_recorded(self, before):
+        self.assertEqual(self.tree_snapshot(), before)
+        _, verdicts = self.migrate_counts()
+        self.assertEqual({h for h, v in verdicts.items() if v == "refused"}, set(self.refused))
+
+    def test_a_record_write_that_fails_leaves_the_ledger_in_the_inventory_and_a_rerun_archives(self):
+        (self.root / ".superpowers" / "archive" / "workflows").mkdir(parents=True)
+        before = self.tree_snapshot()
+        real = tempfile.mkstemp
+
+        def full_disk(*args, **kwargs):
+            if str(kwargs.get("dir", "")).endswith("archive/workflows"):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(*args, **kwargs)
+
+        with mock.patch("tempfile.mkstemp", full_disk):
+            self.assertEqual(self.apply_in_process(), 2)
+        self.assert_every_refused_ledger_in_place_and_none_recorded(before)
+        report = self.archive("--apply")
+        self.assertEqual(report["counts"]["archived"], len(self.refused))
+        for handle in self.refused:
+            self.assertTrue((self.archive_dir / f"{handle}.archived.json").is_file())
+
+    def test_a_failure_publishing_the_record_puts_the_ledger_back(self):
+        (self.root / ".superpowers" / "archive" / "workflows").mkdir(parents=True)
+        before = self.tree_snapshot()
+        real = os.replace
+
+        def refuse_publish(source, target, *args, **kwargs):
+            if str(target).endswith(".archived.json"):
+                raise OSError(errno.EIO, "Input/output error")
+            return real(source, target, *args, **kwargs)
+
+        with mock.patch("os.replace", refuse_publish):
+            self.assertEqual(self.apply_in_process(), 2)
+        self.assert_every_refused_ledger_in_place_and_none_recorded(before)
+        self.assertEqual(self.archive("--apply")["counts"]["archived"], len(self.refused))
+
 
 class LedgerSnapshotTest(MigrationFixtures, unittest.TestCase):
     """`ledger-snapshot` (#584 D7, D9): one consistent, restorable cut of both stores."""
@@ -1216,3 +1264,35 @@ class LedgerSnapshotTest(MigrationFixtures, unittest.TestCase):
         before = self.tree_snapshot()
         self.restore("--apply", code=2, snapshot=not_gzip)
         self.assertEqual(self.tree_snapshot(), before)
+
+    def test_restore_keeps_every_held_lock_valid_for_a_writer_that_waited_through_it(self):
+        (self.workflows_dir / ".direct-5.lock").write_bytes(b"")
+        self.take()
+        locks = [self.workflows_dir / "orchestrate-17" / "state.lock",
+                 self.workflows_dir / ".direct-5.lock", self.store_root / "attempt-runs.lock"]
+        waiters = []
+        for path in locks:  # a writer that opened the lock before the restore, to flock it after
+            waiter = open(path, "r+b")
+            self.addCleanup(waiter.close)
+            waiters.append(waiter)
+        self.restore("--apply")
+        for path, waiter in zip(locks, waiters):
+            with self.subTest(lock=path.name):
+                fcntl.flock(waiter.fileno(), fcntl.LOCK_EX)  # the waiter resumes holding it
+                with open(path, "r+b") as contender:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(waiter.fileno(), fcntl.LOCK_UN)
+
+    def test_a_snapshot_of_hard_linked_files_round_trips(self):
+        ledger = self.workflows_dir / "orchestrate-17"
+        (ledger / "first.txt").write_bytes(b"shared bytes")
+        os.link(ledger / "first.txt", ledger / "second.txt")
+        os.link(ledger / "first.txt", self.store_root / "third.txt")
+        before = self.stores()
+        self.take()
+        with tarfile.open(self.out, "r:gz") as tar:
+            self.assertTrue(all(m.isdir() or m.isreg() for m in tar.getmembers()))
+        (ledger / "first.txt").write_bytes(b"changed")
+        self.restore("--apply")
+        self.assertEqual(self.stores(), before)
