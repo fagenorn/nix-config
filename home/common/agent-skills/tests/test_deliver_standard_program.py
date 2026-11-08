@@ -2471,6 +2471,44 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertTrue(result["branch_problems"])
         self.assertNotIn("impl-1", labels(calls))
 
+    RANGE = "git -C /r/.wt/cand diff origin/dev...cand"
+    FINAL_FINDING = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "candidate drops a key"}]}
+
+    def test_final_review_covers_the_declared_branch_range(self):
+        stopped, calls = run(replies={"plan": bplan(), "verify": None},
+                             patch={"impl-1": {"commit": TIP}, "impl-2": {"start_head": "1" * 40, "commit": "d" * 40}})
+        self.assertEqual(stopped["stage"], "verify")
+        for label in ("final-codex", "final-1"):
+            with self.subTest(label=label):
+                self.assertIn(self.RANGE, prompt(calls, label))
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "branches": {"cand": "d" * 40}})
+        chunked = bplan()
+        chunked["tasks"] = tasks(3) + [dict(chunked["tasks"][1], n=4, file="/g/task-4.md")]
+        _, calls = run(replies={"plan": chunked})
+        for label in ("final-1", "final-2", "final-integration"):
+            with self.subTest(label=label):
+                self.assertIn(self.RANGE, prompt(calls, label))
+        _, plain = run()
+        self.assertNotIn("declared branches", prompt(plain, "final-1"))
+        self.assertNotIn(self.RANGE, prompt(plain, "final-codex"))
+
+    def test_fix_wave_records_and_rereviews_the_declared_branch_heads(self):
+        moved = {"start_head": TIP, "commit": TIP, "branch_heads": [{"name": "cand", "head": "e" * 40}]}
+        stopped, calls = run(replies={"plan": bplan(), "final-1": self.FINAL_FINDING, "verify": None},
+                             patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}, "fix-wave": moved})
+        self.assertEqual(stopped["stage"], "verify")
+        self.assertIn("branch_heads", prompt(calls, "fix-wave"))
+        self.assertIn(f"git -C /r/.wt/cand diff {'d' * 40}..{'e' * 40}", prompt(calls, "fix-wave-review"))
+        self.assertNotIn("push origin", prompt(calls, "fix-wave-review"))
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "branches": {"cand": "e" * 40}})
+        for heads in (None, [], [{"name": "cand", "head": "e" * 7}], [None, "cand"]):
+            with self.subTest(heads=heads):
+                wave = {"start_head": TIP, "commit": TIP} if heads is None else {"start_head": TIP, "commit": TIP, "branch_heads": heads}
+                stopped, _ = run(replies={"plan": bplan(), "final-1": self.FINAL_FINDING},
+                                 patch={"impl-2": {"commit": "d" * 40}, "fix-wave": wave})
+                self.assertEqual(stopped["stage"], "fix-wave")
+                self.assertNotIn("final_reviewed", stopped["cont"])
+
 
 if __name__ == "__main__":
     unittest.main()

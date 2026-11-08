@@ -112,6 +112,8 @@ const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change any
 const STRS = { type: 'array', items: { type: 'string' } }
 // A forge or agent may report a short sha; the same head must not read as moved.
 const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }
+const BRANCH_HEADS = { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' } }, required: ['name', 'head'] } }
+const FIX_WAVE_IMPL = { ...IMPL, properties: { ...IMPL.properties, branch_heads: BRANCH_HEADS } }
 const normSha = x => x.trim().toLowerCase()
 const sameSha = (a, b) => {
   if (typeof a !== 'string' || typeof b !== 'string') return false
@@ -163,6 +165,11 @@ const own = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnPro
 const isEntry = b => !!b && typeof b === 'object' && !Array.isArray(b)
 const declared = p => (p && Array.isArray(p.branches) ? p.branches.filter(isEntry) : [])
 const SHA_RE = /^[0-9a-f]{40}$/
+const factOf = (list, name) => (Array.isArray(list) ? list.find(f => isEntry(f) && f.name === name) || null : null)
+const headOf = (list, name) => {
+  const f = factOf(list, name)
+  return f && typeof f.head === 'string' && SHA_RE.test(normSha(f.head)) ? normSha(f.head) : null
+}
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/
 const PATH_RE = /^\/[A-Za-z0-9._\/-]+$/
 const REF_NAMESPACES = ['refs', 'heads', 'tags', 'remotes']
@@ -527,12 +534,15 @@ const FOCUSED = 'Run only the tests that cover the files you changed; do not run
 let ACS = null, PLAN_REF = null
 // The last head this run knows for each declared branch (#713); read only through own().
 const branchTips = Object.create(null)
+const branchSnap = () => (declared(plan).length ? { branches: { ...branchTips } } : {})
 const planRefs = () => {
   GRANTS = declared(plan); RULES = RULES_FOR(W)
   for (const b of declared(plan)) if (!own(branchTips, b.name)) branchTips[b.name] = b.head
   ACS = JSON.stringify(plan.acceptance)
   PLAN_REF = plan.plan_root ? `Plan: ${plan.plan_root} (task files beside it).` : 'No plan: direct lane.'
 }
+const declaredRanges = () => declared(plan).map(b => `git -C ${b.worktree} diff ${b.base}...${b.name}`)
+const EXTRA_RANGES = () => (declared(plan).length ? ` The plan's declared branches belong to this delivery: also review ${declaredRanges().join(' and ')}.` : '')
 let chunked = false
 // A ready stop's verified head, unchanged and clean, needs no second review or verify.
 const SKIP_REVIEW = !!(verified && plan && sameSha(setup.head, verified.head) && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)))
@@ -778,11 +788,11 @@ if (!SKIP_REVIEW && !SKIP_FINAL) {
 }
 const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
-Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package; this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
+Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package;${EXTRA_RANGES()} this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
 ${RULES}`, { label: 'final-codex', phase: 'Final review', model: 'sonnet', schema: CODEX }) : Promise.resolve(null)
 const finals = await parallel(groups.map((g, gi) => () => call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
-Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}. ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is actually met, with the test or command that shows it). Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })))
+Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is actually met, with the test or command that shows it). Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })))
 const codexR = await codexP
 if (finals.some(r => !r)) return stop('final-review', { details: 'a final reviewer returned nothing', finals })
 let finalFindings = finals.flatMap(findingsOf)
@@ -793,22 +803,30 @@ if (REVIEW_CODE) {
 }
 if (chunked) {
   const integ = await call(`${CTX}
-${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed. ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
   if (!integ) return stop('final-review', { details: 'the integration reviewer returned nothing' })
   finalFindings = finalFindings.concat(findingsOf(integ))
 }
 if (finalFindings.length) {
   // At most two waves: the second runs only when the first re-review's findings all narrow the first round (same kind of defect on another path); a new kind stops.
   let waveFindings = finalFindings
+  const hasBranches = declared(plan).length > 0
   for (let k = 1; k <= 2; k++) {
     const fwLabel = k === 1 ? 'fix-wave' : `fix-wave-${k}`
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FOCUSED} ${IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
     if (!implDone(fw)) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves })
+    const collected = []
+    for (const b of declared(plan)) {
+      const h = headOf(fw.branch_heads, b.name)
+      if (!h) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves, details: `no head for the declared branch ${b.name}` })
+      if (!sameSha(h, branchTips[b.name])) collected.push(`git -C ${b.worktree} diff ${branchTips[b.name]}..${h}`)
+      branchTips[b.name] = h
+    }
     tip = fw.commit
-    const rv = await call(`${CTX}\nRe-review these final-review findings against the fix (${span(fw)}); implementer notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}. Report any still unresolved and any new Important or Critical defect. For each finding you still report, set relation: narrowing when it is the same kind of defect as one of the findings above reached on another path, input or call site; new when it is a different kind. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+    const rv = await call(`${CTX}\nRe-review these final-review findings against the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''}); implementer notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}. Report any still unresolved and any new Important or Critical defect. For each finding you still report, set relation: narrowing when it is the same kind of defect as one of the findings above reached on another path, input or call site; new when it is a different kind. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
     if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
     const next = findingsOf(rv)
     if (!next.length) break
@@ -816,7 +834,7 @@ if (finalFindings.length) {
     waveFindings = next
   }
 }
-if (present(tip)) finalReviewed = { head: tip }
+if (present(tip)) finalReviewed = { head: tip, ...branchSnap() }
 }
 }
 
