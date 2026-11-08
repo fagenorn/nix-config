@@ -6,7 +6,7 @@ onboards through the project contract; included documents receive the owner's sn
 
 | Surface | Lives at (per repo) | Carries |
 |---|---|---|
-| **Values** | `.agents/project.json` | Tracker, branches, verify commands, doc paths, naming, deploy adapter — every binding the skills resolve. See the per-skill "Keys used" lines. |
+| **Values** | `.agents/project.json` | Tracker, branches, verify commands, doc paths, naming — every binding the skills resolve. See the per-skill "Keys used" lines. |
 | **Prose hints** | paths in `bindings.paths.hints` | Project-specific prose the generic skills receive from the retained snapshot. |
 | **Domain language** | `docs/CONTEXT-MAP.md` + `docs/areas/<area>/CONTEXT.md` | The map is an index (≤150 lines): areas, term → area table, `governs:` globs (root-relative). Area files are budgeted glossaries. Format: `skills/grill-with-docs/CONTEXT-FORMAT.md`; linter: `~/.agents/bin/context-map-lint`. |
 | **Decisions** | `docs/areas/<slug>/adr/` — every area's own, including the reserved `system` area for decisions no single area owns | 1–3 sentence records, gated on hard-to-reverse AND surprising AND real-trade-off. Ids are `ADR-<slug>-NNN`, numbered per directory from `001`; no global sequence. Format: `skills/grill-with-docs/ADR-FORMAT.md`. |

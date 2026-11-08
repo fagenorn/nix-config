@@ -1708,7 +1708,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn("~/.agents/bin/workflow-state", text)
         for name, text in (("research", self.research),):
             with self.subTest(skill=name):
-                self.assertIn("~/.agents/bin/agent-evidence", text)
+                # A second resolution route is a ladder (issue 579): the bare name is the contract.
+                self.assertIn("`agent-evidence research <artifact.json>`", text)
+                self.assertNotIn("~/.agents/bin/agent-evidence", text)
         with self.subTest(skill="ship-issue"):
             self.assertIn("~/.agents/bin/review-range", self.ship_issue)
         # The packaged detail producer and external workspace command are both

@@ -2,16 +2,16 @@
 
 These three functions are the adapter's whole public surface (#124 D7). `describe()` returns a
 fresh descriptor with one operation, `deploy`: `publication_triggered` mode, `unsupported` for
-`invoke` (`bridge_watch_only`) and supported for `inspect`, so no release profile can bind it yet
-and it is read through `release deploy inspect` (D1, D5). Its closed config is
-`workflow`, `branch`, `services` (a `string_list`), `health_url` and `health_commit_field`.
+`invoke` (`bridge_watch_only`) and supported for `inspect`, so no release profile can bind it yet.
+It stays registered for the release core's activation unit (#555, P9), and no candidate command
+reads it until #555 binds it. Its closed config is `workflow`, `branch`, `services` (a `string_list`), `health_url` and `health_commit_field`.
 
 This module imports only the standard library and `agent_tools.canonical`: the registry in
 `release_adapter` imports it, never the reverse, so its inner checks are its own (D14).
 
 `inspect(request)` never raises and never mutates. A request outside the closed shape is
 `unknown`/`parameters_invalid` and a predicate request is `unknown`/`predicate_unsupported`.
-Otherwise it runs `gh run list` by name with the caller's environment unchanged (the command
+Otherwise it runs `gh run list` by name with the caller's environment unchanged (the caller
 applies the tracker's credential binding, D10) and, only when the newest run at the candidate
 commit on the configured branch is completed, one `GET` of the health URL that follows no
 redirect and reads at most `HEALTH_BODY_LIMIT` bytes, both under one

@@ -2,6 +2,7 @@
 
 Run: just agent-workflow-tests
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -283,6 +284,53 @@ class TracesTest(unittest.TestCase):
 
     def test_a_since_without_an_offset_is_a_usage_error(self):
         self.assertEqual(self.traces(since="2026-11-08T00:00:00")[0], 2)
+
+
+class CandidateTreeTest(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def audit(self):
+        shim = self.enterContext(tempfile.TemporaryDirectory())
+        # The probe runs the resolve-project on PATH: point it at this tree's own resolver.
+        stub = Path(shim) / "resolve-project"
+        stub.write_text(f'#!/bin/sh\nPYTHONPATH="{self.ROOT / "python"}" exec "{sys.executable}" '
+                        '-m agent_tools.resolve_project "$@"\n')
+        stub.chmod(0o755)
+        proc = subprocess.run(
+            [sys.executable, "-m", "agent_tools.fallback_audit", "ladders",
+             "--repo-root", str(self.ROOT),
+             "--manifest", str(self.ROOT / "home/common/agent-skills/platform-manifest.json")],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "PYTHONPATH": str(self.ROOT / "python"),
+                 "PATH": f"{shim}:{os.environ['PATH']}"})
+        return proc, json.loads(proc.stdout)
+
+    def test_the_candidate_tree_has_no_ladder(self):
+        proc, report = self.audit()
+        self.assertEqual(report["findings"], [])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_only_the_listed_sites_are_exempt(self):
+        _, report = self.audit()
+        sys.path.insert(0, str(self.ROOT / "python"))
+        try:
+            from agent_tools.fallback_audit import NON_LADDER_SITES
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(sorted({(e["path"], e["marker_id"]) for e in report["exempt"]}),
+                         sorted((path, marker) for path, marker, _ in NON_LADDER_SITES))
+
+    def test_the_known_ladders_are_deleted_not_reworded(self):
+        skill = (self.ROOT / "home/common/agent-skills/skills/research/SKILL.md").read_text("utf-8")
+        self.assertNotIn("~/.agents/bin/agent-evidence", skill)
+        sys.path.insert(0, str(self.ROOT / "python"))
+        try:
+            self.assertIsNone(importlib.util.find_spec("agent_tools.release_bridge"))
+            from agent_tools import release
+            with self.assertRaises(SystemExit):
+                release.main(["deploy", "inspect", "--commit", "a" * 40])
+        finally:
+            sys.path.pop(0)
 
 
 if __name__ == "__main__":
