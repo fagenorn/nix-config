@@ -2504,6 +2504,27 @@ class DeclaredBranchTest(unittest.TestCase):
                 self.assertIsNone(result["cont"]["plan"])
                 self.assertNotIn("impl-1", labels(calls))
 
+    def test_a_kept_plan_the_resume_drops_demands_no_branch_facts(self):
+        """A plan-review stop keeps an unreviewed plan; when the resume will drop and replan it, a vanished worktree must not stop setup."""
+        setup = {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"}
+        interface = {"severity": "important", "summary": "interface mismatch"}
+        codex = {"severity": "important", "rule": "R2", "summary": "s", "source": "codex"}
+        rule = {"severity": "important", "rule": "R2", "summary": "s"}
+        for name, kept in (("non-rule finding", interface), ("codex finding", codex)):
+            with self.subTest(name=name):
+                cont = {"setup": setup, "plan": bplan(), "plan_reviewed": False,
+                        "plan_findings": {"rules": [kept], "findings": [kept], "rounds": 0}, "done": []}
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
+                self.assertNotEqual(result["stage"], "setup")
+                self.assertEqual(labels(calls).count("plan"), 1)
+                self.assertNotIn("plan-rules-revise", labels(calls))
+        # A rules-only kept plan is revised in place and still reads its facts first.
+        cont = {"setup": setup, "plan": bplan(), "plan_reviewed": False,
+                "plan_findings": {"rules": [rule], "findings": [rule], "rounds": 0}, "done": []}
+        result, _ = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
+        self.assertEqual(result["stage"], "setup")
+        self.assertEqual(result["missing"], ["branch_heads.cand"])
+
     RANGE = "git -C /r/.wt/cand diff origin/dev...cand"
     FINAL_FINDING = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "candidate drops a key"}]}
 

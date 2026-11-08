@@ -287,8 +287,15 @@ for (const k of ['code', 'plan']) {
   if (!present(st)) missing.push(`review_state.${k}`)
   else if (st === 'available' && !(setup.review && present(setup.review[k]))) missing.push(`review.${k}`)
 }
-// A kept plan with an invalid declaration is dropped by the Plan section below, so no fact of it is demanded here (the plan check comes first).
-if (CONT && CONT.plan && !setup.merged_pr && !missing.length && !branchProblems(CONT.plan, CONT.setup && (CONT.setup.worktree || CONT.setup.worktree_path), setup.integration_branch).length) {
+const RULE_IDS = PLAN_REVIEW.properties.findings.items.properties.rule.enum
+// A rules-only revise may settle the findings that triggered it only when none came from Codex: the rules re-reviewer does not
+// preserve source or finding identity, so a Codex finding it re-reports under any rule id needs a Codex review, not a Claude one.
+const rulesOnly = (rules, triggered) => rules.length > 0 && rules.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex') && !triggered.some(f => f.source === 'codex')
+// The Plan section below drops a kept plan with an invalid declaration, and one a plan-review stop kept with findings no rules-only
+// revise may settle; no fact of such a plan is demanded here, or a vanished worktree would stop every resume before the replan.
+const keptDropped = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules)
+  && !rulesOnly(CONT.plan_findings.rules, Array.isArray(CONT.plan_findings.findings) ? CONT.plan_findings.findings : []))
+if (CONT && CONT.plan && !keptDropped && !setup.merged_pr && !missing.length && !branchProblems(CONT.plan, CONT.setup && (CONT.setup.worktree || CONT.setup.worktree_path), setup.integration_branch).length) {
   for (const b of declared(CONT.plan)) if (typeof b.name === 'string' && factProblem(b, factOf(setup.branch_heads, b.name))) missing.push(`branch_heads.${b.name}`)
 }
 if (missing.length) return { stage: 'setup', result: setup, missing, ...deadOf(), ...(CONT ? { cont: CONT } : {}) }
@@ -655,10 +662,6 @@ Read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, ex
   }
   return null
 }
-const RULE_IDS = PLAN_REVIEW.properties.findings.items.properties.rule.enum
-// A rules-only revise may settle the findings that triggered it only when none came from Codex: the rules re-reviewer does not
-// preserve source or finding identity, so a Codex finding it re-reports under any rule id needs a Codex review, not a Claude one.
-const rulesOnly = (rules, triggered) => rules.length > 0 && rules.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex') && !triggered.some(f => f.source === 'codex')
 const RESUME_KEPT = !!(plan && !planReviewed && planFindingsKept)
 // Only findings the rules-only revise may touch resume as one. A kept plan with any other finding left has spent its one full
 // revise, so it is dropped and planned again with the owner's answer; the kept state stays in the cont until that answer is read.
