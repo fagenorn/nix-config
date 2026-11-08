@@ -527,13 +527,31 @@ class SharedOpenPrTest(unittest.TestCase):
     def test_reconcile_and_c7_read_the_same_same_repository_heads(self):
         def pr(n, ref, repo):
             return {"number": n, "updated_at": f"2026-11-0{n}T00:00:00Z",
-                    "head": {"ref": ref, "repo": {"full_name": repo}}}
+                    "head": {"ref": ref, "repo": {"full_name": repo}},
+                    "base": {"repo": {"full_name": "o/r"}}}
         self.respond({"repos/o/r/pulls?state=open&per_page=100":
                        [[pr(5, "mine", "o/r"), pr(4, "theirs", "fork/r")], [pr(3, "mine", "O/R")]],
                        "repos/o/r/issues?labels=in-progress&state=open&per_page=100": [[]]})
         prs = worktree_reconcile.gh_open_prs(self.fleet.root)
         self.assertEqual(prs, {"mine": {"number": 3, "updated_at": "2026-11-03T00:00:00Z"}})
         self.assertEqual(set(worktree_forge.forge_facts(self.fleet.root).open_prs), set(prs))
+
+    def test_a_renamed_repository_behind_origin_keeps_its_open_pr_worktree(self):
+        f = self.fleet
+        wt = f.worktree("feature")
+        self.respond({"repos/o/r/pulls?state=open&per_page=100":
+                       [[{"number": 5, "updated_at": "t",
+                          "head": {"ref": "feature", "repo": {"full_name": "new/r"}},
+                          "base": {"repo": {"full_name": "new/r"}}}]]})
+        self.assertEqual(worktree_reconcile.gh_open_prs(f.root),
+                         {"feature": {"number": 5, "updated_at": "t"}})
+        archive = f.base / "archive"
+        archive.mkdir()
+        plan = build_plan(f.root, report(), fleet_roots=[f.root], archive_root=archive,
+                          live_cwds=none_live, open_prs=worktree_reconcile.gh_open_prs, now=NOW,
+                          refused_pending=False)
+        entry = next(e for e in plan["entries"] if e["path"] == wt)
+        self.assertIn("open_pr", entry["keep"])
 
     def test_a_forge_failure_is_a_reconcile_tool_error(self):
         self.respond({})
@@ -546,7 +564,8 @@ class SharedOpenPrTest(unittest.TestCase):
         wt = f.worktree("theirs")
         self.respond({"repos/o/r/pulls?state=open&per_page=100":
                        [[{"number": 4, "updated_at": "t",
-                          "head": {"ref": "theirs", "repo": {"full_name": "fork/r"}}}]]})
+                          "head": {"ref": "theirs", "repo": {"full_name": "fork/r"}},
+                          "base": {"repo": {"full_name": "o/r"}}}]]})
         archive = f.base / "archive"
         archive.mkdir()
         plan = build_plan(f.root, report(), fleet_roots=[f.root], archive_root=archive,

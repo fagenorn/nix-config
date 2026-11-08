@@ -377,9 +377,10 @@ ISSUES = "repos/o/r/issues?labels=in-progress&state=open&per_page=100"
 PULLS = "repos/o/r/pulls?state=open&per_page=100"
 
 
-def pull(number, ref, repo="o/r"):
+def pull(number, ref, repo="o/r", base="o/r"):
     return {"number": number, "updated_at": "2026-11-08T00:00:00Z",
-            "head": {"ref": ref, "repo": {"full_name": repo} if repo else None}}
+            "head": {"ref": ref, "repo": {"full_name": repo} if repo else None},
+            "base": {"repo": {"full_name": base}}}
 
 
 class ForgeWrapperTest(unittest.TestCase):
@@ -429,6 +430,20 @@ class ForgeWrapperTest(unittest.TestCase):
         done = self.run_check(f, {ISSUES: [[]], PULLS: [[pull(9, "feature")], [pull(8, "feature")]]})
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.row(done)["paths"][0]["forge"], [{"reason": "open_pr", "pr": 8}])
+
+    def test_an_open_pr_maps_when_the_repository_was_renamed_behind_origin(self):
+        f = Fleet(self)
+        f.worktree("feature")
+        done = self.run_check(f, {ISSUES: [[]], PULLS: [[pull(5, "feature", repo="new/r", base="new/r")]]})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.row(done)["paths"][0]["forge"], [{"reason": "open_pr", "pr": 5}])
+
+    def test_a_fork_pr_into_a_renamed_repository_maps_nothing(self):
+        f = Fleet(self)
+        f.worktree("feature")
+        done = self.run_check(f, {ISSUES: [[]], PULLS: [[pull(5, "feature", repo="fork/r", base="new/r")]]})
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(self.row(done)["paths"][0]["class"], "unmapped")
 
     def test_the_declared_candidate_maps_while_its_issue_is_open(self):
         for state, code in (("open", 0), ("closed", 1)):
@@ -498,11 +513,19 @@ class ForgeWrapperTest(unittest.TestCase):
 
     def test_a_malformed_forge_payload_is_exit_2(self):
         bad_pull = {"number": "8", "updated_at": "t", "head": {"ref": "any", "repo": None}}
-        no_repo_name = {"number": 8, "updated_at": "t", "head": {"ref": "any", "repo": {}}}
+        no_repo_name = {"number": 8, "updated_at": "t", "head": {"ref": "any", "repo": {}},
+                        "base": {"repo": {"full_name": "o/r"}}}
+        head = {"ref": "any", "repo": {"full_name": "o/r"}}
+        no_base = {"number": 8, "updated_at": "t", "head": head}
+        null_base_repo = {"number": 8, "updated_at": "t", "head": head, "base": {"repo": None}}
+        no_base_name = {"number": 8, "updated_at": "t", "head": head, "base": {"repo": {}}}
         cases = {
             "issue number": ({ISSUES: [[{"number": "12"}]], PULLS: [[]]}, "o/r"),
             "pull number": ({ISSUES: [[]], PULLS: [[bad_pull]]}, "o/r"),
             "pull repo name": ({ISSUES: [[]], PULLS: [[no_repo_name]]}, "o/r"),
+            "pull base": ({ISSUES: [[]], PULLS: [[no_base]]}, "o/r"),
+            "pull base repo": ({ISSUES: [[]], PULLS: [[null_base_repo]]}, "o/r"),
+            "pull base repo name": ({ISSUES: [[]], PULLS: [[no_base_name]]}, "o/r"),
             "pull page": ({ISSUES: [[]], PULLS: [{"number": 8}]}, "o/r"),
             "declared document": ({
                 "repos/fagenorn/nix-config/issues?labels=in-progress&state=open&per_page=100": [[]],

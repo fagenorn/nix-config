@@ -3,7 +3,7 @@
 `forge_facts(root)` reads three things for the GitHub repository named by the root's `origin`,
 GET only and never a write: the live claims of the open issues labelled `CLAIM_LABEL` (D5, the
 winning claim marker of a trusted author names a branch), the open pull requests whose head
-branch lives in the same repository (D6, a fork's PR maps nothing) and the branches of
+branch lives in the PR's own base repository (D6, a fork's PR maps nothing) and the branches of
 `DECLARED_BRANCHES` whose declaring issue is still open (D7). A root without a GitHub `origin`
 reads no forge and gets empty `ForgeFacts`.
 
@@ -52,11 +52,26 @@ def root_slug(root: Path) -> str | None:
     return github_slug(done.stdout)
 
 
-def open_pull_heads(slug: str) -> dict[str, dict]:
-    """The open pull requests headed in `slug` itself, as `{branch: {number, updated_at}}`.
+def _base_full_name(number: int, base: object) -> str:
+    if not isinstance(base, dict):
+        raise _invalid(f"pull request {number} base is not an object")
+    repo = base.get("repo")
+    if not isinstance(repo, dict):
+        raise _invalid(f"pull request {number} base repo is not an object")
+    full_name = repo.get("full_name")
+    if not isinstance(full_name, str):
+        raise _invalid(f"pull request {number} base repo full_name is not a string")
+    return full_name
 
-    Every page is read. A pull request from a fork (or a deleted fork, a `null` head repo) maps
-    nothing; when several open pull requests share a branch the lowest number is kept.
+
+def open_pull_heads(slug: str) -> dict[str, dict]:
+    """The open pull requests headed in their own base repository, as `{branch: {number, updated_at}}`.
+
+    Every page is read. A pull request is same-repository when its head repo's `full_name` equals
+    its base repo's: the pull request's own payload decides, never the local origin's name, which
+    a renamed or transferred repository leaves stale (GitHub redirects the old name). A pull
+    request from a fork (or a deleted fork, a `null` head repo) maps nothing; when several open
+    pull requests share a branch the lowest number is kept.
     """
     heads: dict[str, dict] = {}
     for page in forge_markers.api_pages(f"repos/{slug}/pulls?state=open&per_page=100"):
@@ -75,6 +90,7 @@ def open_pull_heads(slug: str) -> dict[str, dict]:
             ref, repo = head.get("ref"), head.get("repo")
             if not isinstance(ref, str):
                 raise _invalid(f"pull request {number} head ref is not a string")
+            base_name = _base_full_name(number, pr.get("base"))
             if repo is None:
                 continue
             if not isinstance(repo, dict):
@@ -82,7 +98,7 @@ def open_pull_heads(slug: str) -> dict[str, dict]:
             full_name = repo.get("full_name")
             if not isinstance(full_name, str):
                 raise _invalid(f"pull request {number} head repo full_name is not a string")
-            if full_name.lower() != slug.lower():
+            if full_name.lower() != base_name.lower():
                 continue
             if ref not in heads or number < heads[ref]["number"]:
                 heads[ref] = {"number": number, "updated_at": updated}
