@@ -58,6 +58,7 @@ NON_LADDER_SITES = (
 
 CODEX_SHELL_TOOLS = ("shell", "shell_command", "exec_command", "local_shell")
 TRACE_MARKER_IDS = ("release-deploy-inspect", "resolve-bindings", "legacy-skills-config")
+UNREADABLE_MARKER_ID = "unreadable_input"
 REMOVAL_SUBJECT_KINDS = ("project_file", "platform_behavior")
 EXCERPT_CHARACTERS = 200
 PROBE_TIMEOUT_SECONDS = 60
@@ -101,11 +102,14 @@ def _entry_files(root: Path) -> list[str]:
 
 
 def _scan(root: Path, markers: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Every marker hit, plus one `unreadable_input` finding for each tracked
+    entry file that could not be read: a scan that skipped a file is not clean."""
     hits: list[dict[str, Any]] = []
     for relative in _entry_files(root):
         try:
             text = (root / relative).read_text(encoding="utf-8", errors="replace")
         except OSError:
+            hits.append({"path": relative, "line": None, "marker_id": UNREADABLE_MARKER_ID})
             continue
         for number, line in enumerate(text.splitlines(), start=1):
             seen: set[str] = set()

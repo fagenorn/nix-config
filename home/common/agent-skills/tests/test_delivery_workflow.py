@@ -1995,7 +1995,7 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
             contract_value["bindings"]["vcs"]["merge"]["delete_branch"] = "yes"
 
         def future_schema(contract_value):
-            contract_value["schema_version"] = 2
+            contract_value["schema_version"] = 3
 
         prefix = b"workflow-state: resolve-project refused at repo-root: "
         for label, mutate, code, pointers in (
