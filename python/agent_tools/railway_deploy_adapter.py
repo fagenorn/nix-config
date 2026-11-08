@@ -21,8 +21,8 @@ the linked project and environment, then one `railway deployment list ... --json
 and classifies each service by plan P5, in order. Only read-only `railway` verbs are ever run.
 
 A `SKIPPED` deployment is `satisfied` only with two kinds of affirmative evidence (plan P5.5):
-the released commit's GitHub check runs are all green, and the serving deployment is the
-skipped push's immediate predecessor at the released commit's first parent. Railway skips a push
+the released commit's GitHub check runs (every attempt, re-runs included) are all green with no
+check ever re-run, and the serving deployment is the skipped push's immediate predecessor at the released commit's first parent. Railway skips a push
 both when no watched path changed and after failed or timed-out CI, so a skip alone proves
 nothing. Anything short of both is `unknown`/`skip_unexplained`, a conservative answer the
 driver waits on and then parks, never a false success.
@@ -69,9 +69,13 @@ def deployment_argv(service: str, environment: str) -> list[str]:
 
 
 def check_runs_argv(repository: str, commit: str) -> list[str]:
-    """The check runs of a commit as an explicit GET, run through `release_merge.gh`."""
+    """The check runs of a commit as an explicit GET, run through `release_merge.gh`.
+
+    `filter=all` keeps the superseded attempts of a re-run: the default `latest` hides an
+    earlier failure once the same check turns green.
+    """
     return ["api", "-X", "GET", f"repos/{repository}/commits/{commit}/check-runs", "-f",
-            f"per_page={CHECK_RUN_LIMIT}"]
+            f"per_page={CHECK_RUN_LIMIT}", "-f", "filter=all"]
 
 
 def parent_argv(repository: str, commit: str) -> list[str]:
@@ -328,25 +332,33 @@ def _check_runs(repository: str, commit: str, deadline: float
                 ) -> tuple[str, dict[str, Any] | None]:
     """`(verdict, facts)` of the released commit's check runs, read once.
 
-    `verdict` is `failed` (a completed run outside `BENIGN_CONCLUSIONS`), `complete` (every
-    run completed and benign) or the missing piece: `checks_unread`, `checks_none`,
-    `checks_over_limit` or `checks_incomplete`.
+    `verdict` is `failed` (the latest attempt of a check completed outside
+    `BENIGN_CONCLUSIONS`), `complete` (every run completed and benign, and no check was ever
+    re-run) or the missing piece: `checks_unread`, `checks_none`, `checks_over_limit`,
+    `checks_incomplete` or `checks_rerun`. A re-run is never `complete`: CI that failed, caused
+    Railway's skip and then turned green leaves the older serving row without the candidate's
+    changes, and no reading shows that the skip was about unchanged watch paths instead.
     """
     status, payload, _ = release_merge.gh(check_runs_argv(repository, commit), deadline)
     runs = payload.get("check_runs") if isinstance(payload, dict) else None
     total = payload.get("total_count") if isinstance(payload, dict) else None
     if (status != "ok" or type(total) is not int or not isinstance(runs, list)
-            or not all(isinstance(run, dict) and isinstance(run.get("status"), str)
-                       and (run.get("conclusion") is None
-                            or isinstance(run.get("conclusion"), str)) for run in runs)):
+            or not all(isinstance(run, dict) and type(run.get("id")) is int
+                       and _text(run.get("name")) and isinstance(run.get("status"), str)
+                       and "conclusion" in run
+                       and (run["conclusion"] is None or isinstance(run["conclusion"], str))
+                       for run in runs)):
         return "checks_unread", None
     conclusions: dict[str, int] = {}
+    latest: dict[str, dict[str, Any]] = {}
     for run in runs:
         label = run["conclusion"] or run["status"]
         conclusions[label] = conclusions.get(label, 0) + 1
+        if run["name"] not in latest or run["id"] > latest[run["name"]]["id"]:
+            latest[run["name"]] = run
     facts = {"total": total, "conclusions": conclusions}
     if any(run["status"] == "completed" and run["conclusion"] is not None
-           and run["conclusion"] not in BENIGN_CONCLUSIONS for run in runs):
+           and run["conclusion"] not in BENIGN_CONCLUSIONS for run in latest.values()):
         return "failed", facts
     if total == 0:
         return "checks_none", facts
@@ -355,6 +367,8 @@ def _check_runs(repository: str, commit: str, deadline: float
     if (len(runs) != total or any(run["status"] != "completed" or run["conclusion"] is None
                                   for run in runs)):
         return "checks_incomplete", facts
+    if len(latest) != len(runs):
+        return "checks_rerun", facts
     return "complete", facts
 
 

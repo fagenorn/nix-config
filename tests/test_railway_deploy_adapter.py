@@ -229,6 +229,28 @@ class SkipTest(unittest.TestCase):
                                                   **case["options"]),
                                  ("unknown", "skip_unexplained"))
 
+    def test_a_check_run_without_a_conclusion_member_is_unread_not_a_crash(self):
+        """Regression (COR-002): GitHub writes `conclusion: null` for a run in progress; a run
+        with no `conclusion` member at all is outside the closed shape and must not raise."""
+        payload = {"total_count": 1, "check_runs": [{"id": 1, "name": "ci",
+                                                     "status": "in_progress"}]}
+        self.assertEqual(self.skipped_api(stdout=json.dumps(payload)),
+                         ("unknown", "skip_unexplained"))
+        self.assertEqual(self.detail(), "checks_unread")
+
+    def test_green_checks_after_a_failed_attempt_do_not_explain_the_skip(self):
+        """Regression (COR-001): CI that failed, caused Railway's skip and then turned green
+        leaves the older serving row without the candidate's changes; the skip is explained
+        by a CI failure, not by an unchanged watch path, so it stays unknown."""
+        self.assertEqual(self.skipped_api(("completed", "failure", "ci"),
+                                          ("completed", "success", "ci"), GREEN),
+                         ("unknown", "skip_unexplained"))
+        self.assertEqual(self.detail(), "checks_rerun")
+        self.setUp()
+        self.assertEqual(self.skipped_api(("completed", "failure", "ci"),
+                                          ("completed", "failure", "ci")),
+                         ("diverged", "skipped_after_ci_failure"))
+
     def test_a_full_page_of_green_checks_is_still_over_the_limit(self):
         self.assertEqual(self.skipped_api(*[GREEN] * 101), ("unknown", "skip_unexplained"))
         self.assertEqual(self.detail(), "checks_over_limit")

@@ -116,12 +116,19 @@ class RailwayWorld:
             self.respond("gh", commit_argv(oid),
                          {"sha": oid, "parents": [{"sha": p} for p in parents]})
 
-    def check_runs(self, commit: str, *runs: tuple[str, str | None], total: int | None = None,
+    def check_runs(self, commit: str, *runs: tuple, total: int | None = None,
                    exit: int = 0, stdout: str | None = None) -> None:
+        """Every check run of the commit, history included, oldest first.
+
+        A run is `(status, conclusion)` or `(status, conclusion, name)`; its id is its position,
+        so a later run of the same name is a re-run that supersedes the earlier one.
+        """
         argv = ["api", "-X", "GET", f"repos/{SLUG}/commits/{commit}/check-runs", "-f",
-                "per_page=100"]
+                "per_page=100", "-f", "filter=all"]
         payload = {"total_count": len(runs) if total is None else total,
-                   "check_runs": [{"status": s, "conclusion": c} for s, c in runs]}
+                   "check_runs": [{"id": index + 1, "name": run[2] if len(run) > 2 else f"job-{index}",
+                                   "status": run[0], "conclusion": run[1]}
+                                  for index, run in enumerate(runs)]}
         self._answer("gh", argv, json.dumps(payload) if stdout is None else stdout, exit, "", 0)
 
     def commit_parents(self, commit: str, *parents: str, exit: int = 0,
