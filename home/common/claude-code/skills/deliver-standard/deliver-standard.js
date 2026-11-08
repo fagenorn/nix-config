@@ -425,7 +425,8 @@ const K = setup.knowledge || {}
 const list = a => (a && a.length ? a.join(', ') : 'none')
 const KNOW = `Ground the review in: ~/.agents/standards/the-bar.md and its stacks/ shards matching the changed file types (when present); the project's standards (${list(K.standards)}), only shards whose globs intersect the change; review hints (${list(K.hints)}); recorded rejections (${list(K.rejections)}): never raise a finding a rejection already settles.`
 const implDone = i => !!(i && i.status === 'done' && present(i.commit) && present(i.start_head))
-const span = i => `git -C ${W} diff ${i.start_head}..${i.commit}`
+const spanIn = (wt, i) => `git -C ${wt} diff ${i.start_head}..${i.commit}`
+const span = i => spanIn(W, i)
 log(`claimed #${ISSUE}, worktree ${W}; review code=${REVIEW_CODE || RS.code || 'none'} plan=${REVIEW_PLAN || RS.plan || 'none'}`)
 
 // ---------------- Plan ----------------
@@ -524,8 +525,11 @@ const takePlan = (p, label) => {
 
 const FOCUSED = 'Run only the tests that cover the files you changed; do not run the full test suite or the project\'s declared verification (that runs once later).'
 let ACS = null, PLAN_REF = null
+// The last head this run knows for each declared branch (#713); read only through own().
+const branchTips = Object.create(null)
 const planRefs = () => {
   GRANTS = declared(plan); RULES = RULES_FOR(W)
+  for (const b of declared(plan)) if (!own(branchTips, b.name)) branchTips[b.name] = b.head
   ACS = JSON.stringify(plan.acceptance)
   PLAN_REF = plan.plan_root ? `Plan: ${plan.plan_root} (task files beside it).` : 'No plan: direct lane.'
 }
@@ -725,14 +729,17 @@ for (const t of plan.tasks) {
     const lost = await renew('tasks', 'Tasks')
     if (lost) return lost
   }
-  const start = `${CTX}\n${PLAN_REF}`
+  const B = typeof t.branch === 'string' ? declared(plan).find(b => b.name === t.branch) || null : null
+  const TW = B ? B.worktree : W
+  const start = `${CTX}\n${PLAN_REF}${B ? `\nTask ${t.n} commits to the declared branch ${B.name} in the worktree ${TW} (base ${B.base}), not to ${setup.branch}: run this task's commands there (git -C ${TW}).` : ''}`
+  const PUSH_HERE = B ? ` After each commit, push it alone with git -C ${TW} push origin ${B.name}.` : ''
   const halt = (stage, extra) => haltTask(t.n, stage, extra)
   let impl = await call(`${start}
-Implement task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${FOCUSED} ${IMPL_RETURN} Return status blocked with notes if the task file is wrong or impossible.${CONT && CONT.partial === t.n ? `
-An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
+Implement task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE} Return status blocked with notes if the task file is wrong or impossible.${CONT && CONT.partial === t.n ? `
+An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${TW} status, git -C ${TW} diff and git -C ${TW} log ${B ? `${B.base}..HEAD` : RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
 ${RULES}`, { label: `impl-${t.n}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: IMPL })
   if (!implDone(impl)) return halt('task', { task: t, impl })
-  const taskSpan = span(impl)
+  const taskSpan = spanIn(TW, impl)
   const reviewer = (t.risk === 'mechanical' || t.risk === 'low') ? 'reviewer-lite' : 'reviewer'
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
   let review = await call(`${start}
@@ -742,17 +749,18 @@ ${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of tas
   while (findingsOf(review).length && rounds < 2) {
     rounds++
     const fix = await call(`${start}
-Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findingsOf(review))}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${IMPL_RETURN}
+Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findingsOf(review))}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE}
 ${RULES}`, { label: `fix-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: IMPL })
     if (!implDone(fix)) return halt('task-fix', { task: t, impl: fix })
     impl = fix
     review = await call(`${start}
-Re-review only these previously reported findings for task ${t.n} against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: `rereview-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
+Re-review only these previously reported findings for task ${t.n} against the fix: ${spanIn(TW, fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: `rereview-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
     if (!review) return halt('task-review', { task: t, review: null })
   }
   if (findingsOf(review).length) return halt('task-review', { task: t, review })
-  taskLog.push({ n: t.n, commit: impl.commit, review_rounds: rounds, reviewer })
-  tip = impl.commit
+  taskLog.push({ n: t.n, commit: impl.commit, review_rounds: rounds, reviewer, ...(B ? { branch: B.name } : {}) })
+  if (B) branchTips[B.name] = impl.commit
+  else tip = impl.commit
   if (partial === t.n) partial = undefined
 }
 

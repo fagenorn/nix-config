@@ -2387,6 +2387,29 @@ class DeclaredBranchTest(unittest.TestCase):
         for label in ("hold", "close-out"):
             self.assertNotIn(BR_PUSH, prompt(calls, label))
 
+    def test_a_declared_branch_task_runs_in_its_worktree(self):
+        one, two, three = "1" * 40, "2" * 40, "3" * 40
+        result, calls = run(replies={"plan": bplan(), "review-2": TASK_FINDING},
+                            patch={"impl-2": {"start_head": one, "commit": two},
+                                   "fix-2-1": {"start_head": two, "commit": three}})
+        self.assertEqual(result["stage"], "done")
+        here = "Task 2 commits to the declared branch cand in the worktree /r/.wt/cand"
+        push = "After each commit, push it alone with git -C /r/.wt/cand push origin cand."
+        for label in ("impl-2", "review-2", "fix-2-1", "rereview-2-1"):
+            with self.subTest(label=label):
+                self.assertIn(here, prompt(calls, label))
+        for label in ("impl-2", "fix-2-1"):
+            self.assertIn(push, prompt(calls, label))
+        for label in ("review-2", "rereview-2-1"):
+            self.assertNotIn("push origin", prompt(calls, label))
+        self.assertIn(f"git -C /r/.wt/cand diff {one}..{two}", prompt(calls, "review-2"))
+        self.assertIn(f"git -C /r/.wt/cand diff {two}..{three}", prompt(calls, "rereview-2-1"))
+        self.assertNotIn("commits to the declared branch", prompt(calls, "impl-1"))
+        self.assertIn("git -C /r/.wt/w-issue-9-x diff b0..c0ffee", prompt(calls, "review-1"))
+        self.assertEqual(result["tasks"][1], {"n": 2, "commit": three, "review_rounds": 1,
+                                              "reviewer": "reviewer", "branch": "cand"})
+        self.assertNotIn("branch", result["tasks"][0])
+
     def test_declaring_the_integration_branch_is_invalid(self):
         bad = {
             "integration": bplan([dict(BR, name="dev", current="dev")], task_branch="dev"),
