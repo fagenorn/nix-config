@@ -386,6 +386,15 @@ class ClosedClaimTest(unittest.TestCase):
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": False})
         self.assertIsNone(result["relaunch"])
 
+    def test_a_closed_issue_with_a_failed_claim_lookup_stops_and_stays_in_relaunch(self):
+        # A failed lookup proves nothing about ownership: the closed row must not be final, or a claim this batch holds is never released.
+        err = {"state": "CLOSED", "claim": {"verdict": "error", "by": None}}
+        result, calls, _ = run(patch={"facts-1": err})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": "claim status"})
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertNotIn("release-1", labels(calls))
+        self.assertNotIn("lane-1", labels(calls))
+
     def test_a_closed_issue_claimed_by_another_holder_is_not_released(self):
         for verdict in ("held_by", "stale"):
             with self.subTest(verdict=verdict):

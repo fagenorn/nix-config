@@ -190,7 +190,11 @@ const mergedReadopt = (n, f) => {
 }
 const eligibility = (n, f) => {
   const readopt = mergedReadopt(n, f)
-  if (f.state === 'CLOSED' && !readopt) return { issue: n, outcome: 'closed' }
+  // A closed issue whose claim lookup failed is not final: its claim may be this batch's, and only the release gives it back.
+  if (f.state === 'CLOSED' && !readopt) {
+    if ((f.claim || { verdict: 'error' }).verdict === 'error') return { issue: n, outcome: 'stopped', detail: 'claim status' }
+    return { issue: n, outcome: 'closed' }
+  }
   const labels = f.labels || []
   for (const [label, outcome] of [['needs-verification', 'needs-verification'], ['parked', 'parked'], ['agent:human-required', 'human-required']]) {
     if (labels.includes(label) && !(readopt && label === 'needs-verification')) return { issue: n, outcome }
