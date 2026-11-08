@@ -70,7 +70,7 @@ def open_pull_heads(slug: str) -> dict[str, dict]:
     Every page is read. A pull request is same-repository when its head repo's `full_name` equals
     its base repo's: the pull request's own payload decides, never the local origin's name, which
     a renamed or transferred repository leaves stale (GitHub redirects the old name). A pull
-    request from a fork (or a deleted fork, a `null` head repo) maps nothing; when several open
+    request from a fork (or a deleted fork, an explicit `null` head repo; an omitted one is malformed) maps nothing; when several open
     pull requests share a branch the lowest number is kept.
     """
     heads: dict[str, dict] = {}
@@ -90,6 +90,8 @@ def open_pull_heads(slug: str) -> dict[str, dict]:
             ref, repo = head.get("ref"), head.get("repo")
             if not isinstance(ref, str):
                 raise _invalid(f"pull request {number} head ref is not a string")
+            if "repo" not in head:
+                raise _invalid(f"pull request {number} head repo is missing")
             base_name = _base_full_name(number, pr.get("base"))
             if repo is None:
                 continue

@@ -517,12 +517,15 @@ class ForgeWrapperTest(unittest.TestCase):
                         "base": {"repo": {"full_name": "o/r"}}}
         head = {"ref": "any", "repo": {"full_name": "o/r"}}
         no_base = {"number": 8, "updated_at": "t", "head": head}
+        omitted_head_repo = {"number": 8, "updated_at": "t", "head": {"ref": "any"},
+                             "base": {"repo": {"full_name": "o/r"}}}
         null_base_repo = {"number": 8, "updated_at": "t", "head": head, "base": {"repo": None}}
         no_base_name = {"number": 8, "updated_at": "t", "head": head, "base": {"repo": {}}}
         cases = {
             "issue number": ({ISSUES: [[{"number": "12"}]], PULLS: [[]]}, "o/r"),
             "pull number": ({ISSUES: [[]], PULLS: [[bad_pull]]}, "o/r"),
             "pull repo name": ({ISSUES: [[]], PULLS: [[no_repo_name]]}, "o/r"),
+            "pull head repo omitted": ({ISSUES: [[]], PULLS: [[omitted_head_repo]]}, "o/r"),
             "pull base": ({ISSUES: [[]], PULLS: [[no_base]]}, "o/r"),
             "pull base repo": ({ISSUES: [[]], PULLS: [[null_base_repo]]}, "o/r"),
             "pull base repo name": ({ISSUES: [[]], PULLS: [[no_base_name]]}, "o/r"),
