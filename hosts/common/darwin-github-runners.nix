@@ -148,7 +148,12 @@ in
           description = "GitHub runner for ${e.owner}/${e.name}";
         };
       }) accounts
-    );
+    )
+    // {
+      # The existing account records this canonical path; nix-darwin compares homes literally.
+      _github-runner.home = lib.mkForce "/private/var/lib/github-runners";
+    };
+
     users.groups = lib.listToAttrs (
       map (e: {
         name = e.account.name;

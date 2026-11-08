@@ -53,9 +53,10 @@ let
     "forge-claim"
     "guard-policy"
     "lane-triage"
+    "ledger-archive"
+    "ledger-snapshot"
     "launch-commit"
     "launch-scope"
-    "orchestrate-control"
     "owner-actions"
     "promotion"
     "release"
@@ -70,6 +71,7 @@ let
     "verification-observe"
     "verified-tree"
     "verify-pending"
+    "worktree-reconcile"
   ];
 
   # A launcher script: bash under `-p`, which ignores BASH_ENV and the functions

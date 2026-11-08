@@ -60,6 +60,15 @@ in
   power.restartAfterPowerFailure = true;
   power.restartAfterFreeze = true;
 
+  # The owner runs sudo without a password here, as on anis-desktop, so a merged change can be
+  # switched in headless (just switch runs sudo darwin-rebuild) by the owner's sessions and the
+  # verify-pending runner. On this shared host that makes anything running as the owner root,
+  # including access to teammates' homes; teammates and _github-runner are unaffected. Only the
+  # owner's key reaches the account (key-only SSH below). mbp keeps Touch ID sudo.
+  security.sudo.extraConfig = ''
+    ${username} ALL=(ALL) NOPASSWD: ALL
+  '';
+
   # Tailscale as the tailscaled system daemon, not the menu-bar app (the tailscale-app cask is
   # MBP-only): the app is controlled by one logged-in user's session, which on this multi-user
   # Mac locks the others out, and it does not run without a login. The daemon starts at boot
@@ -111,8 +120,6 @@ in
     )
     // {
       ${username}.openssh.authorizedKeys.keys = ownerKeys;
-      # The existing account records this canonical path; nix-darwin compares homes literally.
-      _github-runner.home = lib.mkForce "/private/var/lib/github-runners";
     };
 
   # When Remote Login is limited to "Only these users", macOS checks the com.apple.access_ssh
