@@ -44,9 +44,10 @@ MANIFEST_MEMBERS = (
 MIGRATION_MEMBERS = ("id", "from_schema", "to_schema")
 
 # Issue 580 D1: a `deprecations` entry is closed on exactly these six members,
-# and its `kind` is one of two. A `project_file` subject is a path a project
+# and its `kind` is one of three. A `project_file` subject is a path a project
 # may hold, so a warning can look for it; a `platform_behavior` subject is
-# free text naming shipped behaviour.
+# free text naming shipped behaviour. A `removals` entry has the same six
+# members and the same member rules (issue 579 P2).
 DEPRECATION_MEMBERS = ("id", "kind", "subject", "since", "successor",
                        "migration")
 DEPRECATION_KINDS = ("project_file", "platform_behavior", "project_schema")
@@ -312,8 +313,12 @@ def _validate_migrations(source: dict, violations: list[dict]) -> None:
 
 
 def _validate_deprecation_entry(entry: object, pointer: str,
-                                violations: list[dict]) -> object:
+                                violations: list[dict],
+                                section: str = "deprecations") -> object:
     """Validate one closed deprecation record (issue 580 D1).
+
+    A `removals` entry is the same record (issue 579 P2): `section` names the
+    manifest member the entry came from and prefixes its repair ids.
 
     Returns the entry's `id` when it is a non-empty string, else None, so the
     caller can check uniqueness only over well-typed ids.
@@ -321,9 +326,9 @@ def _validate_deprecation_entry(entry: object, pointer: str,
     if not isinstance(entry, dict):
         violations.append(_violation(
             pointer, "must be an object",
-            "platform.manifest.deprecations.not_object"))
+            f"platform.manifest.{section}.not_object"))
         return None
-    _check_exact_members(entry, pointer, DEPRECATION_MEMBERS, "deprecations",
+    _check_exact_members(entry, pointer, DEPRECATION_MEMBERS, section,
                          violations)
     for name in ("id", "subject", "successor", "migration"):
         if (name == "subject" and entry.get("kind") == "project_schema"
@@ -332,21 +337,21 @@ def _validate_deprecation_entry(entry: object, pointer: str,
         if name in entry and not (isinstance(entry[name], str) and entry[name]):
             violations.append(_violation(
                 f"{pointer}/{name}", "must be a non-empty string",
-                "platform.manifest.deprecations.not_string"))
+                f"platform.manifest.{section}.not_string"))
     kind = entry.get("kind")
     if "kind" in entry and not (isinstance(kind, str)
                                 and kind in DEPRECATION_KINDS):
         violations.append(_violation(
             f"{pointer}/kind",
             "must be one of: " + ", ".join(DEPRECATION_KINDS),
-            "platform.manifest.deprecations.kind_unknown"))
+            f"platform.manifest.{section}.kind_unknown"))
     if "since" in entry:
         parsed = parse_semver(entry["since"])
         if parsed is None or parsed[2] != 0 or parsed[1] < 1:
             violations.append(_violation(
                 f"{pointer}/since",
                 "must be a minor release: MAJOR.MINOR.0 with MINOR at least 1",
-                "platform.manifest.deprecations.since_not_minor"))
+                f"platform.manifest.{section}.since_not_minor"))
     subject = entry.get("subject")
     if kind == "project_file" and isinstance(subject, str) and subject:
         if (subject.startswith("/") or "\\" in subject or "\0" in subject
@@ -356,35 +361,55 @@ def _validate_deprecation_entry(entry: object, pointer: str,
                 f"{pointer}/subject",
                 "must be a repository-relative POSIX path without empty, "
                 "'.' or '..' segments",
-                "platform.manifest.deprecations.subject_not_relative_path"))
+                f"platform.manifest.{section}.subject_not_relative_path"))
     if kind == "project_schema" and isinstance(subject, str):
         if not re.fullmatch(r"(?:0|[1-9][0-9]*)", subject):
             violations.append(_violation(
                 f"{pointer}/subject",
                 "must be a decimal project schema version: digits only, "
                 "no sign and no leading zero",
-                "platform.manifest.deprecations.subject_not_schema_version"))
+                f"platform.manifest.{section}.subject_not_schema_version"))
     identifier = entry.get("id")
     return identifier if isinstance(identifier, str) and identifier else None
 
 
-def _validate_deprecations(source: dict, violations: list[dict]) -> None:
-    if "deprecations" not in source:
+def _validate_entries(source: dict, section: str,
+                      violations: list[dict]) -> None:
+    """Validate the `section` array of closed deprecation records."""
+    if section not in source:
         return
-    entries = source["deprecations"]
-    if not _check_list(entries, "/deprecations", "deprecations", violations):
+    entries = source[section]
+    if not _check_list(entries, f"/{section}", section, violations):
         return
     identifiers: list[object] = []
     for index, entry in enumerate(entries):
         identifier = _validate_deprecation_entry(
-            entry, f"/deprecations/{index}", violations)
+            entry, f"/{section}/{index}", violations, section)
         if identifier is not None:
             identifiers.append(identifier)
     if (len(identifiers) == len(entries)
             and len(set(identifiers)) != len(identifiers)):
         violations.append(_violation(
-            "/deprecations", "each entry must carry a distinct id",
-            "platform.manifest.deprecations.duplicate_id"))
+            f"/{section}", "each entry must carry a distinct id",
+            f"platform.manifest.{section}.duplicate_id"))
+
+
+def _validate_removals(source: dict, violations: list[dict]) -> None:
+    """A removal has a deprecation's shape and is never also a deprecation."""
+    _validate_entries(source, "removals", violations)
+    removals = source.get("removals")
+    deprecations = source.get("deprecations")
+    if not isinstance(removals, list) or not isinstance(deprecations, list):
+        return
+    deprecated = {entry["id"] for entry in deprecations
+                  if isinstance(entry, dict) and isinstance(entry.get("id"), str)}
+    for index, entry in enumerate(removals):
+        identifier = entry.get("id") if isinstance(entry, dict) else None
+        if isinstance(identifier, str) and identifier in deprecated:
+            violations.append(_violation(
+                f"/removals/{index}/id",
+                "a removed id must not also be a deprecation id",
+                "platform.manifest.removals.still_deprecated"))
 
 
 def validate_manifest(source: object) -> list[dict]:
@@ -409,12 +434,8 @@ def validate_manifest(source: object) -> list[dict]:
                             "/resolved_schema_version",
                             "resolved_schema_version", violations)
     _validate_migrations(source, violations)
-    _validate_deprecations(source, violations)
-    # `deprecations` is closed (issue 580 D1). `removals` stays opaque until a
-    # major declares one (issue 580 D7): it is validated as an array and never
-    # read. Do not invent an entry shape for it here.
-    if "removals" in source:
-        _check_list(source["removals"], "/removals", "removals", violations)
+    _validate_entries(source, "deprecations", violations)
+    _validate_removals(source, violations)
     return violations
 
 
@@ -454,7 +475,7 @@ def _finite_float(literal: str) -> float:
     return value
 
 
-def load_manifest() -> tuple[dict, Path]:
+def load_manifest(path: Path | None = None) -> tuple[dict, Path]:
     """The installed manifest and the absolute resolved path it came from.
 
     The second member is `Path.resolve()` of the file actually loaded, which
@@ -463,12 +484,17 @@ def load_manifest() -> tuple[dict, Path]:
 
     An unset or empty `HOME` names no installed manifest, so it refuses as
     `platform.manifest.missing` before any filesystem read (#177 D4).
+
+    `path` names another manifest to load by the same rules (issue 579 P7):
+    it replaces the installed location and needs no `HOME`, and a missing or
+    invalid one refuses exactly as a broken installed manifest does.
     """
-    if not os.environ.get("HOME"):
-        raise _refuse([_violation(
-            "", "the installed platform manifest was not found",
-            "platform.manifest.missing")])
-    path = manifest_path()
+    if path is None:
+        if not os.environ.get("HOME"):
+            raise _refuse([_violation(
+                "", "the installed platform manifest was not found",
+                "platform.manifest.missing")])
+        path = manifest_path()
     try:
         resolved = path.resolve(strict=True)
         raw = resolved.read_bytes()

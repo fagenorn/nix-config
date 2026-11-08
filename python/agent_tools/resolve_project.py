@@ -108,8 +108,8 @@ CONTRACT_FILENAME = ".agents/project.json"
 # answered by the manifest (D8) and appear inside the report's `platform`
 # block, so reusing either here would publish one fact twice under two names.
 # Version 2 adds `deprecated_uses` to the `project` block and to every fleet
-# row (issue 580 D4).
-PLATFORM_STATUS_SCHEMA_VERSION = 2
+# row (issue 580 D4). Version 3 adds `removed_uses` to both (issue 579 P2).
+PLATFORM_STATUS_SCHEMA_VERSION = 3
 
 # The manifest members the `platform` block republishes, in the manifest's own
 # order. The manifest's `schema_version` is not among them: it versions the
@@ -1661,7 +1661,7 @@ def emit_error(code: str, repair_id: str, violations: list[dict],
     return 2
 
 
-def require_platform_manifest() -> tuple[dict, Path]:
+def require_platform_manifest(path: Path | None = None) -> tuple[dict, Path]:
     """The installed platform manifest, or a refusal if it will not load.
 
     Every subcommand calls this before root discovery and before any contract
@@ -1676,9 +1676,13 @@ def require_platform_manifest() -> tuple[dict, Path]:
     loaded from, which is the deployment identity `platform-status` publishes
     (D2). One load, one call site: a second `load_manifest()` elsewhere would
     be a second failure surface for one fact.
+
+    `path` names another manifest to judge against (`platform-status
+    --manifest`, issue 579 P7); it loads by the same rules and refuses the
+    same way.
     """
     try:
-        manifest, path = agent_platform.load_manifest()
+        manifest, path = agent_platform.load_manifest(path)
     except agent_platform.PlatformManifestError as error:
         raise ContractError(
             "resolver_failure", error.repair_id, error.violations) from None
@@ -1875,6 +1879,8 @@ def deprecated_uses(root: Path, manifest: dict) -> list[str] | None:
     """The ids of the manifest's `project_file` and `project_schema`
     deprecations this root holds.
 
+    `removed_uses` applies the same rules to `removals`.
+
     Null when nothing can be said: the root is not a usable directory
     (including one whose parent cannot be searched: `os.path.isdir` answers
     False for every OSError where `Path.is_dir` re-raises EACCES and EIO), or
@@ -1893,9 +1899,22 @@ def deprecated_uses(root: Path, manifest: dict) -> list[str] | None:
     whose version is not an integer, because nothing can be said of it
     (issue 579, P4).
     """
+    return _held_uses(root, manifest["deprecations"])
+
+
+def removed_uses(root: Path, manifest: dict) -> list[str] | None:
+    """The ids of the manifest's `removals` this root still holds.
+
+    The `deprecated_uses` rules, applied to `removals` (issue 579 P2): null
+    when nothing can be said, otherwise the ascending ids.
+    """
+    return _held_uses(root, manifest["removals"])
+
+
+def _held_uses(root: Path, entries: list[dict]) -> list[str] | None:
     if not os.path.isdir(root):
         return None
-    schema_entries = [entry for entry in manifest["deprecations"]
+    schema_entries = [entry for entry in entries
                       if entry["kind"] == "project_schema"]
     uses = []
     if schema_entries:
@@ -1909,7 +1928,7 @@ def deprecated_uses(root: Path, manifest: dict) -> list[str] | None:
             return None
         uses.extend(entry["id"] for entry in schema_entries
                     if entry["subject"] == str(version))
-    for entry in manifest["deprecations"]:
+    for entry in entries:
         if entry["kind"] != "project_file":
             continue
         try:
@@ -1950,6 +1969,7 @@ def evaluate_named_project(root: Path, source: dict,
         "project_schema_version": facts["project_schema_version"],
         "platform_interval": facts["platform_interval"],
         "deprecated_uses": deprecated_uses(root, manifest),
+        "removed_uses": removed_uses(root, manifest),
     }
     return project, compatibility_block(reason_code)
 
@@ -2004,6 +2024,7 @@ def fleet_row(entry: dict, manifest: dict) -> dict:
         "project_schema_version": facts["project_schema_version"],
         "platform_interval": facts["platform_interval"],
         "deprecated_uses": deprecated_uses(Path(entry["root"]), manifest),
+        "removed_uses": removed_uses(Path(entry["root"]), manifest),
         **compatibility_block(reason_code),
     }
 
@@ -2015,14 +2036,17 @@ def command_platform_status(args: argparse.Namespace) -> int:
     flags compose and neither suppresses the other. The `project` block and
     every fleet row also carry `deprecated_uses`: the ids of the manifest's
     deprecated project files the root still holds, a warning that never
-    changes the verdict.
+    changes the verdict, and `removed_uses`, the same for its `removals`.
+    `--manifest PATH` judges against that manifest instead of the installed
+    one (issue 579 P7).
 
     Projection drift is deliberately not checked: a stale target is `resolve`'s
     structural refusal (D10), not a fact about platform compatibility.
     """
     # Before root discovery, so a broken platform installation can never be
     # masked by `not_onboarded` or a contract error (R1.3).
-    manifest, path = require_platform_manifest()
+    manifest, path = require_platform_manifest(
+        None if args.manifest is None else Path(args.manifest))
     status: dict = {
         "schema_version": PLATFORM_STATUS_SCHEMA_VERSION,
         "platform": platform_block(manifest, path),
@@ -2083,8 +2107,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Report the installed platform's version facts. With --repo-root, "
             "add that project's declared interval and its compatibility "
-            "verdict and the deprecated paths it still holds "
-            "(deprecated_uses); with --fleet, add one verdict row per "
+            "verdict and the deprecated and removed paths it still holds "
+            "(deprecated_uses, removed_uses); with --fleet, add one verdict row per "
             "registered project. Without --repo-root no project is "
             "inspected and no project root is discovered."),
     )
@@ -2093,6 +2117,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--fleet",
         action="store_true",
         help="add one compatibility row per project in the fleet registry",
+    )
+    platform_status.add_argument(
+        "--manifest",
+        help="judge against the platform manifest at this path instead of "
+             "the installed one; it is loaded and validated by the same "
+             "rules, and a missing or invalid file refuses resolver_failure",
     )
     return parser
 

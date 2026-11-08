@@ -1,9 +1,11 @@
 """`agent_tools.verify_checks`: the committed verify checks of issue 638."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -342,6 +344,369 @@ class ManagedPrePushHookTest(unittest.TestCase):
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode("home/common/verify-pending/checks/managed-pre-push-hook"),
                          "100755")
+
+
+def fleet(version, rows):
+    return {"platform": {"platform_version": version}, "fleet": rows}
+
+
+def row(pid, compatible=True, removed=None):
+    return {"project_id": pid, "root": f"/r/{pid}", "compatible": compatible,
+            "removed_uses": removed if removed is not None else []}
+
+
+def entry(i):
+    return {"id": f"d{i}", "kind": "platform_behavior", "subject": f"s{i}",
+            "since": "1.2.0", "successor": "x", "migration": "m"}
+
+
+def manifests(main_ids=(1, 2), removal_ids=(1, 2), main="1.2.0", cand="2.0.0"):
+    return ({"platform_version": main, "deprecations": [entry(i) for i in main_ids], "removals": []},
+            {"platform_version": cand, "deprecations": [], "removals": [entry(i) for i in removal_ids]})
+
+
+GREEN_MANIFEST = {"verdict": "green"}
+
+
+class ManifestVerdictTest(unittest.TestCase):
+    def test_every_removal_declared_is_green(self):
+        code, report = verify_checks.manifest_verdict(*manifests())
+        self.assertEqual((code, report["verdict"], report["undeclared"]), (0, "green", []))
+        self.assertEqual(report, {"verdict": "green", "main_version": "1.2.0",
+                                  "candidate_version": "2.0.0", "removal_ids": ["d1", "d2"],
+                                  "undeclared": []})
+
+    def test_one_missing_deprecation_is_not_green(self):
+        code, report = verify_checks.manifest_verdict(*manifests(main_ids=(1,)))
+        self.assertEqual((code, report["verdict"], report["undeclared"]), (75, "red", ["d2"]))
+
+    def test_a_changed_entry_is_not_declared(self):
+        main, cand = manifests()
+        cand["removals"][0]["successor"] = "other"
+        self.assertEqual(verify_checks.manifest_verdict(main, cand)[1]["undeclared"], ["d1"])
+
+    def test_every_one_of_the_six_members_must_be_equal(self):
+        for member in ("id", "kind", "subject", "since", "successor", "migration"):
+            with self.subTest(member=member):
+                main, cand = manifests(main_ids=(1,), removal_ids=(1,))
+                cand["removals"][0][member] = "changed"
+                code, report = verify_checks.manifest_verdict(main, cand)
+                self.assertEqual(code, 75)
+                self.assertEqual(len(report["undeclared"]), 1)
+
+    def test_majors_and_emptiness(self):
+        for args in (dict(main="2.0.0"), dict(cand="1.3.0"), dict(removal_ids=())):
+            with self.subTest(**args):
+                self.assertEqual(verify_checks.manifest_verdict(*manifests(**args))[0], 75)
+
+    def test_an_unreadable_manifest_is_usage(self):
+        for main, cand in (([], manifests()[1]), (manifests()[0], "x"), (None, None)):
+            with self.subTest(main=main):
+                code, report = verify_checks.manifest_verdict(main, cand)
+                self.assertEqual((code, report["verdict"]), (2, "unreadable"))
+
+    def test_a_manifest_lacking_a_member_is_usage(self):
+        for member in ("platform_version", "deprecations", "removals"):
+            for side in (0, 1):
+                with self.subTest(member=member, side=side):
+                    pair = list(manifests())
+                    del pair[side][member]
+                    self.assertEqual(verify_checks.manifest_verdict(*pair)[0], 2)
+
+
+class PreflightVerdictTest(unittest.TestCase):
+    def test_green_needs_every_row_compatible_on_both_sides(self):
+        code, report = verify_checks.preflight_verdict(
+            fleet("1.2.0", [row("b"), row("a")]), fleet("2.0.0", [row("a"), row("b")]), SHA,
+            GREEN_MANIFEST)
+        self.assertEqual((code, report["verdict"]), (0, "green"))
+        self.assertEqual({key: report[key] for key in
+                          ("candidate", "bridge_version", "candidate_version", "manifest")},
+                         {"candidate": SHA, "bridge_version": "1.2.0",
+                          "candidate_version": "2.0.0", "manifest": GREEN_MANIFEST})
+        self.assertEqual(report["rows"], [
+            {"project_id": pid, "root": f"/r/{pid}", "bridge_compatible": True,
+             "candidate_compatible": True, "removed_uses": [], "reason": None}
+            for pid in ("a", "b")])
+
+    def test_each_rule_alone_keeps_it_not_yet(self):
+        ok = (fleet("1.2.0", [row("a")]), fleet("2.0.0", [row("a")]))
+        cases = {
+            "manifest_red": (*ok, {"verdict": "red", "undeclared": ["d2"]}),
+            "bridge_too_old": (fleet("1.1.0", [row("a")]), ok[1], GREEN_MANIFEST),
+            "bridge_not_major_1": (fleet("2.0.0", [row("a")]), ok[1], GREEN_MANIFEST),
+            "candidate_not_major_2": (ok[0], fleet("1.3.0", [row("a")]), GREEN_MANIFEST),
+            "empty": (fleet("1.2.0", []), fleet("2.0.0", []), GREEN_MANIFEST),
+            "roster_differs": (ok[0], fleet("2.0.0", [row("b")]), GREEN_MANIFEST),
+            "bridge_incompatible": (fleet("1.2.0", [row("a", False)]), ok[1], GREEN_MANIFEST),
+            "candidate_incompatible": (ok[0], fleet("2.0.0", [row("a", False)]), GREEN_MANIFEST),
+            "removed_use": (ok[0], fleet("2.0.0", [row("a", removed=["legacy-skills-config"])]),
+                            GREEN_MANIFEST),
+            "removed_use_unknown": (ok[0], fleet("2.0.0", [row("a", removed=None) | {
+                "removed_uses": None}]), GREEN_MANIFEST),
+        }
+        for name, (bridge, candidate, manifest) in cases.items():
+            with self.subTest(name=name):
+                code, report = verify_checks.preflight_verdict(bridge, candidate, SHA, manifest)
+                self.assertEqual(code, 75)
+                self.assertNotEqual(report["verdict"], "green")
+
+    def test_a_row_reason_is_the_first_rule_it_fails(self):
+        code, report = verify_checks.preflight_verdict(
+            fleet("1.2.0", [row("a", False), row("b"), row("c"), row("d")]),
+            fleet("2.0.0", [row("a", False), row("b", False), row("c", removed=["x"]),
+                            row("e")]),
+            SHA, GREEN_MANIFEST)
+        self.assertEqual(code, 75)
+        reasons = {r["project_id"]: r["reason"] for r in report["rows"]}
+        self.assertEqual([r["project_id"] for r in report["rows"]], ["a", "b", "c", "d", "e"])
+        self.assertEqual(reasons["a"], "bridge_incompatible")
+        self.assertEqual(reasons["b"], "candidate_incompatible")
+        self.assertEqual(reasons["c"], "removed_use")
+        self.assertEqual(reasons["d"], "candidate_missing")
+        self.assertEqual(reasons["e"], "bridge_missing")
+
+    def test_a_malformed_report_is_not_green_and_does_not_raise(self):
+        for bridge, candidate in (({}, {}), ({"platform": [], "fleet": 1}, fleet("2.0.0", [])),
+                                  (fleet("1.2.0", [1]), fleet("2.0.0", [{"project_id": 1}]))):
+            with self.subTest(bridge=bridge):
+                self.assertEqual(
+                    verify_checks.preflight_verdict(bridge, candidate, SHA, GREEN_MANIFEST)[0], 75)
+
+    def test_the_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/cutover-preflight"), "100755")
+
+
+MANIFEST = "home/common/agent-skills/platform-manifest.json"
+CANDIDATE_BRANCH = "cutover-130-candidate"
+
+CANDIDATE_RESOLVER = """import json, os, sys
+if os.path.realpath(__file__).split(os.sep)[:len(os.path.realpath(os.getcwd()).split(os.sep))] \
+        != os.path.realpath(os.getcwd()).split(os.sep):
+    sys.exit(9)
+args = sys.argv[1:]
+if args[:2] != ["platform-status", "--fleet"] or args[2] != "--manifest" or len(args) != 4:
+    sys.exit(8)
+if not os.path.isfile(args[3]):
+    sys.exit(7)
+print(json.dumps({"platform": {"platform_version": "2.0.0"},
+                  "fleet": [{"project_id": "a", "root": "/r/a", "compatible": True,
+                             "removed_uses": []}]}))
+"""
+BRIDGE = """#!/bin/sh
+[ -z "${PYTHONPATH+x}" ] || exit 9
+[ "$*" = "platform-status --fleet" ] || exit 8
+%s
+"""
+BRIDGE_JSON = json.dumps(fleet("1.2.0", [row("a")]))
+
+
+class CutoverWorld:
+    """A bare `origin`, a pusher that writes it, and a clone that has only `main`."""
+
+    def __init__(self, test_case, main_ids=(1, 2)):
+        tmp = tempfile.TemporaryDirectory()
+        test_case.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name).resolve()
+        patch = mock.patch.dict(os.environ, {
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"})
+        patch.start()
+        test_case.addCleanup(patch.stop)
+        self.bare = self.tmp / "origin.git"
+        self.git(self.tmp, "init", "-q", "--bare", "-b", "main", str(self.bare))
+        self.pusher = self.tmp / "pusher"
+        self.git(self.tmp, "init", "-q", "-b", "main", str(self.pusher))
+        self.git(self.pusher, "remote", "add", "origin", str(self.bare))
+        self.commit(self.pusher, manifests(main_ids=main_ids)[0])
+        self.git(self.pusher, "push", "-q", "origin", "main")
+        self.clone = self.tmp / "clone"
+        self.git(self.tmp, "clone", "-q", str(self.bare), str(self.clone))
+
+    @staticmethod
+    def git(cwd, *args):
+        return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+                              check=True, timeout=60).stdout.strip()
+
+    def commit(self, repo, manifest, files=None):
+        path = repo / MANIFEST
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        for name, text in (files or {}).items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text, encoding="utf-8")
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "-m", "manifest")
+        return self.git(repo, "rev-parse", "HEAD")
+
+    def publish_candidate(self, removal_ids=(1, 2), files=None):
+        self.git(self.pusher, "checkout", "-q", "-b", CANDIDATE_BRANCH)
+        sha = self.commit(self.pusher, manifests(removal_ids=removal_ids)[1], files)
+        self.git(self.pusher, "push", "-q", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        self.git(self.pusher, "checkout", "-q", "main")
+        return sha
+
+    def refs(self):
+        return self.git(self.clone, "for-each-ref")
+
+
+class CutoverManifestTest(unittest.TestCase):
+    def test_an_absent_candidate_branch_is_not_yet(self):
+        world = CutoverWorld(self)
+        code, report = verify_checks.cutover_manifest(world.clone, CANDIDATE_BRANCH)
+        self.assertEqual((code, report["verdict"]), (75, "absent"))
+        code, report = verify_checks.cutover_preflight(
+            world.clone, CANDIDATE_BRANCH, environ=os.environ)
+        self.assertEqual((code, report["verdict"]), (75, "absent"))
+
+    def test_the_main_ref_names_the_main_side_and_is_not_fetched(self):
+        world = CutoverWorld(self)
+        world.publish_candidate()
+        code, report = verify_checks.cutover_manifest(world.clone, main_ref="HEAD")
+        self.assertEqual((code, report["verdict"], report["undeclared"]), (0, "green", []))
+        self.assertEqual(report["removal_ids"], ["d1", "d2"])
+        world.commit(world.clone, manifests(main_ids=(1,))[0])
+        code, report = verify_checks.cutover_manifest(world.clone, main_ref="HEAD")
+        self.assertEqual((code, report["verdict"], report["undeclared"]), (75, "red", ["d2"]))
+
+    def test_without_a_main_ref_origin_main_is_the_main_side(self):
+        world = CutoverWorld(self, main_ids=(1,))
+        world.publish_candidate()
+        code, report = verify_checks.cutover_manifest(world.clone, CANDIDATE_BRANCH)
+        self.assertEqual((code, report["undeclared"]), (75, ["d2"]))
+        world.git(world.pusher, "checkout", "-q", "main")
+        world.commit(world.pusher, manifests()[0])
+        world.git(world.pusher, "push", "-q", "origin", "main")
+        code, report = verify_checks.cutover_manifest(world.clone, CANDIDATE_BRANCH)
+        self.assertEqual((code, report["verdict"]), (0, "green"))
+
+    def test_no_ref_is_written_in_the_clone(self):
+        world = CutoverWorld(self, main_ids=(1,))
+        world.publish_candidate()
+        world.git(world.pusher, "checkout", "-q", "main")
+        world.commit(world.pusher, manifests()[0])
+        world.git(world.pusher, "push", "-q", "origin", "main")
+        before = world.refs()
+        self.assertIn("refs/remotes/origin/main", before)
+        verify_checks.cutover_manifest(world.clone, CANDIDATE_BRANCH)
+        self.assertEqual(world.refs(), before)
+
+    def test_a_candidate_without_a_readable_manifest_is_usage(self):
+        world = CutoverWorld(self)
+        world.git(world.pusher, "checkout", "-q", "-b", CANDIDATE_BRANCH)
+        world.git(world.pusher, "rm", "-q", MANIFEST)
+        world.git(world.pusher, "commit", "-q", "-m", "drop")
+        world.git(world.pusher, "push", "-q", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        code, report = verify_checks.cutover_manifest(world.clone, CANDIDATE_BRANCH)
+        self.assertEqual((code, report["verdict"]), (2, "unreadable"))
+
+    def test_the_command_prints_the_report_and_exits_with_its_code(self):
+        world = CutoverWorld(self)
+        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "cutover-manifest",
+                              "--repo-root", str(world.clone)])
+        self.assertEqual(done.returncode, 75, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["verdict"], "absent")
+        world.publish_candidate()
+        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "cutover-manifest",
+                              "--repo-root", str(world.clone), "--main-ref", "HEAD"])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["verdict"], "green")
+
+
+class CutoverPreflightTest(unittest.TestCase):
+    def setUp(self):
+        self.world = CutoverWorld(self)
+        self.sha = self.world.publish_candidate(files={
+            "python/agent_tools/__init__.py": "",
+            "python/agent_tools/resolve_project.py": CANDIDATE_RESOLVER})
+        self.bin = self.world.tmp / "bin"
+        self.bin.mkdir()
+        self.scratch = self.world.tmp / "scratch"
+        self.scratch.mkdir()
+        patch = mock.patch.object(tempfile, "tempdir", str(self.scratch))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def bridge(self, body):
+        script = self.bin / "resolve-project"
+        script.write_text(BRIDGE % body, encoding="utf-8")
+        script.chmod(0o755)
+
+    def environ(self):
+        return {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "PYTHONPATH": "python"}
+
+    def preflight(self):
+        return verify_checks.cutover_preflight(
+            self.world.clone, CANDIDATE_BRANCH, environ=self.environ())
+
+    def test_both_sides_judging_the_fleet_compatible_is_green(self):
+        self.bridge(f"echo '{BRIDGE_JSON}'")
+        code, report = self.preflight()
+        self.assertEqual((code, report["verdict"]), (0, "green"), report)
+        self.assertEqual(report["candidate"], self.sha)
+        self.assertEqual(report["manifest"]["verdict"], "green")
+        self.assertEqual([r["project_id"] for r in report["rows"]], ["a"])
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_the_bridge_failing_names_the_bridge(self):
+        for body in ("exit 3", "echo not-json"):
+            with self.subTest(body=body):
+                self.bridge(body)
+                code, report = self.preflight()
+                self.assertEqual((code, report["verdict"], report["side"]),
+                                 (75, "unreadable", "bridge"))
+                self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_a_missing_bridge_names_the_bridge(self):
+        environ = {**self.environ(), "PATH": f"{self.bin}:{Path(shutil.which('git')).parent}"}
+        code, report = verify_checks.cutover_preflight(
+            self.world.clone, CANDIDATE_BRANCH, environ=environ)
+        self.assertEqual((code, report["verdict"], report["side"]), (75, "unreadable", "bridge"))
+
+    def test_a_hung_side_times_out_and_is_named(self):
+        self.bridge("exec sleep 10")
+        started = time.monotonic()
+        with mock.patch.object(verify_checks, "SIDE_TIMEOUT", 1):
+            code, report = self.preflight()
+        self.assertLess(time.monotonic() - started, 8)
+        self.assertEqual((code, report["verdict"], report["side"]), (75, "unreadable", "bridge"))
+
+    def test_the_candidate_side_failing_names_the_candidate(self):
+        self.bridge(f"echo '{BRIDGE_JSON}'")
+        self.world.git(self.world.pusher, "checkout", "-q", CANDIDATE_BRANCH)
+        (self.world.pusher / "python/agent_tools/resolve_project.py").write_text(
+            "import sys\nsys.exit(4)\n", encoding="utf-8")
+        self.world.git(self.world.pusher, "commit", "-q", "-am", "break")
+        self.world.git(self.world.pusher, "push", "-q", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        code, report = self.preflight()
+        self.assertEqual((code, report["verdict"], report["side"]), (75, "unreadable", "candidate"))
+
+    def test_an_incompatible_candidate_row_is_not_yet(self):
+        self.bridge(f"echo '{BRIDGE_JSON}'")
+        self.world.git(self.world.pusher, "checkout", "-q", CANDIDATE_BRANCH)
+        (self.world.pusher / "python/agent_tools/resolve_project.py").write_text(
+            CANDIDATE_RESOLVER.replace('"compatible": True', '"compatible": False'),
+            encoding="utf-8")
+        self.world.git(self.world.pusher, "commit", "-q", "-am", "incompatible")
+        self.world.git(self.world.pusher, "push", "-q", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        code, report = self.preflight()
+        self.assertEqual((code, report["verdict"]), (75, "not_yet"))
+        self.assertEqual(report["rows"][0]["reason"], "candidate_incompatible")
+
+    def test_no_ref_is_written_in_the_clone(self):
+        self.bridge(f"echo '{BRIDGE_JSON}'")
+        before = self.world.refs()
+        self.preflight()
+        self.assertEqual(self.world.refs(), before)
+
+    def test_the_command_runs_the_wrapper(self):
+        self.bridge(f"echo '{BRIDGE_JSON}'")
+        done = run_from_root(
+            [str(ROOT / CHECKS / "cutover-preflight"), "--repo-root", str(self.world.clone)],
+            {"HOME": str(self.world.tmp), "PATH": self.environ()["PATH"]})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["verdict"], "green")
 
 
 if __name__ == "__main__":

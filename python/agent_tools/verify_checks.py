@@ -13,16 +13,28 @@ truncated listing rather than judging it.
 managed `-agent-git-hooks` directory and, in a local fixture of S whose own git configuration
 holds only that hooks path, an agent push of `main` is refused by its `pre-push` with the
 remote unchanged while a feature-branch push is admitted. It exits 2 on a fixture error.
+
+`cutover-manifest [--repo-root R] [--branch B] [--main-ref REV]` (issue 579, C4.a) is met (0, `green`)
+when the manifest at the tip of origin's candidate branch is a major-2 manifest whose `removals`
+are non-empty and each equal, in all six members, to a `deprecations` entry of a major-1 manifest
+on main. It is 75 when anything of that is not yet so (`absent` when the branch does not exist) and
+2 when a manifest cannot be read. It only reads: it fetches objects, and writes no ref.
+
+`cutover-preflight [--repo-root R] [--branch B]` (issue 579, C4.b) is met when `cutover-manifest` is
+green and both the installed bridge and the candidate's own code judge every registered project
+compatible, with no removed use. It is 75 otherwise, and 0 only when green.
 """
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -30,6 +42,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from agent_tools import forge_markers
+from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver
 from agent_tools.agent_costs import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
 
@@ -232,6 +245,240 @@ def managed_pre_push_hook(slug: str, *, git_bin: str,
     return (0 if report["met"] else 1), report
 
 
+MANIFEST_PATH = "home/common/agent-skills/platform-manifest.json"
+CANDIDATE_BRANCH = "cutover-130-candidate"
+SIDE_TIMEOUT = 120
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _manifest_facts(manifest: object) -> tuple[str, list[dict], list[dict]] | None:
+    """The version, deprecations and removals of a readable manifest, else None."""
+    if not isinstance(manifest, dict):
+        return None
+    version = manifest.get("platform_version")
+    if parse_semver(version) is None:
+        return None
+    lists = []
+    for name in ("deprecations", "removals"):
+        entries = manifest.get(name)
+        if not isinstance(entries, list) or not all(
+                isinstance(item, dict) and isinstance(item.get("id"), str) for item in entries):
+            return None
+        lists.append(entries)
+    return version, lists[0], lists[1]
+
+
+def manifest_verdict(main: object, candidate: object) -> tuple[int, dict]:
+    """C4.a: every removal of the major-2 candidate was a deprecation on major-1 main."""
+    main_facts = _manifest_facts(main)
+    candidate_facts = _manifest_facts(candidate)
+    report: dict = {
+        "verdict": "unreadable",
+        "main_version": main_facts[0] if main_facts else None,
+        "candidate_version": candidate_facts[0] if candidate_facts else None,
+        "removal_ids": [], "undeclared": []}
+    if main_facts is None or candidate_facts is None:
+        return 2, report
+    deprecated = {entry["id"]: entry for entry in main_facts[1]}
+    removals = candidate_facts[2]
+    report["removal_ids"] = [entry["id"] for entry in removals]
+    report["undeclared"] = [
+        entry["id"] for entry in removals
+        if not (entry["id"] in deprecated and all(
+            member in entry and member in deprecated[entry["id"]]
+            and entry[member] == deprecated[entry["id"]][member]
+            for member in DEPRECATION_MEMBERS))]
+    green = (parse_semver(main_facts[0])[0] == 1 and parse_semver(candidate_facts[0])[0] == 2
+             and bool(removals) and not report["undeclared"])
+    report["verdict"] = "green" if green else "red"
+    return (0 if green else 75), report
+
+
+class GitError(Exception):
+    """A git call the cutover checks depend on failed; the caller exits 2."""
+
+
+def _git(repo_root: Path, *args: str, environ: Mapping[str, str] | None = None,
+         text: bool = True) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            env=dict(os.environ if environ is None else environ),
+            capture_output=True, text=text, timeout=300, check=False)
+    except (subprocess.SubprocessError, OSError) as error:
+        raise GitError(f"git {args[0]}: {type(error).__name__}") from error
+
+
+def _git_ok(repo_root: Path, *args: str, environ: Mapping[str, str] | None = None) -> str:
+    done = _git(repo_root, *args, environ=environ)
+    if done.returncode != 0:
+        detail = done.stderr.strip().splitlines()
+        raise GitError(f"git {args[0]} failed: {detail[0] if detail else done.returncode}")
+    return done.stdout
+
+
+def _candidate_sha(repo_root: Path, branch: str, environ: Mapping[str, str] | None) -> str | None:
+    ref = f"refs/heads/{branch}"
+    for line in _git_ok(repo_root, "ls-remote", "origin", ref, environ=environ).splitlines():
+        found, _, name = line.partition("\t")
+        if name == ref and _OBJECT_ID.fullmatch(found):
+            return found
+    return None
+
+
+def _show_manifest(repo_root: Path, rev: str, environ: Mapping[str, str] | None) -> object:
+    """The manifest at `rev`, or None when it cannot be read or is not JSON."""
+    done = _git(repo_root, "show", f"{rev}:{MANIFEST_PATH}", environ=environ)
+    if done.returncode != 0:
+        return None
+    try:
+        return json.loads(done.stdout)
+    except ValueError:
+        return None
+
+
+def _absent_manifest_report() -> dict:
+    return {"verdict": "absent", "main_version": None, "candidate_version": None,
+            "removal_ids": [], "undeclared": []}
+
+
+def _fetch_manifests(repo_root: Path, sha: str, main_ref: str | None,
+                     environ: Mapping[str, str] | None) -> tuple[object, object]:
+    """Both sides' manifests. Fetches objects only: `--refmap=` keeps the main
+    fetch from updating a remote-tracking ref, and a bare sha names no ref."""
+    _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "origin", sha, environ=environ)
+    candidate = _show_manifest(repo_root, sha, environ)
+    if main_ref is None:
+        _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "--refmap=", "origin",
+                "refs/heads/main", environ=environ)
+        main_ref = "FETCH_HEAD"
+    return _show_manifest(repo_root, main_ref, environ), candidate
+
+
+def cutover_manifest(repo_root: Path, branch: str = CANDIDATE_BRANCH,
+                     main_ref: str | None = None) -> tuple[int, dict]:
+    """C4.a over the candidate branch on origin and main (or `main_ref`).
+
+    Raises GitError when git cannot be driven; the caller exits 2."""
+    sha = _candidate_sha(repo_root, branch, None)
+    if sha is None:
+        return 75, _absent_manifest_report()
+    return manifest_verdict(*_fetch_manifests(repo_root, sha, main_ref, None))
+
+
+def _roster(report: dict) -> dict[tuple[object, object], dict]:
+    rows = report.get("fleet") if isinstance(report, dict) else None
+    found: dict[tuple[object, object], dict] = {}
+    for item in rows if isinstance(rows, list) else []:
+        if isinstance(item, dict) and isinstance(item.get("project_id"), str):
+            found[(item["project_id"], item.get("root"))] = item
+    return found
+
+
+def _platform_version(report: dict) -> str | None:
+    platform = report.get("platform") if isinstance(report, dict) else None
+    version = platform.get("platform_version") if isinstance(platform, dict) else None
+    return version if parse_semver(version) is not None else None
+
+
+def preflight_verdict(bridge: dict, candidate: dict, candidate_sha: str,
+                      manifest: dict) -> tuple[int, dict]:
+    """C4.b over the two `platform-status --fleet` reports and the C4.a report."""
+    bridge_version = _platform_version(bridge)
+    candidate_version = _platform_version(candidate)
+    bridge_rows = _roster(bridge)
+    candidate_rows = _roster(candidate)
+    rows = []
+    for key in sorted(set(bridge_rows) | set(candidate_rows), key=lambda k: (k[0], str(k[1]))):
+        old, new = bridge_rows.get(key), candidate_rows.get(key)
+        removed = new.get("removed_uses") if new else None
+        if old is None:
+            reason = "bridge_missing"
+        elif new is None:
+            reason = "candidate_missing"
+        elif old.get("compatible") is not True:
+            reason = "bridge_incompatible"
+        elif new.get("compatible") is not True:
+            reason = "candidate_incompatible"
+        elif removed != []:
+            reason = "removed_use"
+        else:
+            reason = None
+        rows.append({
+            "project_id": key[0], "root": key[1],
+            "bridge_compatible": None if old is None else old.get("compatible"),
+            "candidate_compatible": None if new is None else new.get("compatible"),
+            "removed_uses": removed, "reason": reason})
+    # A project in only one fleet has a row whose reason is `bridge_missing` or
+    # `candidate_missing`, so equal rosters need no rule of their own.
+    green = (isinstance(manifest, dict) and manifest.get("verdict") == "green"
+             and bridge_version is not None
+             and parse_semver(bridge_version)[0] == 1 and parse_semver(bridge_version) >= (1, 2, 0)
+             and candidate_version is not None and parse_semver(candidate_version)[0] == 2
+             and bool(bridge_rows) and bool(candidate_rows)
+             and all(row["reason"] is None for row in rows))
+    report = {"verdict": "green" if green else "not_yet", "candidate": candidate_sha,
+              "bridge_version": bridge_version, "candidate_version": candidate_version,
+              "manifest": manifest, "rows": rows}
+    return (0 if green else 75), report
+
+
+def _preflight_failure(verdict: str, sha: str | None, side: str | None = None,
+                       manifest: dict | None = None) -> tuple[int, dict]:
+    report: dict = {"verdict": verdict, "candidate": sha, "bridge_version": None,
+                    "candidate_version": None, "manifest": manifest, "rows": []}
+    if side is not None:
+        report["side"] = side
+    return 75, report
+
+
+def _run_side(argv: list[str], env: Mapping[str, str], cwd: Path) -> dict | None:
+    """One side's `platform-status --fleet` report, or None when it is not a clean JSON object."""
+    try:
+        done = subprocess.run(argv, env=dict(env), cwd=cwd, capture_output=True, text=True,
+                              timeout=SIDE_TIMEOUT, check=False)
+        report = json.loads(done.stdout)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    return report if done.returncode == 0 and isinstance(report, dict) else None
+
+
+def cutover_preflight(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
+                      environ: Mapping[str, str]) -> tuple[int, dict]:
+    """C4.b: the bridge and the candidate's own code judge every registered project compatible.
+
+    Raises GitError when git cannot be driven; the caller exits 2."""
+    sha = _candidate_sha(repo_root, branch, environ)
+    if sha is None:
+        return _preflight_failure("absent", None)
+    main, candidate = _fetch_manifests(repo_root, sha, None, environ)
+    _, manifest = manifest_verdict(main, candidate)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp).resolve()
+        archive = _git(repo_root, "archive", "--format=tar", sha, "python", MANIFEST_PATH,
+                       environ=environ, text=False)
+        if archive.returncode != 0:
+            return _preflight_failure("unreadable", sha, "candidate", manifest)
+        try:
+            with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+                tar.extractall(tmp_path, filter="data")
+        except (tarfile.TarError, OSError):
+            return _preflight_failure("unreadable", sha, "candidate", manifest)
+        bridge_env = {key: value for key, value in environ.items() if key != "PYTHONPATH"}
+        bridge_bin = shutil.which("resolve-project", path=environ.get("PATH"))
+        bridge = (None if bridge_bin is None else _run_side(
+            [bridge_bin, "platform-status", "--fleet"], bridge_env, repo_root))
+        if bridge is None:
+            return _preflight_failure("unreadable", sha, "bridge", manifest)
+        candidate_report = _run_side(
+            [sys.executable, "-m", "agent_tools.resolve_project", "platform-status", "--fleet",
+             "--manifest", str(tmp_path / MANIFEST_PATH)],
+            {**environ, "PYTHONPATH": str(tmp_path / "python")}, tmp_path)
+        if candidate_report is None:
+            return _preflight_failure("unreadable", sha, "candidate", manifest)
+    return preflight_verdict(bridge, candidate_report, sha, manifest)
+
+
 def _repo(value: str) -> str:
     if not REPO.match(value):
         raise argparse.ArgumentTypeError("must be OWNER/NAME")
@@ -257,7 +504,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         "managed-pre-push-hook",
         help="issue 672: the managed pre-push hook refuses an agent default-branch push")
     hook.add_argument("--slug", type=_repo, required=True)
+    for name, help_text in (
+            ("cutover-manifest", "issue 579 C4.a: the candidate's removals were main's deprecations"),
+            ("cutover-preflight", "issue 579 C4.b: the bridge and the candidate judge the fleet")):
+        cutover = checks.add_parser(name, help=help_text)
+        cutover.add_argument("--repo-root", type=Path, default=Path("."))
+        cutover.add_argument("--branch", default=CANDIDATE_BRANCH)
+        if name == "cutover-manifest":
+            cutover.add_argument("--main-ref", default=None)
     args = parser.parse_args(argv)
+    if args.check in ("cutover-manifest", "cutover-preflight"):
+        try:
+            if args.check == "cutover-manifest":
+                code, report = cutover_manifest(args.repo_root, args.branch, args.main_ref)
+            else:
+                code, report = cutover_preflight(args.repo_root, args.branch, environ=os.environ)
+        except GitError as error:
+            print(f"verify-checks: git_error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "managed-pre-push-hook":
         git_bin = shutil.which("git", path=os.environ.get("PATH"))
         if git_bin is None:
