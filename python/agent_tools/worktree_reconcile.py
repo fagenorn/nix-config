@@ -4,6 +4,7 @@
                             [--refused-pending] [--keep PATH ...] --out FILE
     worktree-reconcile apply --plan FILE --archive-root DIR --acknowledge-cleanup
     worktree-reconcile restore --manifest FILE --n N
+    worktree-reconcile audit --run-dir DIR --archive-root DIR --repo-root R [--repo-root R ...]
 
 `plan` is read-only: it classifies the linked worktrees of one root with
 `agent_tools.worktree_mapping` and records, per worktree, the facts that decide whether it may be
@@ -13,8 +14,12 @@ preceded by an archive (a copy of the worktree's git admin directory, a pin comm
 everything that admin directory alone reaches, and a verified bundle of it) and a durable record.
 Branches are never deleted, and `git worktree prune` and `git gc` are never run.
 
-Exit codes: 0 success; 1 when any result is `failed`; 2 a refusal or tool error
-(`worktree-reconcile: <code>: <detail>` on stderr, nothing on stdout).
+`audit` is the read-only pre-merge check: every red path of each root is `kept` with a reason the
+plan recorded, `removed` on a durable record and a whole archive, `gone_elsewhere`, or
+`new_since_plan`; anything else is `unresolved`.
+
+Exit codes: 0 success; 1 when any result is `failed` (`audit`: when any path is unresolved); 2 a
+refusal or tool error (`worktree-reconcile: <code>: <detail>` on stderr, nothing on stdout).
 """
 from __future__ import annotations
 
@@ -35,6 +40,7 @@ from agent_tools import worktree_mapping
 from agent_tools.github_remote import github_slug
 from agent_tools.worktree_mapping import (MappingError, Worktree, classify, is_runner_workspace,
                                           ledger_matches, list_worktrees, verdicts_of)
+from agent_tools.worktree_mapping import classify_root
 
 PLAN_SCHEMA = "worktree-reconcile-plan/v2"
 APPLY_SCHEMA = "worktree-reconcile-apply/v1"
@@ -773,6 +779,223 @@ def gh_open_prs(root: Path) -> dict[str, dict]:
         raise ReconcileError("tool_error", "gh pr list printed an unusable listing") from None
 
 
+# --- audit -------------------------------------------------------------------------------------
+
+_RECORD_FIELDS = {"schema": str, "state": str, "run_id": str, "root": str, "n": int, "path": str,
+                  "entry": dict, "archive_ref": str, "pin": str, "tree": str, "parents": list,
+                  "admin_files": dict, "bundle": str, "bundle_sha256": str, "bundle_heads": list}
+_GONE_STATES = ("renamed", "removed")
+
+
+def load_run_dir(run_dir: Path) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    """Plans and apply results found directly in `run_dir`, each grouped by its `root` string."""
+    base = Path(run_dir)
+    if not base.is_dir():
+        raise ReconcileError("bad_run_dir", f"{run_dir} is not a directory")
+    plans: dict[str, list[dict]] = {}
+    applies: dict[str, list[dict]] = {}
+    for file in sorted(base.glob("*.json")):
+        if not file.is_file():
+            continue
+        try:
+            text = file.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            raise ReconcileError("bad_run_dir", f"cannot read {file}: {error}") from None
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            if PLAN_SCHEMA in text:
+                raise ReconcileError("bad_run_dir", f"{file} does not parse") from None
+            continue
+        schema = doc.get("schema") if isinstance(doc, dict) else None
+        if schema == PLAN_SCHEMA:
+            if (not isinstance(doc.get("root"), str) or not isinstance(doc.get("run_id"), str)
+                    or not isinstance(doc.get("entries"), list)
+                    or not all(isinstance(e, dict) and isinstance(e.get("path"), str)
+                               for e in doc["entries"])):
+                raise ReconcileError("bad_run_dir", f"{file} is a malformed plan")
+            if any(p["run_id"] == doc["run_id"] for p in plans.get(doc["root"], [])):
+                raise ReconcileError("bad_run_dir",
+                                     f"two plans of {doc['root']} have run id {doc['run_id']}")
+            plans.setdefault(doc["root"], []).append(doc)
+        elif schema == APPLY_SCHEMA:
+            if (isinstance(doc.get("root"), str) and isinstance(doc.get("run_id"), str)
+                    and isinstance(doc.get("results"), list)):
+                applies.setdefault(doc["root"], []).append(doc)
+    return plans, applies
+
+
+def _record_valid(dir: Path, record: object) -> bool:
+    if not isinstance(record, dict) or record.get("schema") != ARCHIVE_SCHEMA:
+        return False
+    for key, kind in _RECORD_FIELDS.items():
+        value = record.get(key)
+        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+            return False
+    pins = record["entry"].get("pins")
+    if not isinstance(pins, dict) or not isinstance(pins.get("commits"), list):
+        return False
+    if record.get("directory") is not None and not isinstance(record["directory"], str):
+        return False
+    if "directory" not in record:
+        return False
+    parent = Path(dir).parent.parent.parent
+    return Path(dir) == archive_dir(parent, record["run_id"], Path(record["root"]), record["n"],
+                                    record["path"])
+
+
+def verify_archive(root: Path, dir: Path, record: dict) -> str | None:
+    """None when the record's archive is whole, else the first failing reason (P10)."""
+    dir = Path(dir)
+    if not _record_valid(dir, record):
+        return "record_invalid"
+    done = _git(root, "rev-parse", "--verify", "-q", record["archive_ref"] + "^{commit}", read=True,
+                check=False)
+    if done.returncode != 0:
+        return "archive_ref_missing"
+    pin = record["pin"]
+    parents_done = _git(root, "rev-list", "--parents", "-n", "1", pin, read=True, check=False)
+    tree_done = _git(root, "rev-parse", "--verify", "-q", pin + "^{tree}", read=True, check=False)
+    fields = _text(parents_done.stdout).split()
+    parents = fields[1:]
+    if (_text(done.stdout).strip() != pin or tree_done.returncode != 0
+            or _text(tree_done.stdout).strip() != record["tree"] or parents_done.returncode != 0
+            or parents != record["parents"]):
+        return "pin_mismatch"
+    if not parents or parents[0] != record["entry"].get("head"):
+        return "archive_head_mismatch"
+    if any(sha not in parents for sha in record["entry"]["pins"]["commits"]):
+        return "pins_unreachable"
+    try:
+        if admin_digests(dir / "admin") != record["admin_files"]:
+            return "admin_mismatch"
+    except OSError:
+        return "admin_mismatch"
+    bundle = dir / "history.bundle"
+    try:
+        whole = (bundle.is_file() and record["bundle"] == str(bundle)
+                 and _sha256_file(bundle) == record["bundle_sha256"])
+    except OSError:
+        whole = False
+    if not whole:
+        return "bundle_damaged"
+    heads = _git(root, "bundle", "list-heads", str(bundle), read=True, check=False)
+    listed = [line.split(" ", 1) for line in _text(heads.stdout).splitlines() if line.strip()]
+    if heads.returncode != 0 or listed != record["bundle_heads"]:
+        return "bundle_heads_mismatch"
+    if _git(root, "bundle", "verify", str(bundle), read=True, check=False).returncode != 0:
+        return "bundle_unverified"
+    directory = record.get("directory")
+    if directory is not None and (directory != str(dir / "tree") or not os.path.isdir(directory)):
+        return "directory_missing"
+    return None
+
+
+def _identity(path: str) -> frozenset[str]:
+    return frozenset({path, os.path.realpath(path)})
+
+
+def _same(a: str, b: str) -> bool:
+    return bool(_identity(a) & _identity(b))
+
+
+def _read_record(file: Path) -> dict | None:
+    try:
+        doc = json.loads(file.read_text(encoding="utf-8", errors="surrogateescape"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _latest_outcome(applies: list[dict], path: str) -> str | None:
+    best: tuple[str, str | None] | None = None
+    for apply in applies:
+        for result in apply["results"]:
+            if (isinstance(result, dict) and isinstance(result.get("path"), str)
+                    and _same(result["path"], path)):
+                if best is None or apply["run_id"] > best[0]:
+                    best = (apply["run_id"], result.get("outcome"))
+    return best[1] if best else None
+
+
+def audit_root(root: Path, migrate_report: dict, plans: list[dict], applies: list[dict], *,
+               archive_root: Path) -> dict:
+    """Every red path of `root` resolved or listed `unresolved`; read-only, judged on fresh state."""
+    fresh = classify_root(root, migrate_report)
+    listing = [wt.path for wt in list_worktrees(root)]
+    red = [row["path"] for row in fresh["paths"] if row["class"] in ("unmapped", "refused-only")]
+    plans = sorted(plans, key=lambda p: p["run_id"])
+    latest = plans[-1] if plans else None
+    out = {"root": str(root), "red": len(red), "excluded": list(fresh["excluded"]), "removed": [],
+           "gone_elsewhere": [], "kept": {}, "new_since_plan": [], "unresolved": []}
+    unresolved = out["unresolved"]
+    settled: list[str] = []
+
+    def row(path: str, why: str, outcome: str | None, action: str | None = "archive_remove") -> None:
+        unresolved.append({"path": path, "why": why, "action": action, "outcome": outcome})
+        settled.append(path)
+
+    candidates: dict[str, list[tuple[dict, dict]]] = {}
+    for plan in plans:
+        for entry in plan["entries"]:
+            if entry.get("action") == "archive_remove" and isinstance(entry.get("n"), int):
+                candidates.setdefault(os.path.realpath(entry["path"]), []).append((plan, entry))
+    for hits in candidates.values():
+        path = hits[-1][1]["path"]
+        records: list[tuple[str, Path, dict | None]] = []
+        for plan, entry in hits:
+            d = archive_dir(archive_root, plan["run_id"], root, entry["n"], entry["path"])
+            if (d / "record.json").is_file():
+                records.append((plan["run_id"], d, _read_record(d / "record.json")))
+        gone = [r for r in records if r[2] is not None and r[2].get("state") in _GONE_STATES]
+        present = any(_same(path, listed) for listed in listing)
+        if present:
+            if gone:
+                row(path, "reappeared", "removed")
+            continue
+        applied = _latest_outcome(applies, path)
+        if gone:
+            run_id, d, record = gone[-1]
+            reason = verify_archive(root, d, record)
+            if reason is None:
+                out["removed"].append({"path": path, "run_id": run_id, "n": record["n"],
+                                       "state": record["state"]})
+            else:
+                row(path, reason, "removed")
+        elif records:
+            row(path, "record_invalid" if any(r[2] is None for r in records)
+                else "removal_unconfirmed", applied)
+        else:
+            pinned = any(
+                _git(root, "rev-parse", "--verify", "-q",
+                     f"refs/archive/worktree-reconcile/{plan['run_id']}/{entry['n']}", read=True,
+                     check=False).returncode == 0 for plan, entry in hits)
+            if pinned or applied == "removed":
+                row(path, "record_missing", applied)
+            else:
+                out["gone_elsewhere"].append({"path": path,
+                                              "run_ids": sorted({p["run_id"] for p, _ in hits})})
+    for path in red:
+        if any(_same(path, s) for s in settled):
+            continue
+        entry = next((e for e in latest["entries"] if _same(e["path"], path)), None) if latest else None
+        if latest is None:
+            row(path, "no_plan", None, None)
+        elif entry is None:
+            out["new_since_plan"].append(path)
+        elif entry.get("action") == "keep" and entry.get("keep"):
+            out["kept"][path] = list(entry["keep"])
+        elif entry.get("action") == "archive_remove":
+            row(path, "planned_archive_remove", _latest_outcome(applies, path), "archive_remove")
+        else:
+            row(path, "planned_none_now_red", _latest_outcome(applies, path), entry.get("action"))
+    unresolved.sort(key=lambda u: (u["path"], u["why"]))
+    out["new_since_plan"].sort()
+    out["removed"].sort(key=lambda r: (r["path"], r["run_id"]))
+    out["gone_elsewhere"].sort(key=lambda g: g["path"])
+    return out
+
+
 # --- command ----------------------------------------------------------------------------------
 
 def _parser() -> argparse.ArgumentParser:
@@ -792,6 +1015,10 @@ def _parser() -> argparse.ArgumentParser:
     restore = sub.add_parser("restore", help="put a removed worktree back")
     restore.add_argument("--manifest", required=True, type=Path)
     restore.add_argument("--n", required=True, type=int)
+    audit = sub.add_parser("audit", help="check that every red path is resolved (read-only)")
+    audit.add_argument("--run-dir", required=True, type=Path)
+    audit.add_argument("--archive-root", required=True, type=Path)
+    audit.add_argument("--repo-root", required=True, action="append", type=Path)
     return parser
 
 
@@ -826,6 +1053,22 @@ def _command_apply(args: argparse.Namespace) -> int:
     return 1 if any(r["outcome"] == "failed" for r in result["results"]) else 0
 
 
+def _command_audit(args: argparse.Namespace) -> int:
+    plans, applies = load_run_dir(args.run_dir)
+    if shutil.which("workflow-state") is None:
+        raise ReconcileError("tool_error", "workflow-state not found")
+    roots = []
+    for root in args.repo_root:
+        own = os.path.realpath(root)
+        pick = lambda found: [doc for key, docs in found.items()
+                              if os.path.realpath(key) == own for doc in docs]
+        roots.append(audit_root(root, migrate_dry_run(root), pick(plans), pick(applies),
+                                archive_root=args.archive_root))
+    unmet = any(r["unresolved"] for r in roots)
+    print(json.dumps({"met": not unmet, "roots": roots}, indent=2, ensure_ascii=False))
+    return 1 if unmet else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -833,6 +1076,8 @@ def main(argv: list[str] | None = None) -> int:
             return _command_plan(args)
         if args.command == "apply":
             return _command_apply(args)
+        if args.command == "audit":
+            return _command_audit(args)
         print(json.dumps(restore_entry(args.manifest, args.n)))
         return 0
     except ReconcileError as error:
