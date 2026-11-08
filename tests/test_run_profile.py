@@ -29,8 +29,10 @@ def user(text, ts="2026-11-08T10:00:00Z"):
     return {"type": "user", "timestamp": ts, "message": {"role": "user", "content": text}}
 
 
-def reply(mid, usage, content=(), ts="2026-11-08T10:05:00Z"):
+def reply(mid, usage, content=(), ts="2026-11-08T10:05:00Z", model=None):
     message = {"usage": usage, "content": list(content)}
+    if model is not None:
+        message["model"] = model
     if mid is not None:
         message["id"] = mid
     return {"type": "assistant", "timestamp": ts, "message": message}
@@ -50,7 +52,7 @@ def make_run(root, name, agents, journal=True):
     """agents: (agent_id, label, phase, records, result, meta) tuples."""
     run = Path(root) / name
     run.mkdir()
-    lines = [{"type": "launched"}, "not json", [1]]
+    lines = [{"type": "launched"}]
     for aid, label, phase, records, result, meta in agents:
         write_jsonl(run / f"agent-{aid}.jsonl", records)
         if meta is not None:
@@ -119,7 +121,7 @@ class DedupTest(Fixture):
         stats = run_profile.agent_stats(self.batch / "agent-a3.jsonl")
         self.assertEqual(stats, {"fresh": 20, "cache_read": 100, "output": 4, "tools": 1,
                                  "minutes": 30.0, "first_prompt": "Issue #12 of acme/widgets: plan it",
-                                 "read_error": None})
+                                 "model": "", "read_error": None})
 
     def test_assistant_records_without_an_id_each_count(self):
         path = Path(self.tmp.name) / "agent-noid.jsonl"
@@ -127,7 +129,7 @@ class DedupTest(Fixture):
         stats = run_profile.agent_stats(path)
         self.assertEqual((stats["fresh"], stats["tools"], stats["minutes"]), (8, 1, 0.0))
 
-    def test_a_line_that_is_not_valid_utf8_is_skipped(self):
+    def test_a_line_that_is_not_valid_utf8_is_skipped_and_flagged(self):
         path = Path(self.tmp.name) / "agent-trunc.jsonl"
         good = json.dumps(reply("m", {"input_tokens": 3}))
         with open(path, "wb") as handle:
@@ -137,6 +139,28 @@ class DedupTest(Fixture):
             handle.write(b'{"type":"assistant","message":{"id":"z","content":[{"type":"text","text":"caf\xc3')
         stats = run_profile.agent_stats(path)  # the cut final line must not raise
         self.assertEqual((stats["fresh"], stats["first_prompt"]), (3, "Issue #5 x"))
+        self.assertEqual(stats["read_error"], "2 malformed record(s), first at line 2")
+
+    def test_a_truncated_json_record_makes_the_run_incomplete(self):
+        run = Path(self.tmp.name) / "wf_trunc"
+        run.mkdir()
+        write_jsonl(run / "agent-t1.jsonl", [reply("m", {"input_tokens": 7}),
+                                             '{"type":"assistant","message":{"id":"z","usage":{"input_tok'])
+        report = run_profile.profile_runs([run])
+        self.assertEqual(report["agents"][0]["fresh"], 7)
+        self.assertEqual([(i["file"], i["error"]) for i in report["incomplete"]],
+                         [("agent-t1.jsonl", "1 malformed record(s), first at line 2")])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(run_profile.main([str(run)]), 1)
+
+    def test_a_malformed_journal_line_or_non_object_record_makes_the_run_incomplete(self):
+        run = make_run(self.tmp.name, "wf_badjournal", [("j1", "close-out-5", "Land", [reply("m", {"input_tokens": 1})],
+                                                         {"released": True}, None)])
+        with open(run / "journal.jsonl", "a", encoding="utf-8") as handle:
+            handle.write("not json\n[1]\n\n")  # a blank line is not a record
+        report = run_profile.profile_runs([run])
+        self.assertEqual([(i["file"], i["error"]) for i in report["incomplete"]],
+                         [("journal.jsonl", "2 malformed record(s), first at line 4")])
 
 
 class ReadFailureTest(Fixture):
@@ -172,6 +196,22 @@ class ReadFailureTest(Fixture):
     def test_an_absent_journal_and_meta_are_not_incomplete(self):
         self.assertEqual(self.report["incomplete"], [])
         self.assertEqual(run_profile.main([str(self.bare)]), 0)
+
+
+class ModelTest(Fixture):
+    def test_the_model_comes_from_meta_else_from_the_transcript(self):
+        path = Path(self.tmp.name) / "agent-m.jsonl"
+        write_jsonl(path, [reply("a", {"input_tokens": 1}, model="claude-opus-5-5"),
+                           reply("b", {"input_tokens": 1}, model="<synthetic>"),
+                           reply("c", {"input_tokens": 1}, model="claude-opus-5-5"),
+                           reply("d", {"input_tokens": 1}, model="claude-haiku-5")])
+        self.assertEqual(run_profile.agent_stats(path)["model"], "claude-opus-5-5")
+        run = make_run(self.tmp.name, "wf_model", [
+            ("d1", "plan", "Plan", [reply("x", {"input_tokens": 1}, model="claude-opus-5-5")], None, {}),
+            ("d2", "plan", "Plan", [reply("y", {"input_tokens": 1}, model="claude-opus-5-5")], None, {"model": "sonnet"}),
+            ("d3", "plan", "Plan", [reply("z", {"input_tokens": 1})], None, None)])
+        models = {a["agent_id"]: a["model"] for a in run_profile.profile_runs([run])["agents"]}
+        self.assertEqual(models, {"d1": "claude-opus-5-5", "d2": "sonnet", "d3": "?"})
 
 
 class FamilyTest(Fixture):

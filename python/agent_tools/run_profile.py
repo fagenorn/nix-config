@@ -8,7 +8,8 @@ phase, per agent, per label family and per delivered issue.
 `fresh` = input + cache_creation + output tokens. Cache reads are reported
 separately (`cache_read`) because they cost about a tenth of a fresh token.
 
-A transcript or journal that cannot be read in full is listed under `incomplete`
+A transcript or journal that cannot be read in full (including one holding a
+malformed record) is listed under `incomplete`
 (and on stderr) and the command exits 1; an absent journal or meta file is normal.
 
 Usage: `just agent-run-profile <run-dir>... [--json] [--top N]`
@@ -51,22 +52,35 @@ def prompt_issue(text: str) -> int | None:
 
 def _read_jsonl(path: Path) -> tuple[list[dict], str | None]:
     """The dict records of `path` and a read error, if any. The records read before
-    an error are kept, so the caller can still report them as incomplete."""
+    an error are kept, so the caller can still report them as incomplete. A line that
+    is not a JSON object (truncated, not UTF-8, another JSON type) is skipped but
+    counted into the error: its tokens or result are missing from the totals."""
     records: list[dict] = []
+    malformed = 0
+    first_bad = 0
+    os_error: str | None = None
     try:
         with open(path, "rb") as handle:
-            for line in handle:
+            for number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
                 try:
                     # A line cut inside a multibyte character (an agent killed or
-                    # still writing) is not JSON either: decode per line, skip it.
+                    # still writing) is not JSON either: decode per line.
                     record = json.loads(line.decode("utf-8"))
                 except ValueError:  # includes UnicodeDecodeError
-                    continue
+                    record = None
                 if isinstance(record, dict):
                     records.append(record)
+                else:
+                    malformed += 1
+                    first_bad = first_bad or number
     except OSError as error:
-        return records, f"{type(error).__name__}: {error}"
-    return records, None
+        os_error = f"{type(error).__name__}: {error}"
+    problems = ([os_error] if os_error else [])
+    if malformed:
+        problems.append(f"{malformed} malformed record(s), first at line {first_bad}")
+    return records, "; ".join(problems) or None
 
 
 def _count(value: object) -> int:
@@ -104,6 +118,7 @@ def agent_stats(path: Path) -> dict:
     seen_tools: set[str] = set()
     loose_tools = 0
     first_prompt: str | None = None
+    models: dict[str, int] = {}
     first_time: datetime | None = None
     last_time: datetime | None = None
 
@@ -121,6 +136,9 @@ def agent_stats(path: Path) -> dict:
             if not text.startswith(USER_RELAY_PREFIX):
                 first_prompt = text
         elif kind == "assistant" and isinstance(message, dict):
+            model = message.get("model")
+            if isinstance(model, str) and model and not model.startswith("<"):
+                models[model] = models.get(model, 0) + 1  # "<synthetic>" is no model
             usage = message.get("usage")
             usage = usage if isinstance(usage, dict) else {}
             mid = message.get("id")
@@ -154,6 +172,8 @@ def agent_stats(path: Path) -> dict:
         "tools": len(seen_tools) + loose_tools,
         "minutes": minutes,
         "first_prompt": first_prompt or "",
+        # The meta file leaves `model` out on the default model; the transcript has it.
+        "model": max(models, key=lambda name: (models[name], name)) if models else "",
         "read_error": read_error,
     }
 
@@ -226,7 +246,7 @@ def profile_runs(run_dirs: list[Path]) -> dict:
             family = label_family(label)
             row = {
                 "run": run, "agent_id": aid, "phase": phase, "label": label, "family": family,
-                "model": _str(meta.get("model")) or "?", "slug": slug, "issue": issue,
+                "model": _str(meta.get("model")) or stats["model"] or "?", "slug": slug, "issue": issue,
                 "fresh": stats["fresh"], "cache_read": stats["cache_read"],
                 "output": stats["output"], "tools": stats["tools"],
                 "minutes": round(stats["minutes"], 2),
