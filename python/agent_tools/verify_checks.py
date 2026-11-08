@@ -14,6 +14,11 @@ managed `-agent-git-hooks` directory and, in a local fixture of S whose own git 
 holds only that hooks path, an agent push of `main` is refused by its `pre-push` with the
 remote unchanged while a feature-branch push is admitted. It exits 2 on a fixture error.
 
+`self-hosted-runner --repo R --runner N --label L...` (issue 680) is met when R lists a runner
+named N whose status is online and whose labels include `self-hosted` and every L; not met when
+it is online but lacks one (a wrong registration), and not yet when it is unlisted or not online.
+It only reads one paginated runner listing and refuses a truncated or malformed one.
+
 `worktree-mapping [--red-pending] --repo-root R...` (issue 585) states the #130 checklist C7 rule
 over each root through `agent_tools.worktree_mapping`, read-only, using the verdicts of
 `workflow-state migrate --repo-root R`. It exits 0 when every root is green, 1 when one is red,
@@ -177,6 +182,34 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
     return (0 if not report["missing"] else 1), report
 
 
+def self_hosted_runner(repo: str, runner: str, labels: Sequence[str]) -> tuple[int, dict]:
+    """Met when `runner` is listed on `repo`, online, and carries `self-hosted` and every label."""
+    required = {"self-hosted", *labels}
+    entries = _counted_pages(forge_markers.api_pages(
+        f"repos/{repo}/actions/runners?per_page=100"), "runners", "runner listing")
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            raise _invalid("runner entry has no name")
+    report: dict = {"repo": repo, "runner": runner, "required": sorted(required), "found": False,
+                    "status": None, "labels": [], "missing": []}
+    found = next((entry for entry in entries if entry["name"] == runner), None)  # type: ignore[index]
+    if found is None:
+        report["missing"] = sorted(required)
+        return 75, report
+    status, listed = found.get("status"), found.get("labels")
+    if not isinstance(status, str):
+        raise _invalid("runner has no status")
+    if (not isinstance(listed, list)
+            or not all(isinstance(label, dict) and isinstance(label.get("name"), str)
+                       for label in listed)):
+        raise _invalid("runner labels are not a list of named objects")
+    names = {label["name"] for label in listed}
+    report.update(found=True, status=status, labels=sorted(names), missing=sorted(required - names))
+    if status != "online":
+        return 75, report
+    return (0 if not report["missing"] else 1), report
+
+
 MANAGED_HOOKS_SUFFIX = "-agent-git-hooks"
 PRE_PUSH_REFUSAL = "lifecycle guard pre-push: unsafe push: refusing to push the default branch main"
 CONTROL_BRANCH = "verify-pre-push-control"
@@ -301,6 +334,12 @@ def _repo(value: str) -> str:
     return value
 
 
+def _nonempty(value: str) -> str:
+    if not value:
+        raise argparse.ArgumentTypeError("must not be empty")
+    return value
+
+
 def _rfc3339(value: str) -> datetime:
     try:
         return parse_rfc3339_utc(value)
@@ -320,6 +359,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "managed-pre-push-hook",
         help="issue 672: the managed pre-push hook refuses an agent default-branch push")
     hook.add_argument("--slug", type=_repo, required=True)
+    runner = checks.add_parser(
+        "self-hosted-runner",
+        help="issue 680: a named self-hosted runner is registered, online and labelled")
+    runner.add_argument("--repo", type=_repo, required=True)
+    runner.add_argument("--runner", type=_nonempty, required=True)
+    runner.add_argument("--label", type=_nonempty, action="append", required=True)
     mapping = checks.add_parser(
         "worktree-mapping",
         help="issue 585: every retained worktree has a strict-path ledger mapping (C7)")
@@ -348,7 +393,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(report, sort_keys=True))
         return code
     try:
-        code, report = required_checks(args.repo, args.base, args.since)
+        if args.check == "self-hosted-runner":
+            code, report = self_hosted_runner(args.repo, args.runner, args.label)
+        else:
+            code, report = required_checks(args.repo, args.base, args.since)
     except forge_markers.ForgeError as error:
         print(f"verify-checks: forge_error: {error.code}", file=sys.stderr)
         return 2

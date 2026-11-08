@@ -20,24 +20,36 @@ switch target_host=hostname: (build target_host)
   @echo "switching to new config for {{target_host}}"
   sudo ./result/sw/bin/darwin-rebuild switch --flake ".#{{target_host}}"
 
-# Mint a one-hour registration token per self-hosted runner repo (see
-# hosts/common/darwin-github-runners.nix) and hand it to the runner daemon, which
-# watches the file and registers on change. Needed once, after the first switch,
-# or again after deleting /var/lib/github-runners/<name>/.runner.
+# Mint a one-hour registration token per self-hosted runner (see
+# hosts/common/darwin-github-runners.nix) for the repository its URL names, and
+# install it into that runner's own token file, readable only by the runner's group;
+# the runner daemon watches the file and registers on change. Needed once, after the
+# first switch, or again after deleting /var/lib/github-runners/<name>/.runner.
+# Naming another host mints here and installs there over ssh, which needs passwordless
+# sudo on that host.
 [macos]
 register-runners target_host=hostname:
   #!/usr/bin/env bash
   set -euo pipefail
-  repos=$(nix eval --raw ".#darwinConfigurations.{{target_host}}.config.services.github-runners" \
-    --apply 'rs: builtins.concatStringsSep " " (map (r: builtins.baseNameOf r.url) (builtins.attrValues rs))')
+  triples=$(nix eval --raw ".#darwinConfigurations.{{target_host}}.config.services.github-runners" \
+    --apply 'rs: builtins.concatStringsSep " " (map (r: "${builtins.replaceStrings [ "https://github.com/" ] [ "" ] r.url}=${r.tokenFile}=${if r.group == null then "_github-runner" else r.group}") (builtins.attrValues rs))')
   # install refuses a pipe as its source, so stage each token in a private file.
   umask 077
   tmp=$(mktemp)
   trap 'rm -f "$tmp"' EXIT
-  for repo in $repos; do
-    echo "registering runner for fagenorn/$repo" >&2
-    gh api -X POST "repos/fagenorn/$repo/actions/runners/registration-token" -q .token | tr -d '\n' > "$tmp"
-    sudo install -m 0440 -o root -g _github-runner "$tmp" "/var/lib/github-runner-tokens/$repo.token"
+  for triple in $triples; do
+    slug=${triple%%=*}
+    rest=${triple#*=}
+    file=${rest%%=*}
+    group=${rest#*=}
+    echo "registering runner for $slug on {{target_host}}" >&2
+    gh api -X POST "repos/$slug/actions/runners/registration-token" -q .token | tr -d '\n' > "$tmp"
+    if [ "{{target_host}}" = "{{hostname}}" ]; then
+      sudo install -m 0440 -o root -g "$group" "$tmp" "$file"
+    else
+      # The token travels on ssh's stdin into a private file on the target, never on a command line.
+      ssh -o BatchMode=yes "{{target_host}}" "umask 077; t=\$(mktemp) && cat > \"\$t\" && sudo -n install -m 0440 -o root -g '$group' \"\$t\" '$file'; rc=\$?; rm -f \"\$t\"; exit \$rc" < "$tmp"
+    fi
   done
 
 ### linux
@@ -149,6 +161,7 @@ agent-workflow-tests *args:
     tests/test_verify_pending_owner.py \
     tests/test_verify_pending_pass.py \
     tests/test_verify_pending_units.py \
+    tests/test_github_runners.py \
     tests/test_host_sudo.py \
     tests/test_runner_home.py \
     tests/test_verify_checks.py \
