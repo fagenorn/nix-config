@@ -19,6 +19,8 @@ export const meta = {
 // no session watches, D12).
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
+// A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
+// that is not post-merge) and its row is final with released; a release that failed leaves the row stopped for a relaunch.
 // A questions row is {issue, outcome: 'questions', lane?, questions, marker}: marker is the box prompt's
 // comment id when an unattended run posted it, null when nothing was posted (a session-launched run
 // returns the questions to its session). A session-launched conflict or needs-label row carries
@@ -147,6 +149,7 @@ const ask = async (pending, label) => {
 
 // --- Intake: every facts agent runs before any lane agent (one barrier) ---
 phase('Intake')
+const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
 const FACTS_SCHEMA = {
   type: 'object',
   properties: {
@@ -169,6 +172,10 @@ const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git 
 6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id and questions.
 7. already_fixed: name the issue's concrete symptom as one literal string taken from its body (an error string, a quoted code literal, or the quoted output of a failing command; never run the failing command). Run git -C ${REPO} fetch origin ${INT}, then git -C ${REPO} grep -n -F '<literal>' origin/${INT} and git -C ${REPO} log origin/${INT} -S'<literal>' --since=<createdAt> --format='%H %s'. Return already_fixed {commit (the full sha of the commit since the issue opened that removed the literal), evidence (the literal and what both commands printed)} only when the grep finds the literal nowhere at origin/${INT} and the log names such a commit; otherwise, or with no concrete literal, return already_fixed null.
 ${RULES_FOR(REPO, '<branch>')}`
+const releaseClosedPrompt = n => `Issue #${n} of ${SLUG} (the git repository at ${REPO}) is closed and this batch still holds its claim. Release it.
+Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed
+Return its verdict (released on exit 0, not_held (exit 3) when the claim is already gone, or error on any other exit) and any detail. Run nothing else.
+${RULES_FOR(REPO, (FACTS[n] || {}).branch || '<branch>')}`
 
 await parallel(ISSUES.map(n => async () => {
   FACTS[n] = await ask(agent(factsPrompt(n), { label: `facts-${n}`, phase: 'Intake', model: 'sonnet', effort: 'low', schema: FACTS_SCHEMA }), `facts-${n}`)
@@ -216,6 +223,15 @@ for (const n of ISSUES) {
   else eligible.push(n)
 }
 
+// A closed issue whose claim this batch still holds gives the claim back at intake (#714).
+const heldHere = f => { const c = (f && f.claim) || {}; return (c.verdict === 'held_by' || c.verdict === 'stale') && c.by === HOLDER }
+await parallel(ISSUES.filter(n => rows[n] && rows[n].outcome === 'closed' && heldHere(FACTS[n])).map(n => async () => {
+  const rel = await ask(agent(releaseClosedPrompt(n), { label: `release-${n}`, phase: 'Intake', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
+  if (rel && (rel.verdict === 'released' || rel.verdict === 'not_held')) rows[n] = { ...rows[n], released: rel.verdict === 'released' }
+  // A failed release is not final: the row stays open so a relaunch retries it, as close-out keeps a failed release stopped.
+  else rows[n] = { issue: n, outcome: 'stopped', stage: 'release', detail: rel ? (rel.detail || rel.verdict) : `release-${n} returned nothing` }
+}))
+
 // The in-batch blockers of n still open on the tracker, ascending. An outside blocker is decided by eligibility.
 const inBatchBlockers = n => Array.from(new Set(((FACTS[n] || {}).blockers || [])
   .filter(b => b.state === 'OPEN' && ISSUES.includes(b.issue)).map(b => b.issue))).sort((a, b) => a - b)
@@ -252,7 +268,7 @@ const ACQUIRE_SCHEMA = {
   required: ['verdict'],
 }
 const ASK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['posted', 'already_posted', 'error'] }, comment_id: { type: 'integer' } }, required: ['verdict'] }
-const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
+const SETTLE_SCHEMA = { type: 'object', properties: { state: { type: 'string', enum: ['OPEN', 'CLOSED'] }, release: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['state'] }
 const ENDED_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
 
 // A FIFO semaphore of MAX child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted.
@@ -266,6 +282,9 @@ const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
 // D12: a null child, or a stop that names dead agents, ends admission; a null field alone is an ordinary stop.
 const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
+// A stop the child raised after the merge (a re-adopted landing) still has close-out work its cont finishes; it is never settled (#714).
+const POST_MERGE = ['hold', 'close-out', 'code-unmet']
+const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
 const readyOf = n => READY[n]
 // The child's whole input (D1): the batch args, the issue's cont, its lane and the owner's answer, nothing else.
@@ -745,7 +764,22 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `ask-${n}`, phase: 'Deliver', model: 'so
       rows[n] = { issue: n, outcome: 'questions', lane: laneName, questions: r.needs_user, marker }
       return
     }
-    if (r.cont) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }; return }
+    if (r.cont) {
+      if (r.stage !== 'planned' && !postMerge(r)) {
+        // A stop on an issue closed meanwhile: give the claim back and drop the cont; an open issue keeps both (#714).
+        const st = await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) stopped with a continuation. Settle its claim.
+1. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state and return state (OPEN or CLOSED).
+2. Only when state is CLOSED, run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed and return its verdict as release: released (exit 0), not_held (exit 3) when the claim is already gone, or error on any other exit; otherwise return release null. Run nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', model: 'sonnet', effort: 'low', schema: SETTLE_SCHEMA }), `settle-${n}`)
+        if (st && st.state === 'CLOSED' && (st.release === 'released' || st.release === 'not_held')) {
+          delete CONTS[n]
+          rows[n] = { issue: n, outcome: 'closed', stage: r.stage, released: st.release === 'released' }
+          return
+        }
+      }
+      rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }
+      return
+    }
     // A stop with nothing to resume: give the claim back.
     await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) stopped without anything to resume. Release the batch claim.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped

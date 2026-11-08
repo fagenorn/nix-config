@@ -23,6 +23,7 @@ const DEFAULTS = [
   [/^acquire-/, () => ({ verdict: 'acquired', comment_id: 7 })],
   [/^renew-/, () => ({ verdict: 'renewed' })],
   [/^release-/, () => ({ verdict: 'released' })],
+  [/^settle-/, () => ({ state: 'OPEN', release: null })],
   [/^(ask|land-ask)-/, () => ({ verdict: 'posted', comment_id: 99 })],
   [/^recover-end-/, () => ({ verdict: 'ended' })],
   [/^readopt-/, l => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: AC })],
