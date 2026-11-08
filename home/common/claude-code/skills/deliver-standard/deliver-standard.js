@@ -35,7 +35,7 @@ export const meta = {
 // { setup, lane, plan, plan_reviewed, plan_findings?, decisions?, done, fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
-// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when only rule findings were left, runs one rules-only revise of it instead of a full review (any other finding left sends it to the full review), dropping the plan after a second failed rules revise), skips the tasks in cont.done, then
+// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when only rule findings were left, runs one rules-only revise of it instead of a full review (any other finding left sends it to the full review, which counts as a round), dropping the plan once rounds reach two), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). When the PR
 // is already merged, the re-adopt goes straight to close-out. A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
@@ -564,7 +564,9 @@ const rulesOnly = fs => fs.length > 0 && fs.every(f => RULE_IDS.includes(f.rule)
 const RESUME_KEPT = !!(plan && !planReviewed && planFindingsKept)
 // Only findings the rules-only revise may touch resume as one; a kept plan with any other finding left is reviewed in full.
 const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules)
-if (RESUME_KEPT && !RESUME_RULES) planFindingsKept = null
+// A kept state the full review resumes from stays in the cont until a pass finishes or stops again, so an unread owner answer
+// or a silent reviewer never loses it; its rounds count is carried into the full review (a resume is itself one round).
+const RESUMED_ROUNDS = RESUME_KEPT && !RESUME_RULES ? planFindingsKept.rounds + 1 : 0
 if (!plan || RESUME_KEPT) {
   const stopped = await readAnswer()
   if (stopped) return stopped
@@ -573,8 +575,15 @@ if (!plan) {
   const halted = takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA }), 'plan')
   if (halted) return halted
 }
-const rulesReview = triggered => call(`${CTX}
+const rulesReview = async triggered => {
+  const rr = await call(`${CTX}
 Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
+  if (!rr) return rr
+  // The re-review need not echo source: a finding it reports for a Codex-triggered plan inherits Codex provenance when it
+  // names the same rule as a Codex finding, or when that Codex finding names none.
+  const codex = triggered.filter(f => f.source === 'codex')
+  return { ...rr, findings: findingsOf(rr).map(f => f.source || !codex.some(c => !c.rule || c.rule === f.rule) ? f : { ...f, source: 'codex' }) }
+}
 // One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
 const rulesRevise = async findings => {
   const root = plan.plan_root
@@ -625,10 +634,10 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     if (halted) return { ...halted, findings: planFindings }
     const still = planRules(plan)
     const rr = await rulesReview(planFindings)
-    if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT)
-    let rules = still.concat(findingsOf(rr)), rounds = 0
-    if (rulesOnly(rules)) {
-      rounds = 1
+    if (!rr) return reviewStop(planFindings, planFindings, RESUMED_ROUNDS, SILENT)
+    let rules = still.concat(findingsOf(rr)), rounds = RESUMED_ROUNDS
+    if (rulesOnly(rules) && rounds < 2) {
+      rounds++
       const r = await rulesRevise(rules)
       if (r.halted) return { ...r.halted, findings: planFindings }
       if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT)

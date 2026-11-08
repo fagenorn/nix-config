@@ -757,6 +757,63 @@ class PlanRulesTest(unittest.TestCase):
                 self.assertEqual(names.count("owner-answer"), 1)
                 self.assertNotIn("plan_findings", result.get("cont") or {})
 
+    def test_a_stuck_plan_with_a_ruleless_finding_is_dropped_within_the_revise_bound(self):
+        # Plan bound: at most two rules revises per plan, however many resumes a ruleless or Codex finding takes.
+        plan = with_criteria(HUMAN)
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC3 breaks a rule"}]}
+        replies = {"plan": plan, "plan-revise": plan, "plan-rules-revise": plan, "plan-review": self.RULE_FINDING,
+                   "plan-rules-review": [self.RULE_FINDING, bare]}
+        result, calls = run(replies=replies)
+        names = labels(calls)
+        self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
+        self.assertEqual([r["summary"] for r in result["cont"]["plan_findings"]["rules"]], ["AC3 breaks a rule"])
+        dropped = False
+        for _ in range(4):
+            result, calls = run(args=dict(ARGS, cont=result["cont"]), replies=replies)
+            names += labels(calls)
+            if result["cont"]["plan"] is None:
+                dropped = True
+                break
+        self.assertTrue(dropped, "the stuck plan was never dropped")
+        self.assertLessEqual(names.count("plan-rules-revise"), 2)
+        self.assertNotIn("plan_findings", result["cont"])
+        self.assertNotIn("impl-1", names)
+
+    def test_a_kept_finding_survives_an_unread_owner_answer(self):
+        plan = with_criteria(HUMAN)
+        interface = {"verdict": "findings", "findings": [{"severity": "important", "summary": "interface mismatch"}]}
+        first, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-review": interface, "plan-rules-review": None})
+        kept = first["cont"]["plan_findings"]
+        self.assertIsNotNone(kept)
+        for answer in (None, {"verdict": "answered", "comment_id": 1, "questions": [], "decisions": " "}):
+            with self.subTest(answer=answer):
+                result, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"owner-answer": answer})
+                self.assertEqual(result["stage"], "owner-answer")
+                self.assertEqual(result["cont"]["plan"], plan)
+                self.assertEqual(result["cont"]["plan_findings"], kept)
+                self.assertNotIn("plan-review", labels(calls))
+                again, calls = run(args=dict(ARGS, cont=result["cont"]), replies={"owner-answer": {
+                    "verdict": "answered", "comment_id": 1, "questions": [], "decisions": "D: pick one"}})
+                self.assertEqual(labels(calls).count("owner-answer"), 1)
+                self.assertIn("plan-review", labels(calls))
+                self.assertIn("D: pick one", again["cont"]["decisions"])
+
+    def test_a_codex_finding_re_reported_without_source_gets_no_rules_only_revise(self):
+        # The rules re-review does not have to preserve source; the program carries Codex provenance through it.
+        plan = with_criteria(HUMAN)
+        reported = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "s"}]}
+        for name, codex, rereview in (("ruled", reported, reported), ("ruleless", bare, reported)):
+            with self.subTest(codex=name):
+                result, calls = run(replies={
+                    "plan": plan, "plan-revise": plan,
+                    "plan-codex": {"available": True, **codex}, "plan-rules-review": rereview})
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertNotIn("plan-rules-revise", labels(calls))
+                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
+                self.assertEqual(result["cont"]["plan_findings"]["rules"][0]["source"], "codex")
+                self.assertNotIn("impl-1", labels(calls))
+
     def test_second_rules_failure_on_resume_drops_the_plan(self):
         first, _ = self.keep_stop()
         result, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"plan-rules-review": self.RULE_FINDING})
