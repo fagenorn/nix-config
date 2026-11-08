@@ -2331,5 +2331,123 @@ class SourceTest(unittest.TestCase):
             self.assertIn(arg, meta)
 
 
+BR = {"name": "cand", "worktree": "/r/.wt/cand", "base": "origin/dev", "head": "b" * 40,
+      "current": "cand", "toplevel": "/r/.wt/cand"}
+BR_PUSH = "git -C /r/.wt/cand push origin cand"
+NO_FORCE = "Never push with --force, --force-with-lease or a +refspec, and never push dev or main."
+TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug on the candidate"}]}
+REVIEWERS = ("reviewer", "reviewer-lite")
+
+
+def bplan(branches=..., task_branch="cand", **top):
+    """A two-task plan whose second task commits to the declared branch cand (#713)."""
+    second = {"n": 2, "title": "two", "file": "/g/task-2.md", "risk": "standard"}
+    if task_branch is not None:
+        second["branch"] = task_branch
+    return dict(PLAN, branches=[dict(BR)] if branches is ... else branches,
+                tasks=[dict(PLAN["tasks"][0]), second], **top)
+
+
+def at(path, **more):
+    """BR moved to another worktree path whose facts agree with it."""
+    return dict(BR, worktree=path, toplevel=path, **more)
+
+
+class DeclaredBranchTest(unittest.TestCase):
+    """#713 (#685 item 3): a plan may declare extra branches its fix agents edit and push, never forced."""
+
+    def test_declared_branch_grants_non_force_push_to_its_fix_agent(self):
+        result, calls = run(replies={"plan": bplan(), "review-2": TASK_FINDING})
+        self.assertEqual(result["stage"], "done")
+        cut = labels(calls).index("plan-review") + 1
+        post = calls[cut:]
+        granted = {c["label"] for c in post if c["agentType"] not in REVIEWERS}
+        self.assertLessEqual({"renew-tasks", "impl-1", "impl-2", "fix-2-1", "renew-final-review", "final-codex",
+                              "verify", "pr", "land-lock-1", "checks-1", "merge", "land-unlock", "hold",
+                              "close-out"}, granted)
+        for c in post:
+            with self.subTest(label=c["label"]):
+                if c["agentType"] in REVIEWERS:
+                    self.assertNotIn("push origin", c["prompt"])
+                else:
+                    self.assertIn(BR_PUSH, c["prompt"])
+                    self.assertIn(NO_FORCE, c["prompt"])
+        for c in calls[:cut]:
+            with self.subTest(label=c["label"]):
+                self.assertNotIn(BR_PUSH, c["prompt"])
+        _, plain = run()
+        for call in plain:
+            self.assertNotIn("--force-with-lease", call["prompt"], call["label"])
+        # D7: the merged-PR re-adopt closes out before the resumed plan is validated, and pushes nothing.
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": bplan(), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}, {"n": 2, "commit": "d" * 40}]}
+        merged, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
+        self.assertEqual(merged["stage"], "done")
+        for label in ("hold", "close-out"):
+            self.assertNotIn(BR_PUSH, prompt(calls, label))
+
+    def test_declaring_the_integration_branch_is_invalid(self):
+        bad = {
+            "integration": bplan([dict(BR, name="dev", current="dev")], task_branch="dev"),
+            "default": bplan([dict(BR, name="main", current="main")], task_branch="main"),
+            "issue branch": bplan([dict(BR, name="issue-9-x", current="issue-9-x")], task_branch="issue-9-x"),
+            "case alias": bplan([dict(BR, name="DEV", current="DEV")], task_branch="DEV"),
+            "namespaced": bplan([dict(BR, name="refs/heads/main", current="refs/heads/main")], task_branch="refs/heads/main"),
+            "heads alias": bplan([dict(BR, name="heads/cand", current="heads/cand")], task_branch="heads/cand"),
+            "lock": bplan([dict(BR, name="cand.lock", current="cand.lock")], task_branch="cand.lock"),
+            "dot component": bplan([dict(BR, name="a/.b", current="a/.b")], task_branch="a/.b"),
+            "trailing dot": bplan([dict(BR, name="cand.", current="cand.")], task_branch="cand."),
+            "HEAD": bplan([dict(BR, name="HEAD", current="HEAD")], task_branch="HEAD"),
+            "refspec": bplan([dict(BR, name="+cand", current="+cand")], task_branch="+cand"),
+            "shell": bplan([dict(BR, name="cand;x", current="cand;x")], task_branch="cand;x"),
+            "delivery worktree": bplan([at("/r/.wt/w-issue-9-x")]),
+            "delivery worktree, slash": bplan([at("/r/.wt/w-issue-9-x/")]),
+            "shared checkout": bplan([at("/r")]),
+            "shared checkout, slash": bplan([at("/r/")]),
+            "shared checkout, dot": bplan([at("/r/.")]),
+            "shared checkout, case": bplan([at("/R")]),
+            "dot-dot worktree": bplan([at("/r/.wt/../cand")]),
+            "relative worktree": bplan([at("wt/cand")]),
+            "on another branch": bplan([dict(BR, current="issue-9-x")]),
+            "not its own checkout": bplan([dict(BR, worktree="/r/sub", toplevel="/r")]),
+            "no toplevel": bplan([{k: v for k, v in BR.items() if k != "toplevel"}]),
+            "no head": bplan([{k: v for k, v in BR.items() if k != "head"}]),
+            "short head": bplan([dict(BR, head="b" * 7)]),
+            "bad base": bplan([dict(BR, base="x..y")]),
+            "shell base": bplan([dict(BR, base="origin/dev;x")]),
+            "twice": bplan([dict(BR), at("/r/.wt/cand2")]),
+            "shared worktree": bplan([dict(BR), dict(BR, name="cand2", current="cand2")]),
+            "undeclared task branch": bplan(task_branch="other"),
+            "task branch not a string": bplan(task_branch=5),
+            "not a list": bplan("cand"),
+            "entry not an object": bplan(["cand"]),
+            "null entry": bplan([None]),
+            "list entry": bplan([[dict(BR)]]),
+        }
+        for name, reply in bad.items():
+            with self.subTest(name=name):
+                result, calls = run(replies={"plan": reply})
+                self.assertEqual((result["stage"], result["step"]), ("plan", "plan"))
+                self.assertTrue(result["branch_problems"])
+                self.assertIsNone(result["cont"]["plan"])
+                self.assertNotIn("plan-review", labels(calls))
+                self.assertNotIn("impl-1", labels(calls))
+        ok, _ = run(replies={"plan": bplan([dict(BR), at("/r/.wt/cand2", name="cand2", current="cand2")])})
+        self.assertEqual(ok["stage"], "done")
+        result, calls = run(replies={"plan-review": TASK_FINDING,
+                                     "plan-revise": bplan([dict(BR, name="dev", current="dev")], task_branch="dev")})
+        self.assertEqual((result["stage"], result["step"]), ("plan", "plan-revise"))
+        self.assertTrue(result["branch_problems"])
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},
+                "plan": bplan([dict(BR, name="dev", current="dev")], task_branch="dev"), "plan_reviewed": True, "done": []}
+        # branch_heads keeps the Task 4 resume re-read satisfied, so the stop is the plan check itself.
+        facts = [{"name": "dev", "head": "b" * 40, "current": "dev", "toplevel": "/r/.wt/cand"}]
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"branch_heads": facts}})
+        self.assertEqual((result["stage"], result["step"]), ("plan", "resume"))
+        self.assertTrue(result["branch_problems"])
+        self.assertNotIn("impl-1", labels(calls))
+
+
 if __name__ == "__main__":
     unittest.main()

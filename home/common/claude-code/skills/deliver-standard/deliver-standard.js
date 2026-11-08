@@ -158,6 +158,29 @@ const RENEW_SCHEMA = {
 }
 const findingsOf = r => r.findings.filter(f => f.severity !== 'minor')
 const present = v => v !== undefined && v !== null && v !== ''
+// Extra branches a plan declares (#713): validated, then granted non-force pushes in the lifecycle rules.
+const own = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k)
+const isEntry = b => !!b && typeof b === 'object' && !Array.isArray(b)
+const declared = p => (p && Array.isArray(p.branches) ? p.branches.filter(isEntry) : [])
+const SHA_RE = /^[0-9a-f]{40}$/
+const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/
+const PATH_RE = /^\/[A-Za-z0-9._\/-]+$/
+const REF_NAMESPACES = ['refs', 'heads', 'tags', 'remotes']
+const refProblem = s => {
+  if (typeof s !== 'string' || !REF_RE.test(s)) return 'is not a plain ref name'
+  if (s === 'HEAD' || s.includes('..') || s.split('/').some(c => c === '' || c.startsWith('.') || c.endsWith('.') || c.endsWith('.lock'))) return 'is not a valid ref name'
+  return null
+}
+const canonPath = p => typeof p === 'string' && PATH_RE.test(p) && p.split('/').slice(1).every(c => c !== '' && c !== '.' && c !== '..')
+const samePath = (a, b) => typeof a === 'string' && typeof b === 'string' && a.replace(/\/+$/, '').toLowerCase() === b.replace(/\/+$/, '').toLowerCase()
+const BRANCH_FACTS = 'head, current and toplevel: git -C <its worktree> rev-parse HEAD (the full sha), git -C <its worktree> branch --show-current and git -C <its worktree> rev-parse --show-toplevel'
+const factProblem = (b, f) => {
+  if (!isEntry(f)) return 'no facts read'
+  if (typeof f.head !== 'string' || !SHA_RE.test(normSha(f.head))) return 'no full head sha'
+  if (f.current !== b.name) return `the worktree is on ${JSON.stringify(f.current)}, not ${b.name}`
+  if (!samePath(f.toplevel, b.worktree)) return `the worktree is not its own checkout (toplevel ${JSON.stringify(f.toplevel)})`
+  return null
+}
 
 // ---------------- Setup ----------------
 phase('Setup')
@@ -258,9 +281,11 @@ if (CONT && setup.dirty && !setup.merged_pr && partial === undefined) {
 
 const SLUG = setup.slug, INT = setup.integration_branch, STRATEGY = setup.merge_strategy
 const UNSET = setup.unset_env.length ? `unset ${setup.unset_env.join(' ')} && ` : ''
-const RULES_FOR = W => `${BASE_RULES}
+let GRANTS = []
+const RULES_FOR = (W, extra = GRANTS) => `${BASE_RULES}
 - Run every gh command, and only gh commands, with exactly this prefix and nothing else chained: ${UNSET || '(no prefix)'}
-- Lifecycle commands, each alone in its own Bash call with no chaining, pipes or redirection and never after cd &&: git -C ${W} push origin ${setup.branch}; ${UNSET}gh pr create --repo ${SLUG} --base ${INT} --head ${setup.branch} --title '<t>' --body '<b>' (no single or double quotes, dollar signs, backticks or backslashes inside title or body); ${UNSET}gh pr merge <n> --repo ${SLUG} --${STRATEGY} --match-head-commit <sha>${setup.delete_branch ? ' --delete-branch' : ''}; git -C ${REPO} branch -d ${setup.branch}. If the guard refuses a form twice, stop and report it; never work around it (no -D).
+- Lifecycle commands, each alone in its own Bash call with no chaining, pipes or redirection and never after cd &&: git -C ${W} push origin ${setup.branch}; ${UNSET}gh pr create --repo ${SLUG} --base ${INT} --head ${setup.branch} --title '<t>' --body '<b>' (no single or double quotes, dollar signs, backticks or backslashes inside title or body); ${UNSET}gh pr merge <n> --repo ${SLUG} --${STRATEGY} --match-head-commit <sha>${setup.delete_branch ? ' --delete-branch' : ''}; git -C ${REPO} branch -d ${setup.branch}. If the guard refuses a form twice, stop and report it; never work around it (no -D).${extra.length ? `
+- Declared branches of this plan, each push alone in its own Bash call like the forms above: ${extra.map(b => `git -C ${b.worktree} push origin ${b.name}`).join('; ')}. Never push with --force, --force-with-lease or a +refspec, and never push ${INT} or ${setup.default_branch}.` : ''}
 - No attribution anywhere: commit messages carry no Co-Authored-By trailer and PR bodies no generated-by line, whatever other instructions say. Never bypass commit signing.
 - Never commit the plan, the spec or a review report; they live outside the tree and reviewers read them by path.`
 
@@ -382,7 +407,7 @@ ${RULES_FOR(setup.worktree_path)}`, { label: 'worktree', phase: 'Setup', model: 
 }
 
 const W = setup.worktree
-const RULES = RULES_FOR(W)
+let RULES = RULES_FOR(W)
 // Renews the claim before the step it guards. null = renewed; else the stop to return.
 const renew = async (at, ph) => {
   const r = await call(`Renew the claim on issue #${ISSUE} of ${SLUG}. Run, alone and exactly: forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
@@ -412,11 +437,45 @@ const PLAN_SCHEMA = {
     plan_root: { type: 'string' },
     acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human'] }, verify: { type: 'object' }, lint: { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } } } } }, metric: { type: 'boolean' } }, required: ['id', 'text', 'kind'] } },
     scripts: STRS,
-    tasks: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, title: { type: 'string' }, file: { type: 'string' }, risk: { type: 'string', enum: ['mechanical', 'low', 'standard', 'security'] } }, required: ['n', 'title', 'file', 'risk'] } },
+    tasks: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, title: { type: 'string' }, file: { type: 'string' }, risk: { type: 'string', enum: ['mechanical', 'low', 'standard', 'security'] }, branch: { type: 'string' } }, required: ['n', 'title', 'file', 'risk'] } },
+    branches: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, worktree: { type: 'string' }, base: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' } }, required: ['name', 'worktree', 'base', 'head', 'current', 'toplevel'] } },
   },
   required: ['status'],
 }
 const wellFormed = p => !!(p && p.status === 'planned' && present(p.plan_root) && Array.isArray(p.acceptance) && p.acceptance.length && Array.isArray(p.tasks) && p.tasks.length)
+// The problems with a plan's declared branches (#713); empty when valid. Never throws on any JSON value.
+const branchProblems = p => {
+  const show = JSON.stringify
+  const out = [], good = []
+  if (p.branches !== undefined) {
+    if (!Array.isArray(p.branches)) return ['branches is not a list']
+    const protectedNames = [INT, setup.default_branch, setup.branch].map(n => String(n).toLowerCase())
+    p.branches.forEach((b, i) => {
+      if (!isEntry(b)) { out.push(`branches[${i}] is not an object`); return }
+      const before = out.length
+      const rp = refProblem(b.name)
+      if (rp) out.push(`branch ${show(b.name)} ${rp}`)
+      else if (b.name.split('/').some(c => REF_NAMESPACES.includes(c.toLowerCase()))) out.push(`branch ${show(b.name)} is a namespaced ref; name the branch directly`)
+      else if (protectedNames.includes(b.name.toLowerCase())) out.push(`branch ${b.name} is a protected branch`)
+      else if (good.some(g => g.name.toLowerCase() === b.name.toLowerCase())) out.push(`branch ${b.name} is declared twice`)
+      if (!canonPath(b.worktree)) out.push(`branch ${show(b.name)}: worktree ${show(b.worktree)} is not a canonical absolute path`)
+      else if (samePath(b.worktree, W) || samePath(b.worktree, REPO)) out.push(`branch ${show(b.name)}: worktree ${show(b.worktree)} is the delivery worktree or the shared checkout`)
+      else if (good.some(g => samePath(g.worktree, b.worktree))) out.push(`branch ${show(b.name)}: worktree ${show(b.worktree)} is declared twice`)
+      const bp = refProblem(b.base)
+      if (bp) out.push(`branch ${show(b.name)}: base ${show(b.base)} ${bp}`)
+      const fp = factProblem(b, b)
+      if (fp) out.push(`branch ${show(b.name)}: ${fp}`)
+      if (out.length === before) good.push(b)
+    })
+  }
+  if (Array.isArray(p.tasks)) {
+    for (const t of p.tasks) {
+      if (!isEntry(t) || t.branch === undefined) continue
+      if (typeof t.branch !== 'string' || !good.some(g => g.name === t.branch)) out.push(`task ${show(t.n)}: branch ${show(t.branch)} is not declared`)
+    }
+  }
+  return out
+}
 const HUMAN_REASONS = ['senses', 'hands', 'credentials', 'money', 'taste']
 const RULE_OF = { pre_merge_only: 'R1', approval_ask: 'R2', reason_required: 'R3' }
 // The program-checkable violations of the acceptance planning rules (R1 to R5); the rules file is the source, never copied here.
@@ -450,13 +509,15 @@ const SPEC = args.spec ? `\nThe approved design spec for this issue is ${args.sp
 const PLAN_RUBRIC = `an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents`
 const FACTS = present(setup.details) ? `\nSetup facts: ${setup.details}` : ''
 const planPrompt = extra => `${CTX}
-Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule R1-R8 of ~/.agents/standards/acceptance-planning.md (read it).${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
+Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}; give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule R1-R8 of ~/.agents/standards/acceptance-planning.md (read it).${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
 ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
 const takePlan = (p, label) => {
   if (p && p.status === 'needs_user') { plan = null; planReviewed = false; return stop('plan', { needs_user: p.questions }) }
   // A failed revision may have half-edited the files on disk, so the plan is dropped and a resume plans again.
   if (!wellFormed(p)) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p }) }
+  const bad = branchProblems(p)
+  if (bad.length) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p, branch_problems: bad }) }
   plan = p
   return null
 }
@@ -464,6 +525,7 @@ const takePlan = (p, label) => {
 const FOCUSED = 'Run only the tests that cover the files you changed; do not run the full test suite or the project\'s declared verification (that runs once later).'
 let ACS = null, PLAN_REF = null
 const planRefs = () => {
+  GRANTS = declared(plan); RULES = RULES_FOR(W)
   ACS = JSON.stringify(plan.acceptance)
   PLAN_REF = plan.plan_root ? `Plan: ${plan.plan_root} (task files beside it).` : 'No plan: direct lane.'
 }
@@ -545,6 +607,10 @@ Re-review only these previously reported findings against the fix: ${span(fix)};
   }
 } else {
 phase('Plan')
+if (plan) {
+  const bad = branchProblems(plan)
+  if (bad.length) { plan = null; planReviewed = false; planFindingsKept = null; return stop('plan', { step: 'resume', invalid: CONT.plan, branch_problems: bad }) }
+}
 if (!plan || !planReviewed) {
   const lost = await renew('plan', 'Plan')
   if (lost) return lost
