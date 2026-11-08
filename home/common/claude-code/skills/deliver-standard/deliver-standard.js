@@ -35,7 +35,7 @@ export const meta = {
 // { setup, lane, plan, plan_reviewed, plan_findings?, decisions?, done, fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
-// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and runs one rules-only revise of it instead of a full review, dropping the plan after a second failed rules revise), skips the tasks in cont.done, then
+// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when only rule findings were left, runs one rules-only revise of it instead of a full review (any other finding left sends it to the full review), dropping the plan after a second failed rules revise), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). When the PR
 // is already merged, the re-adopt goes straight to close-out. A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
@@ -559,8 +559,13 @@ Read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, ex
   }
   return null
 }
-const RESUME_RULES = !!(plan && !planReviewed && planFindingsKept)
-if (!plan || RESUME_RULES) {
+const RULE_IDS = PLAN_REVIEW.properties.findings.items.properties.rule.enum
+const rulesOnly = fs => fs.length > 0 && fs.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex')
+const RESUME_KEPT = !!(plan && !planReviewed && planFindingsKept)
+// Only findings the rules-only revise may touch resume as one; a kept plan with any other finding left is reviewed in full.
+const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules)
+if (RESUME_KEPT && !RESUME_RULES) planFindingsKept = null
+if (!plan || RESUME_KEPT) {
   const stopped = await readAnswer()
   if (stopped) return stopped
 }
@@ -568,8 +573,6 @@ if (!plan) {
   const halted = takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA }), 'plan')
   if (halted) return halted
 }
-const RULE_IDS = PLAN_REVIEW.properties.findings.items.properties.rule.enum
-const rulesOnly = fs => fs.length > 0 && fs.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex')
 const rulesReview = triggered => call(`${CTX}
 Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
 // One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).

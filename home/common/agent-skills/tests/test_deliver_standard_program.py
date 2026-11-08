@@ -740,6 +740,23 @@ class PlanRulesTest(unittest.TestCase):
         self.assertIn("impl-1", names)
         self.assertNotIn("plan_findings", result.get("cont") or {})
 
+    def test_resume_reviews_in_full_when_a_non_rule_finding_was_kept(self):
+        # A silent rules re-reviewer keeps every finding of the full review, including ones no rules revise may clear.
+        plan = with_criteria(HUMAN)
+        interface = {"verdict": "findings", "findings": [{"severity": "important", "summary": "interface mismatch"}]}
+        codex = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "s", "source": "codex"}]}
+        for kept in (interface, codex):
+            with self.subTest(kept=kept["findings"][0]["summary"]):
+                first, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-review": kept, "plan-rules-review": None})
+                self.assertEqual(first["stage"], "plan-review")
+                self.assertIsNotNone(first["cont"]["plan_findings"])
+                result, calls = run(args=dict(ARGS, cont=first["cont"]))
+                names = labels(calls)
+                self.assertNotIn("plan-rules-revise", names)
+                self.assertIn("plan-review", names)
+                self.assertEqual(names.count("owner-answer"), 1)
+                self.assertNotIn("plan_findings", result.get("cont") or {})
+
     def test_second_rules_failure_on_resume_drops_the_plan(self):
         first, _ = self.keep_stop()
         result, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"plan-rules-review": self.RULE_FINDING})
