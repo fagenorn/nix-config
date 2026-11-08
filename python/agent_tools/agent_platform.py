@@ -49,7 +49,7 @@ MIGRATION_MEMBERS = ("id", "from_schema", "to_schema")
 # free text naming shipped behaviour.
 DEPRECATION_MEMBERS = ("id", "kind", "subject", "since", "successor",
                        "migration")
-DEPRECATION_KINDS = ("project_file", "platform_behavior")
+DEPRECATION_KINDS = ("project_file", "platform_behavior", "project_schema")
 
 # The fleet registry's members, and D18's closed entry: a stable identity and
 # a location, plus one optional record of how a registration reached its
@@ -326,6 +326,9 @@ def _validate_deprecation_entry(entry: object, pointer: str,
     _check_exact_members(entry, pointer, DEPRECATION_MEMBERS, "deprecations",
                          violations)
     for name in ("id", "subject", "successor", "migration"):
+        if (name == "subject" and entry.get("kind") == "project_schema"
+                and entry.get(name) == ""):
+            continue  # judged below as a schema version, not as a string
         if name in entry and not (isinstance(entry[name], str) and entry[name]):
             violations.append(_violation(
                 f"{pointer}/{name}", "must be a non-empty string",
@@ -354,6 +357,13 @@ def _validate_deprecation_entry(entry: object, pointer: str,
                 "must be a repository-relative POSIX path without empty, "
                 "'.' or '..' segments",
                 "platform.manifest.deprecations.subject_not_relative_path"))
+    if kind == "project_schema" and isinstance(subject, str):
+        if not re.fullmatch(r"(?:0|[1-9][0-9]*)", subject):
+            violations.append(_violation(
+                f"{pointer}/subject",
+                "must be a decimal project schema version: digits only, "
+                "no sign and no leading zero",
+                "platform.manifest.deprecations.subject_not_schema_version"))
     identifier = entry.get("id")
     return identifier if isinstance(identifier, str) and identifier else None
 

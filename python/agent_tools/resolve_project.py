@@ -1872,7 +1872,8 @@ def declared_facts(source: object) -> dict:
 
 
 def deprecated_uses(root: Path, manifest: dict) -> list[str] | None:
-    """The ids of the manifest's `project_file` deprecations this root holds.
+    """The ids of the manifest's `project_file` and `project_schema`
+    deprecations this root holds.
 
     Null when nothing can be said: the root is not a usable directory
     (including one whose parent cannot be searched: `os.path.isdir` answers
@@ -1885,10 +1886,29 @@ def deprecated_uses(root: Path, manifest: dict) -> list[str] | None:
     this operation starts no child process (R3.6). A `platform_behavior` entry
     names no path and is never listed. This is a warning, never a verdict: it
     changes neither compatibility nor the exit code (issue 66, D2).
+
+    A `project_schema` entry is held when its subject equals the decimal
+    `schema_version` of `<root>/.agents/project.json`, read as JSON. A root
+    without that file is null, as is one whose file cannot be read or parsed or
+    whose version is not an integer, because nothing can be said of it
+    (issue 579, P4).
     """
     if not os.path.isdir(root):
         return None
+    schema_entries = [entry for entry in manifest["deprecations"]
+                      if entry["kind"] == "project_schema"]
     uses = []
+    if schema_entries:
+        try:
+            version = json.loads(
+                (root / ".agents" / "project.json").read_text("utf-8")
+            )["schema_version"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if not isinstance(version, int) or isinstance(version, bool):
+            return None
+        uses.extend(entry["id"] for entry in schema_entries
+                    if entry["subject"] == str(version))
     for entry in manifest["deprecations"]:
         if entry["kind"] != "project_file":
             continue

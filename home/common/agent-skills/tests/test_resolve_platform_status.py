@@ -35,6 +35,7 @@ from .test_resolve_project import (
     mutated_manifest,
     registry,
     run,
+    schema_two,
     source_contract,
     tree_snapshot,
 )
@@ -600,6 +601,85 @@ class PlatformStatusDeprecationTest(ResolverTestCase):
         self.assertIsNone(rows[0]["deprecated_uses"])
         self.assertFalse(rows[0]["compatible"])
         self.assertEqual(rows[0]["reason_code"], "project_schema_unsupported")
+
+
+class PlatformStatusProjectSchemaDeprecationTest(ResolverTestCase):
+    """Issue 579 P4: a `project_schema` entry is a use for exactly the roots
+    whose contract declares that schema version, and only a warning."""
+
+    ENTRY = {"id": "bindings-deploy", "kind": "project_schema",
+             "subject": "1", "since": "1.1.0", "successor": "profiles",
+             "migration": "bindings-deploy.retire"}
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.set_manifest(mutated_manifest(deprecations=[self.ENTRY]))
+
+    def status(self, *args: str) -> dict:
+        code, out, err = run("platform-status", *args, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        return json.loads(out)
+
+    def schema_two_root(self, project_id: str = "fagenorn/nix-config") -> Path:
+        contract = schema_two(source_contract())
+        contract["project"]["id"] = project_id
+        return self.make_root(contract)
+
+    def test_a_schema_one_root_is_warned_and_stays_compatible(self):
+        payload = self.status("--repo-root", str(self.make_root()))
+        self.assertEqual(payload["project"]["deprecated_uses"],
+                         ["bindings-deploy"])
+        self.assertEqual(payload["compatibility"], {
+            "compatible": True, "reason_code": None, "repair_id": None})
+
+    def test_a_schema_two_root_is_not_warned(self):
+        payload = self.status("--repo-root", str(self.schema_two_root()))
+        self.assertEqual(payload["project"]["deprecated_uses"], [])
+        self.assertTrue(payload["compatibility"]["compatible"])
+
+    def test_a_non_integer_schema_version_is_uncertain_never_absent(self):
+        contract = source_contract()
+        contract["schema_version"] = "1"
+        root = self.make_root(contract)
+        # `--repo-root` refuses such a contract, so the fleet row is where
+        # the null is observable.
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/nix-config", "root": str(root)}))
+        row = self.status("--fleet")["fleet"][0]
+        self.assertIsNone(row["deprecated_uses"])
+
+    def test_a_root_without_a_contract_is_uncertain_never_absent(self):
+        root = self.make_root()
+        (root / ".agents" / "project.json").unlink()
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/nix-config", "root": str(root)}))
+        row = self.status("--fleet")["fleet"][0]
+        self.assertIsNone(row["deprecated_uses"])
+
+    def test_it_is_listed_beside_a_project_file_use_in_id_order(self):
+        entries = [self.ENTRY,
+                   {**DEPRECATIONS[0], "id": "alpha", "subject": "alpha.json"}]
+        self.set_manifest(mutated_manifest(deprecations=entries))
+        root = self.make_root()
+        (root / "alpha.json").write_text("{}\n")
+        payload = self.status("--repo-root", str(root))
+        self.assertEqual(payload["project"]["deprecated_uses"],
+                         ["alpha", "bindings-deploy"])
+
+    def test_fleet_rows_carry_their_own_schema_use(self):
+        old = self.make_root(dict(source_contract(),
+                                  project={**source_contract()["project"],
+                                           "id": "fagenorn/old"}))
+        new = self.schema_two_root("fagenorn/new")
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/old", "root": str(old)},
+            {"project_id": "fagenorn/new", "root": str(new)}))
+        rows = {row["project_id"]: row
+                for row in self.status("--fleet")["fleet"]}
+        self.assertEqual(rows["fagenorn/old"]["deprecated_uses"],
+                         ["bindings-deploy"])
+        self.assertTrue(rows["fagenorn/old"]["compatible"])
+        self.assertEqual(rows["fagenorn/new"]["deprecated_uses"], [])
 
 
 if __name__ == "__main__":

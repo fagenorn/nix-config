@@ -481,6 +481,27 @@ class ManifestDeprecationEntryTest(ResolverTestCase):
                                     "/deprecations/0/subject",
                                     "subject_not_relative_path")
 
+    def test_a_project_schema_subject_must_be_a_schema_version(self):
+        for value in ("", "01", "-1", "+1", "1.0", "one", " 1", "1 "):
+            with self.subTest(subject=value):
+                self.assert_refused(
+                    [deprecation(kind="project_schema", subject=value)],
+                    "/deprecations/0/subject", "subject_not_schema_version")
+
+    def test_a_project_schema_subject_must_still_be_a_string(self):
+        self.assert_refused(
+            [deprecation(kind="project_schema", subject=1)],
+            "/deprecations/0/subject", "not_string")
+
+    def test_a_schema_version_subject_loads(self):
+        for value in ("1", "2", "10"):
+            with self.subTest(subject=value):
+                self.set_manifest(mutated_manifest(deprecations=[
+                    deprecation(kind="project_schema", subject=value)]))
+                code, out, err = run("resolve", "--repo-root",
+                                     str(self.make_root()), home=self.home)
+                self.assertEqual(code, 0, err or out)
+
     def test_ids_must_be_distinct(self):
         self.assert_refused(
             [VALID_DEPRECATION, deprecation(subject="other/file")],
@@ -527,6 +548,18 @@ class CommittedManifestTest(ResolverTestCase):
         {"id": "legacy-skills-config-writer", "kind": "platform_behavior",
          "subject": "adopt-project legacy binding config rewrite",
          "since": "1.1.0", "successor": "resolve-project resolve",
+         "migration": "legacy-skills-config.retire"},
+        {"id": "bindings-deploy", "kind": "project_schema", "subject": "1",
+         "since": "1.2.0", "successor": "release profile activation",
+         "migration": "bindings-deploy.retire"},
+        {"id": "release-deploy-inspect", "kind": "platform_behavior",
+         "subject": "release deploy inspect", "since": "1.2.0",
+         "successor": "release profile activation",
+         "migration": "bindings-deploy.retire"},
+        {"id": "release-bridge-planning", "kind": "platform_behavior",
+         "subject": "adopt-project release_bridge legacy deploy planning",
+         "since": "1.2.0",
+         "successor": "release profiles in .agents/project.json",
          "migration": "legacy-skills-config.retire"},
     ]
 
