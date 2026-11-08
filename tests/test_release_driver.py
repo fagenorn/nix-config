@@ -1,6 +1,7 @@
 """The release driver library against the real TransactionStore (#128 spec §1, §2, §4, §7)."""
 import dataclasses
 import json
+import os
 import re
 import unittest
 from unittest import mock
@@ -467,6 +468,27 @@ class ActivationWatchTest(DriverCase):
         refusal = self.driver(unowned).shape_refusal()
         self.assertEqual((refusal.code, refusal.repair_id),
                          ("deploy_watch_unowned", "release.profile.activation_unbound"))
+
+    def test_the_watch_reads_run_without_the_tracker_credential_exclusions(self):
+        """The contract's `unset_before_invocation` names are absent from every watch read,
+        as for `deploy inspect`, and are back in this process afterwards."""
+        names = ["GITHUB_TOKEN", "GH_TOKEN"]
+        project = rs.project(self, profiles={"watched": support.watched_profile()})
+        project = dataclasses.replace(project, contract={
+            **project.contract, "bindings": {**project.contract["bindings"], "tracker": {
+                **project.contract["bindings"]["tracker"],
+                "credential_env": {"unset_before_invocation": names}}}})
+        watch = rs.ScriptedWatch(("satisfied", "deployed"))
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "expired", "GH_TOKEN": "expired",
+                                          "KEPT": "kept"}):
+            driver = self.watched(watch, project)
+            _, result = rs.release(driver, rs.candidate())
+            self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+            self.assertEqual(os.environ["GITHUB_TOKEN"], "expired")
+        self.assertEqual({request["kind"] for request in watch.requests}, {"effect", "predicate"})
+        for environment in watch.environments:
+            self.assertEqual([name for name in names if name in environment], [])
+            self.assertEqual(environment["KEPT"], "kept")
 
     def test_a_satisfied_watch_proves_and_succeeds_without_an_invoke(self):
         """AC4: satisfied."""

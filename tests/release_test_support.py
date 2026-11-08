@@ -25,7 +25,8 @@ def descriptors() -> dict:
 
 
 def base_contract() -> dict:
-    return {"bindings": {"tracker": {"kind": "github", "repo_slug": "fagenorn/nix-config"},
+    return {"bindings": {"tracker": {"kind": "github", "repo_slug": "fagenorn/nix-config",
+                                 "credential_env": {"unset_before_invocation": []}},
                          "vcs": {"default_branch": "main"}},
             "capabilities": {"deploy": {"support": "unsupported"}}}
 

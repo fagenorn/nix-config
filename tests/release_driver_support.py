@@ -1,5 +1,6 @@
 """Shared fixtures for the release driver suites (#128 spec, Test seams 2 and 3)."""
 import copy
+import os
 import tempfile
 from pathlib import Path
 
@@ -165,6 +166,7 @@ class ScriptedWatch:
         self.effects = list(effects) or [("satisfied", "deployed")]
         self.running = running
         self.requests = []
+        self.environments = []
         self.crash_next_inspect = False
 
     def describe(self):
@@ -172,6 +174,7 @@ class ScriptedWatch:
 
     def inspect(self, request):
         self.requests.append(copy.deepcopy(request))
+        self.environments.append(dict(os.environ))
         if self.crash_next_inspect:
             self.crash_next_inspect = False
             raise Crash("deploy inspect")

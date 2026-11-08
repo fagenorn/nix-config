@@ -26,7 +26,8 @@ diverged or past the deadline (issue 555 D4, D5).
 
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -403,7 +404,8 @@ class Driver:
         missing = [action for given, action in listed.items() if given not in supplied]
         if missing:
             raise Refusal("confirmation_required", "confirm: " + ", ".join(missing))
-        router = _Router(self.compiled, self.registry)
+        router = _Router(self.compiled, self.registry, self.project.contract["bindings"][
+            "tracker"]["credential_env"]["unset_before_invocation"])
         legacy = None
         if plan.transaction is None:
             store = self.store(create=True)
@@ -507,10 +509,15 @@ class _Router:
 
     It holds one `core_binding` per adapter alias and picks by what a request names: the
     action's node for `inspect` and `invoke`, the collector (an alias) for `observe`. It adds
-    no seam: fixture adapters enter only through the driver's `registry` argument.
+    no seam: fixture adapters enter only through the driver's `registry` argument. Every
+    adapter call runs with the tracker's `credential_env.unset_before_invocation` names removed
+    from this process's environment, as `release deploy inspect` removes them, and restored
+    afterwards: the watch's `gh` child inherits its environment (issue 555).
     """
 
-    def __init__(self, compiled: Mapping[str, Any], registry: Mapping[str, Any]) -> None:
+    def __init__(self, compiled: Mapping[str, Any], registry: Mapping[str, Any],
+                 unset: Sequence[str] = ()) -> None:
+        self._unset = tuple(unset)
         self._bindings = {
             alias: release_adapter.core_binding(registry[identity["adapter"]], compiled, alias)
             for alias, identity in compiled["adapters"].items()}
@@ -523,14 +530,25 @@ class _Router:
             raise ValueError(f"action {name!r} is no node of the compiled profile")
         return self._bindings[self._alias[name]]
 
+    @contextmanager
+    def _credentials_excluded(self) -> Iterator[None]:
+        held = {name: os.environ.pop(name) for name in self._unset if name in os.environ}
+        try:
+            yield
+        finally:
+            os.environ.update(held)
+
     def inspect(self, request: Mapping[str, Any]) -> dict[str, str]:
-        return self._action(request).inspect(request)
+        with self._credentials_excluded():
+            return self._action(request).inspect(request)
 
     def invoke(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        return self._action(request).invoke(request)
+        with self._credentials_excluded():
+            return self._action(request).invoke(request)
 
     def observe(self, request: Mapping[str, Any]) -> dict[str, str]:
-        return self._bindings[request["collector"]].observe(request)
+        with self._credentials_excluded():
+            return self._bindings[request["collector"]].observe(request)
 
 
 class _Drive:
