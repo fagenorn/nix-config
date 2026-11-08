@@ -33,15 +33,13 @@ Build the packet from the operation document. Before invoking, classify the sele
 
 Any other flag or positional token (this skill owns model, effort, cwd and output, and a positional would displace the stdin packet), and any other argv, bare `["codex"]` included, is a **binding shape error**: a configuration error with no Codex call, no retry and no native fallback. It stops the operation the way `blocked` does, without a repair ID, with one error naming the operation, the `review_id`, the authored argv, the expected form `codex-companion task [--fresh] --reviewer <op>`, and the first failing cause in this order: an executable other than `codex-companion` (bare `codex` included), a subcommand other than `task`, a missing or mismatched `--reviewer`, an unsupported companion token.
 
-**Invocation.** Keep the command's base argv, cwd and declared env (unset only declared env names), append the exact tail, and send the whole packet on stdin, with no positional argument, in the foreground:
+**Invocation.** Keep the command's base argv, cwd and declared env (unset only declared env names), append the exact tail, and send the whole packet on stdin, with no positional argument, in the foreground, keeping its packet, stdout and stderr in its own `mktemp -d` directory, never at a fixed shared path:
 
 ```text
 bindings.commands[review_id].argv \
   --model gpt-6-astra --effort xhigh \
   --cwd <absolute-worktree> --json
 ```
-
-The companion's reviewer mode already forces a fresh, read-only, ephemeral thread with its own wall-clock budget.
 
 **Validation.** Require exit 0 and stdout that parses as exactly one JSON object with `status` `0`, empty `touchedFiles`, `runtime.model` `gpt-6-astra`, `runtime.reasoningEffort` `xhigh` and a non-empty `rawOutput` string (the companion's last agent message); then validate the operation's headings. Only that success establishes reviewer identity `Codex`.
 
