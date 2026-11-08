@@ -54,6 +54,7 @@ let
     "guard-policy"
     "lane-triage"
     "ledger-archive"
+    "ledger-snapshot"
     "launch-commit"
     "launch-scope"
     "orchestrate-control"
