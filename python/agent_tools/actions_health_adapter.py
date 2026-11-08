@@ -16,7 +16,7 @@ This module imports only the standard library and `agent_tools.canonical`: the r
 is `unknown`/`predicate_unsupported`, and every non-`satisfied` answer for that predicate stays in
 its derived reason space (D9). The released commit is `candidate.commit`, or, when the candidate
 binds a `merge`, the merge commit of that release PR (D6). Otherwise it runs `gh run list` by
-name with the caller's environment unchanged (the command applies the tracker's credential
+name with the caller's environment unchanged (the caller applies the tracker's credential
 binding, D10) and, only when the newest run at the released commit on the configured branch is
 completed, one `GET` of the health URL that follows no redirect and reads at most
 `HEALTH_BODY_LIMIT` bytes, all under one `COLLECTION_BUDGET_SECONDS` deadline. `satisfied` needs a `success` run whose commit the health
