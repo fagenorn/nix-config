@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "project": {
     "id": "fagenorn/nix-config",
     "name": "nix-config"
@@ -125,11 +125,6 @@
           ".agents/project.json"
         ]
       }
-    },
-    "deploy": {
-      "adapter": "none",
-      "command": null,
-      "config": {}
     }
   },
   "capabilities": {
@@ -159,9 +154,6 @@
     },
     "review.code": {
       "support": "supported"
-    },
-    "deploy": {
-      "support": "unsupported"
     }
   },
   "projections": [
@@ -181,8 +173,8 @@
     }
   ],
   "platform": {
-    "min_inclusive": "1.0.0",
-    "max_exclusive": "2.0.0"
+    "min_inclusive": "1.2.0",
+    "max_exclusive": "3.0.0"
   },
   "release": {
     "profiles": {
