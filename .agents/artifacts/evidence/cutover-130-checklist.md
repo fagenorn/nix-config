@@ -107,6 +107,8 @@ C2.c adopt-project verify --repo-root R
 
 Registration is the C2.a fleet row: `verify` reports `registered` false unless it registered, and no `--register` ran. Planning's nix-config finding (D16, `adoption-evidence-record`) now reads three failed ids; Nodo's fleet failure is as planned.
 
+Re-read after #583 (read-only, 2026-11-08T13:33:54Z): mbp /Users/anis/Projects/nodocom at de844daee933 dev 0 dirty, after https://github.com/elevenyellow/nodocom/pull/2603 merged as de844daee9339d3e99fa496908fd7354a0fa3255: C2.a exit 0, row compatible, platform 1.1.0; C2.b exit 0, fleet passed, no warning checks; C2.c exit 0, verify adopted, blockers 0. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
+
 Item verdict: **red**
 
 ### C3 — Approved bundle binds the candidate
@@ -394,6 +396,8 @@ C10.a conformance run --purpose doctor --repo-root R
 | eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C10.a | 2026-11-03T16:08:05Z | 0 | doctor passed; no warning checks; 0 suppressed or not_run; admission passed | green |
 | anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
 
+Re-read after #583 (read-only, 2026-11-08T13:33:54Z): mbp /Users/anis/Projects/nodocom at de844daee933 dev 0 dirty, after https://github.com/elevenyellow/nodocom/pull/2603 merged as de844daee9339d3e99fa496908fd7354a0fa3255: C10.a exit 0, doctor passed, no warning checks, 0 suppressed or not_run, admission passed. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
+
 Item verdict: **red**
 
 ### C11 — Deprecations shipped, zero users
@@ -468,7 +472,7 @@ These six items are `post` and `human-pending`: this attempt does not evaluate t
 | C11 mbp /Users/anis/Projects/arcwave | Arcwave: retire the tracked legacy skills config and its reader | #581 delivered (fagenorn/arcwave#227) |
 | C11 mbp /Users/anis/Projects/nodocom | Nodo: move the railway deploy off bindings.deploy | #582 filed |
 | C11 mbp /Users/anis/Projects/jarbird | JarBird github-actions-health deploy watch (release core) | #555 cited |
-| C2 mbp /Users/anis/Projects/nodocom; C10 mbp /Users/anis/Projects/nodocom | Nodo: repair the overbroad runtime-sentinel ignore rule | #583 filed |
+| C2 mbp /Users/anis/Projects/nodocom; C10 mbp /Users/anis/Projects/nodocom | Nodo: repair the overbroad runtime-sentinel ignore rule | #583 delivered (elevenyellow/nodocom#2603) |
 | C6 mbp /Users/anis/Projects/arcwave; C6 mbp /Users/anis/Projects/argus; C6 mbp /Users/anis/tmp/nix-config; C6 mbp /Users/anis/Projects/nodocom | Dispose of the refused legacy ledgers | #584 delivered |
 | C7 mbp /Users/anis/Projects/arcwave; C7 mbp /Users/anis/Projects/argus; C7 mbp /Users/anis/tmp/nix-config; C7 mbp /Users/anis/Projects/jarbird; C7 mbp /Users/anis/Projects/nodocom | Reconcile worktrees without a resumable mapping | #585 filed |
 | C2 mbp /Users/anis/tmp/nix-config | Keep bundle and trials JSON out of the adoption-evidence candidate set (D16) | #586 filed |

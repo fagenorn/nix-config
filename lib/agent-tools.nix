@@ -57,7 +57,6 @@ let
     "ledger-snapshot"
     "launch-commit"
     "launch-scope"
-    "orchestrate-control"
     "owner-actions"
     "promotion"
     "release"
