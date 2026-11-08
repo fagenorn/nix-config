@@ -32,11 +32,11 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel}]), plan_reviewed, plan_findings?, decisions?, done, fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when only rule findings were left and none came from Codex, runs one rules-only revise of it, dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
-// runs final review, verify and ship again (ship reuses an open PR). Every resume re-reads the facts of each branch cont.plan declares (a missing or wrong one stops setup with branch_heads.<name> missing); cont.verified and cont.final_reviewed carry branches { <name>: <head> }, and a resume reuses either only when every declared head the setup re-read is unchanged. When the PR
+// runs final review, verify and ship again (ship reuses an open PR). Every resume re-reads the facts of each branch cont.plan declares (a missing or wrong one stops setup with branch_heads.<name> missing, but only for a plan whose declarations are valid: an invalid one is dropped by the Plan section first); cont.verified and cont.final_reviewed carry branches { <name>: <head> }, and a resume reuses either only when every declared head the setup re-read is unchanged. When the PR
 // is already merged, the re-adopt goes straight to close-out. A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
 // sync merge and its acceptance drops the marker. A result also carries dead_agents,
@@ -109,10 +109,12 @@ const IMPL = {
   required: ['status', 'notes'],
 }
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
+// A wave that may commit on several branches reports the issue worktree's commits only in start_head and commit.
+const IMPL_RETURN_AT = w => `Return start_head (git -C ${w} rev-parse HEAD before you change anything) and commit (the full sha of git -C ${w} rev-parse HEAD after your last commit): both name the issue worktree ${w}, never a declared branch's commit (those go in branch_heads); when you commit nothing there, commit equals start_head.`
 const STRS = { type: 'array', items: { type: 'string' } }
 // A forge or agent may report a short sha; the same head must not read as moved.
 const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }
-const BRANCH_HEADS = { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' } }, required: ['name', 'head'] } }
+const BRANCH_HEADS = { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' } }, required: ['name', 'head'] } }
 const FIX_WAVE_IMPL = { ...IMPL, properties: { ...IMPL.properties, branch_heads: BRANCH_HEADS } }
 const normSha = x => x.trim().toLowerCase()
 const sameSha = (a, b) => {
@@ -181,13 +183,51 @@ const refProblem = s => {
 }
 const canonPath = p => typeof p === 'string' && PATH_RE.test(p) && p.split('/').slice(1).every(c => c !== '' && c !== '.' && c !== '..')
 const samePath = (a, b) => typeof a === 'string' && typeof b === 'string' && a.replace(/\/+$/, '').toLowerCase() === b.replace(/\/+$/, '').toLowerCase()
-const BRANCH_FACTS = 'head, current and toplevel: git -C <its worktree> rev-parse HEAD (the full sha), git -C <its worktree> branch --show-current and git -C <its worktree> rev-parse --show-toplevel'
+const BRANCH_FACTS = 'head, current, toplevel and common_dir: git -C <its worktree> rev-parse HEAD (the full sha), git -C <its worktree> branch --show-current, git -C <its worktree> rev-parse --show-toplevel and git -C <its worktree> rev-parse --path-format=absolute --git-common-dir'
+const REPO_COMMON = typeof REPO === 'string' ? `${REPO.replace(/\/+$/, '')}/.git` : null
 const factProblem = (b, f) => {
   if (!isEntry(f)) return 'no facts read'
   if (typeof f.head !== 'string' || !SHA_RE.test(normSha(f.head))) return 'no full head sha'
   if (f.current !== b.name) return `the worktree is on ${JSON.stringify(f.current)}, not ${b.name}`
   if (!samePath(f.toplevel, b.worktree)) return `the worktree is not its own checkout (toplevel ${JSON.stringify(f.toplevel)})`
+  if (!samePath(f.common_dir, REPO_COMMON)) return `the worktree belongs to another repository (common dir ${JSON.stringify(f.common_dir)})`
   return null
+}
+
+// The problems with a plan's declared branches (#713); empty when valid. Never throws on any JSON value.
+const branchProblems = (p, w = W, int = INT) => {
+  const show = JSON.stringify
+  const out = [], good = []
+  if (p.branches !== undefined) {
+    if (!Array.isArray(p.branches)) return ['branches is not a list']
+    const protectedNames = [int, setup.default_branch, setup.branch].map(n => String(n).toLowerCase())
+    p.branches.forEach((b, i) => {
+      if (!isEntry(b)) { out.push(`branches[${i}] is not an object`); return }
+      const before = out.length
+      const rp = refProblem(b.name)
+      if (rp) out.push(`branch ${show(b.name)} ${rp}`)
+      else if (b.name.split('/').some(c => REF_NAMESPACES.includes(c.toLowerCase()))) out.push(`branch ${show(b.name)} is a namespaced ref; name the branch directly`)
+      else if (protectedNames.includes(b.name.toLowerCase())) out.push(`branch ${b.name} is a protected branch`)
+      else if (good.some(g => g.name.toLowerCase() === b.name.toLowerCase())) out.push(`branch ${b.name} is declared twice`)
+      if (!canonPath(b.worktree)) out.push(`branch ${show(b.name)}: worktree ${show(b.worktree)} is not a canonical absolute path`)
+      else if (samePath(b.worktree, w) || samePath(b.worktree, REPO)) out.push(`branch ${show(b.name)}: worktree ${show(b.worktree)} is the delivery worktree or the shared checkout`)
+      else if (good.some(g => samePath(g.worktree, b.worktree))) out.push(`branch ${show(b.name)}: worktree ${show(b.worktree)} is declared twice`)
+      const bp = refProblem(b.base)
+      if (bp) out.push(`branch ${show(b.name)}: base ${show(b.base)} ${bp}`)
+      const fp = factProblem(b, b)
+      if (fp) out.push(`branch ${show(b.name)}: ${fp}`)
+      // Admission only: a resume may find a task's own uncommitted edits in the worktree, but a plan declares a worktree with none.
+      if (b.clean !== true) out.push(`branch ${show(b.name)}: the worktree is not clean (git status --porcelain must print nothing at declaration)`)
+      if (out.length === before) good.push(b)
+    })
+  }
+  if (Array.isArray(p.tasks)) {
+    for (const t of p.tasks) {
+      if (!isEntry(t) || t.branch === undefined) continue
+      if (typeof t.branch !== 'string' || !good.some(g => g.name === t.branch)) out.push(`task ${show(t.n)}: branch ${show(t.branch)} is not declared`)
+    }
+  }
+  return out
 }
 
 // ---------------- Setup ----------------
@@ -218,7 +258,7 @@ const EXISTING_READ = (branch, path) => `Read what already exists for the delive
 // The head the final review passed at, when a resume's cont names one: the setup then reports how HEAD relates to it.
 const FR_HEAD = CONT && CONT.final_reviewed && present(CONT.final_reviewed.head) ? CONT.final_reviewed.head : null
 const FR_ACCEPTED = FR_HEAD && Array.isArray(CONT.final_reviewed.accepted) ? CONT.final_reviewed.accepted.filter(present) : []
-const BRANCH_READ = CONT && CONT.plan && declared(CONT.plan).length ? ` For each declared branch of the plan (${declared(CONT.plan).map(b => `${b.name} in ${b.worktree}`).join(', ')}) return branch_heads: one {name, head, current, toplevel} each, with ${BRANCH_FACTS}; give a missing worktree no entry.` : ''
+const BRANCH_READ = CONT && CONT.plan && declared(CONT.plan).length ? ` For each declared branch of the plan (${declared(CONT.plan).map(b => `${b.name} in ${b.worktree}`).join(', ')}) return branch_heads: one {name, head, current, toplevel, common_dir} each, with ${BRANCH_FACTS}; give a missing worktree no entry.` : ''
 const SINCE_REVIEWED = FR_HEAD ? ` The final review passed at ${FR_HEAD}: after git -C <worktree> fetch origin, return since_reviewed: same when HEAD is ${FR_HEAD}; merge_only when git -C <worktree> merge-base --is-ancestor ${FR_HEAD} HEAD succeeds, git -C <worktree> rev-list --no-merges ${FR_HEAD}..HEAD ^origin/<integration_branch> prints nothing (the head only gained integration-branch merges), and every merge in git -C <worktree> rev-list --merges ${FR_HEAD}..HEAD ${FR_ACCEPTED.length ? `is one of ${FR_ACCEPTED.join(', ')} or ` : ''}is a clean two-parent merge, meaning git -C <worktree> merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C <worktree> rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged); else moved.` : ''
 const setup = await call(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
 1. ${CONTRACT_READ}
@@ -247,7 +287,10 @@ for (const k of ['code', 'plan']) {
   if (!present(st)) missing.push(`review_state.${k}`)
   else if (st === 'available' && !(setup.review && present(setup.review[k]))) missing.push(`review.${k}`)
 }
-if (CONT && CONT.plan && !setup.merged_pr) for (const b of declared(CONT.plan)) if (typeof b.name === 'string' && factProblem(b, factOf(setup.branch_heads, b.name))) missing.push(`branch_heads.${b.name}`)
+// A kept plan with an invalid declaration is dropped by the Plan section below, so no fact of it is demanded here (the plan check comes first).
+if (CONT && CONT.plan && !setup.merged_pr && !missing.length && !branchProblems(CONT.plan, CONT.setup && (CONT.setup.worktree || CONT.setup.worktree_path), setup.integration_branch).length) {
+  for (const b of declared(CONT.plan)) if (typeof b.name === 'string' && factProblem(b, factOf(setup.branch_heads, b.name))) missing.push(`branch_heads.${b.name}`)
+}
 if (missing.length) return { stage: 'setup', result: setup, missing, ...deadOf(), ...(CONT ? { cont: CONT } : {}) }
 if (CONT) Object.assign(setup, { worktree_path: CONT.setup.worktree_path, worktree: CONT.setup.worktree, base_sha: CONT.setup.base_sha, plan_dir: CONT.setup.plan_dir, ...(CONT.setup.holder ? { holder: CONT.setup.holder } : {}) })
 setup.holder = (CONT && CONT.setup && CONT.setup.holder) || `${setup.host}/${HOLDER_ID}`
@@ -449,44 +492,11 @@ const PLAN_SCHEMA = {
     acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human'] }, verify: { type: 'object' }, lint: { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } } } } }, metric: { type: 'boolean' } }, required: ['id', 'text', 'kind'] } },
     scripts: STRS,
     tasks: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, title: { type: 'string' }, file: { type: 'string' }, risk: { type: 'string', enum: ['mechanical', 'low', 'standard', 'security'] }, branch: { type: 'string' } }, required: ['n', 'title', 'file', 'risk'] } },
-    branches: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, worktree: { type: 'string' }, base: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' } }, required: ['name', 'worktree', 'base', 'head', 'current', 'toplevel'] } },
+    branches: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, worktree: { type: 'string' }, base: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' }, clean: { type: 'boolean' } }, required: ['name', 'worktree', 'base', 'head', 'current', 'toplevel', 'common_dir', 'clean'] } },
   },
   required: ['status'],
 }
 const wellFormed = p => !!(p && p.status === 'planned' && present(p.plan_root) && Array.isArray(p.acceptance) && p.acceptance.length && Array.isArray(p.tasks) && p.tasks.length)
-// The problems with a plan's declared branches (#713); empty when valid. Never throws on any JSON value.
-const branchProblems = p => {
-  const show = JSON.stringify
-  const out = [], good = []
-  if (p.branches !== undefined) {
-    if (!Array.isArray(p.branches)) return ['branches is not a list']
-    const protectedNames = [INT, setup.default_branch, setup.branch].map(n => String(n).toLowerCase())
-    p.branches.forEach((b, i) => {
-      if (!isEntry(b)) { out.push(`branches[${i}] is not an object`); return }
-      const before = out.length
-      const rp = refProblem(b.name)
-      if (rp) out.push(`branch ${show(b.name)} ${rp}`)
-      else if (b.name.split('/').some(c => REF_NAMESPACES.includes(c.toLowerCase()))) out.push(`branch ${show(b.name)} is a namespaced ref; name the branch directly`)
-      else if (protectedNames.includes(b.name.toLowerCase())) out.push(`branch ${b.name} is a protected branch`)
-      else if (good.some(g => g.name.toLowerCase() === b.name.toLowerCase())) out.push(`branch ${b.name} is declared twice`)
-      if (!canonPath(b.worktree)) out.push(`branch ${show(b.name)}: worktree ${show(b.worktree)} is not a canonical absolute path`)
-      else if (samePath(b.worktree, W) || samePath(b.worktree, REPO)) out.push(`branch ${show(b.name)}: worktree ${show(b.worktree)} is the delivery worktree or the shared checkout`)
-      else if (good.some(g => samePath(g.worktree, b.worktree))) out.push(`branch ${show(b.name)}: worktree ${show(b.worktree)} is declared twice`)
-      const bp = refProblem(b.base)
-      if (bp) out.push(`branch ${show(b.name)}: base ${show(b.base)} ${bp}`)
-      const fp = factProblem(b, b)
-      if (fp) out.push(`branch ${show(b.name)}: ${fp}`)
-      if (out.length === before) good.push(b)
-    })
-  }
-  if (Array.isArray(p.tasks)) {
-    for (const t of p.tasks) {
-      if (!isEntry(t) || t.branch === undefined) continue
-      if (typeof t.branch !== 'string' || !good.some(g => g.name === t.branch)) out.push(`task ${show(t.n)}: branch ${show(t.branch)} is not declared`)
-    }
-  }
-  return out
-}
 const HUMAN_REASONS = ['senses', 'hands', 'credentials', 'money', 'taste']
 const RULE_OF = { pre_merge_only: 'R1', approval_ask: 'R2', reason_required: 'R3' }
 // The program-checkable violations of the acceptance planning rules (R1 to R5); the rules file is the source, never copied here.
@@ -520,7 +530,7 @@ const SPEC = args.spec ? `\nThe approved design spec for this issue is ${args.sp
 const PLAN_RUBRIC = `an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents`
 const FACTS = present(setup.details) ? `\nSetup facts: ${setup.details}` : ''
 const planPrompt = extra => `${CTX}
-Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}; give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule R1-R8 of ~/.agents/standards/acceptance-planning.md (read it).${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
+Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel, common_dir, clean}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}, and clean: true only when git -C <its worktree> status --porcelain prints nothing (a worktree with any staged, unstaged or untracked change is not declared); give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule R1-R8 of ~/.agents/standards/acceptance-planning.md (read it).${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
 ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
 const takePlan = (p, label) => {
@@ -821,7 +831,7 @@ if (finalFindings.length) {
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FOCUSED} ${IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FOCUSED} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
     if (!implDone(fw)) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves })
     const collected = []
     for (const b of declared(plan)) {

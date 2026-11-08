@@ -2332,7 +2332,7 @@ class SourceTest(unittest.TestCase):
 
 
 BR = {"name": "cand", "worktree": "/r/.wt/cand", "base": "origin/dev", "head": "b" * 40,
-      "current": "cand", "toplevel": "/r/.wt/cand"}
+      "current": "cand", "toplevel": "/r/.wt/cand", "common_dir": "/r/.git", "clean": True}
 BR_PUSH = "git -C /r/.wt/cand push origin cand"
 NO_FORCE = "Never push with --force, --force-with-lease or a +refspec, and never push dev or main."
 TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug on the candidate"}]}
@@ -2359,6 +2359,9 @@ class DeclaredBranchTest(unittest.TestCase):
     def test_declared_branch_grants_non_force_push_to_its_fix_agent(self):
         result, calls = run(replies={"plan": bplan(), "review-2": TASK_FINDING})
         self.assertEqual(result["stage"], "done")
+        planner = prompt(calls, "plan")
+        self.assertIn("--git-common-dir", planner)
+        self.assertIn("status --porcelain", planner)
         cut = labels(calls).index("plan-review") + 1
         post = calls[cut:]
         granted = {c["label"] for c in post if c["agentType"] not in REVIEWERS}
@@ -2434,6 +2437,10 @@ class DeclaredBranchTest(unittest.TestCase):
             "relative worktree": bplan([at("wt/cand")]),
             "on another branch": bplan([dict(BR, current="issue-9-x")]),
             "not its own checkout": bplan([dict(BR, worktree="/r/sub", toplevel="/r")]),
+            "dirty": bplan([dict(BR, clean=False)]),
+            "no clean": bplan([{k: v for k, v in BR.items() if k != "clean"}]),
+            "other repository": bplan([dict(BR, common_dir="/other/.git")]),
+            "no common dir": bplan([{k: v for k, v in BR.items() if k != "common_dir"}]),
             "no toplevel": bplan([{k: v for k, v in BR.items() if k != "toplevel"}]),
             "no head": bplan([{k: v for k, v in BR.items() if k != "head"}]),
             "short head": bplan([dict(BR, head="b" * 7)]),
@@ -2464,12 +2471,38 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertTrue(result["branch_problems"])
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},
                 "plan": bplan([dict(BR, name="dev", current="dev")], task_branch="dev"), "plan_reviewed": True, "done": []}
-        # branch_heads keeps the Task 4 resume re-read satisfied, so the stop is the plan check itself.
-        facts = [{"name": "dev", "head": "b" * 40, "current": "dev", "toplevel": "/r/.wt/cand"}]
+        facts = [{"name": "dev", "head": "b" * 40, "current": "dev", "toplevel": "/r/.wt/cand", "common_dir": "/r/.git"}]
         result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"branch_heads": facts}})
         self.assertEqual((result["stage"], result["step"]), ("plan", "resume"))
         self.assertTrue(result["branch_problems"])
         self.assertNotIn("impl-1", labels(calls))
+
+    def test_a_kept_plan_with_an_invalid_declaration_is_dropped_on_resume_whatever_the_facts_read(self):
+        """The plan check comes before the branch-fact check: honest facts of an invalid declaration must not stop setup."""
+        cont_of = lambda plan: {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},
+                                "plan": plan, "plan_reviewed": True, "done": []}
+        honest = {
+            "delivery worktree": (at("/r/.wt/w-issue-9-x"), {"current": "issue-9-x", "toplevel": "/r/.wt/w-issue-9-x"}),
+            "shared checkout": (at("/r"), {"current": "main", "toplevel": "/r"}),
+            "relative worktree": (at("wt/cand"), {"toplevel": "/r/wt/cand"}),
+            "dot-dot worktree": (at("/r/.wt/../cand"), {"toplevel": "/r/.wt/cand"}),
+            "on another branch": (dict(BR, current="issue-9-x"), {"current": "issue-9-x"}),
+            "not its own checkout": (dict(BR, worktree="/r/sub", toplevel="/r"), {"toplevel": "/r"}),
+            "integration branch": (dict(BR, name="dev", current="dev"), {"name": "dev", "current": "dev"}),
+            "dirty": (dict(BR, clean=False), {}),
+            "unread": (dict(BR, common_dir="/other/.git"), None),
+        }
+        for name, (entry, read) in honest.items():
+            with self.subTest(name=name):
+                tb = entry["name"]
+                cont = cont_of(bplan([entry], task_branch=tb))
+                fact = None if read is None else dict(self.facts("b" * 40, name=tb)[0], **read)
+                patch = {"head": TIP} if fact is None else {"head": TIP, "branch_heads": [fact]}
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": patch})
+                self.assertEqual((result["stage"], result["step"]), ("plan", "resume"))
+                self.assertTrue(result["branch_problems"])
+                self.assertIsNone(result["cont"]["plan"])
+                self.assertNotIn("impl-1", labels(calls))
 
     RANGE = "git -C /r/.wt/cand diff origin/dev...cand"
     FINAL_FINDING = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "candidate drops a key"}]}
@@ -2498,6 +2531,10 @@ class DeclaredBranchTest(unittest.TestCase):
                              patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}, "fix-wave": moved})
         self.assertEqual(stopped["stage"], "verify")
         self.assertIn("branch_heads", prompt(calls, "fix-wave"))
+        wave = prompt(calls, "fix-wave")
+        self.assertIn("git -C /r/.wt/w-issue-9-x rev-parse HEAD", wave)
+        self.assertIn("never a declared branch's commit", wave)
+        self.assertNotIn("(git rev-parse HEAD before", wave)
         self.assertIn(f"git -C /r/.wt/cand diff {'d' * 40}..{'e' * 40}", prompt(calls, "fix-wave-review"))
         self.assertNotIn("push origin", prompt(calls, "fix-wave-review"))
         self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "branches": {"cand": "e" * 40}})
@@ -2512,7 +2549,7 @@ class DeclaredBranchTest(unittest.TestCase):
 
     @staticmethod
     def facts(head, name="cand", **more):
-        return [dict({"name": name, "head": head, "current": name, "toplevel": "/r/.wt/cand"}, **more)]
+        return [dict({"name": name, "head": head, "current": name, "toplevel": "/r/.wt/cand", "common_dir": "/r/.git"}, **more)]
 
     def test_resume_where_only_the_declared_branch_changed_reviews_again(self):
         stopped, _ = run(replies={"plan": bplan(), "verify": None},
@@ -2525,6 +2562,7 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertIn("cand in /r/.wt/cand", prompt(calls, "setup"))
         self.assertIn("branch_heads", prompt(calls, "setup"))
         self.assertIn("branch --show-current", prompt(calls, "setup"))
+        self.assertIn("--git-common-dir", prompt(calls, "setup"))
         moved, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40)}})
         self.assertEqual(moved["stage"], "done")
         self.assertIn("final-1", labels(calls))
@@ -2534,6 +2572,8 @@ class DeclaredBranchTest(unittest.TestCase):
         wrong = {"unread": None, "short head": self.facts("d" * 7),
                  "on another branch": self.facts("d" * 40, current="issue-9-x"),
                  "not its own checkout": self.facts("d" * 40, toplevel="/r"),
+                 "another repository": self.facts("d" * 40, common_dir="/other/.git"),
+                 "no common dir": self.facts("d" * 40, common_dir=None),
                  "another name": self.facts("d" * 40, name="other")}
         for name, heads in wrong.items():
             with self.subTest(name=name):
