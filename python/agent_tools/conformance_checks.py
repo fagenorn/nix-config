@@ -188,10 +188,13 @@ def check_contract_resolvable(context: Context) -> Outcome:
             "passed", facts=compatibility_facts(resolver, manifest, source))
 
         stage = "projection_fresh"
-        context.bindings = resolver.normalize_bindings(source["bindings"], root)
+        # The resolver reads a schema-2 contract through its resolved-1 shape
+        # (P3); conformance composes the same stages, so it reads that shape too.
+        resolved = resolver.resolved_one_form(source)
+        context.bindings = resolver.normalize_bindings(resolved["bindings"], root)
         context.capabilities = resolver.compute_capabilities(
-            context.bindings, root, source["capabilities"], source["release"],
-            source)
+            context.bindings, root, resolved["capabilities"], resolved["release"],
+            resolved)
         resolver.validate_projections(root, source)
         context.stages["projection_fresh"] = Outcome("passed")
 

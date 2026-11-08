@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -25,6 +26,7 @@ from .conformance_test_support import (
     Rebinding, doctor, fixture, load_module, make_root, make_stub_bin,
     mutated_manifest, platform_env, run,
 )
+from .test_resolve_project import make_project_root, schema_two, source_contract
 
 
 def valid_report() -> dict:
@@ -551,6 +553,27 @@ class NotOnboardedTest(unittest.TestCase):
             self.assertEqual(
                 [report["subject"]["root"], report["subject"]["project_id"]],
                 [str(root.resolve()), "fagenorn/nix-config"])
+
+
+class SchemaTwoContractTest(ReportAssertions, unittest.TestCase):
+    """P3: conformance judges a schema-2 contract through the resolved-1 shape
+    `resolve` reads, so a contract `resolve` accepts is not an internal failure."""
+
+    def statuses(self, contract: dict) -> dict:
+        root = make_project_root(contract)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        report, by_id = doctor(self, root, "--offline")
+        self.assert_validates(report)
+        return {check_id: [c["status"], c["reason_code"], c["facts"]]
+                for check_id, c in by_id.items()}
+
+    def test_a_schema_two_contract_passes_the_ladder_as_its_schema_one_twin_does(self):
+        twin = self.statuses(source_contract())
+        got = self.statuses(schema_two(source_contract()))
+        self.assertEqual(got["repository.contract.resolvable"][0], "passed")
+        self.assertEqual(
+            {k: v for k, v in got.items() if k != "compatibility.contract.schema_supported"},
+            {k: v for k, v in twin.items() if k != "compatibility.contract.schema_supported"})
 
 
 class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
