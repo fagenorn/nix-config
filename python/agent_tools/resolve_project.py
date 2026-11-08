@@ -68,18 +68,13 @@ CAPABILITY_NAMES = (
     "review.plan",
     "review.code",
     "release",
-    "deploy",
 )
 # D1: `capabilities.release` is derived from the `release` member, never
 # authored, so an authored contract declares these ten and the snapshot all
-# eleven.
+# ten.
 AUTHORED_CAPABILITY_NAMES = tuple(
     name for name in CAPABILITY_NAMES if name != "release")
-BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow", "deploy")
-# Project schema 2 retires the deploy watch (P3): the two members it forbids. The
-# schema-2 sets are the schema-1 sets minus `deploy`; the contract's own
-# `schema_version` chooses between them, never a fallback.
-SCHEMA_TWO_RETIRED = ("/bindings/deploy", "/capabilities/deploy")
+BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow")
 CAPABILITY_STATES = ("available", "unsupported", "blocked")
 AUTHORED_SUPPORT = ("supported", "unsupported")
 ERROR_CODES = (
@@ -173,7 +168,6 @@ ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
 LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
 VERIFICATION_CONDITION_MEMBERS = ("when_changed", "skip_reason")
 LIGHT_LANE_MODES = ("shadow", "active")
-DEPLOY_MEMBERS = ("adapter", "command", "config")
 PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
 
 # D6: what each capability demands of the bindings when it is declared
@@ -181,7 +175,6 @@ PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
 # predicate the authored value must satisfy; failing one is `invalid_contract`,
 # never `blocked`. Only a declared `supported` capability is walked, so an
 # `unsupported` one imposes none of its rows on the bindings.
-# The deploy command row is skipped for a registered release adapter, which is itself the deploy reader (issue 465 D3).
 CAPABILITY_BINDING_REQUIREMENTS = {
     "tracker": (
         (("tracker", "kind"), lambda value: value != "none"),
@@ -197,10 +190,6 @@ CAPABILITY_BINDING_REQUIREMENTS = {
         (("workflow", "review", "plan"), lambda value: value is not None),),
     "review.code": (
         (("workflow", "review", "code"), lambda value: value is not None),),
-    "deploy": (
-        (("deploy", "adapter"), lambda value: value != "none"),
-        (("deploy", "command"), lambda value: value is not None),
-    ),
 }
 
 # The `paths` list each `knowledge.*` capability reads its prerequisite from.
@@ -436,7 +425,7 @@ class NonFiniteNumber(Exception):
 def reject_non_finite(token: str) -> object:
     """`parse_constant` for `json.loads`: the three bare tokens are refused.
 
-    Python's decoder accepts them as an extension, and `deploy.config` is an
+    Python's decoder accepts them as an extension, and an adapter `config` is an
     unconstrained dict, so an accepted token would travel through validation
     untouched and land in a snapshot that no standards JSON parser can read —
     from a tool whose whole contract is that its output can be trusted. The
@@ -871,96 +860,14 @@ def validate_verification_conditions(workflow: dict, violations: list[dict]) -> 
                      "unconditional", "contract.workflow.no_unconditional_verification"))
 
 
-def registered_deploy_adapter(deploy: object) -> str | None:
-    """The deploy binding's adapter when it is a `release_adapter.REGISTRY` key, else None."""
-    adapter = deploy.get("adapter") if isinstance(deploy, dict) else None
-    return adapter if isinstance(adapter, str) and adapter in release_adapter.REGISTRY else None
-
-
-def validate_deploy(deploy: dict, commands: dict | None, tracker: dict | None,
-                    violations: list[dict]) -> None:
-    """Every shape violation of `bindings.deploy`, whatever the authored support.
-
-    A registered release adapter adds four rules (issue 465 D3, D15): `command` must be null,
-    the descriptor must have one watch operation, `config` must pass that operation's closed
-    schema, and the tracker must be GitHub. Any other adapter keeps a free-form `config` and
-    a `command` id checked against `commands`.
-    """
-    check_exact_members(
-        deploy, "/bindings/deploy", DEPLOY_MEMBERS, "deploy", violations)
-    if "adapter" in deploy:
-        check_string(deploy["adapter"], "/bindings/deploy/adapter", "deploy",
-                     violations)
-    registered = registered_deploy_adapter(deploy)
-    if "command" in deploy and deploy["command"] is not None:
-        if registered is not None:
-            violations.append(violation(
-                "/bindings/deploy/command",
-                f"must be null: the registered adapter '{registered}' is the deploy reader",
-                "contract.deploy.command_conflict"))
-        else:
-            check_command_id(
-                deploy["command"], "/bindings/deploy/command", commands, violations)
-    config_ok = "config" in deploy and check_object(
-        deploy["config"], "/bindings/deploy/config", "deploy", violations)
-    if registered is None:
-        return
-    descriptor = release_adapter.DESCRIPTORS[registered]
-    operation = release_adapter.watch_operation(descriptor)
-    if operation is None:
-        violations.append(violation(
-            "/bindings/deploy/adapter",
-            f"adapter '{registered}' has no single operation a deploy watch can inspect",
-            "contract.deploy.adapter_unwatchable"))
-    elif config_ok:
-        schema = descriptor["operations"][operation]["config_schema"]
-        for problem in release_adapter.config_problems(schema, deploy["config"]):
-            violations.append(violation(
-                "/bindings/deploy/config", problem, "contract.deploy.config_invalid"))
-    if isinstance(tracker, dict) and "kind" in tracker and tracker["kind"] != "github":
-        violations.append(violation(
-            "/bindings/deploy/adapter",
-            f"adapter '{registered}' watches a GitHub repository, and the tracker is not GitHub",
-            "contract.deploy.tracker_not_github"))
-
-
-def is_schema_two(source: dict) -> bool:
-    version = source.get("schema_version")
-    return version == 2 and not isinstance(version, bool)
-
-
-def binding_namespaces(source: dict) -> tuple[str, ...]:
-    if is_schema_two(source):
-        return tuple(n for n in BINDING_NAMESPACES if n != "deploy")
-    return BINDING_NAMESPACES
-
-
-def authored_capability_names(source: dict) -> tuple[str, ...]:
-    if is_schema_two(source):
-        return tuple(n for n in AUTHORED_CAPABILITY_NAMES if n != "deploy")
-    return AUTHORED_CAPABILITY_NAMES
-
-
-def retired_member(pointer: str, violations: list[dict]) -> None:
-    section = pointer.strip("/").replace("/", ".")
-    violations.append(violation(
-        pointer, "retired in project schema 2: remove this member",
-        f"contract.{section}.retired"))
-
-
 def validate_bindings(source: dict, violations: list[dict]) -> None:
     bindings = source.get("bindings")
     if not check_object(bindings, "/bindings", "bindings", violations):
         return
-    namespaces = binding_namespaces(source)
-    schema_two_source = is_schema_two(source)
     check_exact_members(
-        bindings, "/bindings", namespaces, "bindings", violations,
-        optional=("deploy",) if schema_two_source else ())
-    if schema_two_source and "deploy" in bindings:
-        retired_member("/bindings/deploy", violations)
+        bindings, "/bindings", BINDING_NAMESPACES, "bindings", violations)
     present = {}
-    for namespace in namespaces:
+    for namespace in BINDING_NAMESPACES:
         if namespace not in bindings:
             continue
         if check_object(
@@ -978,22 +885,16 @@ def validate_bindings(source: dict, violations: list[dict]) -> None:
         validate_commands(commands, violations)
     if "workflow" in present:
         validate_workflow(present["workflow"], commands, violations)
-    if "deploy" in present:
-        validate_deploy(present["deploy"], commands, present.get("tracker"), violations)
 
 
 def validate_capabilities(source: dict, violations: list[dict]) -> None:
     capabilities = source.get("capabilities")
     if not check_object(capabilities, "/capabilities", "capabilities", violations):
         return
-    names = authored_capability_names(source)
-    schema_two_source = is_schema_two(source)
     check_exact_members(
-        capabilities, "/capabilities", names, "capabilities",
-        violations, optional=("deploy",) if schema_two_source else ())
-    if schema_two_source and "deploy" in capabilities:
-        retired_member("/capabilities/deploy", violations)
-    for name in names:
+        capabilities, "/capabilities", AUTHORED_CAPABILITY_NAMES, "capabilities",
+        violations)
+    for name in AUTHORED_CAPABILITY_NAMES:
         if name not in capabilities:
             continue
         pointer = f"/capabilities/{name}"
@@ -1031,15 +932,12 @@ def validate_capability_bindings(source: dict) -> list[dict]:
     bindings = source.get("bindings")
     if not isinstance(capabilities, dict) or not isinstance(bindings, dict):
         return violations
-    for name in authored_capability_names(source):
+    for name in AUTHORED_CAPABILITY_NAMES:
         declaration = capabilities.get(name)
         if (not isinstance(declaration, dict)
                 or declaration.get("support") != "supported"):
             continue
         for path, is_complete in CAPABILITY_BINDING_REQUIREMENTS[name]:
-            if path == ("deploy", "command") and registered_deploy_adapter(
-                    bindings.get("deploy")) is not None:
-                continue
             found, value = find_binding(bindings, path)
             if found and not is_complete(value):
                 violations.append(violation(
@@ -1133,18 +1031,6 @@ def projection_paths(source: object) -> list[str]:
     return paths
 
 
-def without_deploy(source: dict) -> dict:
-    """The source as the release grammar judges it: a schema-2 contract's retired
-    deploy members are reported once, by their own violation, never again here."""
-    if not is_schema_two(source):
-        return source
-    out = dict(source)
-    for key in ("bindings", "capabilities"):
-        if isinstance(out.get(key), dict):
-            out[key] = {k: v for k, v in out[key].items() if k != "deploy"}
-    return out
-
-
 def validate_contract(source: dict, manifest: dict) -> list[dict]:
     """Every shape violation of the authored source, collected in one pass.
 
@@ -1185,8 +1071,7 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
         # D2: the grammar's violations join the one ordered list; what the
         # admissibility rules refuse is a capability state, never a violation.
         violations.extend(
-            release_profile.grammar_violations(
-                source["release"], without_deploy(source)))
+            release_profile.grammar_violations(source["release"], source))
     violations.extend(validate_capability_bindings(source))
     return violations
 
@@ -1238,9 +1123,7 @@ def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | Non
     """The first failing prerequisite's reason code, or None when all pass.
 
     Only the declared `supported` capabilities reach here, and D6 has already
-    refused an incomplete binding, so every member read below is present. A deploy binding
-    that names a registered release adapter is ready when every executable its descriptor
-    declares resolves on `PATH`, else `release_adapter_unavailable` (issue 465 D3).
+    refused an incomplete binding, so every member read below is present.
     """
     if name == "tracker":
         # The tracker CLI is not a `commands` entry, so its base is the root.
@@ -1268,13 +1151,6 @@ def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | Non
         ids = [bindings["workflow"]["review"]["plan"]]
     elif name == "review.code":
         ids = [bindings["workflow"]["review"]["code"]]
-    elif name == "deploy":
-        adapter = registered_deploy_adapter(bindings["deploy"])
-        if adapter is not None:
-            executables = release_adapter.DESCRIPTORS[adapter]["executables"]
-            return None if all(resolves_on_path(executable, root)
-                               for executable in executables) else "release_adapter_unavailable"
-        ids = [bindings["deploy"]["command"]]
     else:
         raise ValueError(f"unknown capability name: {name!r}")
     return None if commands_resolve(bindings, ids) else "command_missing"
@@ -1353,17 +1229,6 @@ def compute_capabilities(bindings: dict, root: Path, declarations: dict,
     return resolved
 
 
-def resolved_one_form(source: dict) -> dict:
-    """A schema-2 source as the resolved-1 shape reads it: a deep copy carrying the
-    inert deploy binding and an unsupported deploy capability. `source` is untouched."""
-    if not is_schema_two(source):
-        return source
-    out = copy.deepcopy(source)
-    out["bindings"]["deploy"] = {"adapter": "none", "command": None, "config": {}}
-    out["capabilities"]["deploy"] = {"support": "unsupported"}
-    return out
-
-
 def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # Readiness reads the normalized bindings, so each command's `cwd` is
     # already the absolute base a relative argv[0] resolves against (D22).
@@ -1372,9 +1237,6 @@ def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # `resolved_schema_version`, the schema this platform resolves *to*. It is
     # not the contract's declared `schema_version`, which may legally be an
     # older supported schema (R2.5).
-    #
-    # P3: resolved schema 1 spells schema 2's absent deploy watch as the inert binding
-    source = resolved_one_form(source)
     bindings = normalize_bindings(source["bindings"], root)
     return {
         "schema_version": manifest["resolved_schema_version"],

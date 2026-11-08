@@ -1,6 +1,0 @@
-{
-  "orchestration": {
-    "agentBudgetMinutes": 180,
-    "maxParallel": 2
-  }
-}

@@ -26,7 +26,7 @@ from .conformance_test_support import (
     Rebinding, doctor, fixture, load_module, make_root, make_stub_bin,
     mutated_manifest, platform_env, run,
 )
-from .test_resolve_project import make_project_root, schema_two, source_contract
+from .test_resolve_project import make_project_root, source_contract
 
 
 def valid_report() -> dict:
@@ -408,13 +408,14 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
 
     def test_an_incompatible_platform_or_schema_fails_schema_supported(self):
         cases = (
-            ("platform_too_old", "0.9.0", 1, "/platform"),
-            ("platform_too_new", "2.0.0", 1, "/platform"),
-            # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+            ("platform_too_old", "0.9.0", 2, "/platform"),
+            ("platform_too_new", "2.0.0", 2, "/platform"),
+            # Platform 2.0.0 supports project schema 2 alone: 1 is retired, 3 is not yet.
+            ("project_schema_unsupported", "1.4.2", 1, "/schema_version"),
             ("project_schema_unsupported", "1.4.2", 3, "/schema_version"),
         )
         for reason_code, version, schema, pointer in cases:
-            with self.subTest(reason_code=reason_code), fixture() as tmp:
+            with self.subTest(reason_code=reason_code, schema=schema), fixture() as tmp:
                 root = with_contract(make_root(tmp), schema_version=schema,
                                      platform=INTERVAL)
                 env = platform_env(
@@ -427,7 +428,7 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
                      "contract.schema.unsupported"])
                 self.assertEqual(check["facts"], {
                     "platform_version": version,
-                    "supported_project_schemas": ["1", "2"],  # P3: platform 1.2.0
+                    "supported_project_schemas": ["2"],
                     "project_schema_version": schema,
                     "platform_min_inclusive": "1.0.0",
                     "platform_max_exclusive": "2.0.0",
@@ -443,16 +444,16 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
 
     def test_the_installed_schema_set_decides_schema_support(self):
         """Support comes from the installed manifest, not a constant or the
-        committed set: widening it admits a schema-1 contract, narrowing it
-        refuses one, and the facts name the installed set (D4, D6)."""
-        base = {"platform_version": "1.4.2", "project_schema_version": 1,
+        committed set: widening it keeps a schema-2 contract admitted, narrowing it
+        to schema 1 refuses one, and the facts name the installed set (D4, D6)."""
+        base = {"platform_version": "1.4.2", "project_schema_version": 2,
                 "platform_min_inclusive": "1.0.0",
                 "platform_max_exclusive": "2.0.0"}
         cases = (
-            ([1, 2], ["passed", None, None,
-                      {**base, "supported_project_schemas": ["1", "2"]}]),
-            ([2], ["failed", "unsupported_schema", "contract.schema.unsupported",
-                   {**base, "supported_project_schemas": ["2"],
+            ([2, 3], ["passed", None, None,
+                      {**base, "supported_project_schemas": ["2", "3"]}]),
+            ([1], ["failed", "unsupported_schema", "contract.schema.unsupported",
+                   {**base, "supported_project_schemas": ["1"],
                     "schema_reason_code": "project_schema_unsupported",
                     "violations": 1, "first_pointer": "/schema_version"}]),
         )
@@ -509,8 +510,8 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
                 ["passed", None, None])
             self.assertEqual(check["facts"], {
                 "platform_version": "1.4.2",
-                "supported_project_schemas": ["1", "2"],  # P3: platform 1.2.0
-                "project_schema_version": 1,
+                "supported_project_schemas": ["2"],
+                "project_schema_version": 2,
                 "platform_min_inclusive": "1.0.0",
                 "platform_max_exclusive": "2.0.0",
             })
@@ -556,8 +557,8 @@ class NotOnboardedTest(unittest.TestCase):
 
 
 class SchemaTwoContractTest(ReportAssertions, unittest.TestCase):
-    """P3: conformance judges a schema-2 contract through the resolved-1 shape
-    `resolve` reads, so a contract `resolve` accepts is not an internal failure."""
+    """Platform 2.0.0 resolves project schema 2 alone: conformance judges a schema-2
+    contract as `resolve` does, and a schema-1 contract is not a supported schema."""
 
     def statuses(self, contract: dict) -> dict:
         root = make_project_root(contract)
@@ -567,13 +568,16 @@ class SchemaTwoContractTest(ReportAssertions, unittest.TestCase):
         return {check_id: [c["status"], c["reason_code"], c["facts"]]
                 for check_id, c in by_id.items()}
 
-    def test_a_schema_two_contract_passes_the_ladder_as_its_schema_one_twin_does(self):
-        twin = self.statuses(source_contract())
-        got = self.statuses(schema_two(source_contract()))
+    def test_a_schema_two_contract_passes_the_contract_checks(self):
+        got = self.statuses(source_contract())
         self.assertEqual(got["repository.contract.resolvable"][0], "passed")
-        self.assertEqual(
-            {k: v for k, v in got.items() if k != "compatibility.contract.schema_supported"},
-            {k: v for k, v in twin.items() if k != "compatibility.contract.schema_supported"})
+        self.assertEqual(got["compatibility.contract.schema_supported"][0], "passed")
+
+    def test_a_schema_one_contract_is_not_a_supported_schema(self):
+        contract = source_contract()
+        contract["schema_version"] = 1
+        got = self.statuses(contract)
+        self.assertNotEqual(got["compatibility.contract.schema_supported"][0], "passed")
 
 
 class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
@@ -583,7 +587,7 @@ class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
         with fixture() as tmp:
             code, out, err = run("run", "--purpose", "workflow_entry",
                                  "--repo-root", str(make_root(tmp)),
-                                 "--require", "deploy")
+                                 "--require", "knowledge.context")
             self.assertEqual(code, 2, err)
             report = json.loads(out)
             self.assertEqual(len(report["checks"]), 1)
@@ -593,7 +597,7 @@ class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
                  check["repair_id"]],
                 ["host.capability.required", "failed", "capability_unavailable",
                  "capability.required.unavailable"])
-            self.assertEqual(report["request"]["required_capabilities"], ["deploy"])
+            self.assertEqual(report["request"]["required_capabilities"], ["knowledge.context"])
             self.assert_validates(report)
 
     def test_repeated_requires_are_deduplicated_sorted_and_known_names(self):

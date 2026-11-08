@@ -520,16 +520,6 @@ class ApplyRefusalTest(ApplyTestCase):
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
         self.refuse(root, plan_id, "dirty_worktree")
 
-    def test_an_unstaged_edit_to_a_legacy_binding_config_is_dirty(self):
-        """The living-reference rewrite merges into the bytes on disk, so the
-        edit would be carried into the adoption commit the same way."""
-        root = apply_repo(self.home)
-        write(root, ".claude/skills.config.json", json.dumps(
-            {"orchestration": {"agentBudgetMinutes": 60, "maxParallel": 2}},
-            indent=2) + "\n")
-        plan_id = self.ready_plan(root)["plan"]["plan_id"]
-        self.refuse(root, plan_id, "dirty_worktree")
-
     def test_a_retained_worktree_refuses_and_is_never_deleted(self):
         root = apply_repo(self.home)
         plan_id = self.ready_plan(root)["plan"]["plan_id"]

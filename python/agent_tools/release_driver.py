@@ -75,7 +75,6 @@ class Project:
     common_dir: Path
     integration_branch: str
     default_branch: str
-    deploy_adapter: str
     contract: Mapping[str, Any]
 
 
@@ -194,11 +193,6 @@ class Driver:
                 f"{project.integration_branch} differs from {project.default_branch}, and the "
                 "profile declares no materialize action to merge it",
                 "release.profile.merge_unsupported")
-        if project.deploy_adapter != "none":
-            return Refusal("deploy_watch_unowned",
-                           f"the deploy adapter {project.deploy_adapter!r} is not watched by "
-                           "the driver, so it cannot release this project",
-                           "release.profile.activation_unbound")
         if any(unit["posture"] == "restorable"
                for unit in compiled["recovery_declaration"]["units"]):
             return Refusal("anchors_unsupported", "the profile declares a restorable unit, "

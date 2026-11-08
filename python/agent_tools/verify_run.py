@@ -344,7 +344,7 @@ class _Pass:
             return self.line(None, None, "closed", "verified" if verified else "not_verified")
         bindings = self.project.bindings
         self.ctx = verify_facts.Context(self.slug, self.project.root, bindings["vcs"]["default_branch"],
-                                        bindings["deploy"], bindings["tracker"], self.markers)
+                                        bindings["tracker"], self.markers)
         checks = self.block["checks"]
         self.states = [None] * len(checks)
         for index, check in enumerate(checks):

@@ -57,8 +57,6 @@ class GateTest(DriverCase):
         registry = {"github-forge": forge_adapter, "fixture-store": rs.FixtureStore()}
         cases = (("merge_not_declared", "release.profile.merge_unsupported",
                   rs.project(self, integration="dev"), {}),
-                 ("deploy_watch_unowned", "release.profile.activation_unbound",
-                  rs.project(self, deploy_adapter="github-actions-health"), {}),
                  ("anchors_unsupported", "release.profile.anchor_unbound", restorable,
                   {"registry": registry}))
         for code, repair, project, kwargs in cases:
