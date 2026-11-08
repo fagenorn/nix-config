@@ -36,8 +36,7 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_tools import worktree_mapping
-from agent_tools.github_remote import github_slug
+from agent_tools import forge_markers, worktree_forge, worktree_mapping
 from agent_tools.worktree_mapping import (MappingError, Worktree, classify, is_runner_workspace,
                                           ledger_matches, list_worktrees, verdicts_of)
 from agent_tools.worktree_mapping import classify_root
@@ -332,12 +331,6 @@ def _normalize_keep(keeps: Iterable[str]) -> frozenset[str]:
     return frozenset(os.path.realpath(os.path.expanduser(str(k))) for k in keeps)
 
 
-def _short(branch: str | None) -> str | None:
-    if branch is None:
-        return None
-    return branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
-
-
 def _index_facts(root: Path, admin: str | None, head: str | None) -> tuple[bool, bool]:
     """`(index_differs, unmerged)` of the admin directory's own index; never refreshes it."""
     index = os.path.join(admin, "index") if admin else None
@@ -366,7 +359,7 @@ def entry_of(root: Path, wt: Worktree, n: int, *, verdicts, fleet_roots, archive
     pushed = bool(wt.head) and bool(_git_out(
         root, "for-each-ref", "--contains", wt.head, "refs/remotes", read=True).strip())
     pins = pin_sources(root, admin, wt.head) if admin else None
-    open_pr = prs.get(_short(wt.branch)) if wt.branch else None
+    open_pr = prs.get(worktree_mapping.short_branch(wt.branch)) if wt.branch else None
     reasons: set[str] = set()
     if _is_live(path, real, live):
         reasons.add("live_process")
@@ -802,22 +795,21 @@ def lsof_cwds() -> set[str]:
 
 
 def gh_open_prs(root: Path) -> dict[str, dict]:
-    """Open pull requests of the root's GitHub repository, by head branch name."""
-    remote = _git(root, "remote", "get-url", "origin", read=True, check=False)
-    slug = github_slug(_text(remote.stdout)) if remote.returncode == 0 else None
+    """Open pull requests headed in the root's GitHub repository, by head branch name.
+
+    The same reader as the C7 worktree-mapping check (`worktree_forge.open_pull_heads`): a pull
+    request from a fork does not name a branch of this repository.
+    """
+    try:
+        slug = worktree_forge.root_slug(root)
+    except MappingError as error:
+        raise ReconcileError("tool_error", str(error)) from None
     if slug is None:
         return {}
-    done = _run(["gh", "pr", "list", "--repo", slug, "--state", "open", "--json",
-                 "number,headRefName,updatedAt", "--limit", "500"], timeout=PROBE_TIMEOUT)
-    if done.returncode != 0:
-        raise ReconcileError("tool_error", f"gh pr list exit {done.returncode}: "
-                                           f"{_text(done.stderr).strip()}")
     try:
-        rows = json.loads(_text(done.stdout))
-        return {row["headRefName"]: {"number": row["number"], "updated_at": row["updatedAt"]}
-                for row in rows}
-    except (ValueError, KeyError, TypeError):
-        raise ReconcileError("tool_error", "gh pr list printed an unusable listing") from None
+        return worktree_forge.open_pull_heads(slug)
+    except forge_markers.ForgeError as error:
+        raise ReconcileError("tool_error", f"open pull requests of {slug}: {error}") from None
 
 
 # --- audit -------------------------------------------------------------------------------------

@@ -8,10 +8,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import verify_exec, worktree_reconcile
+from agent_tools import verify_exec, worktree_forge, worktree_reconcile
 from agent_tools.worktree_reconcile import ReconcileError, apply_plan, build_plan, restore_entry
 
-from .test_worktree_mapping import GIT_ENV, ROOT, Fleet, report
+from .test_worktree_mapping import GIT_ENV, ROOT, Fleet, git, report, write_fake_gh
 
 NOW = datetime(2026, 11, 8, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -505,6 +505,55 @@ class CliTest(unittest.TestCase):
         done = self.run_cli("apply", "--plan", os.devnull, "--archive-root", os.devnull)
         self.assertEqual((done.returncode, done.stdout), (2, ""))
         self.assertTrue(done.stderr.startswith("worktree-reconcile: not_acknowledged: "))
+
+
+class SharedOpenPrTest(unittest.TestCase):
+    """Issue 710 D13: reconcile's open_pr keep reason and C7's open_pr reason are one reader."""
+
+    def setUp(self):
+        self.fleet = Fleet(self)
+        git("remote", "add", "origin", "https://github.com/o/r.git", cwd=self.fleet.root)
+        self.bin = self.fleet.base / "bin"
+        self.bin.mkdir()
+        write_fake_gh(self.bin, self.fleet.base)
+        patcher = mock.patch.dict(os.environ, {**GIT_ENV,
+                                               "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def respond(self, responses):
+        (self.fleet.base / "responses.json").write_text(json.dumps(responses), encoding="utf-8")
+
+    def test_reconcile_and_c7_read_the_same_same_repository_heads(self):
+        def pr(n, ref, repo):
+            return {"number": n, "updated_at": f"2026-11-0{n}T00:00:00Z",
+                    "head": {"ref": ref, "repo": {"full_name": repo}}}
+        self.respond({"repos/o/r/pulls?state=open&per_page=100":
+                       [[pr(5, "mine", "o/r"), pr(4, "theirs", "fork/r")], [pr(3, "mine", "O/R")]],
+                       "repos/o/r/issues?labels=in-progress&state=open&per_page=100": [[]]})
+        prs = worktree_reconcile.gh_open_prs(self.fleet.root)
+        self.assertEqual(prs, {"mine": {"number": 3, "updated_at": "2026-11-03T00:00:00Z"}})
+        self.assertEqual(set(worktree_forge.forge_facts(self.fleet.root).open_prs), set(prs))
+
+    def test_a_forge_failure_is_a_reconcile_tool_error(self):
+        self.respond({})
+        with self.assertRaises(ReconcileError) as caught:
+            worktree_reconcile.gh_open_prs(self.fleet.root)
+        self.assertEqual(caught.exception.code, "tool_error")
+
+    def test_a_fork_pr_no_longer_keeps_the_worktree(self):
+        f = self.fleet
+        wt = f.worktree("theirs")
+        self.respond({"repos/o/r/pulls?state=open&per_page=100":
+                       [[{"number": 4, "updated_at": "t",
+                          "head": {"ref": "theirs", "repo": {"full_name": "fork/r"}}}]]})
+        archive = f.base / "archive"
+        archive.mkdir()
+        plan = build_plan(f.root, report(), fleet_roots=[f.root], archive_root=archive,
+                          live_cwds=none_live, open_prs=worktree_reconcile.gh_open_prs, now=NOW,
+                          refused_pending=False)
+        entry = next(e for e in plan["entries"] if e["path"] == wt)
+        self.assertNotIn("open_pr", entry["keep"])
 
 
 if __name__ == "__main__":
