@@ -23,6 +23,13 @@ on main. It is 75 when anything of that is not yet so (`absent` when the branch 
 `cutover-preflight [--repo-root R] [--branch B]` (issue 579, C4.b) is met when `cutover-manifest` is
 green and both the installed bridge and the candidate's own code judge every registered project
 compatible, with no removed use. It is 75 otherwise, and 0 only when green.
+
+`cutover-bundle [--repo-root R] [--branch B]` (issue 579, C3) is met (0, `green`) when a `*-bundle.json`
+under `.agents/artifacts/evidence/` at origin's main verifies, through `agent_gate_bundle.verify_bundle`,
+as `approved` and binds the commit at the tip of origin's candidate branch. The state is the verifier's
+return value, never the document's own `state` field; a bundle the verifier refuses is `unreadable` and
+never counts. It is 75 otherwise (`absent` when the branch does not exist) and 2 when git cannot be
+driven. It only reads: it fetches objects, and writes no ref.
 """
 from __future__ import annotations
 
@@ -42,6 +49,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from agent_tools import forge_markers
+from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver
 from agent_tools.agent_costs import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
@@ -479,6 +487,72 @@ def cutover_preflight(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
     return preflight_verdict(bridge, candidate_report, sha, manifest)
 
 
+EVIDENCE_DIR = ".agents/artifacts/evidence"
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}")
+
+
+def bundle_verdict(bundles: Mapping[str, object], candidate_sha: str) -> tuple[int, dict]:
+    """C3: some emitted bundle verifies `approved` and binds `candidate_sha`.
+
+    Each value goes through `verify_bundle`, the one verifier of an emitted bundle: the id is
+    recomputed over the body and the state re-decided from the bundle's own evidence. The state
+    read is its return value, never `document["state"]`."""
+    approved: list[str] = []
+    other: list[dict] = []
+    unreadable: list[dict] = []
+    for path in sorted(bundles):
+        document = bundles[path]
+        try:
+            state = verify_bundle(document)
+            bound = document["identity"]["bound"]["commit"]["candidate"]  # type: ignore[index]
+            if not (isinstance(bound, str) and _COMMIT_ID.fullmatch(bound)):
+                raise BundleIntegrityError("identity.bound.commit.candidate is not a commit id")
+        except BundleIntegrityError as error:
+            unreadable.append({"path": path, "error": str(error)})
+            continue
+        except (KeyError, TypeError):
+            unreadable.append({"path": path,
+                               "error": "identity.bound.commit.candidate is missing"})
+            continue
+        if state == "approved" and bound == candidate_sha:
+            approved.append(path)
+        else:
+            other.append({"path": path, "state": state, "candidate": bound})
+    green = bool(approved)
+    return (0 if green else 75), {
+        "verdict": "green" if green else "red", "candidate": candidate_sha,
+        "approved": approved, "other": other, "unreadable": unreadable}
+
+
+def cutover_bundle(repo_root: Path, branch: str = CANDIDATE_BRANCH) -> tuple[int, dict]:
+    """C3 over origin's candidate branch and the bundles committed at origin's main.
+
+    Fetches objects and `FETCH_HEAD` only (`--refmap=` keeps it from updating a remote-tracking
+    ref). Raises GitError when git cannot be driven; the caller exits 2."""
+    sha = _candidate_sha(repo_root, branch, None)
+    if sha is None:
+        return 75, {"verdict": "absent", "candidate": None, "approved": [], "other": [],
+                    "unreadable": []}
+    _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "--refmap=", "origin", "refs/heads/main")
+    listing = _git(repo_root, "ls-tree", "--name-only", f"FETCH_HEAD:{EVIDENCE_DIR}/")
+    names = sorted(name for name in listing.stdout.splitlines()
+                   if listing.returncode == 0 and name.endswith("-bundle.json"))
+    bundles: dict[str, object] = {}
+    unparsed: list[dict] = []
+    for name in names:
+        path = f"{EVIDENCE_DIR}/{name}"
+        shown = _git(repo_root, "show", f"FETCH_HEAD:{path}")
+        try:
+            if shown.returncode != 0:
+                raise ValueError(f"git show failed: {shown.returncode}")
+            bundles[path] = json.loads(shown.stdout)
+        except ValueError as error:
+            unparsed.append({"path": path, "error": f"not JSON: {error}"})
+    code, report = bundle_verdict(bundles, sha)
+    report["unreadable"] = sorted(report["unreadable"] + unparsed, key=lambda item: item["path"])
+    return code, report
+
+
 def _repo(value: str) -> str:
     if not REPO.match(value):
         raise argparse.ArgumentTypeError("must be OWNER/NAME")
@@ -506,17 +580,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     hook.add_argument("--slug", type=_repo, required=True)
     for name, help_text in (
             ("cutover-manifest", "issue 579 C4.a: the candidate's removals were main's deprecations"),
-            ("cutover-preflight", "issue 579 C4.b: the bridge and the candidate judge the fleet")):
+            ("cutover-preflight", "issue 579 C4.b: the bridge and the candidate judge the fleet"),
+            ("cutover-bundle", "issue 579 C3: an approved bundle binds the candidate")):
         cutover = checks.add_parser(name, help=help_text)
         cutover.add_argument("--repo-root", type=Path, default=Path("."))
         cutover.add_argument("--branch", default=CANDIDATE_BRANCH)
         if name == "cutover-manifest":
             cutover.add_argument("--main-ref", default=None)
     args = parser.parse_args(argv)
-    if args.check in ("cutover-manifest", "cutover-preflight"):
+    if args.check in ("cutover-manifest", "cutover-preflight", "cutover-bundle"):
         try:
             if args.check == "cutover-manifest":
                 code, report = cutover_manifest(args.repo_root, args.branch, args.main_ref)
+            elif args.check == "cutover-bundle":
+                code, report = cutover_bundle(args.repo_root, args.branch)
             else:
                 code, report = cutover_preflight(args.repo_root, args.branch, environ=os.environ)
         except GitError as error:

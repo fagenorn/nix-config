@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "kind": "agent-gate-trials",
+  "identity": {
+    "bound": {
+      "commit": {"base": "f70a164245b486dd068a3b9455a6597533425ecf",
+                 "candidate": "6b98674402994180a2a1f1852cf71f18fd1aa0ca"},
+      "project_contract_version": {"base": "1", "candidate": "2"},
+      "shared_platform_version": {"base": "1.2.0", "candidate": "2.0.0"}
+    },
+    "pinned": {
+      "evaluator_version": {"base": "unpinned", "candidate": "unpinned"},
+      "rubric_version": {"base": "unpinned", "candidate": "unpinned"},
+      "environment_fingerprint": {"base": "unpinned", "candidate": "unpinned"},
+      "builds": {
+        "claude": {"agent": {"base": "unpinned", "candidate": "unpinned"},
+                   "model": {"base": "unpinned", "candidate": "unpinned"}},
+        "codex": {"agent": {"base": "unpinned", "candidate": "unpinned"},
+                  "model": {"base": "unpinned", "candidate": "unpinned"}}
+      }
+    }
+  },
+  "expansion": {"expanded": false, "checkpoint_ref": null},
+  "cases": [
+    {"case_id": "cold-resolution", "case_class": "cold-resolution", "strata": {}},
+    {"case_id": "routine-issue", "case_class": "routine-issue", "strata": {}},
+    {"case_id": "fuzzy-design", "case_class": "fuzzy-design", "strata": {}},
+    {"case_id": "review-ship", "case_class": "review-ship", "strata": {}}
+  ]
+}

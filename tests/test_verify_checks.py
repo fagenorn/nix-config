@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_markers, verify_checks
+from agent_tools import agent_gate_bundle, forge_markers, verify_checks
 from agent_tools.verify_checks import required_checks
 
 from .pre_push_world import PrePushWorld
+from .test_agent_gate_bundle import IDENTITY, context, flat, stratum  # the emitted-bundle builders
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = "home/common/verify-pending/checks"
@@ -707,6 +708,91 @@ class CutoverPreflightTest(unittest.TestCase):
             {"HOME": str(self.world.tmp), "PATH": self.environ()["PATH"]})
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.loads(done.stdout)["verdict"], "green")
+
+
+def emitted(state, candidate):
+    """A real emitted bundle (assemble_bundle, valid id) whose identity binds `candidate`."""
+    identity = json.loads(json.dumps(IDENTITY))
+    identity["bound"]["commit"]["candidate"] = candidate
+    value = {"approved": flat(stratum(context(1000, 800))),
+             "rejected": flat(stratum(context(1000, 999))), "unmeasured": None}[state]
+    return agent_gate_bundle.assemble_bundle(
+        {"identity": identity, "expansion": {"expanded": False, "checkpoint_ref": None}},
+        value, [], None, state)
+
+
+class BundleVerdictTest(unittest.TestCase):
+    def test_an_approved_bundle_binding_the_candidate_is_green(self):
+        code, report = verify_checks.bundle_verdict(
+            {"a-bundle.json": emitted("approved", SHA),
+             "release-128-bundle.json": emitted("unmeasured", "b" * 40)}, SHA)
+        self.assertEqual((code, report["verdict"]), (0, "green"))
+        self.assertEqual(report["approved"], ["a-bundle.json"])
+
+    def test_unmeasured_rejected_or_another_candidate_is_not_yet(self):
+        for bundles in ({}, {"x-bundle.json": emitted("unmeasured", SHA)},
+                        {"x-bundle.json": emitted("rejected", SHA)},
+                        {"x-bundle.json": emitted("approved", "b" * 40)}):
+            with self.subTest(bundles=list(bundles)):
+                self.assertEqual(verify_checks.bundle_verdict(bundles, SHA)[0], 75)
+
+    def test_a_two_field_approval_is_unreadable(self):
+        fake = {"state": "approved", "identity": {"bound": {"commit": {"candidate": SHA}}}}
+        code, report = verify_checks.bundle_verdict({"x-bundle.json": fake}, SHA)
+        self.assertEqual((code, [u["path"] for u in report["unreadable"]]), (75, ["x-bundle.json"]))
+
+    def test_a_relabelled_bundle_is_unreadable(self):
+        tampered = emitted("rejected", SHA)
+        tampered["state"] = "approved"
+        code, report = verify_checks.bundle_verdict({"x-bundle.json": tampered}, SHA)
+        self.assertEqual((code, report["approved"]), (75, []))
+        self.assertEqual([u["path"] for u in report["unreadable"]], ["x-bundle.json"])
+
+    def test_a_rebound_candidate_breaks_the_digest(self):
+        moved = emitted("approved", "b" * 40)
+        moved["identity"]["bound"]["commit"]["candidate"] = SHA
+        self.assertEqual(verify_checks.bundle_verdict({"x-bundle.json": moved}, SHA)[0], 75)
+
+    def test_a_candidate_that_is_not_a_commit_id_is_unreadable(self):
+        for bound in ("unpinned", "A" * 40, "a" * 39, None):
+            with self.subTest(bound=bound):
+                code, report = verify_checks.bundle_verdict(
+                    {"x-bundle.json": emitted("approved", bound)}, bound)
+                self.assertEqual((code, report["approved"]), (75, []))
+                self.assertEqual([u["path"] for u in report["unreadable"]], ["x-bundle.json"])
+
+    def test_the_committed_cutover_bundle_verifies_unmeasured(self):
+        doc = json.loads((ROOT / ".agents/artifacts/evidence/cutover-579-bundle.json").read_text())
+        self.assertEqual(agent_gate_bundle.verify_bundle(doc), "unmeasured")
+        self.assertRegex(doc["identity"]["bound"]["commit"]["candidate"], r"^[0-9a-f]{40}$")
+
+    def test_the_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/cutover-bundle"), "100755")
+
+
+EVIDENCE = ".agents/artifacts/evidence"
+
+
+class CutoverBundleTest(unittest.TestCase):
+    def test_the_check_reads_the_bundles_at_origin_main(self):
+        world = CutoverWorld(self)
+        candidate = world.publish_candidate()
+        code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
+        self.assertEqual((code, report["approved"], report["candidate"]), (75, [], candidate))
+        files = {f"{EVIDENCE}/a-bundle.json": json.dumps(emitted("approved", candidate)),
+                 f"{EVIDENCE}/b-bundle.json": "not json",
+                 f"{EVIDENCE}/c-trials.json": "{}"}
+        world.commit(world.pusher, manifests()[0], files)
+        world.git(world.pusher, "push", "-q", "origin", "main")
+        code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
+        self.assertEqual((code, report["verdict"]), (0, "green"))
+        self.assertEqual(report["approved"], [f"{EVIDENCE}/a-bundle.json"])
+        self.assertEqual([u["path"] for u in report["unreadable"]], [f"{EVIDENCE}/b-bundle.json"])
+
+    def test_an_absent_candidate_branch_is_not_yet(self):
+        world = CutoverWorld(self)
+        code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
+        self.assertEqual((code, report["verdict"]), (75, "absent"))
 
 
 if __name__ == "__main__":
