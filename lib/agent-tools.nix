@@ -55,7 +55,6 @@ let
     "lane-triage"
     "launch-commit"
     "launch-scope"
-    "orchestrate-control"
     "owner-actions"
     "promotion"
     "release"
