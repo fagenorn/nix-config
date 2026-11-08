@@ -226,6 +226,48 @@ ANSWERED = dict(OPEN, verdict="answered", decisions="Which flag? Chosen: Use the
                 questions=[dict(QS[0], chosen="Use the flag.", comment_id=99)])
 
 
+FIXED = {"commit": "f" * 40, "evidence": "git grep -F 'boom' finds nothing at origin/dev; ffff removed it"}
+
+
+class AlreadyFixedTest(unittest.TestCase):
+    def test_already_fixed_symptom_skips_lane_claim_and_child(self):
+        result, calls, _ = run(patch={"facts-1": {"already_fixed": FIXED}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "already-fixed",
+                                          "commit": FIXED["commit"], "evidence": FIXED["evidence"]})
+        self.assertEqual(labels(calls), ["setup", "facts-1"])
+        self.assertEqual(result["owner_actions"], [{"issue": 1, "reason": "already-fixed", "commit": FIXED["commit"]}])
+        self.assertIsNone(result["relaunch"])
+        self.assertFalse([c["label"] for c in calls if "gh issue close" in c.get("prompt", "")])
+
+    def test_facts_agent_checks_the_symptom_at_origin_of_the_integration_branch(self):
+        _, calls, _ = run()
+        text = prompt(calls, "facts-1")
+        self.assertIn("createdAt", text)
+        self.assertIn("git -C /r grep -n -F", text)
+        self.assertIn("origin/dev", text)
+        self.assertIn("git -C /r log origin/dev -S", text)
+        self.assertIn("--since=", text)
+        self.assertIn("already_fixed", text)
+
+    def test_a_continued_or_own_claimed_issue_is_never_already_fixed(self):
+        for args, facts in ((dict(ARGS, conts={"1": {"setup": {}}}), {"already_fixed": FIXED}),
+                            (ARGS, {"already_fixed": FIXED, "claim": {"verdict": "held_by", "by": HOLDER}})):
+            with self.subTest(facts=facts, args=args):
+                result, calls, _ = run(args=args, patch={"facts-1": facts})
+                self.assertNotEqual(row(result, 1)["outcome"], "already-fixed")
+                self.assertIn("child-1", labels(calls))
+
+    def test_a_null_or_commitless_already_fixed_stays_eligible(self):
+        for fixed in (None, {"commit": "", "evidence": "x"}):
+            with self.subTest(fixed=fixed):
+                _, calls, _ = run(patch={"facts-1": {"already_fixed": fixed}})
+                self.assertIn("lane-1", labels(calls))
+
+    def test_a_merged_pr_wins_over_already_fixed(self):
+        result, _, _ = run(patch={"facts-1": {"merged_pr": 5, "already_fixed": FIXED}})
+        self.assertEqual(row(result, 1)["outcome"], "duplicate")
+
+
 class ClaimTest(unittest.TestCase):
     def test_a_waiting_issue_is_not_claimed_until_admitted(self):
         _, calls, active = run(args=dict(ARGS, issues=[1, 2]), patch={"setup": {"max_parallel": 1}})
