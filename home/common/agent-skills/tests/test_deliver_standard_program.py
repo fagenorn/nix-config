@@ -740,8 +740,9 @@ class PlanRulesTest(unittest.TestCase):
         self.assertIn("impl-1", names)
         self.assertNotIn("plan_findings", result.get("cont") or {})
 
-    def test_resume_reviews_in_full_when_a_non_rule_finding_was_kept(self):
-        # A silent rules re-reviewer keeps every finding of the full review, including ones no rules revise may clear.
+    def test_resume_plans_again_when_a_non_rule_finding_was_kept(self):
+        # A silent rules re-reviewer keeps every finding of the full review, including ones no rules revise may clear;
+        # the kept plan has spent its one full revise, so the resume plans again with the owner's answer.
         plan = with_criteria(HUMAN)
         interface = {"verdict": "findings", "findings": [{"severity": "important", "summary": "interface mismatch"}]}
         codex = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "s", "source": "codex"}]}
@@ -753,31 +754,30 @@ class PlanRulesTest(unittest.TestCase):
                 result, calls = run(args=dict(ARGS, cont=first["cont"]))
                 names = labels(calls)
                 self.assertNotIn("plan-rules-revise", names)
+                self.assertEqual(names.count("plan"), 1)
+                self.assertEqual(names.count("plan-revise"), 0)
                 self.assertIn("plan-review", names)
                 self.assertEqual(names.count("owner-answer"), 1)
                 self.assertNotIn("plan_findings", result.get("cont") or {})
 
-    def test_a_stuck_plan_with_a_ruleless_finding_is_dropped_within_the_revise_bound(self):
-        # Plan bound: at most two rules revises per plan, however many resumes a ruleless or Codex finding takes.
+    def test_a_stuck_plan_with_a_ruleless_finding_stays_within_the_revise_bound(self):
+        # Plan bound: at most one full revise and two rules revises per plan, however many resumes a ruleless finding takes.
         plan = with_criteria(HUMAN)
         bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC3 breaks a rule"}]}
         replies = {"plan": plan, "plan-revise": plan, "plan-rules-revise": plan, "plan-review": self.RULE_FINDING,
                    "plan-rules-review": [self.RULE_FINDING, bare]}
         result, calls = run(replies=replies)
-        names = labels(calls)
         self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
-        self.assertEqual([r["summary"] for r in result["cont"]["plan_findings"]["rules"]], ["AC3 breaks a rule"])
-        dropped = False
         for _ in range(4):
             result, calls = run(args=dict(ARGS, cont=result["cont"]), replies=replies)
-            names += labels(calls)
-            if result["cont"]["plan"] is None:
-                dropped = True
-                break
-        self.assertTrue(dropped, "the stuck plan was never dropped")
-        self.assertLessEqual(names.count("plan-rules-revise"), 2)
-        self.assertNotIn("plan_findings", result["cont"])
-        self.assertNotIn("impl-1", names)
+            names = labels(calls)
+            # Each resume plans a fresh plan: it is that plan's only full revise, and the kept plan is never revised again.
+            self.assertEqual(names.count("plan"), 1)
+            self.assertEqual(names.count("plan-revise"), 1)
+            self.assertLessEqual(names.count("plan-rules-revise"), 2)
+            self.assertLess(names.index("plan"), names.index("plan-revise"))
+            self.assertEqual(result["stage"], "plan-review")
+            self.assertNotIn("impl-1", names)
 
     def test_a_kept_finding_survives_an_unread_owner_answer(self):
         plan = with_criteria(HUMAN)
@@ -796,23 +796,31 @@ class PlanRulesTest(unittest.TestCase):
                     "verdict": "answered", "comment_id": 1, "questions": [], "decisions": "D: pick one"}})
                 self.assertEqual(labels(calls).count("owner-answer"), 1)
                 self.assertIn("plan-review", labels(calls))
-                self.assertIn("D: pick one", again["cont"]["decisions"])
+                self.assertIn("D: pick one", prompt(calls, "plan"))
 
     def test_a_codex_finding_re_reported_without_source_gets_no_rules_only_revise(self):
-        # The rules re-review does not have to preserve source; the program carries Codex provenance through it.
+        # The rules re-review keeps neither source nor finding identity, so it may re-report a Codex finding under any rule id
+        # or none; a Codex-triggered plan never gets a Claude-only second revise.
         plan = with_criteria(HUMAN)
-        reported = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
-        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "s"}]}
-        for name, codex, rereview in (("ruled", reported, reported), ("ruleless", bare, reported)):
+        def report(**kw):
+            return {"verdict": "findings", "findings": [dict({"severity": "important", "summary": "AC1 is not observable"}, **kw)]}
+        for name, codex, rereview in (("ruled", report(rule="R2"), report(rule="R2")),
+                                      ("ruleless", report(), report(rule="R2")),
+                                      ("other-rule", report(rule="R2"), report(rule="R6"))):
             with self.subTest(codex=name):
-                result, calls = run(replies={
-                    "plan": plan, "plan-revise": plan,
-                    "plan-codex": {"available": True, **codex}, "plan-rules-review": rereview})
+                replies = {"plan": plan, "plan-revise": plan, "plan-codex": {"available": True, **codex},
+                           "plan-rules-review": [rereview, {"verdict": "pass", "findings": []}]}
+                result, calls = run(replies=replies)
                 self.assertEqual(result["stage"], "plan-review")
                 self.assertNotIn("plan-rules-revise", labels(calls))
+                self.assertEqual(labels(calls).count("plan-rules-review"), 1)
                 self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
-                self.assertEqual(result["cont"]["plan_findings"]["rules"][0]["source"], "codex")
                 self.assertNotIn("impl-1", labels(calls))
+                # The resume does not run a rules-only revise either: the plan is planned again and reviewed in full.
+                again, calls = run(args=dict(ARGS, cont=result["cont"]))
+                self.assertNotIn("plan-rules-revise", labels(calls))
+                self.assertEqual(labels(calls).count("plan"), 1)
+                self.assertIn("plan-review", labels(calls))
 
     def test_second_rules_failure_on_resume_drops_the_plan(self):
         first, _ = self.keep_stop()
