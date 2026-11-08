@@ -13,6 +13,12 @@ truncated listing rather than judging it.
 managed `-agent-git-hooks` directory and, in a local fixture of S whose own git configuration
 holds only that hooks path, an agent push of `main` is refused by its `pre-push` with the
 remote unchanged while a feature-branch push is admitted. It exits 2 on a fixture error.
+
+`worktree-mapping [--red-pending] --repo-root R...` (issue 585) states the #130 checklist C7 rule
+over each root through `agent_tools.worktree_mapping`, read-only, using the verdicts of
+`workflow-state migrate --repo-root R`. It exits 0 when every root is green, 1 when one is red,
+75 when none is red and one is human-pending, and 2 on a tool error. Under `--red-pending` any
+root that is not green exits 75.
 """
 from __future__ import annotations
 
@@ -32,6 +38,7 @@ from urllib.parse import quote
 from agent_tools import forge_markers
 from agent_tools.agent_costs import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
+from agent_tools.worktree_mapping import MappingError, classify_root
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -232,6 +239,62 @@ def managed_pre_push_hook(slug: str, *, git_bin: str,
     return (0 if report["met"] else 1), report
 
 
+WORKFLOW_STATE_TIMEOUT = 300
+
+
+def _migrate_report(root: Path, environ: Mapping[str, str]) -> dict:
+    """The dry-run report of `workflow-state migrate --repo-root root`; ToolError when unusable."""
+    binary = shutil.which("workflow-state", path=environ.get("PATH"))
+    if binary is None:
+        raise ToolError("tool_error", "workflow-state not found")
+    try:
+        done = subprocess.run([binary, "migrate", "--repo-root", str(root)], env=dict(environ),
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=WORKFLOW_STATE_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ToolError("tool_error", f"workflow-state failed: {error}") from None
+    if done.returncode != 0:
+        raise ToolError("tool_error", f"workflow-state exit {done.returncode}: {done.stderr.strip()}")
+    try:
+        parsed = json.loads(done.stdout)
+    except ValueError:
+        raise ToolError("mapping_error", f"workflow-state printed non-JSON for {root}") from None
+    if not isinstance(parsed, dict):
+        raise ToolError("mapping_error", f"workflow-state report for {root} is not an object")
+    return parsed
+
+
+class ToolError(Exception):
+    """The check could not judge: `kind` is the stderr label, the caller exits 2."""
+
+    def __init__(self, kind: str, detail: str):
+        super().__init__(detail)
+        self.kind = kind
+
+
+def worktree_mapping_check(roots: Sequence[Path], environ: Mapping[str, str], *,
+                           red_pending: bool) -> tuple[int, dict]:
+    """The C7 rule over each root. Raises ToolError when a root cannot be judged."""
+    rows = []
+    for root in roots:
+        report = _migrate_report(root, environ)
+        try:
+            rows.append(classify_root(root, report))
+        except MappingError as error:
+            raise ToolError("mapping_error", str(error)) from None
+    verdicts = [row["verdict"] for row in rows]
+    green = all(v == "green" for v in verdicts)
+    if green:
+        code = 0
+    elif red_pending:
+        code = 75
+    elif "red" in verdicts:
+        code = 1
+    else:
+        code = 75
+    return code, {"met": green, "roots": rows}
+
+
 def _repo(value: str) -> str:
     if not REPO.match(value):
         raise argparse.ArgumentTypeError("must be OWNER/NAME")
@@ -257,7 +320,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "managed-pre-push-hook",
         help="issue 672: the managed pre-push hook refuses an agent default-branch push")
     hook.add_argument("--slug", type=_repo, required=True)
+    mapping = checks.add_parser(
+        "worktree-mapping",
+        help="issue 585: every retained worktree has a strict-path ledger mapping (C7)")
+    mapping.add_argument("--repo-root", type=Path, action="append", required=True)
+    mapping.add_argument("--red-pending", action="store_true")
     args = parser.parse_args(argv)
+    if args.check == "worktree-mapping":
+        try:
+            code, report = worktree_mapping_check(args.repo_root, os.environ,
+                                                  red_pending=args.red_pending)
+        except ToolError as error:
+            print(f"verify-checks: {error.kind}: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "managed-pre-push-hook":
         git_bin = shutil.which("git", path=os.environ.get("PATH"))
         if git_bin is None:

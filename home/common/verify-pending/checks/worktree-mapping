@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 585: the #130 checklist C7 rule (retained worktrees have a
+# strict-path mapping) over each --repo-root. Read-only. verify-pending runs it from the
+# repository root at the commit the block names; ~/.agents/bin is not on the runner's PATH.
+PATH="$HOME/.agents/bin:$PATH" PYTHONPATH=python exec python3 -m agent_tools.verify_checks worktree-mapping "$@"
