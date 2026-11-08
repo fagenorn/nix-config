@@ -202,12 +202,12 @@ def _create(args, state: dict) -> tuple[dict, int]:
 
 def _link(args, state: dict) -> tuple[dict, int]:
     issue = state["issue"] = args.issue
+    own = database_id(args.repo, issue)  # also proves --issue is this repository's, not a transfer's redirect
     ids = {n: database_id(args.repo, n) for n in args.blocked_by + args.blocks}
     have_by = entries(args.repo, issue, "blocked_by")
     have_blocking = entries(args.repo, issue, "blocking")
     need_by = [n for n in args.blocked_by if ids[n] not in have_by]
     need_blocks = [n for n in args.blocks if ids[n] not in have_blocking]
-    own = database_id(args.repo, issue) if need_blocks else None
     for n in need_by:
         fm.add_blocked_by(args.repo, issue, ids[n])
     for n in need_blocks:

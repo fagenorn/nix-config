@@ -208,6 +208,10 @@ class CreateTest(Base):
 
 
 class LinkTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.world.respond_json("gh", get(NEW), CHILD)
+
     def link_cmd(self, *extra):
         return run("link", "--repo", SLUG, "--issue", str(NEW), *extra)
 
@@ -244,6 +248,16 @@ class LinkTest(Base):
             code, out = self.link_cmd("--blocked-by", "555")
         self.assertEqual((code, out["verdict"], out["blocked_by"]), (0, "linked", sorted([ref(B1), ref(FOREIGN)])))
         self.assertEqual(self.links(), [link(NEW, B1["id"])])
+
+    def test_link_of_a_transferred_issue_answering_from_a_foreign_repository_posts_nothing(self):
+        # GitHub redirects a transferred issue's number to its new home; --blocked-by alone must still
+        # resolve --issue against --repo (COR-002) before listing, posting or reading back.
+        self.world.respond_json("gh", get(NEW), dict(CHILD, repository_url=FOREIGN["repository_url"]))
+        self.lists(NEW, [B1], [])
+        self.world.respond_json("gh", link(NEW, B2["id"]), CHILD)
+        code, out = self.link_cmd("--blocked-by", "688")
+        self.assertEqual((code, out["verdict"], out["error"], out["issue"]), (1, "error", "payload_invalid", NEW))
+        self.assertEqual(self.posts(), [])
 
     def test_link_whose_read_back_holds_only_the_foreign_issue_exits_nonzero(self):
         self.lists(NEW, [FOREIGN], [])
