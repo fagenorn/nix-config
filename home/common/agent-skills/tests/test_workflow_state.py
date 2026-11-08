@@ -9432,9 +9432,8 @@ class OrchestratedHoldTest(LifecycleHarness, unittest.TestCase):
     def expected(self, run_id=None):
         root = self.root.resolve()
         run_id = self.run_id if run_id is None else run_id
-        return (f"workflow-state: issue 73 is held by orchestrated run {run_id}; resume it "
-                f"through orchestrate-issues: orchestrate-control start --repo-root {root} 73 "
-                f"--run-id {run_id}\n")
+        return (f"workflow-state: issue 73 is held by orchestrated run {run_id}; re-enter it "
+                f"with: workflow-state init-run --repo-root {root} --run-id {run_id}\n")
 
     def open_second_run_holding_73(self):
         """The first run stops holding 73 and a second orchestrated run spawns it; returns both
@@ -9476,11 +9475,22 @@ class OrchestratedHoldTest(LifecycleHarness, unittest.TestCase):
             attempt_identity.direct_key(73, 1)))
 
     def test_the_resume_command_survives_a_repository_path_with_spaces(self):
-        command = self.workflow_state.orchestrated_resume_command(
-            "/tmp/project with spaces; $(x)", "73", "rel_x")
+        command = self.workflow_state.held_run_resume_command(
+            "/tmp/project with spaces; $(x)", "rel_x")
         self.assertEqual(shlex.split(command), [
-            "orchestrate-control", "start", "--repo-root", "/tmp/project with spaces; $(x)",
-            "73", "--run-id", "rel_x"])
+            "workflow-state", "init-run", "--repo-root", "/tmp/project with spaces; $(x)",
+            "--run-id", "rel_x"])
+
+    def test_the_resume_command_names_a_live_workflow_state_subcommand(self):
+        """The retired orchestrator's launcher is gone; the refusal must name only a
+        command this helper still parses (issue 682)."""
+        command = self.workflow_state.held_run_resume_command("/tmp/repo", "rel_x")
+        self.assertNotIn("orchestrate-", command)
+        argv = shlex.split(command)
+        self.assertEqual(argv[0], "workflow-state")
+        args = self.workflow_state.build_parser().parse_args(argv[1:])
+        self.assertEqual((args.command, args.repo_root, args.run_id),
+                         ("init-run", "/tmp/repo", "rel_x"))
 
     def test_a_stale_first_pointer_does_not_hide_a_later_holder(self):
         first, second, first_state = self.open_second_run_holding_73()

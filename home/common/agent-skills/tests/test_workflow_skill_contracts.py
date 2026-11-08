@@ -3281,7 +3281,7 @@ class OrchestratedReentryContractsTest(unittest.TestCase):
     """Issue 475: the re-entry argv and refusal markers have their home in workflow-state."""
 
     def setUp(self):
-        self.helper = module_constants(WORKFLOW_STATE, "ORCHESTRATED_RESUME",
+        self.helper = module_constants(WORKFLOW_STATE, "HELD_RUN_RESUME",
                                        *DIRECT_REFUSAL_MARKERS)
 
     def test_acquire_direct_names_each_refusal_direct_owner_prints(self):
