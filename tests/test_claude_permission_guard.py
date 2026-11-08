@@ -35,7 +35,8 @@ EXPECTED_ALLOW = [
     "Bash(workflow-state:*)", "Bash(~/.agents/bin/workflow-state:*)",
     "Bash(artifact-budget:*)", "Bash(~/.agents/bin/artifact-budget:*)",
     "Bash(ship-delivery:*)", "Bash(~/.agents/bin/ship-delivery:*)",
-    "Bash(verification-observe:*)", "Bash(~/.agents/bin/verification-observe:*)", "Agent",
+    "Bash(verification-observe:*)", "Bash(~/.agents/bin/verification-observe:*)",
+    "Bash(forge-issue:*)", "Bash(~/.agents/bin/forge-issue:*)", "Agent",
 ]
 
 # Stand-in for `gh`. Answers the two lookups the guard makes for any slug and
@@ -415,6 +416,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "verification-observe observe --repo-root /r --input - <<'JSON'\n"
             '{"kind":"verification","blocker_id":"sha256:' + "0" * 64 + '",'
             '"sources":[{"name":"flake-lock","paths":["flake.lock"]}]}\nJSON',
+            "forge-issue create --repo octo/widgets --title Wire --body-file /tmp/body.md "
+            "--blocked-by 555 --blocks 689",
         ):
             with self.subTest(command=command.split()[0]):
                 result = self.invoke_command(command)

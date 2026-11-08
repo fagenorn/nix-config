@@ -3,13 +3,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from agent_tools import verify_exec, worktree_mapping
-from agent_tools.worktree_mapping import MappingError, classify, classify_root, ledger_matches
+from agent_tools.worktree_mapping import (
+    ForgeFacts, MappingError, classify, classify_root, ledger_matches)
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK = "home/common/verify-pending/checks/worktree-mapping"
@@ -168,6 +170,87 @@ class ClassifyRootTest(unittest.TestCase):
             classify_root(self.fleet.base / "missing", report())
 
 
+class ForgeClassifyTest(unittest.TestCase):
+    """Issue 710: forge facts map an otherwise unmapped worktree, with the reason (D2, D8)."""
+
+    def setUp(self):
+        self.fleet = Fleet(self)
+        self.calls = []
+
+    def reader(self, facts):
+        def read(root):
+            self.calls.append(root)
+            return facts
+        return read
+
+    def test_a_claim_an_open_pr_and_a_declared_branch_each_map_with_their_reason(self):
+        f = self.fleet
+        claimed, pr, declared = (f.worktree(n) for n in ("c-br", "p-br", "d-br"))
+        facts = ForgeFacts(
+            claims={"c-br": [{"issue": 7, "comment_id": 70, "holder": "h/s"}]},
+            open_prs={"p-br": 9}, declared={"d-br": 130})
+        got = classify_root(f.root, report(), forge=self.reader(facts))
+        self.assertEqual(got["verdict"], "green")
+        self.assertEqual(got["counts"], {"current": 0, "migrate": 0, "refused-only": 0,
+                                         "unmapped": 0, "forge": 3})
+        # Porcelain order: git lists linked worktrees sorted by path (as in
+        # test_lookalikes_of_a_runner_workspace_are_not_excluded), so c-br, d-br, p-br.
+        self.assertEqual(got["paths"], [
+            {"class": "forge", "path": claimed, "ledgers": [], "branch": "c-br",
+             "forge": [{"reason": "claim", "issue": 7, "comment_id": 70, "holder": "h/s"}]},
+            {"class": "forge", "path": declared, "ledgers": [], "branch": "d-br",
+             "forge": [{"reason": "declared", "issue": 130}]},
+            {"class": "forge", "path": pr, "ledgers": [], "branch": "p-br",
+             "forge": [{"reason": "open_pr", "pr": 9}]}])
+        self.assertEqual(self.calls, [f.root])
+
+    def test_every_reason_is_listed_in_order(self):
+        f = self.fleet
+        f.worktree("all")
+        facts = ForgeFacts(claims={"all": [{"issue": 1, "comment_id": 2, "holder": None}]},
+                           open_prs={"all": 3}, declared={"all": 4})
+        row = classify_root(f.root, report(), forge=self.reader(facts))["paths"][0]
+        self.assertEqual([r["reason"] for r in row["forge"]], ["claim", "open_pr", "declared"])
+
+    def test_an_unclaimed_stale_worktree_stays_red(self):
+        f = self.fleet
+        stale = f.worktree("stale")
+        f.worktree("c-br")
+        facts = ForgeFacts(claims={"c-br": [{"issue": 7, "comment_id": 70, "holder": "h/s"}]})
+        got = classify_root(f.root, report(), forge=self.reader(facts))
+        self.assertEqual(got["verdict"], "red")
+        self.assertEqual((got["counts"]["unmapped"], got["counts"]["forge"]), (1, 1))
+        self.assertIn({"class": "unmapped", "path": stale, "ledgers": []}, got["paths"])
+
+    def test_refused_only_and_migrate_keep_their_ledger_class(self):
+        f = self.fleet
+        f.ledger("L3", f.worktree("ref"))
+        f.ledger("L2", f.worktree("mig"))
+        facts = ForgeFacts(open_prs={"ref": 1, "mig": 2})
+        got = classify_root(f.root, report(L3="refused", L2="migrate"), forge=self.reader(facts))
+        self.assertEqual(sorted(p["class"] for p in got["paths"]), ["migrate", "refused-only"])
+        self.assertEqual(got["verdict"], "red")
+        self.assertEqual(self.calls, [])  # no unmapped path, no forge read
+
+    def test_a_detached_worktree_never_maps(self):
+        f = self.fleet
+        f.worktree("x", detach=True)
+        got = classify_root(f.root, report(), forge=self.reader(ForgeFacts(open_prs={"x": 1})))
+        self.assertEqual(got["paths"][0]["class"], "unmapped")
+        self.assertEqual(self.calls, [])
+
+    def test_short_branch_keeps_the_reconcile_semantics(self):
+        self.assertEqual([worktree_mapping.short_branch(b) for b in
+                          (None, "refs/heads/a/b", "refs/heads/", "odd")], [None, "a/b", "", "odd"])
+
+    def test_without_a_reader_the_document_is_unchanged(self):
+        f = self.fleet
+        un = f.worktree("un")
+        got = classify_root(f.root, report())
+        self.assertEqual(set(got["counts"]), set(worktree_mapping.CLASSES))
+        self.assertEqual(got["paths"], [{"class": "unmapped", "path": un, "ledgers": []}])
+
+
 class WrapperTest(unittest.TestCase):
     def run_check(self, fake_body, *roots, flags=()):
         argv = [str(ROOT / CHECK), *flags]
@@ -257,6 +340,213 @@ class RunnerSeamTest(unittest.TestCase):
         self.assertEqual((got["counts"]["unmapped"], len(got["excluded"])), (1, 2))
         _, result = self.run_in_runner(report())
         self.assertEqual(verify_exec.classify(result, None), "not_met", result.stderr)
+
+
+def write_fake_gh(bin_dir, home):
+    """A fake `gh` in `bin_dir` answering `gh api [--paginate --slurp] <path>` from
+    `home/responses.json` (path -> JSON) and logging every argv to `home/gh.log`."""
+    gh = Path(bin_dir) / "gh"
+    gh.write_text(f"#!{sys.executable}\n" + f"HOME_DIR = {str(home)!r}\n" + """
+import json, os, sys
+with open(os.path.join(HOME_DIR, "gh.log"), "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+responses = json.load(open(os.path.join(HOME_DIR, "responses.json")))
+path = sys.argv[-1]
+if sys.argv[1] != "api" or path not in responses:
+    sys.stderr.write("gh: Not Found (HTTP 404)\\n")
+    sys.exit(1)
+print(json.dumps(responses[path]))
+""", encoding="utf-8")
+    gh.chmod(0o755)
+
+
+def fake_forge_home(case, rep, responses):
+    """A HOME whose `.agents/bin` holds a fake `workflow-state` printing `rep` and the fake `gh`."""
+    home = Path(fake_home(case, printing(rep)))
+    (home / "responses.json").write_text(json.dumps(responses), encoding="utf-8")
+    write_fake_gh(home / ".agents" / "bin", home)
+    return str(home)
+
+
+def comment(cid, body, assoc="OWNER"):
+    return {"id": cid, "body": body, "author_association": assoc,
+            "updated_at": "2026-11-08T00:00:00Z"}
+
+
+ISSUES = "repos/o/r/issues?labels=in-progress&state=open&per_page=100"
+PULLS = "repos/o/r/pulls?state=open&per_page=100"
+
+
+def pull(number, ref, repo="o/r", base="o/r"):
+    return {"number": number, "updated_at": "2026-11-08T00:00:00Z",
+            "head": {"ref": ref, "repo": {"full_name": repo} if repo else None},
+            "base": {"repo": {"full_name": base}}}
+
+
+class ForgeWrapperTest(unittest.TestCase):
+    """Issue 710 AC1 through the committed wrapper: forge facts map a worktree, fail-closed."""
+
+    def run_check(self, fleet, responses, *flags, slug="o/r"):
+        git("remote", "add", "origin", f"https://github.com/{slug}.git", cwd=fleet.root)
+        self.home = fake_forge_home(self, report(), responses)
+        return subprocess.run(
+            [str(ROOT / CHECK), *flags, "--repo-root", str(fleet.root)], cwd=ROOT,
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, **GIT_ENV, "HOME": self.home})
+
+    def row(self, done):
+        return json.loads(done.stdout)["roots"][0]
+
+    def gh_calls(self):
+        log = Path(self.home) / "gh.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def test_a_claimed_worktree_maps(self):
+        f = Fleet(self)
+        f.worktree("issue-12-x")
+        claim = "<!-- agent:claim v1 issue=12 holder=h/s branch=issue-12-x renewed=1 -->\nClaimed."
+        done = self.run_check(f, {ISSUES: [[{"number": 12}]], PULLS: [[]],
+                                  "repos/o/r/issues/12/comments?per_page=100": [[comment(55, claim)]]})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        got = self.row(done)
+        self.assertEqual((got["verdict"], got["counts"]["forge"]), ("green", 1))
+        self.assertEqual(got["paths"][0]["forge"],
+                         [{"reason": "claim", "issue": 12, "comment_id": 55, "holder": "h/s"}])
+        self.assertTrue(all("-X" not in argv for argv in self.gh_calls()))
+
+    def test_an_organization_member_claim_maps(self):
+        f = Fleet(self)
+        f.worktree("issue-12-x")
+        claim = "<!-- agent:claim v1 issue=12 holder=h/s branch=issue-12-x renewed=1 -->\nClaimed."
+        done = self.run_check(f, {ISSUES: [[{"number": 12}]], PULLS: [[]],
+                                  "repos/o/r/issues/12/comments?per_page=100":
+                                      [[comment(55, claim, "MEMBER")]]})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.row(done)["paths"][0]["class"], "forge")
+
+    def test_an_open_pr_worktree_maps(self):
+        f = Fleet(self)
+        f.worktree("feature")
+        done = self.run_check(f, {ISSUES: [[]], PULLS: [[pull(9, "feature")], [pull(8, "feature")]]})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.row(done)["paths"][0]["forge"], [{"reason": "open_pr", "pr": 8}])
+
+    def test_an_open_pr_maps_when_the_repository_was_renamed_behind_origin(self):
+        f = Fleet(self)
+        f.worktree("feature")
+        done = self.run_check(f, {ISSUES: [[]], PULLS: [[pull(5, "feature", repo="new/r", base="new/r")]]})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.row(done)["paths"][0]["forge"], [{"reason": "open_pr", "pr": 5}])
+
+    def test_a_fork_pr_into_a_renamed_repository_maps_nothing(self):
+        f = Fleet(self)
+        f.worktree("feature")
+        done = self.run_check(f, {ISSUES: [[]], PULLS: [[pull(5, "feature", repo="fork/r", base="new/r")]]})
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(self.row(done)["paths"][0]["class"], "unmapped")
+
+    def test_the_declared_candidate_maps_while_its_issue_is_open(self):
+        for state, code in (("open", 0), ("closed", 1)):
+            with self.subTest(state=state):
+                f = Fleet(self)
+                f.worktree("cutover-130-candidate")
+                done = self.run_check(f, {
+                    "repos/fagenorn/nix-config/issues?labels=in-progress&state=open&per_page=100": [[]],
+                    "repos/fagenorn/nix-config/pulls?state=open&per_page=100": [[]],
+                    "repos/fagenorn/nix-config/issues/130": {"number": 130, "state": state}},
+                    slug="fagenorn/nix-config")
+                self.assertEqual(done.returncode, code, done.stderr)
+                path = self.row(done)["paths"][0]
+                if state == "open":
+                    self.assertEqual(path["forge"], [{"reason": "declared", "issue": 130}])
+                else:
+                    self.assertEqual(path["class"], "unmapped")
+
+    def test_a_root_without_a_github_origin_reads_no_forge(self):
+        f = Fleet(self)
+        f.worktree("any")
+        self.home = fake_forge_home(self, report(), {})
+        done = subprocess.run([str(ROOT / CHECK), "--repo-root", str(f.root)], cwd=ROOT,
+                              capture_output=True, text=True, timeout=60,
+                              env={**os.environ, **GIT_ENV, "HOME": self.home})
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(self.row(done)["paths"][0]["class"], "unmapped")
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_a_declared_issue_that_is_a_pull_request_maps_nothing(self):
+        f = Fleet(self)
+        f.worktree("cutover-130-candidate")
+        done = self.run_check(f, {
+            "repos/fagenorn/nix-config/issues?labels=in-progress&state=open&per_page=100": [[]],
+            "repos/fagenorn/nix-config/pulls?state=open&per_page=100": [[]],
+            "repos/fagenorn/nix-config/issues/130": {"number": 130, "state": "open",
+                                                    "pull_request": {}}},
+            slug="fagenorn/nix-config")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(self.row(done)["paths"][0]["class"], "unmapped")
+
+    def test_an_unclaimed_stale_worktree_stays_red(self):
+        f = Fleet(self)
+        f.worktree("stale")
+        released = ("<!-- agent:claim v1 issue=12 holder=h/s branch=stale renewed=1 released=done -->"
+                    "\nClaimed.")
+        untrusted = "<!-- agent:claim v1 issue=13 holder=h/s branch=stale renewed=1 -->\nClaimed."
+        done = self.run_check(f, {
+            ISSUES: [[{"number": 12}, {"number": 13}]],
+            "repos/o/r/issues/12/comments?per_page=100": [[comment(55, released)]],
+            "repos/o/r/issues/13/comments?per_page=100": [[comment(56, untrusted, "NONE")]],
+            PULLS: [[pull(8, "stale", repo="fork/r"), pull(7, "stale", repo=None)]]})
+        self.assertEqual(done.returncode, 1, done.stderr)
+        got = self.row(done)
+        self.assertEqual((got["verdict"], got["paths"][0]["class"]), ("red", "unmapped"))
+        done = subprocess.run([str(ROOT / CHECK), "--red-pending", "--repo-root", str(f.root)],
+                              cwd=ROOT, capture_output=True, text=True, timeout=60,
+                              env={**os.environ, **GIT_ENV, "HOME": self.home})
+        self.assertEqual(done.returncode, 75, done.stderr)
+
+    def test_a_forge_failure_is_exit_2(self):
+        f = Fleet(self)
+        f.worktree("any")
+        done = self.run_check(f, {})
+        self.assertEqual((done.returncode, done.stdout), (2, ""))
+        self.assertIn("verify-checks: forge_error:", done.stderr)
+
+    def test_a_malformed_forge_payload_is_exit_2(self):
+        bad_pull = {"number": "8", "updated_at": "t", "head": {"ref": "any", "repo": None}}
+        no_repo_name = {"number": 8, "updated_at": "t", "head": {"ref": "any", "repo": {}},
+                        "base": {"repo": {"full_name": "o/r"}}}
+        head = {"ref": "any", "repo": {"full_name": "o/r"}}
+        no_base = {"number": 8, "updated_at": "t", "head": head}
+        omitted_head_repo = {"number": 8, "updated_at": "t", "head": {"ref": "any"},
+                             "base": {"repo": {"full_name": "o/r"}}}
+        null_base_repo = {"number": 8, "updated_at": "t", "head": head, "base": {"repo": None}}
+        no_base_name = {"number": 8, "updated_at": "t", "head": head, "base": {"repo": {}}}
+        cases = {
+            "issue number": ({ISSUES: [[{"number": "12"}]], PULLS: [[]]}, "o/r"),
+            "pull number": ({ISSUES: [[]], PULLS: [[bad_pull]]}, "o/r"),
+            "pull repo name": ({ISSUES: [[]], PULLS: [[no_repo_name]]}, "o/r"),
+            "pull head repo omitted": ({ISSUES: [[]], PULLS: [[omitted_head_repo]]}, "o/r"),
+            "pull base": ({ISSUES: [[]], PULLS: [[no_base]]}, "o/r"),
+            "pull base repo": ({ISSUES: [[]], PULLS: [[null_base_repo]]}, "o/r"),
+            "pull base repo name": ({ISSUES: [[]], PULLS: [[no_base_name]]}, "o/r"),
+            "pull page": ({ISSUES: [[]], PULLS: [{"number": 8}]}, "o/r"),
+            "declared document": ({
+                "repos/fagenorn/nix-config/issues?labels=in-progress&state=open&per_page=100": [[]],
+                "repos/fagenorn/nix-config/pulls?state=open&per_page=100": [[]],
+                "repos/fagenorn/nix-config/issues/130": [{"state": "open"}]}, "fagenorn/nix-config"),
+        }
+        for name, (responses, slug) in cases.items():
+            with self.subTest(case=name):
+                f = Fleet(self)
+                f.worktree("cutover-130-candidate" if slug != "o/r" else "any")
+                done = self.run_check(f, responses, slug=slug)
+                self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+                self.assertIn("verify-checks: forge_error:", done.stderr)
+
+    def test_the_declared_branch_is_the_cutover_candidate(self):
+        from agent_tools import verify_checks, worktree_forge
+        self.assertEqual(worktree_forge.DECLARED_BRANCHES,
+                         {"fagenorn/nix-config": {verify_checks.CANDIDATE_BRANCH: 130}})
 
 
 if __name__ == "__main__":

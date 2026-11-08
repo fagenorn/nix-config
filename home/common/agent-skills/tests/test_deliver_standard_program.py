@@ -1623,6 +1623,19 @@ class HoldTest(unittest.TestCase):
         self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
         self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
         self.assertLess(labels(calls).index("hold"), labels(calls).index("close-out"))
+        self.assertNotIn("gh issue create", hold)
+        split = hold[hold.index("(forge-issue create --repo owner/repo"):]
+        self.assertNotIn("--block", split[:split.index(")")])  # the split issue carries no edge (R7)
+
+    def test_every_ruled_step_files_issues_through_forge_issue(self):
+        """#697 D11: an issue a plan's task declares is filed by forge-issue with native edges."""
+        _, calls = self.ship(EVIDENCE)
+        _, direct = run(args=dict(ARGS, lane="direct"))
+        for found, label in ((calls, "plan"), (calls, "impl-1"), (calls, "hold"), (direct, "direct-impl")):
+            with self.subTest(label=label):
+                text = prompt(found, label)
+                for argv in ("forge-issue create", "--blocked-by <n>", "--blocks <n>", "forge-issue link"):
+                    self.assertIn(argv, text)
 
     def test_passing_verify_run_closes_instead_of_holding(self):
         result, _ = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="CLOSED")

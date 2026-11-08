@@ -172,6 +172,7 @@ agent-workflow-tests *args:
     tests/test_keepalive_end_turn_cap.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \
+    tests/test_forge_issue.py \
     tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
