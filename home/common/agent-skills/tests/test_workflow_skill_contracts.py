@@ -475,6 +475,10 @@ LEGACY_MIGRATION_INPUTS = {
     "tests/test_fallback_audit.py": frozenset({
         ".claude/skills.config.json", "resolve-bindings",  # policy-gate-pattern
     }),
+    # The deprecations-retired verify check (https://github.com/fagenorn/nix-config/issues/582)
+    # asks git whether the legacy store is still tracked, so it and its tests must name it.
+    "python/agent_tools/verify_checks.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "tests/test_verify_checks.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
 }
 
 SUPPORT_POLICY_FORBIDDEN = (
