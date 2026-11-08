@@ -617,6 +617,24 @@ class PlanRulesTest(unittest.TestCase):
 
     REVISED = with_criteria(HUMAN, tasks=[{"n": 1, "title": "revised", "file": "/g/task-1.md", "risk": "standard"}])
 
+    def test_planner_gets_the_reviewer_rubric_and_setup_facts(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        found = re.search(r"const PLAN_RUBRIC = `([^`]*)`", source)
+        self.assertIsNotNone(found, "PLAN_RUBRIC is not a shared constant")
+        rubric = found.group(1)
+        self.assertEqual(source.count(rubric), 1)
+        facts = "setup-facts-token-712"
+        _, calls = run(patch={"setup": {"details": facts}}, replies={"plan-review": self.RULE_FINDING})
+        self.assertIn(rubric, prompt(calls, "plan-review"))
+        for label in ("plan", "plan-revise"):
+            text = prompt(calls, label)
+            self.assertIn(rubric, text, label)
+            self.assertIn(facts, text, label)
+        _, calls = run()
+        self.assertNotIn(facts, prompt(calls, "plan"))
+        self.assertNotIn("undefined", prompt(calls, "plan"))
+        self.assertIn(rubric, prompt(calls, "plan"))
+
     def keep_stop(self):
         plan = with_criteria(HUMAN)
         return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": self.REVISED,
