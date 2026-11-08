@@ -8,8 +8,8 @@ if either refuses. The resolver is never imported (D26): `adopt_project` hands
 in `run_resolver`, so validation and the projection writer both run in the
 resolver of this process's own store environment.
 
-It never stages, commits or fetches and touches only the contract and the two
-projection targets; the operator commits.
+It never stages, commits or fetches and touches only the contract and the
+`target` of each projection the source contract declares; the operator commits.
 """
 
 from __future__ import annotations
@@ -23,10 +23,6 @@ from agent_tools import adopt_inspection, agent_platform
 
 PLATFORM_FLOOR = "1.2.0"
 PLATFORM_CEILING = "3.0.0"
-
-# The only files a migration may write, repository-relative.
-PROJECTION_FILENAMES = ("AGENTS.md", "CLAUDE.md")
-TOUCHED = (adopt_inspection.CONTRACT_FILENAME, *PROJECTION_FILENAMES)
 
 Resolver = Callable[..., tuple[int, object]]
 
@@ -72,7 +68,37 @@ def deploy_in_use(source: dict) -> str | None:
     return None
 
 
-def _restore(root: Path, kept: dict[str, tuple[bytes, os.stat_result] | None]) -> None:
+def _inside_root(name: str) -> bool:
+    """A relative path with no `..` part: one the resolver would accept, and
+    the only kind this module may read, restore or remove."""
+    path = Path(name)
+    return bool(name) and not path.is_absolute() and ".." not in path.parts
+
+
+def touched_paths(source: dict) -> tuple[str, ...]:
+    """The repository-relative files a migration may write: the contract and
+    the `target` of every projection the source contract declares. A target is
+    any safe relative path, so the set comes from the contract, not a list."""
+    entries = source.get("projections")
+    targets = [entry["target"] for entry in entries
+               if isinstance(entry, dict) and isinstance(entry.get("target"), str)
+               and _inside_root(entry["target"])
+               ] if isinstance(entries, list) else []
+    return tuple(dict.fromkeys([adopt_inspection.CONTRACT_FILENAME, *targets]))
+
+
+def _missing_parents(root: Path, name: str) -> list[Path]:
+    """The directories between `root` and `name` that do not exist yet,
+    outermost first: the projection writer creates them for a nested target."""
+    missing = []
+    for parent in reversed((root / name).parents):
+        if parent != root and root in parent.parents and not parent.exists():
+            missing.append(parent)
+    return missing
+
+
+def _restore(root: Path, kept: dict[str, tuple[bytes, os.stat_result] | None],
+             created: list[Path]) -> None:
     for name, state in kept.items():
         target = root / name
         if state is None:
@@ -82,6 +108,11 @@ def _restore(root: Path, kept: dict[str, tuple[bytes, os.stat_result] | None]) -
         if target.read_bytes() != data:
             agent_platform.write_atomically(target, data)
         os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    for directory in reversed(created):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
 
 
 def _result_invalid(code: object, repair_id: object) -> adopt_inspection.AdoptError:
@@ -124,8 +155,12 @@ def migrate(root: Path, migration_id: str, manifest: dict,
                       "is not a pair of strict SemVer strings",
                       "verification_failed") from None
 
+    touched = touched_paths(source)
     kept: dict[str, tuple[bytes, os.stat_result] | None] = {}
-    for name in TOUCHED:
+    created: list[Path] = []
+    for name in touched:
+        created.extend(path for path in _missing_parents(root, name)
+                       if path not in created)
         target = root / name
         data = adopt_inspection.read_bytes_bounded(target)
         kept[name] = None if data is None else (data, target.stat())
@@ -139,11 +174,11 @@ def migrate(root: Path, migration_id: str, manifest: dict,
             if refusal is not None:
                 raise refusal
     except BaseException:
-        _restore(root, kept)
+        _restore(root, kept, created)
         raise
 
     written = sorted(
-        name for name in TOUCHED
+        name for name in touched
         if adopt_inspection.read_bytes_bounded(root / name)
         != (None if kept[name] is None else kept[name][0]))
     return {"migration": migration_id, "written": written}

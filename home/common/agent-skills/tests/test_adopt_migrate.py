@@ -16,7 +16,7 @@ from agent_tools import adopt_migrate
 
 from .test_adopt_project import AdoptTestCase, git, run, tree_snapshot
 from .test_resolve_project import (
-    install_home, make_home, make_project_root, mutated_manifest,
+    MANAGED_LINE, install_home, make_home, make_project_root, mutated_manifest,
     run as resolve_run, source_contract)
 
 MIGRATION = "bindings-deploy.retire"
@@ -102,6 +102,57 @@ class MigrateTest(AdoptTestCase):
         self.assertEqual(tree_snapshot(root), before)
         self.assertEqual({name: (root / name).read_bytes() for name in contents}, contents)
         self.assertEqual(git(root, "status", "--porcelain"), "")
+
+    def nested_target_root(self, *, doubled_import: bool = False, moved: bool = True):
+        """A schema-1 project whose codex projection targets generated/AGENTS.md."""
+        contract = source_contract()
+        for entry in contract["projections"]:
+            if entry["kind"] == "generated_file":
+                entry["target"] = "generated/AGENTS.md"
+        root = make_project_root(contract)
+        if moved:
+            (root / "generated").mkdir()
+            (root / "AGENTS.md").rename(root / "generated/AGENTS.md")
+        if doubled_import:
+            (root / "CLAUDE.md").write_text(
+                f"# authored body\n{MANAGED_LINE}\n{MANAGED_LINE}\n", encoding="utf-8")
+        commit_all(root)
+        return root
+
+    def test_it_reports_a_projection_target_that_is_not_a_root_file(self):
+        root = self.nested_target_root()
+        before = (root / "generated/AGENTS.md").read_bytes()
+        code, out, err = run("migrate", "--migration", MIGRATION,
+                             "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertNotEqual((root / "generated/AGENTS.md").read_bytes(), before)
+        changed = sorted(line[3:] for line in git(
+            root, "status", "--porcelain", "--untracked-files=all").splitlines())
+        self.assertEqual(json.loads(out)["written"], changed)
+        self.assertIn("generated/AGENTS.md", changed)
+
+    def test_a_refusal_restores_a_projection_target_that_is_not_a_root_file(self):
+        # write-projections writes generated/AGENTS.md, then refuses the
+        # doubled managed import line in CLAUDE.md.
+        root = self.nested_target_root(doubled_import=True)
+        before = tree_snapshot(root)
+        code, out, _ = run("migrate", "--migration", MIGRATION,
+                           "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["error"]["repair_id"],
+                         "adopt.migration.result_invalid")
+        self.assertEqual(tree_snapshot(root), before)
+        self.assertEqual(git(root, "status", "--porcelain"), "")
+
+    def test_a_refusal_removes_a_projection_target_it_created(self):
+        # generated/ and the target do not exist before the run.
+        root = self.nested_target_root(doubled_import=True, moved=False)
+        before = tree_snapshot(root)
+        code, _, _ = run("migrate", "--migration", MIGRATION,
+                         "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 2)
+        self.assertEqual(tree_snapshot(root), before)
+        self.assertFalse((root / "generated").exists())
 
     def test_a_second_run_is_not_applicable(self):
         root = make_project_root(source_contract())
