@@ -45,6 +45,8 @@ from agent_tools import forge_markers, forge_owner_action, verify_block, verify_
 from agent_tools.forge_markers import ForgeError, Marker
 
 NEEDS = "needs-verification"
+# Delivery labels a verified close drops with NEEDS; removing an absent one is a no-op (404).
+DELIVERY = ("in-progress", "agent:ready")
 FAILED = ("verification-failed", "B60205")
 FOLLOW_UP = ("verification-follow-up", "FBCA04")
 QUERY = (
@@ -937,6 +939,8 @@ class _Pass:
         if verified:
             forge_markers.remove_label(self.slug, self.number, FAILED[0])
             forge_markers.close_issue(self.slug, self.number, "completed")
+            for name in DELIVERY:
+                forge_markers.remove_label(self.slug, self.number, name)
             forge_markers.remove_label(self.slug, self.number, NEEDS)
         else:
             forge_markers.close_issue(self.slug, self.number, "not_planned")
