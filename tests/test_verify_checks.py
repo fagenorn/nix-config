@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import agent_gate_bundle, forge_markers, verify_checks
-from agent_tools.verify_checks import required_checks
+from agent_tools.verify_checks import required_checks, self_hosted_runner
 
 from .pre_push_world import PrePushWorld
 from .test_agent_gate_bundle import IDENTITY, context, flat, stratum  # the emitted-bundle builders
@@ -817,3 +817,104 @@ class CutoverBundleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+RUNNERS = "repos/elevenyellow/jarbird/actions/runners?per_page=100"
+WANTED = ("nix", "eleven-m5", "jarbird")
+
+
+def runner_entry(name="eleven-m5-jarbird", status="online",
+                 labels=("self-hosted", "macOS", "ARM64", "nix", "eleven-m5", "jarbird")):
+    return {"id": 1, "name": name, "status": status, "busy": False,
+            "labels": [{"id": i, "name": label, "type": "custom"} for i, label in enumerate(labels)]}
+
+
+def judge_runner(entries, total=None):
+    get, pages = forge({}, {RUNNERS: [{"total_count": len(entries) if total is None else total,
+                                       "runners": list(entries)}]})
+    with get, pages:
+        return self_hosted_runner("elevenyellow/jarbird", "eleven-m5-jarbird", WANTED)
+
+
+class SelfHostedRunnerTest(unittest.TestCase):
+    def test_an_online_runner_with_every_label_is_met(self):
+        code, report = judge_runner([runner_entry(name="other"), runner_entry()])
+        self.assertEqual(code, 0)
+        self.assertEqual((report["found"], report["status"], report["missing"]), (True, "online", []))
+        self.assertEqual(report["required"], ["eleven-m5", "jarbird", "nix", "self-hosted"])
+
+    def test_a_missing_label_is_not_met(self):
+        code, report = judge_runner([runner_entry(labels=("self-hosted", "nix", "eleven-m5"))])
+        self.assertEqual((code, report["missing"]), (1, ["jarbird"]))
+
+    def test_an_offline_runner_is_not_yet(self):
+        self.assertEqual(judge_runner([runner_entry(status="offline")])[0], 75)
+
+    def test_an_unlisted_runner_is_not_yet(self):
+        code, report = judge_runner([runner_entry(name="eleven-m5-arcwave")])
+        self.assertEqual((code, report["found"], report["status"]), (75, False, None))
+
+    def test_a_truncated_listing_is_refused(self):
+        with self.assertRaises(forge_markers.ForgeError):
+            judge_runner([runner_entry()], total=2)
+
+    def test_malformed_entries_are_refused(self):
+        bad_labels = runner_entry()
+        bad_labels["labels"] = ["jarbird"]
+        no_status = runner_entry()
+        del no_status["status"]
+        for entries in (["eleven-m5-jarbird"], [{"status": "online"}], [bad_labels], [no_status]):
+            with self.subTest(entries=entries):
+                with self.assertRaises(forge_markers.ForgeError):
+                    judge_runner(entries)
+
+
+class SelfHostedRunnerCommandTest(unittest.TestCase):
+    ARGS = ["--repo", "elevenyellow/jarbird", "--runner", "eleven-m5-jarbird",
+            "--label", "nix", "--label", "eleven-m5", "--label", "jarbird"]
+
+    def test_wrapper_maps_a_forge_error_to_exit_2(self):
+        # PATH holds only python3, so the wrapper finds its interpreter and gh is missing.
+        with tempfile.TemporaryDirectory() as tmp:
+            os.symlink(sys.executable, Path(tmp) / "python3")
+            done = run_from_root(["/bin/sh", str(ROOT / CHECKS / "self-hosted-runner"), *self.ARGS],
+                                 {"PATH": tmp})
+        self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+        self.assertIn("forge_error", done.stderr)
+
+    def test_a_malformed_listing_exits_2_through_main(self):
+        get, pages = forge({}, {RUNNERS: [{"total_count": 1, "runners": [{"status": "online"}]}]})
+        with get, pages, mock.patch("sys.stdout") as out, mock.patch("sys.stderr") as err:
+            code = verify_checks.main(["self-hosted-runner", *self.ARGS])
+        self.assertEqual(code, 2)
+        out.write.assert_not_called()
+        self.assertIn("forge_error: payload_invalid", "".join(c.args[0] for c in err.write.call_args_list))
+
+    def test_bad_arguments_never_reach_the_forge(self):
+        cases = (["--repo", "jarbird", *self.ARGS[2:]],
+                 [*self.ARGS[:2], "--runner", "", *self.ARGS[4:]],
+                 [*self.ARGS[:4], "--label", ""],
+                 self.ARGS[:4])
+        for argv in cases:
+            with self.subTest(argv=argv):
+                with mock.patch.object(verify_checks, "self_hosted_runner",
+                                       side_effect=AssertionError("reached the forge")):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(["self-hosted-runner", *argv])
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_main_prints_the_report_and_returns_the_code(self):
+        with mock.patch.object(verify_checks, "self_hosted_runner", return_value=(75, {"found": False})) as called:
+            with mock.patch("sys.stdout") as out:
+                code = verify_checks.main(["self-hosted-runner", *self.ARGS])
+        self.assertEqual(code, 75)
+        called.assert_called_once_with("elevenyellow/jarbird", "eleven-m5-jarbird", ["nix", "eleven-m5", "jarbird"])
+        out.write.assert_any_call('{"found": false}')
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/self-hosted-runner"), "100755")
+
+    def test_the_readme_documents_the_check(self):
+        readme = (ROOT / "python" / "README.md").read_text(encoding="utf-8")
+        for needle in ("self-hosted-runner --repo R --runner N --label L", "verify_checks.self_hosted_runner"):
+            self.assertIn(needle, readme)
