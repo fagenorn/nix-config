@@ -49,7 +49,7 @@ Publish each approved slice with the template below, blockers first so "Blocked 
 
 Record blocking edges natively where the tracker supports it:
 
-- **GitHub**: `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`. **`issue_id` is the blocker's numeric database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`), not its `#number` or `node_id`: a number silently links the wrong issue or fails. Read open blockers back from `issue_dependencies_summary.blocked_by`.
+- **GitHub**: `forge-issue create --repo <slug> --title <t> --body-file <f> [--label <l>] --blocked-by <n>...` files the slice and links its blockers by database id, read back. On exit 1 with an `issue`, repair it with `forge-issue link`; on `create_unconfirmed`, search for its title before filing again.
 - **GitLab**: `glab issue note <child> --message "/blocked_by #<blocker>"`; the free tier lacks native links.
 
 Without native links, "Blocked by" is the record. A slice is unblocked when all its blockers are closed.
