@@ -1,11 +1,13 @@
 """The railway-deploy watch adapter (issue 582 P1-P7). Run: just agent-workflow-tests"""
+import json
 import os
 import tempfile
 import unittest
 from unittest import mock
 
 from agent_tools import railway_deploy_adapter as adapter
-from agent_tools import release_adapter, transaction_plan
+from agent_tools import release_adapter, release_profile, transaction_plan
+from . import release_test_support as support
 from .railway_world import (BASE_TIP, CONFIG, GREEN, HEAD, HOTFIX, MERGE, OLDER, PR, PR_VIEW, RED,
                             RUNNING, SLUG, TIMED_OUT, RailwayWorld, commit_argv, deployment)
 
@@ -398,3 +400,43 @@ class RunningIdentityTest(unittest.TestCase):
         self.assertEqual(self.answer(predicate()), ("unknown", "identity_unobservable"))
         self.assertEqual(self.answer(predicate(name="publication_visible")),
                          ("unknown", "predicate_unsupported"))
+
+
+class CompiledRailwayWatchTest(unittest.TestCase):
+    """AC3: the unit the release core compiles and binds is one the real adapter accepts."""
+
+    def setUp(self):
+        self.world = RailwayWorld(self)
+        self.world.status()
+
+    def bound(self, profile, candidate):
+        compiled = release_profile.compile_profile("railway", profile, support.base_contract())
+        inputs = release_profile.bind_candidate(compiled, candidate)
+        unit = next(u["parameters"] for u in inputs["proof"]["units"] if u["name"] == "deploy")
+        return unit, release_adapter.core_binding(adapter, compiled, "railway")
+
+    def test_a_railway_watched_profile_compiles_and_its_unit_is_accepted(self):
+        unit, binding = self.bound(support.railway_watched_profile(), dict(support.CANDIDATE))
+        self.assertEqual(unit["target"], {"handle": "railway-site", "kind": "github_repository",
+                                          "repository": SLUG, "branch": "main"})
+        self.assertEqual(unit["config"], support.RAILWAY_CONFIG)
+        commit = support.CANDIDATE["commit"]
+        self.world.deployments("api", deployment("d1", commit))
+        self.world.deployments("admin", deployment("d2", commit))
+        result = binding.inspect({"parameters": unit})
+        self.assertEqual((result["outcome"], json.loads(result["reference"])["reason"]),
+                         ("satisfied", "deployed"))
+        observed = binding.observe({"predicate": "running_subject_identity",
+                                    "parameters": {"name": "deploy", "parameters": unit}})
+        self.assertEqual((observed["outcome"], observed["reason"]), ("satisfied", "running"))
+
+    def test_the_merge_shape_watches_the_merge_commit(self):
+        candidate = {**support.CANDIDATE, "merge": dict(support.MERGE)}
+        unit, binding = self.bound(support.railway_watched_merge_profile(), candidate)
+        self.assertEqual(unit["candidate"]["merge"], support.MERGE)
+        self.world.merged(parents=(support.MERGE["base_tip"], support.CANDIDATE["commit"]))
+        self.world.deployments("api", deployment("d1", MERGE))
+        self.world.deployments("admin", deployment("d2", MERGE, "FAILED"))
+        result = binding.inspect({"parameters": unit})
+        self.assertEqual((result["outcome"], json.loads(result["reference"])["reason"]),
+                         ("diverged", "deployment_failed"))

@@ -635,3 +635,84 @@ class MergePreviewTest(DriverCase):
         document = driver.preview(None)
         self.assertEqual((document["mode"], document["candidate"]["merge"]), ("resume", support.MERGE))
         self.assertEqual(self.world.calls(), [])
+
+
+class RailwayActivationWatchTest(DriverCase):
+    """AC3: a railway-deploy unit is an inspect-only activation the driver waits on or parks."""
+
+    def watched(self, watch, **project):
+        self.world.reset()
+        self.world.verification_ready()
+        registry = {"github-forge": rs.StatefulForge(self.world), "railway-deploy": watch}
+        return self.driver(rs.project(self, profiles={"railway": support.railway_watched_profile()},
+                                      **project), registry=registry)
+
+    def deploy(self, driver):
+        return next(a for a in driver.status()["release"]["actions"] if a["name"] == "deploy")
+
+    def test_the_profile_passes_the_shape_gate_and_only_with_bindings_deploy_none(self):
+        driver = self.watched(rs.ScriptedRailway())
+        self.assertIsNone(driver.shape_refusal())
+        document = driver.preview(rs.candidate())
+        self.assertEqual((document["runnable"], document["refusal"]), (True, None))
+        self.assertEqual([(a["name"], a["phase"], a["mode"]) for a in document["actions"]][-1],
+                         ("deploy", "activation", "publication_triggered"))
+        refusal = self.watched(rs.ScriptedRailway(), deploy_adapter="railway").shape_refusal()
+        self.assertEqual((refusal.code, refusal.repair_id),
+                         ("deploy_watch_unowned", "release.profile.activation_unbound"))
+
+    def test_a_deployed_watch_succeeds_without_an_invoke(self):
+        watch = rs.ScriptedRailway(("satisfied", "deployed"))
+        driver = self.watched(watch)
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(self.deploy(driver)["attempts"], 0)
+        self.assertTrue(watch.requests)
+
+    def test_a_failed_or_rolled_back_deployment_parks_with_its_reference(self):
+        for reason in ("deployment_failed", "silent_rollback", "superseded", "removed"):
+            with self.subTest(reason=reason):
+                driver = self.watched(rs.ScriptedRailway(("diverged", reason)))
+                _, result = rs.release(driver, rs.candidate())
+                self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+                status = driver.status()["release"]
+                self.assertEqual(status["parked_from"], "activating")
+                self.assertTrue(status["reason"].startswith("deploy: diverged: "), status["reason"])
+                self.assertIn(rs.RAILWAY_REFERENCE, status["reason"])
+                self.assertIn(reason, status["reason"])
+
+    def test_an_unfinished_deployment_waits_inside_its_deadline(self):
+        driver = self.watched(rs.ScriptedRailway(("in_progress", "deployment_in_progress")))
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual(result["next"], "wait")
+        self.assertEqual(self.deploy(driver)["status"], "in_progress")
+
+    def test_an_absent_deployment_waits_then_parks_past_its_deadline_and_never_succeeds(self):
+        """AC3: no Railway deployment of the released commit waits inside the deadline, parks
+        attention_required past it with no invoke and no receipt, and resuming while it is still
+        absent parks again (release_driver watched(): absent past the deadline parks)."""
+        watch = rs.ScriptedRailway(("absent", "deployment_absent"))
+        driver = self.watched(watch)
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("activating", "wait"))
+        self.clock.advance(rs.WATCH_DEADLINE_MS)
+        self.assertEqual(driver.run(None, [])["next"], "wait")
+        self.clock.advance(1)
+        result = driver.run(None, [])
+        self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        status = driver.status()["release"]
+        self.assertEqual((status["parked_from"], status["terminal"], status["receipt"]),
+                         ("activating", None, None))
+        self.assertTrue(status["reason"].startswith(
+            f"deploy: absent past {rs.WATCH_DEADLINE_MS} ms: "), status["reason"])
+        self.assertIn("deployment_absent", status["reason"])
+        self.assertNotIn(rs.RAILWAY_REFERENCE, status["reason"])
+        self.assertEqual(self.deploy(driver)["attempts"], 0)
+        inspected = len(watch.requests)
+        again = driver.run(None, [])
+        self.assertEqual((again["state"], again["next"]), ("attention_required", "attention"))
+        status = driver.status()["release"]
+        self.assertEqual((status["terminal"], status["receipt"]), (None, None))
+        self.assertEqual(self.deploy(driver)["attempts"], 0)
+        self.assertGreaterEqual(len(watch.requests), inspected)
+
