@@ -19,6 +19,14 @@ over each root through `agent_tools.worktree_mapping`, read-only, using the verd
 `workflow-state migrate --repo-root R`. It exits 0 when every root is green, 1 when one is red,
 75 when none is red and one is human-pending, and 2 on a tool error. Under `--red-pending` any
 root that is not green exits 75.
+
+`deprecations-retired [--red-pending] [--watch-adapter A] --repo-root R...` (issue 582) states the
+#130 checklist C11 rule over each root, read-only: no deprecated use reported by
+`resolve-project platform-status` (a), no tracked legacy skills config (b), `bindings.deploy.adapter`
+resolved to `none` (c), and no skill text naming the retired command (d); with `--watch-adapter A`
+it also reads whether the release target A is adopted and available. It exits 0 when every root is
+green, 1 when one is red, 75 when none is red and one is pending, and 2 on a tool error. Under
+`--red-pending` any root that is not green exits 75.
 """
 from __future__ import annotations
 
@@ -295,6 +303,142 @@ def worktree_mapping_check(roots: Sequence[Path], environ: Mapping[str, str], *,
     return code, {"met": green, "roots": rows}
 
 
+SKILLS_CONFIG = ".claude/skills.config.json"
+RETIRED_COMMAND = "release deploy inspect"
+C11D_DEFAULT_SCOPE = (".", ":!.agents/artifacts")
+# The #130 checklist (.agents/artifacts/evidence/cutover-130-checklist.md, C11) documents the
+# per-root pathspec: "for `fagenorn/nix-config` its pathspec is `home/common/agent-skills/skills`".
+# Keyed on the resolved `project.id`, so the command's own constant, this adapter and the tests
+# never count as users of the retired command.
+C11D_SCOPES = {"fagenorn/nix-config": ("home/common/agent-skills/skills",)}
+C11_TIMEOUT = 120
+C11_MAX_HITS = 20
+
+
+def _run_child(argv: Sequence[str], environ: Mapping[str, str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(list(argv), env=dict(environ), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=C11_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ToolError("tool_error", f"{Path(argv[0]).name} failed: {error}") from None
+
+
+def _git(root: Path, environ: Mapping[str, str], *args: str) -> subprocess.CompletedProcess:
+    git_bin = shutil.which("git", path=environ.get("PATH"))
+    if git_bin is None:
+        raise ToolError("tool_error", "git not found")
+    return _run_child([git_bin, "--no-optional-locks", "-C", str(root), *args], environ)
+
+
+def _as_object(text: str, what: str) -> dict:
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        raise ToolError("tool_error", f"{what} printed non-JSON") from None
+    if not isinstance(parsed, dict):
+        raise ToolError("tool_error", f"{what} did not print an object")
+    return parsed
+
+
+def _deprecated_uses_reading(binary: str, root: Path, environ: Mapping[str, str]) -> dict:
+    done = _run_child([binary, "platform-status", "--repo-root", str(root)], environ)
+    project = _as_object(done.stdout, "resolve-project platform-status").get("project")
+    uses = project.get("deprecated_uses") if isinstance(project, dict) else None
+    if not isinstance(uses, list):
+        raise ToolError("tool_error", "platform-status has no project.deprecated_uses list")
+    return {"exit": done.returncode, "deprecated_uses": uses,
+            "status": "green" if not uses else "red"}
+
+
+def _legacy_config_reading(root: Path, environ: Mapping[str, str]) -> dict:
+    done = _git(root, environ, "ls-files", "--", SKILLS_CONFIG)
+    if done.returncode != 0:
+        raise ToolError("tool_error", f"git ls-files exit {done.returncode}: {done.stderr.strip()}")
+    tracked = done.stdout.split()
+    return {"tracked": tracked, "status": "green" if not tracked else "red"}
+
+
+def _resolve_reading(binary: str, root: Path,
+                     environ: Mapping[str, str]) -> tuple[dict, dict | None]:
+    """Reading `c` and the snapshot it came from (None unless the resolve exited 0 with an object)."""
+    done = _run_child([binary, "resolve", "--repo-root", str(root)], environ)
+    snapshot = None
+    try:
+        parsed = json.loads(done.stdout)
+        if isinstance(parsed, dict):
+            snapshot = parsed
+    except ValueError:
+        pass
+    if done.returncode == 0 and snapshot is None:
+        raise ToolError("tool_error", "resolve-project resolve printed no JSON object")
+    if done.returncode != 0:
+        snapshot = None
+    bindings = snapshot.get("bindings") if snapshot else None
+    deploy = bindings.get("deploy") if isinstance(bindings, dict) else None
+    adapter = deploy.get("adapter") if isinstance(deploy, dict) else None
+    green = done.returncode == 0 and adapter == "none"
+    return ({"exit": done.returncode, "adapter": adapter,
+             "status": "green" if green else "red"}, snapshot)
+
+
+def _retired_command_reading(root: Path, environ: Mapping[str, str],
+                             snapshot: dict | None) -> dict:
+    project = snapshot.get("project") if snapshot else None
+    project_id = project.get("id") if isinstance(project, dict) else None
+    scope = C11D_SCOPES.get(project_id, C11D_DEFAULT_SCOPE) if isinstance(project_id, str) \
+        else C11D_DEFAULT_SCOPE
+    done = _git(root, environ, "grep", "-n", "-F", RETIRED_COMMAND, "--", *scope)
+    if done.returncode not in (0, 1):
+        raise ToolError("tool_error", f"git grep exit {done.returncode}: {done.stderr.strip()}")
+    hits = done.stdout.splitlines()[:C11_MAX_HITS] if done.returncode == 0 else []
+    return {"scope": list(scope), "hits": hits, "status": "green" if done.returncode == 1 else "red"}
+
+
+def _watch_reading(snapshot: dict | None, adapter: str) -> dict:
+    release = snapshot.get("release") if snapshot else None
+    targets = release.get("targets") if isinstance(release, dict) else None
+    adopted = [t for t in targets or [] if isinstance(t, dict) and t.get("adapter") == adapter]
+    if not adopted:
+        return {"adapter": adapter, "status": "pending"}
+    capabilities = snapshot.get("capabilities") if snapshot else None
+    state_row = capabilities.get("release") if isinstance(capabilities, dict) else None
+    row = state_row if isinstance(state_row, dict) else {}
+    state = row.get("state")
+    return {"adapter": adapter, "state": state, "reason_code": row.get("reason_code"),
+            "status": "green" if state == "available" else "red"}
+
+
+def deprecations_retired_check(roots: Sequence[Path], environ: Mapping[str, str], *,
+                               watch_adapter: str | None, red_pending: bool) -> tuple[int, dict]:
+    """The C11 rule over each root. Raises ToolError when a root cannot be judged."""
+    binary = shutil.which("resolve-project", path=environ.get("PATH"))
+    if binary is None:
+        raise ToolError("tool_error", "resolve-project not found")
+    rows = []
+    for root in roots:
+        readings: dict = {"a": _deprecated_uses_reading(binary, root, environ),
+                          "b": _legacy_config_reading(root, environ)}
+        readings["c"], snapshot = _resolve_reading(binary, root, environ)
+        readings["d"] = _retired_command_reading(root, environ, snapshot)
+        readings["watch"] = (_watch_reading(snapshot, watch_adapter)
+                             if watch_adapter is not None else None)
+        statuses = [r["status"] for r in readings.values() if r is not None]
+        verdict = ("red" if "red" in statuses
+                   else "pending" if "pending" in statuses else "green")
+        rows.append({"root": str(root), "readings": readings, "verdict": verdict})
+    verdicts = [row["verdict"] for row in rows]
+    green = all(v == "green" for v in verdicts)
+    if green:
+        code = 0
+    elif red_pending:
+        code = 75
+    elif "red" in verdicts:
+        code = 1
+    else:
+        code = 75
+    return code, {"met": green, "roots": rows}
+
+
 def _repo(value: str) -> str:
     if not REPO.match(value):
         raise argparse.ArgumentTypeError("must be OWNER/NAME")
@@ -325,7 +469,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="issue 585: every retained worktree has a strict-path ledger mapping (C7)")
     mapping.add_argument("--repo-root", type=Path, action="append", required=True)
     mapping.add_argument("--red-pending", action="store_true")
+    retired = checks.add_parser(
+        "deprecations-retired",
+        help="issue 582: the deprecated paths have zero users in every root (C11)")
+    retired.add_argument("--repo-root", type=Path, action="append", required=True)
+    retired.add_argument("--watch-adapter")
+    retired.add_argument("--red-pending", action="store_true")
     args = parser.parse_args(argv)
+    if args.check == "deprecations-retired":
+        try:
+            code, report = deprecations_retired_check(
+                args.repo_root, os.environ, watch_adapter=args.watch_adapter,
+                red_pending=args.red_pending)
+        except ToolError as error:
+            print(f"verify-checks: {error.kind}: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "worktree-mapping":
         try:
             code, report = worktree_mapping_check(args.repo_root, os.environ,
