@@ -1,21 +1,25 @@
-"""The GitHub Actions deploy-watch adapter (issue 465 D2, D6-D8, D14): `describe`, `inspect`, `invoke`.
+"""The GitHub Actions deploy-watch adapter (issue 465 D2, D6-D8, D14; issue 555 D3, D6, D9): `describe`, `inspect`, `invoke`.
 
 These three functions are the adapter's whole public surface (#124 D7). `describe()` returns a
-fresh descriptor with one operation, `deploy`: `publication_triggered` mode, `unsupported` for
-`invoke` (`bridge_watch_only`) and supported for `inspect`, so no release profile can bind it yet.
-It stays registered for the release core's activation unit (#555, P9), and no candidate command
-reads it until #555 binds it. Its closed config is `workflow`, `branch`, `services` (a `string_list`), `health_url` and `health_commit_field`.
+fresh descriptor with one operation, `deploy`: a watch-only `publication_triggered` activation
+unit a release profile may bind (issue 555 D3). It is supported for `inspect`, and `invoke`
+refuses every request (`watch_only`), so the adapter never changes the world. It also answers
+the `running_subject_identity` predicate by reading the health commit of the released commit.
+Its closed config is `workflow`, `branch`, `services` (a `string_list`), `health_url` and
+`health_commit_field`.
 
 This module imports only the standard library and `agent_tools.canonical`: the registry in
 `release_adapter` imports it, never the reverse, so its inner checks are its own (D14).
 
 `inspect(request)` never raises and never mutates. A request outside the closed shape is
-`unknown`/`parameters_invalid` and a predicate request is `unknown`/`predicate_unsupported`.
-Otherwise it runs `gh run list` by name with the caller's environment unchanged (the caller
-applies the tracker's credential binding, D10) and, only when the newest run at the candidate
-commit on the configured branch is completed, one `GET` of the health URL that follows no
-redirect and reads at most `HEALTH_BODY_LIMIT` bytes, both under one
-`COLLECTION_BUDGET_SECONDS` deadline. `satisfied` needs a `success` run whose commit the health
+`unknown`/`parameters_invalid`; a predicate request naming anything but `running_subject_identity`
+is `unknown`/`predicate_unsupported`, and every non-`satisfied` answer for that predicate stays in
+its derived reason space (D9). The released commit is `candidate.commit`, or, when the candidate
+binds a `merge`, the merge commit of that release PR (D6). Otherwise it runs `gh run list` by
+name with the caller's environment unchanged (the caller applies the tracker's credential
+binding, D10) and, only when the newest run at the released commit on the configured branch is
+completed, one `GET` of the health URL that follows no redirect and reads at most
+`HEALTH_BODY_LIMIT` bytes, all under one `COLLECTION_BUDGET_SECONDS` deadline. `satisfied` needs a `success` run whose commit the health
 endpoint also reports (D6, D7).
 
 `invoke(request)` refuses every request with `unsupported_operation` and starts no child process.
@@ -40,7 +44,7 @@ DETAIL_LIMIT = 240
 HEALTH_BODY_LIMIT = 65536
 RUN_LIMIT = 5
 RUN_FIELDS = "databaseId,status,conclusion,headSha,headBranch,createdAt"
-USER_AGENT = "agent-tools-github-actions-health/1.0.0"
+USER_AGENT = "agent-tools-github-actions-health/1.1.0"
 SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
 CANDIDATE_SHA = re.compile(r"[0-9a-f]{40}")
@@ -49,7 +53,11 @@ REPORTED_SHA = re.compile(r"[0-9A-Fa-f]{7,40}")
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 CONFIG_MEMBERS = {"workflow": "string", "branch": "string", "services": "string_list",
                   "health_url": "string", "health_commit_field": "string"}
+VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 TARGET_MEMBERS = frozenset(("kind", "repository", "branch"))
+MERGE_MEMBERS = frozenset(("pr", "base_tip"))
+CANDIDATE_SHAPES = (frozenset(("commit",)), frozenset(("version", "commit")),
+                    frozenset(("version", "commit", "merge")))
 REQUIRED = frozenset(("target", "candidate", "config"))
 TOLERATED = frozenset(("action", "operation"))
 
@@ -58,10 +66,10 @@ def describe() -> dict[str, Any]:
     """The `github-actions-health` descriptor (issue 465 D2), a fresh plain dict."""
     return {
         "name": "github-actions-health",
-        "adapter_contract_version": "1.0.0",
+        "adapter_contract_version": "1.1.0",
         "operations": {
-            "deploy": {"mode": "publication_triggered", "support": "unsupported",
-                       "inspect": "supported", "reason": "bridge_watch_only",
+            "deploy": {"mode": "publication_triggered", "support": "supported",
+                       "inspect": "supported", "reason": None,
                        "mutability": "in_place", "config_schema_version": 1,
                        "config_schema": {"members": dict(CONFIG_MEMBERS),
                                          "required": list(CONFIG_MEMBERS)},
@@ -70,7 +78,7 @@ def describe() -> dict[str, Any]:
         },
         "predicates": {
             "publication_visible": {"support": "unsupported", "reason": "no_publication_mode"},
-            "running_subject_identity": {"support": "unsupported", "reason": "bridge_watch_only"},
+            "running_subject_identity": {"support": "supported", "reason": None},
         },
         "collector": {"max_collection_latency_ms": 30000, "max_concurrent_collections": 1},
         "target_kinds": {"github_repository": ["branch", "repository"]},
@@ -91,9 +99,9 @@ def _text(value: object) -> bool:
 def _observation(outcome: str, reason: str, *, runs: list[dict[str, Any]] | None = None,
                  run: dict[str, Any] | None = None, health: dict[str, Any] | None = None,
                  services: list[str] | None = None, references: list[str] | None = None,
-                 detail: str | None = None) -> dict[str, Any]:
+                 detail: str | None = None, released: str | None = None) -> dict[str, Any]:
     facts: dict[str, Any] = {"runs": runs or [], "run": run, "health": health,
-                             "services": services or []}
+                             "services": services or [], "released": released}
     if detail is not None:
         facts["detail"] = detail[:DETAIL_LIMIT]
     return {"outcome": outcome, "reason": reason,
@@ -107,6 +115,30 @@ def _matches(reported: str, commit: str) -> bool:
     return REPORTED_SHA.fullmatch(reported) is not None and commit.startswith(reported.lower())
 
 
+def _hex40(value: object) -> bool:
+    return isinstance(value, str) and CANDIDATE_SHA.fullmatch(value) is not None
+
+
+def _candidate_problem(candidate: Any) -> str | None:
+    """The first way `candidate` departs from the three closed candidate shapes, or None."""
+    if not isinstance(candidate, dict) or frozenset(candidate) not in CANDIDATE_SHAPES:
+        return "candidate is not {commit}, {version, commit} or {version, commit, merge}"
+    if not _hex40(candidate["commit"]):
+        return "candidate commit is not 40 lowercase hex characters"
+    if "version" in candidate and not (isinstance(candidate["version"], str)
+                                       and VERSION.fullmatch(candidate["version"])):
+        return "candidate version is not vMAJOR.MINOR.PATCH"
+    if "merge" in candidate:
+        merge = candidate["merge"]
+        if not isinstance(merge, dict) or set(merge) != MERGE_MEMBERS:
+            return "merge is not {pr, base_tip}"
+        if type(merge["pr"]) is not int or merge["pr"] < 1:
+            return "merge pr is not a positive integer"
+        if not _hex40(merge["base_tip"]):
+            return "merge base_tip is not 40 lowercase hex characters"
+    return None
+
+
 def _parameters_problem(parameters: Any) -> str | None:
     """The first way `parameters` departs from the closed deploy shape, or None (D14)."""
     if not isinstance(parameters, dict):
@@ -118,19 +150,21 @@ def _parameters_problem(parameters: Any) -> str | None:
     if undeclared:
         return f"parameters has an undeclared member {undeclared[0]}"
     target = parameters["target"]
-    if (not isinstance(target, dict) or set(target) != TARGET_MEMBERS
+    if (not isinstance(target, dict)
+            or not TARGET_MEMBERS <= set(target) <= TARGET_MEMBERS | {"handle"}
             or target["kind"] != "github_repository"):
-        return "target is not a github_repository of exactly kind, repository and branch"
+        return ("target is not a github_repository of exactly kind, repository and branch, "
+                "and an optional handle")
+    if "handle" in target and not _text(target["handle"]):
+        return "target handle is not a non-empty string"
     repository, branch = target["repository"], target["branch"]
     if not isinstance(repository, str) or SLUG.fullmatch(repository) is None or ".." in repository:
         return "target repository is not an owner/name slug"
     if not isinstance(branch, str) or BRANCH.fullmatch(branch) is None or ".." in branch:
         return "target branch is not a branch name"
-    candidate = parameters["candidate"]
-    if (not isinstance(candidate, dict) or set(candidate) != {"commit"}
-            or not isinstance(candidate["commit"], str)
-            or CANDIDATE_SHA.fullmatch(candidate["commit"]) is None):
-        return "candidate is not exactly a commit of 40 lowercase hex characters"
+    problem = _candidate_problem(parameters["candidate"])
+    if problem is not None:
+        return problem
     config = parameters["config"]
     if not isinstance(config, dict) or set(config) != set(CONFIG_MEMBERS):
         return f"config is not exactly {', '.join(CONFIG_MEMBERS)}"
@@ -154,8 +188,8 @@ def _parameters_problem(parameters: Any) -> str | None:
     return None
 
 
-def _run_list(slug: str, workflow: str, branch: str, deadline: float) -> tuple[str, Any, str]:
-    """Run `gh run list` within what is left of `deadline`: `(status, payload, detail)`.
+def _gh(args: list[str], deadline: float) -> tuple[str, Any, str]:
+    """Run `gh <args>` within what is left of `deadline`: `(status, payload, detail)`.
 
     `status` is `"ok"` with the parsed JSON payload, or one of `lookup_failed`,
     `lookup_timeout`, `payload_invalid` and `executable_missing`, with a payload of `None`.
@@ -167,8 +201,7 @@ def _run_list(slug: str, workflow: str, branch: str, deadline: float) -> tuple[s
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return "lookup_timeout", None, ""
-    argv = ["gh", "run", "list", "--repo", slug, "--workflow", workflow, "--branch", branch,
-            "--limit", str(RUN_LIMIT), "--json", RUN_FIELDS]
+    argv = ["gh", *args]
     try:
         done = subprocess.run(argv, capture_output=True, text=True, errors="replace",
                               timeout=remaining, stdin=subprocess.DEVNULL)
@@ -185,6 +218,12 @@ def _run_list(slug: str, workflow: str, branch: str, deadline: float) -> tuple[s
         return "ok", json.loads(done.stdout), detail
     except (ValueError, RecursionError):
         return "payload_invalid", None, detail
+
+
+def _run_list(slug: str, workflow: str, branch: str, deadline: float) -> tuple[str, Any, str]:
+    """`gh run list` for the workflow on the branch: the `_gh` answer."""
+    return _gh(["run", "list", "--repo", slug, "--workflow", workflow, "--branch", branch,
+                "--limit", str(RUN_LIMIT), "--json", RUN_FIELDS], deadline)
 
 
 class _Invalid(Exception):
@@ -293,32 +332,95 @@ def _health(url: str, field: str, deadline: float) -> dict[str, Any]:
     return result("ok", status, commit)
 
 
+def _mismatch(detail: str) -> dict[str, str]:
+    return {"outcome": "diverged", "reason": "release_merge_mismatch", "detail": detail}
+
+
+def _released(parameters: dict[str, Any], deadline: float
+              ) -> tuple[str | None, dict[str, str] | None, list[str]]:
+    """`(commit, failure, references)`: the commit the release published (issue 555 D6).
+
+    Without `candidate.merge` it is `candidate.commit` and nothing is read. With it, the release
+    PR is read, then (only when `MERGED`) its merge commit, and the merge commit is the released
+    commit when the PR merged into the target branch as `[merge.base_tip, candidate.commit]`.
+    `failure` is `{outcome, reason, detail}` for a merge that does not resolve.
+    """
+    candidate = parameters["candidate"]
+    merge = candidate.get("merge")
+    if merge is None:
+        return candidate["commit"], None, []
+    slug, branch = parameters["target"]["repository"], parameters["target"]["branch"]
+    references = [f"repos/{slug}/pulls/{merge['pr']}"]
+
+    def unread(status: str, detail: str) -> tuple[None, dict[str, str], list[str]]:
+        return None, {"outcome": "unknown", "reason": status, "detail": detail}, references
+
+    status, view, detail = _gh(["pr", "view", str(merge["pr"]), "--repo", slug, "--json",
+                                "state,baseRefName,mergeCommit"], deadline)
+    if status != "ok":
+        return unread(status, detail)
+    if not isinstance(view, dict) or not isinstance(view.get("state"), str):
+        return unread("payload_invalid", "pull request state is not a string")
+    if view["state"] == "OPEN":
+        return None, {"outcome": "absent", "reason": "release_unmerged",
+                      "detail": "the release pull request is open"}, references
+    if view["state"] == "CLOSED":
+        return None, _mismatch("the release pull request was closed unmerged"), references
+    if view["state"] != "MERGED":
+        return unread("payload_invalid", f"pull request state {view['state']!r} is unknown")
+    if view.get("baseRefName") != branch:
+        return None, _mismatch("the release pull request merged into another branch"), references
+    merge_commit = view.get("mergeCommit")
+    oid = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
+    if not _hex40(oid):
+        return unread("payload_invalid", "mergeCommit oid is not 40 lowercase hex characters")
+    references.append(f"repos/{slug}/git/commits/{oid}")
+    status, commit, detail = _gh(["api", f"repos/{slug}/git/commits/{oid}"], deadline)
+    if status != "ok":
+        return unread(status, detail)
+    parents = commit.get("parents") if isinstance(commit, dict) else None
+    if not (isinstance(parents, list) and all(
+            isinstance(parent, dict) and _hex40(parent.get("sha")) for parent in parents)):
+        return unread("payload_invalid", "merge commit parents are not a list of shas")
+    if [parent["sha"] for parent in parents] != [merge["base_tip"], candidate["commit"]]:
+        return (None, _mismatch("the merge commit parents are not the base tip and the head"),
+                references)
+    return oid, None, references
+
+
 def _deploy(parameters: Any, deadline: float) -> dict[str, Any]:
     """The effect observation of one deploy request (D6): the spec's classification table."""
     problem = _parameters_problem(parameters)
     if problem is not None:
         return _observation("unknown", "parameters_invalid", detail=problem)
     target, config = parameters["target"], parameters["config"]
-    commit, services = parameters["candidate"]["commit"], list(config["services"])
+    services = list(config["services"])
+    commit, failure, merge_references = _released(parameters, deadline)
+    if failure is not None:
+        return _observation(failure["outcome"], failure["reason"], services=services,
+                            references=merge_references, detail=failure["detail"])
     status, payload, detail = _run_list(target["repository"], config["workflow"],
                                         config["branch"], deadline)
     if status != "ok":
-        return _observation("unknown", status, services=services, detail=detail)
+        return _observation("unknown", status, services=services, references=merge_references,
+                            detail=detail, released=commit)
     try:
         entries = _entries(payload)
     except _Invalid as error:
-        return _observation("unknown", "payload_invalid", services=services, detail=str(error))
+        return _observation("unknown", "payload_invalid", services=services,
+                            references=merge_references, detail=str(error), released=commit)
     runs = [entry for _, _, entry in entries]
     selected = next((index for index, (_, _, entry) in enumerate(entries)
                      if _matches(entry["commit"], commit) and entry["branch"] == config["branch"]),
                     None)
     if selected is None:
-        return _observation("absent", "run_absent", runs=runs, services=services)
+        return _observation("absent", "run_absent", runs=runs, services=services,
+                            references=merge_references, released=commit)
     _, completed, run = entries[selected]
-    references = [f"repos/{target['repository']}/actions/runs/{run['id']}"]
+    references = [*merge_references, f"repos/{target['repository']}/actions/runs/{run['id']}"]
     if not completed:
         return _observation("in_progress", "run_in_progress", runs=runs, run=run,
-                            services=services, references=references)
+                            services=services, references=references, released=commit)
     health = _health(config["health_url"], config["health_commit_field"], deadline)
     references.append(config["health_url"])
     matched = health["status"] == "ok" and _matches(health["commit"], commit)
@@ -335,14 +437,44 @@ def _deploy(parameters: Any, deadline: float) -> dict[str, Any]:
     else:
         outcome, reason = "diverged", "run_failed"
     return _observation(outcome, reason, runs=runs, run=run, health=health, services=services,
-                        references=references)
+                        references=references, released=commit)
+
+
+def _running(parameters: Any, deadline: float) -> dict[str, Any]:
+    """The `running_subject_identity` answer: the health commit against the released commit.
+
+    Every non-`satisfied` answer is in the derived reason space (issue 555 D9): an unresolved
+    merge and a health read that is not `ok` are `identity_unobservable`. No run list is read.
+    """
+    def answer(outcome: str, reason: str, references: list[str]) -> dict[str, Any]:
+        return {"outcome": outcome, "reason": reason, "references": references,
+                "observed_at": _now_ms()}
+
+    commit, failure, references = _released(parameters, deadline)
+    if failure is not None:
+        return answer("unknown", "identity_unobservable", references)
+    config = parameters["config"]
+    health = _health(config["health_url"], config["health_commit_field"], deadline)
+    references = [*references, config["health_url"]]
+    if health["status"] != "ok":
+        return answer("unknown", "identity_unobservable", references)
+    if _matches(health["commit"], commit):
+        return answer("satisfied", "running", references)
+    return answer("unsatisfied", "subject_mismatch", references)
 
 
 def inspect(request: Any) -> dict[str, Any]:
     """The observation of one request. Never raises and never mutates (issue 465 D6)."""
     deadline = time.monotonic() + COLLECTION_BUDGET_SECONDS
     if isinstance(request, dict) and request.get("kind") == "predicate":
-        return {"outcome": "unknown", "reason": "predicate_unsupported", "references": [],
+        if request.get("predicate") != "running_subject_identity":
+            return {"outcome": "unknown", "reason": "predicate_unsupported", "references": [],
+                    "observed_at": _now_ms()}
+        if (set(request) == {"kind", "predicate", "operation", "parameters"}
+                and request["operation"] == "deploy"
+                and _parameters_problem(request["parameters"]) is None):
+            return _running(request["parameters"], deadline)
+        return {"outcome": "unknown", "reason": "identity_unobservable", "references": [],
                 "observed_at": _now_ms()}
     if (isinstance(request, dict) and set(request) == {"kind", "operation", "parameters"}
             and request["kind"] == "effect"):
@@ -355,6 +487,6 @@ def inspect(request: Any) -> dict[str, Any]:
 
 
 def invoke(request: Any) -> dict[str, Any]:
-    """Refuse every request: the deploy operation is watch-only and starts no child process."""
+    """Refuse every request: the deploy operation is watch-only and starts no child process (D3)."""
     return {"result": "rejected", "error_class": "unsupported_operation",
-            "reference": "deploy: bridge_watch_only"}
+            "reference": "deploy: watch_only"}

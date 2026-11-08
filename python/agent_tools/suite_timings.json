@@ -1,7 +1,6 @@
 {
  "tests/test_review_derivation.py": 192.0,
  "tests/test_review_issue121.py": 184.4,
- "tests/test_orchestrate_control.py": 147.3,
  "tests/test_review_replay.py": 125.8,
  "home/common/agent-skills/tests/test_adopt_apply.py": 113.0,
  "tests/test_sdd_gate.py": 107.5,
@@ -17,7 +16,6 @@
  "home/common/agent-skills/tests/test_conformance_checks.py": 47.5,
  "home/common/agent-skills/tests/test_adopt_verify.py": 47.5,
  "home/common/agent-skills/tests/test_artifact_budget.py": 43.4,
- "home/common/agent-skills/tests/test_admission_replay.py": 42.9,
  "tests/test_launch_scope.py": 41.3,
  "home/common/agent-skills/evals/tests/test-run-eval-tree.sh": 40.4,
  "home/common/agent-skills/tests/test_control_decisions.py": 39.3,

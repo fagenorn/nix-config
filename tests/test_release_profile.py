@@ -327,5 +327,46 @@ class MergeBindingTest(unittest.TestCase):
         self.assertIsNotNone(release_profile.candidate_problem({**support.CANDIDATE, "version": "1.2.3"}))
 
 
+class WatchBindingTest(unittest.TestCase):
+    """Issue 555 D2, D6: a github-actions-health unit compiles and watches what publication released."""
+
+    IDENTITY = {"version": "v1.2.3", "commit": "1" * 40}
+
+    def compiled(self, profile):
+        return release_profile.compile_profile("watched", profile, support.base_contract())
+
+    def test_a_watched_profile_compiles_with_the_registered_descriptors(self):
+        for profile in (support.watched_profile(), support.watched_merge_profile()):
+            compiled = self.compiled(profile)
+            with self.subTest(publication=[node["id"] for node in compiled["publication"]]):
+                self.assertEqual([(node["id"], node["mode"]) for node in compiled["activation"]],
+                                 [("deploy", "publication_triggered")])
+                self.assertEqual(compiled["adapters"]["watch"]["adapter"], "github-actions-health")
+                self.assertEqual(compiled["adapters"]["watch"]["adapter_contract_version"], "1.1.0")
+                self.assertEqual(compiled["deadlines"]["deploy"], 600000)
+                self.assertEqual(list(compiled["candidate_members"]["deploy"]), [])  # frozen tuple
+
+    def test_the_watch_unit_sees_the_merge_only_where_publication_merges(self):
+        single = release_profile.bind_candidate(self.compiled(support.watched_profile()),
+                                                dict(support.CANDIDATE))
+        for unit in (*single["proof"]["units"], *single["recovery"]["units"]):
+            with self.subTest(single=unit["name"]):
+                self.assertEqual(unit["parameters"]["candidate"], self.IDENTITY)
+        merged = release_profile.bind_candidate(self.compiled(support.watched_merge_profile()),
+                                                {**support.CANDIDATE, "merge": support.MERGE})
+        identity = {**self.IDENTITY, "merge": support.MERGE}
+        self.assertEqual([unit["name"] for unit in merged["proof"]["units"]],
+                         ["merge", "tag", "github-release", "deploy"])
+        for unit in (*merged["proof"]["units"], *merged["recovery"]["units"]):
+            with self.subTest(merged=unit["name"]):
+                self.assertEqual(unit["parameters"]["candidate"], identity)
+        deploy = merged["proof"]["units"][3]
+        self.assertEqual((deploy["phase"], deploy["collector"], deploy["parameters"]["config"]),
+                         ("activation", "watch", support.WATCH_CONFIG))
+        self.assertEqual(deploy["parameters"]["target"],
+                         {"handle": "site", "kind": "github_repository",
+                          "branch": "main", "repository": "fagenorn/nix-config"})
+
+
 if __name__ == "__main__":
     unittest.main()

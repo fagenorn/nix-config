@@ -1,6 +1,7 @@
 """The release driver library against the real TransactionStore (#128 spec §1, §2, §4, §7)."""
 import dataclasses
 import json
+import os
 import re
 import unittest
 from unittest import mock
@@ -432,6 +433,135 @@ class FinalReviewTest(DriverCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ActivationWatchTest(DriverCase):
+    """Issue 555 D2, D4, D5: a github-actions-health unit is an inspect-only activation."""
+
+    def watched(self, watch, project=None):
+        self.world.reset()
+        self.world.verification_ready()
+        registry = {"github-forge": rs.StatefulForge(self.world), "github-actions-health": watch}
+        project = project or rs.project(self, profiles={"watched": support.watched_profile()})
+        return self.driver(project, registry=registry)
+
+    def deploy(self, driver):
+        return next(a for a in driver.status()["release"]["actions"] if a["name"] == "deploy")
+
+    def test_a_watched_profile_compiles_and_passes_the_shape_gate(self):
+        """AC1."""
+        driver = self.watched(rs.ScriptedWatch())
+        self.assertIsNone(driver.shape_refusal())
+        self.assertIsNone(driver.status()["shape"])
+        document = driver.preview(rs.candidate())
+        self.assertEqual((document["runnable"], document["refusal"]), (True, None))
+        self.assertEqual([(a["name"], a["phase"], a["mode"], a["effect"]) for a in document["actions"]],
+                         [("tag", "publication", "index", "irreversible"),
+                          ("github-release", "publication", "index", "irreversible"),
+                          ("deploy", "activation", "publication_triggered",
+                           "reversible_no_incremental_spend")])
+        self.assertEqual([c["action"] for c in document["confirmations"]], ["tag", "github-release"])
+
+    def test_the_watch_reads_run_without_the_tracker_credential_exclusions(self):
+        """The contract's `unset_before_invocation` names are absent from every watch read,
+        and are back in this process afterwards."""
+        names = ["GITHUB_TOKEN", "GH_TOKEN"]
+        project = rs.project(self, profiles={"watched": support.watched_profile()})
+        project = dataclasses.replace(project, contract={
+            **project.contract, "bindings": {**project.contract["bindings"], "tracker": {
+                **project.contract["bindings"]["tracker"],
+                "credential_env": {"unset_before_invocation": names}}}})
+        watch = rs.ScriptedWatch(("satisfied", "deployed"))
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "expired", "GH_TOKEN": "expired",
+                                          "KEPT": "kept"}):
+            driver = self.watched(watch, project)
+            _, result = rs.release(driver, rs.candidate())
+            self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+            self.assertEqual(os.environ["GITHUB_TOKEN"], "expired")
+        self.assertEqual({request["kind"] for request in watch.requests}, {"effect", "predicate"})
+        for environment in watch.environments:
+            self.assertEqual([name for name in names if name in environment], [])
+            self.assertEqual(environment["KEPT"], "kept")
+
+    def test_a_satisfied_watch_proves_and_succeeds_without_an_invoke(self):
+        """AC4: satisfied."""
+        watch = rs.ScriptedWatch(("satisfied", "deployed"))
+        driver = self.watched(watch)
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual({request["kind"] for request in watch.requests}, {"effect", "predicate"})
+        effect = next(request for request in watch.requests if request["kind"] == "effect")
+        self.assertEqual(effect["parameters"]["candidate"],
+                         {"version": CANONICAL["tag"], "commit": CANONICAL["commit"]})
+        deploy = self.deploy(driver)
+        self.assertEqual((deploy["phase"], deploy["status"], deploy["attempts"]),
+                         ("activation", "satisfied", 0))
+        events = driver.store().load(result["transaction_id"]).events
+        self.assertNotIn(release_driver.ACTIVATION_NOT_APPLICABLE,
+                         [event.get("evidence_id") for event in events])
+
+    def test_pending_outcomes_wait_through_the_deadline(self):
+        """AC4: in_progress, and absent within the window, wait (D5)."""
+        for outcome, reason in (("in_progress", "run_in_progress"), ("absent", "run_absent"),
+                                ("unknown", "health_unreachable")):
+            with self.subTest(outcome=outcome):
+                driver = self.watched(rs.ScriptedWatch((outcome, reason)))
+                _, result = rs.release(driver, rs.candidate())
+                self.assertEqual((result["state"], result["next"]), ("activating", "wait"))
+                self.clock.advance(rs.WATCH_DEADLINE_MS)
+                result = driver.run(None, [])
+                self.assertEqual((result["state"], result["next"]), ("activating", "wait"))
+                self.assertEqual(self.deploy(driver)["attempts"], 0)
+
+    def test_pending_outcomes_past_the_deadline_park_with_the_run_reference(self):
+        """AC4: absent past the window parks naming run_absent (no run exists to reference);
+        in_progress and unknown are bounded too and name the run (D5)."""
+        for outcome, reason in (("absent", "run_absent"), ("in_progress", "run_in_progress"),
+                                ("unknown", "health_unreachable")):
+            with self.subTest(outcome=outcome):
+                driver = self.watched(rs.ScriptedWatch((outcome, reason)))
+                rs.release(driver, rs.candidate())
+                self.clock.advance(rs.WATCH_DEADLINE_MS + 1)
+                result = driver.run(None, [])
+                self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+                status = driver.status()["release"]
+                self.assertEqual((status["parked_from"], status["terminal"]), ("activating", None))
+                self.assertTrue(status["reason"].startswith(
+                    f"deploy: {outcome} past {rs.WATCH_DEADLINE_MS} ms: "), status["reason"])
+                self.assertIn(reason, status["reason"])
+                if outcome == "absent":
+                    self.assertNotIn("actions/runs/", status["reason"])
+                else:
+                    self.assertIn(rs.WATCH_RUN_REFERENCE, status["reason"])
+
+    def test_a_failed_run_or_a_stale_health_commit_parks_and_never_succeeds(self):
+        """AC2 and AC4: diverged parks with the run reference, and resuming parks again."""
+        for reason in ("run_failed", "health_commit_mismatch", "silent_rollback", "superseded"):
+            with self.subTest(reason=reason):
+                driver = self.watched(rs.ScriptedWatch(("diverged", reason)))
+                _, result = rs.release(driver, rs.candidate())
+                self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+                status = driver.status()["release"]
+                self.assertEqual((status["parked_from"], status["terminal"], status["receipt"]),
+                                 ("activating", None, None))
+                self.assertTrue(status["reason"].startswith("deploy: diverged: "), status["reason"])
+                self.assertIn(rs.WATCH_RUN_REFERENCE, status["reason"])
+                self.assertIn(reason, status["reason"])
+                deploy = self.deploy(driver)
+                self.assertEqual((deploy["phase"], deploy["status"], deploy["attempts"]),
+                                 ("activation", "diverged", 0))
+                self.assertIn(rs.WATCH_RUN_REFERENCE, deploy["reference"])
+                again = driver.run(None, [])
+                self.assertEqual((again["state"], again["next"]), ("attention_required", "attention"))
+
+    def test_a_running_identity_left_on_the_previous_release_parks_in_proving(self):
+        """AC2: the deploy run succeeded, but the running identity is still the previous release."""
+        driver = self.watched(rs.ScriptedWatch(("satisfied", "deployed"), running="unsatisfied"))
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("attention_required", "attention"))
+        status = driver.status()["release"]
+        self.assertEqual((status["parked_from"], status["reason"], status["terminal"]),
+                         ("proving", "proof_rejected", None))
 
 
 class MergePreviewTest(DriverCase):

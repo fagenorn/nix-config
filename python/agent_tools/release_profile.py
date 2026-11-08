@@ -35,6 +35,10 @@ further, a non-empty obligation list is one violation and each obligation is sti
 unit reports any entry as `contract.release.reference_unknown`. A publication-free profile
 compiles to empty graphs, and `bind_candidate` refuses it.
 
+A `publication_triggered` activation unit watches what publication released, so
+`bind_candidate` binds it `merge` whenever the profile binds one (issue 555 D6, amending
+issue 554 D15 for that mode).
+
 `phase_nodes` is the one post-grammar reader of a phase's authored nodes: it returns the
 publication actions or activation units of a profile, and an empty list for a phase
 authored as `"none"`. `release_targets` lists the targets every profile binds, each with
@@ -95,6 +99,7 @@ TITLE_FORBIDDEN = frozenset('"$`\\\0\r\n')
 CANDIDATE_KEYS = frozenset(("version", "commit", "title", "notes"))
 MERGE_MEMBER = "merge"
 MERGE_KEYS = frozenset(("pr", "base_tip"))
+WATCH_MODE = "publication_triggered"
 PHASES = ("publication", "activation")
 _PHASE_MEMBER = MappingProxyType({"publication": "actions", "activation": "units"})
 PHASE_MODES = {"publication": release_adapter.PUBLICATION_MODES,
@@ -1115,8 +1120,10 @@ def bind_candidate(compiled: ResolvedReleaseProfile, candidate: dict) -> dict[st
     naming the profile, before the candidate is read. The candidate carries `merge` exactly
     when `binds_merge(compiled)` (issue 554 D2, D15): it is bound beside `version` and
     `commit` into the subject's `candidate` and into the `candidate` of every unit whose
-    adapter alias is the alias of a node that consumes it, and the units of any other alias
-    keep `{version, commit}`. The grammar's merge-alias rule keeps every node of the consuming
+    adapter alias is the alias of a node that consumes it, and also into every
+    `publication_triggered` activation unit, which watches what publication released (issue 555
+    D6, amending issue 554 D15 for that mode); the units of any other alias keep
+    `{version, commit}`. The grammar's merge-alias rule keeps every node of the consuming
     adapter on a consuming alias, so no `tag` or `release` misses the merge."""
     if not isinstance(compiled, ResolvedReleaseProfile):
         raise TypeError("bind_candidate takes a ResolvedReleaseProfile")
@@ -1139,6 +1146,7 @@ def bind_candidate(compiled: ResolvedReleaseProfile, candidate: dict) -> dict[st
     identity = {"version": candidate["version"], "commit": candidate["commit"]}
     bound = ({**identity, MERGE_MEMBER: dict(candidate[MERGE_MEMBER])} if consumers else identity)
     merge_aliases = {node["adapter"] for node in consumers}
+    watch_units = {node["id"] for node in compiled["activation"] if node["mode"] == WATCH_MODE}
     aliases = {node["id"]: node["adapter"] for node in
                (*compiled["publication"], *compiled["activation"])}
     configs = {node["id"]: node["config"] for node in
@@ -1147,7 +1155,8 @@ def bind_candidate(compiled: ResolvedReleaseProfile, candidate: dict) -> dict[st
     for unit in (*proof["units"], *recovery["units"]):
         name = unit["name"]
         unit["parameters"].update({
-            "candidate": copy.deepcopy(bound if aliases[name] in merge_aliases else identity),
+            "candidate": copy.deepcopy(bound if aliases[name] in merge_aliases or name in watch_units
+                                     else identity),
             "config": thaw(configs[name])})
         for member in compiled["candidate_members"][name]:
             if member != MERGE_MEMBER:

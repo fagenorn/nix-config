@@ -159,10 +159,19 @@ def migrate(root: Path, migration_id: str, manifest: dict,
     kept: dict[str, tuple[bytes, os.stat_result] | None] = {}
     created: list[Path] = []
     for name in touched:
+        if not adopt_inspection.contained_relative(root, name):
+            raise _refuse("adopt.migration.path_outside_checkout", f"/{name}",
+                          "the path resolves outside the checkout, so it is "
+                          "neither read nor written")
+    for name in touched:
         created.extend(path for path in _missing_parents(root, name)
                        if path not in created)
         target = root / name
         data = adopt_inspection.read_bytes_bounded(target)
+        if data is None and os.path.lexists(target):
+            raise _refuse("adopt.migration.unreadable", f"/{name}",
+                          "the file exists but cannot be read, so it cannot be "
+                          "backed up and restored")
         kept[name] = None if data is None else (data, target.stat())
     try:
         agent_platform.write_atomically(

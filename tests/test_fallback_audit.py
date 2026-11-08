@@ -149,6 +149,22 @@ class LaddersTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(report["probe"]["exit"], 0)
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads every file")
+    def test_an_unreadable_tracked_file_is_a_finding_not_a_clean_scan(self):
+        files = dict(self.EXEMPT_ONLY)
+        files["home/common/agent-skills/skills/ship-release/SKILL.md"] = "resolve-bindings\n"
+        root = self.make_repo(files)
+        unreadable = root / "home/common/agent-skills/skills/ship-release/SKILL.md"
+        unreadable.chmod(0)
+        self.addCleanup(unreadable.chmod, 0o644)
+        code, report, _ = self.ladders(
+            root, stub_body="""echo '{"error":{"code":"not_onboarded"}}'; exit 2""")
+        self.assertEqual((code, report["clean"]), (1, False))
+        self.assertEqual(
+            report["findings"],
+            [{"path": "home/common/agent-skills/skills/ship-release/SKILL.md",
+              "line": None, "marker_id": "unreadable_input"}])
+
     def test_a_clean_tree_with_a_closed_probe_exits_zero(self):
         root = self.make_repo(self.EXEMPT_ONLY)
         code, report, _ = self.ladders(

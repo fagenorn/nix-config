@@ -25,7 +25,8 @@ def descriptors() -> dict:
 
 
 def base_contract() -> dict:
-    return {"bindings": {"tracker": {"kind": "github", "repo_slug": "fagenorn/nix-config"},
+    return {"bindings": {"tracker": {"kind": "github", "repo_slug": "fagenorn/nix-config",
+                                 "credential_env": {"unset_before_invocation": []}},
                          "vcs": {"default_branch": "main"}},
             "capabilities": {}}
 
@@ -50,6 +51,40 @@ def merge_profile() -> dict:
     units = profile["recovery"]["units"]
     units["merge"] = copy.deepcopy(units["tag"])
     return profile
+
+
+WATCH_CONFIG = {"workflow": "deploy.yml", "branch": "main", "services": ["site"],
+                "health_url": "https://example.com/health", "health_commit_field": "commit"}
+
+
+def _watch(profile: dict, config: dict) -> dict:
+    """`profile` plus a github-actions-health activation unit `deploy` on alias `watch` (issue 555)."""
+    profile["requirements"]["adapters"]["watch"] = {"min_inclusive": "1.1.0",
+                                                    "max_exclusive": "2.0.0"}
+    bindings = profile["bindings"]
+    bindings["adapters"]["watch"] = {"adapter": "github-actions-health"}
+    bindings["targets"]["site"] = {"adapter": "watch", "kind": "github_repository",
+                                   "repository": "fagenorn/nix-config", "branch": "main"}
+    bindings["credentials"]["gh-cli"] = {"adapter": "watch", "class": "gh_cli"}
+    profile["activation"] = {"units": [{
+        "id": "deploy", "mode": "publication_triggered", "adapter": "watch",
+        "operation": "deploy", "target": "site", "principal": "maintainer",
+        "credential": "gh-cli", "effect": "reversible_no_incremental_spend",
+        "config_schema_version": 1, "config": {**copy.deepcopy(WATCH_CONFIG), **config},
+        "deps": [], "observation_deadline_ms": 600000}]}
+    profile["recovery"]["units"]["deploy"] = {"posture": "supersedable_only", "anchor": None,
+                                              "compatibility": None, "edges": []}
+    return profile
+
+
+def watched_profile(**config: object) -> dict:
+    """The forge profile whose deploy is a github-actions-health watch (issue 555)."""
+    return _watch(forge_profile(), config)
+
+
+def watched_merge_profile(**config: object) -> dict:
+    """The JarBird shape: `pr_merge` -> `tag` -> `github-release`, then the watch (issue 555)."""
+    return _watch(merge_profile(), config)
 
 
 def publication_free_profile() -> dict:

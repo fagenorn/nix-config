@@ -10,6 +10,7 @@ pinned schema-1 contract and its project roots (P11).
 from __future__ import annotations
 
 import json
+import os
 import unittest
 
 from agent_tools import adopt_migrate
@@ -159,6 +160,49 @@ class MigrateTest(AdoptTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(tree_snapshot(root), before)
         self.assertFalse((root / "generated").exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every file")
+    def test_an_unreadable_existing_file_refuses_before_any_write_and_survives(self):
+        # CLAUDE.md exists but cannot be read, so no byte of it can be backed up.
+        root = make_project_root(source_contract())
+        commit_all(root)
+        unreadable = root / "CLAUDE.md"
+        original = unreadable.read_bytes()
+        contract_before = (root / ".agents/project.json").read_bytes()
+        unreadable.chmod(0)
+        code, out, _ = run("migrate", "--migration", MIGRATION,
+                           "--repo-root", str(root), home=self.home)
+        if unreadable.exists():
+            unreadable.chmod(0o644)
+        self.assertEqual(code, 2)
+        error = json.loads(out)["error"]
+        self.assertEqual((error["repair_id"], error["violations"][0]["pointer"]),
+                         ("adopt.migration.unreadable", "/CLAUDE.md"))
+        self.assertEqual(unreadable.read_bytes(), original)
+        self.assertEqual((root / ".agents/project.json").read_bytes(), contract_before)
+        self.assertEqual(git(root, "status", "--porcelain"), "")
+
+    def test_a_target_through_a_symlink_out_of_the_checkout_refuses_and_writes_nothing(self):
+        contract = source_contract()
+        for entry in contract["projections"]:
+            if entry["kind"] == "generated_file":
+                entry["target"] = "generated/AGENTS.md"
+        root = make_project_root(contract)
+        outside = make_project_root(source_contract())
+        external = outside / "AGENTS.md"
+        external.write_text("another repository\n", encoding="utf-8")
+        (root / "generated").symlink_to(outside)
+        (root / "AGENTS.md").unlink()
+        commit_all(root)
+        contract_before = (root / ".agents/project.json").read_bytes()
+        code, out, _ = run("migrate", "--migration", MIGRATION,
+                           "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 2)
+        error = json.loads(out)["error"]
+        self.assertEqual((error["repair_id"], error["violations"][0]["pointer"]),
+                         ("adopt.migration.path_outside_checkout", "/generated/AGENTS.md"))
+        self.assertEqual(external.read_text(encoding="utf-8"), "another repository\n")
+        self.assertEqual((root / ".agents/project.json").read_bytes(), contract_before)
 
     def test_a_second_run_is_not_applicable(self):
         root = make_project_root(source_contract())

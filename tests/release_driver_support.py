@@ -1,9 +1,10 @@
 """Shared fixtures for the release driver suites (#128 spec, Test seams 2 and 3)."""
 import copy
+import os
 import tempfile
 from pathlib import Path
 
-from agent_tools import forge_adapter, release_driver, release_profile
+from agent_tools import actions_health_adapter, forge_adapter, release_driver, release_profile
 from . import release_test_support as support
 from .forge_world import CANONICAL, ROWS
 
@@ -143,6 +144,54 @@ MERGED_TIP = "3" * 40
 
 class Crash(Exception):
     """A simulated process death: raised out of an adapter call, never caught by the driver."""
+
+
+WATCH_RUN = 4242
+WATCH_RUN_REFERENCE = f"repos/{CANONICAL['slug']}/actions/runs/{WATCH_RUN}"
+WATCH_HEALTH = support.WATCH_CONFIG["health_url"]
+WATCH_DEADLINE_MS = 600000
+
+
+class ScriptedWatch:
+    """`github-actions-health` for registry injection (issue 555): the real descriptor and
+    scripted answers in the real adapter's per-outcome shape. `effects` are `(outcome, reason)`
+    pairs returned in turn, the last one repeating; `running` is the `running_subject_identity`
+    outcome. Every request is kept in `requests`; `crash_next_inspect` raises `Crash` from the
+    next inspection; `invoke` is a defect, because the driver never invokes a
+    publication_triggered unit (D4)."""
+
+    def __init__(self, *effects, running="satisfied"):
+        self.effects = list(effects) or [("satisfied", "deployed")]
+        self.running = running
+        self.requests = []
+        self.environments = []
+        self.crash_next_inspect = False
+
+    def describe(self):
+        return actions_health_adapter.describe()
+
+    def inspect(self, request):
+        self.requests.append(copy.deepcopy(request))
+        self.environments.append(dict(os.environ))
+        if self.crash_next_inspect:
+            self.crash_next_inspect = False
+            raise Crash("deploy inspect")
+        if request["kind"] == "predicate":
+            reason = "running" if self.running == "satisfied" else "subject_mismatch"
+            return {"outcome": self.running, "reason": reason, "references": [WATCH_HEALTH],
+                    "observed_at": 1}
+        outcome, reason = self.effects.pop(0) if len(self.effects) > 1 else self.effects[0]
+        # The real adapter's shapes: an absent run selects nothing, an unfinished run is not
+        # health-read, every other outcome names the run and the health read.
+        references = {"absent": [], "in_progress": [WATCH_RUN_REFERENCE]}.get(
+            outcome, [WATCH_RUN_REFERENCE, WATCH_HEALTH])
+        return {"outcome": outcome, "reason": reason,
+                "observed_subject": {"commit": None,
+                                     "run": None if outcome == "absent" else WATCH_RUN},
+                "references": references, "observed_at": 1, "facts": {}}
+
+    def invoke(self, request):
+        raise AssertionError("a publication_triggered unit is never invoked")
 
 
 def _fixture_descriptor(name: str, operation: str, entry: dict, predicate: str,
