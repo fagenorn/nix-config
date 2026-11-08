@@ -223,6 +223,7 @@ agent-workflow-tests *args:
     tests/test_codesigned_artifact_adapter.py \
     tests/test_launchd_agent_adapter.py \
     tests/test_agent_costs.py \
+    tests/test_run_profile.py \
     tests/test_agent_owner_report.py \
     tests/test_agent_owner_replay.py \
     tests/test_agent_boot_report.py \
@@ -368,6 +369,10 @@ install IP:
 # Report agent token spend per issue from the local Claude Code and Codex sessions
 agent-costs *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_costs {{args}}
+
+# Profile Workflow run dirs: fresh and cache-read tokens, wall time and tool calls per phase, agent, label family and delivered issue
+agent-run-profile *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.run_profile {{args}}
 
 agent-model-drift *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_drift {{args}}
