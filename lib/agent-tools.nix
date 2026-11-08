@@ -53,6 +53,7 @@ let
     "forge-claim"
     "guard-policy"
     "lane-triage"
+    "ledger-archive"
     "launch-commit"
     "launch-scope"
     "orchestrate-control"
