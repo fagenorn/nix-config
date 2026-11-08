@@ -17,6 +17,10 @@ back; `create` succeeds only when each id set equals the requested one, `link` w
 D8, output: every call, a usage error included, prints exactly one JSON object on one stdout
 line. Exit 0 success, 1 a forge error or a read-back that differs, 2 usage.
 
+D11, home repository: a lookup is accepted only when its `repository_url` names `--repo`, because
+GitHub redirects a transferred issue's number to its new home, where the same number may be another
+issue whose database id would otherwise be posted and read back identically.
+
 D10, identity is the database id: an existing edge and the read-back match requested issues by
 `id`, never by `number`, so an issue of another repository sharing a requested number is
 neither an existing edge nor a confirmed link.
@@ -36,6 +40,9 @@ NUMBER = re.compile(r"[1-9][0-9]*")
 KEYS = ("command", "repo", "issue", "verdict", "blocked_by", "blocks", "missing_blocked_by",
         "missing_blocks", "unexpected_blocked_by", "unexpected_blocks", "error", "detail")
 OK, FORGE_ERROR, USAGE = 0, 1, 2
+# The user-only Instruction Budget raise label: the lifecycle guard sees `gh --add-label`, not this
+# helper's API call, and the helper is allowed outright, so it refuses the label itself (COR-001).
+RESERVED_LABEL = "instruction-budget-raise"
 
 
 class UsageError(Exception):
@@ -62,6 +69,8 @@ def _number(value: str) -> int:
 def _label(value: str) -> str:
     if not value:
         raise argparse.ArgumentTypeError("a label must not be empty")
+    if value.strip().casefold() == RESERVED_LABEL:
+        raise argparse.ArgumentTypeError(f"label {RESERVED_LABEL!r} is the user's to apply, never the helper's")
     return value
 
 
@@ -104,13 +113,17 @@ def _parse(argv: list[str]) -> argparse.Namespace:
 
 
 def database_id(slug: str, number: int) -> int:
-    """The database id of issue `number` of `slug`; a pull request or another number's payload is an error."""
+    """The database id of issue `number` of `slug`; a pull request, another number's or another repository's payload is an error."""
     payload = fm.api_get(f"repos/{slug}/issues/{number}")
     answered = payload.get("number") if isinstance(payload, dict) else None
     if not isinstance(payload, dict) or isinstance(answered, bool) or answered != number:
         raise ForgeError("payload_invalid", f"#{number} answered as {answered!r}")
     if "pull_request" in payload:
         raise ForgeError("not_an_issue", f"#{number} is a pull request")
+    url = payload.get("repository_url")
+    home = url.split("/repos/", 1)[1] if isinstance(url, str) and "/repos/" in url else None
+    if home is None or home.casefold() != slug.casefold():
+        raise ForgeError("payload_invalid", f"#{number} answered from repository {home!r}, not {slug}")
     ident = payload.get("id")
     if isinstance(ident, bool) or not isinstance(ident, int) or ident <= 0:
         raise ForgeError("payload_invalid", f"#{number} has no database id")

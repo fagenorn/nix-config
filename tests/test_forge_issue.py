@@ -157,6 +157,29 @@ class CreateTest(Base):
         self.assertEqual((code, out["verdict"], out["error"], out["issue"]), (1, "error", "gh_failed", None))
         self.assertEqual(self.posts(), [])
 
+    def test_a_transferred_issue_answered_by_another_repository_files_nothing(self):
+        # GitHub redirects a transferred issue's lookup; the destination's same-numbered issue
+        # carries a foreign database id and must not be posted as a dependency (COR-002).
+        for n, flag in ((555, "--blocked-by"), (689, "--blocks")):
+            with self.subTest(flag=flag):
+                self.world.respond_json("gh", get(n), dict(FOREIGN, number=n))
+                code, out = self.file(flag, str(n))
+                self.assertEqual((code, out["error"], out["issue"]), (1, "payload_invalid", None))
+                self.assertEqual(self.posts(), [])
+
+    def test_a_lookup_without_a_repository_url_files_nothing(self):
+        self.world.respond_json("gh", get(555), {k: v for k, v in B1.items() if k != "repository_url"})
+        code, out = self.file("--blocked-by", "555")
+        self.assertEqual((code, out["error"], out["issue"]), (1, "payload_invalid", None))
+        self.assertEqual(self.posts(), [])
+
+    def test_the_repository_is_matched_case_insensitively(self):
+        upper = dict(B1, repository_url=B1["repository_url"].upper().replace("HTTPS://API.GITHUB.COM/REPOS", "https://api.github.com/repos"))
+        self.created_world([B1], [])
+        self.world.respond_json("gh", get(555), upper)
+        code, out = self.file("--blocked-by", "555")
+        self.assertEqual((code, out["verdict"]), (0, "created"))
+
     def test_a_payload_answering_another_number_files_nothing(self):
         self.world.respond_json("gh", get(555), B2)
         code, out = self.file("--blocked-by", "555")
@@ -252,6 +275,9 @@ class UsageTest(Base):
             ["create", "--repo", SLUG, "--body-file", body],
             ["link", "--repo", SLUG, "--issue", str(NEW)],
             ["link", "--repo", SLUG, "--issue", str(NEW), "--blocked-by", str(NEW)],
+            base + ["--label", "instruction-budget-raise"],
+            base + ["--label", "Instruction-Budget-Raise"],
+            base + ["--label", " instruction-budget-raise "],
             ["frobnicate"],
             [],
         ):
