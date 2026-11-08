@@ -72,6 +72,9 @@ in
     ];
   };
 
+  # The existing account records this canonical path; nix-darwin compares homes literally.
+  users.users._github-runner.home = lib.mkForce "/private/var/lib/github-runners";
+
   # Runs after nix-darwin has created `_github-runner` (users activate first).
   system.activationScripts.launchd.text = lib.mkBefore ''
     ${lib.getExe' pkgs.coreutils "install"} -d -m 0750 -o root -g _github-runner ${tokenDir}

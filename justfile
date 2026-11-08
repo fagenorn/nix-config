@@ -150,6 +150,7 @@ agent-workflow-tests *args:
     tests/test_verify_pending_pass.py \
     tests/test_verify_pending_units.py \
     tests/test_host_sudo.py \
+    tests/test_runner_home.py \
     tests/test_verify_checks.py \
     tests/test_worktree_mapping.py \
     tests/test_worktree_reconcile.py \
