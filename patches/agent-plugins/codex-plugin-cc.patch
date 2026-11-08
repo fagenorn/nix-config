@@ -2256,10 +2256,11 @@ index 2da2349..29eb4f2 100644
 +
 diff --git a/plugins/codex/scripts/lib/stdio-claims.mjs b/plugins/codex/scripts/lib/stdio-claims.mjs
 new file mode 100644
-index 0000000..fab2dea
+index 0000000..19625fd
 --- /dev/null
 +++ b/plugins/codex/scripts/lib/stdio-claims.mjs
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,261 @@
++import { execFileSync } from "node:child_process";
 +import crypto from "node:crypto";
 +import fs from "node:fs";
 +import path from "node:path";
@@ -2270,6 +2271,45 @@ index 0000000..fab2dea
 +export const STDIO_CLAIMS_DIR = "stdio-claims";
 +
 +const MAX_ANNOUNCE_ATTEMPTS = 3;
++const FINISHED_FILE = "finished.json";
++const FINISHED_TTL_MS = 60 * 60 * 1000;
++
++// Identifies one process instance, so a pid that was recycled by an unrelated
++// process is told apart from the reviewer that wrote an entry. Returns null
++// when it cannot be read; a null on either side is treated as "same process".
++export function processStartId(pid) {
++  try {
++    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
++    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
++    if (fields[19]) {
++      return `proc:${fields[19]}`;
++    }
++  } catch {
++    // No procfs here, or the process is gone.
++  }
++  try {
++    const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
++      encoding: "utf8",
++      env: { ...process.env, LC_ALL: "C" },
++      stdio: ["ignore", "pipe", "ignore"],
++      timeout: 2000
++    }).trim();
++    return started ? `ps:${started}` : null;
++  } catch {
++    return null;
++  }
++}
++
++function sameInstance(recorded, pid) {
++  if (typeof recorded !== "string") {
++    return true;
++  }
++  const live = processStartId(pid);
++  if (live === null || live.split(":")[0] !== recorded.split(":")[0]) {
++    return true;
++  }
++  return live === recorded;
++}
 +
 +function couldNotClaim(role, entry) {
 +  return new Error(`Could not claim the reviewer ${role} file at ${entry}.`);
@@ -2279,7 +2319,7 @@ index 0000000..fab2dea
 +// so the entry is never visible half written. An EEXIST means a dead earlier
 +// process with a reused pid left it (this process claims a key only once).
 +function announce({ root, keyDir, entry, pid, role }) {
-+  const body = JSON.stringify({ pid, role });
++  const body = JSON.stringify({ pid, role, start: processStartId(pid) });
 +  let replaced = false;
 +  for (let attempt = 1; attempt <= MAX_ANNOUNCE_ATTEMPTS; attempt += 1) {
 +    const temp = path.join(keyDir, `.${pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
@@ -2327,11 +2367,72 @@ index 0000000..fab2dea
 +      continue;
 +    }
 +    const holder = Number(match[1]);
-+    if (Number.isSafeInteger(holder) && holder > 0 && isProcessAlive(holder)) {
++    if (!Number.isSafeInteger(holder) || holder <= 0 || !isProcessAlive(holder)) {
++      continue;
++    }
++    let recorded = null;
++    try {
++      recorded = JSON.parse(fs.readFileSync(path.join(keyDir, name), "utf8"))?.start;
++    } catch {
++      // An unreadable entry cannot prove its pid was recycled.
++    }
++    if (sameInstance(recorded, holder)) {
 +      return holder;
 +    }
 +  }
 +  return null;
++}
++
++// A shell opens, and so truncates, a `>` file before this process exists. A
++// reviewer that finished and released while this one was still starting would
++// then leave its object in a file this one is about to overwrite from offset 0.
++// The finished reviewer records the size and mtime its output left behind; the
++// same pair on this file now means nothing has rewritten it since.
++function finishedWriter(keyDir, stat) {
++  let marker;
++  try {
++    marker = JSON.parse(fs.readFileSync(path.join(keyDir, FINISHED_FILE), "utf8"));
++  } catch {
++    return null;
++  }
++  if (marker?.size === String(stat.size) && marker?.mtimeNs === String(stat.mtimeNs) && Number.isSafeInteger(marker.pid)) {
++    return marker.pid;
++  }
++  return null;
++}
++
++function writeFinishedMarker(keyDir, fd, pid) {
++  const stat = fs.fstatSync(fd, { bigint: true });
++  if (!stat.isFile() || stat.size === 0n) {
++    return;
++  }
++  const temp = path.join(keyDir, `.finished.${pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
++  try {
++    fs.writeFileSync(temp, JSON.stringify({ pid, size: String(stat.size), mtimeNs: String(stat.mtimeNs) }), { mode: 0o600 });
++    fs.renameSync(temp, path.join(keyDir, FINISHED_FILE));
++  } finally {
++    fs.rmSync(temp, { force: true });
++  }
++}
++
++function pruneFinished(root) {
++  let keys;
++  try {
++    keys = fs.readdirSync(root);
++  } catch {
++    return;
++  }
++  for (const key of keys) {
++    const keyDir = path.join(root, key);
++    try {
++      if (Date.now() - fs.statSync(path.join(keyDir, FINISHED_FILE)).mtimeMs > FINISHED_TTL_MS) {
++        fs.rmSync(path.join(keyDir, FINISHED_FILE), { force: true });
++        fs.rmdirSync(keyDir);
++      }
++    } catch {
++      // No marker, a claimant's entry keeps the directory, or it is already gone.
++    }
++  }
 +}
 +
 +// Claims the regular files behind a reviewer's stdin and stdout. Each claimant
@@ -2347,15 +2448,28 @@ index 0000000..fab2dea
 +} = {}) {
 +  const announced = [];
 +
-+  function release() {
-+    for (const { entry } of announced) {
++  function teardown(finished) {
++    const claims = announced.splice(0);
++    if (finished) {
++      for (const { keyDir, stdoutFd } of claims) {
++        if (stdoutFd === null) {
++          continue;
++        }
++        try {
++          writeFinishedMarker(keyDir, stdoutFd, pid);
++        } catch {
++          // The marker only narrows a race; failing to leave one is not an error.
++        }
++      }
++    }
++    for (const { entry } of claims) {
 +      try {
 +        fs.unlinkSync(entry);
 +      } catch {
 +        // Already gone.
 +      }
 +    }
-+    for (const { keyDir } of announced) {
++    for (const { keyDir } of claims) {
 +      try {
 +        fs.rmdirSync(keyDir);
 +      } catch {
@@ -2365,10 +2479,11 @@ index 0000000..fab2dea
 +  }
 +
 +  try {
++    pruneFinished(root);
 +    for (const { fd, role } of streams) {
 +      let stat;
 +      try {
-+        stat = fs.fstatSync(fd);
++        stat = fs.fstatSync(fd, { bigint: true });
 +      } catch {
 +        continue;
 +      }
@@ -2376,27 +2491,35 @@ index 0000000..fab2dea
 +        continue;
 +      }
 +      const key = `${stat.dev}-${stat.ino}`;
-+      if (announced.some((claim) => claim.key === key)) {
-+        continue;
++      let claim = announced.find((candidate) => candidate.key === key);
++      if (!claim) {
++        const keyDir = path.join(root, key);
++        const ownName = `${pid}.json`;
++        const entry = path.join(keyDir, ownName);
++        fs.mkdirSync(root, { recursive: true, mode: 0o700 });
++        announce({ root, keyDir, entry, pid, role });
++        claim = { key, keyDir, entry, stdoutFd: null };
++        announced.push(claim);
++        afterAnnounce?.(key);
++        const holder = liveHolder(keyDir, ownName);
++        if (holder !== null) {
++          throw new Error(`Another running codex-companion reviewer (pid ${holder}) has the same ${role} file; give each review its own packet and output file.`);
++        }
 +      }
-+      const keyDir = path.join(root, key);
-+      const ownName = `${pid}.json`;
-+      const entry = path.join(keyDir, ownName);
-+      fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-+      announce({ root, keyDir, entry, pid, role });
-+      announced.push({ key, keyDir, entry });
-+      afterAnnounce?.(key);
-+      const holder = liveHolder(keyDir, ownName);
-+      if (holder !== null) {
-+        throw new Error(`Another running codex-companion reviewer (pid ${holder}) has the same ${role} file; give each review its own packet and output file.`);
++      if (role === "stdout" && claim.stdoutFd === null) {
++        claim.stdoutFd = fd;
++        const writer = finishedWriter(claim.keyDir, stat);
++        if (writer !== null) {
++          throw new Error(`Reviewer pid ${writer} already wrote this stdout file after it was opened here; give each review its own packet and output file.`);
++        }
 +      }
 +    }
 +  } catch (error) {
-+    release();
++    teardown(false);
 +    throw error;
 +  }
 +
-+  return { claims: announced.map(({ entry }) => entry), release };
++  return { claims: announced.map(({ entry }) => entry), release: () => teardown(true) };
 +}
 diff --git a/plugins/codex/scripts/lib/tracked-jobs.mjs b/plugins/codex/scripts/lib/tracked-jobs.mjs
 index 9028690..1979459 100644
@@ -4626,10 +4749,10 @@ index 0000000..efcb118
 +});
 diff --git a/tests/reviewer-stdio-isolation.test.mjs b/tests/reviewer-stdio-isolation.test.mjs
 new file mode 100644
-index 0000000..64b4ad6
+index 0000000..36ed455
 --- /dev/null
 +++ b/tests/reviewer-stdio-isolation.test.mjs
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,164 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -4687,7 +4810,7 @@ index 0000000..64b4ad6
 +    .filter((entry) => entry.isDirectory())
 +    .flatMap((entry) => {
 +      try {
-+        return fs.readdirSync(path.join(claimsRoot(), entry.name)).filter((name) => name.endsWith(".json"));
++        return fs.readdirSync(path.join(claimsRoot(), entry.name)).filter((name) => /^\d+\.json$/.test(name));
 +      } catch {
 +        return [];
 +      }
@@ -4767,6 +4890,32 @@ index 0000000..64b4ad6
 +  assert.equal(JSON.parse(fs.readFileSync(firstOut, "utf8")).status, 0);
 +  assert.ok(JSON.parse(fs.readFileSync(fakeState(firstBin), "utf8")).lastTurnStart.prompt.includes("review-marker-stdin"));
 +  assert.deepEqual(claimEntries(), []);
++});
++
++test("a reviewer whose truncating redirect opened before another reviewer finished is refused, not allowed to overwrite it", async () => {
++  const repo = reviewRepo();
++  const firstBin = fakeCodex("echo-slow-task");
++  const laterBin = fakeCodex("echo-slow-task");
++  const outFile = path.join(makeTempDir(), "out.json");
++  const firstFd = fs.openSync(outFile, "w");
++  const firstExit = startReviewer({ repo, binDir: firstBin, stdin: "ignore", stdout: firstFd, prompt: "review packet review-marker-alpha" });
++  await waitFor(() => claimEntries().length === 1, "the first reviewer's claim");
++
++  // The later reviewer's shell opens, and so truncates, the shared file now. Its process starts only after
++  // the first reviewer has written its object and released its claim.
++  const laterFd = fs.openSync(outFile, "w");
++  const first = await firstExit;
++  assert.equal(first.status, 0, first.stderr);
++  assert.equal(JSON.parse(fs.readFileSync(outFile, "utf8")).status, 0);
++  assert.deepEqual(claimEntries(), []);
++
++  const later = await startReviewer({ repo, binDir: laterBin, stdin: "ignore", stdout: laterFd, prompt: "review packet review-marker-beta" });
++  assert.equal(later.status, 1);
++  assert.match(later.stderr, /already wrote this stdout file/);
++  assert.equal(fs.existsSync(fakeState(laterBin)), false, "the refused reviewer started Codex");
++  const survivor = JSON.parse(fs.readFileSync(outFile, "utf8"));
++  assert.ok(survivor.rawOutput.includes("review-marker-alpha"));
++  assert.ok(!survivor.rawOutput.includes("review-marker-beta"));
 +});
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
 index 8f27683..692054c 100644
@@ -5040,10 +5189,10 @@ index 0f8f57c..cafb91e 100644
 +    savedJobs.map((job) => job.id),
 diff --git a/tests/stdio-claims.test.mjs b/tests/stdio-claims.test.mjs
 new file mode 100644
-index 0000000..2395f98
+index 0000000..f2c32f7
 --- /dev/null
 +++ b/tests/stdio-claims.test.mjs
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,270 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -5206,6 +5355,113 @@ index 0000000..2395f98
 +  assert.equal(claim.claims.length, 1);
 +  claim.release();
 +  assert.deepEqual(fs.readdirSync(root), []);
++});
++
++const startKind = () => (fs.existsSync("/proc/self/stat") ? "proc" : "ps");
++
++test("an entry whose pid now belongs to a different process instance is stale and ignored", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "out.json");
++  const dir = keyDir(root, fd);
++  const recycled = liveChild();
++  t.after(() => recycled.kill("SIGKILL"));
++  fs.mkdirSync(dir, { recursive: true });
++  fs.writeFileSync(
++    path.join(dir, `${recycled.pid}.json`),
++    JSON.stringify({ pid: recycled.pid, role: "stdout", start: `${startKind()}:not-the-start-of-this-process` })
++  );
++  const claim = claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root });
++  assert.deepEqual(fs.readdirSync(dir).sort(), [`${recycled.pid}.json`, `${process.pid}.json`].sort());
++  claim.release();
++  assert.deepEqual(fs.readdirSync(dir), [`${recycled.pid}.json`]);
++});
++
++test("an entry that carries no start identity still counts as held while its pid is alive", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "out.json");
++  const dir = keyDir(root, fd);
++  const holder = liveChild();
++  t.after(() => holder.kill("SIGKILL"));
++  fs.mkdirSync(dir, { recursive: true });
++  fs.writeFileSync(path.join(dir, `${holder.pid}.json`), JSON.stringify({ pid: holder.pid, role: "stdout" }));
++  assert.throws(() => claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root }), refusal(holder.pid, "stdout"));
++});
++
++test("an entry announced for a live pid records that process's start identity", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "out.json");
++  const other = liveChild();
++  t.after(() => other.kill("SIGKILL"));
++  const claim = claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root, pid: other.pid });
++  const entry = JSON.parse(fs.readFileSync(claim.claims[0], "utf8"));
++  assert.match(entry.start, new RegExp(`^${startKind()}:.+`));
++  // A second claimant sees the same instance and is refused.
++  assert.throws(() => claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root }), refusal(other.pid, "stdout"));
++  claim.release();
++});
++
++test("a reviewer that wrote a stdout file leaves it refused to a later claimant that opened it earlier", (t) => {
++  const root = makeTempDir();
++  const target = path.join(makeTempDir(), "out.json");
++  const firstFd = fs.openSync(target, "w");
++  const laterFd = fs.openSync(target, "w"); // the later reviewer's shell truncated it before the first one wrote
++  t.after(() => { fs.closeSync(firstFd); fs.closeSync(laterFd); });
++  const other = liveChild();
++  t.after(() => other.kill("SIGKILL"));
++
++  const first = claimReviewerStdio({ streams: [{ fd: firstFd, role: "stdout" }], root });
++  fs.writeSync(firstFd, '{"review":"first"}\n');
++  first.release();
++
++  assert.throws(
++    () => claimReviewerStdio({ streams: [{ fd: laterFd, role: "stdout" }], root, pid: other.pid }),
++    new RegExp(`^Error: Reviewer pid ${process.pid} already wrote this stdout file after it was opened here; give each review its own packet and output file\\.$`)
++  );
++  assert.equal(fs.readFileSync(target, "utf8"), '{"review":"first"}\n');
++  assert.equal(fs.readdirSync(keyDir(root, firstFd)).includes(`${other.pid}.json`), false, "the refused claimant left its entry");
++
++  // Once the file is truncated again, as a fresh redirect would do, it is free.
++  fs.ftruncateSync(laterFd, 0);
++  const later = claimReviewerStdio({ streams: [{ fd: laterFd, role: "stdout" }], root, pid: other.pid });
++  later.release();
++});
++
++test("a finished reviewer's unchanged packet or empty output refuses nobody", (t) => {
++  const root = makeTempDir();
++  const work = makeTempDir();
++  const packet = path.join(work, "packet.md");
++  fs.writeFileSync(packet, "review packet\n");
++  const out = path.join(work, "out.json");
++  const packetFd = fs.openSync(packet, "r");
++  const outFd = fs.openSync(out, "w");
++  t.after(() => { fs.closeSync(packetFd); fs.closeSync(outFd); });
++
++  claimReviewerStdio({ streams: [{ fd: packetFd, role: "stdin" }, { fd: outFd, role: "stdout" }], root }).release();
++  // The packet may be reused for a retry; an output that stayed empty left nothing to protect.
++  claimReviewerStdio({ streams: [{ fd: packetFd, role: "stdin" }, { fd: outFd, role: "stdout" }], root }).release();
++  assert.equal(fs.existsSync(path.join(keyDir(root, packetFd), "finished.json")), false);
++});
++
++test("finished markers older than an hour are pruned, with their key directory", (t) => {
++  const root = makeTempDir();
++  const work = makeTempDir();
++  const oldOut = path.join(work, "old.json");
++  const newOut = path.join(work, "new.json");
++  const oldFd = fs.openSync(oldOut, "w");
++  const newFd = fs.openSync(newOut, "w");
++  t.after(() => { fs.closeSync(oldFd); fs.closeSync(newFd); });
++
++  const old = claimReviewerStdio({ streams: [{ fd: oldFd, role: "stdout" }], root });
++  fs.writeSync(oldFd, "x");
++  old.release();
++  const oldMarker = path.join(keyDir(root, oldFd), "finished.json");
++  assert.equal(fs.existsSync(oldMarker), true);
++  const longAgo = new Date(Date.now() - 2 * 3600 * 1000);
++  fs.utimesSync(oldMarker, longAgo, longAgo);
++
++  const next = claimReviewerStdio({ streams: [{ fd: newFd, role: "stdout" }], root });
++  assert.equal(fs.existsSync(keyDir(root, oldFd)), false);
++  next.release();
 +});
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
