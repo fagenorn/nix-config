@@ -55,7 +55,7 @@ NOT_LAUNCHERS = ("workflow-state",)
 # full set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
                   "context-map-lint", "context-meter", "derive-review-feasibility-fixtures",
-                  "diff-scope", "forge-claim", "lane-triage", "orchestrate-control", "owner-actions",
+                  "diff-scope", "forge-claim", "lane-triage", "owner-actions",
                   "replay-retained", "resolve-project", "review-package", "review-range", "sdd-gate",
                   "ship-delivery")
 # The retained commands (#249) and their modules: refusal parity cases below.
