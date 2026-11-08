@@ -127,11 +127,13 @@ C3.c reads `<candidate>`, the head of `origin/cutover-130-candidate` (6b98674402
 |------|---------|----------|---------|-----|------|----------|---------|
 | mbp | .agents/artifacts/evidence/ | eb5bdd256bcc | C3.a; C3.b | 2026-11-03T16:13:31Z | 0; 0; 0 | approved and binding the candidate: 0 of 2 bundles; C4 names no candidate | red |
 | mbp | origin/main .agents/artifacts/evidence/ against 6b9867440299 | f70a164245b4 | C3.c | 2026-11-08T14:17:22Z | 75 | approved and binding the candidate: 0 of 2 bundles at origin/main, both unmeasured and bound to other commits; the issue branch's cutover-579-bundle.json is unmeasured and binds the candidate, so only an unmeasured bundle binds it | red |
+| mbp | origin/main .agents/artifacts/evidence/ against 720c67e53867 | 304aef7f742a | C3.c | 2026-11-08T15:56:54Z | 75 | approved and binding the candidate: 0 of 2 bundles at origin/main, both unmeasured and bound to other commits; the issue branch's regenerated cutover-579-bundle.json is unmeasured and binds 720c67e53867, so only an unmeasured bundle binds it; 6b9867440299 is superseded | red |
 
 Informational bundles (no verdict, outside the worst-row rule):
 - .agents/artifacts/evidence/promotion-127-bundle.json: state unmeasured; candidate 66ccba5844ea
 - .agents/artifacts/evidence/release-128-bundle.json: state unmeasured; candidate 33149faddfc0
 - .agents/artifacts/evidence/cutover-579-bundle.json (issue 579, on the issue branch): state unmeasured; candidate 6b9867440299, the output of `just agent-gate-bundle --trials .agents/artifacts/evidence/cutover-579-trials.json`, never hand-authored
+- .agents/artifacts/evidence/cutover-579-bundle.json, regenerated (issue 579, on the issue branch): state unmeasured; candidate 720c67e53867, base 304aef7f742a, the output of `just agent-gate-bundle --trials .agents/artifacts/evidence/cutover-579-trials.json` after the trials manifest was rebound, never hand-authored; the bullet above records the superseded 6b9867440299 binding
 
 Item verdict: **red**
 
@@ -154,9 +156,12 @@ No candidate exists: the strict major #66 requires is `2.0.0` or above, and the 
 
 The paragraph above is the evidence-time reading. A candidate now exists (issue 579): `origin/cutover-130-candidate`, 6b98674402994180a2a1f1852cf71f18fd1aa0ca.
 
+That candidate is superseded by 720c67e538670562ed9a096716ee978dc07377ee, the candidate regenerated on main after #555: a new commit on that branch, merging 6b9867440299 with the rebuilt candidate and carrying the rebuilt tree, so the branch moved by fast-forward and was never force-pushed.
+
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
 | mbp | home/common/agent-skills/platform-manifest.json | f70a164245b4 | C4.a (`--main-ref` the issue branch HEAD) | 2026-11-08T14:17:22Z | 0 | main_version 1.2.0; candidate_version 2.0.0; 5 removals, 0 undeclared; verdict green; read at the issue branch; origin/main reads the same after merge (#579 AC2); C4.b waits on the fleet-migration follow-up | green |
+| mbp | home/common/agent-skills/platform-manifest.json against 720c67e53867 | 304aef7f742a | C4.a (`--main-ref` the issue branch HEAD) | 2026-11-08T15:56:58Z | 0 | main_version 1.2.0; candidate_version 2.0.0; 5 removals, 0 undeclared; verdict green; read at the issue branch; origin/main reads the same after merge (#579 AC2); C4.b waits on the fleet-migration follow-up; 6b9867440299 is superseded | green |
 
 Item verdict: **red**
 
