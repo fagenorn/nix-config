@@ -151,13 +151,19 @@ class RunnersTest(unittest.TestCase):
 
     def test_the_jarbird_account_is_declared_on_eleven_m5_only(self):
         got = self.got["eleven-m5"]
-        self.assertEqual(got["account"], {"uid": 534, "gid": 534, "home": "/var/empty", "createHome": False})
+        self.assertEqual(got["account"], {"uid": 534, "gid": 534, "home": "/private/var/empty", "createHome": False})
         self.assertEqual(got["accountGroup"], {"gid": 534})
         self.assertIn(JARBIRD_ACCOUNT, got["knownUsers"])
         self.assertIn(JARBIRD_ACCOUNT, got["knownGroups"])
         mbp = self.got["mbp"]
         self.assertIsNone(mbp["account"])
         self.assertNotIn(JARBIRD_ACCOUNT, mbp["knownUsers"])
+
+    def test_the_account_home_is_canonical_so_a_second_activation_accepts_it(self):
+        # sysadminctl records the canonical /private path, and nix-darwin compares the
+        # recorded home to this literal on every later activation, aborting on a mismatch.
+        home = self.got["eleven-m5"]["account"]["home"]
+        self.assertTrue(home.startswith("/private/"), home)
 
     def test_another_tenant_shares_no_user_group_or_token_dir_with_the_owner(self):
         runners = self.got["eleven-m5"]["runners"]

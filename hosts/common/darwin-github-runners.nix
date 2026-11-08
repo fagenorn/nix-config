@@ -140,7 +140,9 @@ in
         value = {
           uid = e.account.id;
           gid = e.account.id;
-          home = "/var/empty";
+          # The canonical path: sysadminctl records /private/..., and nix-darwin compares
+          # the recorded home to this literal on every later activation.
+          home = "/private/var/empty";
           createHome = false;
           shell = "/bin/bash";
           description = "GitHub runner for ${e.owner}/${e.name}";
