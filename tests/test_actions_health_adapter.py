@@ -467,6 +467,27 @@ class CompiledWatchTest(unittest.TestCase):
                                          "parameters": {"name": "deploy", "parameters": self.unit}})
         self.assertEqual((observed["outcome"], observed["reason"]), ("unsatisfied", "subject_mismatch"))
 
+    def test_a_merge_bound_unit_watches_the_merge_commit_through_the_core_binding(self):
+        compiled = release_profile.compile_profile(
+            "watched", support.watched_merge_profile(health_url=self.world.url()),
+            support.base_contract())
+        inputs = release_profile.bind_candidate(compiled, {**support.CANDIDATE, "merge": support.MERGE})
+        unit = next(unit["parameters"] for unit in inputs["proof"]["units"] if unit["name"] == "deploy")
+        binding = release_adapter.core_binding(adapter, compiled, "watch")
+        self.world.merged(parents=(support.MERGE["base_tip"], support.CANDIDATE["commit"]))
+        self.world.runs(run(9, MERGE))
+        self.world.health(commit=MERGE)
+        result = binding.inspect({"parameters": unit})
+        self.assertEqual(result["outcome"], "satisfied")
+        self.assertEqual(json.loads(result["reference"])["references"][:2],
+                         [f"repos/{SLUG}/pulls/{support.MERGE['pr']}",
+                          f"repos/{SLUG}/git/commits/{MERGE}"])
+        observed = binding.observe({"predicate": "running_subject_identity",
+                                    "parameters": {"name": "deploy", "parameters": unit}})
+        self.assertEqual((observed["outcome"], observed["reason"]), ("satisfied", "running"))
+        self.assertEqual([call["argv"] for call in self.world.calls()][:3],
+                         [PR_VIEW, commit_argv(MERGE), RUN_LIST])
+
     def test_a_handle_that_is_not_a_non_empty_string_is_parameters_invalid(self):
         for handle in ("", 7, None):
             with self.subTest(handle=handle):
