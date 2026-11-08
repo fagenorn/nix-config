@@ -163,6 +163,13 @@ def ladders(args: argparse.Namespace) -> int:
     return 0 if clean else 1
 
 
+def _argv_text(command: Any, fallback: str) -> str:
+    """An argv command as the one line a shell would see; anything else as given."""
+    if isinstance(command, list) and command and all(isinstance(part, str) for part in command):
+        return " ".join(command)
+    return fallback
+
+
 def _calls(record: dict[str, Any]) -> list[tuple[str, str]]:
     """The (source, text) of each shell call a transcript record holds."""
     calls: list[tuple[str, str]] = []
@@ -182,13 +189,21 @@ def _calls(record: dict[str, Any]) -> list[tuple[str, str]]:
             return calls
         kind, name = payload.get("type"), payload.get("name")
         if kind == "function_call" and name in CODEX_SHELL_TOOLS:
-            if isinstance(payload.get("arguments"), str):
-                calls.append(("codex", payload["arguments"]))
+            arguments = payload.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    decoded = json.loads(arguments)
+                except ValueError:
+                    decoded = None
+                command = decoded.get("command") if isinstance(decoded, dict) else None
+                calls.append(("codex", _argv_text(command, arguments)))
         elif kind == "custom_tool_call" and name == "exec":
             if isinstance(payload.get("input"), str):
                 calls.append(("codex", payload["input"]))
         elif kind == "local_shell_call" and "action" in payload:
-            calls.append(("codex", json.dumps(payload["action"])))
+            action = payload["action"]
+            command = action.get("command") if isinstance(action, dict) else None
+            calls.append(("codex", _argv_text(command, json.dumps(action))))
     return calls
 
 

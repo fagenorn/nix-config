@@ -249,6 +249,18 @@ class TracesTest(unittest.TestCase):
             "type": "local_shell_call", "action": {"type": "exec", "command": ["resolve-bindings"]}})])
         self.assertEqual(self.traces()[0], 1)
 
+    def test_a_codex_argv_command_matches_a_multi_word_marker(self):
+        arguments = json.dumps({"command": ["release", "deploy", "inspect", "--commit", "abc"]})
+        self.write(self.codex / "2026/11/09/rollout-x.jsonl", [
+            codex_line(self.AFTER, {"type": "function_call", "name": "shell",
+                                    "arguments": arguments, "call_id": "c1"}),
+            codex_line(self.AFTER, {"type": "local_shell_call", "action": {
+                "type": "exec", "command": ["release", "deploy", "inspect"]}})])
+        code, report, _ = self.traces()
+        self.assertEqual(code, 1)
+        self.assertEqual([e["marker_id"] for e in report["executions"]],
+                         ["release-deploy-inspect", "release-deploy-inspect"])
+
     def test_a_codex_collaboration_call_is_not_a_shell_call(self):
         self.write(self.codex / "2026/11/09/rollout-x.jsonl", [codex_line(self.AFTER, {
             "type": "function_call", "name": "send_message",
