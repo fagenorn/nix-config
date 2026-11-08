@@ -76,6 +76,10 @@ CAPABILITY_NAMES = (
 AUTHORED_CAPABILITY_NAMES = tuple(
     name for name in CAPABILITY_NAMES if name != "release")
 BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow", "deploy")
+# Project schema 2 retires the deploy watch (P3): the two members it forbids. The
+# schema-2 sets are the schema-1 sets minus `deploy`; the contract's own
+# `schema_version` chooses between them, never a fallback.
+SCHEMA_TWO_RETIRED = ("/bindings/deploy", "/capabilities/deploy")
 CAPABILITY_STATES = ("available", "unsupported", "blocked")
 AUTHORED_SUPPORT = ("supported", "unsupported")
 ERROR_CODES = (
@@ -104,8 +108,8 @@ CONTRACT_FILENAME = ".agents/project.json"
 # answered by the manifest (D8) and appear inside the report's `platform`
 # block, so reusing either here would publish one fact twice under two names.
 # Version 2 adds `deprecated_uses` to the `project` block and to every fleet
-# row (issue 580 D4).
-PLATFORM_STATUS_SCHEMA_VERSION = 2
+# row (issue 580 D4). Version 3 adds `removed_uses` to both (issue 579 P2).
+PLATFORM_STATUS_SCHEMA_VERSION = 3
 
 # The manifest members the `platform` block republishes, in the manifest's own
 # order. The manifest's `schema_version` is not among them: it versions the
@@ -920,14 +924,43 @@ def validate_deploy(deploy: dict, commands: dict | None, tracker: dict | None,
             "contract.deploy.tracker_not_github"))
 
 
+def is_schema_two(source: dict) -> bool:
+    version = source.get("schema_version")
+    return version == 2 and not isinstance(version, bool)
+
+
+def binding_namespaces(source: dict) -> tuple[str, ...]:
+    if is_schema_two(source):
+        return tuple(n for n in BINDING_NAMESPACES if n != "deploy")
+    return BINDING_NAMESPACES
+
+
+def authored_capability_names(source: dict) -> tuple[str, ...]:
+    if is_schema_two(source):
+        return tuple(n for n in AUTHORED_CAPABILITY_NAMES if n != "deploy")
+    return AUTHORED_CAPABILITY_NAMES
+
+
+def retired_member(pointer: str, violations: list[dict]) -> None:
+    section = pointer.strip("/").replace("/", ".")
+    violations.append(violation(
+        pointer, "retired in project schema 2: remove this member",
+        f"contract.{section}.retired"))
+
+
 def validate_bindings(source: dict, violations: list[dict]) -> None:
     bindings = source.get("bindings")
     if not check_object(bindings, "/bindings", "bindings", violations):
         return
+    namespaces = binding_namespaces(source)
+    schema_two_source = is_schema_two(source)
     check_exact_members(
-        bindings, "/bindings", BINDING_NAMESPACES, "bindings", violations)
+        bindings, "/bindings", namespaces, "bindings", violations,
+        optional=("deploy",) if schema_two_source else ())
+    if schema_two_source and "deploy" in bindings:
+        retired_member("/bindings/deploy", violations)
     present = {}
-    for namespace in BINDING_NAMESPACES:
+    for namespace in namespaces:
         if namespace not in bindings:
             continue
         if check_object(
@@ -953,10 +986,14 @@ def validate_capabilities(source: dict, violations: list[dict]) -> None:
     capabilities = source.get("capabilities")
     if not check_object(capabilities, "/capabilities", "capabilities", violations):
         return
+    names = authored_capability_names(source)
+    schema_two_source = is_schema_two(source)
     check_exact_members(
-        capabilities, "/capabilities", AUTHORED_CAPABILITY_NAMES, "capabilities",
-        violations)
-    for name in AUTHORED_CAPABILITY_NAMES:
+        capabilities, "/capabilities", names, "capabilities",
+        violations, optional=("deploy",) if schema_two_source else ())
+    if schema_two_source and "deploy" in capabilities:
+        retired_member("/capabilities/deploy", violations)
+    for name in names:
         if name not in capabilities:
             continue
         pointer = f"/capabilities/{name}"
@@ -994,7 +1031,7 @@ def validate_capability_bindings(source: dict) -> list[dict]:
     bindings = source.get("bindings")
     if not isinstance(capabilities, dict) or not isinstance(bindings, dict):
         return violations
-    for name in AUTHORED_CAPABILITY_NAMES:
+    for name in authored_capability_names(source):
         declaration = capabilities.get(name)
         if (not isinstance(declaration, dict)
                 or declaration.get("support") != "supported"):
@@ -1096,6 +1133,18 @@ def projection_paths(source: object) -> list[str]:
     return paths
 
 
+def without_deploy(source: dict) -> dict:
+    """The source as the release grammar judges it: a schema-2 contract's retired
+    deploy members are reported once, by their own violation, never again here."""
+    if not is_schema_two(source):
+        return source
+    out = dict(source)
+    for key in ("bindings", "capabilities"):
+        if isinstance(out.get(key), dict):
+            out[key] = {k: v for k, v in out[key].items() if k != "deploy"}
+    return out
+
+
 def validate_contract(source: dict, manifest: dict) -> list[dict]:
     """Every shape violation of the authored source, collected in one pass.
 
@@ -1136,7 +1185,8 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
         # D2: the grammar's violations join the one ordered list; what the
         # admissibility rules refuse is a capability state, never a violation.
         violations.extend(
-            release_profile.grammar_violations(source["release"], source))
+            release_profile.grammar_violations(
+                source["release"], without_deploy(source)))
     violations.extend(validate_capability_bindings(source))
     return violations
 
@@ -1303,6 +1353,17 @@ def compute_capabilities(bindings: dict, root: Path, declarations: dict,
     return resolved
 
 
+def resolved_one_form(source: dict) -> dict:
+    """A schema-2 source as the resolved-1 shape reads it: a deep copy carrying the
+    inert deploy binding and an unsupported deploy capability. `source` is untouched."""
+    if not is_schema_two(source):
+        return source
+    out = copy.deepcopy(source)
+    out["bindings"]["deploy"] = {"adapter": "none", "command": None, "config": {}}
+    out["capabilities"]["deploy"] = {"support": "unsupported"}
+    return out
+
+
 def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # Readiness reads the normalized bindings, so each command's `cwd` is
     # already the absolute base a relative argv[0] resolves against (D22).
@@ -1311,6 +1372,9 @@ def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # `resolved_schema_version`, the schema this platform resolves *to*. It is
     # not the contract's declared `schema_version`, which may legally be an
     # older supported schema (R2.5).
+    #
+    # P3: resolved schema 1 spells schema 2's absent deploy watch as the inert binding
+    source = resolved_one_form(source)
     bindings = normalize_bindings(source["bindings"], root)
     return {
         "schema_version": manifest["resolved_schema_version"],
@@ -1597,7 +1661,7 @@ def emit_error(code: str, repair_id: str, violations: list[dict],
     return 2
 
 
-def require_platform_manifest() -> tuple[dict, Path]:
+def require_platform_manifest(path: Path | None = None) -> tuple[dict, Path]:
     """The installed platform manifest, or a refusal if it will not load.
 
     Every subcommand calls this before root discovery and before any contract
@@ -1612,9 +1676,13 @@ def require_platform_manifest() -> tuple[dict, Path]:
     loaded from, which is the deployment identity `platform-status` publishes
     (D2). One load, one call site: a second `load_manifest()` elsewhere would
     be a second failure surface for one fact.
+
+    `path` names another manifest to judge against (`platform-status
+    --manifest`, issue 579 P7); it loads by the same rules and refuses the
+    same way.
     """
     try:
-        manifest, path = agent_platform.load_manifest()
+        manifest, path = agent_platform.load_manifest(path)
     except agent_platform.PlatformManifestError as error:
         raise ContractError(
             "resolver_failure", error.repair_id, error.violations) from None
@@ -1808,7 +1876,10 @@ def declared_facts(source: object) -> dict:
 
 
 def deprecated_uses(root: Path, manifest: dict) -> list[str] | None:
-    """The ids of the manifest's `project_file` deprecations this root holds.
+    """The ids of the manifest's `project_file` and `project_schema`
+    deprecations this root holds.
+
+    `removed_uses` applies the same rules to `removals`.
 
     Null when nothing can be said: the root is not a usable directory
     (including one whose parent cannot be searched: `os.path.isdir` answers
@@ -1821,11 +1892,43 @@ def deprecated_uses(root: Path, manifest: dict) -> list[str] | None:
     this operation starts no child process (R3.6). A `platform_behavior` entry
     names no path and is never listed. This is a warning, never a verdict: it
     changes neither compatibility nor the exit code (issue 66, D2).
+
+    A `project_schema` entry is held when its subject equals the decimal
+    `schema_version` of `<root>/.agents/project.json`, read as JSON. A root
+    without that file is null, as is one whose file cannot be read or parsed or
+    whose version is not an integer, because nothing can be said of it
+    (issue 579, P4).
     """
+    return _held_uses(root, manifest["deprecations"])
+
+
+def removed_uses(root: Path, manifest: dict) -> list[str] | None:
+    """The ids of the manifest's `removals` this root still holds.
+
+    The `deprecated_uses` rules, applied to `removals` (issue 579 P2): null
+    when nothing can be said, otherwise the ascending ids.
+    """
+    return _held_uses(root, manifest["removals"])
+
+
+def _held_uses(root: Path, entries: list[dict]) -> list[str] | None:
     if not os.path.isdir(root):
         return None
+    schema_entries = [entry for entry in entries
+                      if entry["kind"] == "project_schema"]
     uses = []
-    for entry in manifest["deprecations"]:
+    if schema_entries:
+        try:
+            version = json.loads(
+                (root / ".agents" / "project.json").read_text("utf-8")
+            )["schema_version"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if not isinstance(version, int) or isinstance(version, bool):
+            return None
+        uses.extend(entry["id"] for entry in schema_entries
+                    if entry["subject"] == str(version))
+    for entry in entries:
         if entry["kind"] != "project_file":
             continue
         try:
@@ -1866,6 +1969,7 @@ def evaluate_named_project(root: Path, source: dict,
         "project_schema_version": facts["project_schema_version"],
         "platform_interval": facts["platform_interval"],
         "deprecated_uses": deprecated_uses(root, manifest),
+        "removed_uses": removed_uses(root, manifest),
     }
     return project, compatibility_block(reason_code)
 
@@ -1920,6 +2024,7 @@ def fleet_row(entry: dict, manifest: dict) -> dict:
         "project_schema_version": facts["project_schema_version"],
         "platform_interval": facts["platform_interval"],
         "deprecated_uses": deprecated_uses(Path(entry["root"]), manifest),
+        "removed_uses": removed_uses(Path(entry["root"]), manifest),
         **compatibility_block(reason_code),
     }
 
@@ -1931,14 +2036,17 @@ def command_platform_status(args: argparse.Namespace) -> int:
     flags compose and neither suppresses the other. The `project` block and
     every fleet row also carry `deprecated_uses`: the ids of the manifest's
     deprecated project files the root still holds, a warning that never
-    changes the verdict.
+    changes the verdict, and `removed_uses`, the same for its `removals`.
+    `--manifest PATH` judges against that manifest instead of the installed
+    one (issue 579 P7).
 
     Projection drift is deliberately not checked: a stale target is `resolve`'s
     structural refusal (D10), not a fact about platform compatibility.
     """
     # Before root discovery, so a broken platform installation can never be
     # masked by `not_onboarded` or a contract error (R1.3).
-    manifest, path = require_platform_manifest()
+    manifest, path = require_platform_manifest(
+        None if args.manifest is None else Path(args.manifest))
     status: dict = {
         "schema_version": PLATFORM_STATUS_SCHEMA_VERSION,
         "platform": platform_block(manifest, path),
@@ -1999,8 +2107,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Report the installed platform's version facts. With --repo-root, "
             "add that project's declared interval and its compatibility "
-            "verdict and the deprecated paths it still holds "
-            "(deprecated_uses); with --fleet, add one verdict row per "
+            "verdict and the deprecated and removed paths it still holds "
+            "(deprecated_uses, removed_uses); with --fleet, add one verdict row per "
             "registered project. Without --repo-root no project is "
             "inspected and no project root is discovered."),
     )
@@ -2009,6 +2117,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--fleet",
         action="store_true",
         help="add one compatibility row per project in the fleet registry",
+    )
+    platform_status.add_argument(
+        "--manifest",
+        help="judge against the platform manifest at this path instead of "
+             "the installed one; it is loaded and validated by the same "
+             "rules, and a missing or invalid file refuses resolver_failure",
     )
     return parser
 

@@ -35,6 +35,7 @@ from .test_resolve_project import (
     mutated_manifest,
     registry,
     run,
+    schema_two,
     source_contract,
     tree_snapshot,
 )
@@ -50,12 +51,13 @@ PLATFORM_BLOCK_MEMBERS = [
     "project_schema_versions", "removals", "resolved_schema_version",
 ]
 PROJECT_BLOCK_MEMBERS = [
-    "deprecated_uses", "platform_interval", "project_id", "project_schema_version", "root",
+    "deprecated_uses", "platform_interval", "project_id", "project_schema_version",
+    "removed_uses", "root",
 ]
 COMPATIBILITY_MEMBERS = ["compatible", "reason_code", "repair_id"]
 FLEET_ROW_MEMBERS = [
     "compatible", "deprecated_uses", "platform_interval", "project_id",
-    "project_schema_version", "reason_code", "repair_id", "root",
+    "project_schema_version", "reason_code", "removed_uses", "repair_id", "root",
 ]
 
 
@@ -80,7 +82,7 @@ class PlatformStatusTest(ResolverTestCase):
         code, payload, err = self.status()
         self.assertEqual(code, 0, err)
         self.assertEqual(sorted(payload), PLATFORM_STATUS_MEMBERS)
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertIsNone(payload["project"])
         self.assertIsNone(payload["compatibility"])
         self.assertIsNone(payload["fleet"])
@@ -160,12 +162,13 @@ class PlatformStatusTest(ResolverTestCase):
 
     def test_an_unsupported_project_schema_is_a_verdict_on_exit_zero(self):
         contract = source_contract()
-        contract["schema_version"] = 2
+        # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+        contract["schema_version"] = 3
         code, payload, err = self.status(
             "--repo-root", str(self.make_root(contract)))
         self.assertEqual(code, 0, err)
         self.assertNotIn("error", payload)
-        self.assertEqual(payload["project"]["project_schema_version"], 2)
+        self.assertEqual(payload["project"]["project_schema_version"], 3)
         self.assertEqual(payload["compatibility"], {
             "compatible": False,
             "reason_code": "project_schema_unsupported",
@@ -280,6 +283,7 @@ class PlatformStatusFleetTest(ResolverTestCase):
         self.assertIsNone(row["project_schema_version"])
         self.assertIsNone(row["platform_interval"])
         self.assertIsNone(row["deprecated_uses"])
+        self.assertIsNone(row["removed_uses"])
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
                      "root reads a 0000 file, so the case cannot be staged")
@@ -601,5 +605,225 @@ class PlatformStatusDeprecationTest(ResolverTestCase):
         self.assertEqual(rows[0]["reason_code"], "project_schema_unsupported")
 
 
+class PlatformStatusProjectSchemaDeprecationTest(ResolverTestCase):
+    """Issue 579 P4: a `project_schema` entry is a use for exactly the roots
+    whose contract declares that schema version, and only a warning."""
+
+    ENTRY = {"id": "bindings-deploy", "kind": "project_schema",
+             "subject": "1", "since": "1.1.0", "successor": "profiles",
+             "migration": "bindings-deploy.retire"}
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.set_manifest(mutated_manifest(deprecations=[self.ENTRY]))
+
+    def status(self, *args: str) -> dict:
+        code, out, err = run("platform-status", *args, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        return json.loads(out)
+
+    def schema_two_root(self, project_id: str = "fagenorn/nix-config") -> Path:
+        contract = schema_two(source_contract())
+        contract["project"]["id"] = project_id
+        return self.make_root(contract)
+
+    def test_a_schema_one_root_is_warned_and_stays_compatible(self):
+        payload = self.status("--repo-root", str(self.make_root()))
+        self.assertEqual(payload["project"]["deprecated_uses"],
+                         ["bindings-deploy"])
+        self.assertEqual(payload["compatibility"], {
+            "compatible": True, "reason_code": None, "repair_id": None})
+
+    def test_a_schema_two_root_is_not_warned(self):
+        payload = self.status("--repo-root", str(self.schema_two_root()))
+        self.assertEqual(payload["project"]["deprecated_uses"], [])
+        self.assertTrue(payload["compatibility"]["compatible"])
+
+    def test_a_non_integer_schema_version_is_uncertain_never_absent(self):
+        contract = source_contract()
+        contract["schema_version"] = "1"
+        root = self.make_root(contract)
+        # `--repo-root` refuses such a contract, so the fleet row is where
+        # the null is observable.
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/nix-config", "root": str(root)}))
+        row = self.status("--fleet")["fleet"][0]
+        self.assertIsNone(row["deprecated_uses"])
+
+    def test_a_root_without_a_contract_is_uncertain_never_absent(self):
+        root = self.make_root()
+        (root / ".agents" / "project.json").unlink()
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/nix-config", "root": str(root)}))
+        row = self.status("--fleet")["fleet"][0]
+        self.assertIsNone(row["deprecated_uses"])
+
+    def test_it_is_listed_beside_a_project_file_use_in_id_order(self):
+        entries = [self.ENTRY,
+                   {**DEPRECATIONS[0], "id": "alpha", "subject": "alpha.json"}]
+        self.set_manifest(mutated_manifest(deprecations=entries))
+        root = self.make_root()
+        (root / "alpha.json").write_text("{}\n")
+        payload = self.status("--repo-root", str(root))
+        self.assertEqual(payload["project"]["deprecated_uses"],
+                         ["alpha", "bindings-deploy"])
+
+    def test_fleet_rows_carry_their_own_schema_use(self):
+        old = self.make_root(dict(source_contract(),
+                                  project={**source_contract()["project"],
+                                           "id": "fagenorn/old"}))
+        new = self.schema_two_root("fagenorn/new")
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/old", "root": str(old)},
+            {"project_id": "fagenorn/new", "root": str(new)}))
+        rows = {row["project_id"]: row
+                for row in self.status("--fleet")["fleet"]}
+        self.assertEqual(rows["fagenorn/old"]["deprecated_uses"],
+                         ["bindings-deploy"])
+        self.assertTrue(rows["fagenorn/old"]["compatible"])
+        self.assertEqual(rows["fagenorn/new"]["deprecated_uses"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+REMOVAL = {"id": "legacy-file", "kind": "project_file",
+           "subject": ".claude/skills.config.json", "since": "1.1.0",
+           "successor": "resolve-project resolve",
+           "migration": "legacy-file.retire"}
+
+
+class PlatformStatusRemovedUsesTest(ResolverTestCase):
+    """Issue 579 P2: `removed_uses` applies the `deprecated_uses` rules to the
+    manifest's `removals`, in the `project` block and in every fleet row."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.set_manifest(mutated_manifest(
+            deprecations=[], removals=[
+                REMOVAL,
+                {**REMOVAL, "id": "schema-1", "kind": "project_schema",
+                 "subject": "1"}]))
+
+    def status(self, *args: str) -> dict:
+        code, out, err = run("platform-status", *args, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        return json.loads(out)
+
+    def held_root(self, project_id: str = "fagenorn/nix-config") -> Path:
+        contract = source_contract()
+        contract["project"]["id"] = project_id
+        root = self.make_root(contract)
+        (root / ".claude").mkdir(exist_ok=True)
+        (root / ".claude" / "skills.config.json").write_text("{}\n")
+        return root
+
+    def test_a_root_holding_a_removed_file_and_schema_lists_both_ids(self):
+        payload = self.status("--repo-root", str(self.held_root()))
+        self.assertEqual(payload["project"]["removed_uses"],
+                         ["legacy-file", "schema-1"])
+        self.assertEqual(payload["project"]["deprecated_uses"], [])
+
+    def test_a_root_holding_neither_lists_nothing(self):
+        contract = schema_two(source_contract())
+        payload = self.status("--repo-root", str(self.make_root(contract)))
+        self.assertEqual(payload["project"]["removed_uses"], [])
+
+    def test_a_fleet_row_carries_its_own_removed_uses_and_null_when_gone(self):
+        held = self.held_root("fagenorn/held")
+        gone = self.make_root()
+        shutil.rmtree(gone)
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/held", "root": str(held)},
+            {"project_id": "fagenorn/gone", "root": str(gone)}))
+        rows = {row["project_id"]: row for row in self.status("--fleet")["fleet"]}
+        self.assertEqual(rows["fagenorn/held"]["removed_uses"],
+                         ["legacy-file", "schema-1"])
+        self.assertIsNone(rows["fagenorn/gone"]["removed_uses"])
+
+
+class PlatformStatusManifestOptionTest(ResolverTestCase):
+    """Issue 579 P7: `--manifest PATH` judges the fleet against another
+    manifest, loaded and validated by the installed loader's rules."""
+
+    CANDIDATE = {
+        "schema_version": 1, "platform_version": "2.0.0",
+        "project_schema_versions": [2], "resolved_schema_version": 1,
+        "migrations": [], "deprecations": [], "removals": [REMOVAL],
+    }
+
+    def write_manifest(self, manifest: object) -> Path:
+        directory = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = directory / "candidate-manifest.json"
+        path.write_text(manifest if isinstance(manifest, str)
+                        else json.dumps(manifest))
+        return path
+
+    def run_status(self, *args: str) -> tuple[int, dict]:
+        code, out, _ = run("platform-status", *args, home=self.home)
+        return code, json.loads(out)
+
+    def test_the_named_manifest_replaces_the_installed_one(self):
+        schema_one = self.make_root()
+        contract = schema_two(source_contract())
+        contract["project"]["id"] = "fagenorn/two"
+        schema_two_root = self.make_root(contract)
+        (schema_two_root / ".claude").mkdir(exist_ok=True)
+        (schema_two_root / ".claude" / "skills.config.json").write_text("{}\n")
+        install_registry(self.home, registry(
+            {"project_id": "fagenorn/nix-config", "root": str(schema_one)},
+            {"project_id": "fagenorn/two", "root": str(schema_two_root)}))
+        path = self.write_manifest(self.CANDIDATE)
+        code, payload = self.run_status("--fleet", "--manifest", str(path))
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(payload["platform"]["manifest_path"], str(path.resolve()))
+        self.assertEqual(payload["platform"]["platform_version"], "2.0.0")
+        self.assertEqual(payload["platform"]["removals"], [REMOVAL])
+        rows = {row["project_id"]: row for row in payload["fleet"]}
+        old = rows["fagenorn/nix-config"]
+        self.assertFalse(old["compatible"])
+        self.assertEqual(old["reason_code"], "project_schema_unsupported")
+        self.assertEqual(old["removed_uses"], [])
+        new = rows["fagenorn/two"]
+        self.assertEqual(new["removed_uses"], ["legacy-file"])
+        self.assertEqual(new["project_schema_version"], 2)
+
+    def test_the_path_is_resolved_through_a_symlink(self):
+        path = self.write_manifest(self.CANDIDATE)
+        link = path.parent / "link.json"
+        link.symlink_to(path)
+        code, payload = self.run_status("--manifest", str(link))
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(payload["platform"]["manifest_path"], str(path.resolve()))
+
+    def test_without_the_flag_the_installed_manifest_is_used(self):
+        code, payload = self.run_status()
+        self.assertEqual(code, 0, payload)
+        self.assertEqual(payload["platform"]["manifest_path"], str(
+            self.home / ".agents" / "share" / "platform-manifest.json"))
+        self.assertEqual(payload["platform"]["platform_version"],
+                         committed_manifest()["platform_version"])
+
+    def test_a_missing_path_refuses_resolver_failure(self):
+        code, payload = self.run_status("--manifest", str(self.home / "absent.json"))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["code"], "resolver_failure")
+        self.assertEqual(payload["error"]["repair_id"], "platform.manifest.missing")
+
+    def test_an_invalid_path_refuses_resolver_failure_like_a_broken_install(self):
+        cases = (
+            ("not json", "platform.manifest.parse"),
+            ({**self.CANDIDATE, "removals": [{"id": "x"}]},
+             "platform.manifest.removals.member_missing"),
+            ({**self.CANDIDATE, "platform_version": "2"},
+             "platform.manifest.platform_version.not_semver"),
+        )
+        for content, repair_id in cases:
+            with self.subTest(repair_id=repair_id):
+                path = self.write_manifest(content)
+                code, payload = self.run_status("--manifest", str(path))
+                self.assertEqual(code, 2)
+                self.assertEqual(payload["error"]["code"], "resolver_failure")
+                self.assertEqual(payload["error"]["repair_id"], repair_id)

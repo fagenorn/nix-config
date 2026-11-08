@@ -147,6 +147,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_conformance_checks.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
     home/common/agent-skills/tests/test_adopt_project.py \
+    home/common/agent-skills/tests/test_adopt_migrate.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
@@ -204,6 +205,7 @@ agent-workflow-tests *args:
     tests/test_release_profile.py \
     tests/test_release_bridge.py \
     tests/test_release_command.py \
+    tests/test_fallback_audit.py \
     tests/test_release_driver.py \
     tests/test_release_crash_matrix.py \
     tests/test_release_cutover.py \

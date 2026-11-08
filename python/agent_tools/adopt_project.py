@@ -58,6 +58,13 @@ adoption commit derived from it is not its ancestor (D19). What it stores is
 `{project_id, root}` with the real root (#148 D18), plus the `branch_override`
 member when the operand selected the branch.
 
+`migrate --migration ID` executes one manifest migration on the checkout
+in place (https://github.com/fagenorn/nix-config/issues/579): it rewrites
+`.agents/project.json`, has the resolver child regenerate the projections and
+then judge the result, restores every byte it wrote when either refuses, and
+stages and commits nothing. `adopt_migrate` owns the executors and the
+transaction.
+
 The resolver is consumed **only** as a child process, never imported (D26):
 `run_resolver` runs `agent_tools.resolve_project` under this process's own
 interpreter through `agent_tools.siblings.sibling_argv` (#177 D5), so
@@ -79,7 +86,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_planning, adopt_references, adopt_verify, agent_platform
+from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_migrate, adopt_planning, adopt_references, adopt_verify, agent_platform
 from agent_tools.siblings import sibling_argv
 
 
@@ -664,6 +671,26 @@ def command_apply(args: argparse.Namespace) -> int:
                       "plan_id": stored_plan["plan_id"], **records})
 
 
+def find_repository_root() -> str:
+    """The nearest ancestor of the working directory that holds a `.git`."""
+    here = Path.cwd().resolve()
+    for candidate in (here, *here.parents):
+        if (candidate / ".git").exists():
+            return str(candidate)
+    raise adopt_inspection.refuse(
+        "not_a_repository", "adopt.repository.not_git", "",
+        "no git repository encloses the working directory")
+
+
+def command_migrate(args: argparse.Namespace) -> int:
+    manifest = require_manifest()
+    root = adopt_inspection.require_repository(
+        args.repo_root if args.repo_root is not None else find_repository_root())
+    report = adopt_migrate.migrate(root, args.migration, manifest,
+                                   load_contract_source(root), run_resolver)
+    return emit_json(report)
+
+
 # --------------------------------------------------------------------------
 # `verify`
 #
@@ -777,6 +804,14 @@ def build_parser() -> argparse.ArgumentParser:
                              "branch's contract does not resolve; origin "
                              "must list it and its own contract must resolve "
                              "and name it")
+    migrate = subparsers.add_parser(
+        "migrate", help="execute one manifest migration on a checkout, "
+                        "validated by the resolver")
+    migrate.add_argument("--migration", required=True, metavar="ID",
+                         help="the id of a manifest migrations entry")
+    migrate.add_argument("--repo-root",
+                         help="the top level of the repository to migrate; "
+                              "default: the nearest enclosing git checkout")
     return parser
 
 
@@ -787,6 +822,8 @@ def dispatch(args: argparse.Namespace) -> int:
         return command_apply(args)
     if args.command == "verify":
         return command_verify(args)
+    if args.command == "migrate":
+        return command_migrate(args)
     raise ValueError(f"unknown subcommand: {args.command!r}")
 
 

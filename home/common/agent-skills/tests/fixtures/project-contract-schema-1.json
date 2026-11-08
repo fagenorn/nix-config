@@ -1,0 +1,290 @@
+{
+  "schema_version": 1,
+  "project": {
+    "id": "fagenorn/nix-config",
+    "name": "nix-config"
+  },
+  "bindings": {
+    "vcs": {
+      "kind": "git",
+      "default_branch": "main",
+      "integration_branch": "main",
+      "branch_pattern": "issue-<num>-<slug>",
+      "worktree": {
+        "root": ".worktrees",
+        "prefix": "worktree-"
+      },
+      "commit": {
+        "co_authored_by": true,
+        "signed": true
+      },
+      "merge": {
+        "strategy": "merge",
+        "delete_branch": true
+      }
+    },
+    "tracker": {
+      "kind": "github",
+      "cli": "gh",
+      "repo_slug": "fagenorn/nix-config",
+      "credential_env": {
+        "unset_before_invocation": []
+      }
+    },
+    "paths": {
+      "artifacts": {
+        "specs": ".agents/artifacts/specs",
+        "plans": ".agents/artifacts/plans"
+      },
+      "context": [],
+      "standards": [
+        "home/common/agent-skills/standards",
+        "docs/standards"
+      ],
+      "architecture": [
+        "CLAUDE.md"
+      ],
+      "operations": [],
+      "hints": [],
+      "rejections": [
+        ".agents/knowledge/rejections"
+      ]
+    },
+    "commands": {
+      "nix-build": {
+        "argv": [
+          "just",
+          "build"
+        ],
+        "cwd": ".",
+        "env": []
+      },
+      "nix-activate": {
+        "argv": [
+          "just",
+          "switch"
+        ],
+        "cwd": ".",
+        "env": []
+      },
+      "agent-workflow-tests": {
+        "argv": [
+          "just",
+          "agent-workflow-tests"
+        ],
+        "cwd": ".",
+        "env": []
+      },
+      "codex-plan-review": {
+        "argv": [
+          "codex-companion",
+          "task",
+          "--fresh",
+          "--reviewer",
+          "plan-review"
+        ],
+        "cwd": ".",
+        "env": []
+      },
+      "codex-diff-review": {
+        "argv": [
+          "codex-companion",
+          "task",
+          "--fresh",
+          "--reviewer",
+          "diff-review"
+        ],
+        "cwd": ".",
+        "env": []
+      }
+    },
+    "workflow": {
+      "verification": [
+        "nix-build"
+      ],
+      "orchestration": {
+        "max_parallel": 2,
+        "attempt_budget_minutes": 240
+      },
+      "review": {
+        "plan": "codex-plan-review",
+        "code": "codex-diff-review"
+      },
+      "light_lane": {
+        "mode": "shadow",
+        "budget_minutes": 90,
+        "risk_paths": [
+          "home/common/claude-code/lifecycle_guard.py",
+          "home/common/agent-skills/scripts/workflow-state.py",
+          "home/common/agent-skills/scripts/workflow_state.py",
+          "python/agent_tools/transaction_*.py",
+          "python/agent_tools/resolve_project.py",
+          "python/agent_tools/lane_triage.py",
+          "home/common/agent-skills/scripts/delivery_model/*",
+          "home/common/agent-skills/scripts/workflow_delivery*.py",
+          ".agents/project.json"
+        ]
+      }
+    },
+    "deploy": {
+      "adapter": "none",
+      "command": null,
+      "config": {}
+    }
+  },
+  "capabilities": {
+    "tracker": {
+      "support": "supported"
+    },
+    "worktrees": {
+      "support": "supported"
+    },
+    "knowledge.context": {
+      "support": "unsupported"
+    },
+    "knowledge.standards": {
+      "support": "supported"
+    },
+    "knowledge.architecture": {
+      "support": "supported"
+    },
+    "knowledge.hints": {
+      "support": "unsupported"
+    },
+    "verification": {
+      "support": "supported"
+    },
+    "review.plan": {
+      "support": "supported"
+    },
+    "review.code": {
+      "support": "supported"
+    },
+    "deploy": {
+      "support": "unsupported"
+    }
+  },
+  "projections": [
+    {
+      "id": "codex.entry",
+      "agent": "codex",
+      "kind": "generated_file",
+      "target": "AGENTS.md",
+      "source": ".agents/instructions/bootstrap.md"
+    },
+    {
+      "id": "claude.entry",
+      "agent": "claude",
+      "kind": "managed_import",
+      "target": "CLAUDE.md",
+      "source": ".agents/instructions/bootstrap.md"
+    }
+  ],
+  "platform": {
+    "min_inclusive": "1.0.0",
+    "max_exclusive": "2.0.0"
+  },
+  "release": {
+    "profiles": {
+      "github-release": {
+        "profile_version": 1,
+        "target": {
+          "environment": "github-main",
+          "concurrency_keys": [
+            "release/fagenorn/nix-config"
+          ]
+        },
+        "requirements": {
+          "adapters": {
+            "forge": {
+              "min_inclusive": "1.0.0",
+              "max_exclusive": "2.0.0"
+            }
+          }
+        },
+        "bindings": {
+          "adapters": {
+            "forge": {
+              "adapter": "github-forge"
+            }
+          },
+          "targets": {
+            "repository": {
+              "adapter": "forge",
+              "kind": "github_repository",
+              "repository": "fagenorn/nix-config",
+              "branch": "main"
+            }
+          },
+          "principals": {
+            "maintainer": {
+              "class": "forge_write"
+            }
+          },
+          "credentials": {
+            "forge-keyring": {
+              "adapter": "forge",
+              "class": "gh_keyring"
+            }
+          }
+        },
+        "publication": {
+          "actions": [
+            {
+              "id": "tag",
+              "mode": "index",
+              "adapter": "forge",
+              "operation": "tag",
+              "target": "repository",
+              "principal": "maintainer",
+              "credential": "forge-keyring",
+              "effect": "irreversible",
+              "config_schema_version": 1,
+              "config": {},
+              "deps": [],
+              "observation_deadline_ms": 600000
+            },
+            {
+              "id": "github-release",
+              "mode": "index",
+              "adapter": "forge",
+              "operation": "release",
+              "target": "repository",
+              "principal": "maintainer",
+              "credential": "forge-keyring",
+              "effect": "irreversible",
+              "config_schema_version": 1,
+              "config": {},
+              "deps": [
+                "tag"
+              ],
+              "observation_deadline_ms": 600000
+            }
+          ]
+        },
+        "activation": "none",
+        "proof": {
+          "convergence_window_ms": 1800000,
+          "obligations": []
+        },
+        "recovery": {
+          "units": {
+            "tag": {
+              "posture": "supersedable_only",
+              "anchor": null,
+              "compatibility": null,
+              "edges": []
+            },
+            "github-release": {
+              "posture": "supersedable_only",
+              "anchor": null,
+              "compatibility": null,
+              "edges": []
+            }
+          }
+        },
+        "limits": {}
+      }
+    }
+  }
+}
