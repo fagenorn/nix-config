@@ -707,6 +707,16 @@ class WorkspaceTest(GitRepos):
         self.second = self.commit("two")
         self.lag(self.first)
 
+    def test_every_workspace_has_the_shape_readers_recognise(self):
+        with vx.workspace(self.root, self.first) as one, vx.workspace(self.root, self.first) as two:
+            for wt in (one, two):
+                self.assertTrue(vx.is_workspace(str(wt)), wt)
+                self.assertTrue(vx.is_workspace(os.path.realpath(wt)), wt)
+            self.assertNotEqual(one, two)
+        self.assertFalse(vx.is_workspace("/tmp/verify-pending-abc/wt"))
+        self.assertFalse(vx.is_workspace("/tmp/verify-pending-abcdefgh/other"))
+        self.assertFalse(vx.is_workspace("/tmp/elsewhere-abcdefgh/wt"))
+
     def test_a_commit_only_origin_holds_is_fetched_and_checked_out_detached(self):
         with vx.workspace(self.root, self.second) as wt:
             self.assertEqual((wt / "f").read_text(), "two\n")
