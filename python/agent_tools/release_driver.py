@@ -18,9 +18,14 @@ before it writes anything, then takes custody of the release, issues one grant p
 confirmation token and drives the transaction as far as it can go without waiting on the
 world. It returns `done`, `confirm`, `wait` or `attention` and gives custody up on every
 normal return; a raised effect leaves custody to lapse (D21).
+
+A `publication_triggered` activation unit is a deploy watch: the driver inspects it and never
+invokes it, waits while it is pending inside its observation deadline and parks when it is
+diverged or past the deadline (issue 555 D4, D5).
 """
 
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +37,7 @@ from agent_tools.transaction_core import (
     CreationConflict, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
     TransactionBusy, TransactionError, TransactionStore)
 from agent_tools.transaction_history import TERMINALS, Custody, Transaction
-from agent_tools.transaction_storage import lstat_mode
+from agent_tools.transaction_storage import lstat_mode, parse_at
 
 SCHEMA_VERSION = 1
 KEY_SCHEMA = "release/v1"
@@ -229,14 +234,20 @@ class Driver:
         found = self.transactions()
         return found[-1] if found else None
 
+    def now_ms(self) -> int:
+        return self.clock() if self.clock is not None else int(time.time() * 1000)
+
     def _nodes(self) -> list[Mapping[str, Any]]:
         return [*self.compiled["publication"], *self.compiled["activation"]]
 
     def _actions(self, transaction: Transaction | None) -> list[dict[str, Any]]:
         actions = []
+        activation = {node["id"] for node in self.compiled["activation"]}
         for node in self._nodes():
             view = _view(transaction, node["id"])
-            actions.append({"name": node["id"], "operation": node["operation"],
+            actions.append({"name": node["id"],
+                            "phase": "activation" if node["id"] in activation else "publication",
+                            "operation": node["operation"],
                             "mode": node["mode"], "effect": node["effect"],
                             "target": node["target"],
                             "status": None if view is None else view["status"]})
@@ -485,8 +496,8 @@ class Driver:
             reference = next((event["reference"] for event in reversed(events)
                               if event["type"] == "action_inspected"
                               and event["action_id"] == view["action_id"]), None)
-        return {"name": action["name"], "operation": action["operation"],
-                "effect": action["effect"], "status": action["status"],
+        return {"name": action["name"], "phase": action["phase"],
+                "operation": action["operation"], "effect": action["effect"], "status": action["status"],
                 "attempts": 0 if view is None else view["attempts"], "reference": reference}
 
 
@@ -667,6 +678,8 @@ class _Drive:
         status = self.status(name)
         if status == "satisfied":
             return None
+        if self.nodes[name]["mode"] == release_profile.WATCH_MODE:
+            return self.watched(name, status)
         if status != "absent":
             return self.stopped(name, status)
         if self.nodes[name]["effect"] == "irreversible":
@@ -683,6 +696,30 @@ class _Drive:
             return self.park(f"{name}: refused {refused.reason}")
         status = self.status(name)
         return None if status == "satisfied" else self.stopped(name, status, self.after_invoke(name))
+
+    def reference(self, name: str) -> str:
+        """The reference of the unit's latest `action_inspected` event."""
+        action_id = _view(self.transaction, name)["action_id"]
+        return next(event["reference"] for event in reversed(self.transaction.events)
+                    if event["type"] == "action_inspected" and event["action_id"] == action_id)
+
+    def watched(self, name: str, status: str) -> str | None:
+        """The ending for an inspected `WATCH_MODE` unit that is not satisfied (issue 555 D5).
+
+        `diverged` parks. `absent`, `in_progress` and `unknown` wait while the unit is within
+        its observation deadline, counted from its first declaration, and park past it.
+        """
+        if status == "diverged":
+            return self.park(f"{name}: diverged: {self.reference(name)}")
+        if status not in ("absent", "in_progress", "unknown"):
+            raise ValueError(f"action {name!r} has status {status!r}, which the driver cannot read")
+        action_id = _view(self.transaction, name)["action_id"]
+        declared = next(event["at"] for event in self.transaction.events
+                        if event["type"] == "action_declared" and event["action_id"] == action_id)
+        deadline = self.driver.compiled["deadlines"][name]
+        if self.driver.now_ms() - parse_at(declared) <= deadline:
+            return "wait"
+        return self.park(f"{name}: {status} past {deadline} ms: {self.reference(name)}")
 
     def after_invoke(self, name: str) -> str:
         """` after <result> <error_class>: <reference>` for the action's latest invoke when it
