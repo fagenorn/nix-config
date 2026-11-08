@@ -56,7 +56,7 @@ from urllib.parse import quote
 
 from agent_tools import forge_markers
 from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
-from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver
+from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver, validate_manifest
 from agent_tools.agent_costs import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
 from agent_tools.worktree_mapping import MappingError, classify_root
@@ -267,8 +267,11 @@ _OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
 def _manifest_facts(manifest: object) -> tuple[str, list[dict], list[dict]] | None:
-    """The version, deprecations and removals of a readable manifest, else None."""
-    if not isinstance(manifest, dict):
+    """The version, deprecations and removals of a readable manifest, else None.
+
+    Readable means the platform's own manifest validator accepts it, so a
+    manifest missing a required member is unreadable however its records compare."""
+    if not isinstance(manifest, dict) or validate_manifest(manifest):
         return None
     version = manifest.get("platform_version")
     if parse_semver(version) is None:

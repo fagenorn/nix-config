@@ -164,6 +164,12 @@ def migrate(root: Path, migration_id: str, manifest: dict,
                           "the path resolves outside the checkout, so it is "
                           "neither read nor written")
     for name in touched:
+        if (root / name).is_symlink():
+            raise _refuse("adopt.migration.symlink_target", f"/{name}",
+                          "the file is a symbolic link, which the projection "
+                          "writer would replace with a regular file and a "
+                          "restore could not put back")
+    for name in touched:
         created.extend(path for path in _missing_parents(root, name)
                        if path not in created)
         target = root / name

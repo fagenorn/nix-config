@@ -362,8 +362,12 @@ def entry(i):
 
 
 def manifests(main_ids=(1, 2), removal_ids=(1, 2), main="1.2.0", cand="2.0.0"):
-    return ({"platform_version": main, "deprecations": [entry(i) for i in main_ids], "removals": []},
-            {"platform_version": cand, "deprecations": [], "removals": [entry(i) for i in removal_ids]})
+    shape = {"schema_version": 1, "project_schema_versions": [1, 2],
+             "resolved_schema_version": 1, "migrations": []}
+    return ({**shape, "platform_version": main,
+             "deprecations": [entry(i) for i in main_ids], "removals": []},
+            {**shape, "platform_version": cand,
+             "deprecations": [], "removals": [entry(i) for i in removal_ids]})
 
 
 GREEN_MANIFEST = {"verdict": "green"}
@@ -387,10 +391,12 @@ class ManifestVerdictTest(unittest.TestCase):
         self.assertEqual(verify_checks.manifest_verdict(main, cand)[1]["undeclared"], ["d1"])
 
     def test_every_one_of_the_six_members_must_be_equal(self):
-        for member in ("id", "kind", "subject", "since", "successor", "migration"):
+        valid_change = {"id": "changed", "kind": "project_file", "subject": "changed",
+                        "since": "1.9.0", "successor": "changed", "migration": "changed"}
+        for member, changed in valid_change.items():
             with self.subTest(member=member):
                 main, cand = manifests(main_ids=(1,), removal_ids=(1,))
-                cand["removals"][0][member] = "changed"
+                cand["removals"][0][member] = changed
                 code, report = verify_checks.manifest_verdict(main, cand)
                 self.assertEqual(code, 75)
                 self.assertEqual(len(report["undeclared"]), 1)
@@ -413,6 +419,20 @@ class ManifestVerdictTest(unittest.TestCase):
                     pair = list(manifests())
                     del pair[side][member]
                     self.assertEqual(verify_checks.manifest_verdict(*pair)[0], 2)
+
+
+    def test_a_manifest_the_validator_rejects_is_usage_even_when_the_records_match(self):
+        for member in ("project_schema_versions", "resolved_schema_version",
+                       "schema_version", "migrations"):
+            for side in (0, 1):
+                with self.subTest(member=member, side=side):
+                    pair = list(manifests())
+                    del pair[side][member]
+                    code, report = verify_checks.manifest_verdict(*pair)
+                    self.assertEqual((code, report["verdict"]), (2, "unreadable"))
+        pair = list(manifests())
+        pair[1]["removals"][0]["kind"] = "not-a-kind"
+        self.assertEqual(verify_checks.manifest_verdict(*pair)[0], 2)
 
 
 class PreflightVerdictTest(unittest.TestCase):
