@@ -440,14 +440,12 @@ LEGACY_MIGRATION_INPUTS = {
     }),
     "tests/fixtures/retained-review-evidence/issue-121.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "tests/fixtures/retained-review-evidence/task7-estimate.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
-    "python/agent_tools/adopt_inspection.py": frozenset({
-        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
-    }),
+    "python/agent_tools/adopt_inspection.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "home/common/agent-skills/tests/test_adopt_apply.py": frozenset({
         ".claude/skills.config.json", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
     }),
     "home/common/agent-skills/tests/test_adopt_project.py": frozenset({
-        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
+        ".claude/skills.config.json", "specDir",  # policy-gate-pattern
         "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
     }),
     "home/common/agent-skills/tests/test_adopt_project_boundaries.py": frozenset({
