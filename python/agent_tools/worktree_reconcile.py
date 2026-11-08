@@ -27,7 +27,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,7 +40,7 @@ PLAN_SCHEMA = "worktree-reconcile-plan/v2"
 APPLY_SCHEMA = "worktree-reconcile-apply/v1"
 ARCHIVE_SCHEMA = "worktree-reconcile-archive/v1"
 KEEP_REASONS = ("live_process", "fleet_ledger", "locked", "open_pr", "git_operation",
-                "refused_ledger_pending", "operator", "cross_device")
+                "refused_ledger_pending", "nested_worktree", "operator", "cross_device")
 
 GIT_TIMEOUT = 300
 PROBE_TIMEOUT = 120
@@ -311,6 +311,21 @@ def _is_live(path: str, real: str | None, live: set[str]) -> bool:
     return any(cwd == name or cwd.startswith(name.rstrip("/") + "/") for cwd in live for name in names)
 
 
+def _holds_another(path: str, real: str | None, others: Iterable[str]) -> bool:
+    """True when a path of `others` lies below this worktree: removing it would carry that one off."""
+    names = {path} | ({real} if real else set())
+    for other in others:
+        spellings = {other, os.path.realpath(other)}
+        if any(o != name and o.startswith(name.rstrip("/") + "/") for o in spellings for name in names):
+            return True
+    return False
+
+
+def _normalize_keep(keeps: Iterable[str]) -> frozenset[str]:
+    """Each operator `--keep` as the one absolute, symlink-free spelling a worktree compares by."""
+    return frozenset(os.path.realpath(os.path.expanduser(str(k))) for k in keeps)
+
+
 def _short(branch: str | None) -> str | None:
     if branch is None:
         return None
@@ -333,7 +348,7 @@ def _index_facts(root: Path, admin: str | None, head: str | None) -> tuple[bool,
 
 
 def entry_of(root: Path, wt: Worktree, n: int, *, verdicts, fleet_roots, archive_root, live, prs,
-             refused_pending, operator_keep, device_of=default_device_of) -> dict:
+             refused_pending, operator_keep, other_paths=(), device_of=default_device_of) -> dict:
     """The one derivation of an entry; `build_plan` and `apply_plan` both call it."""
     path = wt.path
     exists = os.path.isdir(path)
@@ -366,7 +381,9 @@ def entry_of(root: Path, wt: Worktree, n: int, *, verdicts, fleet_roots, archive
         reasons.add("git_operation")
     if kind == "refused-only" and refused_pending:
         reasons.add("refused_ledger_pending")
-    if path in operator_keep or (real is not None and real in operator_keep):
+    if _holds_another(path, real, other_paths):
+        reasons.add("nested_worktree")
+    if path in operator_keep or os.path.realpath(path) in operator_keep:
         reasons.add("operator")
     if exists and device_of(path) != device_of(str(archive_root)):
         reasons.add("cross_device")
@@ -376,6 +393,11 @@ def entry_of(root: Path, wt: Worktree, n: int, *, verdicts, fleet_roots, archive
             "head": wt.head, "branch": wt.branch, "locked": wt.locked, "prunable": wt.prunable,
             "fingerprint": fingerprint(path, admin), "index_differs": differs, "pushed": pushed,
             "pins": pins, "open_pr": open_pr, "keep": keep, "action": action}
+
+
+def _other_paths(root: Path, listing: list[Worktree], wt: Worktree) -> list[str]:
+    """Every registered path but `wt`'s own, the main checkout included."""
+    return [str(root)] + [other.path for other in listing if other.path != wt.path]
 
 
 def build_plan(root: Path, migrate_report: dict, *, fleet_roots: list[Path], archive_root: Path,
@@ -394,16 +416,22 @@ def build_plan(root: Path, migrate_report: dict, *, fleet_roots: list[Path], arc
     verdicts = verdicts_of(migrate_report)
     live = live_cwds()
     prs = open_prs(root)
+    operator_keep = _normalize_keep(operator_keep)
     excluded: list[str] = []
     entries: list[dict] = []
-    for wt in list_worktrees(root):
+    listing = list_worktrees(root)
+    known = {os.path.realpath(wt.path) for wt in listing}
+    for unknown in sorted(operator_keep - known):
+        raise ReconcileError("unknown_keep", f"--keep {unknown} is not a linked worktree of {root}")
+    for wt in listing:
         if is_runner_workspace(wt):
             excluded.append(wt.path)
             continue
         entries.append(entry_of(
             root, wt, len(entries) + 1, verdicts=verdicts, fleet_roots=fleet_roots,
             archive_root=archive_root, live=live, prs=prs, refused_pending=refused_pending,
-            operator_keep=operator_keep, device_of=device_of))
+            operator_keep=operator_keep, other_paths=_other_paths(root, listing, wt),
+            device_of=device_of))
     return {"schema": PLAN_SCHEMA, "root": str(root), "run_id": now.strftime("%Y%m%dT%H%M%SZ"),
             "fleet_roots": [str(r) for r in fleet_roots], "archive_root": str(archive_root),
             "refused_pending": refused_pending, "operator_keep": sorted(operator_keep),
@@ -608,7 +636,8 @@ def _reconcile_one(root: Path, entry: dict, result: dict, *, run_dir: Path, run_
                    fleet_roots, archive_root, refused_pending, operator_keep, migrate_dry_run,
                    live_cwds, open_prs, device_of, flush) -> None:
     try:
-        wt = next((w for w in list_worktrees(root) if w.path == entry["path"]), None)
+        listing = list_worktrees(root)
+        wt = next((w for w in listing if w.path == entry["path"]), None)
     except MappingError as error:
         result.update(outcome="failed", detail=str(error))
         return
@@ -622,7 +651,7 @@ def _reconcile_one(root: Path, entry: dict, result: dict, *, run_dir: Path, run_
         fresh = entry_of(root, wt, entry["n"], verdicts=verdicts_of(report), fleet_roots=fleet_roots,
                          archive_root=archive_root, live=live, prs=prs,
                          refused_pending=refused_pending, operator_keep=operator_keep,
-                         device_of=device_of)
+                         other_paths=_other_paths(root, listing, wt), device_of=device_of)
     except (MappingError, ReconcileError, OSError) as error:
         result.update(outcome="failed", detail=f"re-check failed: {error}")
         return

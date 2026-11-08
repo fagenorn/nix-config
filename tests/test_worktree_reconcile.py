@@ -124,6 +124,42 @@ class ReconcileTest(unittest.TestCase):
         p = self.plan(operator_keep=frozenset({held}))
         self.assertEqual(self.entry(p, held)["keep"], ["operator"])
 
+    def test_an_operator_keep_is_normalized_before_it_is_compared(self):
+        held = self.fleet.worktree("held")
+        for spelling in (held + "/", held + "/../held", os.path.relpath(held)):
+            with self.subTest(spelling=spelling):
+                p = self.plan(operator_keep=frozenset({spelling}))
+                self.assertEqual(self.entry(p, held)["keep"], ["operator"])
+                self.assertEqual(p["operator_keep"], [os.path.realpath(held)])
+
+    def test_a_tilde_operator_keep_is_expanded(self):
+        held = self.fleet.worktree("held")
+        with mock.patch.dict(os.environ, {"HOME": str(self.fleet.base)}):
+            p = self.plan(operator_keep=frozenset({"~/held"}))
+        self.assertEqual(self.entry(p, held)["keep"], ["operator"])
+
+    def test_an_operator_keep_matching_no_worktree_is_refused(self):
+        self.fleet.worktree("held")
+        with self.assertRaises(ReconcileError) as caught:
+            self.plan(operator_keep=frozenset({str(self.fleet.base / "typo")}))
+        self.assertEqual(caught.exception.code, "unknown_keep")
+
+    def test_a_worktree_holding_another_worktree_is_kept_and_the_inner_one_survives(self):
+        f = self.fleet
+        outer = f.worktree("outer")
+        inner = f.worktree("inner", at=Path(outer) / ".worktrees" / "inner")
+        f.ledger("L1", inner)
+        p = self.plan(migrate_report=report(L1="current"))
+        self.assertEqual(self.entry(p, outer)["keep"], ["nested_worktree"])
+        self.assertEqual(self.entry(p, outer)["action"], "keep")
+        self.assertEqual(self.entry(p, inner)["action"], "none")
+        result = self.apply(p, migrate_report=report(L1="current"))
+        self.assertEqual({r["path"]: r["outcome"] for r in result["results"]},
+                         {outer: "kept", inner: "kept"})
+        self.assertTrue(os.path.isdir(inner))
+        self.assertTrue(os.path.isdir(outer))
+        self.assertNotIn("prunable", out("worktree", "list", "--porcelain", cwd=f.root))
+
     def test_reftable_storage_is_refused(self):
         other = self.fleet.base / "reftable"
         other.mkdir()
