@@ -3,16 +3,22 @@
 Run: just agent-workflow-tests
 """
 
+import contextlib
+import errno
 import fcntl
 import hashlib
+import io
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools import attempt_identity as ai
 from agent_tools.transaction_core import TransactionStore
@@ -615,3 +621,678 @@ class LegacyOwnerCompatibilityTest(MigrationFixtures, unittest.TestCase):
                                     completed.stderr)
                     self.assertIn("workflow state schema", completed.stderr)
                     self.assertEqual(self.tree_snapshot(), snapshot)
+
+
+_SHIM = """#!@PYTHON@
+import json, os, shutil, subprocess, sys
+from pathlib import Path
+
+plan_path = Path(os.environ["LEDGER_ARCHIVE_SHIM_PLAN"])
+counter = plan_path.with_suffix(".calls")
+call = int(counter.read_text(encoding="utf-8")) if counter.exists() else 0
+counter.write_text(str(call + 1), encoding="utf-8")
+plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else {}
+step = plan.get(str(call), {})
+
+
+def act(actions):
+    for kind, source, target in actions:
+        if kind == "copytree":
+            shutil.copytree(source, target)
+        elif kind == "move":
+            shutil.move(source, target)
+        elif kind == "symlink":
+            os.symlink(source, target)  # source is the link's target, target the link
+        else:
+            shutil.copyfile(source, target)
+
+
+act(step.get("before", []))
+if "exit" in step or "stdout" in step:
+    sys.stdout.write(step.get("stdout", ""))
+    sys.stderr.write(step.get("stderr", ""))
+    sys.exit(step.get("exit", 0))
+done = subprocess.run([sys.executable, @SCRIPT@, *sys.argv[1:]], capture_output=True,
+                      text=True, check=False)
+act(step.get("after", []))
+sys.stdout.write(done.stdout)
+sys.stderr.write(done.stderr)
+sys.exit(done.returncode)
+"""
+
+
+class LedgerArchiveTest(MigrationFixtures, unittest.TestCase):
+    """`ledger-archive` (#584): refused ledgers leave `migrate`'s inventory, nothing else moves."""
+
+    def setUp(self):
+        super().setUp()
+        self.refused = self.install_refusal_fixtures()
+        self.install_orchestrated("orchestrate-17")
+        shims = tempfile.TemporaryDirectory()
+        self.addCleanup(shims.cleanup)
+        shim = Path(shims.name) / "workflow-state"
+        shim.write_text(_SHIM.replace("@PYTHON@", sys.executable)
+                        .replace("@SCRIPT@", repr(str(SCRIPT))), encoding="utf-8")
+        shim.chmod(0o755)
+        self.plan_path = Path(shims.name) / "plan.json"
+        self.archive_env = {**self.cli_env, "PYTHONPATH": str(REPO / "python"),
+                            "LEDGER_ARCHIVE_SHIM_PLAN": str(self.plan_path),
+                            "PATH": f"{shims.name}{os.pathsep}{os.environ['PATH']}"}
+        self.archive_dir = self.root / ".superpowers" / "archive" / "workflows"
+        self.labels_path = Path(shims.name) / "labels.json"  # outside the tree
+        self.write_labels()
+
+    def write_labels(self, labels=None):
+        if labels is None:
+            labels = {handle: {"disposition": "archived", "redeliver": []}
+                      for handle in self.refused}
+        self.labels_path.write_text(json.dumps(labels), encoding="utf-8")
+
+    def shim_plan(self, plan):
+        """Set the shim's call plan and reset its call counter."""
+        self.plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        self.plan_path.with_suffix(".calls").unlink(missing_ok=True)
+
+    def shim_calls(self):
+        counter = self.plan_path.with_suffix(".calls")
+        return int(counter.read_text(encoding="utf-8")) if counter.exists() else 0
+
+    def archive(self, *args, code=0, labels=True):
+        extra = ["--labels", str(self.labels_path)] if labels and "--apply" in args else []
+        completed = subprocess.run(
+            [sys.executable, "-m", "agent_tools.ledger_archive", "--repo-root",
+             str(self.root), *args, *extra], env=self.archive_env, capture_output=True, text=True,
+            check=False)
+        self.assertEqual(completed.returncode, code, completed.stderr)
+        if code == 2:
+            self.assertEqual(completed.stdout, "")
+            self.assertRegex(completed.stderr, r"^ledger-archive: ")
+        return json.loads(completed.stdout) if completed.stdout else None
+
+    def migrate_counts(self):
+        _, report = self.run_cli_json("migrate", "--repo-root", self.root)
+        return report["counts"], {row["ledger"]: row["verdict"] for row in report["ledgers"]}
+
+    def ledger_bytes(self, base, handle):
+        return {str(p.relative_to(base / handle)): p.read_bytes()
+                for p in sorted((base / handle).rglob("*")) if p.is_file()}
+
+    def assert_nothing_moved(self, before):
+        self.assertEqual(self.tree_snapshot(), before)
+        self.assertFalse((self.root / ".superpowers" / "archive").exists())
+        for handle in self.refused:
+            with open(self.workflows_dir / handle / "state.lock", "r+b") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # released
+
+    def test_dry_run_lists_every_refused_ledger_and_writes_nothing(self):
+        counts, verdicts = self.migrate_counts()
+        self.assertEqual(verdicts["orchestrate-17"], "migrate")
+        self.assertEqual(counts["refused"], len(self.refused))
+        before = self.tree_snapshot()
+        report = self.archive()
+        self.assertEqual(report["schema"], "ledger-archive-report/v1")
+        self.assertEqual(report["mode"], "dry_run")
+        self.assertIsNone(report["post_check"])
+        self.assertEqual({row["ledger"]: row["reason"] for row in report["ledgers"]},
+                         self.refused)
+        self.assertEqual({row["verdict"] for row in report["ledgers"]}, {"would_archive"})
+        self.assertEqual(report["counts"], {"would_archive": len(self.refused),
+                                            "archived": 0, "skipped": 0})
+        self.assertEqual(set(report["ledgers"][0]), {
+            "ledger", "run_id", "schema_version", "dialect", "issues", "reason",
+            "disposition", "redeliver", "destination", "verdict", "skip_reason"})
+        self.assertEqual({row["disposition"] for row in report["ledgers"]}, {None})
+        self.assertEqual(self.tree_snapshot(), before)
+        self.assertFalse((self.root / ".superpowers" / "archive").exists())
+        self.assertEqual(self.shim_calls(), 1)
+
+    def test_apply_moves_refused_ledgers_byte_for_byte_and_leaves_the_rest(self):
+        workflows = self.workflows_dir
+        moved = {handle: self.ledger_bytes(workflows, handle) for handle in self.refused}
+        kept = self.ledger_bytes(workflows, "orchestrate-17")
+        report = self.archive("--apply")
+        self.assertEqual(report["mode"], "apply")
+        self.assertEqual(report["counts"], {"would_archive": 0,
+                                            "archived": len(self.refused), "skipped": 0})
+        self.assertEqual(report["post_check"],
+                         {"passed": True, "refused_after": 0, "unexpected": []})
+        self.assertEqual(self.shim_calls(), 3)  # inventory, re-read under the locks, post-check
+        for handle, files in moved.items():
+            with self.subTest(handle=handle):
+                self.assertFalse((workflows / handle).exists())
+                self.assertEqual(self.ledger_bytes(self.archive_dir, handle), files)
+                record = json.loads((self.archive_dir / f"{handle}.archived.json")
+                                    .read_text(encoding="utf-8"))
+                self.assertEqual(record["schema"], "ledger-archive-record/v1")
+                self.assertEqual(record["ledger"], handle)
+                self.assertEqual(record["reason"], self.refused[handle])
+                self.assertEqual(record["source"], str(workflows.resolve() / handle))
+                self.assertEqual((record["disposition"], record["redeliver"]), ("archived", []))
+                self.assertEqual(record["state_sha256"], "sha256:" + hashlib.sha256(
+                    files["state.json"]).hexdigest())
+                self.assertRegex(record["archived_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(self.ledger_bytes(workflows, "orchestrate-17"), kept)
+        counts, verdicts = self.migrate_counts()
+        self.assertEqual(counts["refused"], 0)
+        self.assertEqual(verdicts, {"orchestrate-17": "migrate"})
+
+    def test_apply_again_archives_nothing(self):
+        self.archive("--apply")
+        before = self.tree_snapshot()
+        report = self.archive("--apply")
+        self.assertEqual(report["ledgers"], [])
+        self.assertEqual(report["counts"], {"would_archive": 0, "archived": 0, "skipped": 0})
+        self.assertTrue(report["post_check"]["passed"])
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_a_held_lock_skips_that_ledger_only(self):
+        with open(self.workflows_dir / "orchestrate-92" / "state.lock", "r+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            report = self.archive("--apply")
+        rows = {row["ledger"]: row for row in report["ledgers"]}
+        self.assertEqual((rows["orchestrate-92"]["verdict"],
+                          rows["orchestrate-92"]["skip_reason"]), ("skipped", "locked"))
+        self.assertTrue((self.workflows_dir / "orchestrate-92" / "state.json").is_file())
+        self.assertEqual(report["counts"]["archived"], len(self.refused) - 1)
+        self.assertEqual(report["post_check"],
+                         {"passed": True, "refused_after": 1, "unexpected": []})
+
+    def test_a_candidate_changed_before_its_lock_is_skipped_as_changed(self):
+        changed = self.workflows_dir / "issue-14-test" / "state.json"
+        replacement = self.workflows_dir / "orchestrate-17" / "state.json"
+        # After the unlocked inventory, before the locks: the row turns location_mismatch.
+        self.shim_plan({"0": {"after": [["copyfile", str(replacement), str(changed)]]}})
+        report = self.archive("--apply")
+        rows = {row["ledger"]: row for row in report["ledgers"]}
+        self.assertEqual((rows["issue-14-test"]["verdict"],
+                          rows["issue-14-test"]["skip_reason"]), ("skipped", "changed"))
+        self.assertEqual(changed.read_bytes(), replacement.read_bytes())
+        self.assertFalse((self.archive_dir / "issue-14-test").exists())
+        self.assertFalse((self.archive_dir / "issue-14-test.archived.json").exists())
+        self.assertEqual(report["counts"]["archived"], len(self.refused) - 1)
+        self.assertEqual(report["post_check"],
+                         {"passed": True, "refused_after": 1, "unexpected": []})
+
+    def test_a_candidate_removed_after_the_inventory_is_skipped_as_missing(self):
+        gone = tempfile.TemporaryDirectory()
+        self.addCleanup(gone.cleanup)
+        source = self.workflows_dir / "issue-14-test"
+        # After the unlocked inventory, before its lock: the candidate disappears.
+        self.shim_plan({"0": {"after": [["move", str(source), str(Path(gone.name) / "away")]]}})
+        report = self.archive("--apply")
+        rows = {row["ledger"]: row for row in report["ledgers"]}
+        self.assertEqual((rows["issue-14-test"]["verdict"],
+                          rows["issue-14-test"]["skip_reason"]), ("skipped", "ledger_missing"))
+        self.assertFalse(os.path.lexists(source))  # no lock file or directory was recreated
+        self.assertFalse(os.path.lexists(self.archive_dir / "issue-14-test"))
+        self.assertFalse(os.path.lexists(self.archive_dir / "issue-14-test.archived.json"))
+        self.assertEqual(report["counts"]["archived"], len(self.refused) - 1)
+        self.assertEqual(report["post_check"],
+                         {"passed": True, "refused_after": 0, "unexpected": []})
+
+    def test_a_candidate_replaced_by_a_symlink_gets_no_lock_outside_the_tree(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        bait = Path(outside.name) / "bait"
+        bait.mkdir()
+        source = self.workflows_dir / "issue-14-test"
+        # After the inventory: the directory moves away and a symlink to an empty
+        # directory outside the tree takes its name.
+        self.shim_plan({"0": {"after": [["move", str(source), str(Path(outside.name) / "away")],
+                                        ["symlink", str(bait), str(source)]]}})
+        report = self.archive("--apply")
+        rows = {row["ledger"]: row for row in report["ledgers"]}
+        self.assertEqual((rows["issue-14-test"]["verdict"],
+                          rows["issue-14-test"]["skip_reason"]), ("skipped", "ledger_missing"))
+        self.assertEqual(list(bait.iterdir()), [])  # no state.lock created through the link
+        self.assertTrue(source.is_symlink())
+        self.assertFalse(os.path.lexists(self.archive_dir / "issue-14-test"))
+        self.assertEqual(report["counts"]["archived"], len(self.refused) - 1)
+        self.assertTrue(report["post_check"]["passed"])
+
+    def test_an_existing_destination_is_skipped_and_kept(self):
+        (self.archive_dir / "issue-14-test").mkdir(parents=True)
+        report = self.archive("--apply")
+        rows = {row["ledger"]: row for row in report["ledgers"]}
+        self.assertEqual(rows["issue-14-test"]["skip_reason"], "destination_exists")
+        self.assertTrue((self.workflows_dir / "issue-14-test" / "state.json").is_file())
+        self.assertEqual(list((self.archive_dir / "issue-14-test").iterdir()), [])
+
+    def test_a_symlinked_archive_home_refuses_before_any_move(self):
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        (self.root / ".superpowers" / "archive").symlink_to(elsewhere.name)
+        before = self.tree_snapshot()
+        self.assertIsNone(self.archive("--apply", code=2))
+        self.assertEqual(self.tree_snapshot(), before)
+        self.assertEqual(list(Path(elsewhere.name).iterdir()), [])
+
+    def test_a_missing_workflows_directory_exits_2_before_workflow_state_runs(self):
+        shutil.rmtree(self.workflows_dir)
+        self.assertIsNone(self.archive("--apply", code=2))
+        self.assertFalse((self.root / ".superpowers" / "archive").exists())
+        self.assertEqual(self.shim_calls(), 0)
+
+    def test_a_bad_inventory_exits_2_with_nothing_moved(self):
+        _, real = self.run_cli_json("migrate", "--repo-root", self.root)
+        text = json.dumps(real)
+        variants = {
+            "nonzero_exit": {"exit": 3, "stderr": "workflow-state: boom\n"},
+            "apply_mode": {"stdout": json.dumps({**real, "mode": "apply"})},
+            "duplicate_key": {"stdout": '{"mode": "dry_run", ' + text[1:]},
+            "wrong_schema": {"stdout": json.dumps({**real, "schema": "other/v1"})},
+            "not_json": {"stdout": "not json\n"},
+        }
+        for name, step in variants.items():
+            with self.subTest(variant=name):
+                self.shim_plan({"0": step})
+                before = self.tree_snapshot()
+                self.assertIsNone(self.archive("--apply", code=2))
+                self.assertEqual(self.shim_calls(), 1)  # the shim ran; the check is not local
+                self.assert_nothing_moved(before)
+
+    def test_a_failing_re_read_under_the_locks_exits_2_with_nothing_moved(self):
+        for name, step in {"nonzero_exit": {"exit": 3, "stderr": "boom\n"},
+                           "not_json": {"stdout": "{\n"}}.items():
+            with self.subTest(variant=name):
+                self.shim_plan({"1": step})
+                before = self.tree_snapshot()
+                self.assertIsNone(self.archive("--apply", code=2))
+                self.assertEqual(self.shim_calls(), 2)
+                self.assert_nothing_moved(before)
+
+    def test_an_archived_ledger_reappearing_fails_the_post_check(self):
+        self.shim_plan({"2": {"before": [[
+            "copytree", str(self.archive_dir / "issue-14-test"),
+            str(self.workflows_dir / "issue-14-test")]]}})
+        report = self.archive("--apply", code=1)
+        self.assertEqual(report["counts"]["archived"], len(self.refused))
+        self.assertEqual(report["post_check"],
+                         {"passed": False, "refused_after": 1, "unexpected": ["issue-14-test"]})
+
+    def test_a_new_refused_ledger_fails_the_post_check(self):
+        self.shim_plan({"1": {"after": [[
+            "copytree", str(self.workflows_dir / "orchestrate-92"),
+            str(self.workflows_dir / "orchestrate-93")]]}})
+        report = self.archive("--apply", code=1)
+        self.assertNotIn("orchestrate-93", {row["ledger"] for row in report["ledgers"]})
+        self.assertEqual(report["counts"]["archived"], len(self.refused))
+        self.assertEqual(report["post_check"],
+                         {"passed": False, "refused_after": 1, "unexpected": ["orchestrate-93"]})
+        self.assertTrue((self.workflows_dir / "orchestrate-93" / "state.json").is_file())
+
+    def test_apply_without_labels_exits_2_before_workflow_state_runs(self):
+        before = self.tree_snapshot()
+        self.assertIsNone(self.archive("--apply", code=2, labels=False))
+        self.assertEqual(self.shim_calls(), 0)
+        self.assert_nothing_moved(before)
+
+    def test_an_unlabelled_candidate_is_skipped_and_kept(self):
+        self.write_labels({handle: {"disposition": "archived", "redeliver": []}
+                           for handle in self.refused if handle != "orchestrate-92"})
+        report = self.archive("--apply")
+        rows = {row["ledger"]: row for row in report["ledgers"]}
+        self.assertEqual((rows["orchestrate-92"]["verdict"],
+                          rows["orchestrate-92"]["skip_reason"]), ("skipped", "unlabelled"))
+        self.assertTrue((self.workflows_dir / "orchestrate-92" / "state.json").is_file())
+        self.assertFalse((self.archive_dir / "orchestrate-92.archived.json").exists())
+        self.assertEqual(report["counts"]["archived"], len(self.refused) - 1)
+        self.assertEqual(report["post_check"],
+                         {"passed": True, "refused_after": 1, "unexpected": []})
+
+    def test_each_record_carries_its_label(self):
+        labels = {handle: {"disposition": "archived", "redeliver": []}
+                  for handle in self.refused}
+        labels["orchestrate-91"] = {"disposition": "abandoned", "redeliver": [207]}
+        labels["orchestrate-92"] = {"disposition": "unresolved", "redeliver": [92]}
+        labels["issue-14-test"] = {"disposition": "unresolved", "redeliver": []}
+        labels["not-a-candidate"] = {"disposition": "archived", "redeliver": []}
+        self.write_labels(labels)
+        report = self.archive("--apply")
+        self.assertEqual(report["counts"]["archived"], len(self.refused))
+        rows = {row["ledger"]: row for row in report["ledgers"]}
+        for handle in self.refused:
+            with self.subTest(handle=handle):
+                record = json.loads((self.archive_dir / f"{handle}.archived.json")
+                                    .read_text(encoding="utf-8"))
+                want = (labels[handle]["disposition"], labels[handle]["redeliver"])
+                self.assertEqual((record["disposition"], record["redeliver"]), want)
+                self.assertEqual((rows[handle]["disposition"], rows[handle]["redeliver"]), want)
+        self.assertNotIn("not-a-candidate", rows)
+
+    def test_an_invalid_labels_file_exits_2_with_nothing_moved(self):
+        good = {"disposition": "archived", "redeliver": []}
+        variants = {
+            "not_json": "not json",
+            "duplicate_key": '{"issue-14-test": %s, "issue-14-test": %s}' % (
+                json.dumps(good), json.dumps(good)),
+            "not_an_object": "[]",
+            "unknown_disposition": json.dumps({"issue-14-test": {
+                "disposition": "dropped", "redeliver": []}}),
+            "archived_with_issues": json.dumps({"issue-14-test": {
+                "disposition": "archived", "redeliver": [14]}}),
+            "abandoned_without_issues": json.dumps({"issue-14-test": {
+                "disposition": "abandoned", "redeliver": []}}),
+            "unsorted": json.dumps({"issue-14-test": {
+                "disposition": "unresolved", "redeliver": [3, 2]}}),
+            "bool_issue": json.dumps({"issue-14-test": {
+                "disposition": "abandoned", "redeliver": [True]}}),
+            "zero_issue": json.dumps({"issue-14-test": {
+                "disposition": "abandoned", "redeliver": [0]}}),
+            "extra_field": json.dumps({"issue-14-test": {**good, "note": "x"}}),
+            "bad_ledger_name": json.dumps({"../issue-14-test": good}),
+        }
+        for name, text in variants.items():
+            with self.subTest(variant=name):
+                self.labels_path.write_text(text, encoding="utf-8")
+                self.shim_plan({})
+                before = self.tree_snapshot()
+                self.assertIsNone(self.archive("--apply", code=2))
+                self.assertEqual(self.shim_calls(), 0)
+                self.assert_nothing_moved(before)
+
+    def apply_in_process(self):
+        from agent_tools import ledger_archive
+        with mock.patch.dict(os.environ, self.archive_env), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return ledger_archive.main(["--repo-root", str(self.root), "--apply",
+                                        "--labels", str(self.labels_path)])
+
+    def assert_every_refused_ledger_in_place_and_none_recorded(self, before):
+        self.assertEqual(self.tree_snapshot(), before)
+        _, verdicts = self.migrate_counts()
+        self.assertEqual({h for h, v in verdicts.items() if v == "refused"}, set(self.refused))
+
+    def test_a_record_write_that_fails_leaves_the_ledger_in_the_inventory_and_a_rerun_archives(self):
+        (self.root / ".superpowers" / "archive" / "workflows").mkdir(parents=True)
+        before = self.tree_snapshot()
+        real = tempfile.mkstemp
+
+        def full_disk(*args, **kwargs):
+            if str(kwargs.get("dir", "")).endswith("archive/workflows"):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(*args, **kwargs)
+
+        with mock.patch("tempfile.mkstemp", full_disk):
+            self.assertEqual(self.apply_in_process(), 2)
+        self.assert_every_refused_ledger_in_place_and_none_recorded(before)
+        report = self.archive("--apply")
+        self.assertEqual(report["counts"]["archived"], len(self.refused))
+        for handle in self.refused:
+            self.assertTrue((self.archive_dir / f"{handle}.archived.json").is_file())
+
+    def test_a_failure_publishing_the_record_puts_the_ledger_back(self):
+        (self.root / ".superpowers" / "archive" / "workflows").mkdir(parents=True)
+        before = self.tree_snapshot()
+        real = os.replace
+
+        def refuse_publish(source, target, *args, **kwargs):
+            if str(target).endswith(".archived.json"):
+                raise OSError(errno.EIO, "Input/output error")
+            return real(source, target, *args, **kwargs)
+
+        with mock.patch("os.replace", refuse_publish):
+            self.assertEqual(self.apply_in_process(), 2)
+        self.assert_every_refused_ledger_in_place_and_none_recorded(before)
+        self.assertEqual(self.archive("--apply")["counts"]["archived"], len(self.refused))
+
+
+class LedgerSnapshotTest(MigrationFixtures, unittest.TestCase):
+    """`ledger-snapshot` (#584 D7, D9): one consistent, restorable cut of both stores."""
+
+    def setUp(self):
+        super().setUp()
+        self.install_orchestrated("orchestrate-17")
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")  # fills attempt-transactions
+        self.assertTrue((self.store_root / "attempt-runs.lock").is_file())
+        # Not `self.home`: the harness keeps HOME there.
+        self.archive_home = self.root / ".superpowers" / "archive"
+        self.out = self.archive_home / "pre-test.tar.gz"
+        self.env = {**self.cli_env, "PYTHONPATH": str(REPO / "python")}
+
+    def cli(self, *args, code=0):
+        completed = subprocess.run(
+            [sys.executable, "-m", "agent_tools.ledger_snapshot", *args], env=self.env,
+            capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, code, completed.stderr)
+        if code == 2:
+            self.assertEqual(completed.stdout, "")
+            self.assertRegex(completed.stderr, r"^ledger-snapshot: ")
+            return completed.stderr
+        return json.loads(completed.stdout)
+
+    def take(self, code=0):
+        return self.cli("take", "--repo-root", str(self.root), "--out", str(self.out), code=code)
+
+    def restore(self, *extra, code=0, snapshot=None):
+        return self.cli("restore", "--repo-root", str(self.root), "--snapshot",
+                        str(snapshot or self.out), *extra, code=code)
+
+    def stores(self):
+        return {key: value for key, value in self.tree_snapshot().items()
+                if key.split("/")[0] in ("workflows", "attempt-transactions")}
+
+    def lock_paths(self):
+        ledgers = [self.workflows_dir / name / "state.lock"
+                   for name in sorted(os.listdir(self.workflows_dir))
+                   if (self.workflows_dir / name / "state.lock").is_file()]
+        return ledgers + [self.store_root / name for name in
+                          ("attempt-runs.lock", "creation.lock", "leases.lock")
+                          if (self.store_root / name).is_file()]
+
+    def assert_all_locks_free(self):
+        for path in self.lock_paths():
+            with open(path, "r+b") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_take_writes_one_tarball_of_both_stores_and_releases_every_lock(self):
+        report = self.take()
+        stores = self.stores()
+        self.assertEqual(report["schema"], "ledger-snapshot-report/v1")
+        self.assertEqual(report["mode"], "take")
+        self.assertEqual(report["snapshot"], str(self.out.resolve()))
+        self.assertTrue(report["transactions"])
+        self.assertGreaterEqual(report["ledgers"], 1)
+        self.assertRegex(report["taken_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(report["sha256"],
+                         "sha256:" + hashlib.sha256(self.out.read_bytes()).hexdigest())
+        with tarfile.open(self.out, "r:gz") as tar:
+            members = tar.getmembers()
+            self.assertEqual({m.name for m in members}, set(stores))
+            self.assertTrue(all(m.isdir() or m.isreg() for m in members))
+            for member in members:
+                if member.isreg():
+                    self.assertEqual(tar.extractfile(member).read(), stores[member.name])
+        self.assertEqual(report["members"], len(stores))
+        self.assertEqual(sorted(p.name for p in self.archive_home.iterdir()), ["pre-test.tar.gz"])
+        self.assert_all_locks_free()
+
+    def test_a_held_lock_refuses_take_with_nothing_written(self):
+        (self.workflows_dir / ".direct-5.lock").write_bytes(b"")
+        for held in (self.workflows_dir / "orchestrate-17" / "state.lock",
+                     self.workflows_dir / ".direct-5.lock",
+                     self.store_root / "attempt-runs.lock"):
+            with self.subTest(held=held.name):
+                before = self.tree_snapshot()
+                with open(held, "r+b") as lock:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                    self.assertRegex(self.take(code=2), r"^ledger-snapshot: busy: ")
+                self.assertEqual(self.tree_snapshot(), before)
+                self.assertFalse(self.archive_home.exists())
+                self.assert_all_locks_free()
+
+    def test_a_ledger_or_store_appearing_while_fenced_refuses_and_leaves_no_snapshot(self):
+        from agent_tools import ledger_snapshot
+
+        def late_ledger():
+            (self.workflows_dir / "late-1").mkdir()
+            (self.workflows_dir / "late-1" / "state.json").write_text("{}", encoding="utf-8")
+
+        def store_vanishes():
+            os.rename(self.store_root, self.root / "store-away")
+
+        for name, appear in (("ledger", late_ledger), ("store", store_vanishes)):
+            with self.subTest(change=name):
+                with self.assertRaises(ledger_snapshot.SnapshotRefused) as caught:
+                    ledger_snapshot.take(self.root, self.out, on_written=appear,
+                                         now=lambda: "2026-11-08T00:00:00Z")
+                self.assertEqual(caught.exception.code, "changed")
+                self.assertEqual(list(self.archive_home.iterdir()), [])  # no snapshot, no partial
+                if name == "ledger":
+                    shutil.move(str(self.workflows_dir / "late-1"), str(self.root / "late-away"))
+
+    def test_take_refuses_an_existing_or_misplaced_out(self):
+        self.archive_home.mkdir(mode=0o700)
+        self.out.write_bytes(b"kept")
+        before = self.tree_snapshot()
+        self.assertRegex(self.take(code=2), r"^ledger-snapshot: exists: ")
+        self.assertEqual(self.tree_snapshot(), before)
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        for out in (Path(elsewhere.name) / "pre.tar.gz", self.archive_home / "pre.tar",
+                    self.archive_home / "sub" / "pre.tar.gz"):
+            with self.subTest(out=str(out)):
+                self.cli("take", "--repo-root", str(self.root), "--out", str(out), code=2)
+                self.assertEqual(self.tree_snapshot(), before)
+                self.assertEqual(list(Path(elsewhere.name).iterdir()), [])
+
+    def test_a_symlinked_archive_home_or_a_symlink_in_a_store_refuses_take(self):
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        self.archive_home.symlink_to(elsewhere.name)
+        self.assertRegex(self.take(code=2), r"^ledger-snapshot: invalid_store: ")
+        self.assertEqual(list(Path(elsewhere.name).iterdir()), [])
+        self.archive_home.unlink()
+        (self.workflows_dir / "orchestrate-17" / "link").symlink_to(elsewhere.name)
+        self.assertRegex(self.take(code=2), r"^ledger-snapshot: invalid_store: ")
+        self.assertEqual(list(self.archive_home.iterdir()), [])
+        self.assert_all_locks_free()
+
+    def test_restore_returns_both_stores_to_the_snapshot_and_keeps_every_later_file(self):
+        self.take()
+        before = self.stores()
+        (self.archive_home / "workflows").mkdir()
+        os.rename(self.workflows_dir / "orchestrate-17", self.archive_home / "workflows" / "orchestrate-17")
+        (self.workflows_dir / "late").mkdir()
+        (self.workflows_dir / "late" / "state.json").write_text("{}", encoding="utf-8")
+        (self.store_root / "late.json").write_text("{}", encoding="utf-8")
+        later = self.tree_snapshot()
+        dry = self.restore()
+        self.assertEqual(dry["mode"], "restore_dry_run")
+        self.assertIsNone(dry["aside"])
+        self.assertEqual(dry["moved"], ["workflows", "attempt-transactions", "archive/workflows"])
+        self.assertEqual(dry["restored"], ["workflows", "attempt-transactions"])
+        self.assertIn("workflows/late/state.json", dry["newer"])
+        self.assertIn("attempt-transactions/late.json", dry["newer"])
+        self.assertEqual(self.tree_snapshot(), later)  # the dry run wrote nothing
+        report = self.restore("--apply")
+        self.assertEqual(report["mode"], "restore")
+        self.assertEqual(self.stores(), before)
+        self.assertFalse(os.path.lexists(self.archive_home / "workflows"))
+        aside = Path(report["aside"])
+        self.assertEqual(aside.parent, self.archive_home.resolve())
+        prefix = {"workflows": "workflows", "attempt-transactions": "attempt-transactions",
+                  "archive-workflows": "archive/workflows"}
+        kept = {f"{prefix[p.relative_to(aside).parts[0]]}/"
+                f"{'/'.join(p.relative_to(aside).parts[1:])}": p.read_bytes()
+                for p in aside.rglob("*") if p.is_file() and len(p.relative_to(aside).parts) > 1}
+        for key, value in later.items():
+            if value != "<dir>" and key.split("/")[0] in ("workflows", "attempt-transactions",
+                                                          "archive"):
+                if key.startswith("archive/") and not key.startswith("archive/workflows/"):
+                    continue
+                with self.subTest(kept=key):
+                    self.assertEqual(kept.get(key), value)
+        self.assert_all_locks_free()
+
+    def test_a_store_absent_at_snapshot_time_stays_absent_after_restore(self):
+        shutil.move(str(self.store_root), str(self.root / "store-away"))
+        report = self.take()
+        self.assertFalse(report["transactions"])
+        before = self.stores()
+        self.store_root.mkdir()
+        (self.store_root / "late.json").write_text("{}", encoding="utf-8")
+        report = self.restore("--apply")
+        self.assertFalse(report["transactions"])
+        self.assertEqual(report["restored"], ["workflows"])
+        self.assertFalse(os.path.lexists(self.store_root))
+        self.assertEqual(self.stores(), before)
+        self.assertEqual((Path(report["aside"]) / "attempt-transactions" / "late.json")
+                         .read_text(encoding="utf-8"), "{}")
+
+    def test_a_held_lock_refuses_restore_with_nothing_moved(self):
+        self.take()
+        before = self.tree_snapshot()
+        with open(self.workflows_dir / "orchestrate-17" / "state.lock", "r+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            self.assertRegex(self.restore("--apply", code=2), r"^ledger-snapshot: busy: ")
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_an_invalid_snapshot_refuses_restore_with_nothing_moved(self):
+        self.archive_home.mkdir(mode=0o700)
+
+        def build(path, entries):
+            with tarfile.open(path, "w:gz") as tar:
+                for name, kind in entries:
+                    info = tarfile.TarInfo(name)
+                    if kind == "dir":
+                        info.type = tarfile.DIRTYPE
+                        tar.addfile(info)
+                    elif kind == "link":
+                        info.type, info.linkname = tarfile.SYMTYPE, "/etc"
+                        tar.addfile(info)
+                    else:
+                        info.size = 2
+                        tar.addfile(info, io.BytesIO(b"{}"))
+
+        variants = {
+            "dotdot": [("workflows", "dir"), ("workflows/../escape", "file")],
+            "absolute": [("workflows", "dir"), ("/workflows/x", "file")],
+            "symlink": [("workflows", "dir"), ("workflows/link", "link")],
+            "outside_stores": [("workflows", "dir"), ("other/file", "file")],
+            "no_workflows": [("attempt-transactions", "dir")],
+        }
+        for name, entries in variants.items():
+            with self.subTest(variant=name):
+                bad = self.archive_home / f"bad-{name}.tar.gz"
+                build(bad, entries)
+                before = self.tree_snapshot()
+                self.restore("--apply", code=2, snapshot=bad)
+                self.assertEqual(self.tree_snapshot(), before)
+        not_gzip = self.archive_home / "not-gzip.tar.gz"
+        not_gzip.write_bytes(b"not a tarball")
+        before = self.tree_snapshot()
+        self.restore("--apply", code=2, snapshot=not_gzip)
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_restore_keeps_every_held_lock_valid_for_a_writer_that_waited_through_it(self):
+        (self.workflows_dir / ".direct-5.lock").write_bytes(b"")
+        self.take()
+        locks = [self.workflows_dir / "orchestrate-17" / "state.lock",
+                 self.workflows_dir / ".direct-5.lock", self.store_root / "attempt-runs.lock"]
+        waiters = []
+        for path in locks:  # a writer that opened the lock before the restore, to flock it after
+            waiter = open(path, "r+b")
+            self.addCleanup(waiter.close)
+            waiters.append(waiter)
+        self.restore("--apply")
+        for path, waiter in zip(locks, waiters):
+            with self.subTest(lock=path.name):
+                fcntl.flock(waiter.fileno(), fcntl.LOCK_EX)  # the waiter resumes holding it
+                with open(path, "r+b") as contender:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(waiter.fileno(), fcntl.LOCK_UN)
+
+    def test_a_snapshot_of_hard_linked_files_round_trips(self):
+        ledger = self.workflows_dir / "orchestrate-17"
+        (ledger / "first.txt").write_bytes(b"shared bytes")
+        os.link(ledger / "first.txt", ledger / "second.txt")
+        os.link(ledger / "first.txt", self.store_root / "third.txt")
+        before = self.stores()
+        self.take()
+        with tarfile.open(self.out, "r:gz") as tar:
+            self.assertTrue(all(m.isdir() or m.isreg() for m in tar.getmembers()))
+        (ledger / "first.txt").write_bytes(b"changed")
+        self.restore("--apply")
+        self.assertEqual(self.stores(), before)
