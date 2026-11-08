@@ -32,10 +32,10 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan, plan_reviewed, decisions?, done, fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan, plan_reviewed, plan_findings?, decisions?, done, fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
-// (reviewing it first unless plan_reviewed), skips the tasks in cont.done, then
+// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and runs one rules-only revise of it instead of a full review, dropping the plan after a second failed rules revise), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). When the PR
 // is already merged, the re-adopt goes straight to close-out. A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
@@ -221,6 +221,9 @@ if (!HOLDER_RE.test(setup.holder)) return { stage: 'setup', result: setup, inval
 
 let plan = CONT && CONT.plan ? CONT.plan : null
 let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
+// A plan-review stop keeps the revised plan and the findings left on it; a resume runs one rules-only revise on it.
+const KEPT = CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules) ? CONT.plan_findings : null
+let planFindingsKept = KEPT ? { rules: KEPT.rules, findings: Array.isArray(KEPT.findings) ? KEPT.findings : [], rounds: Number.isInteger(KEPT.rounds) ? KEPT.rounds : 0 } : null
 const taskLog = CONT && CONT.done ? CONT.done.slice() : []
 let claimIncomplete = !!(CONT && CONT.claim_incomplete)
 // A partial task's edits stay claimed through any stop until that task is done.
@@ -243,7 +246,7 @@ if (CONT && Array.isArray(CONT.decisions)) CONT.decisions.forEach(addDecision)
 addDecision(args.decisions)
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(decisions.length ? { decisions } : {}), done: taskLog, fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } }
+  return { stage, ...extra, ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -542,7 +545,7 @@ if (!plan || !planReviewed) {
   const lost = await renew('plan', 'Plan')
   if (lost) return lost
 }
-if (!plan) {
+const readAnswer = async () => {
   const answer = await call(`${CTX}
 Read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: { type: 'object' } }, decisions: { type: 'string' } }, required: ['verdict'] } })
   if (!answer || !['none', 'open', 'answered'].includes(answer.verdict)) return stop('owner-answer', { result: answer })
@@ -551,8 +554,46 @@ Read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, ex
     if (typeof answer.decisions !== 'string' || !answer.decisions.trim()) return stop('owner-answer', { result: answer })
     addDecision(answer.decisions)
   }
+  return null
+}
+const RESUME_RULES = !!(plan && !planReviewed && planFindingsKept)
+if (!plan || RESUME_RULES) {
+  const stopped = await readAnswer()
+  if (stopped) return stopped
+}
+if (!plan) {
   const halted = takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA }), 'plan')
   if (halted) return halted
+}
+const RULE_IDS = PLAN_REVIEW.properties.findings.items.properties.rule.enum
+const rulesOnly = fs => fs.length > 0 && fs.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex')
+const rulesReview = triggered => call(`${CTX}
+Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
+// One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
+const rulesRevise = async findings => {
+  const root = plan.plan_root
+  const halted = takePlan(await call(planPrompt(`\nFix only these rule findings in your plan at ${root} in place, change nothing else, and return the full result again: ${JSON.stringify(findings)}`), { label: 'plan-rules-revise', phase: 'Plan', schema: PLAN_SCHEMA }), 'plan-rules-revise')
+  if (halted) return { halted }
+  const still = planRules(plan)
+  const rr = await rulesReview(findings)
+  if (!rr) return { silent: true }
+  return { rules: still.concat(findingsOf(rr)) }
+}
+// A plan-review stop keeps the revised plan unless this was the second failed rules revise (D5).
+const reviewStop = (rules, findings, rounds, extra) => {
+  planReviewed = false
+  if (rounds >= 2) { plan = null; planFindingsKept = null } else planFindingsKept = { rules, findings, rounds }
+  return stop('plan-review', { ...(extra || {}), rules, findings })
+}
+const SILENT = { details: 'the rules re-reviewer returned nothing' }
+if (RESUME_RULES) {
+  const { rules, findings, rounds } = planFindingsKept
+  const r = await rulesRevise(rules)
+  if (r.halted) return { ...r.halted, findings }
+  if (r.silent) return reviewStop(rules, findings, rounds + 1, SILENT)
+  if (r.rules.length) return reviewStop(r.rules, findings, rounds + 1)
+  planFindingsKept = null
+  planReviewed = true
 }
 if (!planReviewed) {
   const ACS0 = JSON.stringify(plan.acceptance)
@@ -577,12 +618,19 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const halted = takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
     const still = planRules(plan)
-    const rr = await call(`${CTX}
-Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(planFindings)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
-    if (!rr) { plan = null; planReviewed = false; return stop('plan-review', { details: 'the rules re-reviewer returned nothing', findings: planFindings }) }
-    const rules = still.concat(findingsOf(rr))
-    if (rules.length) { plan = null; planReviewed = false; return stop('plan-review', { rules, findings: planFindings }) }
+    const rr = await rulesReview(planFindings)
+    if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT)
+    let rules = still.concat(findingsOf(rr)), rounds = 0
+    if (rulesOnly(rules)) {
+      rounds = 1
+      const r = await rulesRevise(rules)
+      if (r.halted) return { ...r.halted, findings: planFindings }
+      if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT)
+      rules = r.rules
+    }
+    if (rules.length) return reviewStop(rules, planFindings, rounds)
   }
+  planFindingsKept = null
   planReviewed = true
 }
 planRefs()

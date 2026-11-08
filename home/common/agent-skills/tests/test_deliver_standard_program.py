@@ -615,19 +615,30 @@ class PlanRulesTest(unittest.TestCase):
     RULE_FINDING = {"verdict": "findings",
                     "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
 
+    REVISED = with_criteria(HUMAN, tasks=[{"n": 1, "title": "revised", "file": "/g/task-1.md", "risk": "standard"}])
+
+    def keep_stop(self):
+        plan = with_criteria(HUMAN)
+        return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": self.REVISED,
+                            "plan-review": self.RULE_FINDING, "plan-rules-review": self.RULE_FINDING})
+
     def gate(self, plan):
-        return run(replies={"plan": plan, "plan-revise": plan})
+        return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan})
 
     def test_each_rule_violation_stops_at_plan_review_naming_the_rule(self):
         for rule, bad in self.ROWS:
             with self.subTest(rule=rule, ac=bad["id"]):
-                result, calls = self.gate(with_criteria(bad))
+                plan = with_criteria(bad)
+                result, calls = self.gate(plan)
                 self.assertEqual(result["stage"], "plan-review")
                 self.assertIn((rule, bad["id"]), [(r["rule"], r["ac"]) for r in result["rules"]])
-                self.assertIsNone(result["cont"]["plan"])
+                self.assertEqual(result["cont"]["plan"], plan)
                 self.assertFalse(result["cont"]["plan_reviewed"])
+                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
                 self.assertEqual(labels(calls).count("plan-revise"), 1)
+                self.assertEqual(labels(calls).count("plan-rules-revise"), 1)
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-revise"))
+                self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-rules-revise"))
                 self.assertNotIn("impl-1", labels(calls))
 
     def test_pre_merge_only_evidence_stops_at_plan_review_naming_r1(self):
@@ -662,22 +673,80 @@ class PlanRulesTest(unittest.TestCase):
         self.assertEqual(labels(calls).count("plan-rules-review"), 1)
         self.assertIn("impl-1", labels(calls))
 
-    def test_reviewer_rule_violation_surviving_an_unchanged_revision_stops(self):
-        # A violation only a reviewer can see (an approval written as an act run) is re-checked after revision.
-        plan = with_criteria(HUMAN)
-        result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
-                                     "plan-rules-review": self.RULE_FINDING})
+    def test_rules_stop_keeps_the_revised_plan(self):
+        # A violation only a reviewer can see survives the full revise and one rules revise: the revised plan is kept.
+        result, calls = self.keep_stop()
+        names = labels(calls)
         self.assertEqual(result["stage"], "plan-review")
         self.assertEqual([r["rule"] for r in result["rules"]], ["R2"])
-        self.assertIsNone(result["cont"]["plan"])
-        self.assertNotIn("impl-1", labels(calls))
+        self.assertEqual(result["cont"]["plan"], self.REVISED)
+        self.assertFalse(result["cont"]["plan_reviewed"])
+        kept = result["cont"]["plan_findings"]
+        self.assertEqual(kept["rounds"], 1)
+        self.assertEqual([r["rule"] for r in kept["rules"]], ["R2"])
+        self.assertEqual([f["rule"] for f in kept["findings"]], ["R2"])
+        self.assertEqual((names.count("plan-revise"), names.count("plan-rules-revise"), names.count("plan-rules-review")), (1, 1, 2))
+        self.assertLess(names.index("plan-revise"), names.index("plan-rules-revise"))
+        self.assertIn('"rule":"R2"', prompt(calls, "plan-rules-revise"))
         self.assertIn('"rule":"R2"', prompt(calls, "plan-rules-review"))
+        self.assertNotIn("impl-1", names)
+        # A clean rules re-review after the full revise proceeds with no rules revise.
+        plan = with_criteria(HUMAN)
         _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING},
                        patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertNotIn("plan-rules-revise", labels(calls))
         self.assertIn("impl-1", labels(calls))
-        result, _ = run(replies={"plan": plan, "plan-review": self.RULE_FINDING, "plan-rules-review": None})
+        # A silent rules re-reviewer keeps the revised plan, re-targeting the findings the revise was given (D6).
+        result, calls = run(replies={"plan": plan, "plan-review": self.RULE_FINDING, "plan-rules-review": None})
         self.assertEqual(result["stage"], "plan-review")
+        self.assertIsNotNone(result["cont"]["plan"])
+        self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
+        self.assertEqual([r["rule"] for r in result["cont"]["plan_findings"]["rules"]], ["R2"])
+        self.assertNotIn("plan-rules-revise", labels(calls))
+
+    def test_resume_runs_one_rules_revise_with_decisions(self):
+        first, _ = self.keep_stop()
+        decision = "D: keep the act run and name the senses reason."
+        result, calls = run(args=dict(ARGS, cont=first["cont"], decisions=decision))
+        names = labels(calls)
+        for label in ("plan", "plan-revise", "plan-review", "plan-codex"):
+            self.assertNotIn(label, names)
+        self.assertEqual(names.count("owner-answer"), 1)
+        self.assertEqual(names.count("plan-rules-revise"), 1)
+        self.assertLess(names.index("renew-plan"), names.index("owner-answer"))
+        self.assertLess(names.index("owner-answer"), names.index("plan-rules-revise"))
+        self.assertLess(names.index("plan-rules-revise"), names.index("plan-rules-review"))
+        revise = prompt(calls, "plan-rules-revise")
+        self.assertIn(decision, revise)
+        self.assertIn('"rule":"R2"', revise)
+        self.assertIn("impl-1", names)
+        self.assertNotIn("plan_findings", result.get("cont") or {})
+
+    def test_second_rules_failure_on_resume_drops_the_plan(self):
+        first, _ = self.keep_stop()
+        result, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"plan-rules-review": self.RULE_FINDING})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual(labels(calls).count("plan-rules-revise"), 1)
         self.assertIsNone(result["cont"]["plan"])
+        self.assertFalse(result["cont"]["plan_reviewed"])
+        self.assertNotIn("plan_findings", result["cont"])
+        self.assertNotIn("impl-1", labels(calls))
+        _, calls = run(args=dict(ARGS, cont=result["cont"]))
+        self.assertIn("plan", labels(calls))
+
+    def test_codex_finding_left_gets_no_second_revise(self):
+        plan = with_criteria(HUMAN)
+        echoed = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "s", "source": "codex"}]}
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC3 breaks a rule"}]}
+        for left in (echoed, bare):
+            with self.subTest(left=left["findings"][0]["summary"]):
+                result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
+                                             "plan-rules-review": left})
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertNotIn("plan-rules-revise", labels(calls))
+                self.assertEqual(result["cont"]["plan"], plan)
+                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
+                self.assertNotIn("impl-1", labels(calls))
 
     def test_rules_rereview_finding_without_a_rule_still_blocks(self):
         plan = with_criteria(HUMAN)
@@ -687,6 +756,7 @@ class PlanRulesTest(unittest.TestCase):
         self.assertEqual(result["stage"], "plan-review")
         self.assertEqual([r["summary"] for r in result["rules"]], ["AC3 breaks a rule"])
         self.assertNotIn("impl-1", labels(calls))
+        self.assertNotIn("plan-rules-revise", labels(calls))
         minor = {"verdict": "findings", "findings": [{"severity": "minor", "summary": "style"}]}
         _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
                                 "plan-rules-review": minor}, patch={"close-out": {"issue_state": "OPEN"}})
@@ -802,6 +872,13 @@ class ResumeTest(unittest.TestCase):
     def test_cont_without_plan_plans_again(self):
         _, calls = run(args=dict(ARGS, cont={"setup": self.cont()["setup"], "plan": None, "done": []}))
         self.assertIn("plan", labels(calls))
+        # The cont an old child wrote at a plan-review stop: plan dropped, no plan_findings.
+        old = {"setup": self.cont()["setup"], "plan": None, "plan_reviewed": False, "done": [], "fix_waves": 0}
+        _, calls = run(args=dict(ARGS, cont=old))
+        names = labels(calls)
+        for label in ("owner-answer", "plan", "plan-review", "impl-1"):
+            self.assertIn(label, names)
+        self.assertNotIn("plan-rules-revise", names)
 
 
 class ReviewAndVerifyTest(unittest.TestCase):
