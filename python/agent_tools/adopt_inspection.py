@@ -195,18 +195,10 @@ SECRET_MARKERS = ("credential", "credentials", "private", "secret", "secrets",
                   "token", "tokens")
 SECRET_PREFIXES = (".env",)
 
-# D30: the whole living-reference sweep for non-link text. Nothing outside
-# this tuple is ever a rewrite target for a prose or configuration reference —
-# a repository-wide reference scan is not mechanically decidable and would risk
-# re-pointing machine-global platform source. Relative Markdown link targets are
-# the one exception, rewritten across every tracked Markdown file by
-# `adopt_links` (#345 D1).
+# The legacy binding config is a store adoption detects (see the classification
+# table below) and no longer reads or writes: it is kept out of every rewrite, so
+# no path-reference edit lands in it either.
 LEGACY_BINDING_CONFIGS = (".claude/skills.config.json",)
-LEGACY_BINDING_KEYS = (
-    ("specDir", ("artifacts", "specs")),
-    ("planDir", ("artifacts", "plans")),
-    ("rejectionsDir", ("rejections", 0)),
-)
 
 # Paths whose presence makes a repository an agent-development surface even
 # when no contract exists. Used by routing rules 1 and 2.
@@ -1214,5 +1206,4 @@ def dirty_targets(found: Candidates) -> list[str]:
     also scopes the untracked-overlap evidence the plan id is taken over.
     """
     return sorted(set(overlap_targets(found)).union(
-        (CONTRACT_FILENAME, RUNTIME_SENTINEL, GITIGNORE),
-        LEGACY_BINDING_CONFIGS))
+        (CONTRACT_FILENAME, RUNTIME_SENTINEL, GITIGNORE)))

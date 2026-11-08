@@ -14,11 +14,7 @@ the command still exits 0.
 
 `release adapter inspect <adapter> <operation> --parameters <json>` is the one project-free
 adapter read (D15): it resolves no project, calls the registered adapter's `inspect` for one
-effect and prints the observation. `release deploy inspect --commit <sha>` (issue 465 D5) is
-a read-only deploy observation for one commit: it resolves the project with `deploy` required,
-removes the tracker's `credential_env.unset_before_invocation` names from its own environment
-(D10), asks the registered deploy adapter's `inspect` about the commit and prints the
-observation with exit 0 whatever its outcome.
+effect and prints the observation.
 
 `release transaction status|preview|run|abandon` drives one release through the transaction
 core (`release_driver`; python/README.md § Release driver). Adapter `invoke` is reachable
@@ -29,8 +25,6 @@ prints one document; a driver `Refusal` prints `{"error": ...}` and exits 3.
 
 import argparse
 import json
-import os
-import re
 import subprocess
 import sys
 import traceback
@@ -41,7 +35,7 @@ from agent_tools import release_adapter, release_profile, transaction_plan
 from agent_tools.release_driver import Driver, Project, Refusal, main_checkout, require_cwd
 from agent_tools.resolve_project import (
     ContractError, add_repo_root, emit_error, emit_json, load_contract,
-    registered_deploy_adapter, require_platform_manifest, resolve, resolves_on_path)
+    require_platform_manifest, resolve, resolves_on_path)
 
 SCHEMA_VERSION = 1
 GIT_TIMEOUT_SECONDS = 10
@@ -225,40 +219,6 @@ def command_adapter_inspect(args: argparse.Namespace) -> int:
         {"kind": "effect", "operation": args.operation, "parameters": parameters}))
 
 
-COMMIT = re.compile(r"[0-9a-f]{40}")
-
-
-def command_deploy_inspect(args: argparse.Namespace) -> int:
-    """The registered deploy adapter's observation for one merge commit (issue 465 D5, D10).
-
-    A malformed `--commit`, a resolver refusal (`deploy` is required) and an unregistered
-    deploy adapter are typed errors. Otherwise the tracker's credential variables are removed
-    from this process before the adapter's `inspect` runs, and the observation is printed
-    whatever its outcome.
-    """
-    if COMMIT.fullmatch(args.commit) is None:
-        raise _adapter_error("parameters_invalid", "release.deploy.commit_invalid", "/commit",
-                             "--commit must be 40 lowercase hex characters")
-    bindings = resolve(args.repo_root, ["deploy"])["bindings"]
-    name = registered_deploy_adapter(bindings["deploy"])
-    if name is None:
-        raise _adapter_error(
-            "deploy_adapter_unregistered", "release.deploy.adapter_unregistered",
-            "/bindings/deploy/adapter",
-            f"{bindings['deploy']['adapter']} is not a registered adapter: "
-            "the binding's command is the deploy reader")
-    for variable in bindings["tracker"]["credential_env"]["unset_before_invocation"]:
-        os.environ.pop(variable, None)
-    operation = release_adapter.watch_operation(release_adapter.DESCRIPTORS[name])
-    return emit_json(release_adapter.REGISTRY[name].inspect({
-        "kind": "effect", "operation": operation, "parameters": {
-            "target": {"kind": "github_repository",
-                       "repository": bindings["tracker"]["repo_slug"],
-                       "branch": bindings["vcs"]["default_branch"]},
-            "candidate": {"commit": args.commit},
-            "config": bindings["deploy"]["config"]}}))
-
-
 CANDIDATE_FLAGS = ("commit", "version", "title", "notes_file")
 REFUSAL_EXIT = 3
 
@@ -284,7 +244,6 @@ def _project(snapshot: dict[str, Any], root: Path) -> Project:
     return Project(project_id=snapshot["project"]["id"], root=root, common_dir=main_checkout(root),
                    integration_branch=vcs["integration_branch"],
                    default_branch=vcs["default_branch"],
-                   deploy_adapter=snapshot["bindings"]["deploy"]["adapter"],
                    contract=load_contract(root))
 
 
@@ -332,7 +291,7 @@ def _transaction_parser(areas: Any) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="release",
-        description="Release inspection: profiles, adapters and the deploy watch. Adapter "
+        description="Release inspection: profiles and adapters. Adapter "
                     "invoke is reachable only through `release transaction run`, which "
                     "drives the transaction core.")
     areas = parser.add_subparsers(dest="area", required=True)
@@ -350,13 +309,6 @@ def build_parser() -> argparse.ArgumentParser:
     adapter_inspect.add_argument("operation", help="the operation to inspect")
     adapter_inspect.add_argument("--parameters", required=True,
                                  help="the operation parameters, a JSON object")
-    deploy = areas.add_parser("deploy", help="deploy watching")
-    deploy_actions = deploy.add_subparsers(dest="action", required=True)
-    deploy_inspect = deploy_actions.add_parser(
-        "inspect", help="print the deploy observation for one commit on stdout")
-    deploy_inspect.add_argument("--commit", required=True,
-                                help="the merge commit, 40 lowercase hex characters")
-    add_repo_root(deploy_inspect)
     _transaction_parser(areas)
     return parser
 
@@ -365,7 +317,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return {"profile": command_profile_inspect, "adapter": command_adapter_inspect,
-                "deploy": command_deploy_inspect,
                 "transaction": command_transaction}[args.area](args)
     except Refusal as refusal:
         emit_json({"error": refusal.as_object()})

@@ -123,6 +123,5 @@
  "tests/test_verification_blocker.py": 0.1,
  "tests/test_attempt_delivery.py": 0.1,
  "tests/test_transaction_recovery_plan.py": 0.1,
- "tests/test_release_bridge.py": 0.1,
  "tests/test_release_evidence.py": 0.1
 }

@@ -232,9 +232,8 @@ def world_with(test, *tools):
 TRACKER = {"kind": "github", "repo_slug": SLUG, "cli": "gh", "credential_env": {"unset_before_invocation": []}}
 
 
-def context(world, markers=(), deploy=None):
+def context(world, markers=()):
     return vf.Context(slug=SLUG, root=world.checkout, default_branch="main",
-                      deploy=deploy or {"adapter": "none", "command": None, "config": {}},
                       tracker=TRACKER, markers=list(markers))
 
 
@@ -248,6 +247,26 @@ def pushed(world, rev, on_forge=True):
 
 def ancestry(world, sha, rev, exit):
     world.respond("git", ["-C", str(world.checkout), "merge-base", "--is-ancestor", sha, rev], exit=exit)
+
+
+class StrictContextTest(unittest.TestCase):
+    """Platform 2.0.0: the deploy binding is gone, so the context carries none (P9)."""
+
+    def test_the_context_has_no_deploy_member(self):
+        self.assertNotIn("deploy", {f.name for f in dataclasses.fields(vf.Context)})
+
+    def test_released_includes_reads_the_latest_release(self):
+        world = world_with(self)
+        latest = "v1.2.0"
+        world.respond_json("gh", ["api", f"repos/{SLUG}/releases/latest"], {"tag_name": latest, "draft": False})
+        world.respond_json("gh", ["api", f"repos/{SLUG}/compare/{MERGE}...{latest}"], {"status": "ahead"})
+        world.respond_json("gh", ["api", f"repos/{SLUG}/compare/{latest}...main"], {"status": "ahead"})
+        due = vf.evaluate_when({"released_includes": MERGE}, MERGE, context(world))
+        self.assertEqual((due.due, due.facts), (True, {"tag": latest}))
+
+    def test_no_observation_reader_survives(self):
+        self.assertEqual([name for name in dir(vf) if "observ" in name.lower()
+                          or "health" in name.lower()], [])
 
 
 class WhenTest(unittest.TestCase):
@@ -320,88 +339,6 @@ class WhenTest(unittest.TestCase):
         self.assertEqual(self.released("v1.2.0", contains="behind").reason, "not_released")
         self.assertEqual(self.released("v1.2.0", on_default="diverged").reason, "not_released")
         self.assertEqual(self.released(None).reason, "not_released")
-
-    def test_bound_deploy_watch_decides_release_inclusion(self):
-        world = world_with(self)
-        bound = context(world, deploy={"adapter": "github-actions-health", "command": None, "config": {}})
-        with mock.patch.object(vf, "deploy_observation", return_value={"outcome": "satisfied"}):
-            self.assertTrue(vf.evaluate_when({"released_includes": MERGE}, MERGE, bound).due)
-        with mock.patch.object(vf, "deploy_observation", return_value={"outcome": "absent"}):
-            self.assertEqual(vf.evaluate_when({"released_includes": MERGE}, MERGE, bound).reason, "not_released")
-        self.assertEqual(world.argvs("gh"), [])
-
-    def test_a_descendant_of_the_merge_deployed_counts_as_released(self):
-        world = world_with(self)
-        bound = context(world, deploy={"adapter": "github-actions-health", "command": None, "config": {}})
-        deployed = {"outcome": "diverged", "reason": "health_commit_mismatch",
-                    "observed_subject": {"commit": REV[:12], "run": 1}}
-        ancestry(world, MERGE, REV[:12], 0)
-        with mock.patch.object(vf, "deploy_observation", return_value=deployed):
-            due = vf.evaluate_when({"released_includes": MERGE}, MERGE, bound)
-        self.assertEqual((due.due, due.facts), (True, {"rev": REV[:12]}))
-
-    def test_a_deployed_revision_that_lacks_the_merge_is_not_released(self):
-        world = world_with(self)
-        bound = context(world, deploy={"adapter": "github-actions-health", "command": None, "config": {}})
-        ancestry(world, MERGE, REV[:12], 1)
-        for observed in ({"commit": REV[:12], "run": 1}, {"commit": None, "run": None}, {"commit": "zz", "run": 1}):
-            deployed = {"outcome": "diverged", "reason": "health_commit_mismatch", "observed_subject": observed}
-            with mock.patch.object(vf, "deploy_observation", return_value=deployed):
-                self.assertEqual(vf.evaluate_when({"released_includes": MERGE}, MERGE, bound).reason,
-                                 "not_released", observed)
-
-    def test_a_command_backed_watch_stays_pending_without_tags(self):
-        world = world_with(self)
-        deploy = {"adapter": "custom-reader", "command": "deploy-read", "config": {}}
-        due = vf.evaluate_when({"released_includes": MERGE}, MERGE, context(world, deploy=deploy))
-        self.assertEqual(due.reason, "deploy_watch_unread")
-        self.assertEqual(world.argvs("gh"), [])
-
-    def pushed_out(self, health, git_exit=0):
-        """The bound adapter, with the merge's own run pushed out of its five-run window by newer deploys."""
-        world = world_with(self)
-        deploy = {"adapter": "github-actions-health", "command": None,
-                  "config": {"workflow": "deploy.yaml", "branch": "main", "services": ["web"],
-                             "health_url": "https://health.example.invalid/version",
-                             "health_commit_field": "commit"}}
-        newer = [{"databaseId": 10 + n, "status": "completed", "conclusion": "success", "headSha": f"{n:040x}",
-                  "headBranch": "main", "createdAt": f"2026-11-06T10:0{n}:00Z"} for n in range(1, 6)]
-        world.respond_json("gh", ["run", "list", "--repo", SLUG, "--workflow", "deploy.yaml", "--branch", "main",
-                                  "--limit", "5", "--json", "databaseId,status,conclusion,headSha,headBranch,createdAt"],
-                           newer)
-        ancestry(world, MERGE, REV[:12], git_exit)
-        with mock.patch("agent_tools.actions_health_adapter._health", return_value=health) as read:
-            due = vf.evaluate_when({"released_includes": MERGE}, MERGE, context(world, deploy=deploy))
-        return due, read
-
-    def test_a_descendant_deployed_after_the_merge_run_left_the_window_counts_as_released(self):
-        ok = {"status": "ok", "http_status": 200, "commit": REV[:12], "detail": None}
-        due, read = self.pushed_out(ok)
-        self.assertEqual((due.due, due.facts), (True, {"rev": REV[:12]}))
-        self.assertEqual(read.call_args.args[:2], ("https://health.example.invalid/version", "commit"))
-
-    def test_a_health_commit_lacking_the_merge_or_unread_stays_not_released_when_the_run_left_the_window(self):
-        ok = {"status": "ok", "http_status": 200, "commit": REV[:12], "detail": None}
-        self.assertEqual(self.pushed_out(ok, git_exit=1)[0].reason, "not_released")
-        down = {"status": "health_unreachable", "http_status": None, "commit": None, "detail": "down"}
-        self.assertEqual(self.pushed_out(down)[0].reason, "not_released")
-
-    def test_the_bound_adapter_runs_with_no_token_and_the_environment_comes_back(self):
-        world = world_with(self)
-        deploy = {"adapter": "github-actions-health", "command": None,
-                  "config": {"workflow": "deploy.yaml", "branch": "main", "services": ["web"],
-                             "health_url": "https://health.example.invalid/version",
-                             "health_commit_field": "commit"}}
-        world.respond_json("gh", ["run", "list", "--repo", SLUG, "--workflow", "deploy.yaml", "--branch", "main",
-                                  "--limit", "5", "--json", "databaseId,status,conclusion,headSha,headBranch,createdAt"],
-                           [{"databaseId": 1, "status": "in_progress", "conclusion": "", "headSha": MERGE,
-                             "headBranch": "main", "createdAt": T0}])
-        with mock.patch.dict(os.environ, {"GH_TOKEN": "user-token"}):
-            due = vf.evaluate_when({"released_includes": MERGE}, MERGE, context(world, deploy=deploy))
-            self.assertEqual((os.environ["GITHUB_TOKEN"], os.environ["GH_TOKEN"]), ("harness-token", "user-token"))
-        self.assertEqual(due.reason, "not_released")
-        runs = [call for call in world.calls() if call["argv"][:2] == ["run", "list"]]
-        self.assertEqual([call["token_visible"] for call in runs], [False])
 
     def ci(self, runs):
         world = world_with(self)
@@ -829,7 +766,6 @@ def bindings(root):
                          "check-later": command("verify-later"), "nix-activate": command("verify-ok")},
             "workflow": {"verification": ["check-ok", "check-bad", "check-later"]},
             "vcs": {"integration_branch": "main", "default_branch": "main"},
-            "deploy": {"adapter": "none", "command": None, "config": {}},
             "tracker": TRACKER}
 
 

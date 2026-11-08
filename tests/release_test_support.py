@@ -27,7 +27,7 @@ def descriptors() -> dict:
 def base_contract() -> dict:
     return {"bindings": {"tracker": {"kind": "github", "repo_slug": "fagenorn/nix-config"},
                          "vcs": {"default_branch": "main"}},
-            "capabilities": {"deploy": {"support": "unsupported"}}}
+            "capabilities": {}}
 
 
 def forge_profile() -> dict:

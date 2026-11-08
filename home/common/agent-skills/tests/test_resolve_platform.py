@@ -56,9 +56,10 @@ def non_finite_manifest(token: str) -> str:
     """The committed manifest's text with one non-finite `token` (a bare
     token or an overflowing number) placed in an otherwise valid position: the one element of `removals`, an
     array whose elements the validator does not type."""
-    text = json.dumps(committed_manifest())
-    marked = text.replace('"removals": []', f'"removals": [{token}]')
-    assert marked != text, "the committed manifest's removals moved"
+    manifest = committed_manifest()
+    manifest["removals"] = ["@@token@@"]
+    marked = json.dumps(manifest).replace('"@@token@@"', token)
+    assert token in marked, "the placeholder moved"
     return marked
 
 
@@ -552,7 +553,7 @@ class SemverBoundaryTest(ResolverTestCase):
         # Both spellings sit inside this repository's committed contract
         # interval, so the range check (R2.3) cannot mask the shape question
         # this case is about.
-        for value in ("1.0.0", "1.20.30"):
+        for value in ("1.2.0", "1.20.30"):
             with self.subTest(platform_version=value):
                 self.set_manifest(mutated_manifest(platform_version=value))
                 code, out, err = run("resolve", "--repo-root",
@@ -564,7 +565,8 @@ class CommittedManifestTest(ResolverTestCase):
     """The committed manifest is the one the store installs (D1), so the suite
     checks that file rather than a fixture."""
 
-    BRIDGE_DEPRECATIONS = [
+    # The five 1.x deprecations, byte-identical, now the candidate's removals (#130 D1).
+    REMOVALS = [
         {"id": "legacy-skills-config", "kind": "project_file",
          "subject": ".claude/skills.config.json", "since": "1.1.0",
          "successor": "resolve-project resolve",
@@ -591,17 +593,16 @@ class CommittedManifestTest(ResolverTestCase):
         manifest = committed_manifest()
         self.assertEqual(sorted(manifest), sorted(MANIFEST_MEMBERS))
         self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["platform_version"], "1.2.0")
-        self.assertEqual(manifest["project_schema_versions"], [1, 2])
-        self.assertEqual(manifest["resolved_schema_version"], 1)
+        self.assertEqual(manifest["platform_version"], "2.0.0")
+        self.assertEqual(manifest["project_schema_versions"], [2])
+        self.assertEqual(manifest["resolved_schema_version"], 2)
         self.assertEqual(manifest["migrations"], [
             {"id": "bindings-deploy.retire", "from_schema": 1, "to_schema": 2}])
-        self.assertEqual(manifest["removals"], [])
+        self.assertEqual(manifest["deprecations"], [])
 
-    def test_it_declares_the_bridge_minor_deprecations(self):
-        """Issue 580 D5: the legacy skills config and its adoption writer."""
-        self.assertEqual(committed_manifest()["deprecations"],
-                         self.BRIDGE_DEPRECATIONS)
+    def test_it_declares_the_bridge_deprecations_as_removals(self):
+        """The candidate removes what the 1.x bridge deprecated, entry for entry."""
+        self.assertEqual(committed_manifest()["removals"], self.REMOVALS)
 
     def test_every_deprecation_began_in_this_major(self):
         """Issue 580 D3: pinned on the committed file, not in the validator."""
@@ -695,9 +696,9 @@ class PlatformRangeTest(ResolverTestCase):
         self.assertNotIn("schema_version", payload)
 
     def test_a_platform_at_the_max_bound_is_out_of_range(self):
-        # The committed contract declares [1.0.0, 2.0.0); `max_exclusive` is
-        # exclusive, so 2.0.0 is already outside it.
-        self.set_manifest(mutated_manifest(platform_version="2.0.0"))
+        # The committed contract declares [1.2.0, 3.0.0); `max_exclusive` is
+        # exclusive, so 3.0.0 is already outside it.
+        self.set_manifest(mutated_manifest(platform_version="3.0.0"))
         code, payload, _ = self.resolve(self.make_root())
         self.assert_unsupported(code, payload, "platform_too_new", "/platform")
 
@@ -707,10 +708,10 @@ class PlatformRangeTest(ResolverTestCase):
         self.assert_unsupported(code, payload, "platform_too_old", "/platform")
 
     def test_the_min_bound_itself_is_inside_the_range(self):
-        self.set_manifest(mutated_manifest(platform_version="1.0.0"))
+        self.set_manifest(mutated_manifest(platform_version="1.2.0"))
         code, snap, err = self.resolve(self.make_root())
         self.assertEqual(code, 0, err)
-        self.assertEqual(snap["schema_version"], 1)
+        self.assertEqual(snap["schema_version"], 2)
 
     def test_a_malformed_interval_never_reaches_the_range_check(self):
         """An out-of-range platform *and* a malformed interval: the shape
@@ -725,7 +726,7 @@ class PlatformRangeTest(ResolverTestCase):
 
     def test_a_schema_absent_from_the_manifest_set_is_unsupported(self):
         contract = source_contract()
-        # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+        # Platform 2.0.0 supports schema 2 alone; 3 is an unsupported integer.
         contract["schema_version"] = 3
         code, payload, _ = self.resolve(self.make_root(contract))
         self.assert_unsupported(code, payload, "project_schema_unsupported",
@@ -735,7 +736,8 @@ class PlatformRangeTest(ResolverTestCase):
 
     def test_a_supported_non_current_schema_resolves(self):
         """R2.5: no refusal, no deprecation notice, still five members."""
-        self.set_manifest(mutated_manifest(project_schema_versions=[1, 2]))
+        self.set_manifest(mutated_manifest(project_schema_versions=[2, 3],
+                                           resolved_schema_version=3))
         code, snap, err = self.resolve(self.make_root())
         self.assertEqual(code, 0, err)
         self.assertEqual(
@@ -748,12 +750,12 @@ class PlatformRangeTest(ResolverTestCase):
         """D8: the snapshot's interface version comes from the manifest, not
         from the contract's declared schema and not from a source literal."""
         self.set_manifest(mutated_manifest(
-            project_schema_versions=[1, 2], resolved_schema_version=2))
+            project_schema_versions=[2, 3], resolved_schema_version=3))
         contract = source_contract()
-        self.assertEqual(contract["schema_version"], 1)
+        self.assertEqual(contract["schema_version"], 2)
         code, snap, err = self.resolve(self.make_root(contract))
         self.assertEqual(code, 0, err)
-        self.assertEqual(snap["schema_version"], 2)
+        self.assertEqual(snap["schema_version"], 3)
 
 
 class ReasonCodePositionTest(ResolverTestCase):
@@ -773,7 +775,7 @@ class ReasonCodePositionTest(ResolverTestCase):
             "resolve", "--repo-root", str(empty))))
 
         contract = source_contract()
-        del contract["bindings"]["deploy"]
+        del contract["bindings"]["paths"]
         cases.append(("invalid_contract", self.refusal(
             "resolve", "--repo-root", str(self.make_root(contract)))))
 
@@ -784,7 +786,7 @@ class ReasonCodePositionTest(ResolverTestCase):
 
         cases.append(("capability_unavailable", self.refusal(
             "resolve", "--repo-root", str(self.make_root()),
-            "--require", "deploy")))
+            "--require", "knowledge.hints")))
 
         broken = self.make_root()
         self.set_manifest(None)
@@ -806,11 +808,11 @@ class ReasonCodePositionTest(ResolverTestCase):
         closed = ("platform_too_old", "platform_too_new",
                   "project_schema_unsupported")
         contract = source_contract()
-        # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+        # Platform 2.0.0 supports schema 2 alone; 3 is an unsupported integer.
         contract["schema_version"] = 3
         errors = [self.refusal("resolve", "--repo-root",
                                str(self.make_root(contract)))]
-        for version in ("0.9.0", "2.0.0"):
+        for version in ("0.9.0", "3.0.0"):
             self.set_manifest(mutated_manifest(platform_version=version))
             errors.append(self.refusal("resolve", "--repo-root",
                                        str(self.make_root())))
@@ -831,8 +833,8 @@ class CommittedIntervalTest(ResolverTestCase):
     def test_the_committed_contract_declares_the_interval(self):
         platform = source_contract()["platform"]
         self.assertEqual(sorted(platform), ["max_exclusive", "min_inclusive"])
-        self.assertEqual(platform["min_inclusive"], "1.0.0")
-        self.assertEqual(platform["max_exclusive"], "2.0.0")
+        self.assertEqual(platform["min_inclusive"], "1.2.0")
+        self.assertEqual(platform["max_exclusive"], "3.0.0")
 
     def test_the_committed_platform_version_is_inside_the_interval(self):
         platform = source_contract()["platform"]
@@ -915,3 +917,31 @@ class SchemaReasonDispatchTest(InProcessTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StrictCandidateTest(ResolverTestCase):
+    """Platform 2.0.0 (#130 D1): project schema 1 and the deploy members are gone."""
+
+    def test_a_schema_one_contract_is_unsupported(self):
+        contract = source_contract()
+        contract["schema_version"] = 1
+        code, payload, _ = self.resolve(self.make_root(contract))
+        error = self.assert_refusal(code, payload, "unsupported_schema")
+        self.assertEqual(error["reason_code"], "project_schema_unsupported")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/schema_version"])
+
+    def test_the_snapshot_has_no_deploy_member(self):
+        code, snap, err = self.resolve(self.make_root(source_contract()))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["schema_version"], 2)
+        self.assertNotIn("deploy", snap["bindings"])
+        self.assertNotIn("deploy", snap["capabilities"])
+
+    def test_the_bridge_modules_are_gone(self):
+        import importlib.util
+        self.assertIsNone(importlib.util.find_spec("agent_tools.release_bridge"))
+        from agent_tools import resolve_project
+        self.assertEqual(
+            [name for name in dir(resolve_project) if "deploy" in name.lower()
+             and "deployment" not in name.lower()], [])

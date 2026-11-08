@@ -35,7 +35,7 @@ from .test_resolve_project import (
     mutated_manifest,
     registry,
     run,
-    schema_two,
+    schema_one,
     source_contract,
     tree_snapshot,
 )
@@ -129,7 +129,7 @@ class PlatformStatusTest(ResolverTestCase):
         self.assertEqual(sorted(project), PROJECT_BLOCK_MEMBERS)
         self.assertEqual(project["project_id"], "fagenorn/nix-config")
         self.assertEqual(project["root"], str(root))
-        self.assertEqual(project["project_schema_version"], 1)
+        self.assertEqual(project["project_schema_version"], 2)
         self.assertEqual(project["platform_interval"],
                          source_contract()["platform"])
         self.assertEqual(sorted(payload["compatibility"]),
@@ -139,11 +139,11 @@ class PlatformStatusTest(ResolverTestCase):
         self.assertIsNone(payload["fleet"])
 
     def test_an_out_of_range_platform_is_a_verdict_on_exit_zero(self):
-        """D6: the committed contract declares [1.0.0, 2.0.0), so 0.9.0 is
-        below its floor and 2.0.0 has already reached its exclusive ceiling."""
+        """D6: the committed contract declares [1.2.0, 3.0.0), so 0.9.0 is
+        below its floor and 3.0.0 has already reached its exclusive ceiling."""
         cases = (
             ("0.9.0", "platform_too_old", "contract.platform.too_old"),
-            ("2.0.0", "platform_too_new", "contract.platform.too_new"),
+            ("3.0.0", "platform_too_new", "contract.platform.too_new"),
         )
         for version, reason_code, repair_id in cases:
             with self.subTest(platform_version=version):
@@ -162,7 +162,7 @@ class PlatformStatusTest(ResolverTestCase):
 
     def test_an_unsupported_project_schema_is_a_verdict_on_exit_zero(self):
         contract = source_contract()
-        # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+        # Platform 2.0.0 supports schema 2 alone; 3 is an unsupported integer.
         contract["schema_version"] = 3
         code, payload, err = self.status(
             "--repo-root", str(self.make_root(contract)))
@@ -177,7 +177,7 @@ class PlatformStatusTest(ResolverTestCase):
     def test_a_structurally_invalid_contract_refuses_exactly_like_resolve(self):
         """R3.5: the same one-object error, the same code, the same exit."""
         contract = source_contract()
-        del contract["bindings"]["deploy"]
+        del contract["bindings"]["paths"]
         root = self.make_root(contract)
         code, payload, err = self.status("--repo-root", str(root))
         self.assertEqual(code, 2, err)
@@ -263,7 +263,7 @@ class PlatformStatusFleetTest(ResolverTestCase):
             with self.subTest(project_id=entry["project_id"]):
                 self.assertEqual(sorted(row), FLEET_ROW_MEMBERS)
                 self.assertEqual(row["root"], entry["root"])
-                self.assertEqual(row["project_schema_version"], 1)
+                self.assertEqual(row["project_schema_version"], 2)
                 self.assertEqual(row["platform_interval"],
                                  source_contract()["platform"])
                 self.assertTrue(row["compatible"])
@@ -307,7 +307,7 @@ class PlatformStatusFleetTest(ResolverTestCase):
         the operator named this repository, so `--repo-root` refuses it; the
         registry named it, so `--fleet` describes it."""
         contract = source_contract()
-        del contract["bindings"]["deploy"]
+        del contract["bindings"]["paths"]
         entry, root = self.registered("fagenorn/invalid", contract)
         install_registry(self.home, registry(entry))
         code, payload, err = self.fleet()
@@ -318,7 +318,7 @@ class PlatformStatusFleetTest(ResolverTestCase):
         self.assert_reported_broken(row, entry)
         # Only the verdict is negative: what the contract does declare is
         # reported as declared.
-        self.assertEqual(row["project_schema_version"], 1)
+        self.assertEqual(row["project_schema_version"], 2)
         self.assertEqual(row["platform_interval"], source_contract()["platform"])
         named_code, named_out, named_err = run(
             "platform-status", "--repo-root", str(root), home=self.home)
@@ -350,7 +350,7 @@ class PlatformStatusFleetTest(ResolverTestCase):
         self.assertEqual(row["repair_id"], "registry.project_id.mismatch")
         # Only the verdict is negative: what the contract declares is still
         # reported as declared.
-        self.assertEqual(row["project_schema_version"], 1)
+        self.assertEqual(row["project_schema_version"], 2)
         self.assertEqual(row["platform_interval"], source_contract()["platform"])
 
     def test_a_broken_contract_keeps_its_own_reason_over_the_identity_one(self):
@@ -359,7 +359,7 @@ class PlatformStatusFleetTest(ResolverTestCase):
         replace one true answer with another."""
         contract = source_contract()
         contract["project"]["id"] = "fagenorn/renamed"
-        del contract["bindings"]["deploy"]
+        del contract["bindings"]["paths"]
         entry, _ = self.registered("fagenorn/original", contract)
         install_registry(self.home, registry(entry))
         code, payload, err = self.fleet()
@@ -377,7 +377,7 @@ class PlatformStatusFleetTest(ResolverTestCase):
         gone_entry, gone_root = self.registered("fagenorn/gone")
         unreadable_entry, unreadable_root = self.registered("fagenorn/unreadable")
         invalid_contract = source_contract()
-        del invalid_contract["bindings"]["deploy"]
+        del invalid_contract["bindings"]["paths"]
         invalid_entry, invalid_root = self.registered(
             "fagenorn/invalid", invalid_contract)
         shutil.rmtree(gone_root)
@@ -478,7 +478,7 @@ class PlatformStatusDeprecationTest(ResolverTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.set_manifest(mutated_manifest(deprecations=DEPRECATIONS))
+        self.set_manifest(mutated_manifest(deprecations=DEPRECATIONS, removals=[]))
 
     def status(self, *args: str) -> dict:
         code, out, err = run("platform-status", *args, home=self.home)
@@ -503,7 +503,7 @@ class PlatformStatusDeprecationTest(ResolverTestCase):
 
     def test_a_platform_behavior_is_never_a_use_even_if_its_subject_exists(self):
         behavior = {**DEPRECATIONS[1], "subject": "README.md"}
-        self.set_manifest(mutated_manifest(deprecations=[behavior]))
+        self.set_manifest(mutated_manifest(deprecations=[behavior], removals=[]))
         root = self.make_root()
         (root / "README.md").write_text("x\n")
         payload = self.status("--repo-root", str(root))
@@ -514,7 +514,7 @@ class PlatformStatusDeprecationTest(ResolverTestCase):
             {**DEPRECATIONS[0], "id": "zeta", "subject": "zeta.json"},
             {**DEPRECATIONS[0], "id": "alpha", "subject": "alpha.json"},
         ]
-        self.set_manifest(mutated_manifest(deprecations=entries))
+        self.set_manifest(mutated_manifest(deprecations=entries, removals=[]))
         root = self.make_root()
         for name in ("zeta.json", "alpha.json"):
             (root / name).write_text("{}\n")
@@ -615,7 +615,7 @@ class PlatformStatusProjectSchemaDeprecationTest(ResolverTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.set_manifest(mutated_manifest(deprecations=[self.ENTRY]))
+        self.set_manifest(mutated_manifest(deprecations=[self.ENTRY], removals=[]))
 
     def status(self, *args: str) -> dict:
         code, out, err = run("platform-status", *args, home=self.home)
@@ -623,16 +623,18 @@ class PlatformStatusProjectSchemaDeprecationTest(ResolverTestCase):
         return json.loads(out)
 
     def schema_two_root(self, project_id: str = "fagenorn/nix-config") -> Path:
-        contract = schema_two(source_contract())
+        contract = source_contract()
         contract["project"]["id"] = project_id
         return self.make_root(contract)
 
-    def test_a_schema_one_root_is_warned_and_stays_compatible(self):
-        payload = self.status("--repo-root", str(self.make_root()))
+    def test_a_schema_one_root_is_listed_beside_its_unsupported_verdict(self):
+        payload = self.status("--repo-root",
+                              str(self.make_root(schema_one(source_contract()))))
         self.assertEqual(payload["project"]["deprecated_uses"],
                          ["bindings-deploy"])
         self.assertEqual(payload["compatibility"], {
-            "compatible": True, "reason_code": None, "repair_id": None})
+            "compatible": False, "reason_code": "project_schema_unsupported",
+            "repair_id": "contract.schema_version.unsupported"})
 
     def test_a_schema_two_root_is_not_warned(self):
         payload = self.status("--repo-root", str(self.schema_two_root()))
@@ -661,17 +663,17 @@ class PlatformStatusProjectSchemaDeprecationTest(ResolverTestCase):
     def test_it_is_listed_beside_a_project_file_use_in_id_order(self):
         entries = [self.ENTRY,
                    {**DEPRECATIONS[0], "id": "alpha", "subject": "alpha.json"}]
-        self.set_manifest(mutated_manifest(deprecations=entries))
-        root = self.make_root()
+        self.set_manifest(mutated_manifest(deprecations=entries, removals=[]))
+        root = self.make_root(schema_one(source_contract()))
         (root / "alpha.json").write_text("{}\n")
         payload = self.status("--repo-root", str(root))
         self.assertEqual(payload["project"]["deprecated_uses"],
                          ["alpha", "bindings-deploy"])
 
     def test_fleet_rows_carry_their_own_schema_use(self):
-        old = self.make_root(dict(source_contract(),
-                                  project={**source_contract()["project"],
-                                           "id": "fagenorn/old"}))
+        old = self.make_root(schema_one(dict(
+            source_contract(),
+            project={**source_contract()["project"], "id": "fagenorn/old"})))
         new = self.schema_two_root("fagenorn/new")
         install_registry(self.home, registry(
             {"project_id": "fagenorn/old", "root": str(old)},
@@ -680,7 +682,7 @@ class PlatformStatusProjectSchemaDeprecationTest(ResolverTestCase):
                 for row in self.status("--fleet")["fleet"]}
         self.assertEqual(rows["fagenorn/old"]["deprecated_uses"],
                          ["bindings-deploy"])
-        self.assertTrue(rows["fagenorn/old"]["compatible"])
+        self.assertFalse(rows["fagenorn/old"]["compatible"])
         self.assertEqual(rows["fagenorn/new"]["deprecated_uses"], [])
 
 
@@ -712,7 +714,7 @@ class PlatformStatusRemovedUsesTest(ResolverTestCase):
         return json.loads(out)
 
     def held_root(self, project_id: str = "fagenorn/nix-config") -> Path:
-        contract = source_contract()
+        contract = schema_one(source_contract())
         contract["project"]["id"] = project_id
         root = self.make_root(contract)
         (root / ".claude").mkdir(exist_ok=True)
@@ -726,8 +728,7 @@ class PlatformStatusRemovedUsesTest(ResolverTestCase):
         self.assertEqual(payload["project"]["deprecated_uses"], [])
 
     def test_a_root_holding_neither_lists_nothing(self):
-        contract = schema_two(source_contract())
-        payload = self.status("--repo-root", str(self.make_root(contract)))
+        payload = self.status("--repo-root", str(self.make_root(source_contract())))
         self.assertEqual(payload["project"]["removed_uses"], [])
 
     def test_a_fleet_row_carries_its_own_removed_uses_and_null_when_gone(self):
@@ -766,14 +767,14 @@ class PlatformStatusManifestOptionTest(ResolverTestCase):
         return code, json.loads(out)
 
     def test_the_named_manifest_replaces_the_installed_one(self):
-        schema_one = self.make_root()
-        contract = schema_two(source_contract())
+        schema_one_root = self.make_root(schema_one(source_contract()))
+        contract = source_contract()
         contract["project"]["id"] = "fagenorn/two"
         schema_two_root = self.make_root(contract)
         (schema_two_root / ".claude").mkdir(exist_ok=True)
         (schema_two_root / ".claude" / "skills.config.json").write_text("{}\n")
         install_registry(self.home, registry(
-            {"project_id": "fagenorn/nix-config", "root": str(schema_one)},
+            {"project_id": "fagenorn/nix-config", "root": str(schema_one_root)},
             {"project_id": "fagenorn/two", "root": str(schema_two_root)}))
         path = self.write_manifest(self.CANDIDATE)
         code, payload = self.run_status("--fleet", "--manifest", str(path))

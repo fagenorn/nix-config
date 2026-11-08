@@ -52,14 +52,14 @@ COMMITTED = object()
 CAPABILITY_NAMES = (
     "tracker", "worktrees", "knowledge.context", "knowledge.standards",
     "knowledge.architecture", "knowledge.hints", "verification",
-    "review.plan", "review.code", "release", "deploy",
+    "review.plan", "review.code", "release",
 )
 # `capabilities.release` is derived from the `release` member (D1), never
-# authored: an authored contract carries these ten, a resolved snapshot all
-# eleven.
+# authored: an authored contract carries these nine, a resolved snapshot all
+# ten.
 AUTHORED_CAPABILITY_NAMES = tuple(
     name for name in CAPABILITY_NAMES if name != "release")
-BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow", "deploy")
+BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow")
 CAPABILITY_STATES = ("available", "unsupported", "blocked")
 
 
@@ -225,21 +225,12 @@ def assert_read_only(case: unittest.TestCase, root: Path,
     case.assertEqual(tree_snapshot(root), before_tree)
 
 
-# P11: a pinned schema-1 contract, so migrating this repository's own contract cannot move it.
-SCHEMA_ONE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "project-contract-schema-1.json"
+# P11: a pinned schema-2 contract, so a later change to this repository's own contract cannot move the suites.
+SCHEMA_TWO_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "project-contract-schema-2.json"
 
 
 def source_contract() -> dict:
-    return json.loads(SCHEMA_ONE_FIXTURE.read_text("utf-8"))
-
-
-def schema_two(contract: dict) -> dict:
-    """The schema-2 form of a schema-1 contract (P3): no deploy members."""
-    out = json.loads(json.dumps(contract))
-    out["schema_version"] = 2
-    del out["bindings"]["deploy"]
-    del out["capabilities"]["deploy"]
-    return out
+    return json.loads(SCHEMA_TWO_FIXTURE.read_text("utf-8"))
 
 
 def forge_profile() -> dict:
@@ -260,7 +251,7 @@ def codex_header(version: int) -> str:
     )
 
 
-CODEX_HEADER = codex_header(1)
+CODEX_HEADER = codex_header(2)
 MANAGED_LINE = "@.agents/instructions/bootstrap.md"
 
 
@@ -310,7 +301,7 @@ def make_project_root(contract: object | None = None, *,
         source = (root / ".agents" / "instructions" / "bootstrap.md").read_bytes()
         version = contract.get("schema_version") if isinstance(contract, dict) else None
         if isinstance(version, bool) or not isinstance(version, int):
-            version = 1
+            version = 2
         (root / "AGENTS.md").write_bytes(
             codex_header(version).encode() + b"\n\n" + source)
         body += MANAGED_LINE + "\n"
@@ -318,12 +309,30 @@ def make_project_root(contract: object | None = None, *,
     return root
 
 
-class SchemaOneFixtureTest(unittest.TestCase):
-    def test_the_fixture_is_schema_one_with_both_deploy_members(self):
+# The binding and capability member that project schema 2 retired. Tests that build a
+# schema-1 contract name it through this constant.
+RETIRED_MEMBER = "deploy"
+
+
+def schema_one(contract: dict) -> dict:
+    """The schema-1 form of the pinned contract: the two inert deploy members back,
+    `schema_version` 1 and the 1.x platform interval. Platform 2.0.0 refuses such a
+    contract; the only code that reads one is `adopt-project` (the
+    `bindings-deploy.retire` migration) and the `platform-status` report."""
+    out = json.loads(json.dumps(contract))
+    out["schema_version"] = 1
+    out["bindings"][RETIRED_MEMBER] = {"adapter": "none", "command": None, "config": {}}
+    out["capabilities"][RETIRED_MEMBER] = {"support": "unsupported"}
+    out["platform"] = {"min_inclusive": "1.0.0", "max_exclusive": "2.0.0"}
+    return out
+
+
+class SchemaTwoFixtureTest(unittest.TestCase):
+    def test_the_fixture_is_schema_two_without_either_deploy_member(self):
         contract = source_contract()
-        self.assertEqual(contract["schema_version"], 1)
-        self.assertIn("deploy", contract["bindings"])
-        self.assertIn("deploy", contract["capabilities"])
+        self.assertEqual(contract["schema_version"], 2)
+        self.assertNotIn("deploy", contract["bindings"])
+        self.assertNotIn("deploy", contract["capabilities"])
 
 
 class ResolverTestCase(unittest.TestCase):
@@ -373,61 +382,30 @@ class ResolverTestCase(unittest.TestCase):
 
 
 class SchemaTwoContractTest(ResolverTestCase):
-    def test_schema_two_resolves_to_the_resolved_one_shape_without_a_deploy_watch(self):
-        one = self.make_root(source_contract())
-        two = self.make_root(schema_two(source_contract()))
-        code_one, snap_one, err_one = self.resolve(one)
-        code_two, snap_two, err_two = self.resolve(two)
-        self.assertEqual((code_one, code_two), (0, 0), err_one + err_two)
-        self.assertEqual(snap_two["schema_version"], 1)
-        self.assertEqual(snap_two["bindings"]["deploy"],
-                         {"adapter": "none", "command": None, "config": {}})
-        self.assertEqual(snap_two["capabilities"]["deploy"]["state"], "unsupported")
-        for snap, root in ((snap_one, one), (snap_two, two)):
-            snap["project"]["root"] = "R"
-            snap["bindings"] = json.loads(json.dumps(snap["bindings"]).replace(str(root), "R"))
-        self.assertEqual(snap_one["bindings"], snap_two["bindings"])
-
     def test_schema_two_projections_carry_schema_two(self):
-        root = self.make_root(schema_two(source_contract()))
+        root = self.make_root(source_contract())
         self.assertIn("(project schema 2)", (root / "AGENTS.md").read_text("utf-8"))
         code, _, err = run("check-projections", "--repo-root", str(root), home=self.home)
         self.assertEqual(code, 0, err)
 
-    def test_schema_two_refuses_each_retired_member(self):
-        for pointer, repair in (("/bindings/deploy", "contract.bindings.deploy.retired"),
-                                ("/capabilities/deploy", "contract.capabilities.deploy.retired")):
+    def test_schema_two_refuses_each_retired_member_as_not_part_of_the_schema(self):
+        for pointer, repair in (("/bindings/deploy", "contract.bindings.member_unexpected"),
+                                ("/capabilities/deploy", "contract.capabilities.member_unexpected")):
             with self.subTest(pointer=pointer):
-                contract = schema_two(source_contract())
+                contract = source_contract()
                 parent, name = pointer.strip("/").split("/")
-                contract[parent][name] = source_contract()[parent][name]
+                contract[parent][name] = {"adapter": "none", "command": None, "config": {}}
                 code, payload, _ = self.resolve(self.make_root(contract))
                 error = self.assert_refusal(code, payload, "invalid_contract")
-                self.assertIn(pointer, [v["pointer"] for v in error["violations"]])
+                self.assertEqual([v["pointer"] for v in error["violations"]], [pointer])
                 self.assertEqual(error["repair_id"], repair)
 
-    def test_a_retired_supported_deploy_is_one_violation_beside_release_profiles(self):
-        contract = schema_two(source_contract())
-        self.assertNotEqual(contract["release"], "unsupported")
-        contract["capabilities"]["deploy"] = {"support": "supported"}
+    def test_schema_one_is_unsupported(self):
+        contract = source_contract()
+        contract["schema_version"] = 1
         code, payload, _ = self.resolve(self.make_root(contract))
-        error = self.assert_refusal(code, payload, "invalid_contract")
-        self.assertEqual([v["pointer"] for v in error["violations"]],
-                         ["/capabilities/deploy"])
-
-    def test_both_retired_members_are_exactly_two_violations(self):
-        contract = schema_two(source_contract())
-        contract["bindings"]["deploy"] = {"adapter": "none", "command": None, "config": {}}
-        contract["capabilities"]["deploy"] = {"support": "supported"}
-        code, payload, _ = self.resolve(self.make_root(contract))
-        error = self.assert_refusal(code, payload, "invalid_contract")
-        self.assertEqual([v["pointer"] for v in error["violations"]],
-                         ["/bindings/deploy", "/capabilities/deploy"])
-
-    def test_schema_one_is_unchanged(self):
-        code, snap, err = self.resolve(self.make_root(source_contract()))
-        self.assertEqual(code, 0, err)
-        self.assertIn("deploy", snap["bindings"])
+        error = self.assert_refusal(code, payload, "unsupported_schema")
+        self.assertEqual(error["reason_code"], "project_schema_unsupported")
 
 
 class SnapshotShapeTest(ResolverTestCase):
@@ -437,7 +415,7 @@ class SnapshotShapeTest(ResolverTestCase):
         self.assertEqual(
             sorted(snap), ["bindings", "capabilities", "project", "release", "schema_version"])
         self.assertEqual(sorted(snap["release"]), ["targets"])
-        self.assertEqual(snap["schema_version"], 1)
+        self.assertEqual(snap["schema_version"], 2)
         self.assertEqual(sorted(snap["project"]), ["id", "name", "root"])
         self.assertEqual(sorted(snap["bindings"]), sorted(BINDING_NAMESPACES))
         self.assertEqual(sorted(snap["capabilities"]), sorted(CAPABILITY_NAMES))
@@ -457,7 +435,7 @@ class SnapshotShapeTest(ResolverTestCase):
     def test_unsupported_capabilities_carry_null_reason_and_repair(self):
         code, snap, err = self.resolve(self.make_root())
         self.assertEqual(code, 0, err)
-        for name in ("deploy", "knowledge.context", "knowledge.hints"):
+        for name in ("knowledge.context", "knowledge.hints"):
             with self.subTest(capability=name):
                 entry = snap["capabilities"][name]
                 self.assertEqual(entry["state"], "unsupported")
@@ -598,7 +576,7 @@ class ErrorOutputTest(ResolverTestCase):
     def test_a_non_finite_number_is_invalid_contract(self):
         """COR-001: Python's decoder accepts bare `NaN`; the contract does not.
 
-        `bindings.deploy.config` is an unconstrained dict, so no later shape
+        An adapter `config` is an unconstrained dict, so no later shape
         rule would have stopped the token: it would reach the snapshot and be
         re-emitted as JSON no standards parser can read. The refusal is the
         closed `invalid_contract`, not `resolver_failure`.
@@ -610,7 +588,7 @@ class ErrorOutputTest(ResolverTestCase):
                              ("-Infinity", float("-inf"))):
             with self.subTest(token=token):
                 contract = source_contract()
-                contract["bindings"]["deploy"]["config"] = {"threshold": value}
+                contract["project"]["extra"] = {"threshold": value}
                 root = self.make_root(contract)
                 # The fixture writes the contract with `json.dumps`, which
                 # emits the bare token: assert the input really carries it.
@@ -658,13 +636,13 @@ class ErrorOutputTest(ResolverTestCase):
 
     def test_all_violations_are_reported_in_one_pass(self):
         contract = source_contract()
-        del contract["bindings"]["deploy"]
-        del contract["capabilities"]["deploy"]
+        del contract["bindings"]["paths"]
+        del contract["capabilities"]["worktrees"]
         code, payload, _ = self.resolve(self.make_root(contract))
         error = self.assert_refusal(code, payload, "invalid_contract")
         pointers = [v["pointer"] for v in error["violations"]]
-        self.assertIn("/bindings/deploy", pointers)
-        self.assertIn("/capabilities/deploy", pointers)
+        self.assertIn("/bindings/paths", pointers)
+        self.assertIn("/capabilities/worktrees", pointers)
 
 
 class WorkflowRefusalFixtureTest(ResolverTestCase):
@@ -771,7 +749,6 @@ class MalformedValueTest(ResolverTestCase):
         ("/bindings/vcs/commit/signed", ("bindings", "vcs", "commit", "signed"), 1),
         ("/bindings/tracker/repo_slug", ("bindings", "tracker", "repo_slug"), []),
         ("/bindings/tracker/cli", ("bindings", "tracker", "cli"), ""),
-        ("/bindings/deploy/adapter", ("bindings", "deploy", "adapter"), None),
     )
 
     def test_each_malformed_leaf_is_an_invalid_contract_violation(self):
@@ -842,22 +819,22 @@ class OnePassCollectionTest(ResolverTestCase):
 
     def test_an_invalid_schema_version_is_collected_with_the_others(self):
         source = source_contract()
-        source["schema_version"] = "1"
-        del source["bindings"]["deploy"]
+        source["schema_version"] = "2"
+        del source["bindings"]["paths"]
         root = self.make_root(source)
         code, payload, _ = self.resolve(root)
         self.assertEqual(code, 2)
         self.assertEqual(payload["error"]["code"], "invalid_contract")
         pointers = [v["pointer"] for v in payload["error"]["violations"]]
         self.assertIn("/schema_version", pointers)
-        self.assertIn("/bindings/deploy", pointers)
+        self.assertIn("/bindings/paths", pointers)
         self.assertEqual(pointers, sorted(pointers))
 
     def test_an_unsupported_integer_version_short_circuits(self):
         source = source_contract()
-        # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+        # Platform 2.0.0 supports schema 2 alone; 3 is an unsupported integer.
         source["schema_version"] = 3
-        del source["bindings"]["deploy"]
+        del source["bindings"]["paths"]
         root = self.make_root(source)
         code, payload, _ = self.resolve(root)
         self.assertEqual(code, 2)
@@ -871,12 +848,12 @@ class OnePassCollectionTest(ResolverTestCase):
         source = source_contract()
         source["platform"] = {"min_inclusive": "1.0", "max_exclusive": 7,
                               "extra": True}
-        del source["bindings"]["deploy"]
+        del source["bindings"]["paths"]
         code, payload, _ = self.resolve(self.make_root(source))
         self.assertEqual(code, 2)
         self.assertEqual(payload["error"]["code"], "invalid_contract")
         pointers = [v["pointer"] for v in payload["error"]["violations"]]
-        for pointer in ("/bindings/deploy", "/platform/extra",
+        for pointer in ("/bindings/paths", "/platform/extra",
                         "/platform/max_exclusive", "/platform/min_inclusive"):
             self.assertIn(pointer, pointers)
         self.assertEqual(pointers, sorted(pointers))
@@ -887,12 +864,12 @@ class OnePassCollectionTest(ResolverTestCase):
         source = source_contract()
         source["platform"] = {"min_inclusive": "2.0.0",
                               "max_exclusive": "1.0.0"}
-        del source["capabilities"]["deploy"]
+        del source["capabilities"]["worktrees"]
         code, payload, _ = self.resolve(self.make_root(source))
         self.assertEqual(code, 2)
         self.assertEqual(payload["error"]["code"], "invalid_contract")
         pointers = [v["pointer"] for v in payload["error"]["violations"]]
-        self.assertIn("/capabilities/deploy", pointers)
+        self.assertIn("/capabilities/worktrees", pointers)
         self.assertIn("/platform/max_exclusive", pointers)
         self.assertEqual(pointers, sorted(pointers))
 
@@ -1036,7 +1013,7 @@ class EmitGuardTest(InProcessTestCase):
                 buffer = io.StringIO()
                 with self.assertRaises(ValueError):
                     with contextlib.redirect_stdout(buffer):
-                        module.emit_json({"deploy": {"config": value}})
+                        module.emit_json({"config": value})
                 self.assertNotIn("NaN", buffer.getvalue())
                 self.assertNotIn("Infinity", buffer.getvalue())
 
@@ -1051,7 +1028,7 @@ class EmitGuardTest(InProcessTestCase):
 class CommittedContractTest(ResolverTestCase):
     def test_the_repositorys_own_contract_is_structurally_valid(self):
         contract = source_contract()
-        self.assertEqual(contract["schema_version"], 1)
+        self.assertEqual(contract["schema_version"], 2)
         self.assertEqual(sorted(contract["capabilities"]), sorted(AUTHORED_CAPABILITY_NAMES))
         self.assertEqual(sorted(contract["bindings"]), sorted(BINDING_NAMESPACES))
 
@@ -1061,8 +1038,8 @@ class CommittedContractTest(ResolverTestCase):
         self.assertEqual(orchestration["attempt_budget_minutes"], 240)
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
-    def test_nix_activate_is_exact_and_deploy_stays_unsupported(self):
-        # P11: this means this repository's own live contract, not the pinned schema-1 fixture.
+    def test_nix_activate_is_exact_and_the_snapshot_has_no_deploy(self):
+        # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
         code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
         self.assertEqual(code, 0, err or out)
         snapshot = json.loads(out)
@@ -1071,12 +1048,8 @@ class CommittedContractTest(ResolverTestCase):
             "cwd": str(REPO_ROOT),
             "env": [],
         })
-        self.assertEqual(snapshot["bindings"]["deploy"], {
-            "adapter": "none", "command": None, "config": {},
-        })
-        self.assertEqual(snapshot["capabilities"]["deploy"], {
-            "state": "unsupported", "reason_code": None, "repair_id": None,
-        })
+        self.assertNotIn("deploy", snapshot["bindings"])
+        self.assertNotIn("deploy", snapshot["capabilities"])
 
 
 def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, str]:
@@ -1196,7 +1169,7 @@ class CapabilityStateTest(ResolverTestCase):
         root = self.make_root()
         code, snap, _, err = self.resolve_with_path(root, make_stub_bin(()))
         self.assertEqual(code, 0, err)
-        for name in ("deploy", "knowledge.context", "knowledge.hints"):
+        for name in ("knowledge.context", "knowledge.hints"):
             with self.subTest(capability=name):
                 self.assertEqual(snap["capabilities"][name]["state"], "unsupported")
 
@@ -1325,17 +1298,11 @@ class ReleaseMemberTest(ResolverTestCase):
         self.assertEqual(self.release_state(self.profiles(profile))["reason_code"],
                          "release_profile_inadmissible")
 
-    def test_grammar_and_deploy_conflict_are_contract_errors(self):
+    def test_a_grammar_violation_is_a_contract_error(self):
         profile = forge_profile()
         profile["limits"] = {"max_spend": 1}
         code, payload, _ = self.resolve(self.make_root(self.profiles(profile)))
         self.assert_refusal(code, payload, "invalid_contract")
-        contract = self.profiles()
-        contract["capabilities"]["deploy"]["support"] = "supported"
-        contract["bindings"]["deploy"] = {"adapter": "railway", "command": "nix-build", "config": {}}
-        code, payload, _ = self.resolve(self.make_root(contract))
-        error = self.assert_refusal(code, payload, "invalid_contract")
-        self.assertIn("/capabilities/deploy/support", [v["pointer"] for v in error["violations"]])
 
     # Issue 368: a forge target without a publication, and the `release.targets` member.
 
@@ -1436,93 +1403,6 @@ class ReleaseMemberTest(ResolverTestCase):
                          [("forge-target", []), ("github-release", ["release", "tag"])])
 
 
-class DeployWatchTest(ResolverTestCase):
-    """Issue 465: a registered deploy adapter beside a release profile (D1, D3, D4, D15)."""
-
-    DEPLOY = {"adapter": "github-actions-health", "command": None,
-              "config": {"workflow": "deploy.yml", "branch": "main",
-                         "services": ["jarbird", "jarbird-caddy"],
-                         "health_url": "https://jarbird.com/health",
-                         "health_commit_field": "commit"}}
-
-    def jarbird(self) -> dict:
-        """This repository's contract reshaped as the issue's JarBird repro."""
-        contract = source_contract()
-        contract["release"] = {"profiles": {"forge-main": publication_free_profile()}}
-        contract["bindings"]["deploy"] = copy.deepcopy(self.DEPLOY)
-        contract["bindings"]["tracker"]["credential_env"]["unset_before_invocation"] = [
-            "GITHUB_TOKEN", "GH_TOKEN"]
-        contract["capabilities"]["deploy"]["support"] = "supported"
-        return contract
-
-    def snapshot(self, contract: dict, stubs: tuple[str, ...]) -> dict:
-        code, out, err = run_with_path(str(make_stub_bin(stubs)), "resolve", "--repo-root",
-                                       str(self.make_root(contract)), home=self.home)
-        self.assertEqual(code, 0, err or out)
-        return json.loads(out)
-
-    def test_a_jarbird_shaped_project_watches_its_deploy(self):
-        snap = self.snapshot(self.jarbird(), ("gh", "git", "just", "codex-companion"))
-        self.assertEqual(snap["capabilities"]["deploy"],
-                         {"state": "available", "reason_code": None, "repair_id": None})
-        self.assertEqual(snap["bindings"]["deploy"], self.DEPLOY)
-        self.assertEqual(snap["capabilities"]["release"]["state"], "unsupported")
-        blocked = self.snapshot(self.jarbird(), ("git", "just", "codex-companion"))
-        self.assertEqual(blocked["capabilities"]["deploy"], {
-            "state": "blocked", "reason_code": "release_adapter_unavailable",
-            "repair_id": "capability.deploy.release_adapter_unavailable"})
-
-    def test_without_profiles_a_registered_adapter_is_available(self):
-        contract = self.jarbird()
-        contract["release"] = "unsupported"
-        self.assertEqual(self.snapshot(contract, ("gh",))["capabilities"]["deploy"]["state"],
-                         "available")
-
-    def test_each_registered_adapter_rule_is_one_contract_error(self):
-        def unwatchable(contract):
-            contract["bindings"]["deploy"] = {"adapter": "github-forge", "command": None,
-                                              "config": {}}
-
-        def command(contract):
-            contract["bindings"]["deploy"]["command"] = "nix-build"
-
-        def config(contract):
-            contract["bindings"]["deploy"]["config"].update(services="jarbird", region="eu")
-
-        def gitlab(contract):
-            contract["release"] = "unsupported"
-            contract["bindings"]["tracker"]["kind"] = "gitlab"
-
-        cases = (
-            (unwatchable, "contract.deploy.adapter_unwatchable", ["/bindings/deploy/adapter"]),
-            (command, "contract.deploy.command_conflict", ["/bindings/deploy/command"]),
-            (config, "contract.deploy.config_invalid", ["/bindings/deploy/config"] * 2),
-            (gitlab, "contract.deploy.tracker_not_github", ["/bindings/deploy/adapter"]),
-        )
-        for mutate, repair_id, pointers in cases:
-            with self.subTest(repair_id=repair_id):
-                contract = self.jarbird()
-                mutate(contract)
-                code, payload, _ = self.resolve(self.make_root(contract))
-                error = self.assert_refusal(code, payload, "invalid_contract")
-                self.assertEqual(error["repair_id"], repair_id)
-                self.assertEqual([v["pointer"] for v in error["violations"]], pointers)
-                if repair_id == "contract.deploy.config_invalid":
-                    self.assertEqual([v["message"] for v in error["violations"]], [
-                        "config member 'region' is not declared",
-                        "config member 'services' must be a string_list"])
-
-    def test_a_local_apply_adapter_is_unwatchable(self):
-        """Issue 547 D10: `launchd-agent` activates locally, so no deploy watch can name it."""
-        contract = self.jarbird()
-        contract["bindings"]["deploy"] = {"adapter": "launchd-agent", "command": None,
-                                          "config": {}}
-        code, payload, _ = self.resolve(self.make_root(contract))
-        error = self.assert_refusal(code, payload, "invalid_contract")
-        self.assertEqual(error["repair_id"], "contract.deploy.adapter_unwatchable")
-        self.assertEqual([v["pointer"] for v in error["violations"]], ["/bindings/deploy/adapter"])
-
-
 class HostLocalReleaseTest(ResolverTestCase):
     """Issue 547 AC1: a host-local activation profile resolves through the real registry."""
 
@@ -1609,14 +1489,8 @@ class ContradictionTest(ResolverTestCase):
     def test_unsupported_capabilities_impose_no_binding_requirement(self):
         contract = source_contract()
         contract["release"] = "unsupported"
-        self.assertEqual(contract["bindings"]["deploy"]["adapter"], "none")
         code, _, err = self.resolve(self.make_root(contract))
         self.assertEqual(code, 0, err)
-
-    def test_a_supported_deploy_needs_an_adapter_and_a_command(self):
-        contract = source_contract()
-        contract["capabilities"]["deploy"]["support"] = "supported"
-        self.refuse(contract)
 
 
 class RequireTest(ResolverTestCase):
@@ -1651,12 +1525,14 @@ class RequireTest(ResolverTestCase):
         code, out, _ = run_with_path(
             str(make_stub_bin(("gh", "git", "just", "codex-companion"))),
             "resolve", "--repo-root", str(root),
-            "--require", "knowledge.hints", "--require", "deploy", home=self.home)
+            "--require", "knowledge.hints", "--require", "knowledge.context",
+            home=self.home)
         error = json.loads(out)["error"]
         self.assertEqual(code, 2)
         pointers = [v["pointer"] for v in error["violations"]]
-        self.assertEqual(pointers, ["/capabilities/deploy", "/capabilities/knowledge.hints"])
-        self.assertEqual(error["repair_id"], "capability.deploy.unsupported")
+        self.assertEqual(pointers, ["/capabilities/knowledge.context",
+                                    "/capabilities/knowledge.hints"])
+        self.assertEqual(error["repair_id"], "capability.knowledge.context.unsupported")
 
     def test_requiring_an_available_capability_returns_the_snapshot(self):
         root = self.make_root()
@@ -1665,7 +1541,7 @@ class RequireTest(ResolverTestCase):
             "resolve", "--repo-root", str(root), "--require", "tracker",
             home=self.home)
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out)["schema_version"], 1)
+        self.assertEqual(json.loads(out)["schema_version"], 2)
 
     def test_an_unknown_require_name_is_an_argparse_usage_error(self):
         root = self.make_root()
@@ -1685,7 +1561,7 @@ class NoSubprocessTest(ResolverTestCase):
             home=self.home)
         self.assertEqual(code, 0, err)
         self.assertEqual(err, "")
-        self.assertEqual(json.loads(out)["schema_version"], 1)
+        self.assertEqual(json.loads(out)["schema_version"], 2)
 
     def test_platform_status_runs_no_child_process(self):
         """R3.6: the administrative operation reads too, and starts nothing."""
@@ -2040,7 +1916,7 @@ class DriftGateTest(ResolverTestCase):
                              home=self.home)
         self.assertEqual(code, 0, err or out)
         snapshot = json.loads(out)
-        self.assertEqual(snapshot["schema_version"], 1)
+        self.assertEqual(snapshot["schema_version"], 2)
         self.assertEqual(sorted(snapshot["capabilities"]), sorted(CAPABILITY_NAMES))
         self.assertEqual(snapshot["project"]["id"], "fagenorn/nix-config")
         self.assertEqual(snapshot["project"]["root"], str(REPO_ROOT))
@@ -2068,8 +1944,7 @@ class DriftGateTest(ResolverTestCase):
              "knowledge.context": "available", "knowledge.standards": "available",
              "knowledge.architecture": "available", "knowledge.hints": "unsupported",
              "verification": "available", "review.plan": "unsupported",
-             "review.code": "unsupported", "release": "unsupported",
-             "deploy": "unsupported"},
+             "review.code": "unsupported", "release": "unsupported"},
         )
         code, out, err = run("check-projections", "--repo-root", str(EVAL_FIXTURE), home=self.home)
         self.assertEqual(code, 0, err or out)
@@ -2429,25 +2304,26 @@ class PublicResolveTest(InProcessTestCase):
 
     def test_resolve_applies_required_capabilities(self):
         root = make_project_root()
-        code, printed = self.printed(root, "--require", "deploy")
+        code, printed = self.printed(root, "--require", "knowledge.hints")
         self.assertEqual(code, 2)
         self.assertEqual(printed["error"]["code"], "capability_unavailable")
-        self.assertEqual(self.raised_refusal(root, "deploy"), printed["error"])
+        self.assertEqual(self.raised_refusal(root, "knowledge.hints"), printed["error"])
 
-    def test_resolve_raises_the_failure_the_command_prints_for_an_overflowing_number(self):
-        """COR-002: `1e400` decodes to `inf` without reaching `parse_constant`.
+    def test_resolve_raises_the_failure_the_command_prints_for_an_oversized_integer(self):
+        """COR-002: an integer past Python's digit limit is not a contract error.
 
-        The command has always refused it at the emit guard as the fixed
-        `resolver_failure`; `resolve()` raises that same refusal, so no caller
-        of the API evaluates a project the command refuses.
+        `load_contract` does not translate the `ValueError` the decoder raises
+        for it, so the command prints the fixed `resolver_failure`; `resolve()`
+        raises that same refusal, so no caller of the API evaluates a project
+        the command refuses.
         """
         contract = source_contract()
-        contract["bindings"]["deploy"]["config"] = {"threshold": 271828.5}
+        contract["project"]["extra"] = {"threshold": 271828}
         root = make_project_root(contract)
         path = root / ".agents" / "project.json"
         text = path.read_text(encoding="utf-8")
-        self.assertEqual(text.count("271828.5"), 1)
-        path.write_text(text.replace("271828.5", "1e400"), encoding="utf-8")
+        self.assertEqual(text.count("271828"), 1)
+        path.write_text(text.replace("271828", "9" * 5000), encoding="utf-8")
         code, out, _ = run("resolve", "--repo-root", str(root), home=self.home)
         self.assertEqual(code, 2)
         self.assertEqual(out, '{"error":{"code":"resolver_failure","repair_id":'

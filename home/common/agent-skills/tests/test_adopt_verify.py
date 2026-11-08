@@ -506,8 +506,8 @@ class RegistrationTest(VerifyTestCase):
             "root": str(root),
             # P3: the fixture contract is in the highest supported schema, 2.
             "project_schema_version": 2,
-            "platform_interval": {"min_inclusive": "1.0.0",
-                                  "max_exclusive": "2.0.0"},
+            "platform_interval": {"min_inclusive": "1.2.0",
+                                  "max_exclusive": "3.0.0"},
             "deprecated_uses": [],
             "removed_uses": [],
             "compatible": True,
@@ -924,8 +924,8 @@ class IntegrationBranchOperandTest(VerifyTestCase):
             "root": str(root),
             # P3: the fixture contract is in the highest supported schema, 2.
             "project_schema_version": 2,
-            "platform_interval": {"min_inclusive": "1.0.0",
-                                  "max_exclusive": "2.0.0"},
+            "platform_interval": {"min_inclusive": "1.2.0",
+                                  "max_exclusive": "3.0.0"},
             "deprecated_uses": [],
             "removed_uses": [],
             "compatible": True,
