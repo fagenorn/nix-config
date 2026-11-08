@@ -937,10 +937,11 @@ class _Pass:
     def finish(self, verified: bool) -> None:
         """The idempotent finishing steps: the one that unlists the issue comes last."""
         if verified:
-            forge_markers.remove_label(self.slug, self.number, FAILED[0])
-            forge_markers.close_issue(self.slug, self.number, "completed")
-            for name in DELIVERY:
+            # Every label but NEEDS goes before the close: a closed issue is no longer listed, so a
+            # label left on it by a failed removal could never be retried.
+            for name in (*DELIVERY, FAILED[0]):
                 forge_markers.remove_label(self.slug, self.number, name)
+            forge_markers.close_issue(self.slug, self.number, "completed")
             forge_markers.remove_label(self.slug, self.number, NEEDS)
         else:
             forge_markers.close_issue(self.slug, self.number, "not_planned")
