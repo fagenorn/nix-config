@@ -51,7 +51,8 @@ class Cutover(DeliveredCustody):
         archive = subprocess.run(
             ["git", "-C", str(REPO), "archive", BASE_COMMIT, "python/agent_tools",
              "home/common/agent-skills/scripts",
-             "home/common/agent-skills/artifact-budget-policy.json"],
+             "home/common/agent-skills/artifact-budget-policy.json",
+             "home/common/agent-skills/platform-manifest.json"],
             capture_output=True, check=True)
         subprocess.run(["tar", "-x", "-C", str(cls.base)], input=archive.stdout, check=True)
 
@@ -79,11 +80,31 @@ class Cutover(DeliveredCustody):
             request["interface_version"] = BASE_REQUESTS[args[0]]
             del request["verification"]
             stdin = json.dumps(request).encode()
-        completed = subprocess.run(
-            [sys.executable, str(self.base / WORKFLOW.relative_to(REPO)), *map(str, args)],
-            input=stdin, capture_output=True, check=False, cwd=cwd,
-            env={**os.environ, "HOME": str(self.home),
-                 "PYTHONPATH": str(self.base / "python")})
+        # The tree rests in this checkout's schema 2 and platform; the base helper reads it as
+        # schema 1 under the base platform manifest for the one call, and the bytes are put
+        # back, so no tree comparison sees the swap.
+        manifest = self.home / ".agents/share/platform-manifest.json"
+        contracts = self.contracts()
+        entries = [path.parents[1] / "AGENTS.md" for path in contracts]
+        rested = {path: path.read_bytes() for path in [*contracts, *entries, manifest]}
+        try:
+            shutil.copyfile(self.base / "home/common/agent-skills/platform-manifest.json",
+                            manifest)
+            for path in contracts:
+                path.write_text(
+                    json.dumps(self.base_form(json.loads(rested[path])), indent=2) + "\n",
+                    encoding="utf-8")
+            for path in entries:  # the projection header records the contract's own schema
+                path.write_bytes(rested[path].replace(b"(project schema 2)",
+                                                      b"(project schema 1)", 1))
+            completed = subprocess.run(
+                [sys.executable, str(self.base / WORKFLOW.relative_to(REPO)), *map(str, args)],
+                input=stdin, capture_output=True, check=False, cwd=cwd,
+                env={**os.environ, "HOME": str(self.home),
+                     "PYTHONPATH": str(self.base / "python")})
+        finally:
+            for path, raw in rested.items():
+                path.write_bytes(raw)
         if ok:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         return completed
@@ -100,6 +121,21 @@ class Cutover(DeliveredCustody):
             input=raw if isinstance(raw, bytes) else json.dumps(raw).encode(),
             capture_output=True, check=False,
             env={**os.environ, "PYTHONPATH": str(self.base / "python")})
+
+    @staticmethod
+    def base_form(contract):
+        """The schema-1 contract the base helper's resolver requires: `schema_version` 1, the
+        base platform window and the inert `deploy` members that project schema 2 retired
+        (#579)."""
+        contract["schema_version"] = 1
+        contract["platform"] = {"min_inclusive": "1.0.0", "max_exclusive": "2.0.0"}
+        contract["bindings"]["deploy"] = {"adapter": "none", "command": None, "config": {}}
+        contract["capabilities"]["deploy"] = {"support": "unsupported"}
+        return contract
+
+    def contracts(self):
+        return [p for p in Path(self.root).rglob(".agents/project.json")
+                if ".git" not in p.relative_to(self.root).parts]
 
     def declare(self, slots):
         (self.home / ".agents/share/host-declaration.json").write_text(json.dumps(
