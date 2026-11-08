@@ -8,7 +8,8 @@ the `running_subject_identity` predicate by reading the health commit of the rel
 Its closed config is `workflow`, `branch`, `services` (a `string_list`), `health_url` and
 `health_commit_field`.
 
-This module imports only the standard library and `agent_tools.canonical`: the registry in
+This module imports only the standard library, `agent_tools.canonical` and
+`agent_tools.release_merge`: the registry in
 `release_adapter` imports it, never the reverse, so its inner checks are its own (D14).
 
 `inspect(request)` never raises and never mutates. A request outside the closed shape is
@@ -28,7 +29,6 @@ endpoint also reports (D6, D7).
 import http.client
 import json
 import re
-import subprocess
 import threading
 import time
 import urllib.error
@@ -37,10 +37,11 @@ import urllib.request
 from datetime import datetime
 from typing import Any
 
+from agent_tools import release_merge
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
 COLLECTION_BUDGET_SECONDS = 30
-DETAIL_LIMIT = 240
+DETAIL_LIMIT = release_merge.DETAIL_LIMIT
 HEALTH_BODY_LIMIT = 65536
 RUN_LIMIT = 5
 RUN_FIELDS = "databaseId,status,conclusion,headSha,headBranch,createdAt"
@@ -188,42 +189,11 @@ def _parameters_problem(parameters: Any) -> str | None:
     return None
 
 
-def _gh(args: list[str], deadline: float) -> tuple[str, Any, str]:
-    """Run `gh <args>` within what is left of `deadline`: `(status, payload, detail)`.
-
-    `status` is `"ok"` with the parsed JSON payload, or one of `lookup_failed`,
-    `lookup_timeout`, `payload_invalid` and `executable_missing`, with a payload of `None`.
-    An argument the operating system cannot pass (`ValueError`) is `lookup_failed`.
-    The child inherits the environment unchanged (D10). `detail` is the bounded stderr after
-    the child ran, empty on `lookup_timeout`, the operating-system error on
-    `executable_missing` and `gh could not be started: <error>` for a `ValueError`.
-    """
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        return "lookup_timeout", None, ""
-    argv = ["gh", *args]
-    try:
-        done = subprocess.run(argv, capture_output=True, text=True, errors="replace",
-                              timeout=remaining, stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return "lookup_timeout", None, ""
-    except OSError as error:
-        return "executable_missing", None, str(error)
-    except ValueError as error:
-        return "lookup_failed", None, f"gh could not be started: {error}"
-    detail = done.stderr.strip()[:DETAIL_LIMIT]
-    if done.returncode != 0:
-        return "lookup_failed", None, detail
-    try:
-        return "ok", json.loads(done.stdout), detail
-    except (ValueError, RecursionError):
-        return "payload_invalid", None, detail
-
-
 def _run_list(slug: str, workflow: str, branch: str, deadline: float) -> tuple[str, Any, str]:
-    """`gh run list` for the workflow on the branch: the `_gh` answer."""
-    return _gh(["run", "list", "--repo", slug, "--workflow", workflow, "--branch", branch,
-                "--limit", str(RUN_LIMIT), "--json", RUN_FIELDS], deadline)
+    """`gh run list` for the workflow on the branch: the `release_merge.gh` answer."""
+    return release_merge.gh(["run", "list", "--repo", slug, "--workflow", workflow,
+                             "--branch", branch, "--limit", str(RUN_LIMIT), "--json",
+                             RUN_FIELDS], deadline)
 
 
 class _Invalid(Exception):
@@ -332,62 +302,6 @@ def _health(url: str, field: str, deadline: float) -> dict[str, Any]:
     return result("ok", status, commit)
 
 
-def _mismatch(detail: str) -> dict[str, str]:
-    return {"outcome": "diverged", "reason": "release_merge_mismatch", "detail": detail}
-
-
-def _released(parameters: dict[str, Any], deadline: float
-              ) -> tuple[str | None, dict[str, str] | None, list[str]]:
-    """`(commit, failure, references)`: the commit the release published (issue 555 D6).
-
-    Without `candidate.merge` it is `candidate.commit` and nothing is read. With it, the release
-    PR is read, then (only when `MERGED`) its merge commit, and the merge commit is the released
-    commit when the PR merged into the target branch as `[merge.base_tip, candidate.commit]`.
-    `failure` is `{outcome, reason, detail}` for a merge that does not resolve.
-    """
-    candidate = parameters["candidate"]
-    merge = candidate.get("merge")
-    if merge is None:
-        return candidate["commit"], None, []
-    slug, branch = parameters["target"]["repository"], parameters["target"]["branch"]
-    references = [f"repos/{slug}/pulls/{merge['pr']}"]
-
-    def unread(status: str, detail: str) -> tuple[None, dict[str, str], list[str]]:
-        return None, {"outcome": "unknown", "reason": status, "detail": detail}, references
-
-    status, view, detail = _gh(["pr", "view", str(merge["pr"]), "--repo", slug, "--json",
-                                "state,baseRefName,mergeCommit"], deadline)
-    if status != "ok":
-        return unread(status, detail)
-    if not isinstance(view, dict) or not isinstance(view.get("state"), str):
-        return unread("payload_invalid", "pull request state is not a string")
-    if view["state"] == "OPEN":
-        return None, {"outcome": "absent", "reason": "release_unmerged",
-                      "detail": "the release pull request is open"}, references
-    if view["state"] == "CLOSED":
-        return None, _mismatch("the release pull request was closed unmerged"), references
-    if view["state"] != "MERGED":
-        return unread("payload_invalid", f"pull request state {view['state']!r} is unknown")
-    if view.get("baseRefName") != branch:
-        return None, _mismatch("the release pull request merged into another branch"), references
-    merge_commit = view.get("mergeCommit")
-    oid = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
-    if not _hex40(oid):
-        return unread("payload_invalid", "mergeCommit oid is not 40 lowercase hex characters")
-    references.append(f"repos/{slug}/git/commits/{oid}")
-    status, commit, detail = _gh(["api", f"repos/{slug}/git/commits/{oid}"], deadline)
-    if status != "ok":
-        return unread(status, detail)
-    parents = commit.get("parents") if isinstance(commit, dict) else None
-    if not (isinstance(parents, list) and all(
-            isinstance(parent, dict) and _hex40(parent.get("sha")) for parent in parents)):
-        return unread("payload_invalid", "merge commit parents are not a list of shas")
-    if [parent["sha"] for parent in parents] != [merge["base_tip"], candidate["commit"]]:
-        return (None, _mismatch("the merge commit parents are not the base tip and the head"),
-                references)
-    return oid, None, references
-
-
 def _deploy(parameters: Any, deadline: float) -> dict[str, Any]:
     """The effect observation of one deploy request (D6): the spec's classification table."""
     problem = _parameters_problem(parameters)
@@ -395,7 +309,7 @@ def _deploy(parameters: Any, deadline: float) -> dict[str, Any]:
         return _observation("unknown", "parameters_invalid", detail=problem)
     target, config = parameters["target"], parameters["config"]
     services = list(config["services"])
-    commit, failure, merge_references = _released(parameters, deadline)
+    commit, failure, merge_references = release_merge.released_commit(parameters, deadline)
     if failure is not None:
         return _observation(failure["outcome"], failure["reason"], services=services,
                             references=merge_references, detail=failure["detail"])
@@ -450,7 +364,7 @@ def _running(parameters: Any, deadline: float) -> dict[str, Any]:
         return {"outcome": outcome, "reason": reason, "references": references,
                 "observed_at": _now_ms()}
 
-    commit, failure, references = _released(parameters, deadline)
+    commit, failure, references = release_merge.released_commit(parameters, deadline)
     if failure is not None:
         return answer("unknown", "identity_unobservable", references)
     config = parameters["config"]
