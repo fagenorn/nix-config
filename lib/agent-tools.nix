@@ -50,6 +50,7 @@ let
     "context-meter"
     "derive-review-feasibility-fixtures"
     "diff-scope"
+    "fallback-audit"
     "forge-claim"
     "guard-policy"
     "lane-triage"

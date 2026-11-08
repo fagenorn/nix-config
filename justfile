@@ -189,6 +189,7 @@ agent-workflow-tests *args:
     tests/test_release_profile.py \
     tests/test_release_bridge.py \
     tests/test_release_command.py \
+    tests/test_fallback_audit.py \
     tests/test_release_driver.py \
     tests/test_release_crash_matrix.py \
     tests/test_release_cutover.py \
