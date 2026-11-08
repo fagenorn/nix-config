@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import verify_exec, worktree_mapping
-from agent_tools.worktree_mapping import MappingError, classify, classify_root, ledger_matches
+from agent_tools.worktree_mapping import (
+    ForgeFacts, MappingError, classify, classify_root, ledger_matches)
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK = "home/common/verify-pending/checks/worktree-mapping"
@@ -166,6 +167,87 @@ class ClassifyRootTest(unittest.TestCase):
     def test_a_git_failure_is_refused(self):
         with self.assertRaises(MappingError):
             classify_root(self.fleet.base / "missing", report())
+
+
+class ForgeClassifyTest(unittest.TestCase):
+    """Issue 710: forge facts map an otherwise unmapped worktree, with the reason (D2, D8)."""
+
+    def setUp(self):
+        self.fleet = Fleet(self)
+        self.calls = []
+
+    def reader(self, facts):
+        def read(root):
+            self.calls.append(root)
+            return facts
+        return read
+
+    def test_a_claim_an_open_pr_and_a_declared_branch_each_map_with_their_reason(self):
+        f = self.fleet
+        claimed, pr, declared = (f.worktree(n) for n in ("c-br", "p-br", "d-br"))
+        facts = ForgeFacts(
+            claims={"c-br": [{"issue": 7, "comment_id": 70, "holder": "h/s"}]},
+            open_prs={"p-br": 9}, declared={"d-br": 130})
+        got = classify_root(f.root, report(), forge=self.reader(facts))
+        self.assertEqual(got["verdict"], "green")
+        self.assertEqual(got["counts"], {"current": 0, "migrate": 0, "refused-only": 0,
+                                         "unmapped": 0, "forge": 3})
+        # Porcelain order: git lists linked worktrees sorted by path (as in
+        # test_lookalikes_of_a_runner_workspace_are_not_excluded), so c-br, d-br, p-br.
+        self.assertEqual(got["paths"], [
+            {"class": "forge", "path": claimed, "ledgers": [], "branch": "c-br",
+             "forge": [{"reason": "claim", "issue": 7, "comment_id": 70, "holder": "h/s"}]},
+            {"class": "forge", "path": declared, "ledgers": [], "branch": "d-br",
+             "forge": [{"reason": "declared", "issue": 130}]},
+            {"class": "forge", "path": pr, "ledgers": [], "branch": "p-br",
+             "forge": [{"reason": "open_pr", "pr": 9}]}])
+        self.assertEqual(self.calls, [f.root])
+
+    def test_every_reason_is_listed_in_order(self):
+        f = self.fleet
+        f.worktree("all")
+        facts = ForgeFacts(claims={"all": [{"issue": 1, "comment_id": 2, "holder": None}]},
+                           open_prs={"all": 3}, declared={"all": 4})
+        row = classify_root(f.root, report(), forge=self.reader(facts))["paths"][0]
+        self.assertEqual([r["reason"] for r in row["forge"]], ["claim", "open_pr", "declared"])
+
+    def test_an_unclaimed_stale_worktree_stays_red(self):
+        f = self.fleet
+        stale = f.worktree("stale")
+        f.worktree("c-br")
+        facts = ForgeFacts(claims={"c-br": [{"issue": 7, "comment_id": 70, "holder": "h/s"}]})
+        got = classify_root(f.root, report(), forge=self.reader(facts))
+        self.assertEqual(got["verdict"], "red")
+        self.assertEqual((got["counts"]["unmapped"], got["counts"]["forge"]), (1, 1))
+        self.assertIn({"class": "unmapped", "path": stale, "ledgers": []}, got["paths"])
+
+    def test_refused_only_and_migrate_keep_their_ledger_class(self):
+        f = self.fleet
+        f.ledger("L3", f.worktree("ref"))
+        f.ledger("L2", f.worktree("mig"))
+        facts = ForgeFacts(open_prs={"ref": 1, "mig": 2})
+        got = classify_root(f.root, report(L3="refused", L2="migrate"), forge=self.reader(facts))
+        self.assertEqual(sorted(p["class"] for p in got["paths"]), ["migrate", "refused-only"])
+        self.assertEqual(got["verdict"], "red")
+        self.assertEqual(self.calls, [])  # no unmapped path, no forge read
+
+    def test_a_detached_worktree_never_maps(self):
+        f = self.fleet
+        f.worktree("x", detach=True)
+        got = classify_root(f.root, report(), forge=self.reader(ForgeFacts(open_prs={"x": 1})))
+        self.assertEqual(got["paths"][0]["class"], "unmapped")
+        self.assertEqual(self.calls, [])
+
+    def test_short_branch_keeps_the_reconcile_semantics(self):
+        self.assertEqual([worktree_mapping.short_branch(b) for b in
+                          (None, "refs/heads/a/b", "refs/heads/", "odd")], [None, "a/b", "", "odd"])
+
+    def test_without_a_reader_the_document_is_unchanged(self):
+        f = self.fleet
+        un = f.worktree("un")
+        got = classify_root(f.root, report())
+        self.assertEqual(set(got["counts"]), set(worktree_mapping.CLASSES))
+        self.assertEqual(got["paths"], [{"class": "unmapped", "path": un, "ledgers": []}])
 
 
 class WrapperTest(unittest.TestCase):
