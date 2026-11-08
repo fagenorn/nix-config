@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from agent_tools import run_profile
@@ -117,7 +118,8 @@ class DedupTest(Fixture):
     def test_a_repeated_message_id_counts_its_usage_once_and_keeps_its_tool_call(self):
         stats = run_profile.agent_stats(self.batch / "agent-a3.jsonl")
         self.assertEqual(stats, {"fresh": 20, "cache_read": 100, "output": 4, "tools": 1,
-                                 "minutes": 30.0, "first_prompt": "Issue #12 of acme/widgets: plan it"})
+                                 "minutes": 30.0, "first_prompt": "Issue #12 of acme/widgets: plan it",
+                                 "read_error": None})
 
     def test_assistant_records_without_an_id_each_count(self):
         path = Path(self.tmp.name) / "agent-noid.jsonl"
@@ -135,6 +137,41 @@ class DedupTest(Fixture):
             handle.write(b'{"type":"assistant","message":{"id":"z","content":[{"type":"text","text":"caf\xc3')
         stats = run_profile.agent_stats(path)  # the cut final line must not raise
         self.assertEqual((stats["fresh"], stats["first_prompt"]), (3, "Issue #5 x"))
+
+
+class ReadFailureTest(Fixture):
+    def test_a_transcript_that_cannot_be_opened_is_reported_incomplete(self):
+        run = make_run(self.tmp.name, "wf_bad", [("g1", "setup", "Setup", [reply("m", {"input_tokens": 2})],
+                                                  {"slug": "a/b"}, None)])
+        (run / "agent-g2.jsonl").mkdir()  # globbed as a transcript; opening it raises OSError
+        report = run_profile.profile_runs([run])
+        self.assertEqual([(i["run"], i["file"]) for i in report["incomplete"]], [("wf_bad", "agent-g2.jsonl")])
+        self.assertIn("IsADirectoryError", report["incomplete"][0]["error"])
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(err):
+            code = run_profile.main([str(run), "--json"])
+        self.assertEqual(code, 1)
+        self.assertEqual(len(json.loads(out.getvalue())["incomplete"]), 1)
+        self.assertIn("incomplete evidence: wf_bad/agent-g2.jsonl", err.getvalue())
+
+    def test_a_read_error_mid_file_keeps_the_records_read_and_flags_the_file(self):
+        class Flaky:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def __iter__(self):
+                yield json.dumps(reply("m", {"input_tokens": 6})).encode("utf-8") + b"\n"
+                raise OSError("read error")
+        path = Path(self.tmp.name) / "agent-flaky.jsonl"
+        with mock.patch.object(run_profile, "open", return_value=Flaky(), create=True):
+            stats = run_profile.agent_stats(path)
+        self.assertEqual(stats["fresh"], 6)
+        self.assertEqual(stats["read_error"], "OSError: read error")
+
+    def test_an_absent_journal_and_meta_are_not_incomplete(self):
+        self.assertEqual(self.report["incomplete"], [])
+        self.assertEqual(run_profile.main([str(self.bare)]), 0)
 
 
 class FamilyTest(Fixture):
@@ -170,6 +207,29 @@ class AttributionTest(Fixture):
     def test_other_agents_take_the_first_issue_of_their_first_prompt(self):
         self.assertEqual(run_profile.prompt_issue("Issue #12 of x: see #99"), 12)
         self.assertIsNone(run_profile.prompt_issue("no issue"))
+
+    def test_an_explicit_issue_reference_beats_an_earlier_pull_request_number(self):
+        # The landing-lock prompt of deliver-standard.js, whose PR number comes first.
+        lock = ("Take the cross-host landing lock of the branch main for PR #800 of issue #715 "
+                "of acme/widgets at the head abc.")
+        self.assertEqual(run_profile.prompt_issue(lock), 715)
+        self.assertEqual(run_profile.prompt_issue("Push the branch b of PR #800 at the head abc."), None)
+        self.assertEqual(run_profile.prompt_issue("see #5, then Issue #7"), 7)
+        self.assertEqual(run_profile.prompt_issue("PR #8 then #9"), 9)
+
+    def test_a_pull_request_number_does_not_steal_the_issues_tokens(self):
+        root = self.tmp.name
+        run = make_run(root, "wf_lock", [
+            ("l1", "setup", "Setup", [reply("ms", {"input_tokens": 1})], {"slug": "acme/widgets"}, None),
+            ("l2", "land-lock-715", "Ship", [
+                user("Take the cross-host landing lock of the branch main for PR #800 of issue #715 of acme/widgets."),
+                reply("ml", {"input_tokens": 30})], {}, None),
+            ("l3", "close-out", "Ship", [user("Issue #715 of acme/widgets: close out"),
+                                         reply("mc", {"input_tokens": 5})],
+             {"issue_state": "CLOSED", "released": True}, None)])
+        report = run_profile.profile_runs([run])
+        self.assertEqual([r["agent_id"] for r in report["agents"] if r["issue"] == 715], ["l2", "l3"])
+        self.assertEqual([(r["issue"], r["agents"], r["fresh"]) for r in report["issues"]], [(715, 2, 35)])
         self.assertEqual(self.agent("a3")["issue"], 12)  # the relay's #99 is skipped
         self.assertEqual(self.agent("a5")["issue"], 34)  # impl-1 is a counter, not issue 1
         self.assertEqual(self.agent("b2")["issue"], 12)  # list-form prompt
@@ -207,7 +267,7 @@ class CommandTest(Fixture):
              "--json", "--top", "2"], capture_output=True, text=True, timeout=60, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         doc = json.loads(completed.stdout)
-        self.assertEqual(sorted(doc), ["agents", "families", "issues", "phases", "runs"])
+        self.assertEqual(sorted(doc), ["agents", "families", "incomplete", "issues", "phases", "runs"])
         self.assertEqual([a["agent_id"] for a in doc["agents"]], ["a5", "a1"])
         self.assertEqual(len(doc["families"]), 2)
         self.assertEqual([(r["slug"], r["issue"]) for r in doc["issues"]], [("acme/widgets", 12), ("other/repo", 12)])

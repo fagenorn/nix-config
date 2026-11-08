@@ -8,6 +8,9 @@ phase, per agent, per label family and per delivered issue.
 `fresh` = input + cache_creation + output tokens. Cache reads are reported
 separately (`cache_read`) because they cost about a tenth of a fresh token.
 
+A transcript or journal that cannot be read in full is listed under `incomplete`
+(and on stderr) and the command exits 1; an absent journal or meta file is normal.
+
 Usage: `just agent-run-profile <run-dir>... [--json] [--top N]`
 """
 
@@ -39,11 +42,16 @@ def label_issue(label: str, phase: str) -> int | None:
 
 
 def prompt_issue(text: str) -> int | None:
-    match = re.search(r"#(\d+)", text)
+    """The issue a prompt is about: an explicit `issue #N` first, else the first
+    bare `#N` that is not a pull request (`PR #N`), whose number is not an issue's."""
+    match = (re.search(r"\bissue #(\d+)", text, re.IGNORECASE)
+             or re.search(r"(?<!\bPR )(?<!\bpr )#(\d+)", text))
     return int(match.group(1)) if match else None
 
 
-def _read_jsonl(path: Path) -> list[dict]:
+def _read_jsonl(path: Path) -> tuple[list[dict], str | None]:
+    """The dict records of `path` and a read error, if any. The records read before
+    an error are kept, so the caller can still report them as incomplete."""
     records: list[dict] = []
     try:
         with open(path, "rb") as handle:
@@ -56,9 +64,9 @@ def _read_jsonl(path: Path) -> list[dict]:
                     continue
                 if isinstance(record, dict):
                     records.append(record)
-    except OSError:
-        return []
-    return records
+    except OSError as error:
+        return records, f"{type(error).__name__}: {error}"
+    return records, None
 
 
 def _count(value: object) -> int:
@@ -99,7 +107,8 @@ def agent_stats(path: Path) -> dict:
     first_time: datetime | None = None
     last_time: datetime | None = None
 
-    for record in _read_jsonl(path):
+    records, read_error = _read_jsonl(path)
+    for record in records:
         stamp = _parse_time(record.get("timestamp"))
         if stamp is not None:
             if first_time is None:
@@ -145,6 +154,7 @@ def agent_stats(path: Path) -> dict:
         "tools": len(seen_tools) + loose_tools,
         "minutes": minutes,
         "first_prompt": first_prompt or "",
+        "read_error": read_error,
     }
 
 
@@ -161,13 +171,14 @@ def _str(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _read_journal(run_dir: Path) -> tuple[dict, dict, str | None, bool]:
+def _read_journal(run_dir: Path) -> tuple[dict, dict, str | None, bool, str | None]:
     path = run_dir / "journal.jsonl"
     present = path.is_file()
     starts: dict[str, tuple[str, str]] = {}
     results: dict[str, object] = {}
     slug: str | None = None
-    for record in _read_jsonl(path) if present else []:
+    records, read_error = _read_jsonl(path) if present else ([], None)
+    for record in records:
         aid = record.get("agentId")
         if not isinstance(aid, str):
             aid = None
@@ -182,7 +193,7 @@ def _read_journal(run_dir: Path) -> tuple[dict, dict, str | None, bool]:
                 candidate = result.get("slug")
                 if isinstance(candidate, str) and candidate:
                     slug = candidate
-    return starts, results, slug, present
+    return starts, results, slug, present, read_error
 
 
 def profile_runs(run_dirs: list[Path]) -> dict:
@@ -190,10 +201,13 @@ def profile_runs(run_dirs: list[Path]) -> dict:
     agents: list[dict] = []
     terminals: set[tuple[str | None, int]] = set()
     issue_rows: dict[tuple[str | None, int], dict] = {}
+    incomplete: list[dict] = []
 
     for run_dir in run_dirs:
         run = run_dir.name
-        starts, results, slug, journal = _read_journal(run_dir)
+        starts, results, slug, journal, journal_error = _read_journal(run_dir)
+        if journal_error is not None:
+            incomplete.append({"run": run, "file": "journal.jsonl", "error": journal_error})
         files = sorted(run_dir.glob("agent-*.jsonl"))
         runs.append({"run": run, "slug": slug, "journal": journal, "agents": len(files)})
         for file in files:
@@ -204,6 +218,8 @@ def profile_runs(run_dirs: list[Path]) -> dict:
             else:
                 phase, label = _str(meta.get("workflowPhase")), _str(meta.get("description"))
             stats = agent_stats(file)
+            if stats["read_error"] is not None:
+                incomplete.append({"run": run, "file": file.name, "error": stats["read_error"]})
             issue = label_issue(label, phase)
             if issue is None:
                 issue = prompt_issue(stats["first_prompt"])
@@ -247,6 +263,7 @@ def profile_runs(run_dirs: list[Path]) -> dict:
         phase["minutes"] = round(phase["minutes"], 2)
 
     return {
+        "incomplete": incomplete,
         "runs": runs,
         "phases": sorted(phase_rows.values(), key=lambda r: (-r["fresh"], r["run"], r["phase"])),
         "agents": sorted(agents, key=lambda r: (-r["fresh"], r["run"], r["agent_id"])),
@@ -292,6 +309,9 @@ def render_text(report: dict) -> str:
                [[_issue_cell(r["slug"], r["issue"]), n(r["agents"]), n(r["fresh"]),
                  n(r["cache_read"]), n(r["planner_calls"])] for r in report["issues"]]),
     ]
+    if report["incomplete"]:
+        sections.append(_table("INCOMPLETE: these files could not be read in full", "run | file | error",
+                               [[r["run"], r["file"], r["error"]] for r in report["incomplete"]]))
     return "\n\n".join(sections) + "\n"
 
 
@@ -314,7 +334,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     else:
         print(render_text(report), end="")
-    return 0
+    for item in report["incomplete"]:
+        print(f"agent-run-profile: incomplete evidence: {item['run']}/{item['file']}: {item['error']}",
+              file=sys.stderr)
+    return 1 if report["incomplete"] else 0
 
 
 if __name__ == "__main__":
