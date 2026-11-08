@@ -48,6 +48,7 @@ in
   imports = [
     ./omlx.nix
     ./docker.nix
+    ./github-runners.nix
   ];
 
   # mkDarwin sets HostName and LocalHostName; Tailscale names the node after the Computer Name.
