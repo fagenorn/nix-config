@@ -70,6 +70,7 @@ let
     "verification-observe"
     "verified-tree"
     "verify-pending"
+    "worktree-reconcile"
   ];
 
   # A launcher script: bash under `-p`, which ignores BASH_ENV and the functions
