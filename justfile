@@ -92,7 +92,6 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_control_decisions.py \
     home/common/agent-skills/tests/test_delivery_sealing.py \
     home/common/agent-skills/tests/test_host_admission.py \
-    home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
@@ -150,6 +149,7 @@ agent-workflow-tests *args:
     tests/test_verify_pending_owner.py \
     tests/test_verify_pending_pass.py \
     tests/test_verify_pending_units.py \
+    tests/test_host_sudo.py \
     tests/test_verify_checks.py \
     tests/test_worktree_mapping.py \
     tests/test_worktree_reconcile.py \
@@ -165,7 +165,6 @@ agent-workflow-tests *args:
     tests/test_context_meter.py \
     tests/test_sdd_brief.py \
     tests/test_sdd_gate.py \
-    tests/test_orchestrate_control.py \
     tests/test_launch_commit.py \
     tests/test_launch_scope.py \
     tests/test_review_range.py \

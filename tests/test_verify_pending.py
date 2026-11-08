@@ -932,9 +932,32 @@ class PassTransitionsTest(PassBase):
         self.assertEqual(self.world.issue()["labels"], [])
         issue = f"repos/{SLUG}/issues/{ISSUE}"
         finishing = [(a[2], a[3]) for a in self.mutations() if a[3] == issue or a[3].startswith(issue + "/labels/")]
-        self.assertEqual(finishing, [("DELETE", issue + "/labels/verification-failed"), ("PATCH", issue),
+        self.assertEqual(finishing, [("DELETE", issue + "/labels/in-progress"),
+                                     ("DELETE", issue + "/labels/agent%3Aready"),
+                                     ("DELETE", issue + "/labels/verification-failed"), ("PATCH", issue),
                                      ("DELETE", issue + "/labels/needs-verification")])
         self.second_pass_is_silent()
+
+    def test_a_verified_close_removes_the_delivery_labels_with_needs_verification_last(self):
+        self.hold(ok_check(), labels=("needs-verification", "in-progress", "agent:ready"))
+        self.assertEqual(self.run_pass(), [line(0, "AC1", "pass", "changed"), line(None, None, "closed", "verified")])
+        self.assertEqual((self.world.issue()["state"], self.world.issue()["labels"]), ("closed", []))
+        issue = f"repos/{SLUG}/issues/{ISSUE}"
+        removed = [a[3][len(issue + "/labels/"):] for a in self.mutations()
+                   if a[2] == "DELETE" and a[3].startswith(issue + "/labels/")]
+        self.assertEqual(removed[-1], "needs-verification")
+        self.assertIn("in-progress", removed)
+        self.assertIn("agent%3Aready", removed)
+        self.second_pass_is_silent()
+
+    def test_a_failed_delivery_label_removal_leaves_the_issue_open_for_the_next_pass(self):
+        self.hold(ok_check(), labels=("needs-verification", "in-progress", "agent:ready"),
+                  fail_once=["remove_label"])
+        self.assertEqual(self.run_pass()[-1]["reason"], "forge_error")
+        self.assertEqual(self.world.issue()["state"], "open")
+        self.assertIn("needs-verification", self.world.issue()["labels"])
+        self.assertEqual(self.run_pass()[-1], line(None, None, "closed", "verified"))
+        self.assertEqual((self.world.issue()["state"], self.world.issue()["labels"]), ("closed", []))
 
     def test_fail_labels_before_recording_and_a_rerun_posts_nothing(self):
         self.hold(check(run={"command": "check-bad"}))

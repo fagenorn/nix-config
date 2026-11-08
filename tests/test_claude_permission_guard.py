@@ -35,7 +35,6 @@ EXPECTED_ALLOW = [
     "Bash(workflow-state:*)", "Bash(~/.agents/bin/workflow-state:*)",
     "Bash(artifact-budget:*)", "Bash(~/.agents/bin/artifact-budget:*)",
     "Bash(ship-delivery:*)", "Bash(~/.agents/bin/ship-delivery:*)",
-    "Bash(orchestrate-control:*)", "Bash(~/.agents/bin/orchestrate-control:*)",
     "Bash(verification-observe:*)", "Bash(~/.agents/bin/verification-observe:*)", "Agent",
 ]
 
@@ -413,9 +412,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "| workflow-state checkpoint-delivery --repo-root /r --run-id run --checkpoint-file - "
             "| artifact-budget validate-report --boundary workflow-response --input -\n"
             '{"observed_at":"2026-10-22T00:00:00Z","requested_stage":null}\nJSON',
-            "orchestrate-control step --repo-root /r --input - <<'JSON'\n"
-            '{"session":{},"first_sweep":true,"owners":[],"contracts_due":[],'
-            '"refused_contracts":[]}\nJSON',
             "verification-observe observe --repo-root /r --input - <<'JSON'\n"
             '{"kind":"verification","blocker_id":"sha256:' + "0" * 64 + '",'
             '"sources":[{"name":"flake-lock","paths":["flake.lock"]}]}\nJSON',
