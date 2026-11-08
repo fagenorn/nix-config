@@ -5,7 +5,7 @@ Run: rel_01a1a1d8-7220-72a2-841e-df2806f78396
 Revisions: delivery worktree cfd3ad5b7e64f999b372bae34b14e4b8a80c03d8; origin/main 36284d437b88f5cb80d0d793585c739f86706bd6, as last fetched (D15)
 Hosts: eleven-m5, mbp, anis-desktop
 Evidence window: 2026-11-03T15:55:33Z to 2026-11-03T16:20:04Z
-Activation readiness: activation not permitted — 7 red, 5 human-pending, 0 green of 12 pre-activation items.
+Activation readiness: activation not permitted — 6 red, 6 human-pending, 0 green of 12 pre-activation items.
 
 ## Summary
 
@@ -16,7 +16,7 @@ Activation readiness: activation not permitted — 7 red, 5 human-pending, 0 gre
 | C3 | A fresh `approved` #70 bundle covers the strict-cutover candidate as a whole | issue; #71; #128 AC5 | pre | red | owner: paired live trials (#128 D11), tracked in the C3 issue that #579's ship files |
 | C4 | Candidate and retained-bridge fleet preflight are green for every registered project | #71 | pre | red | C4.b: the fleet-migration follow-up |
 | C5 | No legacy release is in flight | #90 | pre | human-pending | owner: host online |
-| C6 | No legacy attempt is left without a resumable strict-path mapping | issue; refresh | pre | red | #584; JarBird on mbp: owner: gate step 1; anis-desktop: owner: host online |
+| C6 | No legacy attempt is left without a resumable strict-path mapping | issue; refresh | pre | human-pending | JarBird on mbp: owner: gate step 1; anis-desktop: owner: host online |
 | C7 | No retained legacy worktree is left without a resumable mapping | refresh | pre | red | #585; anis-desktop: owner: host online |
 | C8 | The Codex ship handoff is in place | issue; #119 | pre | human-pending | owner: host online |
 | C9 | Claude and Codex paths answer as their declared host capabilities say, including bounded admission | refresh | pre | human-pending | owner: host online |
@@ -106,6 +106,8 @@ C2.c adopt-project verify --repo-root R
 | eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C2.b; C2.c | 2026-11-03T16:08:05Z | 0; 0 | fleet passed; verify adopted, blockers 0 | green |
 
 Registration is the C2.a fleet row: `verify` reports `registered` false unless it registered, and no `--register` ran. Planning's nix-config finding (D16, `adoption-evidence-record`) now reads three failed ids; Nodo's fleet failure is as planned.
+
+Re-read after #583 (read-only, 2026-11-08T13:33:54Z): mbp /Users/anis/Projects/nodocom at de844daee933 dev 0 dirty, after https://github.com/elevenyellow/nodocom/pull/2603 merged as de844daee9339d3e99fa496908fd7354a0fa3255: C2.a exit 0, row compatible, platform 1.1.0; C2.b exit 0, fleet passed, no warning checks; C2.c exit 0, verify adopted, blockers 0. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
 
 Item verdict: **red**
 
@@ -201,7 +203,133 @@ C6.a workflow-state migrate --repo-root R
 
 `workflow-state migrate` ran without `--apply` on every root. Planning's refusals reappear on nix-config, Argus, Arcwave and Nodo, with Arcwave's four `unknown_dialect`; `human-pending` rows are cleared by the owner's gate step 1.
 
-Item verdict: **red**
+Re-read after #584 (2026-11-08, mbp): /Users/anis/Projects/arcwave at 2adb089868c5 dev 0 dirty: C6.a exit 0, current 11, migrate 0, migrated 0, refused 0. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
+Re-read after #584 (2026-11-08, mbp): /Users/anis/Projects/argus at 21338cae51ea main 1 dirty: C6.a exit 0, current 8, migrate 0, migrated 0, refused 0. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
+Re-read after #584 (2026-11-08, mbp): /Users/anis/tmp/nix-config at 8c255848677b main 0 dirty: C6.a exit 0, current 123, migrate 0, migrated 0, refused 0. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
+Re-read after #584 (2026-11-08, mbp): /Users/anis/Projects/nodocom at de844daee933 dev 0 dirty: C6.a exit 0, current 154, migrate 0, migrated 0, refused 0. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
+
+#### #584 disposition
+
+Archive home: `R/.superpowers/archive/workflows/<ledger>`, with a sidecar `<ledger>.archived.json` in record schema ledger-archive-record/v1, which carries each ledger's disposition label (archived, abandoned or unresolved) and its re-delivery issues. Nothing was deleted. Every snapshot was taken behind the D9 fence: ledger-snapshot take holds every ledger state.lock, every workflows dot-lock and the transaction store locks, all non-blocking, and refuses busy or changed instead of waiting. All four takes exited 0.
+
+Restore, only before this delivery's ship step starts: (1) run ledger-snapshot restore --repo-root R `--snapshot <tarball>` as a dry run, read moved, restored and newer, and stop if any newer path lies outside the ledgers this run archived or migrated, archive/workflows or attempt-transactions, or if another session ran workflow-state on R since the snapshot; (2) run the same command with --apply, which moves the live workflows, attempt-transactions and archive/workflows aside into a new `pre-584-<UTC>.restore-<UTC>` directory under R/.superpowers/archive and then extracts the snapshot (a store absent at snapshot time stays absent; busy means a writer is active, so stop); (3) check that workflow-state migrate --repo-root R reports the pre-change counts. After ship, restore one ledger at a time by the ledger-archive README procedure (mv the archived directory back, then move its record aside).
+
+Pre-change readings (workflow-state migrate --repo-root R, dry run): Arcwave current 0, migrate 11, refused 4; Argus current 0, migrate 8, refused 3; nix-config current 15, migrate 108, refused 6; Nodo current 8, migrate 146, refused 49. JarBird on mbp is outside this delivery and still awaits gate step 1.
+
+##### Arcwave (mbp /Users/anis/Projects/arcwave)
+
+- Snapshot: /Users/anis/Projects/arcwave/.superpowers/archive/pre-584-20261108T135200Z.tar.gz, sha256:059b1cc752bf45a0cbb4cee75ea2e2c092478c7bd55456a9b9df97ab9921be9a, taken_at 2026-11-08T13:52:00Z, 786 members over 15 ledgers; attempt-transactions was in it (the store exists).
+- Labels file: /Users/anis/Projects/arcwave/.superpowers/archive/pre-584-labels-20261108T135200Z.json
+- Liveness proof: 2026-11-08T13:52:49Z, no hit (local: no file in the ledger directory has an mtime within 24 hours; forge: no in-progress label and no live claim on any re-delivery issue the forge knows).
+- Gate step 1 for this root and the C6.a re-read: 2026-11-08T13:53:03Z, exit 0, current 11, migrate 0, migrated 0, refused 0.
+
+| Ledger | Reason | Issues | Disposition | Liveness | Re-deliver |
+|--------|--------|--------|-------------|----------|------------|
+| orchestrate-agent-ready-20260914T185053Z | unknown_dialect | 145, 147, 148, 149, 150, 151, 153, 159 | abandoned | local_quiet; forge_quiet | fagenorn/arcwave#147 |
+| orchestrate-explicit-20260924T113035Z | unknown_dialect | none | archived | local_quiet; not_applicable | none |
+| orchestrate-explicit-20260924T114510Z | unknown_dialect | 146, 152, 154, 155 | archived | local_quiet; not_applicable | none |
+| orchestrate-explicit-20260927T070159Z | unknown_dialect | none | archived | local_quiet; not_applicable | none |
+
+##### Argus (mbp /Users/anis/Projects/argus)
+
+- Snapshot: /Users/anis/Projects/argus/.superpowers/archive/pre-584-20261108T135308Z.tar.gz, sha256:ca72c15eb106fd5a0a81b100325acc245d87764754fa9eab738961dccd014e6d, taken_at 2026-11-08T13:53:08Z, 47 members over 11 ledgers; attempt-transactions was not in it (the store is absent).
+- Labels file: /Users/anis/Projects/argus/.superpowers/archive/pre-584-labels-20261108T135308Z.json
+- Liveness proof: 2026-11-08T13:53:21Z, no hit (local: no file in the ledger directory has an mtime within 24 hours; forge: no in-progress label and no live claim on any re-delivery issue the forge knows).
+- Gate step 1 for this root and the C6.a re-read: 2026-11-08T13:53:30Z, exit 0, current 8, migrate 0, migrated 0, refused 0.
+
+| Ledger | Reason | Issues | Disposition | Liveness | Re-deliver |
+|--------|--------|--------|-------------|----------|------------|
+| issues-48-53 | invalid_state | 48, 49, 50, 51, 52, 53 | archived | local_quiet; not_applicable | none |
+| issues-99-105 | invalid_state | 99, 100, 101, 102 | abandoned | local_quiet; forge_quiet | fagenorn/argus#102 |
+| orch-78-94-20260821 | invalid_state | 78, 79, 80, 81 | abandoned | local_quiet; forge_quiet | fagenorn/argus#78, fagenorn/argus#79, fagenorn/argus#80, fagenorn/argus#81 |
+
+##### nix-config (mbp /Users/anis/tmp/nix-config)
+
+- Snapshot: /Users/anis/tmp/nix-config/.superpowers/archive/pre-584-20261108T135335Z.tar.gz, sha256:941efed6a9a7cf7c18f6305feea8dd208a567df0d31508df72431b007d1069b8, taken_at 2026-11-08T13:53:35Z, 1870 members over 130 ledgers; attempt-transactions was in it (the store exists).
+- Labels file: /Users/anis/tmp/nix-config/.superpowers/archive/pre-584-labels-20261108T135335Z.json
+- Liveness proof: 2026-11-08T13:53:44Z, no hit (local: no file in the ledger directory has an mtime within 24 hours; forge: no in-progress label and no live claim on any re-delivery issue the forge knows).
+- Gate step 1 for this root and the C6.a re-read: 2026-11-08T13:54:00Z, exit 0, current 123, migrate 0, migrated 0, refused 0.
+
+| Ledger | Reason | Issues | Disposition | Liveness | Re-deliver |
+|--------|--------|--------|-------------|----------|------------|
+| direct-74-000001 | invalid_state | 74 | archived | local_quiet; not_applicable | none |
+| issues-29-30-20260817-r2 | invalid_state | 29, 30 | archived | local_quiet; not_applicable | none |
+| issues-29-33-20260817 | invalid_state | 29, 31, 32, 33 | archived | local_quiet; not_applicable | none |
+| issues-42-43 | invalid_state | 42, 43 | archived | local_quiet; not_applicable | none |
+| orchestrate-21-24 | invalid_state | 21, 24 | archived | local_quiet; not_applicable | none |
+| orchestrate-21-24-r2 | invalid_state | 21, 22, 23, 24 | archived | local_quiet; not_applicable | none |
+
+##### Nodo (mbp /Users/anis/Projects/nodocom)
+
+- Snapshot: /Users/anis/Projects/nodocom/.superpowers/archive/pre-584-20261108T135405Z.tar.gz, sha256:15ba17c86e881934d9a31e48dfd964cd201abbae8d0548ca15281aa40e1741b6, taken_at 2026-11-08T13:54:06Z, 3571 members over 203 ledgers; attempt-transactions was in it (the store exists).
+- Labels file: /Users/anis/Projects/nodocom/.superpowers/archive/pre-584-labels-20261108T135405Z.json
+- Liveness proof: 2026-11-08T13:54:32Z, no hit (local: no file in the ledger directory has an mtime within 24 hours; forge: no in-progress label and no live claim on any re-delivery issue the forge knows).
+- Gate step 1 for this root and the C6.a re-read: 2026-11-08T13:54:49Z, exit 0, current 154, migrate 0, migrated 0, refused 0.
+
+| Ledger | Reason | Issues | Disposition | Liveness | Re-deliver |
+|--------|--------|--------|-------------|----------|------------|
+| direct-1093-000001 | invalid_state | 1093 | archived | local_quiet; not_applicable | none |
+| direct-1282-000001 | invalid_state | 1282 | archived | local_quiet; not_applicable | none |
+| issues-1247-1248-1249 | invalid_state | 1247 | archived | local_quiet; not_applicable | none |
+| issues-1261-1262-1263 | invalid_state | 1261 | archived | local_quiet; not_applicable | none |
+| issues-1285-1287 | invalid_state | 1285, 1286, 1287 | archived | local_quiet; not_applicable | none |
+| orch-1293-1295-1296 | unknown_dialect | 1293, 1295, 1296 | abandoned | local_quiet; forge_quiet | elevenyellow/nodocom#1296 |
+| orch-1293-r2 | unknown_dialect | 1293 | archived | local_quiet; not_applicable | none |
+| orch-1295-1296 | unknown_dialect | 1295 | archived | local_quiet; not_applicable | none |
+| orch-1314-1318 | unknown_dialect | 1314, 1315, 1316, 1317 | archived | local_quiet; not_applicable | none |
+| orch-1320-1321 | unknown_dialect | 1320, 1321 | archived | local_quiet; not_applicable | none |
+| orch-1323-1324 | unknown_dialect | 1323 | archived | local_quiet; not_applicable | none |
+| orch-1323-1324-r2 | unknown_dialect | none | archived | local_quiet; not_applicable | none |
+| orch-1324-1326 | unknown_dialect | 1324, 1326 | archived | local_quiet; not_applicable | none |
+| orch-1337-1339-1353-1354 | unknown_dialect | 1337, 1339 | archived | local_quiet; not_applicable | none |
+| orch-1382-1388 | unknown_dialect | 1382, 1383, 1384, 1385, 1386, 1387, 1388 | archived | local_quiet; not_applicable | none |
+| orch-1404-1416 | unknown_dialect | 1404, 1405, 1406, 1407, 1408, 1409, 1410, 1411, 1412, 1413, 1414, 1415, 1416 | archived | local_quiet; not_applicable | none |
+| orch-1432-1437 | unknown_dialect | 1432, 1433, 1434, 1435, 1436, 1437 | archived | local_quiet; not_applicable | none |
+| orch-1444-1446 | unknown_dialect | 1444, 1445, 1446 | archived | local_quiet; not_applicable | none |
+| orch-1445-1446-1480 | unknown_dialect | 1445, 1446, 1480 | abandoned | local_quiet; forge_quiet | elevenyellow/nodocom#1480 |
+| orch-1459-1460-1462 | unknown_dialect | 1459, 1460, 1462 | archived | local_quiet; not_applicable | none |
+| orch-1501-1503 | unknown_dialect | 1501, 1502, 1503 | archived | local_quiet; not_applicable | none |
+| orch-1518-1519 | unknown_dialect | 1518, 1519 | archived | local_quiet; not_applicable | none |
+| orch-1524-1525-1526 | unknown_dialect | 1524, 1525, 1526 | archived | local_quiet; not_applicable | none |
+| orch-1564-1572-1580 | unknown_dialect | 1564, 1572, 1580 | archived | local_quiet; not_applicable | none |
+| orch-1603-1889-1895 | unknown_dialect | 1889, 1890 | archived | local_quiet; not_applicable | none |
+| orch-1622-1623 | unknown_dialect | 1622, 1623 | archived | local_quiet; not_applicable | none |
+| orch-1630-1631-1633 | unknown_dialect | 1630, 1631, 1633 | archived | local_quiet; not_applicable | none |
+| orch-1635-1642 | unknown_dialect | 1635, 1636, 1637, 1638, 1639, 1640, 1641, 1642 | archived | local_quiet; not_applicable | none |
+| orch-1643-1655 | unknown_dialect | 1643, 1644, 1645, 1646, 1647, 1648 | archived | local_quiet; not_applicable | none |
+| orch-1649-1655 | unknown_dialect | 1649, 1650, 1651, 1652, 1653, 1654 | archived | local_quiet; not_applicable | none |
+| orch-1649-1655-r2 | unknown_dialect | 1651, 1655 | archived | local_quiet; not_applicable | none |
+| orch-1670-1673-1674 | unknown_dialect | 1670, 1673 | archived | local_quiet; not_applicable | none |
+| orch-1674-1677-1678-1679-1681-1683 | unknown_dialect | 1674, 1677, 1678, 1679, 1681, 1683 | archived | local_quiet; not_applicable | none |
+| orch-1692-1663-1666 | unknown_dialect | 1663, 1664, 1665, 1666, 1692 | archived | local_quiet; not_applicable | none |
+| orch-1702-1707 | unknown_dialect | 1702, 1703, 1704, 1705, 1706, 1707 | archived | local_quiet; not_applicable | none |
+| orch-1781-1782-1783 | unknown_dialect | 1781, 1782, 1783 | archived | local_quiet; not_applicable | none |
+| orch-1789-1790-1793 | unknown_dialect | 1789, 1790, 1793 | archived | local_quiet; not_applicable | none |
+| orch-1833-1834 | unknown_dialect | 1833, 1834 | archived | local_quiet; not_applicable | none |
+| orch-1838-1840-1841-1850-1851-1857 | unknown_dialect | 1838, 1840, 1841, 1850, 1851, 1857 | archived | local_quiet; not_applicable | none |
+| orch-1842-1843-1844-1845-1846 | unknown_dialect | 1842, 1843, 1844, 1845, 1846 | archived | local_quiet; not_applicable | none |
+| orch-1869-1870-1871-1872-1873 | unknown_dialect | 1869, 1870, 1871, 1872 | abandoned | local_quiet; forge_quiet | elevenyellow/nodocom#1871, elevenyellow/nodocom#1872 |
+| orch-1898-1899-1906 | unknown_dialect | 1898, 1899, 1906 | archived | local_quiet; not_applicable | none |
+| orch-1912-1915 | unknown_dialect | 1912, 1913, 1914, 1915 | archived | local_quiet; not_applicable | none |
+| orch-1938-1939-1891-1895 | unknown_dialect | 1891, 1892, 1893, 1894, 1938, 1939 | archived | local_quiet; not_applicable | none |
+| orch-cost-control-1799-1827 | unknown_dialect | 1799, 1800, 1801, 1812, 1813, 1816 | archived | local_quiet; not_applicable | none |
+| orch-retire-stage-mode | unknown_dialect | 1759, 1760, 1761, 1762, 1763, 1764, 1765, 1766, 1767, 1768, 1769, 1770, 1771, 1772 | archived | local_quiet; not_applicable | none |
+| orchestrate-1231-1237 | invalid_state | 1234 | archived | local_quiet; not_applicable | none |
+| orchestrate-1261-1262-1263 | invalid_state | 1261, 1262, 1263 | archived | local_quiet; not_applicable | none |
+| run-1248-1249 | invalid_state | 1248, 1249 | archived | local_quiet; not_applicable | none |
+
+Each issue below is re-delivered fresh on the strict path, and no archived ledger is resumed. nix-config has no abandoned or unresolved ledger, and no ledger is unresolved on any root.
+
+##### #584 re-delivery
+
+- /Users/anis/Projects/arcwave orchestrate-agent-ready-20260914T185053Z (abandoned): fagenorn/arcwave#147 open
+- /Users/anis/Projects/argus issues-99-105 (abandoned): fagenorn/argus#102 open
+- /Users/anis/Projects/argus orch-78-94-20260821 (abandoned): fagenorn/argus#78 open, fagenorn/argus#79 open, fagenorn/argus#80 open, fagenorn/argus#81 open
+- /Users/anis/Projects/nodocom orch-1293-1295-1296 (abandoned): elevenyellow/nodocom#1296 open
+- /Users/anis/Projects/nodocom orch-1445-1446-1480 (abandoned): elevenyellow/nodocom#1480 open
+- /Users/anis/Projects/nodocom orch-1869-1870-1871-1872-1873 (abandoned): elevenyellow/nodocom#1871 open, elevenyellow/nodocom#1872 open
+
+Item verdict: **human-pending** (mbp JarBird `migrate 19` awaits gate step 1, and anis-desktop was unreachable; the four refused-ledger roots are green)
 
 ### C7 — Retained worktrees have a strict-path mapping
 
@@ -282,6 +410,8 @@ C10.a conformance run --purpose doctor --repo-root R
 | eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C10.a | 2026-11-03T16:08:05Z | 0 | doctor passed; no warning checks; 0 suppressed or not_run; admission passed | green |
 | anis-desktop | host | — | C1.c | 2026-11-03T15:55:33Z | 255 | unreachable in Task 1 (C1.c exit 255) | human-pending |
 
+Re-read after #583 (read-only, 2026-11-08T13:33:54Z): mbp /Users/anis/Projects/nodocom at de844daee933 dev 0 dirty, after https://github.com/elevenyellow/nodocom/pull/2603 merged as de844daee9339d3e99fa496908fd7354a0fa3255: C10.a exit 0, doctor passed, no warning checks, 0 suppressed or not_run, admission passed. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
+
 Item verdict: **red**
 
 ### C11 — Deprecations shipped, zero users
@@ -308,6 +438,8 @@ C11.d git --no-optional-locks -C R grep -n -F 'release deploy inspect' -- . ':!.
 | eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C11.b; C11.c; C11.d | 2026-11-03T16:13:53Z | 0; 0; 1 | legacy file not tracked; deploy.adapter none; 0 hits | green |
 
 C11.d exits 1 (no hit) on every root; for `fagenorn/nix-config` its pathspec is `home/common/agent-skills/skills`. Point-in-time records under `.agents/artifacts` are not users. The `jarbird` root resolves `github-actions-health` on `mbp` (branch dev) and `none` on `eleven-m5` (branch main).
+
+Re-read after #581 (read-only, 2026-11-08T09:23:11Z): mbp /Users/anis/Projects/arcwave at 2adb089868c5 dev 0 dirty, after https://github.com/fagenorn/arcwave/pull/227 merged as 2adb089868c59c7139bd6591d70ece716d937a31: C11.a exit 0, platform 1.1.0, 2 deprecations, deprecated_uses []; C11.b exit 0, no output; C11.c exit 0, deploy.adapter none; C11.d exit 1, no output. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
 
 Item verdict: **red**
 
@@ -351,11 +483,11 @@ These six items are `post` and `human-pending`: this attempt does not evaluate t
 |------|--------------|-------------|
 | C3 mbp .agents/artifacts/evidence/; C4 mbp home/common/agent-skills/platform-manifest.json | Build the strict-cutover candidate (platform 2.0.0, no bridge paths) | #579 built the candidate at origin/cutover-130-candidate; C3: owner: paired live trials (#128 D11), tracked in the C3 issue that #579's ship files; C4.b: the fleet-migration follow-up |
 | C11 mbp host; C11 eleven-m5 host | Bridge minor declaring the deprecations | #580 filed |
-| C11 mbp /Users/anis/Projects/arcwave | Arcwave: retire the tracked legacy skills config and its reader | #581 filed |
+| C11 mbp /Users/anis/Projects/arcwave | Arcwave: retire the tracked legacy skills config and its reader | #581 delivered (fagenorn/arcwave#227) |
 | C11 mbp /Users/anis/Projects/nodocom | Nodo: move the railway deploy off bindings.deploy | #582 filed |
 | C11 mbp /Users/anis/Projects/jarbird | JarBird github-actions-health deploy watch (release core) | #555 cited |
-| C2 mbp /Users/anis/Projects/nodocom; C10 mbp /Users/anis/Projects/nodocom | Nodo: repair the overbroad runtime-sentinel ignore rule | #583 filed |
-| C6 mbp /Users/anis/Projects/arcwave; C6 mbp /Users/anis/Projects/argus; C6 mbp /Users/anis/tmp/nix-config; C6 mbp /Users/anis/Projects/nodocom | Dispose of the refused legacy ledgers | #584 filed |
+| C2 mbp /Users/anis/Projects/nodocom; C10 mbp /Users/anis/Projects/nodocom | Nodo: repair the overbroad runtime-sentinel ignore rule | #583 delivered (elevenyellow/nodocom#2603) |
+| C6 mbp /Users/anis/Projects/arcwave; C6 mbp /Users/anis/Projects/argus; C6 mbp /Users/anis/tmp/nix-config; C6 mbp /Users/anis/Projects/nodocom | Dispose of the refused legacy ledgers | #584 delivered |
 | C7 mbp /Users/anis/Projects/arcwave; C7 mbp /Users/anis/Projects/argus; C7 mbp /Users/anis/tmp/nix-config; C7 mbp /Users/anis/Projects/jarbird; C7 mbp /Users/anis/Projects/nodocom | Reconcile worktrees without a resumable mapping | #585 filed |
 | C2 mbp /Users/anis/tmp/nix-config | Keep bundle and trials JSON out of the adoption-evidence candidate set (D16) | #586 filed |
 

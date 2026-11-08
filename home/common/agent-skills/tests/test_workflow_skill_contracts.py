@@ -1263,9 +1263,38 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(self.standards_review, "capabilities.review.plan", "reason_code",
                             "repair_id")
 
+    def assert_publication_precedes_cleanup(self, section, publication, cleanups):
+        published = section.find(publication)
+        self.assertNotEqual(published, -1, f"missing publication anchor: {publication!r}")
+        for cleanup in cleanups:
+            removed = section.find(cleanup)
+            self.assertNotEqual(removed, -1, f"missing cleanup anchor: {cleanup!r}")
+            self.assertLess(published, removed,
+                            f"{cleanup!r} precedes detail publication {publication!r}")
+
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
+        sdd_finish = normalized(self.sdd.split("\n## Finish\n", 1)[1])
+        self.assert_publication_precedes_cleanup(
+            sdd_finish, "`delivery-detail` mode", ("rm -rf <workspace>",))
+        ship_cleanup = self.ship_issue.split("\n## Phase 8 \u2014 Cleanup\n", 1)[1].split(
+            "\n## Notes\n", 1)[0]
+        self.assert_publication_precedes_cleanup(
+            ship_cleanup, "`delivery-detail` mode",
+            ("git worktree remove <worktree-path>", "git worktree prune", "git branch -d <branch>",
+             "remove only `$BUCKET`", 'ExitWorktree action: "remove"'))
+        before_remove = ship_cleanup.split("2. Remove the worktree", 1)[0]
+        self.assertIn("`delivery-detail` mode", before_remove)
+
+    def test_detail_order_check_fails_when_cleanup_precedes_publication(self):
+        swapped = "rm -rf <workspace> then publish in `delivery-detail` mode"
+        with self.assertRaises(AssertionError):
+            self.assert_publication_precedes_cleanup(
+                swapped, "`delivery-detail` mode", ("rm -rf <workspace>",))
+        with self.assertRaises(AssertionError):
+            self.assert_publication_precedes_cleanup(
+                "publish in `delivery-detail` mode", "`delivery-detail` mode", ("rm -rf <workspace>",))
 
     def test_phase_five_remeasures_every_artifact_it_mutates(self):
         remeasure = normalized(self.standards_review.split("## Accepted-edit remeasurement", 1)[1])
@@ -3259,7 +3288,7 @@ class OrchestratedReentryContractsTest(unittest.TestCase):
     """Issue 475: the re-entry argv and refusal markers have their home in workflow-state."""
 
     def setUp(self):
-        self.helper = module_constants(WORKFLOW_STATE, "ORCHESTRATED_RESUME",
+        self.helper = module_constants(WORKFLOW_STATE, "HELD_RUN_RESUME",
                                        *DIRECT_REFUSAL_MARKERS)
 
     def test_acquire_direct_names_each_refusal_direct_owner_prints(self):

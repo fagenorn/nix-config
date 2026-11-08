@@ -107,6 +107,66 @@ class CrashMatrixTest(MatrixCase):
             self.assertLess(lasts[before], firsts[after], (before, after))
 
 
+class WatchCrashTest(unittest.TestCase):
+    """Issue 555 AC3: a crash while watching resumes by observing; publication never reruns."""
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+        self.world.verification_ready()
+        self.clock = rs.Clock()
+        self.forge, self.watch = rs.StatefulForge(self.world), rs.ScriptedWatch(("satisfied", "deployed"))
+
+    def counts(self):
+        pushes = sum(c["argv"] == ROWS["tag.push"]["argv"][1:] for c in self.world.calls())
+        creates = sum(c["argv"][:2] == ["release", "create"] for c in self.world.calls())
+        return pushes, creates
+
+    def test_a_crash_while_watching_resumes_by_observing_without_republishing(self):
+        project = rs.project(self, profiles={"watched": support.watched_profile()})
+        driver = release_driver.Driver(project, clock=self.clock, registry={
+            "github-forge": self.forge, "github-actions-health": self.watch})
+        self.watch.crash_next_inspect = True
+        shown = driver.preview(rs.candidate())
+        with self.assertRaises(rs.Crash):
+            driver.run(rs.candidate(), [c["token"] for c in shown["confirmations"]])
+        self.assertEqual(driver.status()["release"]["state"], "activating")
+        self.assertEqual(self.counts(), (1, 1))
+        self.clock.advance(release_driver.CUSTODY_TTL_MS + 1)
+        resumed = driver.preview(None)
+        self.assertEqual((resumed["mode"], resumed["confirmations"]), ("resume", []))
+        result = driver.run(None, [])
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        self.assertEqual(self.counts(), (1, 1))
+        events = driver.store().load(result["transaction_id"]).events
+        start = next(e["seq"] for e in events
+                     if e["type"] == "transitioned" and e["to"] == "activating")
+        names = {e["action_id"]: e["name"] for e in events if e["type"] == "action_declared"}
+        later = [names[e["action_id"]] for e in events if e["seq"] > start and e["type"] in
+                 ("action_inspected", "invocation_intended", "invocation_returned")]
+        self.assertEqual(later, ["deploy"])
+
+
+class WatchedTwoBranchTest(unittest.TestCase):
+    """Issue 555 D6: in the JarBird shape the watch observes the merge binding."""
+
+    def test_a_two_branch_watch_receives_the_merge(self):
+        world = ForgeWorld(self)
+        world.verification_ready(integration="dev")
+        world.merge_observation_ready()
+        forge, watch = rs.StatefulForge(world), rs.ScriptedWatch(("satisfied", "deployed"))
+        world.merge_ready()
+        project = rs.project(self, profiles={"watched": support.watched_merge_profile()},
+                             integration="dev")
+        driver = release_driver.Driver(project, clock=rs.Clock(), registry={
+            "github-forge": forge, "github-actions-health": watch})
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["state"], result["next"]), ("succeeded", "done"))
+        effect = next(request for request in watch.requests if request["kind"] == "effect")
+        self.assertEqual(effect["parameters"]["candidate"],
+                         {"version": CANONICAL["tag"], "commit": CANONICAL["commit"],
+                          "merge": support.MERGE})
+
+
 if __name__ == "__main__":
     unittest.main()
 

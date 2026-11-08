@@ -32,6 +32,14 @@ RUN_LIST = ["run", "list", "--repo", SLUG, "--workflow", "deploy.yml", "--branch
 MERGE = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
 OLDER = "0f1e2d3c4b5a69788796a5b4c3d2e1f001234567"
 HOTFIX = "9a8b7c6d5e4f30211203f4e5d6c7b8a998765432"
+PR = 336
+BASE_TIP = "5" * 40
+HEAD = "1" * 40
+PR_VIEW = ["pr", "view", str(PR), "--repo", SLUG, "--json", "state,baseRefName,mergeCommit"]
+
+
+def commit_argv(oid: str) -> list[str]:
+    return ["api", f"repos/{SLUG}/git/commits/{oid}"]
 
 SCRIPT = """#!{python}
 import json, os, sys, time
@@ -120,13 +128,32 @@ class ActionsWorld:
     def url(self, path: str = "/health") -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}{path}"
 
+    def respond(self, argv: list[str], payload: object, *, exit: int = 0, stderr: str = "",
+                sleep: float = 0) -> None:
+        """Answer `argv` with `payload` as JSON (or `""` when None), keeping every other answer."""
+        path = self.state / "responses.json"
+        responses = json.loads(path.read_text("utf-8"))
+        responses[json.dumps(argv)] = {"exit": exit, "stderr": stderr, "sleep": sleep,
+                                       "stdout": "" if payload is None else json.dumps(payload)}
+        path.write_text(json.dumps(responses), encoding="utf-8")
+
     def runs(self, *entries: dict, exit: int = 0, stdout: str | None = None, stderr: str = "",
              sleep: float = 0) -> None:
         """Answer the issue's exact `gh run list` argv with `entries` (or `stdout` verbatim)."""
-        response = {"exit": exit, "stdout": json.dumps(list(entries)) if stdout is None else stdout,
-                    "stderr": stderr, "sleep": sleep}
-        (self.state / "responses.json").write_text(json.dumps({json.dumps(RUN_LIST): response}),
-                                                   encoding="utf-8")
+        path = self.state / "responses.json"
+        responses = json.loads(path.read_text("utf-8"))
+        responses[json.dumps(RUN_LIST)] = {
+            "exit": exit, "stdout": json.dumps(list(entries)) if stdout is None else stdout,
+            "stderr": stderr, "sleep": sleep}
+        path.write_text(json.dumps(responses), encoding="utf-8")
+
+    def merged(self, *, state: str = "MERGED", base: str = "main", oid: str | None = MERGE,
+               parents: tuple[str, ...] = (BASE_TIP, HEAD)) -> None:
+        """The release PR as `gh pr view` prints it and, with an `oid`, its merge commit."""
+        self.respond(PR_VIEW, {"state": state, "baseRefName": base,
+                               "mergeCommit": None if oid is None else {"oid": oid}})
+        if oid is not None:
+            self.respond(commit_argv(oid), {"sha": oid, "parents": [{"sha": p} for p in parents]})
 
     def health(self, status: int = 200, body: bytes | None = None, *, commit: str = MERGE,
                path: str = "/health", headers: dict[str, str] | None = None,

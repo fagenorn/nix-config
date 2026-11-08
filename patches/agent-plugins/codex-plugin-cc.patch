@@ -550,7 +550,7 @@ index 1954274..2097f9f 100644
 +  supervisionTimer.unref();
 +
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..80002c7 100644
+index 83df468..f4c1784 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
 @@ -32,2 +31,0 @@ import {
@@ -563,26 +563,27 @@ index 83df468..80002c7 100644
 -  SESSION_ID_ENV
 +  SESSION_ID_ENV,
 +  setConfigRetainingActive
-@@ -54,0 +56,2 @@ import {
+@@ -54,0 +56,3 @@ import {
 +import { REVIEW_OPERATIONS, reviewerBudgetMs } from "./lib/review-operations.mjs";
 +import { cleanupReviewerRuntime } from "./lib/runtime-home.mjs";
-@@ -70,0 +74,4 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
++import { claimReviewerStdio } from "./lib/stdio-claims.mjs";
+@@ -70,0 +75,4 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 +// Node's maximum setTimeout delay (2^31 - 1 ms, ~24.9 days). A larger delay is
 +// silently clamped to 1 ms, so this is the ceiling on a timeout the worker can
 +// actually enforce — and therefore on one a job record may advertise.
 +const MAX_ENFORCEABLE_TIMEOUT_MS = 2147483647;
-@@ -79 +86 @@ function printUsage() {
+@@ -79 +87 @@ function printUsage() {
 -      "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
 +      "  node scripts/codex-companion.mjs setup [--disable-review-gate] [--json]",
-@@ -82 +89 @@ function printUsage() {
+@@ -82 +90 @@ function printUsage() {
 -      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
 +      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--reviewer <plan-review|diff-review>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
-@@ -198,4 +204,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
+@@ -198,4 +205,0 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 -  if (!config.stopReviewGate) {
 -    nextSteps.push("Optional: run `/codex:setup --enable-review-gate` to require a fresh review before stop.");
 -  }
 -
-@@ -230,4 +233,4 @@ async function handleSetup(argv) {
+@@ -230,4 +234,4 @@ async function handleSetup(argv) {
 -    setConfig(workspaceRoot, "stopReviewGate", true);
 -    actionsTaken.push(`Enabled the stop-time review gate for ${workspaceRoot}.`);
 -  } else if (options["disable-review-gate"]) {
@@ -591,50 +592,50 @@ index 83df468..80002c7 100644
 +  }
 +  if (getConfig(workspaceRoot).stopReviewGate || options["disable-review-gate"]) {
 +    setConfigRetainingActive(workspaceRoot, "stopReviewGate", false);
-@@ -290,4 +292,0 @@ function renderStatusPayload(report, asJson) {
+@@ -290,4 +293,0 @@ function renderStatusPayload(report, asJson) {
 -function isActiveJobStatus(status) {
 -  return status === "queued" || status === "running";
 -}
 -
-@@ -339 +338,3 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
+@@ -339 +339,3 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
 -  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
 +  const jobs = sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)).filter(
 +    (job) => job.id !== options.excludeJobId
 +  );
-@@ -460 +460,0 @@ async function executeReviewRun(request) {
+@@ -460 +461,0 @@ async function executeReviewRun(request) {
 -
-@@ -462,0 +463,2 @@ async function executeTaskRun(request) {
+@@ -462,0 +464,2 @@ async function executeTaskRun(request) {
 +  const reviewOperation = normalizeReviewOperation(request.reviewOperation, STORED_REVIEW_OPERATION_ERROR);
 +  const isReviewer = reviewOperation !== null;
-@@ -464 +465,0 @@ async function executeTaskRun(request) {
+@@ -464 +466,0 @@ async function executeTaskRun(request) {
 -
-@@ -467 +468,2 @@ async function executeTaskRun(request) {
+@@ -467 +469,2 @@ async function executeTaskRun(request) {
 -    resumeLast: request.resumeLast
 +    resumeLast: request.resumeLast,
 +    reviewOperation
-@@ -491 +493 @@ async function executeTaskRun(request) {
+@@ -491 +494 @@ async function executeTaskRun(request) {
 -    sandbox: request.write ? "workspace-write" : "read-only",
 +    sandbox: isReviewer ? "read-only" : request.write ? "workspace-write" : "read-only",
-@@ -493,2 +495,4 @@ async function executeTaskRun(request) {
+@@ -493,2 +496,4 @@ async function executeTaskRun(request) {
 -    persistThread: true,
 -    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
 +    persistThread: !isReviewer,
 +    threadName: isReviewer || resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT),
 +    reviewerJobId: isReviewer ? request.jobId : null,
 +    timeoutMs: request.timeoutMs
-@@ -496,0 +501,4 @@ async function executeTaskRun(request) {
+@@ -496,0 +502,4 @@ async function executeTaskRun(request) {
 +  if (isReviewer && result.touchedFiles.length > 0) {
 +    throw new Error(`Read-only Codex reviewer reported file changes: ${result.touchedFiles.join(", ")}`);
 +  }
 +
-@@ -516 +524,2 @@ async function executeTaskRun(request) {
+@@ -516 +525,2 @@ async function executeTaskRun(request) {
 -    reasoningSummary: result.reasoningSummary
 +    reasoningSummary: result.reasoningSummary,
 +    runtime: result.runtime
-@@ -527 +536 @@ async function executeTaskRun(request) {
+@@ -527 +537 @@ async function executeTaskRun(request) {
 -    jobClass: "task",
 +    jobClass: isReviewer ? "review" : "task",
-@@ -540 +549,7 @@ function buildReviewJobMetadata(reviewName, target) {
+@@ -540 +550,7 @@ function buildReviewJobMetadata(reviewName, target) {
 -function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 +function buildTaskRunMetadata({ prompt, resumeLast = false, reviewOperation = null }) {
 +  if (reviewOperation !== null) {
@@ -643,30 +644,30 @@ index 83df468..80002c7 100644
 +      summary: shorten(prompt || "Read-only review")
 +    };
 +  }
-@@ -564 +579 @@ function getJobKindLabel(kind, jobClass) {
+@@ -564 +580 @@ function getJobKindLabel(kind, jobClass) {
 -  return jobClass === "review" ? "review" : "rescue";
 +  return REVIEW_OPERATIONS.has(kind) ? kind : jobClass === "review" ? "review" : "rescue";
-@@ -592 +607 @@ function createTrackedProgress(job, options = {}) {
+@@ -592 +608 @@ function createTrackedProgress(job, options = {}) {
 -function buildTaskJob(workspaceRoot, taskMetadata, write) {
 +function buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation = null) {
-@@ -594,2 +609,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -594,2 +610,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    prefix: "task",
 -    kind: "task",
 +    prefix: reviewOperation === null ? "task" : "reviewer",
 +    kind: reviewOperation ?? "task",
-@@ -598 +613 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -598 +614 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    jobClass: "task",
 +    jobClass: reviewOperation === null ? "task" : "review",
-@@ -604 +619 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -604 +620 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
 +function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, reviewOperation, timeoutMs, jobId }) {
-@@ -611,0 +627,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
+@@ -611,0 +628,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
 +    reviewOperation,
 +    timeoutMs,
-@@ -671 +688 @@ async function runForegroundCommand(job, runner, options = {}) {
+@@ -671 +689 @@ async function runForegroundCommand(job, runner, options = {}) {
 -function spawnDetachedTaskWorker(cwd, jobId) {
 +function spawnDetachedTaskWorker(cwd, jobId, logFile) {
-@@ -672,0 +690,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -672,0 +691,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  // Same shape as spawnBrokerProcess. The child inherits an O_APPEND fd on the
 +  // job log, so everything it writes to fd 1/2 is appended to the file the job
 +  // record already points at via logFile — including output no application code
@@ -677,12 +678,12 @@ index 83df468..80002c7 100644
 +  // O_APPEND on the same inode from the same process, so the two interleave
 +  // chronologically: the last progress line, then the trail that ended it.
 +  const logFd = fs.openSync(logFile, "a");
-@@ -677 +704 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -677 +705 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 -    stdio: "ignore",
 +    stdio: ["ignore", logFd, logFd],
-@@ -680,0 +708 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -680,0 +709 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  fs.closeSync(logFd);
-@@ -683,0 +712,35 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -683,0 +713,35 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +function resolveJobDeadline(createdAt, timeoutMs) {
 +  // The issue's definition: enqueue time + timeout, and a deadline exists only
 +  // when a timeout does. Measured from the record's own createdAt rather than a
@@ -718,7 +719,7 @@ index 83df468..80002c7 100644
 +  return deadline.toISOString();
 +}
 +
-@@ -688 +751,6 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -688 +752,6 @@ function enqueueBackgroundTask(cwd, job, request) {
 -  const child = spawnDetachedTaskWorker(cwd, job.id);
 +  // Resolved before the spawn. It depends only on the record's createdAt and the
 +  // request's timeoutMs, both already known here, and anything that goes wrong
@@ -726,67 +727,142 @@ index 83df468..80002c7 100644
 +  // job record at all — unreachable, unreportable, and never reaped.
 +  const deadlineAt = resolveJobDeadline(job.createdAt, request.timeoutMs);
 +  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
-@@ -694,0 +763 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -694,0 +764 @@ function enqueueBackgroundTask(cwd, job, request) {
 +    ...(deadlineAt ? { deadlineAt } : {}),
-@@ -704,2 +773,2 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -704,2 +774,2 @@ function enqueueBackgroundTask(cwd, job, request) {
 -      title: job.title,
 -      summary: job.summary,
 +      kind: job.kind,
 +      title: job.title, summary: job.summary,
-@@ -764 +833 @@ async function handleTask(argv) {
+@@ -764 +834 @@ async function handleTask(argv) {
 -    valueOptions: ["model", "effort", "cwd", "prompt-file"],
 +    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms", "reviewer"],
-@@ -782,0 +852,10 @@ async function handleTask(argv) {
-+  const reviewOperation = normalizeReviewOperation(options.reviewer), isReviewer = reviewOperation !== null;
-+  if (isReviewer && (write || resumeLast)) {
-+    throw new Error("Reviewer jobs must be fresh and read-only.");
-+  }
-+  const timeoutMs = options["timeout-ms"] == null
-+    ? (isReviewer ? reviewerBudgetMs(reviewOperation) : null)
-+    : Number(options["timeout-ms"]);
-+  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
-+    throw new Error("--timeout-ms must be a positive number.");
-+  }
-@@ -785 +864,2 @@ async function handleTask(argv) {
+@@ -775,22 +845,21 @@ async function handleTask(argv) {
+-  const prompt = readTaskPrompt(cwd, options, positionals);
+-
+-  const resumeLast = Boolean(options["resume-last"] || options.resume);
+-  const fresh = Boolean(options.fresh);
+-  if (resumeLast && fresh) {
+-    throw new Error("Choose either --resume/--resume-last or --fresh.");
+-  }
+-  const write = Boolean(options.write);
+-  const taskMetadata = buildTaskRunMetadata({
+-    prompt,
 -    resumeLast
-+    resumeLast,
-+    reviewOperation
-@@ -792 +872 @@ async function handleTask(argv) {
+-  });
+-
+-  if (options.background) {
+-    ensureCodexAvailable(cwd);
+-    requireTaskRequest(prompt, resumeLast);
+-
 -    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
-+    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
-@@ -799,0 +880,2 @@ async function handleTask(argv) {
-+      reviewOperation,
-+      timeoutMs,
-@@ -807 +889 @@ async function handleTask(argv) {
+-    const request = buildTaskRequest({
+-      cwd,
+-      model,
+-      effort,
++  const reviewOperation = normalizeReviewOperation(options.reviewer), isReviewer = reviewOperation !== null;
++  const stdioClaim = isReviewer && !options.background ? claimReviewerStdio() : null;
++  try {
++    const prompt = readTaskPrompt(cwd, options, positionals);
++
++    const resumeLast = Boolean(options["resume-last"] || options.resume);
++    const fresh = Boolean(options.fresh);
++    if (resumeLast && fresh) {
++      throw new Error("Choose either --resume/--resume-last or --fresh.");
++    }
++    const write = Boolean(options.write);
++    if (isReviewer && (write || resumeLast)) {
++      throw new Error("Reviewer jobs must be fresh and read-only.");
++    }
++    const timeoutMs = options["timeout-ms"] == null
++      ? (isReviewer ? reviewerBudgetMs(reviewOperation) : null)
++      : Number(options["timeout-ms"]);
++    if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
++      throw new Error("--timeout-ms must be a positive number.");
++    }
++    const taskMetadata = buildTaskRunMetadata({
+@@ -798 +866,0 @@ async function handleTask(argv) {
+-      write,
+@@ -800 +868 @@ async function handleTask(argv) {
+-      jobId: job.id
++      reviewOperation
+@@ -802,4 +869,0 @@ async function handleTask(argv) {
+-    const { payload } = enqueueBackgroundTask(cwd, job, request);
+-    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
+-    return;
+-  }
+@@ -807,5 +871,6 @@ async function handleTask(argv) {
 -  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
-+  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
-@@ -817,0 +900,2 @@ async function handleTask(argv) {
+-  await runForegroundCommand(
+-    job,
+-    (progress) =>
+-      executeTaskRun({
++    if (options.background) {
++      ensureCodexAvailable(cwd);
++      requireTaskRequest(prompt, resumeLast);
++
++      const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
++      const request = buildTaskRequest({
+@@ -818,5 +883,30 @@ async function handleTask(argv) {
+-        jobId: job.id,
+-        onProgress: progress
+-      }),
+-    { json: options.json }
+-  );
 +        reviewOperation,
 +        timeoutMs,
-@@ -874,2 +958,3 @@ async function handleTaskWorker(argv) {
++        jobId: job.id
++      });
++      const { payload } = enqueueBackgroundTask(cwd, job, request);
++      outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
++      return;
++    }
++
++    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
++    await runForegroundCommand(
++      job,
++      (progress) =>
++        executeTaskRun({
++          cwd,
++          model,
++          effort,
++          prompt,
++          write,
++          resumeLast,
++          reviewOperation,
++          timeoutMs,
++          jobId: job.id,
++          onProgress: progress
++        }),
++      { json: options.json }
++    );
++  } finally {
++    stdioClaim?.release();
++  }
+@@ -874,2 +964,3 @@ async function handleTaskWorker(argv) {
 -    () =>
 -      executeTaskRun({
 +    () => {
 +      validateStoredReviewIdentity(storedJob, request);
 +      return executeTaskRun({
-@@ -878 +963,2 @@ async function handleTaskWorker(argv) {
+@@ -878 +969,2 @@ async function handleTaskWorker(argv) {
 -      }),
 +      });
 +    },
-@@ -937 +1023 @@ function handleTaskResumeCandidate(argv) {
+@@ -937 +1029 @@ function handleTaskResumeCandidate(argv) {
 -  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
 +  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)));
-@@ -976 +1062,4 @@ async function handleCancel(argv) {
+@@ -976 +1068,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
 +    job.jobClass === "review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1076,3 @@ async function handleCancel(argv) {
+@@ -986,0 +1082,3 @@ async function handleCancel(argv) {
 +  if (job.jobClass === "review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
-@@ -1023,0 +1116,21 @@ async function handleCancel(argv) {
+@@ -1023,0 +1122,21 @@ async function handleCancel(argv) {
 +const STORED_REVIEW_OPERATION_ERROR = "Stored review operation must be plan-review or diff-review.";
 +const STORED_REVIEW_IDENTITY_ERROR = "Stored review identity must have matching kind, jobClass, and reviewOperation.";
 +
@@ -2178,6 +2254,273 @@ index 2da2349..29eb4f2 100644
 +  pruneJobRecordsInStateDir(resolveStateDir(cwd), { retain });
 +}
 +
+diff --git a/plugins/codex/scripts/lib/stdio-claims.mjs b/plugins/codex/scripts/lib/stdio-claims.mjs
+new file mode 100644
+index 0000000..19625fd
+--- /dev/null
++++ b/plugins/codex/scripts/lib/stdio-claims.mjs
+@@ -0,0 +1,261 @@
++import { execFileSync } from "node:child_process";
++import crypto from "node:crypto";
++import fs from "node:fs";
++import path from "node:path";
++
++import { isProcessAlive } from "./process.mjs";
++import { resolveStateRoot } from "./state.mjs";
++
++export const STDIO_CLAIMS_DIR = "stdio-claims";
++
++const MAX_ANNOUNCE_ATTEMPTS = 3;
++const FINISHED_FILE = "finished.json";
++const FINISHED_TTL_MS = 60 * 60 * 1000;
++
++// Identifies one process instance, so a pid that was recycled by an unrelated
++// process is told apart from the reviewer that wrote an entry. Returns null
++// when it cannot be read; a null on either side is treated as "same process".
++export function processStartId(pid) {
++  try {
++    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
++    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
++    if (fields[19]) {
++      return `proc:${fields[19]}`;
++    }
++  } catch {
++    // No procfs here, or the process is gone.
++  }
++  try {
++    const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
++      encoding: "utf8",
++      env: { ...process.env, LC_ALL: "C" },
++      stdio: ["ignore", "pipe", "ignore"],
++      timeout: 2000
++    }).trim();
++    return started ? `ps:${started}` : null;
++  } catch {
++    return null;
++  }
++}
++
++function sameInstance(recorded, pid) {
++  if (typeof recorded !== "string") {
++    return true;
++  }
++  const live = processStartId(pid);
++  if (live === null || live.split(":")[0] !== recorded.split(":")[0]) {
++    return true;
++  }
++  return live === recorded;
++}
++
++function couldNotClaim(role, entry) {
++  return new Error(`Could not claim the reviewer ${role} file at ${entry}.`);
++}
++
++// Writes `<keyDir>/<pid>.json` by linking a fully written temp file into place,
++// so the entry is never visible half written. An EEXIST means a dead earlier
++// process with a reused pid left it (this process claims a key only once).
++function announce({ root, keyDir, entry, pid, role }) {
++  const body = JSON.stringify({ pid, role, start: processStartId(pid) });
++  let replaced = false;
++  for (let attempt = 1; attempt <= MAX_ANNOUNCE_ATTEMPTS; attempt += 1) {
++    const temp = path.join(keyDir, `.${pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
++    try {
++      fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
++      try {
++        fs.writeFileSync(temp, body, { mode: 0o600 });
++        fs.linkSync(temp, entry);
++        return;
++      } finally {
++        fs.rmSync(temp, { force: true });
++      }
++    } catch (error) {
++      if (error?.code === "EEXIST" && !replaced) {
++        replaced = true;
++        fs.rmSync(entry, { force: true });
++        attempt -= 1;
++        continue;
++      }
++      if (error?.code === "ENOENT" && attempt < MAX_ANNOUNCE_ATTEMPTS) {
++        continue;
++      }
++      if (error?.code === "EEXIST" || error?.code === "ENOENT") {
++        throw couldNotClaim(role, entry);
++      }
++      throw error;
++    }
++  }
++  throw couldNotClaim(role, entry);
++}
++
++function liveHolder(keyDir, ownName) {
++  let names;
++  try {
++    names = fs.readdirSync(keyDir);
++  } catch (error) {
++    if (error?.code === "ENOENT") {
++      return null;
++    }
++    throw error;
++  }
++  for (const name of names) {
++    const match = /^(\d+)\.json$/.exec(name);
++    if (!match || name === ownName) {
++      continue;
++    }
++    const holder = Number(match[1]);
++    if (!Number.isSafeInteger(holder) || holder <= 0 || !isProcessAlive(holder)) {
++      continue;
++    }
++    let recorded = null;
++    try {
++      recorded = JSON.parse(fs.readFileSync(path.join(keyDir, name), "utf8"))?.start;
++    } catch {
++      // An unreadable entry cannot prove its pid was recycled.
++    }
++    if (sameInstance(recorded, holder)) {
++      return holder;
++    }
++  }
++  return null;
++}
++
++// A shell opens, and so truncates, a `>` file before this process exists. A
++// reviewer that finished and released while this one was still starting would
++// then leave its object in a file this one is about to overwrite from offset 0.
++// The finished reviewer records the size and mtime its output left behind; the
++// same pair on this file now means nothing has rewritten it since.
++function finishedWriter(keyDir, stat) {
++  let marker;
++  try {
++    marker = JSON.parse(fs.readFileSync(path.join(keyDir, FINISHED_FILE), "utf8"));
++  } catch {
++    return null;
++  }
++  if (marker?.size === String(stat.size) && marker?.mtimeNs === String(stat.mtimeNs) && Number.isSafeInteger(marker.pid)) {
++    return marker.pid;
++  }
++  return null;
++}
++
++function writeFinishedMarker(keyDir, fd, pid) {
++  const stat = fs.fstatSync(fd, { bigint: true });
++  if (!stat.isFile() || stat.size === 0n) {
++    return;
++  }
++  const temp = path.join(keyDir, `.finished.${pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
++  try {
++    fs.writeFileSync(temp, JSON.stringify({ pid, size: String(stat.size), mtimeNs: String(stat.mtimeNs) }), { mode: 0o600 });
++    fs.renameSync(temp, path.join(keyDir, FINISHED_FILE));
++  } finally {
++    fs.rmSync(temp, { force: true });
++  }
++}
++
++function pruneFinished(root) {
++  let keys;
++  try {
++    keys = fs.readdirSync(root);
++  } catch {
++    return;
++  }
++  for (const key of keys) {
++    const keyDir = path.join(root, key);
++    try {
++      if (Date.now() - fs.statSync(path.join(keyDir, FINISHED_FILE)).mtimeMs > FINISHED_TTL_MS) {
++        fs.rmSync(path.join(keyDir, FINISHED_FILE), { force: true });
++        fs.rmdirSync(keyDir);
++      }
++    } catch {
++      // No marker, a claimant's entry keeps the directory, or it is already gone.
++    }
++  }
++}
++
++// Claims the regular files behind a reviewer's stdin and stdout. Each claimant
++// announces its own entry first and only then lists the key directory, so of
++// two overlapping claimants the one that lists later always sees the other.
++// An entry is never deleted by anyone but its own claimant: deleting a stale
++// one would let two recoverers both proceed.
++export function claimReviewerStdio({
++  streams = [{ fd: 0, role: "stdin" }, { fd: 1, role: "stdout" }],
++  root = path.join(resolveStateRoot(), STDIO_CLAIMS_DIR),
++  pid = process.pid,
++  afterAnnounce = null
++} = {}) {
++  const announced = [];
++
++  function teardown(finished) {
++    const claims = announced.splice(0);
++    if (finished) {
++      for (const { keyDir, stdoutFd } of claims) {
++        if (stdoutFd === null) {
++          continue;
++        }
++        try {
++          writeFinishedMarker(keyDir, stdoutFd, pid);
++        } catch {
++          // The marker only narrows a race; failing to leave one is not an error.
++        }
++      }
++    }
++    for (const { entry } of claims) {
++      try {
++        fs.unlinkSync(entry);
++      } catch {
++        // Already gone.
++      }
++    }
++    for (const { keyDir } of claims) {
++      try {
++        fs.rmdirSync(keyDir);
++      } catch {
++        // Another claimant's entry keeps it, or it is already gone.
++      }
++    }
++  }
++
++  try {
++    pruneFinished(root);
++    for (const { fd, role } of streams) {
++      let stat;
++      try {
++        stat = fs.fstatSync(fd, { bigint: true });
++      } catch {
++        continue;
++      }
++      if (!stat.isFile()) {
++        continue;
++      }
++      const key = `${stat.dev}-${stat.ino}`;
++      let claim = announced.find((candidate) => candidate.key === key);
++      if (!claim) {
++        const keyDir = path.join(root, key);
++        const ownName = `${pid}.json`;
++        const entry = path.join(keyDir, ownName);
++        fs.mkdirSync(root, { recursive: true, mode: 0o700 });
++        announce({ root, keyDir, entry, pid, role });
++        claim = { key, keyDir, entry, stdoutFd: null };
++        announced.push(claim);
++        afterAnnounce?.(key);
++        const holder = liveHolder(keyDir, ownName);
++        if (holder !== null) {
++          throw new Error(`Another running codex-companion reviewer (pid ${holder}) has the same ${role} file; give each review its own packet and output file.`);
++        }
++      }
++      if (role === "stdout" && claim.stdoutFd === null) {
++        claim.stdoutFd = fd;
++        const writer = finishedWriter(claim.keyDir, stat);
++        if (writer !== null) {
++          throw new Error(`Reviewer pid ${writer} already wrote this stdout file after it was opened here; give each review its own packet and output file.`);
++        }
++      }
++    }
++  } catch (error) {
++    teardown(false);
++    throw error;
++  }
++
++  return { claims: announced.map(({ entry }) => entry), release: () => teardown(true) };
++}
 diff --git a/plugins/codex/scripts/lib/tracked-jobs.mjs b/plugins/codex/scripts/lib/tracked-jobs.mjs
 index 9028690..1979459 100644
 --- a/plugins/codex/scripts/lib/tracked-jobs.mjs
@@ -3511,18 +3854,26 @@ index c34b060..71664da 100644
 @@ -223 +305,0 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(readme, /\/codex:setup --enable-review-gate/);
 diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
-index f83c96a..a8ea1dc 100644
+index f83c96a..428fd40 100644
 --- a/tests/fake-codex-fixture.mjs
 +++ b/tests/fake-codex-fixture.mjs
-@@ -274,0 +275,2 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
+@@ -235,0 +236,4 @@ function taskPayload(prompt, resume) {
++  if (BEHAVIOR === "echo-slow-task") {
++    const marker = prompt.match(/review-marker-[a-z]+/);
++    return "Task prompt accepted.\\n" + (marker ? marker[0] : "no-marker");
++  }
+@@ -274,0 +279,2 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
 +bootState.appServerPid = process.pid;
 +bootState.lastCodexHome = process.env.CODEX_HOME || null;
-@@ -314,0 +317,2 @@ rl.on("line", (line) => {
+@@ -314,0 +321,2 @@ rl.on("line", (line) => {
 +        state.lastThreadStart = message.params;
 +        saveState(state);
-@@ -316 +320 @@ rl.on("line", (line) => {
+@@ -316 +324 @@ rl.on("line", (line) => {
 -        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
 +        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: message.params.config?.model_reasoning_effort ?? null } });
+@@ -604,0 +613,2 @@ rl.on("line", (line) => {
++	        } else if (BEHAVIOR === "echo-slow-task") {
++	          emitTurnCompletedLater(thread.id, turnId, items, 1500);
 diff --git a/tests/git.test.mjs b/tests/git.test.mjs
 index 5b5c266..11b94e3 100644
 --- a/tests/git.test.mjs
@@ -4396,6 +4747,176 @@ index 0000000..efcb118
 +  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
 +  assert.equal(Object.hasOwn(fakeState.lastThreadStart, "config"), false);
 +});
+diff --git a/tests/reviewer-stdio-isolation.test.mjs b/tests/reviewer-stdio-isolation.test.mjs
+new file mode 100644
+index 0000000..36ed455
+--- /dev/null
++++ b/tests/reviewer-stdio-isolation.test.mjs
+@@ -0,0 +1,164 @@
++import fs from "node:fs";
++import path from "node:path";
++import test from "node:test";
++import assert from "node:assert/strict";
++import { spawn } from "node:child_process";
++import { fileURLToPath } from "node:url";
++
++import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
++import { initGitRepo, makeTempDir, pinHermeticStateRoot, run } from "./helpers.mjs";
++
++pinHermeticStateRoot("reviewer-stdio-isolation");
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
++
++function reviewRepo() {
++  const repo = makeTempDir();
++  initGitRepo(repo);
++  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
++  run("git", ["add", "README.md"], { cwd: repo });
++  run("git", ["commit", "-m", "init"], { cwd: repo });
++  return repo;
++}
++
++// One fake Codex installation per reviewer: fake-codex-state.json is not safe to share.
++function fakeCodex(behavior) {
++  const binDir = makeTempDir();
++  installFakeCodex(binDir, behavior);
++  return binDir;
++}
++
++function reviewerEnv(binDir) {
++  const canonicalHome = makeTempDir();
++  fs.writeFileSync(path.join(canonicalHome, "auth.json"), "{}\n");
++  return { ...buildEnv(binDir), CODEX_HOME: canonicalHome };
++}
++
++function startReviewer({ repo, binDir, stdin, stdout, prompt, timeoutMs = 20000 }) {
++  const args = [SCRIPT, "task", "--fresh", "--reviewer", "plan-review", "--timeout-ms", String(timeoutMs), "--json"];
++  if (prompt) args.push(prompt);
++  const child = spawn(process.execPath, args, { cwd: repo, env: reviewerEnv(binDir), stdio: [stdin, stdout, "pipe"] });
++  for (const fd of [stdin, stdout]) if (typeof fd === "number") fs.closeSync(fd);
++  return new Promise((resolve) => {
++    let stderr = "";
++    child.stderr.on("data", (chunk) => { stderr += chunk; });
++    child.on("exit", (status) => resolve({ status, stderr }));
++  });
++}
++
++const claimsRoot = () => path.join(process.env.CLAUDE_PLUGIN_DATA, "state", "stdio-claims");
++
++function claimEntries() {
++  if (!fs.existsSync(claimsRoot())) return [];
++  return fs.readdirSync(claimsRoot(), { withFileTypes: true })
++    .filter((entry) => entry.isDirectory())
++    .flatMap((entry) => {
++      try {
++        return fs.readdirSync(path.join(claimsRoot(), entry.name)).filter((name) => /^\d+\.json$/.test(name));
++      } catch {
++        return [];
++      }
++    });
++}
++
++async function waitFor(predicate, what, timeoutMs = 15000) {
++  const deadline = Date.now() + timeoutMs;
++  while (!predicate()) {
++    assert.ok(Date.now() < deadline, `${what} not reached in time`);
++    await new Promise((resolve) => setTimeout(resolve, 20));
++  }
++}
++
++const fakeState = (binDir) => path.join(binDir, "fake-codex-state.json");
++
++test("two concurrent reviewers with their own files each return exactly their own single object", async () => {
++  const repo = reviewRepo();
++  const reviews = ["alpha", "beta"].map((name) => ({
++    marker: `review-marker-${name}`,
++    binDir: fakeCodex("echo-slow-task"),
++    outFile: path.join(makeTempDir(), `${name}.json`)
++  }));
++  const exits = reviews.map(({ marker, binDir, outFile }) =>
++    startReviewer({ repo, binDir, stdin: "ignore", stdout: fs.openSync(outFile, "w"), prompt: `review packet ${marker}` }));
++  await waitFor(() => claimEntries().length === 2, "both reviewers holding their claims at once");
++  const results = await Promise.all(exits);
++  for (const [index, { marker, outFile }] of reviews.entries()) {
++    const otherMarker = reviews[1 - index].marker;
++    assert.equal(results[index].status, 0, results[index].stderr);
++    const review = JSON.parse(fs.readFileSync(outFile, "utf8")); // JSON.parse rejects trailing data
++    assert.equal(review.status, 0);
++    assert.ok(review.rawOutput.includes(marker), `${marker} missing from its own output`);
++    assert.ok(!review.rawOutput.includes(otherMarker), `${otherMarker} leaked into ${marker}'s output`);
++  }
++  assert.deepEqual(claimEntries(), []);
++});
++
++test("a second reviewer sharing the first one's stdout file refuses before running", async () => {
++  const repo = reviewRepo();
++  const firstBin = fakeCodex("interruptible-slow-task");
++  const secondBin = fakeCodex("interruptible-slow-task");
++  const outFile = path.join(makeTempDir(), "out.json");
++  const firstExit = startReviewer({ repo, binDir: firstBin, stdin: "ignore", stdout: fs.openSync(outFile, "w"), prompt: "review packet" });
++  await waitFor(() => claimEntries().length === 1, "the first reviewer's claim");
++
++  const second = await startReviewer({ repo, binDir: secondBin, stdin: "ignore", stdout: fs.openSync(outFile, "a"), prompt: "review packet" });
++  assert.equal(second.status, 1);
++  assert.match(second.stderr, /Another running codex-companion reviewer \(pid \d+\) has the same stdout file/);
++  assert.equal(fs.existsSync(fakeState(secondBin)), false, "the refused reviewer started Codex");
++
++  const first = await firstExit;
++  assert.equal(first.status, 0, first.stderr);
++  assert.equal(JSON.parse(fs.readFileSync(outFile, "utf8")).status, 0);
++  assert.deepEqual(claimEntries(), []);
++});
++
++test("a second reviewer reading the first one's packet file on stdin refuses before reading it", async () => {
++  const repo = reviewRepo();
++  const firstBin = fakeCodex("interruptible-slow-task");
++  const secondBin = fakeCodex("interruptible-slow-task");
++  const packet = path.join(makeTempDir(), "packet.md");
++  fs.writeFileSync(packet, "review packet review-marker-stdin\n");
++  const firstOut = path.join(makeTempDir(), "first.json");
++  const secondOut = path.join(makeTempDir(), "second.json");
++  const firstExit = startReviewer({ repo, binDir: firstBin, stdin: fs.openSync(packet, "r"), stdout: fs.openSync(firstOut, "w") });
++  await waitFor(() => claimEntries().length === 2, "the first reviewer's stdin and stdout claims");
++
++  const second = await startReviewer({ repo, binDir: secondBin, stdin: fs.openSync(packet, "r"), stdout: fs.openSync(secondOut, "w") });
++  assert.equal(second.status, 1);
++  assert.match(second.stderr, /Another running codex-companion reviewer \(pid \d+\) has the same stdin file/);
++  assert.equal(fs.readFileSync(secondOut, "utf8"), "");
++  assert.equal(fs.existsSync(fakeState(secondBin)), false, "the refused reviewer started Codex");
++
++  const first = await firstExit;
++  assert.equal(first.status, 0, first.stderr);
++  assert.equal(JSON.parse(fs.readFileSync(firstOut, "utf8")).status, 0);
++  assert.ok(JSON.parse(fs.readFileSync(fakeState(firstBin), "utf8")).lastTurnStart.prompt.includes("review-marker-stdin"));
++  assert.deepEqual(claimEntries(), []);
++});
++
++test("a reviewer whose truncating redirect opened before another reviewer finished is refused, not allowed to overwrite it", async () => {
++  const repo = reviewRepo();
++  const firstBin = fakeCodex("echo-slow-task");
++  const laterBin = fakeCodex("echo-slow-task");
++  const outFile = path.join(makeTempDir(), "out.json");
++  const firstFd = fs.openSync(outFile, "w");
++  const firstExit = startReviewer({ repo, binDir: firstBin, stdin: "ignore", stdout: firstFd, prompt: "review packet review-marker-alpha" });
++  await waitFor(() => claimEntries().length === 1, "the first reviewer's claim");
++
++  // The later reviewer's shell opens, and so truncates, the shared file now. Its process starts only after
++  // the first reviewer has written its object and released its claim.
++  const laterFd = fs.openSync(outFile, "w");
++  const first = await firstExit;
++  assert.equal(first.status, 0, first.stderr);
++  assert.equal(JSON.parse(fs.readFileSync(outFile, "utf8")).status, 0);
++  assert.deepEqual(claimEntries(), []);
++
++  const later = await startReviewer({ repo, binDir: laterBin, stdin: "ignore", stdout: laterFd, prompt: "review packet review-marker-beta" });
++  assert.equal(later.status, 1);
++  assert.match(later.stderr, /already wrote this stdout file/);
++  assert.equal(fs.existsSync(fakeState(laterBin)), false, "the refused reviewer started Codex");
++  const survivor = JSON.parse(fs.readFileSync(outFile, "utf8"));
++  assert.ok(survivor.rawOutput.includes("review-marker-alpha"));
++  assert.ok(!survivor.rawOutput.includes("review-marker-beta"));
++});
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
 index 8f27683..692054c 100644
 --- a/tests/runtime.test.mjs
@@ -4666,6 +5187,282 @@ index 0f8f57c..cafb91e 100644
 @@ -96 +104 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap",
 -    savedState.jobs.map((job) => job.id),
 +    savedJobs.map((job) => job.id),
+diff --git a/tests/stdio-claims.test.mjs b/tests/stdio-claims.test.mjs
+new file mode 100644
+index 0000000..f2c32f7
+--- /dev/null
++++ b/tests/stdio-claims.test.mjs
+@@ -0,0 +1,270 @@
++import fs from "node:fs";
++import path from "node:path";
++import test from "node:test";
++import assert from "node:assert/strict";
++import { spawn, spawnSync } from "node:child_process";
++import { fileURLToPath, pathToFileURL } from "node:url";
++
++import { makeTempDir } from "./helpers.mjs";
++import { claimReviewerStdio } from "../plugins/codex/scripts/lib/stdio-claims.mjs";
++
++const MODULE_URL = pathToFileURL(path.resolve(
++  path.dirname(fileURLToPath(import.meta.url)), "..", "plugins", "codex", "scripts", "lib", "stdio-claims.mjs"
++)).href;
++
++const refusal = (pid, role) => new RegExp(
++  `^Error: Another running codex-companion reviewer \\(pid ${pid}\\) has the same ${role} file; give each review its own packet and output file\\.$`
++);
++
++function liveChild() {
++  return spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
++}
++
++function deadPid() {
++  return spawnSync(process.execPath, ["-e", ""]).pid;
++}
++
++function keyDir(root, fd) {
++  const { dev, ino } = fs.fstatSync(fd);
++  return path.join(root, `${dev}-${ino}`);
++}
++
++function openTarget(t, name, flags = "w") {
++  const fd = fs.openSync(path.join(makeTempDir(), name), flags);
++  t.after(() => fs.closeSync(fd));
++  return fd;
++}
++
++test("a live holder refuses a second claimant on the same regular file", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "out.json");
++  const first = claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root });
++  assert.deepEqual(first.claims, [path.join(keyDir(root, fd), `${process.pid}.json`)]);
++  const other = liveChild();
++  t.after(() => other.kill("SIGKILL"));
++  assert.throws(() => claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root, pid: other.pid }), refusal(process.pid, "stdout"));
++  assert.deepEqual(fs.readdirSync(keyDir(root, fd)), [`${process.pid}.json`]);
++  first.release();
++  first.release();
++  assert.deepEqual(fs.readdirSync(root), []);
++});
++
++test("a dead holder's entry is ignored and never deleted by another claimant", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "packet.md");
++  const dir = keyDir(root, fd);
++  const dead = deadPid();
++  fs.mkdirSync(dir, { recursive: true });
++  fs.writeFileSync(path.join(dir, `${dead}.json`), JSON.stringify({ pid: dead, role: "stdin" }));
++  const claim = claimReviewerStdio({ streams: [{ fd, role: "stdin" }], root });
++  assert.deepEqual(fs.readdirSync(dir).sort(), [`${dead}.json`, `${process.pid}.json`].sort());
++  claim.release();
++  assert.deepEqual(fs.readdirSync(dir), [`${dead}.json`]);
++});
++
++test("an entry under this process's own pid, left by a dead process that had the same pid, is replaced", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "out.json");
++  const dir = keyDir(root, fd);
++  fs.mkdirSync(dir, { recursive: true });
++  fs.writeFileSync(path.join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, role: "old" }));
++  const claim = claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root });
++  assert.equal(JSON.parse(fs.readFileSync(claim.claims[0], "utf8")).role, "stdout");
++  claim.release();
++  assert.equal(fs.existsSync(dir), false);
++});
++
++test("concurrent recovery over a dead entry admits exactly one holder, in either order", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "out.json");
++  const dir = keyDir(root, fd);
++  const dead = deadPid();
++  fs.mkdirSync(dir, { recursive: true });
++  fs.writeFileSync(path.join(dir, `${dead}.json`), JSON.stringify({ pid: dead, role: "stdout" }));
++  const other = liveChild();
++  t.after(() => other.kill("SIGKILL"));
++  const streams = [{ fd, role: "stdout" }];
++
++  // The second claimant runs fully while the first has announced but not scanned.
++  const first = claimReviewerStdio({
++    streams, root,
++    afterAnnounce: () => assert.throws(() => claimReviewerStdio({ streams, root, pid: other.pid }), refusal(process.pid, "stdout"))
++  });
++  assert.deepEqual(fs.readdirSync(dir).sort(), [`${dead}.json`, `${process.pid}.json`].sort());
++  first.release();
++
++  const second = claimReviewerStdio({
++    streams, root, pid: other.pid,
++    afterAnnounce: () => assert.throws(() => claimReviewerStdio({ streams, root }), refusal(other.pid, "stdout"))
++  });
++  assert.deepEqual(fs.readdirSync(dir).sort(), [`${dead}.json`, `${other.pid}.json`].sort());
++  second.release();
++  assert.deepEqual(fs.readdirSync(dir), [`${dead}.json`]);
++});
++
++test("many processes racing for one file never hold it at the same time", async () => {
++  const root = makeTempDir();
++  const work = makeTempDir();
++  const target = path.join(work, "out.json");
++  fs.writeFileSync(target, "");
++  const { dev, ino } = fs.statSync(target);
++  const dead = deadPid();
++  fs.mkdirSync(path.join(root, `${dev}-${ino}`), { recursive: true });
++  fs.writeFileSync(path.join(root, `${dev}-${ino}`, `${dead}.json`), JSON.stringify({ pid: dead, role: "stdout" }));
++  const gate = path.join(work, "go");
++  const log = path.join(work, "holds.jsonl");
++  const source = `
++    import fs from "node:fs";
++    const [moduleUrl, file, root, log, gate] = process.argv.slice(1);
++    const { claimReviewerStdio } = await import(moduleUrl);
++    const fd = fs.openSync(file, "r");
++    while (!fs.existsSync(gate)) await new Promise((r) => setTimeout(r, 5));
++    let claim;
++    try { claim = claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root }); } catch { process.exit(2); }
++    const start = Date.now();
++    await new Promise((r) => setTimeout(r, 150));
++    fs.appendFileSync(log, JSON.stringify({ start, end: Date.now() }) + "\\n");
++    claim.release();
++  `;
++  const children = Array.from({ length: 8 }, () =>
++    spawn(process.execPath, ["--input-type=module", "-e", source, MODULE_URL, target, root, log, gate], { stdio: "ignore" }));
++  const exits = children.map((child) => new Promise((resolve) => child.on("exit", resolve)));
++  fs.writeFileSync(gate, "");
++  const codes = await Promise.all(exits);
++  assert.ok(codes.every((code) => code === 0 || code === 2), `unexpected exit codes ${codes}`);
++  const holds = fs.existsSync(log)
++    ? fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line)).sort((a, b) => a.start - b.start)
++    : [];
++  assert.equal(holds.length, codes.filter((code) => code === 0).length);
++  for (let i = 1; i < holds.length; i += 1) {
++    assert.ok(holds[i].start > holds[i - 1].end, `holds ${i - 1} and ${i} overlap`);
++  }
++  assert.deepEqual(fs.readdirSync(path.join(root, `${dev}-${ino}`)), [`${dead}.json`]);
++});
++
++test("character devices and pipes are not claimed", (t) => {
++  const root = makeTempDir();
++  const devNull = fs.openSync("/dev/null", "w");
++  t.after(() => fs.closeSync(devNull));
++  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: ["pipe", "ignore", "ignore"] });
++  t.after(() => child.kill("SIGKILL"));
++  const claim = claimReviewerStdio({ streams: [{ fd: devNull, role: "stdout" }, { fd: child.stdin._handle.fd, role: "stdin" }], root });
++  assert.deepEqual(claim.claims, []);
++  assert.deepEqual(fs.existsSync(root) ? fs.readdirSync(root) : [], []);
++});
++
++test("stdin and stdout on the same file take one entry", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "both.txt", "w+");
++  const claim = claimReviewerStdio({ streams: [{ fd, role: "stdin" }, { fd, role: "stdout" }], root });
++  assert.equal(claim.claims.length, 1);
++  claim.release();
++  assert.deepEqual(fs.readdirSync(root), []);
++});
++
++const startKind = () => (fs.existsSync("/proc/self/stat") ? "proc" : "ps");
++
++test("an entry whose pid now belongs to a different process instance is stale and ignored", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "out.json");
++  const dir = keyDir(root, fd);
++  const recycled = liveChild();
++  t.after(() => recycled.kill("SIGKILL"));
++  fs.mkdirSync(dir, { recursive: true });
++  fs.writeFileSync(
++    path.join(dir, `${recycled.pid}.json`),
++    JSON.stringify({ pid: recycled.pid, role: "stdout", start: `${startKind()}:not-the-start-of-this-process` })
++  );
++  const claim = claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root });
++  assert.deepEqual(fs.readdirSync(dir).sort(), [`${recycled.pid}.json`, `${process.pid}.json`].sort());
++  claim.release();
++  assert.deepEqual(fs.readdirSync(dir), [`${recycled.pid}.json`]);
++});
++
++test("an entry that carries no start identity still counts as held while its pid is alive", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "out.json");
++  const dir = keyDir(root, fd);
++  const holder = liveChild();
++  t.after(() => holder.kill("SIGKILL"));
++  fs.mkdirSync(dir, { recursive: true });
++  fs.writeFileSync(path.join(dir, `${holder.pid}.json`), JSON.stringify({ pid: holder.pid, role: "stdout" }));
++  assert.throws(() => claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root }), refusal(holder.pid, "stdout"));
++});
++
++test("an entry announced for a live pid records that process's start identity", (t) => {
++  const root = makeTempDir();
++  const fd = openTarget(t, "out.json");
++  const other = liveChild();
++  t.after(() => other.kill("SIGKILL"));
++  const claim = claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root, pid: other.pid });
++  const entry = JSON.parse(fs.readFileSync(claim.claims[0], "utf8"));
++  assert.match(entry.start, new RegExp(`^${startKind()}:.+`));
++  // A second claimant sees the same instance and is refused.
++  assert.throws(() => claimReviewerStdio({ streams: [{ fd, role: "stdout" }], root }), refusal(other.pid, "stdout"));
++  claim.release();
++});
++
++test("a reviewer that wrote a stdout file leaves it refused to a later claimant that opened it earlier", (t) => {
++  const root = makeTempDir();
++  const target = path.join(makeTempDir(), "out.json");
++  const firstFd = fs.openSync(target, "w");
++  const laterFd = fs.openSync(target, "w"); // the later reviewer's shell truncated it before the first one wrote
++  t.after(() => { fs.closeSync(firstFd); fs.closeSync(laterFd); });
++  const other = liveChild();
++  t.after(() => other.kill("SIGKILL"));
++
++  const first = claimReviewerStdio({ streams: [{ fd: firstFd, role: "stdout" }], root });
++  fs.writeSync(firstFd, '{"review":"first"}\n');
++  first.release();
++
++  assert.throws(
++    () => claimReviewerStdio({ streams: [{ fd: laterFd, role: "stdout" }], root, pid: other.pid }),
++    new RegExp(`^Error: Reviewer pid ${process.pid} already wrote this stdout file after it was opened here; give each review its own packet and output file\\.$`)
++  );
++  assert.equal(fs.readFileSync(target, "utf8"), '{"review":"first"}\n');
++  assert.equal(fs.readdirSync(keyDir(root, firstFd)).includes(`${other.pid}.json`), false, "the refused claimant left its entry");
++
++  // Once the file is truncated again, as a fresh redirect would do, it is free.
++  fs.ftruncateSync(laterFd, 0);
++  const later = claimReviewerStdio({ streams: [{ fd: laterFd, role: "stdout" }], root, pid: other.pid });
++  later.release();
++});
++
++test("a finished reviewer's unchanged packet or empty output refuses nobody", (t) => {
++  const root = makeTempDir();
++  const work = makeTempDir();
++  const packet = path.join(work, "packet.md");
++  fs.writeFileSync(packet, "review packet\n");
++  const out = path.join(work, "out.json");
++  const packetFd = fs.openSync(packet, "r");
++  const outFd = fs.openSync(out, "w");
++  t.after(() => { fs.closeSync(packetFd); fs.closeSync(outFd); });
++
++  claimReviewerStdio({ streams: [{ fd: packetFd, role: "stdin" }, { fd: outFd, role: "stdout" }], root }).release();
++  // The packet may be reused for a retry; an output that stayed empty left nothing to protect.
++  claimReviewerStdio({ streams: [{ fd: packetFd, role: "stdin" }, { fd: outFd, role: "stdout" }], root }).release();
++  assert.equal(fs.existsSync(path.join(keyDir(root, packetFd), "finished.json")), false);
++});
++
++test("finished markers older than an hour are pruned, with their key directory", (t) => {
++  const root = makeTempDir();
++  const work = makeTempDir();
++  const oldOut = path.join(work, "old.json");
++  const newOut = path.join(work, "new.json");
++  const oldFd = fs.openSync(oldOut, "w");
++  const newFd = fs.openSync(newOut, "w");
++  t.after(() => { fs.closeSync(oldFd); fs.closeSync(newFd); });
++
++  const old = claimReviewerStdio({ streams: [{ fd: oldFd, role: "stdout" }], root });
++  fs.writeSync(oldFd, "x");
++  old.release();
++  const oldMarker = path.join(keyDir(root, oldFd), "finished.json");
++  assert.equal(fs.existsSync(oldMarker), true);
++  const longAgo = new Date(Date.now() - 2 * 3600 * 1000);
++  fs.utimesSync(oldMarker, longAgo, longAgo);
++
++  const next = claimReviewerStdio({ streams: [{ fd: newFd, role: "stdout" }], root });
++  assert.equal(fs.existsSync(keyDir(root, oldFd)), false);
++  next.release();
++});
 diff --git a/tests/worker-postmortem.test.mjs b/tests/worker-postmortem.test.mjs
 new file mode 100644
 index 0000000..bd7dd0e
