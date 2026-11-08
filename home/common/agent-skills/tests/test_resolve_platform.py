@@ -534,12 +534,12 @@ class CommittedManifestTest(ResolverTestCase):
         manifest = committed_manifest()
         self.assertEqual(sorted(manifest), sorted(MANIFEST_MEMBERS))
         self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["platform_version"], "1.1.0")
-        self.assertEqual(manifest["project_schema_versions"], [1])
+        self.assertEqual(manifest["platform_version"], "1.2.0")
+        self.assertEqual(manifest["project_schema_versions"], [1, 2])
         self.assertEqual(manifest["resolved_schema_version"], 1)
-        for name in ("migrations", "removals"):
-            with self.subTest(member=name):
-                self.assertEqual(manifest[name], [])
+        self.assertEqual(manifest["migrations"], [
+            {"id": "bindings-deploy.retire", "from_schema": 1, "to_schema": 2}])
+        self.assertEqual(manifest["removals"], [])
 
     def test_it_declares_the_bridge_minor_deprecations(self):
         """Issue 580 D5: the legacy skills config and its adoption writer."""
@@ -668,7 +668,8 @@ class PlatformRangeTest(ResolverTestCase):
 
     def test_a_schema_absent_from_the_manifest_set_is_unsupported(self):
         contract = source_contract()
-        contract["schema_version"] = 2
+        # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+        contract["schema_version"] = 3
         code, payload, _ = self.resolve(self.make_root(contract))
         self.assert_unsupported(code, payload, "project_schema_unsupported",
                                 "/schema_version")
@@ -748,7 +749,8 @@ class ReasonCodePositionTest(ResolverTestCase):
         closed = ("platform_too_old", "platform_too_new",
                   "project_schema_unsupported")
         contract = source_contract()
-        contract["schema_version"] = 2
+        # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+        contract["schema_version"] = 3
         errors = [self.refusal("resolve", "--repo-root",
                                str(self.make_root(contract)))]
         for version in ("0.9.0", "2.0.0"):

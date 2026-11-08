@@ -38,6 +38,7 @@ from agent_tools import adopt_inspection, adopt_links, adopt_planning, adopt_pro
 from agent_tools.siblings import sibling_argv
 
 from ._inprocess_cli import run_module
+from .test_resolve_project import schema_two
 
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -168,8 +169,13 @@ def sha256_hash(data: bytes) -> str:
 # --------------------------------------------------------------------------
 
 
+# P11: the pinned schema-1 contract, not this repository's own live contract.
+SCHEMA_ONE_FIXTURE = (Path(__file__).resolve().parent / "fixtures"
+                      / "project-contract-schema-1.json")
+
+
 def source_contract() -> dict:
-    return json.loads((REPO_ROOT / ".agents" / "project.json").read_text("utf-8"))
+    return json.loads(SCHEMA_ONE_FIXTURE.read_text("utf-8"))
 
 
 # Built fixture repositories, each kept once per process (issue 612, the #500 pattern).
@@ -226,14 +232,19 @@ def write(root: Path, relative: str, text: str) -> Path:
     return path
 
 
-def fixture_contract(**overrides: object) -> dict:
-    """A valid schema-1 contract, taken from this repository's own.
+def fixture_contract(*, schema: int = 2, **overrides: object) -> dict:
+    """A valid contract in the highest supported project schema, derived from the
+    pinned schema-1 contract.
 
     Derived rather than authored so that the fixture cannot drift out of
     validity as the contract's shape evolves; only the members a case is about
     are overridden.
     """
+    # P3: platform 1.2.0 routes a schema-1 project to `migration_required`, so the
+    # fixtures that mean "the current schema" are schema 2 (no deploy members).
     contract = source_contract()
+    if schema == 2:
+        contract = schema_two(contract)
     contract["project"] = {"id": "fixture/target", "name": "target"}
     contract["bindings"]["paths"]["artifacts"] = {
         "specs": ".agents/artifacts/specs", "plans": ".agents/artifacts/plans"}
@@ -336,7 +347,7 @@ def write_adoption_records(root: Path, digest: str = "a1" * 32) -> str:
 
 
 @templated
-def adopted_repo(home: Path, *, records: bool = True) -> Path:
+def adopted_repo(home: Path, *, records: bool = True, schema: int = 2) -> Path:
     """A conformant checkout: valid contract, sentinel present, nothing legacy.
 
     The two adoption records a real apply commits are present by default, in
@@ -345,7 +356,7 @@ def adopted_repo(home: Path, *, records: bool = True) -> Path:
     (D34). `records=False` is the fixture the discovery negatives start from.
     """
     root = init_repo()
-    scaffold(root, host_independent(fixture_contract()), home)
+    scaffold(root, host_independent(fixture_contract(schema=schema)), home)
     write(root, ".agents/runtime/.gitignore", "*\n")
     git(root, "add", "-f", ".agents/runtime/.gitignore")
     git(root, "remote", "add", "origin",
@@ -911,11 +922,22 @@ class OutcomeRoutingTest(AdoptTestCase):
         doc = self.ready_plan(reconcile_repo(self.home))
         self.assertEqual(doc["plan"]["outcome"], "reconcile")
 
+    def test_the_committed_manifest_routes_schema_one_forward_and_schema_two_to_no_change(self):
+        # P3: platform 1.2.0 makes schema 2 the highest supported schema.
+        root = adopted_repo(self.home, schema=1)
+        code, doc, err = self.plan(root, home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["outcome"], "migration_required")
+        self.assertIn("bindings-deploy.retire", doc["handoff"]["next_command"])
+        doc = self.ready_plan(adopted_repo(self.home))
+        self.assertEqual(doc["plan"]["outcome"], "no_change")
+
+    # P3: the schema-1 project below is the one a synthetic manifest routes forward.
     def test_rule_3_supported_but_not_highest_schema_is_migration_required(self):
         home = make_home(manifest_with(
             [1, 2], [{"id": "project-1-to-2", "from_schema": 1,
                       "to_schema": 2}]))
-        root = adopted_repo(home)
+        root = adopted_repo(home, schema=1)
         code, doc, err = self.plan(root, home=home)
         self.assertEqual(code, 0, err)
         self.assertEqual(doc["plan"]["outcome"], "migration_required")
@@ -926,7 +948,7 @@ class OutcomeRoutingTest(AdoptTestCase):
     def test_rule_4_unsupported_schema_with_forward_step_migrates(self):
         home = make_home(manifest_with(
             [2], [{"id": "project-1-to-2", "from_schema": 1, "to_schema": 2}]))
-        root = adopted_repo(self.home)
+        root = adopted_repo(self.home, schema=1)
         code, doc, err = self.plan(root, home=home)
         self.assertEqual(code, 0, err)
         self.assertEqual(doc["plan"]["outcome"], "migration_required")
@@ -934,7 +956,7 @@ class OutcomeRoutingTest(AdoptTestCase):
 
     def test_rule_4_unsupported_schema_without_forward_step_needs_repair(self):
         home = make_home(manifest_with([2], []))
-        root = adopted_repo(self.home)
+        root = adopted_repo(self.home, schema=1)
         code, doc, err = self.plan(root, home=home)
         self.assertEqual(code, 0, err)
         self.assertEqual(doc["plan"]["outcome"], "repair_required")
@@ -981,7 +1003,7 @@ class OutcomeRoutingTest(AdoptTestCase):
 class ForwardStepRefusalTest(AdoptTestCase):
     def test_absent_forward_step_is_adopt_failure(self):
         home = make_home(manifest_with([1, 2], []))
-        root = adopted_repo(self.home)
+        root = adopted_repo(self.home, schema=1)
         code, doc, err = self.plan(root, home=home)
         self.assertEqual(code, 2, err)
         self.assertEqual(doc["error"]["code"], "adopt_failure")
@@ -1370,7 +1392,7 @@ class InspectionBoundaryTest(AdoptTestCase):
 
     def test_read_only_on_a_refusing_run(self):
         home = make_home(manifest_with([1, 2], []))
-        root = adopted_repo(self.home)
+        root = adopted_repo(self.home, schema=1)
         before_status = git(root, "status", "--porcelain")
         before_tree = tree_snapshot(root)
         code, _, err = run("plan", "--repo-root", str(root), home=home)

@@ -408,7 +408,8 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
         cases = (
             ("platform_too_old", "0.9.0", 1, "/platform"),
             ("platform_too_new", "2.0.0", 1, "/platform"),
-            ("project_schema_unsupported", "1.4.2", 2, "/schema_version"),
+            # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+            ("project_schema_unsupported", "1.4.2", 3, "/schema_version"),
         )
         for reason_code, version, schema, pointer in cases:
             with self.subTest(reason_code=reason_code), fixture() as tmp:
@@ -424,7 +425,7 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
                      "contract.schema.unsupported"])
                 self.assertEqual(check["facts"], {
                     "platform_version": version,
-                    "supported_project_schemas": ["1"],
+                    "supported_project_schemas": ["1", "2"],  # P3: platform 1.2.0
                     "project_schema_version": schema,
                     "platform_min_inclusive": "1.0.0",
                     "platform_max_exclusive": "2.0.0",
@@ -506,7 +507,7 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
                 ["passed", None, None])
             self.assertEqual(check["facts"], {
                 "platform_version": "1.4.2",
-                "supported_project_schemas": ["1"],
+                "supported_project_schemas": ["1", "2"],  # P3: platform 1.2.0
                 "project_schema_version": 1,
                 "platform_min_inclusive": "1.0.0",
                 "platform_max_exclusive": "2.0.0",

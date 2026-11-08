@@ -160,12 +160,13 @@ class PlatformStatusTest(ResolverTestCase):
 
     def test_an_unsupported_project_schema_is_a_verdict_on_exit_zero(self):
         contract = source_contract()
-        contract["schema_version"] = 2
+        # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
+        contract["schema_version"] = 3
         code, payload, err = self.status(
             "--repo-root", str(self.make_root(contract)))
         self.assertEqual(code, 0, err)
         self.assertNotIn("error", payload)
-        self.assertEqual(payload["project"]["project_schema_version"], 2)
+        self.assertEqual(payload["project"]["project_schema_version"], 3)
         self.assertEqual(payload["compatibility"], {
             "compatible": False,
             "reason_code": "project_schema_unsupported",

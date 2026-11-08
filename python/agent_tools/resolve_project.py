@@ -76,6 +76,10 @@ CAPABILITY_NAMES = (
 AUTHORED_CAPABILITY_NAMES = tuple(
     name for name in CAPABILITY_NAMES if name != "release")
 BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow", "deploy")
+# Project schema 2 retires the deploy watch (P3): the two members it forbids. The
+# schema-2 sets are the schema-1 sets minus `deploy`; the contract's own
+# `schema_version` chooses between them, never a fallback.
+SCHEMA_TWO_RETIRED = ("/bindings/deploy", "/capabilities/deploy")
 CAPABILITY_STATES = ("available", "unsupported", "blocked")
 AUTHORED_SUPPORT = ("supported", "unsupported")
 ERROR_CODES = (
@@ -920,14 +924,43 @@ def validate_deploy(deploy: dict, commands: dict | None, tracker: dict | None,
             "contract.deploy.tracker_not_github"))
 
 
+def is_schema_two(source: dict) -> bool:
+    version = source.get("schema_version")
+    return version == 2 and not isinstance(version, bool)
+
+
+def binding_namespaces(source: dict) -> tuple[str, ...]:
+    if is_schema_two(source):
+        return tuple(n for n in BINDING_NAMESPACES if n != "deploy")
+    return BINDING_NAMESPACES
+
+
+def authored_capability_names(source: dict) -> tuple[str, ...]:
+    if is_schema_two(source):
+        return tuple(n for n in AUTHORED_CAPABILITY_NAMES if n != "deploy")
+    return AUTHORED_CAPABILITY_NAMES
+
+
+def retired_member(pointer: str, violations: list[dict]) -> None:
+    section = pointer.strip("/").replace("/", ".")
+    violations.append(violation(
+        pointer, "retired in project schema 2: remove this member",
+        f"contract.{section}.retired"))
+
+
 def validate_bindings(source: dict, violations: list[dict]) -> None:
     bindings = source.get("bindings")
     if not check_object(bindings, "/bindings", "bindings", violations):
         return
+    namespaces = binding_namespaces(source)
+    schema_two_source = is_schema_two(source)
     check_exact_members(
-        bindings, "/bindings", BINDING_NAMESPACES, "bindings", violations)
+        bindings, "/bindings", namespaces, "bindings", violations,
+        optional=("deploy",) if schema_two_source else ())
+    if schema_two_source and "deploy" in bindings:
+        retired_member("/bindings/deploy", violations)
     present = {}
-    for namespace in BINDING_NAMESPACES:
+    for namespace in namespaces:
         if namespace not in bindings:
             continue
         if check_object(
@@ -953,10 +986,14 @@ def validate_capabilities(source: dict, violations: list[dict]) -> None:
     capabilities = source.get("capabilities")
     if not check_object(capabilities, "/capabilities", "capabilities", violations):
         return
+    names = authored_capability_names(source)
+    schema_two_source = is_schema_two(source)
     check_exact_members(
-        capabilities, "/capabilities", AUTHORED_CAPABILITY_NAMES, "capabilities",
-        violations)
-    for name in AUTHORED_CAPABILITY_NAMES:
+        capabilities, "/capabilities", names, "capabilities",
+        violations, optional=("deploy",) if schema_two_source else ())
+    if schema_two_source and "deploy" in capabilities:
+        retired_member("/capabilities/deploy", violations)
+    for name in names:
         if name not in capabilities:
             continue
         pointer = f"/capabilities/{name}"
@@ -994,7 +1031,7 @@ def validate_capability_bindings(source: dict) -> list[dict]:
     bindings = source.get("bindings")
     if not isinstance(capabilities, dict) or not isinstance(bindings, dict):
         return violations
-    for name in AUTHORED_CAPABILITY_NAMES:
+    for name in authored_capability_names(source):
         declaration = capabilities.get(name)
         if (not isinstance(declaration, dict)
                 or declaration.get("support") != "supported"):
@@ -1096,6 +1133,18 @@ def projection_paths(source: object) -> list[str]:
     return paths
 
 
+def without_deploy(source: dict) -> dict:
+    """The source as the release grammar judges it: a schema-2 contract's retired
+    deploy members are reported once, by their own violation, never again here."""
+    if not is_schema_two(source):
+        return source
+    out = dict(source)
+    for key in ("bindings", "capabilities"):
+        if isinstance(out.get(key), dict):
+            out[key] = {k: v for k, v in out[key].items() if k != "deploy"}
+    return out
+
+
 def validate_contract(source: dict, manifest: dict) -> list[dict]:
     """Every shape violation of the authored source, collected in one pass.
 
@@ -1136,7 +1185,8 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
         # D2: the grammar's violations join the one ordered list; what the
         # admissibility rules refuse is a capability state, never a violation.
         violations.extend(
-            release_profile.grammar_violations(source["release"], source))
+            release_profile.grammar_violations(
+                source["release"], without_deploy(source)))
     violations.extend(validate_capability_bindings(source))
     return violations
 
@@ -1303,6 +1353,17 @@ def compute_capabilities(bindings: dict, root: Path, declarations: dict,
     return resolved
 
 
+def resolved_one_form(source: dict) -> dict:
+    """A schema-2 source as the resolved-1 shape reads it: a deep copy carrying the
+    inert deploy binding and an unsupported deploy capability. `source` is untouched."""
+    if not is_schema_two(source):
+        return source
+    out = copy.deepcopy(source)
+    out["bindings"]["deploy"] = {"adapter": "none", "command": None, "config": {}}
+    out["capabilities"]["deploy"] = {"support": "unsupported"}
+    return out
+
+
 def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # Readiness reads the normalized bindings, so each command's `cwd` is
     # already the absolute base a relative argv[0] resolves against (D22).
@@ -1311,6 +1372,9 @@ def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # `resolved_schema_version`, the schema this platform resolves *to*. It is
     # not the contract's declared `schema_version`, which may legally be an
     # older supported schema (R2.5).
+    #
+    # P3: resolved schema 1 spells schema 2's absent deploy watch as the inert binding
+    source = resolved_one_form(source)
     bindings = normalize_bindings(source["bindings"], root)
     return {
         "schema_version": manifest["resolved_schema_version"],

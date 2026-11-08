@@ -1,9 +1,15 @@
 {
   "schema_version": 1,
-  "platform_version": "1.1.0",
-  "project_schema_versions": [1],
+  "platform_version": "1.2.0",
+  "project_schema_versions": [1, 2],
   "resolved_schema_version": 1,
-  "migrations": [],
+  "migrations": [
+    {
+      "id": "bindings-deploy.retire",
+      "from_schema": 1,
+      "to_schema": 2
+    }
+  ],
   "deprecations": [
     {
       "id": "legacy-skills-config",
