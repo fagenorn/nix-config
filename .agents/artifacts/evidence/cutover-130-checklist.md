@@ -295,6 +295,8 @@ C11.d git --no-optional-locks -C R grep -n -F 'release deploy inspect' -- . ':!.
 
 C11.d exits 1 (no hit) on every root; for `fagenorn/nix-config` its pathspec is `home/common/agent-skills/skills`. Point-in-time records under `.agents/artifacts` are not users. The `jarbird` root resolves `github-actions-health` on `mbp` (branch dev) and `none` on `eleven-m5` (branch main).
 
+Re-read after #581 (read-only, 2026-11-08T09:23:11Z): mbp /Users/anis/Projects/arcwave at 2adb089868c5 dev 0 dirty, after https://github.com/fagenorn/arcwave/pull/227 merged as 2adb089868c59c7139bd6591d70ece716d937a31: C11.a exit 0, platform 1.1.0, 2 deprecations, deprecated_uses []; C11.b exit 0, no output; C11.c exit 0, deploy.adapter none; C11.d exit 1, no output. Root row green under the rule above; the row in the table is the 2026-11-03 reading.
+
 Item verdict: **red**
 
 ### C12 — Bridge generation identified per host
@@ -337,7 +339,7 @@ These six items are `post` and `human-pending`: this attempt does not evaluate t
 |------|--------------|-------------|
 | C3 mbp .agents/artifacts/evidence/; C4 mbp home/common/agent-skills/platform-manifest.json | Build the strict-cutover candidate (platform 2.0.0, no bridge paths) | #579 filed |
 | C11 mbp host; C11 eleven-m5 host | Bridge minor declaring the deprecations | #580 filed |
-| C11 mbp /Users/anis/Projects/arcwave | Arcwave: retire the tracked legacy skills config and its reader | #581 filed |
+| C11 mbp /Users/anis/Projects/arcwave | Arcwave: retire the tracked legacy skills config and its reader | #581 delivered (fagenorn/arcwave#227) |
 | C11 mbp /Users/anis/Projects/nodocom | Nodo: move the railway deploy off bindings.deploy | #582 filed |
 | C11 mbp /Users/anis/Projects/jarbird | JarBird github-actions-health deploy watch (release core) | #555 cited |
 | C2 mbp /Users/anis/Projects/nodocom; C10 mbp /Users/anis/Projects/nodocom | Nodo: repair the overbroad runtime-sentinel ignore rule | #583 filed |
