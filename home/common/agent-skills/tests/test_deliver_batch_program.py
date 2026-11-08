@@ -146,7 +146,8 @@ class IntakeTest(unittest.TestCase):
             with self.subTest(outcome=outcome):
                 result, calls, _ = run(patch={"facts-1": facts})
                 self.assertEqual(row(result, 1)["outcome"], outcome)
-                self.assertEqual(labels(calls), ["setup", "facts-1"])
+                # A closed issue still runs the release that finishes any cleanup a failed one left (#714): no lane, no claim.
+                self.assertEqual(labels(calls), ["setup", "facts-1"] + (["release-1"] if outcome == "closed" else []))
 
     def test_skip_rows_name_their_evidence(self):
         result, _, _ = run(patch={"facts-1": {"merged_pr": 5}})
@@ -263,6 +264,13 @@ class AlreadyFixedTest(unittest.TestCase):
                 _, calls, _ = run(patch={"facts-1": {"already_fixed": fixed}})
                 self.assertIn("lane-1", labels(calls))
 
+    def test_a_failed_claim_lookup_is_never_already_fixed(self):
+        result, calls, _ = run(patch={"facts-1": {"already_fixed": FIXED, "claim": {"verdict": "error", "by": None}}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": "claim status"})
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertEqual(result["owner_actions"], [])
+        self.assertNotIn("lane-1", labels(calls))
+
     def test_a_merged_pr_wins_over_already_fixed(self):
         result, _, _ = run(patch={"facts-1": {"merged_pr": 5, "already_fixed": FIXED}})
         self.assertEqual(row(result, 1)["outcome"], "duplicate")
@@ -362,6 +370,27 @@ class ClosedClaimTest(unittest.TestCase):
         result, _, _ = run(patch={"facts-1": held}, replies={"release-1": {"verdict": "not_held"}})
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": False})
         self.assertIsNone(result["relaunch"])
+
+    def test_a_closed_issue_with_a_free_claim_retries_a_release_that_ended_the_claim_first(self):
+        # forge-claim ends the claim before the marker edit and label removal, which can fail afterwards:
+        # the next intake reads the claim free, and only the release itself finishes that cleanup.
+        free = {"state": "CLOSED", "claim": {"verdict": "free", "by": None}}
+        result, calls, _ = run(patch={"facts-1": free})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": True})
+        self.assertEqual(labels(calls), ["setup", "facts-1", "release-1"])
+        self.assertIn(CLOSED_RELEASE, prompt(calls, "release-1"))
+        result, _, _ = run(patch={"facts-1": free}, replies={"release-1": {"verdict": "error", "detail": "HTTP 502"}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "release", "detail": "HTTP 502"})
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        result, _, _ = run(patch={"facts-1": free}, replies={"release-1": {"verdict": "not_held"}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": False})
+        self.assertIsNone(result["relaunch"])
+
+    def test_a_closed_issue_claimed_by_another_holder_is_not_released(self):
+        for verdict in ("held_by", "stale"):
+            with self.subTest(verdict=verdict):
+                _, calls, _ = run(patch={"facts-1": {"state": "CLOSED", "claim": {"verdict": verdict, "by": "h2/b9"}}})
+                self.assertNotIn("release-1", labels(calls))
 
     def test_the_intake_release_waits_for_every_facts_agent_and_precedes_every_lane(self):
         _, calls, _ = run(args=dict(ARGS, issues=[1, 2]),

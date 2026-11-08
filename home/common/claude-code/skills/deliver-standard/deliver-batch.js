@@ -196,8 +196,9 @@ const eligibility = (n, f) => {
     if (labels.includes(label) && !(readopt && label === 'needs-verification')) return { issue: n, outcome }
   }
   if (f.merged_pr && !readopt) return { issue: n, outcome: 'duplicate', pr: f.merged_pr }
+  // A failed claim lookup proves nothing about ownership: it falls through to the claim-error stop below, never to a final row.
   const fixed = f.already_fixed
-  if (isObj(fixed) && nonEmpty(fixed.commit) && !CONTS[n] && (f.claim || {}).by !== HOLDER) {
+  if (isObj(fixed) && nonEmpty(fixed.commit) && !CONTS[n] && (f.claim || {}).by !== HOLDER && (f.claim || {}).verdict !== 'error') {
     return { issue: n, outcome: 'already-fixed', commit: fixed.commit, evidence: fixed.evidence }
   }
   const claim = f.claim || { verdict: 'error' }
@@ -223,9 +224,12 @@ for (const n of ISSUES) {
   else eligible.push(n)
 }
 
-// A closed issue whose claim this batch still holds gives the claim back at intake (#714).
-const heldHere = f => { const c = (f && f.claim) || {}; return (c.verdict === 'held_by' || c.verdict === 'stale') && c.by === HOLDER }
-await parallel(ISSUES.filter(n => rows[n] && rows[n].outcome === 'closed' && heldHere(FACTS[n])).map(n => async () => {
+// A closed issue whose claim this batch holds, or that reads free, gives the claim back at intake (#714).
+// A free claim is retried too: forge-claim ends the claim before it edits the marker and removes the label, so a release that failed
+// after that point leaves a free claim and unfinished cleanup, which only the release itself finishes (it answers not_held when none is owed).
+// A live claim of another holder is never touched.
+const releasable = f => { const c = (f && f.claim) || {}; return c.verdict === 'free' || ((c.verdict === 'held_by' || c.verdict === 'stale') && c.by === HOLDER) }
+await parallel(ISSUES.filter(n => rows[n] && rows[n].outcome === 'closed' && releasable(FACTS[n])).map(n => async () => {
   const rel = await ask(agent(releaseClosedPrompt(n), { label: `release-${n}`, phase: 'Intake', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
   if (rel && (rel.verdict === 'released' || rel.verdict === 'not_held')) rows[n] = { ...rows[n], released: rel.verdict === 'released' }
   // A failed release is not final: the row stays open so a relaunch retries it, as close-out keeps a failed release stopped.
