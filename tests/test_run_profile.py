@@ -125,6 +125,17 @@ class DedupTest(Fixture):
         stats = run_profile.agent_stats(path)
         self.assertEqual((stats["fresh"], stats["tools"], stats["minutes"]), (8, 1, 0.0))
 
+    def test_a_line_that_is_not_valid_utf8_is_skipped(self):
+        path = Path(self.tmp.name) / "agent-trunc.jsonl"
+        good = json.dumps(reply("m", {"input_tokens": 3}))
+        with open(path, "wb") as handle:
+            handle.write(b'{"type":"user","message":{"content":"Issue #5 x"}}\n')
+            handle.write(b'{"type":"assistant","message":{"content":"caf\xff"}}\n')  # bad byte mid-file
+            handle.write(good.encode("utf-8") + b"\n")
+            handle.write(b'{"type":"assistant","message":{"id":"z","content":[{"type":"text","text":"caf\xc3')
+        stats = run_profile.agent_stats(path)  # the cut final line must not raise
+        self.assertEqual((stats["fresh"], stats["first_prompt"]), (3, "Issue #5 x"))
+
 
 class FamilyTest(Fixture):
     def test_label_family_strips_every_numeric_part(self):

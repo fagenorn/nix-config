@@ -46,11 +46,13 @@ def prompt_issue(text: str) -> int | None:
 def _read_jsonl(path: Path) -> list[dict]:
     records: list[dict] = []
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(path, "rb") as handle:
             for line in handle:
                 try:
-                    record = json.loads(line)
-                except ValueError:
+                    # A line cut inside a multibyte character (an agent killed or
+                    # still writing) is not JSON either: decode per line, skip it.
+                    record = json.loads(line.decode("utf-8"))
+                except ValueError:  # includes UnicodeDecodeError
                     continue
                 if isinstance(record, dict):
                     records.append(record)
