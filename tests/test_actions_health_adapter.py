@@ -7,19 +7,35 @@ import unittest
 from unittest import mock
 
 from agent_tools import actions_health_adapter as adapter
-from agent_tools import release_adapter
-from .actions_world import CONFIG, HOTFIX, MERGE, OLDER, RUN_LIST, SLUG, ActionsWorld, run
+from agent_tools import release_adapter, release_profile, transaction_plan
+from . import release_test_support as support
+from .actions_world import (BASE_TIP, CONFIG, HEAD, HOTFIX, MERGE, OLDER, PR, PR_VIEW, RUN_LIST,
+                            SLUG, ActionsWorld, commit_argv, run)
 
 WATCH_SCHEMA = {"workflow": "string", "branch": "string", "services": "string_list",
                 "health_url": "string", "health_commit_field": "string"}
 REFUSED = {"result": "rejected", "error_class": "unsupported_operation",
-           "reference": "deploy: bridge_watch_only"}
+           "reference": "deploy: watch_only"}
 
 
 def request(commit: str = MERGE, **config: object) -> dict:
     return {"kind": "effect", "operation": "deploy", "parameters": {
         "target": {"kind": "github_repository", "repository": SLUG, "branch": "main"},
         "candidate": {"commit": commit}, "config": {**CONFIG, **config}}}
+
+
+MERGE_MEMBER = {"pr": PR, "base_tip": BASE_TIP}
+
+
+def bound(candidate: dict, **config: object) -> dict:
+    """The request the release core sends: the compiled node's members plus a bound candidate."""
+    value = request(**config)
+    value["parameters"].update(action="deploy", operation="deploy", candidate=candidate)
+    return value
+
+
+def merge_candidate() -> dict:
+    return {"version": "v1.2.3", "commit": HEAD, "merge": dict(MERGE_MEMBER)}
 
 
 class AdapterContractTest(unittest.TestCase):
@@ -39,7 +55,7 @@ class AdapterContractTest(unittest.TestCase):
         self.assertEqual(release_adapter.DESCRIPTORS["github-actions-health"], descriptor)
         deploy = descriptor["operations"]["deploy"]
         self.assertEqual((deploy["mode"], deploy["support"], deploy["inspect"], deploy["reason"]),
-                         ("publication_triggered", "unsupported", "supported", "bridge_watch_only"))
+                         ("publication_triggered", "supported", "supported", None))
         self.assertEqual(deploy["config_schema"]["members"], WATCH_SCHEMA)
         self.assertEqual(sorted(deploy["config_schema"]["required"]), sorted(WATCH_SCHEMA))
         self.assertEqual(release_adapter.config_problems(deploy["config_schema"], CONFIG), [])
@@ -82,7 +98,7 @@ class AdapterContractTest(unittest.TestCase):
                                  ("unknown", "parameters_invalid"))
                 self.assertTrue(observation["facts"]["detail"])
                 self.assertEqual(release_adapter.effect_observation_problems(observation), [])
-        predicate = adapter.inspect({"kind": "predicate", "predicate": "running_subject_identity",
+        predicate = adapter.inspect({"kind": "predicate", "predicate": "publication_visible",
                                      "operation": "deploy", "parameters": request()["parameters"]})
         self.assertEqual((predicate["outcome"], predicate["reason"]),
                          ("unknown", "predicate_unsupported"))
@@ -178,7 +194,8 @@ class ClassificationTest(unittest.TestCase):
         self.assertEqual(observation["references"],
                          [f"repos/{SLUG}/actions/runs/8", self.world.url()])
         facts = observation["facts"]
-        self.assertEqual(sorted(facts), ["health", "run", "runs", "services"])
+        self.assertEqual(sorted(facts), ["health", "released", "run", "runs", "services"])
+        self.assertEqual(facts["released"], MERGE)
         self.assertEqual(facts["services"], CONFIG["services"])
         self.assertEqual(facts["run"], {"id": 8, "status": "success", "commit": MERGE,
                                         "branch": "main", "createdAt": "2026-10-27T10:00:00Z"})
@@ -299,6 +316,166 @@ class ClassificationTest(unittest.TestCase):
                          ("unknown", "health_unreachable"))
         self.assertEqual(len(self.world.calls()), 1)
         self.assertEqual([seen["path"] for seen in self.world.requests], ["/health"])
+
+
+class WatchBindingTest(unittest.TestCase):
+    """Issue 555 D3, D6: `deploy` binds as a watch-only activation unit of a release profile."""
+
+    def setUp(self):
+        self.world = ActionsWorld(self)
+
+    def argvs(self) -> list[list[str]]:
+        return [call["argv"] for call in self.world.calls()]
+
+    def verdict(self, candidate: dict) -> tuple[str, str]:
+        observation = adapter.inspect(bound(candidate, health_url=self.world.url()))
+        self.assertEqual(release_adapter.effect_observation_problems(observation), [])
+        return observation["outcome"], observation["reason"]
+
+    def predicate(self, candidate: dict, name: str = "running_subject_identity") -> tuple[str, str]:
+        observation = adapter.inspect({"kind": "predicate", "predicate": name, "operation": "deploy",
+                                       "parameters": bound(candidate, health_url=self.world.url())
+                                       ["parameters"]})
+        self.assertEqual(release_adapter.predicate_observation_problems(observation), [])
+        if name == "running_subject_identity" and observation["outcome"] != "satisfied":
+            self.assertIn(observation["reason"],
+                          transaction_plan.DERIVED_REASONS["running_subject_identity"])
+        return observation["outcome"], observation["reason"]
+
+    def test_deploy_is_bindable_answers_the_activation_predicate_and_is_never_invoked(self):
+        descriptor = adapter.describe()
+        deploy = descriptor["operations"]["deploy"]
+        self.assertEqual((descriptor["adapter_contract_version"], deploy["mode"], deploy["support"],
+                          deploy["reason"], deploy["candidate_members"]),
+                         ("1.1.0", "publication_triggered", "supported", None, []))
+        self.assertEqual(descriptor["predicates"]["running_subject_identity"],
+                         {"support": "supported", "reason": None})
+        self.assertEqual(descriptor["predicates"]["publication_visible"]["support"], "unsupported")
+        self.assertEqual(release_adapter.descriptor_problems(descriptor), [])
+        self.assertEqual(release_adapter.watch_operation(descriptor), "deploy")
+        self.assertEqual(adapter.invoke(bound(merge_candidate())), REFUSED)
+        self.assertEqual(self.world.calls(), [])
+
+    def test_a_bound_candidate_is_judged_like_the_bridge_candidate(self):
+        self.world.runs(run(8, MERGE))
+        self.world.health(commit=MERGE)
+        for candidate in ({"commit": MERGE}, {"version": "v1.2.3", "commit": MERGE}):
+            with self.subTest(candidate=candidate):
+                observation = adapter.inspect(bound(candidate, health_url=self.world.url()))
+                self.assertEqual((observation["outcome"], observation["reason"]),
+                                 ("satisfied", "deployed"))
+                self.assertEqual(observation["facts"]["released"], MERGE)
+        self.assertEqual(self.argvs(), [RUN_LIST, RUN_LIST])
+        for candidate in ({"version": "1.2.3", "commit": MERGE}, {"version": "v1.2.3"},
+                          {"version": "v1.2.3", "commit": MERGE, "notes": "x"},
+                          {"version": "v1.2.3", "commit": MERGE, "merge": {"pr": 0, "base_tip": BASE_TIP}},
+                          {"version": "v1.2.3", "commit": MERGE, "merge": {"pr": True, "base_tip": BASE_TIP}},
+                          {"version": "v1.2.3", "commit": MERGE, "merge": {"pr": PR}},
+                          {"commit": MERGE, "merge": dict(MERGE_MEMBER)}):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(self.verdict(candidate), ("unknown", "parameters_invalid"))
+        self.assertEqual(len(self.world.calls()), 2)
+
+    def test_with_a_merge_binding_the_released_commit_is_the_merge_commit(self):
+        self.world.merged()
+        self.world.runs(run(9, MERGE))
+        self.world.health(commit=MERGE)
+        observation = adapter.inspect(bound(merge_candidate(), health_url=self.world.url()))
+        self.assertEqual((observation["outcome"], observation["reason"]), ("satisfied", "deployed"))
+        self.assertEqual(observation["facts"]["released"], MERGE)
+        self.assertEqual(observation["observed_subject"], {"commit": MERGE, "run": 9})
+        self.assertEqual(observation["references"][:3],
+                         [f"repos/{SLUG}/pulls/{PR}", f"repos/{SLUG}/git/commits/{MERGE}",
+                          f"repos/{SLUG}/actions/runs/9"])
+        self.assertEqual(self.argvs(), [PR_VIEW, commit_argv(MERGE), RUN_LIST])
+        self.world.health(commit=HEAD)
+        self.assertEqual(self.verdict(merge_candidate()), ("diverged", "health_commit_mismatch"))
+
+    def test_an_unresolved_merge_reads_neither_runs_nor_health(self):
+        self.world.runs(run(9, MERGE))
+        self.world.health(commit=MERGE)
+        cases = ((dict(state="OPEN", oid=None), ("absent", "release_unmerged")),
+                 (dict(state="CLOSED", oid=None), ("diverged", "release_merge_mismatch")),
+                 (dict(base="dev"), ("diverged", "release_merge_mismatch")),
+                 (dict(parents=(OLDER, HEAD)), ("diverged", "release_merge_mismatch")),
+                 (dict(parents=(HEAD, BASE_TIP)), ("diverged", "release_merge_mismatch")),
+                 (dict(state="DRAFT", oid=None), ("unknown", "payload_invalid")))
+        for kwargs, expected in cases:
+            with self.subTest(**{key: str(value) for key, value in kwargs.items()}):
+                self.world.merged(**kwargs)
+                self.assertEqual(self.verdict(merge_candidate()), expected)
+        self.world.respond(PR_VIEW, None, exit=1, stderr="HTTP 502")
+        observation = adapter.inspect(bound(merge_candidate(), health_url=self.world.url()))
+        self.assertEqual((observation["outcome"], observation["reason"]), ("unknown", "lookup_failed"))
+        self.assertIn("HTTP 502", observation["facts"]["detail"])
+        self.assertIsNone(observation["facts"]["released"])
+        self.assertNotIn(RUN_LIST, self.argvs())
+        self.assertEqual(self.world.requests, [])
+
+    def test_running_subject_identity_reads_the_health_commit_of_the_released_commit(self):
+        plain = {"version": "v1.2.3", "commit": MERGE}
+        self.world.health(commit=MERGE[:12])
+        self.assertEqual(self.predicate(plain), ("satisfied", "running"))
+        self.world.health(commit=OLDER)
+        self.assertEqual(self.predicate(plain), ("unsatisfied", "subject_mismatch"))
+        self.world.health(status=503, body=b"down")
+        self.assertEqual(self.predicate(plain), ("unknown", "identity_unobservable"))
+        self.world.merged()
+        self.world.health(commit=MERGE)
+        self.assertEqual(self.predicate(merge_candidate()), ("satisfied", "running"))
+        self.world.health(commit=HEAD)
+        self.assertEqual(self.predicate(merge_candidate()), ("unsatisfied", "subject_mismatch"))
+        self.world.merged(state="OPEN", oid=None)
+        self.assertEqual(self.predicate(merge_candidate()), ("unknown", "identity_unobservable"))
+        self.assertEqual(self.predicate(plain, "publication_visible"),
+                         ("unknown", "predicate_unsupported"))
+        self.assertEqual(self.predicate({"version": "1.2.3", "commit": MERGE}),
+                         ("unknown", "identity_unobservable"))
+        wrong = adapter.inspect({"kind": "predicate", "predicate": "running_subject_identity",
+                                 "operation": "release",
+                                 "parameters": bound(plain, health_url=self.world.url())["parameters"]})
+        self.assertEqual((wrong["outcome"], wrong["reason"]), ("unknown", "identity_unobservable"))
+        self.assertNotIn(RUN_LIST, self.argvs())
+
+
+class CompiledWatchTest(unittest.TestCase):
+    """Issue 555 D9: the unit the release core compiles and binds is one the real adapter accepts."""
+
+    def setUp(self):
+        self.world = ActionsWorld(self)
+        self.compiled = release_profile.compile_profile(
+            "watched", support.watched_profile(health_url=self.world.url()), support.base_contract())
+        inputs = release_profile.bind_candidate(self.compiled, dict(support.CANDIDATE))
+        self.unit = next(unit["parameters"] for unit in inputs["proof"]["units"]
+                         if unit["name"] == "deploy")
+        self.binding = release_adapter.core_binding(adapter, self.compiled, "watch")
+
+    def test_the_bound_target_carries_the_handle_and_is_accepted(self):
+        self.assertEqual(self.unit["target"], {"handle": "site", "kind": "github_repository",
+                                               "repository": SLUG, "branch": "main"})
+        commit = support.CANDIDATE["commit"]
+        self.world.runs(run(9, commit))
+        self.world.health(commit=commit)
+        result = self.binding.inspect({"parameters": self.unit})
+        self.assertEqual(result["outcome"], "satisfied")
+        self.assertEqual(json.loads(result["reference"])["reason"], "deployed")
+        observed = self.binding.observe({"predicate": "running_subject_identity",
+                                         "parameters": {"name": "deploy", "parameters": self.unit}})
+        self.assertEqual((observed["outcome"], observed["reason"]), ("satisfied", "running"))
+        self.world.health(commit=OLDER)
+        observed = self.binding.observe({"predicate": "running_subject_identity",
+                                         "parameters": {"name": "deploy", "parameters": self.unit}})
+        self.assertEqual((observed["outcome"], observed["reason"]), ("unsatisfied", "subject_mismatch"))
+
+    def test_a_handle_that_is_not_a_non_empty_string_is_parameters_invalid(self):
+        for handle in ("", 7, None):
+            with self.subTest(handle=handle):
+                value = request(health_url=self.world.url())
+                value["parameters"]["target"]["handle"] = handle
+                observation = adapter.inspect(value)
+                self.assertEqual((observation["outcome"], observation["reason"]),
+                                 ("unknown", "parameters_invalid"))
+        self.assertEqual(self.world.calls(), [])
 
 
 if __name__ == "__main__":
