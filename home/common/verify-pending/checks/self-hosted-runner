@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 680: a named self-hosted runner is registered, online and labelled on a
+# repository. Reads the forge only; verify-pending runs it from the repository root at the
+# commit the block names.
+PYTHONPATH=python exec python3 -m agent_tools.verify_checks self-hosted-runner "$@"

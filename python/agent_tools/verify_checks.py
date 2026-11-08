@@ -14,6 +14,28 @@ managed `-agent-git-hooks` directory and, in a local fixture of S whose own git 
 holds only that hooks path, an agent push of `main` is refused by its `pre-push` with the
 remote unchanged while a feature-branch push is admitted. It exits 2 on a fixture error.
 
+`cutover-manifest [--repo-root R] [--branch B] [--main-ref REV]` (issue 579, C4.a) is met (0, `green`)
+when the manifest at the tip of origin's candidate branch is a major-2 manifest whose `removals`
+are non-empty and each equal, in all six members, to a `deprecations` entry of a major-1 manifest
+on main. It is 75 when anything of that is not yet so (`absent` when the branch does not exist) and
+2 when a manifest cannot be read. It only reads: it fetches objects, and writes no ref.
+
+`cutover-preflight [--repo-root R] [--branch B]` (issue 579, C4.b) is met when `cutover-manifest` is
+green and both the installed bridge and the candidate's own code judge every registered project
+compatible, with no removed use. It is 75 otherwise, and 0 only when green.
+
+`cutover-bundle [--repo-root R] [--branch B]` (issue 579, C3) is met (0, `green`) when a `*-bundle.json`
+under `.agents/artifacts/evidence/` at origin's main verifies, through `agent_gate_bundle.verify_bundle`,
+as `approved` and binds the commit at the tip of origin's candidate branch. The state is the verifier's
+return value, never the document's own `state` field; a bundle the verifier refuses is `unreadable` and
+never counts. It is 75 otherwise (`absent` when the branch does not exist) and 2 when git cannot be
+driven. It only reads: it fetches objects, and writes no ref.
+
+`self-hosted-runner --repo R --runner N --label L...` (issue 680) is met when R lists a runner
+named N whose status is online and whose labels include `self-hosted` and every L; not met when
+it is online but lacks one (a wrong registration), and not yet when it is unlisted or not online.
+It only reads one paginated runner listing and refuses a truncated or malformed one.
+
 `worktree-mapping [--red-pending] --repo-root R...` (issue 585) states the #130 checklist C7 rule
 over each root through `agent_tools.worktree_mapping`, read-only, using the verdicts of
 `workflow-state migrate --repo-root R`. It exits 0 when every root is green, 1 when one is red,
@@ -31,12 +53,14 @@ green, 1 when one is red, 75 when none is red and one is pending, and 2 on a too
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -44,6 +68,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 from agent_tools import forge_markers
+from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
+from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver, validate_manifest
 from agent_tools.agent_costs import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
 from agent_tools.worktree_mapping import MappingError, classify_root
@@ -185,6 +211,34 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
     return (0 if not report["missing"] else 1), report
 
 
+def self_hosted_runner(repo: str, runner: str, labels: Sequence[str]) -> tuple[int, dict]:
+    """Met when `runner` is listed on `repo`, online, and carries `self-hosted` and every label."""
+    required = {"self-hosted", *labels}
+    entries = _counted_pages(forge_markers.api_pages(
+        f"repos/{repo}/actions/runners?per_page=100"), "runners", "runner listing")
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            raise _invalid("runner entry has no name")
+    report: dict = {"repo": repo, "runner": runner, "required": sorted(required), "found": False,
+                    "status": None, "labels": [], "missing": []}
+    found = next((entry for entry in entries if entry["name"] == runner), None)  # type: ignore[index]
+    if found is None:
+        report["missing"] = sorted(required)
+        return 75, report
+    status, listed = found.get("status"), found.get("labels")
+    if not isinstance(status, str):
+        raise _invalid("runner has no status")
+    if (not isinstance(listed, list)
+            or not all(isinstance(label, dict) and isinstance(label.get("name"), str)
+                       for label in listed)):
+        raise _invalid("runner labels are not a list of named objects")
+    names = {label["name"] for label in listed}
+    report.update(found=True, status=status, labels=sorted(names), missing=sorted(required - names))
+    if status != "online":
+        return 75, report
+    return (0 if not report["missing"] else 1), report
+
+
 MANAGED_HOOKS_SUFFIX = "-agent-git-hooks"
 PRE_PUSH_REFUSAL = "lifecycle guard pre-push: unsafe push: refusing to push the default branch main"
 CONTROL_BRANCH = "verify-pre-push-control"
@@ -245,6 +299,309 @@ def managed_pre_push_hook(slug: str, *, git_bin: str,
     report["met"] = all(report[key] for key in
                         ("managed", "refused", "remote_unchanged", "control_admitted"))
     return (0 if report["met"] else 1), report
+
+
+MANIFEST_PATH = "home/common/agent-skills/platform-manifest.json"
+CANDIDATE_BRANCH = "cutover-130-candidate"
+SIDE_TIMEOUT = 120
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _manifest_facts(manifest: object) -> tuple[str, list[dict], list[dict]] | None:
+    """The version, deprecations and removals of a readable manifest, else None.
+
+    Readable means the platform's own manifest validator accepts it, so a
+    manifest missing a required member is unreadable however its records compare."""
+    if not isinstance(manifest, dict) or validate_manifest(manifest):
+        return None
+    version = manifest.get("platform_version")
+    if parse_semver(version) is None:
+        return None
+    lists = []
+    for name in ("deprecations", "removals"):
+        entries = manifest.get(name)
+        if not isinstance(entries, list) or not all(
+                isinstance(item, dict) and isinstance(item.get("id"), str) for item in entries):
+            return None
+        lists.append(entries)
+    return version, lists[0], lists[1]
+
+
+def manifest_verdict(main: object, candidate: object) -> tuple[int, dict]:
+    """C4.a: every removal of the major-2 candidate was a deprecation on major-1 main."""
+    main_facts = _manifest_facts(main)
+    candidate_facts = _manifest_facts(candidate)
+    report: dict = {
+        "verdict": "unreadable",
+        "main_version": main_facts[0] if main_facts else None,
+        "candidate_version": candidate_facts[0] if candidate_facts else None,
+        "removal_ids": [], "undeclared": []}
+    if main_facts is None or candidate_facts is None:
+        return 2, report
+    deprecated = {entry["id"]: entry for entry in main_facts[1]}
+    removals = candidate_facts[2]
+    report["removal_ids"] = [entry["id"] for entry in removals]
+    report["undeclared"] = [
+        entry["id"] for entry in removals
+        if not (entry["id"] in deprecated and all(
+            member in entry and member in deprecated[entry["id"]]
+            and entry[member] == deprecated[entry["id"]][member]
+            for member in DEPRECATION_MEMBERS))]
+    green = (parse_semver(main_facts[0])[0] == 1 and parse_semver(candidate_facts[0])[0] == 2
+             and bool(removals) and not report["undeclared"])
+    report["verdict"] = "green" if green else "red"
+    return (0 if green else 75), report
+
+
+class GitError(Exception):
+    """A git call the cutover checks depend on failed; the caller exits 2."""
+
+
+def _git(repo_root: Path, *args: str, environ: Mapping[str, str] | None = None,
+         text: bool = True) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            env=dict(os.environ if environ is None else environ),
+            capture_output=True, text=text, timeout=300, check=False)
+    except (subprocess.SubprocessError, OSError) as error:
+        raise GitError(f"git {args[0]}: {type(error).__name__}") from error
+
+
+def _git_ok(repo_root: Path, *args: str, environ: Mapping[str, str] | None = None) -> str:
+    done = _git(repo_root, *args, environ=environ)
+    if done.returncode != 0:
+        detail = done.stderr.strip().splitlines()
+        raise GitError(f"git {args[0]} failed: {detail[0] if detail else done.returncode}")
+    return done.stdout
+
+
+def _candidate_sha(repo_root: Path, branch: str, environ: Mapping[str, str] | None) -> str | None:
+    ref = f"refs/heads/{branch}"
+    for line in _git_ok(repo_root, "ls-remote", "origin", ref, environ=environ).splitlines():
+        found, _, name = line.partition("\t")
+        if name == ref and _OBJECT_ID.fullmatch(found):
+            return found
+    return None
+
+
+def _show_manifest(repo_root: Path, rev: str, environ: Mapping[str, str] | None) -> object:
+    """The manifest at `rev`, or None when it cannot be read or is not JSON."""
+    done = _git(repo_root, "show", f"{rev}:{MANIFEST_PATH}", environ=environ)
+    if done.returncode != 0:
+        return None
+    try:
+        return json.loads(done.stdout)
+    except ValueError:
+        return None
+
+
+def _absent_manifest_report() -> dict:
+    return {"verdict": "absent", "main_version": None, "candidate_version": None,
+            "removal_ids": [], "undeclared": []}
+
+
+def _fetch_manifests(repo_root: Path, sha: str, main_ref: str | None,
+                     environ: Mapping[str, str] | None) -> tuple[object, object]:
+    """Both sides' manifests. Fetches objects only: `--refmap=` keeps the main
+    fetch from updating a remote-tracking ref, and a bare sha names no ref."""
+    _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "origin", sha, environ=environ)
+    candidate = _show_manifest(repo_root, sha, environ)
+    if main_ref is None:
+        _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "--refmap=", "origin",
+                "refs/heads/main", environ=environ)
+        main_ref = "FETCH_HEAD"
+    return _show_manifest(repo_root, main_ref, environ), candidate
+
+
+def cutover_manifest(repo_root: Path, branch: str = CANDIDATE_BRANCH,
+                     main_ref: str | None = None) -> tuple[int, dict]:
+    """C4.a over the candidate branch on origin and main (or `main_ref`).
+
+    Raises GitError when git cannot be driven; the caller exits 2."""
+    sha = _candidate_sha(repo_root, branch, None)
+    if sha is None:
+        return 75, _absent_manifest_report()
+    return manifest_verdict(*_fetch_manifests(repo_root, sha, main_ref, None))
+
+
+def _roster(report: dict) -> dict[tuple[object, object], dict]:
+    rows = report.get("fleet") if isinstance(report, dict) else None
+    found: dict[tuple[object, object], dict] = {}
+    for item in rows if isinstance(rows, list) else []:
+        if isinstance(item, dict) and isinstance(item.get("project_id"), str):
+            found[(item["project_id"], item.get("root"))] = item
+    return found
+
+
+def _platform_version(report: dict) -> str | None:
+    platform = report.get("platform") if isinstance(report, dict) else None
+    version = platform.get("platform_version") if isinstance(platform, dict) else None
+    return version if parse_semver(version) is not None else None
+
+
+def preflight_verdict(bridge: dict, candidate: dict, candidate_sha: str,
+                      manifest: dict) -> tuple[int, dict]:
+    """C4.b over the two `platform-status --fleet` reports and the C4.a report."""
+    bridge_version = _platform_version(bridge)
+    candidate_version = _platform_version(candidate)
+    bridge_rows = _roster(bridge)
+    candidate_rows = _roster(candidate)
+    rows = []
+    for key in sorted(set(bridge_rows) | set(candidate_rows), key=lambda k: (k[0], str(k[1]))):
+        old, new = bridge_rows.get(key), candidate_rows.get(key)
+        removed = new.get("removed_uses") if new else None
+        if old is None:
+            reason = "bridge_missing"
+        elif new is None:
+            reason = "candidate_missing"
+        elif old.get("compatible") is not True:
+            reason = "bridge_incompatible"
+        elif new.get("compatible") is not True:
+            reason = "candidate_incompatible"
+        elif removed != []:
+            reason = "removed_use"
+        else:
+            reason = None
+        rows.append({
+            "project_id": key[0], "root": key[1],
+            "bridge_compatible": None if old is None else old.get("compatible"),
+            "candidate_compatible": None if new is None else new.get("compatible"),
+            "removed_uses": removed, "reason": reason})
+    # A project in only one fleet has a row whose reason is `bridge_missing` or
+    # `candidate_missing`, so equal rosters need no rule of their own.
+    green = (isinstance(manifest, dict) and manifest.get("verdict") == "green"
+             and bridge_version is not None
+             and parse_semver(bridge_version)[0] == 1 and parse_semver(bridge_version) >= (1, 2, 0)
+             and candidate_version is not None and parse_semver(candidate_version)[0] == 2
+             and bool(bridge_rows) and bool(candidate_rows)
+             and all(row["reason"] is None for row in rows))
+    report = {"verdict": "green" if green else "not_yet", "candidate": candidate_sha,
+              "bridge_version": bridge_version, "candidate_version": candidate_version,
+              "manifest": manifest, "rows": rows}
+    return (0 if green else 75), report
+
+
+def _preflight_failure(verdict: str, sha: str | None, side: str | None = None,
+                       manifest: dict | None = None) -> tuple[int, dict]:
+    report: dict = {"verdict": verdict, "candidate": sha, "bridge_version": None,
+                    "candidate_version": None, "manifest": manifest, "rows": []}
+    if side is not None:
+        report["side"] = side
+    return 75, report
+
+
+def _run_side(argv: list[str], env: Mapping[str, str], cwd: Path) -> dict | None:
+    """One side's `platform-status --fleet` report, or None when it is not a clean JSON object."""
+    try:
+        done = subprocess.run(argv, env=dict(env), cwd=cwd, capture_output=True, text=True,
+                              timeout=SIDE_TIMEOUT, check=False)
+        report = json.loads(done.stdout)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    return report if done.returncode == 0 and isinstance(report, dict) else None
+
+
+def cutover_preflight(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
+                      environ: Mapping[str, str]) -> tuple[int, dict]:
+    """C4.b: the bridge and the candidate's own code judge every registered project compatible.
+
+    Raises GitError when git cannot be driven; the caller exits 2."""
+    sha = _candidate_sha(repo_root, branch, environ)
+    if sha is None:
+        return _preflight_failure("absent", None)
+    main, candidate = _fetch_manifests(repo_root, sha, None, environ)
+    _, manifest = manifest_verdict(main, candidate)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp).resolve()
+        archive = _git(repo_root, "archive", "--format=tar", sha, "python", MANIFEST_PATH,
+                       environ=environ, text=False)
+        if archive.returncode != 0:
+            return _preflight_failure("unreadable", sha, "candidate", manifest)
+        try:
+            with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+                tar.extractall(tmp_path, filter="data")
+        except (tarfile.TarError, OSError):
+            return _preflight_failure("unreadable", sha, "candidate", manifest)
+        bridge_env = {key: value for key, value in environ.items() if key != "PYTHONPATH"}
+        bridge_bin = shutil.which("resolve-project", path=environ.get("PATH"))
+        bridge = (None if bridge_bin is None else _run_side(
+            [bridge_bin, "platform-status", "--fleet"], bridge_env, repo_root))
+        if bridge is None:
+            return _preflight_failure("unreadable", sha, "bridge", manifest)
+        candidate_report = _run_side(
+            [sys.executable, "-m", "agent_tools.resolve_project", "platform-status", "--fleet",
+             "--manifest", str(tmp_path / MANIFEST_PATH)],
+            {**environ, "PYTHONPATH": str(tmp_path / "python")}, tmp_path)
+        if candidate_report is None:
+            return _preflight_failure("unreadable", sha, "candidate", manifest)
+    return preflight_verdict(bridge, candidate_report, sha, manifest)
+
+
+EVIDENCE_DIR = ".agents/artifacts/evidence"
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}")
+
+
+def bundle_verdict(bundles: Mapping[str, object], candidate_sha: str) -> tuple[int, dict]:
+    """C3: some emitted bundle verifies `approved` and binds `candidate_sha`.
+
+    Each value goes through `verify_bundle`, the one verifier of an emitted bundle: the id is
+    recomputed over the body and the state re-decided from the bundle's own evidence. The state
+    read is its return value, never `document["state"]`."""
+    approved: list[str] = []
+    other: list[dict] = []
+    unreadable: list[dict] = []
+    for path in sorted(bundles):
+        document = bundles[path]
+        try:
+            state = verify_bundle(document)
+            bound = document["identity"]["bound"]["commit"]["candidate"]  # type: ignore[index]
+            if not (isinstance(bound, str) and _COMMIT_ID.fullmatch(bound)):
+                raise BundleIntegrityError("identity.bound.commit.candidate is not a commit id")
+        except BundleIntegrityError as error:
+            unreadable.append({"path": path, "error": str(error)})
+            continue
+        except (KeyError, TypeError):
+            unreadable.append({"path": path,
+                               "error": "identity.bound.commit.candidate is missing"})
+            continue
+        if state == "approved" and bound == candidate_sha:
+            approved.append(path)
+        else:
+            other.append({"path": path, "state": state, "candidate": bound})
+    green = bool(approved)
+    return (0 if green else 75), {
+        "verdict": "green" if green else "red", "candidate": candidate_sha,
+        "approved": approved, "other": other, "unreadable": unreadable}
+
+
+def cutover_bundle(repo_root: Path, branch: str = CANDIDATE_BRANCH) -> tuple[int, dict]:
+    """C3 over origin's candidate branch and the bundles committed at origin's main.
+
+    Fetches objects and `FETCH_HEAD` only (`--refmap=` keeps it from updating a remote-tracking
+    ref). Raises GitError when git cannot be driven; the caller exits 2."""
+    sha = _candidate_sha(repo_root, branch, None)
+    if sha is None:
+        return 75, {"verdict": "absent", "candidate": None, "approved": [], "other": [],
+                    "unreadable": []}
+    _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "--refmap=", "origin", "refs/heads/main")
+    listing = _git(repo_root, "ls-tree", "--name-only", f"FETCH_HEAD:{EVIDENCE_DIR}/")
+    names = sorted(name for name in listing.stdout.splitlines()
+                   if listing.returncode == 0 and name.endswith("-bundle.json"))
+    bundles: dict[str, object] = {}
+    unparsed: list[dict] = []
+    for name in names:
+        path = f"{EVIDENCE_DIR}/{name}"
+        shown = _git(repo_root, "show", f"FETCH_HEAD:{path}")
+        try:
+            if shown.returncode != 0:
+                raise ValueError(f"git show failed: {shown.returncode}")
+            bundles[path] = json.loads(shown.stdout)
+        except ValueError as error:
+            unparsed.append({"path": path, "error": f"not JSON: {error}"})
+    code, report = bundle_verdict(bundles, sha)
+    report["unreadable"] = sorted(report["unreadable"] + unparsed, key=lambda item: item["path"])
+    return code, report
 
 
 WORKFLOW_STATE_TIMEOUT = 300
@@ -323,7 +680,7 @@ def _run_child(argv: Sequence[str], environ: Mapping[str, str]) -> subprocess.Co
         raise ToolError("tool_error", f"{Path(argv[0]).name} failed: {error}") from None
 
 
-def _git(root: Path, environ: Mapping[str, str], *args: str) -> subprocess.CompletedProcess:
+def _c11_git(root: Path, environ: Mapping[str, str], *args: str) -> subprocess.CompletedProcess:
     git_bin = shutil.which("git", path=environ.get("PATH"))
     if git_bin is None:
         raise ToolError("tool_error", "git not found")
@@ -351,7 +708,7 @@ def _deprecated_uses_reading(binary: str, root: Path, environ: Mapping[str, str]
 
 
 def _legacy_config_reading(root: Path, environ: Mapping[str, str]) -> dict:
-    done = _git(root, environ, "ls-files", "--", SKILLS_CONFIG)
+    done = _c11_git(root, environ, "ls-files", "--", SKILLS_CONFIG)
     if done.returncode != 0:
         raise ToolError("tool_error", f"git ls-files exit {done.returncode}: {done.stderr.strip()}")
     tracked = done.stdout.split()
@@ -387,7 +744,7 @@ def _retired_command_reading(root: Path, environ: Mapping[str, str],
     project_id = project.get("id") if isinstance(project, dict) else None
     scope = C11D_SCOPES.get(project_id, C11D_DEFAULT_SCOPE) if isinstance(project_id, str) \
         else C11D_DEFAULT_SCOPE
-    done = _git(root, environ, "grep", "-n", "-F", RETIRED_COMMAND, "--", *scope)
+    done = _c11_git(root, environ, "grep", "-n", "-F", RETIRED_COMMAND, "--", *scope)
     if done.returncode not in (0, 1):
         raise ToolError("tool_error", f"git grep exit {done.returncode}: {done.stderr.strip()}")
     hits = done.stdout.splitlines()[:C11_MAX_HITS] if done.returncode == 0 else []
@@ -445,6 +802,12 @@ def _repo(value: str) -> str:
     return value
 
 
+def _nonempty(value: str) -> str:
+    if not value:
+        raise argparse.ArgumentTypeError("must not be empty")
+    return value
+
+
 def _rfc3339(value: str) -> datetime:
     try:
         return parse_rfc3339_utc(value)
@@ -464,6 +827,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         "managed-pre-push-hook",
         help="issue 672: the managed pre-push hook refuses an agent default-branch push")
     hook.add_argument("--slug", type=_repo, required=True)
+    for name, help_text in (
+            ("cutover-manifest", "issue 579 C4.a: the candidate's removals were main's deprecations"),
+            ("cutover-preflight", "issue 579 C4.b: the bridge and the candidate judge the fleet"),
+            ("cutover-bundle", "issue 579 C3: an approved bundle binds the candidate")):
+        cutover = checks.add_parser(name, help=help_text)
+        cutover.add_argument("--repo-root", type=Path, default=Path("."))
+        cutover.add_argument("--branch", default=CANDIDATE_BRANCH)
+        if name == "cutover-manifest":
+            cutover.add_argument("--main-ref", default=None)
+    runner = checks.add_parser(
+        "self-hosted-runner",
+        help="issue 680: a named self-hosted runner is registered, online and labelled")
+    runner.add_argument("--repo", type=_repo, required=True)
+    runner.add_argument("--runner", type=_nonempty, required=True)
+    runner.add_argument("--label", type=_nonempty, action="append", required=True)
     mapping = checks.add_parser(
         "worktree-mapping",
         help="issue 585: every retained worktree has a strict-path ledger mapping (C7)")
@@ -483,6 +861,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 red_pending=args.red_pending)
         except ToolError as error:
             print(f"verify-checks: {error.kind}: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check in ("cutover-manifest", "cutover-preflight", "cutover-bundle"):
+        try:
+            if args.check == "cutover-manifest":
+                code, report = cutover_manifest(args.repo_root, args.branch, args.main_ref)
+            elif args.check == "cutover-bundle":
+                code, report = cutover_bundle(args.repo_root, args.branch)
+            else:
+                code, report = cutover_preflight(args.repo_root, args.branch, environ=os.environ)
+        except GitError as error:
+            print(f"verify-checks: git_error: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, sort_keys=True))
         return code
@@ -508,7 +899,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(report, sort_keys=True))
         return code
     try:
-        code, report = required_checks(args.repo, args.base, args.since)
+        if args.check == "self-hosted-runner":
+            code, report = self_hosted_runner(args.repo, args.runner, args.label)
+        else:
+            code, report = required_checks(args.repo, args.base, args.since)
     except forge_markers.ForgeError as error:
         print(f"verify-checks: forge_error: {error.code}", file=sys.stderr)
         return 2

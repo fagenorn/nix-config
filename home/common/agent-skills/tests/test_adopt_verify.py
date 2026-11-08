@@ -504,10 +504,12 @@ class RegistrationTest(VerifyTestCase):
         self.assertEqual(self.fleet(), [{
             "project_id": "fixture/target",
             "root": str(root),
-            "project_schema_version": 1,
+            # P3: the fixture contract is in the highest supported schema, 2.
+            "project_schema_version": 2,
             "platform_interval": {"min_inclusive": "1.0.0",
                                   "max_exclusive": "2.0.0"},
             "deprecated_uses": [],
+            "removed_uses": [],
             "compatible": True,
             "reason_code": None,
             "repair_id": None,
@@ -920,10 +922,12 @@ class IntegrationBranchOperandTest(VerifyTestCase):
         self.assertEqual(self.fleet(), [{
             "project_id": "fixture/target",
             "root": str(root),
-            "project_schema_version": 1,
+            # P3: the fixture contract is in the highest supported schema, 2.
+            "project_schema_version": 2,
             "platform_interval": {"min_inclusive": "1.0.0",
                                   "max_exclusive": "2.0.0"},
             "deprecated_uses": [],
+            "removed_uses": [],
             "compatible": True,
             "reason_code": None,
             "repair_id": None,

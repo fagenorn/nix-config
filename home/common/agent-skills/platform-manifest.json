@@ -1,9 +1,15 @@
 {
   "schema_version": 1,
-  "platform_version": "1.1.0",
-  "project_schema_versions": [1],
+  "platform_version": "1.2.0",
+  "project_schema_versions": [1, 2],
   "resolved_schema_version": 1,
-  "migrations": [],
+  "migrations": [
+    {
+      "id": "bindings-deploy.retire",
+      "from_schema": 1,
+      "to_schema": 2
+    }
+  ],
   "deprecations": [
     {
       "id": "legacy-skills-config",
@@ -19,6 +25,30 @@
       "subject": "adopt-project legacy binding config rewrite",
       "since": "1.1.0",
       "successor": "resolve-project resolve",
+      "migration": "legacy-skills-config.retire"
+    },
+    {
+      "id": "bindings-deploy",
+      "kind": "project_schema",
+      "subject": "1",
+      "since": "1.2.0",
+      "successor": "release profile activation",
+      "migration": "bindings-deploy.retire"
+    },
+    {
+      "id": "release-deploy-inspect",
+      "kind": "platform_behavior",
+      "subject": "release deploy inspect",
+      "since": "1.2.0",
+      "successor": "release profile activation",
+      "migration": "bindings-deploy.retire"
+    },
+    {
+      "id": "release-bridge-planning",
+      "kind": "platform_behavior",
+      "subject": "adopt-project release_bridge legacy deploy planning",
+      "since": "1.2.0",
+      "successor": "release profiles in .agents/project.json",
       "migration": "legacy-skills-config.retire"
     }
   ],
