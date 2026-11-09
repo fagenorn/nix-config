@@ -1275,7 +1275,9 @@ def _request_host(value, target, reasons):
 
 def _declaration(value, reasons):
     dispatch = value.get("dispatch_id") if isinstance(value.get("dispatch_id"), str) else None
-    role = value.get("role") if isinstance(value.get("role"), str) else None
+    # An empty role is an incomplete declaration, not a spelling: it is absent
+    # (null), because the drift schema rejects an empty string.
+    role = value.get("role") if isinstance(value.get("role"), str) and value["role"] else None
     subagent_type = value.get("subagent_type")
     # The matrix is deliberately not read here. These are the source's known
     # canonical role spellings; an agent type that serves several roles

@@ -1286,6 +1286,25 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
         reasons = agent_costs.Counter()
         self.assertEqual(agent_costs._declaration({"subagent_type": "implementer"}, reasons)["role"], None)
 
+    def test_an_empty_recorded_role_is_absent_and_the_observation_passes_the_drift_schema(self):
+        from agent_tools import agent_model_drift_schema as schema
+        for subagent_type in ("general-purpose", "implementer"):
+            with self.subTest(subagent_type=subagent_type):
+                reasons = agent_costs.Counter()
+                declared = agent_costs._declaration(
+                    {"role": "", "subagent_type": subagent_type,
+                     "dispatch_id": "improve-architecture-scan-owner"}, reasons)
+                self.assertEqual(declared, {"dispatch_id": "improve-architecture-scan-owner",
+                                            "role": None, "authority": "unknown"})
+                self.assertEqual(reasons["role_ambiguous"], 1)
+                host = {"host": "claude", "model": "m", "effort": "high"}
+                schema._observation(
+                    {"declaration": declared, "requested": host, "configured": host,
+                     "observed": dict(host, authority="assistant-execution"),
+                     "escalation": None, "count": 1,
+                     "first_event_at": "2026-09-20T10:05:00Z",
+                     "last_event_at": "2026-09-20T10:05:00Z"}, "/obs")
+
     def test_a_preserved_retired_role_on_a_known_dispatch_is_a_declaration_mismatch(self):
         from agent_tools import agent_model_drift_routing as routing
         observation = {"declaration": {"dispatch_id": "improve-architecture-scan-owner",
