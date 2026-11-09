@@ -1,0 +1,163 @@
+{
+  "rubric_version": "issue-725-r1",
+  "scale": {
+    "min": 0.0,
+    "max": 100.0
+  },
+  "runner": {
+    "mode": "EVAL_TREE",
+    "model": "sonnet",
+    "trials_per_side": 3,
+    "eval_max_usd": 2.5,
+    "total_cap_usd": 60.0
+  },
+  "corpus": [
+    {
+      "case_class": "cold-resolution",
+      "skill": "doc-grounded-questions",
+      "eval_id": 1,
+      "eval_name": "question-grounded-in-fixture-docs",
+      "critical": [
+        "the working tree is untouched and nothing was committed",
+        "no worktree was created"
+      ],
+      "noncritical": [
+        "the output names a grounding source (CONTEXT doc, context map, or ADR)",
+        "the output surfaces the documented out-of-scope-pending-ADR constraint",
+        "a question is actually asked"
+      ]
+    },
+    {
+      "case_class": "routine-issue",
+      "skill": "deliver-direct",
+      "eval_id": 1,
+      "eval_name": "direct-issue-through-test-first",
+      "critical": [
+        "a worktree was created",
+        "nothing was pushed",
+        "local and origin main are unchanged",
+        "the implementation is committed on the worktree branch"
+      ],
+      "noncritical": [
+        "the worktree branch is named for issue 3",
+        "the fixture's tests pass in the worktree",
+        "no occurrence of the old flag remains",
+        "no spec or plan was written",
+        "the worktree is left clean"
+      ]
+    },
+    {
+      "case_class": "fuzzy-design",
+      "skill": "design",
+      "eval_id": 1,
+      "eval_name": "design-leaves-a-code-map",
+      "critical": [
+        "a spec exists under the retained specs directory and is committed",
+        "no code map is tracked or present in the working tree",
+        "the implementation was not started"
+      ],
+      "noncritical": [
+        "the spec's Decisions section names no file path or line number",
+        "the code map exists in the git directory, named after the spec",
+        "the code map is well-formed and lists the three files the issue decides about"
+      ]
+    },
+    {
+      "case_class": "review-ship",
+      "skill": "codex-collaboration",
+      "eval_id": 4,
+      "eval_name": "native-diff-review-before-ship",
+      "critical": [
+        "nothing was pushed",
+        "local and origin main are unchanged",
+        "the branch still carries the implementation"
+      ],
+      "noncritical": [
+        "the worktree is left exactly as committed",
+        "the run names the native route for the unsupported capability",
+        "the run prints the Critical, Important and Minor sections"
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "case_class": "cold-resolution",
+      "base": [
+        [],
+        [],
+        [
+          "a question is actually asked"
+        ]
+      ],
+      "candidate": [
+        [],
+        [
+          "a question is actually asked"
+        ],
+        [
+          "a question is actually asked"
+        ]
+      ],
+      "expected": {
+        "critical_all_pass": true,
+        "evaluator_stability": "stable",
+        "noncritical_median": {
+          "base": 100.0,
+          "candidate": 66.66666666666667
+        }
+      }
+    },
+    {
+      "case_class": "cold-resolution",
+      "base": [
+        [],
+        [],
+        []
+      ],
+      "candidate": [
+        [],
+        [
+          "no worktree was created"
+        ],
+        []
+      ],
+      "expected": {
+        "critical_all_pass": false,
+        "evaluator_stability": "stable",
+        "noncritical_median": {
+          "base": 100.0,
+          "candidate": 100.0
+        }
+      }
+    },
+    {
+      "case_class": "fuzzy-design",
+      "base": [
+        [
+          "the implementation was not started"
+        ],
+        [],
+        []
+      ],
+      "candidate": [
+        [
+          "the implementation was not started"
+        ],
+        [
+          "the implementation was not started"
+        ],
+        [
+          "the code map exists in the git directory, named after the spec"
+        ]
+      ],
+      "expected": {
+        "critical_all_pass": true,
+        "evaluator_stability": "stable",
+        "noncritical_median": {
+          "base": 100.0,
+          "candidate": 100.0
+        }
+      }
+    }
+  ]
+}
