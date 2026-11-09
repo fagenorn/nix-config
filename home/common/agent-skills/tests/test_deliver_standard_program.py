@@ -1914,6 +1914,70 @@ class HoldTest(unittest.TestCase):
         result, _ = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="OPEN")
         self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
 
+    def test_close_out_runs_when_the_once_run_closes_the_issue(self):
+        """#760 AC1: the hold posts a block, the single verify run closes the issue, and close-out still runs."""
+        result, calls = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[-2:], ["hold", "close-out"])
+        close_out = prompt(calls, "close-out")
+        self.assertIn("git -C /r worktree remove /r/.wt/w-issue-9-x", close_out)
+        self.assertIn("forge-claim release --repo owner/repo --issue 9 --holder", close_out)
+        self.assertEqual(prompt(calls, "hold").count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+
+    def test_close_out_runs_when_the_issue_is_already_closed_at_hold_time(self):
+        """#760 AC2: an issue closed before the hold posts nothing and runs nothing, and close-out still runs."""
+        already = {"issue_state": "CLOSED", "already_closed": True, "block": None, "lint": None, "verify_run": None}
+        result, calls = self.ship(EVIDENCE, hold=already, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[-2:], ["hold", "close-out"])
+        close_out = prompt(calls, "close-out")
+        self.assertIn("git -C /r worktree remove /r/.wt/w-issue-9-x", close_out)
+        self.assertIn("forge-claim release --repo owner/repo --issue 9 --holder", close_out)
+        self.assertIn("return already_closed true and issue_state CLOSED", prompt(calls, "hold"))
+        result, calls = self.ship(HUMAN, hold=already, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+
+    def test_closed_at_hold_time_still_checks_a_split_child(self):
+        child = dict(self.CHILD, verify_run={"ran": False, "exit": 0})
+        hold = {"issue_state": "CLOSED", "already_closed": True, "blocks": [12], "split": [child]}
+        result, calls = self.ship(HUMAN, hold=hold, close="CLOSED")
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+        result, calls = self.ship(HUMAN, hold=dict(hold, split=[]), close="CLOSED")
+        self.assertEqual((result["stage"], result["missing_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+        result, _ = self.ship(HUMAN, hold=dict(hold, split=[self.CHILD]), close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+
+    def test_the_hold_prompt_recovers_split_children_when_the_issue_is_already_closed(self):
+        """#760 R2: a resume that finds the parent closed still reads the blocked issues and the split children."""
+        _, calls = self.ship(HUMAN, hold={"issue_state": "CLOSED", "already_closed": True, "blocks": [], "split": []})
+        hold = prompt(calls, "hold")
+        self.assertIn("steps 4 and 5 still apply", hold)
+        self.assertLess(hold.index("steps 4 and 5 still apply"), hold.index("4. Read the issues this one blocks"))
+
+    def test_a_once_run_close_still_validates_the_hold_evidence(self):
+        """#760 R1: CLOSED after this attempt's own run is not already_closed: an uncovered criterion still stops."""
+        partial = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]}
+        for flag in ({}, {"already_closed": False}):
+            with self.subTest(flag=flag):
+                result, calls = self.ship(EVIDENCE, HUMAN, hold=dict({"issue_state": "CLOSED", "block": partial}, **flag),
+                                          close="CLOSED")
+                self.assertEqual((result["stage"], result["missing_checks"]), ("hold", ["AC3"]))
+                self.assertNotIn("close-out", labels(calls))
+        result, calls = self.ship(EVIDENCE, hold={"issue_state": "CLOSED", "lint": None, "verify_run": None},
+                                  close="CLOSED")
+        self.assertEqual(result["stage"], "hold")
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_closed_at_hold_time_still_needs_the_merge_and_the_code_rows(self):
+        already = {"issue_state": "CLOSED", "already_closed": True, "block": None, "lint": None, "verify_run": None}
+        for bad, stage in (({"merge_commit_local": False}, "hold"), ({"code_unmet": ["AC1"]}, "code-unmet")):
+            with self.subTest(bad=bad):
+                result, calls = self.ship(EVIDENCE, hold=dict(already, **bad), close="CLOSED")
+                self.assertEqual(result["stage"], stage)
+                self.assertNotIn("close-out", labels(calls))
+
     def test_refused_lint_or_failed_run_stops_without_close_out(self):
         for hold in ({"lint": {"ok": False, "errors": [{"code": "unverified_reference"}]}},
                      {"verify_run": {"ran": False, "exit": 0}}, {"verify_run": {"ran": True, "exit": 2}},
