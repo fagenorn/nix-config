@@ -17,6 +17,8 @@
 #   PRE_WT    worktree the setup hook pre-created ("" when the eval has no setup)
 #   BASE_MAIN local `main`'s SHA right after the setup hook (the initial commit when
 #             there is no setup)
+#   ORIGIN_REFS  the origin's full ref set right after the setup hook, one
+#             "<refname> <sha>" line per ref (compare it to detect a push under any name)
 #   SPEC_DIR / PLAN_DIR  absolute paths from the fixture's retained resolver snapshot:
 #             use them bare under REPO and as "$WT/${SPEC_DIR#"$REPO"/}" under another
 #             checkout, never "$REPO/$SPEC_DIR"

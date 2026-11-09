@@ -74,6 +74,7 @@
  "home/common/agent-skills/tests/test_sdd_workspace.py": 3.4,
  "tests/test_transaction_recovery.py": 2.6,
  "tests/test_agent_gate_bundle.py": 2.6,
+ "tests/test_agent_gate_corpus.py": 1.0,
  "home/common/agent-skills/tests/test_agent_evidence.py": 2.5,
  "home/common/agent-skills/tests/test_verification_direct.py": 2.4,
  "tests/test_transaction_recovery_settle.py": 2.4,

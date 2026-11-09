@@ -408,8 +408,8 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
 
     def test_an_incompatible_platform_or_schema_fails_schema_supported(self):
         cases = (
-            ("platform_too_old", "0.9.0", 1, "/platform"),
-            ("platform_too_new", "2.0.0", 1, "/platform"),
+            ("platform_too_old", "0.9.0", 2, "/platform"),
+            ("platform_too_new", "2.0.0", 2, "/platform"),
             # P3: schema 2 is supported since platform 1.2.0; 3 is the unsupported integer.
             ("project_schema_unsupported", "1.4.2", 3, "/schema_version"),
         )
@@ -443,16 +443,16 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
 
     def test_the_installed_schema_set_decides_schema_support(self):
         """Support comes from the installed manifest, not a constant or the
-        committed set: widening it admits a schema-1 contract, narrowing it
+        committed set: widening it admits a schema-2 contract, narrowing it
         refuses one, and the facts name the installed set (D4, D6)."""
-        base = {"platform_version": "1.4.2", "project_schema_version": 1,
+        base = {"platform_version": "1.4.2", "project_schema_version": 2,
                 "platform_min_inclusive": "1.0.0",
                 "platform_max_exclusive": "2.0.0"}
         cases = (
             ([1, 2], ["passed", None, None,
                       {**base, "supported_project_schemas": ["1", "2"]}]),
-            ([2], ["failed", "unsupported_schema", "contract.schema.unsupported",
-                   {**base, "supported_project_schemas": ["2"],
+            ([1], ["failed", "unsupported_schema", "contract.schema.unsupported",
+                   {**base, "supported_project_schemas": ["1"],
                     "schema_reason_code": "project_schema_unsupported",
                     "violations": 1, "first_pointer": "/schema_version"}]),
         )
@@ -510,7 +510,7 @@ class PlatformLadderTest(ReportAssertions, unittest.TestCase):
             self.assertEqual(check["facts"], {
                 "platform_version": "1.4.2",
                 "supported_project_schemas": ["1", "2"],  # P3: platform 1.2.0
-                "project_schema_version": 1,
+                "project_schema_version": 2,
                 "platform_min_inclusive": "1.0.0",
                 "platform_max_exclusive": "2.0.0",
             })
