@@ -1,11 +1,11 @@
 # Stage-4 cutover checklist — issue 130
 
 Purpose: pre-activation predicates for the issue 130 strict cutover with fresh read-only evidence, red-row dispositions and the owner's gate; preparation only, per spec D1 and the owner's 2026-11-08 overnight decision.
-Run: rel_01a1a1d8-7220-72a2-841e-df2806f78396; refreshed by the issue 130 overnight preparation, 2026-11-09. The issue 130 activation preparation re-read rows on the morning of 2026-11-09: every anis-desktop row, eleven-m5 C4, C6, C7 and C11, and mbp C6 and C7. It also took mbp C4 and C11 from #724's close. After #733 switched anis-desktop to the bridge, moved its nodocom root onto dev and ran gate step 1 there, every anis-desktop row was re-read (2026-11-09T08:39:12Z to 08:39:23Z).
+Run: rel_01a1a1d8-7220-72a2-841e-df2806f78396; refreshed by the issue 130 overnight preparation, 2026-11-09. The issue 130 activation preparation re-read rows on the morning of 2026-11-09: every anis-desktop row, eleven-m5 C4, C6, C7 and C11, and mbp C6 and C7. It also took mbp C4 and C11 from #724's close. After #733 switched anis-desktop to the bridge, moved its nodocom root onto dev and ran gate step 1 there, every anis-desktop row was re-read (2026-11-09T08:39:12Z to 08:39:23Z). Gate step 1 then ran on the mbp JarBird root, and its C6 and C7 rows were re-read (2026-11-09T08:44:49Z to 08:48:25Z).
 Revisions: overnight rows read origin/main 6e2f9dde45cb76f363813801fb3b3b42b430545d. The morning rows read origin/main 76a3470a347dbbbb3332e22e7d49b877574adb0c on eleven-m5 and anis-desktop; anis-desktop ran that revision's checks exported to /tmp/c130-main-76a3470a. mbp C7 read e1d4db56718b9c4cdc330888de41fbed6d8a4c10, which is PR 723's merge and is now origin/main. The #733 re-read of anis-desktop ran from its K_H checkout, fast-forwarded to e1d4db56718b, and from the system-79 helpers built from that revision. The freeze is lifted. The candidate, origin/cutover-130-candidate, is still 953f9b4b29253720e9868ab71b456b0ed3a62f63.
 Hosts: eleven-m5, mbp, anis-desktop
-Evidence window: 2026-11-09T01:30:03Z to 2026-11-09T01:43:58Z (overnight); 2026-11-09T05:28:06Z to 2026-11-09T05:28:13Z (mbp C4 and C11, #724); 2026-11-09T08:21:54Z to 2026-11-09T08:30:42Z (this morning's pass); 2026-11-09T08:39:12Z to 2026-11-09T08:39:23Z (anis-desktop after #733)
-Activation readiness: activation not permitted. Of the 11 pre-activation items, 1 is red (C3), 1 is human-pending (C6, mbp JarBird gate step 1) and 9 are green. C8 is retired and not counted.
+Evidence window: 2026-11-09T01:30:03Z to 2026-11-09T01:43:58Z (overnight); 2026-11-09T05:28:06Z to 2026-11-09T05:28:13Z (mbp C4 and C11, #724); 2026-11-09T08:21:54Z to 2026-11-09T08:30:42Z (this morning's pass); 2026-11-09T08:39:12Z to 2026-11-09T08:39:23Z (anis-desktop after #733); 2026-11-09T08:44:49Z to 2026-11-09T08:48:25Z (mbp JarBird gate step 1)
+Activation readiness: activation not permitted. Of the 11 pre-activation items, 1 is red (C3), 0 are human-pending and 10 are green. C8 is retired and not counted.
 
 Owner decisions applied (issue 130, 2026-11-08T13:20:31Z): C8 (the Codex ship handoff) is no longer a cutover predicate. C3's live trials are Claude-only. AC4 and AC9 (P3) need a Claude-driven ship on the strict path only.
 
@@ -18,7 +18,7 @@ Owner decisions applied (issue 130, 2026-11-08T13:20:31Z): C8 (the Codex ship ha
 | C3 | A fresh `approved` #70 bundle covers the strict-cutover candidate as a whole | issue; #71; #128 AC5 | pre | red | trial at activation run, after 723 lands |
 | C4 | Candidate and retained-bridge fleet preflight are green for every registered project | #71 | pre | green | — |
 | C5 | No legacy release is in flight | #90 | pre | green | — |
-| C6 | No legacy attempt is left without a resumable strict-path mapping | issue; refresh | pre | human-pending | mbp JarBird: gate step 1 |
+| C6 | No legacy attempt is left without a resumable strict-path mapping | issue; refresh | pre | green | — |
 | C7 | No retained legacy worktree is left without a resumable mapping | refresh | pre | green | — |
 | C8 | The Codex ship handoff is in place | issue; #119 | — | retired | owner decision 2026-11-08: not a cutover predicate |
 | C9 | The Claude path answers as its declared host capabilities say, including bounded admission; Codex answers its declared `unsupported` | refresh | pre | green | — |
@@ -48,6 +48,10 @@ Writes #733 made on anis-desktop, all recoverable (inside `wsl -d NixOS`; the di
 - K_H `/home/anis/tmp/nix-config` was fast-forwarded on main with `git merge --ff-only origin/main` at 2026-11-09T08:35:46Z, from 8a0cf87e6980 to e1d4db56718b. `just switch` ran headless from 08:35:56Z to 08:37:31Z and exited 0, moving the host from system-78 to system-79 (platform 1.2.0, the bridge, not the candidate). The log is `/home/anis/.agents/state/issue-733-switch-20261109T083556Z.log`. system-78 is kept.
 - The clean nodocom root `/home/anis/Projects/nodocom` was moved at 2026-11-09T08:37:58Z from main 49147a1840b3 to a new local branch dev, tracking origin/dev, at 40abc7d326d0 (nodocom PR 2606's merge, the mbp root's revision). Main is untouched. Nothing was pushed or deployed, and the registry is unchanged, with no `branch_override`. `git checkout main` undoes it.
 - Gate step 1 ran on the nodocom root: dry run at 08:38:20Z (migrate 15, refused 0), then `workflow-state migrate --apply` at 2026-11-09T08:38:39Z (migrated 15, refused 0, schema 11). The recoverable copy was taken first, at `/home/anis/.agents/state/worktree-archive/issue-733-20261109T083820Z/`. It holds `ledgers-workflows.tar.gz` (sha256 d1dbf8306176180b4d29c236d5b4e1535fc4be2e2a4d98878d825ad3e8b5d4b9), `attempt-transactions.tar.gz` (sha256 66d68ad17d036d96a724f0197be5c13d7b0018c4d6d2a724dd201ee4728bc35e), verified bundles of `worktree-issue-2206-orchestrated` and of main at 49147a18, SHA256SUMS, the migrate reports and every re-read. No ledger file had an mtime within 24 hours (the newest was 2026-10-27). No worktree was removed.
+
+Writes the mbp JarBird gate step 1 made, all recoverable (mbp, under the bridge generation: system-325, platform 1.2.0; mbp moved from system-324 to system-325 at 2026-11-09T08:17:43Z, not by this run):
+- The fenced snapshot `/Users/anis/Projects/jarbird/.superpowers/archive/pre-130-c6-20261109T084753Z.tar.gz` and the labels file `pre-130-c6-labels-20261109T084753Z.json` beside it were written at 2026-11-09T08:47:55Z, with the reports in `pre-130-c6-20261109T084753Z/`.
+- `workflow-state migrate --repo-root /Users/anis/Projects/jarbird --apply` at 2026-11-09T08:48:11Z migrated 15 schema-10 ledgers to schema 11. Nothing was archived or deleted, and no worktree was removed. The JarBird checkout (9ffd88a5b454, dev) was not moved.
 
 ## Roster
 
@@ -229,12 +233,38 @@ C6.a workflow-state migrate --repo-root R
 | mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C6.a | 2026-11-09T08:29:44Z | 0 | current 11, migrate 0, migrated 0, refused 0 | green |
 | mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C6.a | 2026-11-09T08:29:44Z | 0 | current 8, migrate 0, migrated 0, refused 0 | green |
 | mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C6.a | 2026-11-09T08:29:44Z | 0 | current 123, migrate 0, migrated 0, refused 0 | green |
-| mbp | /Users/anis/Projects/jarbird | 9ffd88a5b454 dev 1 dirty | C6.a | 2026-11-09T08:29:44Z | 0 | current 38, migrate 15, migrated 0, refused 0 | human-pending |
+| mbp | /Users/anis/Projects/jarbird | 9ffd88a5b454 dev 1 dirty | C6.a | 2026-11-09T08:48:17Z | 0 | current 53, migrate 0, migrated 0, refused 0 (after gate step 1) | green |
 | mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C6.a | 2026-11-09T08:29:44Z | 0 | current 154, migrate 0, migrated 0, refused 0 | green |
 | eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C6.a | 2026-11-09T08:23:24Z | 0 | current 0, migrate 0, migrated 0, refused 0 (empty store, created at 01:34:39Z) | green |
 | eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C6.a | 2026-11-09T08:23:24Z | 0 | current 5, migrate 0, migrated 0, refused 0 (after gate step 1, #732) | green |
 
-Every row in the table is a `workflow-state migrate` dry run. No root refuses a ledger. The mbp JarBird `migrate 15` are schema-10 ledgers that the bridge helper migrates to schema 11 at gate step 1. On eleven-m5, gate step 1 ran on JarBird at 2026-11-09T08:23:13Z under #732, with the recoverable copy taken first; its record is below. The mbp JarBird ledgers were not written. On anis-desktop, #733 first put the host on the bridge generation (system-79, platform 1.2.0). Gate step 1 then ran on nodocom at 2026-11-09T08:38:39Z, with the recoverable copy taken first; its record is below. Nothing held by another session was touched.
+Every row in the table is a `workflow-state migrate` dry run. No root refuses a ledger. On mbp, gate step 1 ran on JarBird at 2026-11-09T08:48:11Z, with the recoverable copy taken first: its 15 schema-10 ledgers (`migrate 15` at the 08:29:44Z read) are now schema 11, and its record is below. On eleven-m5, gate step 1 ran on JarBird at 2026-11-09T08:23:13Z under #732, with the recoverable copy taken first; its record is below. On anis-desktop, #733 first put the host on the bridge generation (system-79, platform 1.2.0). Gate step 1 then ran on nodocom at 2026-11-09T08:38:39Z, with the recoverable copy taken first; its record is below. Nothing held by another session was touched.
+
+#### JarBird (mbp /Users/anis/Projects/jarbird) gate step 1 record
+
+- Snapshot: /Users/anis/Projects/jarbird/.superpowers/archive/pre-130-c6-20261109T084753Z.tar.gz, sha256:11b5916fa86b3d79b6926a8fedf9e8f39ea5e0ad8bdc5930299035c624e3c0c4, taken_at 2026-11-09T08:47:55Z by `ledger-snapshot take` (fenced, exit 0), 2306 members over 53 ledgers; attempt-transactions was in it (the store exists). Its digest is also in `pre-130-c6-20261109T084753Z.tar.gz.sha256` beside it, and the dry-run, apply and re-read reports are in `pre-130-c6-20261109T084753Z/` with SHA256SUMS.
+- Labels file: /Users/anis/Projects/jarbird/.superpowers/archive/pre-130-c6-labels-20261109T084753Z.json. Every one of the 15 ledgers is labelled `migrate`, with its issues and no re-delivery. No ledger was archived.
+- Liveness proof: 2026-11-09T08:46:25Z to 08:48:03Z, no hit. Local: no file in the ledger or transaction store has an mtime within 24 hours; the newest file write was 2026-11-07T20:30:51Z. The `workflows` directory's own mtime, 2026-11-08T20:15:34Z, is the archiving of four ledgers into `archive/workflows` recorded in their `.archived.json` sidecars, not a ledger write. Forge: the 54 issues the 15 ledgers name (elevenyellow/jarbird) are all closed, with no in-progress label and no claim. The claims of holder mbp/mbp-20261108-launch-1 on jarbird#238 and jarbird#344 are not live: each has its `agent:end` marker (reason done) at 2026-11-09T05:56:48Z and 06:52:20Z. Neither issue is named by a migrating ledger; jarbird#344 is in the current ledger rel_01a1a244.
+- Dry run at 2026-11-09T08:44:49Z: current 38, migrate 15, refused 0. Gate step 1 for this root (`--apply`): 2026-11-09T08:48:11Z, exit 0, current 38, migrated 15, refused 0, schema 11. The C6.a re-read: 2026-11-09T08:48:17Z, exit 0, current 53, migrate 0, migrated 0, refused 0.
+- Restore: `ledger-snapshot restore --repo-root /Users/anis/Projects/jarbird --snapshot <tarball>`, dry run first, by the #584 procedure below. The bridge reads schema 11, so a rollback needs no restore.
+
+| Ledger | Reason | Issues | Disposition | Liveness | Re-deliver |
+|--------|--------|--------|-------------|----------|------------|
+| rel_01a16b2f-e1dd-73ac-b6e2-281c1b4b52ea | schema 10 | 32 | migrated | local_quiet; forge_quiet | none |
+| rel_01a16caa-16af-738e-ad02-cb67fdb5fcc9 | schema 10 | 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45 | migrated | local_quiet; forge_quiet | none |
+| rel_01a177d2-1f58-70ad-8a17-a4c5de3d96d8 | schema 10 | 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 103, 104, 106, 107 | migrated | local_quiet; forge_quiet | none |
+| rel_01a17dcd-7c02-7cb3-bae1-fdd5984894f8 | schema 10 | 61, 121, 122 | migrated | local_quiet; forge_quiet | none |
+| rel_01a17f35-32c1-75b8-bbbf-a949ac2b966b | schema 10 | 61 | migrated | local_quiet; forge_quiet | none |
+| rel_01a1871a-8450-7c38-a55f-3af717f7c53b | schema 10 | 147 | migrated | local_quiet; forge_quiet | none |
+| rel_01a187a9-66fa-7308-a8c0-98dce0af8cd4 | schema 10 | 192 | migrated | local_quiet; forge_quiet | none |
+| rel_01a18833-64f3-7f3c-a009-a4c0e3c1c39e | schema 10 | 193 | migrated | local_quiet; forge_quiet | none |
+| rel_01a18900-d2d6-78bd-8b71-b0a1cf586ed5 | schema 10 | 194 | migrated | local_quiet; forge_quiet | none |
+| rel_01a18a18-df6c-7684-84aa-acf29c3fbdd6 | schema 10 | 201 | migrated | local_quiet; forge_quiet | none |
+| rel_01a18b5c-8db2-7cd0-8e31-827fe86bc2f0 | schema 10 | 202 | migrated | local_quiet; forge_quiet | none |
+| rel_01a18ec4-f714-7b86-bfca-fe7c1890059b | schema 10 | 227, 228, 229, 230, 231, 232, 233, 234, 246, 247, 248, 249, 250, 251 | migrated | local_quiet; forge_quiet | none |
+| rel_01a1934d-b3a6-7ffc-9722-3c39d7adf2b3 | schema 10 | 260 | migrated | local_quiet; forge_quiet | none |
+| rel_01a19643-d51b-7cc1-9ae4-75f99a2297b3 | schema 10 | 260 | migrated | local_quiet; forge_quiet | none |
+| rel_01a19c3a-1885-7ead-938b-f6c73b528695 | schema 10 | 312, 313 | migrated | local_quiet; forge_quiet | none |
 
 #### #733 gate step 1 record (anis-desktop /home/anis/Projects/nodocom)
 
@@ -262,7 +292,7 @@ Archive home: `R/.superpowers/archive/workflows/<ledger>`, with a sidecar `<ledg
 
 Restore, only before this delivery's ship step starts: (1) run ledger-snapshot restore --repo-root R `--snapshot <tarball>` as a dry run, read moved, restored and newer, and stop if any newer path lies outside the ledgers this run archived or migrated, archive/workflows or attempt-transactions, or if another session ran workflow-state on R since the snapshot; (2) run the same command with --apply, which moves the live workflows, attempt-transactions and archive/workflows aside into a new `pre-584-<UTC>.restore-<UTC>` directory under R/.superpowers/archive and then extracts the snapshot (a store absent at snapshot time stays absent; busy means a writer is active, so stop); (3) check that workflow-state migrate --repo-root R reports the pre-change counts. After ship, restore one ledger at a time by the ledger-archive README procedure (mv the archived directory back, then move its record aside).
 
-Pre-change readings (workflow-state migrate --repo-root R, dry run): Arcwave current 0, migrate 11, refused 4; Argus current 0, migrate 8, refused 3; nix-config current 15, migrate 108, refused 6; Nodo current 8, migrate 146, refused 49. JarBird on mbp is outside this delivery and still awaits gate step 1.
+Pre-change readings (workflow-state migrate --repo-root R, dry run): Arcwave current 0, migrate 11, refused 4; Argus current 0, migrate 8, refused 3; nix-config current 15, migrate 108, refused 6; Nodo current 8, migrate 146, refused 49. JarBird on mbp was outside this delivery; its gate step 1 ran on 2026-11-09 and is recorded above.
 
 ##### Arcwave (mbp /Users/anis/Projects/arcwave)
 
@@ -377,7 +407,7 @@ Each issue below is re-delivered fresh on the strict path, and no archived ledge
 - /Users/anis/Projects/nodocom orch-1445-1446-1480 (abandoned): elevenyellow/nodocom#1480 open
 - /Users/anis/Projects/nodocom orch-1869-1870-1871-1872-1873 (abandoned): elevenyellow/nodocom#1871 open, elevenyellow/nodocom#1872 open
 
-Item verdict: **human-pending** (mbp JarBird awaits gate step 1; every other root is green, anis-desktop nodocom after #733)
+Item verdict: **green** (every root, mbp JarBird after its gate step 1 and anis-desktop nodocom after #733)
 
 ### C7 — Retained worktrees have a strict-path mapping
 
@@ -395,12 +425,12 @@ C7.r (issue 585, with the forge class of #710) states this item's rule in one re
 | mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C7.r | 2026-11-09T08:29:31Z | 0 | worktrees 10: current 10, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
 | mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C7.r | 2026-11-09T08:29:31Z | 0 | worktrees 8: current 8, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
 | mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C7.r | 2026-11-09T08:29:31Z | 0 | worktrees 8: current 6, forge 2, migrate 0, refused-only 0, unmapped 0; forge `cutover-130-candidate` (declared); forge `prep-130-main-baseline` (open_pr 726) | green |
-| mbp | /Users/anis/Projects/jarbird | 9ffd88a5b454 dev 1 dirty | C7.r | 2026-11-09T08:29:31Z | 0 | worktrees 17: current 15, forge 2, migrate 0, refused-only 0, unmapped 0; forge `worktree-issue-282-…` and `worktree-issue-283-…` (claims of another session, mbp/mbp-20261109-fidelity-2) | green |
+| mbp | /Users/anis/Projects/jarbird | 9ffd88a5b454 dev 1 dirty | C7.r | 2026-11-09T08:48:25Z | 0 | worktrees 18: current 15, forge 3, migrate 0, refused-only 0, unmapped 0; forge `worktree-issue-282-…` and `worktree-issue-283-…` (claims of mbp/mbp-20261109-fidelity-2) and `worktree-issue-553-…` (claim of mbp/mbp-20261109-or-keylimit); met true (after gate step 1) | green |
 | mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C7.r | 2026-11-09T08:29:31Z | 0 | worktrees 5: current 5, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
 | eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C7.r | 2026-11-09T08:23:24Z | 0 | worktrees 0: current 0, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
 | eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C7.r | 2026-11-09T08:23:24Z | 0 | worktrees 8: current 8, forge 0, migrate 0, refused-only 0, unmapped 0 (after gate step 1, #732) | green |
 
-Morning pass (2026-11-09): mbp read from origin/main e1d4db56718b and eleven-m5 from 76a3470a347d. anis-desktop read from 76a3470a's checks, exported. On mbp, #700 settled the issue 487 and issue 499 JarBird worktrees: they are gone, and every root is green, as at #700's 05:40:33Z re-read. On eleven-m5, gate step 1 (#732) made the eight JarBird worktrees `current`, and none was removed. On anis-desktop, the one nodocom worktree read `migrate` at 08:27:34Z. After gate step 1 (#733), it reads `current` from K_H at e1d4db56718b, and none was removed. fagenorn/nix-config is still not registered on anis-desktop, so its K_H worktrees (`worktree-issue-468-orchestrated` and `/tmp/launch-scope-td48wcrk/trial`) are outside this reading. #733 closed with that registration decision left open.
+Morning pass (2026-11-09): mbp read from origin/main e1d4db56718b and eleven-m5 from 76a3470a347d. anis-desktop read from 76a3470a's checks, exported. On mbp, #700 settled the issue 487 and issue 499 JarBird worktrees: they are gone, and every root is green, as at #700's 05:40:33Z re-read. After mbp JarBird's gate step 1, its C7.r re-read at 08:48:25Z from e1d4db56718b is green: one more worktree than at 08:29:31Z, the issue 553 worktree, mapped by another session's claim, and none was removed. On eleven-m5, gate step 1 (#732) made the eight JarBird worktrees `current`, and none was removed. On anis-desktop, the one nodocom worktree read `migrate` at 08:27:34Z. After gate step 1 (#733), it reads `current` from K_H at e1d4db56718b, and none was removed. fagenorn/nix-config is still not registered on anis-desktop, so its K_H worktrees (`worktree-issue-468-orchestrated` and `/tmp/launch-scope-td48wcrk/trial`) are outside this reading. #733 closed with that registration decision left open.
 
 The overnight note follows. Exit is the check's exit over all of that host's roots: 1 when a root is red and 75 when the worst root is human-pending. On mbp, JarBird's two unmapped worktrees are the issue 487 and issue 499 worktrees that #585 kept for `operator` and that #700 tracks. jarbird#499 is held by another session, so its worktree was not touched. The four JarBird `forge` paths are live claims of another session. On nix-config, `cutover-130-candidate` is the declared candidate branch, the issue 687 worktree has an open claim and PR #723, and this refresh's evidence worktree (`prep-130-main-baseline`, branch `issue-130-overnight-checklist-refresh`) is mapped by its open pull request. The closed issue 705's worktree, unmapped at the 01:31:03Z read, was removed as recorded under the summary. eleven-m5's JarBird worktrees read `migrate` (they read `current` on 2026-11-03), because their schema-10 ledgers migrate at gate step 1.
 
@@ -535,9 +565,9 @@ Every row that is red at this refresh, and its route:
 |------|--------------|-------------|
 | C3 mbp and eleven-m5 origin/main .agents/artifacts/evidence/ | An `approved` Claude-only #70 bundle binding the candidate, merged into origin/main | trial at activation run, after 723 lands |
 
-Rows that are human-pending and their action: C6 mbp JarBird (gate step 1).
+Rows that are human-pending and their action: none.
 
-Rows that were red or human-pending at the overnight refresh and read green now: C4.b and C11 on mbp (#724); C4.b, C11, C6 and C7 eleven-m5 JarBird (#730, #732); C7 mbp JarBird (#700); C1, C2.a, C4.a, C5 and C9 on anis-desktop (first reading); C2.b, C4.b, C6, C7, C10, C11 and C12 on anis-desktop (#733, closed 2026-11-09T08:40:16Z: host switched to the bridge as system-79, nodocom root moved to dev 40abc7d326d0, gate step 1 run).
+Rows that were red or human-pending at the overnight refresh and read green now: C4.b and C11 on mbp (#724); C4.b, C11, C6 and C7 eleven-m5 JarBird (#730, #732); C7 mbp JarBird (#700); C6 mbp JarBird (gate step 1, 2026-11-09T08:48:11Z); C1, C2.a, C4.a, C5 and C9 on anis-desktop (first reading); C2.b, C4.b, C6, C7, C10, C11 and C12 on anis-desktop (#733, closed 2026-11-09T08:40:16Z: host switched to the bridge as system-79, nodocom root moved to dev 40abc7d326d0, gate step 1 run).
 
 Rows that were red at the 2026-11-03 to 2026-11-08 readings and read green now: C2 mbp /Users/anis/tmp/nix-config (#586), C2 and C10 mbp /Users/anis/Projects/nodocom (#583), C6 on the four refused-ledger roots (#584), C7 on arcwave, argus and nodocom (#585), C11 on the hosts' deprecation lists (#580), C11 readings b to d on every root (#581, #582, #555).
 
