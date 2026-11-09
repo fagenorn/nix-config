@@ -117,6 +117,10 @@ const DECLARED = SETUP.required_checks || []
 const HOLDER = `${SETUP.host}/${BATCH}`
 if (!HOLDER_RE.test(HOLDER)) return { stage: 'setup', result: setup, invalid: 'holder', holder: HOLDER }
 const SLUG = SETUP.slug, INT = SETUP.integration_branch, MAX = SETUP.max_parallel
+// The land lock command, its return sentence and the conditional second release, one line each so deliver-standard.js carries them byte for byte (#716).
+const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
+const LOCK_RETURN = 'Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output.'
+const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
 
 let ISSUES
 if (HAS_LABEL) {
@@ -389,8 +393,8 @@ ${RULES}`, label, { ...cheap, schema: RENEW_SCHEMA })
     c.lock++
     const label = `land-lock-${n}-${c.lock}`
     const r = await call(`Take the cross-host landing lock of the branch ${INT} for PR #${pr} of issue #${n} of ${SLUG} at the head ${expected}.
-Run alone and exactly: forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${expected}${wait ? ' --wait' : ''}
-Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. Run nothing else.
+Run alone and exactly: ${LAND_ACQUIRE(expected, wait)}
+${LOCK_RETURN} Run nothing else.
 ${RULES}`, label, { ...cheap, schema: LOCK_SCHEMA })
     return r ? r.verdict : null
   }

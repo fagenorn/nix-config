@@ -371,6 +371,10 @@ if (CONT && setup.dirty && !setup.merged_pr && partial === undefined) {
 }
 
 const SLUG = setup.slug, INT = setup.integration_branch, STRATEGY = setup.merge_strategy
+// The land lock command, its return sentence and the conditional second release, one line each, byte for byte the same as deliver-batch.js (#716).
+const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
+const LOCK_RETURN = 'Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output.'
+const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
 const UNSET = setup.unset_env.length ? `unset ${setup.unset_env.join(' ')} && ` : ''
 let GRANTS = []
 const RULES_FOR = (W, extra = GRANTS) => `${BASE_RULES}
@@ -958,18 +962,8 @@ if (MODE === 'ready') {
 phase('Ship')
 const allCode = plan.acceptance.every(a => a.kind === 'code')
 const closesLine = allCode && INT === setup.default_branch ? `Closes #${ISSUE}` : `Refs #${ISSUE}`
-{
-  const lost = await renew('ship', 'Ship')
-  if (lost) return lost
-}
-const prR = await call(`${CTX}
-Open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
-${RULES}`, { label: 'pr', phase: 'Ship', model: 'sonnet', schema: { type: 'object', properties: { pr: { type: 'integer' }, head: FULL_SHA, notes: { type: 'string' } }, required: ['pr', 'head'] } })
-if (!prR || !prR.pr) return stop('pr', { result: prR })
-// The shipped head must be the verified head; after a sync, the reviewed merge commit.
-if (!sameSha(prR.head, verify.head)) return stop('head-moved', { pr: prR.pr, expected: verify.head, head: prR.head })
-const PR = prR.pr
-
+const PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head: FULL_SHA, notes: { type: 'string' } }, required: ['pr', 'head'] }
+const MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] }
 const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind'] }, head: FULL_SHA, required: STRS, failing: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
 const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, resolved_files: STRS, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 const LOCK_SCHEMA = {
@@ -978,7 +972,8 @@ const LOCK_SCHEMA = {
   required: ['verdict'],
 }
 const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
-let expected = fuller(verify.head, prR.head)
+let PR = null
+let expected = verify.head
 let head = expected
 let syncs = 0
 let round = 0
@@ -988,9 +983,11 @@ let raced = false
 let contended = 0
 // The cross-host land lock of the integration branch (#677): taken with --wait right after the PR opens, before any sync,
 // moved with a one-shot acquire after every head change, re-checked once before the merge, released after the merge and on every stop.
-// lockSha is assigned only right after a holding verdict, to the head that acquire named: it is the last sha this run owned.
+// lockSha is the last sha this run owned or may own: set before the pr call, whose lock may be taken before its reply is lost, then after each holding verdict to the head that acquire named.
 let lockHeld = false
 let lockSha = null
+// The sha a move acquire may have left held when its answer was lost (#716); cleared by a definitive answer.
+let lockMaybe = null
 let locks = 0
 let retakes = 0
 const HOLDING = ['acquired', 'already_held', 'moved']
@@ -998,8 +995,8 @@ const HOLDING = ['acquired', 'already_held', 'moved']
 const lock = async wait => {
   locks++
   const r = await call(`Take the cross-host landing lock of the branch ${INT} for PR #${PR} of issue #${ISSUE} of ${SLUG} at the head ${expected}.
-Run alone and exactly: forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${expected}${wait ? ' --wait' : ''}
-Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. Run nothing else.
+Run alone and exactly: ${LAND_ACQUIRE(expected, wait)}
+${LOCK_RETURN} Run nothing else.
 ${RULES}`, { label: `land-lock-${locks}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: LOCK_SCHEMA })
   return r ? r.verdict : null
 }
@@ -1013,13 +1010,13 @@ const unlock = async () => {
     r = await call(`Release the cross-host landing lock of the branch ${INT} held for issue #${ISSUE} of ${SLUG}.
 Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}
 released and not_held are both fine. Return its verdict and any detail. Run nothing else.
-${RULES}`, { label: 'land-unlock', phase: 'Ship', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA })
+${lockMaybe && !sameSha(lockMaybe, lockSha) ? RELEASE_AGAIN(lockMaybe) : ''}${RULES}`, { label: 'land-unlock', phase: 'Ship', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA })
   } catch (e) {
     error = String((e && e.message) || e)
     log(`land-unlock failed: ${error}`)
   }
   if (r && (r.verdict === 'released' || r.verdict === 'not_held')) return {}
-  return { lock_unreleased: { sha: lockSha, verdict: r ? r.verdict : null, ...(error ? { error } : {}) }, ...deadOf() }
+  return { lock_unreleased: { sha: lockSha, ...(lockMaybe ? { maybe: lockMaybe } : {}), verdict: r ? r.verdict : null, ...(error ? { error } : {}) }, ...deadOf() }
 }
 // One bounded Ship fix wave: an implementer commits a fix on top of the current head (not pushed), then a fresh reviewer re-reviews it.
 // The repair must start from the head the caller accepted (start_head), or the reviewer would see only its own diff and miss an unreviewed commit beneath it.
@@ -1034,30 +1031,60 @@ const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal =
   return { fix, review, moved, ok: true }
 }
 const landBody = async () => {
-  const v = await lock(true)
-  if (!HOLDING.includes(v)) return stop(v === 'land-contended' || v === 'held_by' || v === 'lost_to' ? 'land-contended' : 'land-lock', { pr: PR, lock: v })
+  // The pr call may take the lock (--wait) after opening the PR: mark the verified head as possibly held before it, so a lost reply still reaches the release.
+  locks++
   lockHeld = true
   lockSha = expected
+  const prR = await call(`${CTX}
+${RENEW_FIRST}
+Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
+Then take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
+${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null.
+${RULES}`, { label: 'pr', phase: 'Ship', model: 'sonnet', schema: withRenew(PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) })
+  if (!prR) return stop('pr', { result: null })
+  // A renew that ended, or a refused lock, means the prompt ran no lock command that holds anything.
+  if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
+  const v = prR.lock ? prR.lock.verdict : null
+  const refused = v === 'land-contended' || v === 'held_by' || v === 'lost_to'
+  if (refused) lockHeld = false
+  const lostClaim = renewed(prR.renew, 'ship')
+  if (lostClaim) return lostClaim
+  if (!complete(prR, PR_SCHEMA)) return stop('pr', { result: prR })
+  PR = prR.pr
+  // The shipped head must be the verified head; after a sync, the reviewed merge commit.
+  if (!sameSha(prR.head, verify.head)) return stop('head-moved', { pr: PR, expected: verify.head, head: prR.head })
+  expected = fuller(verify.head, prR.head)
+  head = expected
+  if (!HOLDING.includes(v)) return stop(refused ? 'land-contended' : 'land-lock', { pr: PR, lock: v })
   for (;;) {
     round++
-    const lost = await renew(`checks-${round}`, 'Ship')
-    if (lost) return lost
-    // A sync merge, sync fix or CI fix moved the head: push it and move the lock to it before the checks wait on it.
-    if (!sameSha(lockSha, expected)) {
+    // A sync merge, sync fix or CI fix moved the head: renew, push it and move the lock to it before the checks wait on it.
+    const moved = !sameSha(lockSha, expected)
+    if (moved) {
+      const lost = await renew(`checks-${round}`, 'Ship')
+      if (lost) return lost
       const pu = await call(`${CTX}
 Push the branch ${setup.branch} of PR #${PR} at the head ${expected}: run alone git -C ${W} push origin ${setup.branch}, then return head (git -C ${W} rev-parse HEAD, the full sha).
 ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { head: FULL_SHA, notes: { type: 'string' } }, required: ['head'] } })
       if (!pu) return stop('push', { pr: PR })
       if (!sameSha(pu.head, expected)) return stop('head-moved', { pr: PR, expected, head: pu.head })
       expected = fuller(expected, pu.head)
+      lockMaybe = expected
       const mv = await lock(false)
+      if (HOLDING.includes(mv)) {
+        lockSha = expected
+        lockMaybe = null
+      } else if (mv === 'land-contended' || mv === 'held_by' || mv === 'lost_to') lockMaybe = null
       if (!HOLDING.includes(mv)) return stop('land-contended', { pr: PR, lock: mv })
-      lockSha = expected
     }
     const ck = await call(`${CTX}
-Wait for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn for the required checks on head: take the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection; if neither answers, every check is required. gh pr checks ${PR} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending) can return early, and its --required list can be partial: never treat a partial list as green. Return passed only when every required name has passed on head, failed with failing (the failing required names) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed) when any required check failed, and the required names you used.
-${RULES}`, { label: `checks-${round}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: CHECKS })
-    if (!ck) return stop('checks', { pr: PR, checks: null })
+${moved ? 'Wait' : `${RENEW_FIRST}\nThen wait`} for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn for the required checks on head: take the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection; if neither answers, every check is required. gh pr checks ${PR} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending) can return early, and its --required list can be partial: never treat a partial list as green. Return passed only when every required name has passed on head, failed with failing (the failing required names) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed) when any required check failed, and the required names you used.
+${RULES}`, { label: `checks-${round}`, phase: 'Ship', model: 'sonnet', effort: 'low', schema: moved ? CHECKS : withRenew(CHECKS) })
+    if (ck && !moved) {
+      const lost = renewed(ck.renew, `checks-${round}`)
+      if (lost) return lost
+    }
+    if (!complete(ck, CHECKS)) return stop('checks', { pr: PR, checks: null })
     if (!sameSha(ck.head, expected)) return stop('head-moved', { pr: PR, expected, head: ck.head })
     expected = fuller(expected, ck.head)
     head = expected
@@ -1076,21 +1103,27 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', model: 'sonnet', effort: '
       continue
     }
     if (ck.state === 'passed') {
-      const lost = await renew('merge', 'Ship')
+      // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first, once), then the merge.
+      locks++
+      mg = await call(`${CTX}
+${RENEW_FIRST}
+Then re-check the cross-host landing lock of the branch ${INT} for PR #${PR}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
+${LOCK_RETURN} Return it as lock.
+Only when lock's verdict is already_held or moved, merge PR #${PR}: run, alone and exactly: ${UNSET}gh pr merge ${PR} --repo ${SLUG} --${STRATEGY} --match-head-commit ${head}${setup.delete_branch ? ' --delete-branch' : ''}
+Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message, and behind true only when the refusal says the head branch is not up to date with the base branch (the integration branch moved), else false. On any other lock verdict run nothing else and return merged false with the verdict in notes.
+${RULES}`, { label: 'merge', phase: 'Ship', model: 'sonnet', effort: 'low', schema: withRenew(MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) })
+      if (!mg) return stop('merge', { pr: PR, merge: null })
+      const pre = mg.lock ? mg.lock.verdict : null
+      if (HOLDING.includes(pre)) lockSha = expected
+      const lost = renewed(mg.renew, 'merge')
       if (lost) return lost
-      // The pre-merge check: still held (or moved) merges; retaken after a loss rechecks first, once.
-      const pre = await lock(false)
       if (!HOLDING.includes(pre)) return stop('land-contended', { pr: PR, lock: pre })
-      lockSha = expected
       if (pre === 'acquired') {
         if (++retakes >= 2) return stop('land-contended', { pr: PR, lock: pre })
         continue
       }
-      mg = await call(`${CTX}
-Merge PR #${PR}. Run, alone and exactly: ${UNSET}gh pr merge ${PR} --repo ${SLUG} --${STRATEGY} --match-head-commit ${head}${setup.delete_branch ? ' --delete-branch' : ''}
-Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message, and behind true only when the refusal says the head branch is not up to date with the base branch (the integration branch moved), else false.
-${RULES}`, { label: 'merge', phase: 'Ship', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] } })
-      if (mg && mg.merged) return null
+      if (!complete(mg, MERGE_SCHEMA)) return stop('merge', { pr: PR, merge: mg })
+      if (mg.merged) return null
       // Refused as not up to date: the next round's checks step fetches, reports behind and syncs; three refusals, or any other, stop.
       // That sync is bounded by the refusal budget alone, so syncs made before the first merge attempt never consume it.
       if (!mg || mg.behind !== true || ++mergeRefusals >= 3) return stop('merge', { pr: PR, merge: mg })

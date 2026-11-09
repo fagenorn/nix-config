@@ -113,6 +113,9 @@ RENEW_READ = {"verdict", "by", "detail"}
 FOLDED_READ = {
     "owner-answer": ({"verdict", "decisions", "comment_id", "questions"}, {"renew": RENEW_READ}),
     "verify": ({"head", "clean", "results"}, {"renew": RENEW_READ, "results[]": {"id", "status", "summary"}}),
+    "pr": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
+    "checks-1": ({"state", "head", "failing", "details"}, {"renew": RENEW_READ}),
+    "merge": ({"merged", "behind", "merge_commit", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
                "worktree_path", "head", "merged_pr", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
                "existing", "unset_env", "merge_strategy", "delete_branch", "review", "review_state", "knowledge",
@@ -138,6 +141,11 @@ class FoldTest(unittest.TestCase):
     def test_folded_schemas_keep_every_read_field(self):
         _, calls = run()
         renew = schema_of(calls, "renew-tasks")
+        merge = "d" * 40
+        _, moved_calls = run(replies={"checks-1": {"state": "behind", "head": SHA},
+                                      "checks-2": {"state": "passed", "head": merge}},
+                             patch={"sync-1": {"merge_commit": merge}})
+        lock = schema_of(moved_calls, "land-lock-2")
         for label, (top, nested) in FOLDED_READ.items():
             with self.subTest(label=label):
                 schema = schema_of(calls, label)
@@ -150,6 +158,8 @@ class FoldTest(unittest.TestCase):
                     if name == "renew":
                         self.assertEqual(branch, renew)
                         self.assertEqual(schema["required"], ["renew"])
+                    if name == "lock":
+                        self.assertEqual(branch, lock)
 
     def test_gate_failure_after_a_folded_claim_keeps_a_claim_incomplete_cont(self):
         derive = "Derive branch from bindings.vcs.branch_pattern"
@@ -183,6 +193,75 @@ class FoldTest(unittest.TestCase):
         self.assertEqual(result["stage"], "setup")
         self.assertNotIn("cont", result)
 
+    def test_folded_pr_lock_is_released_on_head_moved(self):
+        moved = "c" * 40
+        result, calls = run(patch={"pr": {"head": moved}})
+        self.assertEqual(result["stage"], "head-moved")
+        names = labels(calls)
+        self.assertEqual(names[names.index("pr"):], ["pr", "land-unlock"])
+        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n",
+                      prompt(calls, "land-unlock"))
+        self.assertNotIn("lock_unreleased", result)
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n",
+                      prompt(calls, "pr"))
+        # A non-holding verdict leaves nothing to release, even on a head-moved stop.
+        result, calls = run(patch={"pr": {"head": moved, "lock": {"verdict": "held_by", "by": "h2/b9"}}})
+        self.assertEqual(result["stage"], "head-moved")
+        self.assertNotIn("land-unlock", labels(calls))
+
+    def test_a_lost_folded_lock_reply_still_releases_the_lock(self):
+        release = f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n"
+        for reply in (None, "throw"):
+            for label in ("pr", "merge"):
+                with self.subTest(label=label, reply=reply):
+                    result, calls = run(replies={label: reply})
+                    names = labels(calls)
+                    self.assertEqual(names[names.index(label):], [label, "land-unlock"])
+                    self.assertIn(release, prompt(calls, "land-unlock"))
+                    self.assertNotIn("When it prints not_held", prompt(calls, "land-unlock"))
+                    if reply is None:
+                        self.assertEqual(result["stage"], label)
+                    else:
+                        self.assertIsNone(result)
+        # A move lock that never answered: the release tries the old sha, then the move target.
+        merge = "d" * 40
+        moved = {"replies": {"checks-1": {"state": "behind", "head": SHA}}, "patch": {"sync-1": {"merge_commit": merge}}}
+        for reply in (None, "throw", {"verdict": "error", "detail": "gh failed"}):
+            with self.subTest(move=reply):
+                _, calls = run(replies=dict(moved["replies"], **{"land-lock-2": reply}), patch=moved["patch"])
+                text = prompt(calls, "land-unlock")
+                self.assertIn(release, text)
+                self.assertIn(f"When it prints not_held with lock_sha {merge}, run alone and exactly: "
+                              f"forge-claim land release --repo owner/repo --branch dev --sha {merge}", text)
+                self.assertEqual(labels(calls).count("land-unlock"), 1)
+        # A definitive answer: a move refused by another holder leaves only the old sha to release.
+        _, calls = run(replies=dict(moved["replies"], **{"land-lock-2": {"verdict": "lost_to", "lock_sha": "c" * 40}}),
+                       patch=moved["patch"])
+        self.assertIn(release, prompt(calls, "land-unlock"))
+        self.assertNotIn("When it prints not_held", prompt(calls, "land-unlock"))
+        # A pr whose renew ended ran no lock command: nothing to release.
+        _, calls = run(patch={"pr": {"renew": {"verdict": "not_held", "by": "h2/b1"}}})
+        self.assertNotIn("land-unlock", labels(calls))
+
+    def test_merge_skips_on_a_retaken_lock(self):
+        retaken = {"merged": False, "notes": "the lock was retaken (acquired); not merged",
+                   "lock": {"verdict": "acquired", "lock_sha": SHA}}
+        merged = {"merged": True, "merge_commit": SHA, "notes": "merged",
+                  "lock": {"verdict": "already_held", "lock_sha": SHA}}
+        result, calls = run(replies={"merge": [retaken, merged]})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("checks-1"):],
+                         ["checks-1", "merge", "checks-2", "merge", "land-unlock", "hold", "close-out"])
+        text = prompt(calls, "merge")
+        self.assertIn("Only when lock's verdict is already_held or moved", text)
+        self.assertLess(text.index(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n"),
+                        text.index("gh pr merge 42"))
+        self.assertNotIn("--wait", text)
+        result, calls = run(replies={"merge": [retaken, retaken]})
+        self.assertEqual(result["stage"], "land-contended")
+        self.assertEqual(labels(calls).count("land-unlock"), 1)
+
     def test_fresh_setup_claims_after_its_reads_and_before_the_worktree(self):
         _, calls = run()
         text = prompt(calls, "setup")
@@ -208,16 +287,18 @@ class FoldTest(unittest.TestCase):
         self.assertLess(names.index("renew-plan"), names.index("plan-review"))
 
 
+CHILD_HAPPY = ["setup", "owner-answer", "plan", "plan-codex", "plan-review", "renew-tasks", "impl-1", "review-1",
+               "renew-final-review", "final-codex", "final-1", "verify", "pr", "checks-1", "merge",
+               "land-unlock", "hold", "close-out"]
+
+
 class HappyPathTest(unittest.TestCase):
     def test_one_task_runs_every_stage_in_order(self):
         result, calls = run()
         self.assertEqual(result["stage"], "done")
         self.assertTrue(result["merged"])
-        self.assertEqual(labels(calls), [
-            "setup", "owner-answer", "plan", "plan-codex", "plan-review", "renew-tasks",
-            "impl-1", "review-1", "renew-final-review", "final-codex", "final-1", "verify",
-            "renew-ship", "pr", "land-lock-1", "renew-checks-1", "checks-1", "renew-merge", "land-lock-2", "merge",
-            "land-unlock", "hold", "close-out"])
+        self.assertEqual(labels(calls), CHILD_HAPPY)
+        self.assertLessEqual(len(labels(calls)), 19)
 
     def test_merge_carries_contract_strategy_and_the_checked_head(self):
         # The contract decides the form; a host guard that accepts fewer forms refuses
@@ -445,10 +526,10 @@ RENEW = f"forge-claim renew --repo owner/repo --issue 9 --holder {HOLDER} --bran
 # (at, the call that renews, nested): a nested renew rides in that call's reply as renew.
 BOUNDARIES = [("plan", "owner-answer", True), ("tasks", "renew-tasks", False),
               ("final-review", "renew-final-review", False), ("verify", "verify", True),
-              ("ship", "renew-ship", False), ("checks-1", "renew-checks-1", False),
-              ("merge", "renew-merge", False)]
+              ("ship", "pr", True), ("checks-1", "checks-1", True), ("merge", "merge", True)]
 # The text each folded prompt runs after its renew.
-STEP_MARK = {"owner-answer": "forge-claim owner-action status", "verify": "Run the project's declared verification"}
+STEP_MARK = {"owner-answer": "forge-claim owner-action status", "verify": "Run the project's declared verification",
+             "pr": "open the pull request", "checks-1": "to be mergeable", "merge": "forge-claim land acquire"}
 
 
 def boundary_reply(via, nested, renew):
@@ -532,7 +613,7 @@ class ClaimTest(unittest.TestCase):
                     self.assertTrue(result["cont"]["claim_incomplete"])
 
     def test_resume_after_an_unanswered_renew_reacquires_and_finishes(self):
-        stopped, _ = run(replies={"renew-ship": None})
+        stopped, _ = run(patch={"pr": {"renew": None}})
         result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
                             replies={"acquire": {"verdict": "already_held", "comment_id": 7}})
         self.assertEqual(result["stage"], "done")
@@ -1215,7 +1296,7 @@ class ShipTest(unittest.TestCase):
         result, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[names.index("checks-1"):], ["checks-1", "sync-1", "renew-checks-2", "checks-2", "renew-merge", "land-lock-2", "merge",
+        self.assertEqual(names[names.index("checks-1"):], ["checks-1", "sync-1", "checks-2", "merge",
                                                          "land-unlock", "hold", "close-out"])
 
     def test_conflicted_sync_is_rereviewed(self):
@@ -1280,8 +1361,8 @@ class MergeRefusedBehindTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
         self.assertEqual(names[names.index("merge"):], [
-            "merge", "renew-checks-2", "checks-2", "sync-1", "renew-checks-3", "land-push-3", "land-lock-3",
-            "checks-3", "renew-merge", "land-lock-4", "merge", "land-unlock", "hold", "close-out"])
+            "merge", "checks-2", "sync-1", "renew-checks-3", "land-push-3", "land-lock-3",
+            "checks-3", "merge", "land-unlock", "hold", "close-out"])
         self.assertIn(f"--match-head-commit {merge}", prompt(calls, "merge"))
         self.assertEqual(result["syncs"], 1)
 
@@ -1349,17 +1430,15 @@ class LandLockTest(unittest.TestCase):
         result, calls = run()
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[names.index("pr"):], [
-            "pr", "land-lock-1", "renew-checks-1", "checks-1", "renew-merge", "land-lock-2", "merge",
-            "land-unlock", "hold", "close-out"])
+        self.assertEqual(names[names.index("pr"):], ["pr", "checks-1", "merge", "land-unlock", "hold", "close-out"])
 
     def test_lock_commands_are_exact(self):
         _, calls = run()
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n",
-                      prompt(calls, "land-lock-1"))
+                      prompt(calls, "pr"))
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n",
-                      prompt(calls, "land-lock-2"))
-        self.assertNotIn("--wait", prompt(calls, "land-lock-2"))
+                      prompt(calls, "merge"))
+        self.assertNotIn("--wait", prompt(calls, "merge"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n",
                       prompt(calls, "land-unlock"))
 
@@ -1370,8 +1449,8 @@ class LandLockTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
         self.assertEqual(names[names.index("pr"):], [
-            "pr", "land-lock-1", "renew-checks-1", "checks-1", "sync-1", "renew-checks-2", "land-push-2",
-            "land-lock-2", "checks-2", "renew-merge", "land-lock-3", "merge", "land-unlock", "hold", "close-out"])
+            "pr", "checks-1", "sync-1", "renew-checks-2", "land-push-2",
+            "land-lock-2", "checks-2", "merge", "land-unlock", "hold", "close-out"])
         self.assertIn("git -C /r/.wt/w-issue-9-x push origin issue-9-x", prompt(calls, "land-push-2"))
         self.assertIn(f"--sha {merge}\n", prompt(calls, "land-lock-2"))
         self.assertNotIn("--wait", prompt(calls, "land-lock-2"))
@@ -1387,22 +1466,23 @@ class LandLockTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
         self.assertEqual(names.count("land-unlock"), 1)
-        later_locks = [c["prompt"] for c in calls if c["label"].startswith("land-lock-")][1:]
+        later_locks = [c["prompt"] for c in calls if c["label"] in ("land-lock-3", "merge")]
         self.assertEqual(len(later_locks), 3)  # the first pre-merge check, the move after the push, the last pre-merge check
         for text in later_locks:
             self.assertNotIn("--wait", text)
-        self.assertLess(names.index("land-lock-1"), names.index("sync-1"))
+        self.assertIn("--wait", prompt(calls, "pr"))
+        self.assertLess(names.index("pr"), names.index("sync-1"))
         self.assertLess(names.index("sync-1"), names.index("land-push-3"))
         last_merge = len(names) - 1 - names[::-1].index("merge")
         self.assertLess(last_merge, names.index("land-unlock"))
 
     def test_a_contended_lock_is_waited_for_by_the_cli(self):
         waited = {"verdict": "acquired", "lock_sha": SHA, "waited_s": 1800, "took_over": "idle"}
-        result, calls = run(replies={"land-lock-1": waited})
+        result, calls = run(patch={"pr": {"lock": waited}})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[names.index("pr"):names.index("checks-1")], ["pr", "land-lock-1", "renew-checks-1"])
-        self.assertIn(f"--sha {SHA} --wait\n", prompt(calls, "land-lock-1"))
+        self.assertEqual(names[names.index("pr"):names.index("checks-1")], ["pr"])
+        self.assertIn(f"--sha {SHA} --wait\n", prompt(calls, "pr"))
 
     def test_a_fix_commit_in_short_form_moves_the_lock_by_its_full_sha(self):
         short = FIX[:9]
@@ -1417,7 +1497,7 @@ class LandLockTest(unittest.TestCase):
     def test_a_non_holding_wait_answer_stops_with_cont(self):
         for verdict in ("land-contended", "held_by", "lost_to"):
             with self.subTest(verdict=verdict):
-                result, calls = run(replies={"land-lock-1": {"verdict": verdict, "lock_sha": "b" * 40, "by": "h2/b9"}})
+                result, calls = run(patch={"pr": {"lock": {"verdict": verdict, "lock_sha": "b" * 40, "by": "h2/b9"}}})
                 self.assertEqual((result["stage"], result["pr"], result["lock"]), ("land-contended", 42, verdict))
                 self.assertIn("cont", result)
                 for gone in ("land-lock-2", "checks-1", "sync-1", "merge", "land-unlock", "close-out"):
@@ -1459,11 +1539,13 @@ class LandLockTest(unittest.TestCase):
         result, _ = run()
         self.assertNotIn("lock_unreleased", result)
 
-    def test_a_dead_lock_agent_stops_without_a_release(self):
-        result, calls = run(replies={"land-lock-1": None})
+    def test_an_unanswered_folded_lock_stops_with_a_release_at_the_pr_head(self):
+        # The folded lock may have been taken before its reply was lost, so the stop releases the verified head once.
+        result, calls = run(patch={"pr": {"lock": None}})
         self.assertEqual(result["stage"], "land-lock")
         self.assertIn("cont", result)
-        self.assertNotIn("land-unlock", labels(calls))
+        self.assertEqual(labels(calls).count("land-unlock"), 1)
+        self.assertIn(f"--sha {SHA}\n", prompt(calls, "land-unlock"))
 
     def test_every_stop_after_the_lock_releases_it(self):
         fix = "f" * 40
@@ -1475,7 +1557,8 @@ class LandLockTest(unittest.TestCase):
             "merge": {"replies": {"merge": {"merged": False, "notes": "head moved"}}},
             "sync-contention": {"replies": {"checks-1": self.BEHIND, "checks-2": self.BEHIND,
                                             "checks-3": self.BEHIND}},
-            "land-contended": {"replies": {"land-lock-2": {"verdict": "lost_to", "lock_sha": "b" * 40}}},
+            "land-contended": {"replies": {"checks-1": self.BEHIND, "land-lock-2": {"verdict": "lost_to", "lock_sha": "b" * 40}},
+                               "patch": {"sync-1": {"merge_commit": "d" * 40}}},
         }
         for stage, scenario in cases.items():
             with self.subTest(stage=stage):
@@ -1484,32 +1567,34 @@ class LandLockTest(unittest.TestCase):
                 self.assertIn("cont", result)
                 names = labels(calls)
                 self.assertEqual(names.count("land-unlock"), 1)
-                self.assertLess(names.index("land-lock-1"), names.index("land-unlock"))
+                self.assertLess(names.index("pr"), names.index("land-unlock"))
                 self.assertNotIn("close-out", names)
 
     def test_a_lost_claim_after_the_lock_releases_it(self):
-        result, calls = run(replies={"renew-checks-1": {"verdict": "not_held", "by": "h2/b9"}})
+        result, calls = run(patch={"checks-1": {"renew": {"verdict": "not_held", "by": "h2/b9"}}})
         self.assertEqual(result["stage"], "claim-lost")
         self.assertEqual(labels(calls).count("land-unlock"), 1)
         self.assertNotIn("merge", labels(calls))
 
     def test_a_lock_retaken_before_the_merge_rechecks_first(self):
-        result, calls = run(replies={"land-lock-2": {"verdict": "acquired", "lock_sha": SHA}})
+        retaken = {"merged": False, "notes": "retaken", "lock": {"verdict": "acquired", "lock_sha": SHA}}
+        result, calls = run(replies={"merge": [retaken, {"merged": True, "merge_commit": SHA, "notes": "merged"}]})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertLess(names.index("land-lock-2"), names.index("checks-2"))
-        self.assertLess(names.index("checks-2"), names.index("merge"))
-        result, calls = run(replies={"land-lock-2": {"verdict": "acquired", "lock_sha": SHA},
-                                     "land-lock-3": {"verdict": "acquired", "lock_sha": SHA}})
+        self.assertLess(names.index("merge"), names.index("checks-2"))
+        self.assertLess(names.index("checks-2"), len(names) - 1 - names[::-1].index("merge"))
+        result, calls = run(replies={"merge": [retaken, retaken]})
         self.assertEqual(result["stage"], "land-contended")
-        self.assertNotIn("merge", labels(calls))
+        self.assertEqual(labels(calls).count("merge"), 2)
         self.assertEqual(labels(calls).count("land-unlock"), 1)
 
-    def test_a_stop_before_the_lock_takes_none(self):
-        result, calls = run(patch={"pr": {"head": "c" * 40}})
+    def test_a_stop_before_any_lock_command_takes_none(self):
+        # The nested renew ended, so the prompt ran nothing after it; a refused lock holds nothing either.
+        _, calls = run(patch={"pr": {"renew": {"verdict": "not_held", "by": "h2/b1"}}})
+        self.assertNotIn("land-unlock", labels(calls))
+        result, calls = run(patch={"pr": {"head": "c" * 40, "lock": {"verdict": "held_by", "by": "h2/b9"}}})
         self.assertEqual(result["stage"], "head-moved")
-        for gone in ("land-lock-1", "land-unlock"):
-            self.assertNotIn(gone, labels(calls))
+        self.assertNotIn("land-unlock", labels(calls))
 
 
 class ShipFixWaveTest(unittest.TestCase):
@@ -1525,7 +1610,7 @@ class ShipFixWaveTest(unittest.TestCase):
         names = labels(calls)
         self.assertEqual(names[names.index("checks-1"):], [
             "checks-1", "fix-ci", "fix-ci-review", "renew-checks-2", "land-push-2", "land-lock-2", "checks-2",
-            "renew-merge", "land-lock-3", "merge", "land-unlock", "hold", "close-out"])
+            "merge", "land-unlock", "hold", "close-out"])
         fix = prompt(calls, "fix-ci")
         for needle in ("ci-tests", "FAIL test_cache: host-installed state", "regression test"):
             self.assertIn(needle, fix)
@@ -1969,7 +2054,7 @@ class ModeTest(unittest.TestCase):
         self.assertEqual(result["acceptance"], PLAN["acceptance"])
         self.assertEqual(result["cont"]["verified"]["head"], SHA)
         self.assertEqual(labels(calls)[-1], "verify")
-        for label in ("renew-ship", "pr", "checks-1", "merge", "close-out"):
+        for label in ("pr", "checks-1", "merge", "close-out"):
             self.assertNotIn(label, labels(calls))
 
     def test_ship_mode_is_the_default(self):
@@ -1992,8 +2077,7 @@ class ModeTest(unittest.TestCase):
         self.assertIn("rev-parse HEAD", prompt(calls, "setup"))
         done, calls = run(args=dict(ARGS, mode="ship", cont=ready["cont"]), patch={"setup": {"head": SHA}})
         self.assertEqual(done["stage"], "done")
-        self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "land-lock-1", "renew-checks-1", "checks-1",
-                                         "renew-merge", "land-lock-2", "merge", "land-unlock", "hold", "close-out"])
+        self.assertEqual(labels(calls), ["setup", "pr", "checks-1", "merge", "land-unlock", "hold", "close-out"])
 
     def test_ship_after_ready_reviews_again_when_the_head_moved_or_is_dirty(self):
         ready, _ = run(args=dict(ARGS, mode="ready"))
@@ -2071,9 +2155,8 @@ class FinalReviewedResumeTest(unittest.TestCase):
             with self.subTest(head=head):
                 result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": head}})
                 self.assertEqual(result["stage"], "done")
-                self.assertEqual(labels(calls), ["setup", "verify", "renew-ship", "pr",
-                                                 "land-lock-1", "renew-checks-1", "checks-1", "renew-merge",
-                                                 "land-lock-2", "merge", "land-unlock", "hold", "close-out"])
+                self.assertEqual(labels(calls), ["setup", "verify", "pr", "checks-1", "merge", "land-unlock",
+                                                 "hold", "close-out"])
 
     def test_resume_after_only_an_integration_merge_skips_the_final_review(self):
         cont = self.stopped_after_review()["cont"]
@@ -2357,8 +2440,7 @@ class DirectLaneTest(unittest.TestCase):
         ready, _ = run(args=dict(DIRECT, mode="ready"))
         result, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA}})
         self.assertEqual(result["stage"], "done")
-        self.assertEqual(labels(calls), ["setup", "renew-ship", "pr", "land-lock-1", "renew-checks-1", "checks-1",
-                                         "renew-merge", "land-lock-2", "merge", "land-unlock", "hold", "close-out"])
+        self.assertEqual(labels(calls), ["setup", "pr", "checks-1", "merge", "land-unlock", "hold", "close-out"])
 
     def test_a_review_stop_resumes_into_the_review_not_the_implementer(self):
         stopped, _ = run(args=DIRECT, replies={"direct-review": None})
@@ -2425,15 +2507,21 @@ class SourceTest(unittest.TestCase):
         for name in ("LOCK_SCHEMA", "RELEASE_SCHEMA"):
             with self.subTest(name=name):
                 self.assertEqual(literal(mine, name), literal(batch, name))
-        for line in (
-            "Run alone and exactly: forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${expected}${wait ? ' --wait' : ''}",
-            "Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. Run nothing else.",
+
+        def line(text, name):
+            start = text.index(f"const {name} = ")
+            return text[start:text.index("\n", start)]
+
+        for name in ("LAND_ACQUIRE", "LOCK_RETURN", "RELEASE_AGAIN"):
+            with self.subTest(name=name):
+                self.assertEqual(line(mine, name), line(batch, name))
+        for needle in (
             "Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}",
             "released and not_held are both fine. Return its verdict and any detail. Run nothing else.",
         ):
-            with self.subTest(line=line):
-                self.assertIn(line, batch)
-                self.assertIn(line, mine)
+            with self.subTest(line=needle):
+                self.assertIn(needle, batch)
+                self.assertIn(needle, mine)
 
     def test_program_avoids_replay_breaking_builtins(self):
         text = PROGRAM.read_text(encoding="utf-8")
@@ -2506,7 +2594,7 @@ class DeclaredBranchTest(unittest.TestCase):
         post = calls[cut:]
         granted = {c["label"] for c in post if c["agentType"] not in REVIEWERS}
         self.assertLessEqual({"renew-tasks", "impl-1", "impl-2", "fix-2-1", "renew-final-review", "final-codex",
-                              "verify", "pr", "land-lock-1", "checks-1", "merge", "land-unlock", "hold",
+                              "verify", "pr", "checks-1", "merge", "land-unlock", "hold",
                               "close-out"}, granted)
         for c in post:
             with self.subTest(label=c["label"]):
