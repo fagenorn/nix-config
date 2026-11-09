@@ -23,7 +23,7 @@
         },
         {
           "name": "the implementation is committed on the worktree branch",
-          "shell": "commits_touch \"$WT\" tinytask"
+          "shell": "commits_touch \"$WT\" tinytask && [ -z \"$(git -C \"$WT\" status --porcelain --untracked-files=all -- tinytask tests README.md)\" ] || fail \"the implementation in $WT differs from HEAD: it is not all committed\""
         },
         {
           "name": "the renamed flag works through the CLI",

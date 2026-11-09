@@ -799,6 +799,28 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
                 with self.subTest(name=name):
                     self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
 
+    def test_an_uncommitted_rename_behind_an_unrelated_commit_fails_the_commit_check(self):
+        """An unrelated docstring commit satisfies `commits_touch`; the rename left in
+        the working tree satisfies the CLI check. The commit check must still fail."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git, env = published_sandbox(Path(tmp).resolve())
+            worktree = repo / ".worktrees/issue-3-rename-flag"
+            subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
+                                  str(worktree), "main"], check=True)
+            wgit = ["git", "-C", str(worktree), "-c", "user.name=eval",
+                    "-c", "user.email=eval@example.invalid", "-c", "commit.gpgsign=false"]
+            init = worktree / "tinytask/__init__.py"
+            init.write_text('"""Tinytask."""\n' + init.read_text(encoding="utf-8"),
+                            encoding="utf-8")
+            subprocess.run(wgit + ["commit", "-qam", "docs: a docstring"], check=True)
+            subprocess.run(wgit + ["apply", str(SETUP_INPUTS / "implementation.patch")],
+                           check=True)
+            env.update(WT=str(worktree), WT_COUNT="1")
+            self.assertEqual(self.grade("the renamed flag works through the CLI",
+                                        repo, env).returncode, 0)
+            self.assertNotEqual(self.grade(
+                "the implementation is committed on the worktree branch", repo, env).returncode, 0)
+
     def test_a_consistent_rename_to_another_flag_fails_only_the_cli_check(self):
         """Implementation, tests and README renamed together to --foo: every
         candidate-editable assert still passes, the interface the issue names does not."""
@@ -931,6 +953,25 @@ class NativeReviewEvalCaseTest(unittest.TestCase):
                            env={**os.environ, **QUIET_GIT})
             self.assertNotEqual(
                 self.grade("local and origin main are unchanged", repo, env).returncode, 0)
+
+    def test_an_edit_in_the_base_checkout_fails(self):
+        """A review is read-only: an uncommitted edit or a new file in $REPO breaks it
+        although main, origin and the review worktree are all untouched."""
+        name = "local and origin main are unchanged"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            self.assertEqual(self.grade(name, repo, env).returncode, 0)
+            readme = repo / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+            done = self.grade(name, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("README.md", done.stdout)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            (repo / "REVIEW-NOTES.md").write_text("findings\n", encoding="utf-8")
+            done = self.grade(name, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("REVIEW-NOTES.md", done.stdout)
 
     def test_a_moved_origin_main_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

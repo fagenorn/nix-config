@@ -42,7 +42,7 @@
         },
         {
           "name": "local and origin main are unchanged",
-          "shell": "{ [ \"$(git -C \"$REPO\" rev-parse main)\" = \"$BASE_MAIN\" ] && [ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$BASE_MAIN\" ]; } || fail \"main moved\""
+          "shell": "{ [ \"$(git -C \"$REPO\" rev-parse main)\" = \"$BASE_MAIN\" ] && [ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$BASE_MAIN\" ] && git -C \"$REPO\" diff --quiet \"$BASE_MAIN\" -- && [ -z \"$(git -C \"$REPO\" status --porcelain --untracked-files=all)\" ]; } || fail \"main moved or the base checkout was edited: $(git -C \"$REPO\" status --porcelain --untracked-files=all | tr '\\n' ' ')\""
         },
         {
           "name": "the branch still carries the implementation",
