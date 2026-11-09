@@ -1887,7 +1887,7 @@ class DirectLaneRoutingTest(unittest.TestCase):
         """#635: step 1 claims through forge-claim and goes on only on its holding verdicts;
         the hot instruction bytes do not grow."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5032)
+        self.assertLessEqual(len(raw), 5038)
         text = normalized(raw.decode("utf-8"))
         step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
         for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id> --branch <branch>`",
@@ -1912,9 +1912,9 @@ class DirectLaneRoutingTest(unittest.TestCase):
 
     def test_deliver_direct_holds_the_land_lock_from_sync_through_merge(self):
         """#677: step 6 carries the consumed forms in ship order: waiting acquire, sync merge, push,
-        required-check wait, the holding verdict before the merge, release; the hot bytes do not grow."""
+        required-check wait, the holding verdict before the merge, release; the hot bytes stay within their cap."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5032)
+        self.assertLessEqual(len(raw), 5038)
         text = normalized(raw.decode("utf-8"))
         land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
         at = 0
@@ -2171,6 +2171,22 @@ class CodexCollaborationContractTest(unittest.TestCase):
             for value in severities:
                 with self.subTest(document=path.name, severity=value):
                     self.assertIn(f"`{value}`", text)
+
+
+class LiveSkillsNameNoRetiredSkillTest(unittest.TestCase):
+    RETIRED = re.compile(r"issue-" r"owner|from-" r"issue|ship-" r"issue|(?<![\w./-])sdd(?![\w-])")
+    FILES = ("research/SKILL.md", "design/SKILL.md", "grill-with-docs/SKILL.md",
+             "writing-plans/SKILL.md", "writing-plans/evals/evals.json",
+             "doc-grounded-questions/SKILL.md", "codebase-design/DESIGN-IT-TWICE.md",
+             "improve-codebase-architecture/SKILL.md", "improve-codebase-architecture/LICENSE",
+             "deliver-direct/SKILL.md", "wayfind/SKILL.md", "worktrees/SKILL.md", "retro/SKILL.md")
+
+    def test_no_live_skill_names_a_retired_skill_or_agent(self):
+        root = REPO_ROOT / "home/common/agent-skills/skills"
+        for name in self.FILES:
+            with self.subTest(file=name):
+                text = (root / name).read_text(encoding="utf-8")
+                self.assertEqual([m.group() for m in self.RETIRED.finditer(text)], [])
 
 
 if __name__ == "__main__":

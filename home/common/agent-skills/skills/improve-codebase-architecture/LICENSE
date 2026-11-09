@@ -18,7 +18,7 @@ manifest are preserved. Nine things differ:
      reads with `doc-grounded-questions` and its project-specific doc discovery.
   3. Hotspot rule made concrete — inspect the last 50 non-merge commits and
      widen only when history is scattered or has no meaningful concentration.
-  4. Scan becomes a registered dispatch — use one marked Opus/high issue-owner
+  4. Scan becomes a registered dispatch — use one marked Opus/high owner
      scan with a seven-item evidence bar, read-only repository access, at most
      one temporary findings artifact, and an inline fallback.
   5. Candidate contract stated — render zero to five evidence-backed candidates,

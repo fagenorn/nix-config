@@ -8,7 +8,7 @@ Write a user-facing explanation of the candidate: the constraints a new interfac
 
 ## 2. Spawn sub-agents
 
-Spawn 3 or more sub-agents in parallel at the `issue-owner` tier (each produces a design, not a bounded lookup), each with a **radically different** constraint:
+Spawn 3 or more sub-agents in parallel as `general-purpose` agents on Opus/high (each produces a design, not a bounded lookup), each with a **radically different** constraint:
 
 - Agent 1: "Minimize the interface — aim for 1–3 entry points max. Maximise leverage per entry point."
 - Agent 2: "Maximise flexibility — support many use cases and extension."

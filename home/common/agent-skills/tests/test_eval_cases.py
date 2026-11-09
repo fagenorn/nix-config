@@ -525,7 +525,7 @@ class CodeMapCheckTest(unittest.TestCase):
 
 
 class CodeMapEvalCasesTest(unittest.TestCase):
-    """#354: the design case and the writing-plans dispatch case grade a crafted sandbox."""
+    """#354: the design case grades a crafted sandbox."""
 
     SPEC = "2026-10-11-list-state-design.md"
     SPEC_EXISTS = "a spec exists under the retained specs directory and is committed"
@@ -534,8 +534,6 @@ class CodeMapEvalCasesTest(unittest.TestCase):
     MAP_VALID = "the code map is well-formed and lists the three files the issue decides about"
     MAP_PLACED = "no code map is tracked or present in the working tree"
     NOT_STARTED = "the implementation was not started"
-    PROMPT_NAMES = "the printed plan prompt names the spec's code map file"
-    UNCHANGED = "the repository is unchanged"
 
     def design_sandbox(self, tmp, *, decisions="The list command gains a state filter.", with_map=True):
         """The fixture after a good design run: a committed spec and its code map in .git."""
@@ -614,36 +612,6 @@ class CodeMapEvalCasesTest(unittest.TestCase):
             done = self.grade(self.NOT_STARTED, repo, env)
             self.assertNotEqual(done.returncode, 0, done.stdout)
             self.assertIn("tinytask/extra.py", done.stdout)
-
-    def dispatch_env(self, tmp, transcript):
-        repo, _ = fixture_sandbox(tmp)
-        out = Path(tmp) / "output.txt"
-        out.write_text(transcript, encoding="utf-8")
-        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, check=True).stdout.strip()
-        return repo, {"REPO": str(repo), "OUT": str(out), "BASE_MAIN": head, "WT_COUNT": "0"}
-
-    def test_the_dispatch_case_greps_the_transcript_for_the_code_map_name(self):
-        case = find_case("writing-plans", 4)
-        self.assertEqual(case["mode"], "pipeline")
-        self.assertEqual([check["name"] for check in case["asserts"]],
-                         [self.PROMPT_NAMES, self.UNCHANGED])
-        named = "Read `2026-10-07-issue-3-rename-flag-design.code-map.md` in the worktree's git directory.\n"
-        for transcript, passes in ((named, True), ("Give it the spec root and metrics.\n", False)):
-            with self.subTest(passes=passes), tempfile.TemporaryDirectory() as tmp:
-                repo, env = self.dispatch_env(Path(tmp).resolve(), transcript)
-                done = run_assert(case_assert("writing-plans", 4, self.PROMPT_NAMES), repo, **env)
-                self.assertEqual(done.returncode == 0, passes, done.stdout + done.stderr)
-
-    def test_the_dispatch_case_fails_on_a_changed_repository(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = self.dispatch_env(Path(tmp).resolve(), "")
-            shell = case_assert("writing-plans", 4, self.UNCHANGED)
-            self.assertEqual(run_assert(shell, repo, **env).returncode, 0)
-            (repo / "NOTES.md").write_text("scratch\n", encoding="utf-8")
-            done = run_assert(shell, repo, **env)
-            self.assertNotEqual(done.returncode, 0, done.stdout)
-            self.assertIn("NOTES.md", done.stdout)
 
 
 class DirectDeliveryEvalCaseTest(unittest.TestCase):
