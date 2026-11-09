@@ -1,0 +1,51 @@
+{
+  "skill_name": "deliver-direct",
+  "notes": "A cheap pipeline case against the shared tinytask fixture, used as the routine-issue case of a paired trial corpus; it stops after test-first, so review, push and ship are never exercised.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "direct-issue-through-test-first",
+      "mode": "pipeline",
+      "prompt": "Use the `deliver-direct` skill to deliver `issues/003-mechanical.md`.\n\nResolve once into a retained ResolvedProject. A resolver refusal is fatal and values are never defaulted or inferred. The tracker capability is unsupported, so this file is the issue: treat it as issue 3 for branch naming, and skip step 1's claim and every tracker call. Work in the worktree step 2 creates.\n\n**Stop after step 3 (Test first).** Commit the change on the worktree branch, report the branch, and stop: no review, no push, no pull request, no merge.",
+      "expected_output": "A worktree on an `issue-3-<slug>` branch holding one or more commits that rename the flag, with the fixture's tests passing. main is unmoved locally and at origin, nothing is pushed, and no spec or plan is written.",
+      "asserts": [
+        {
+          "name": "a worktree was created",
+          "shell": "[ -n \"$WT\" ] || fail \"no worktree beyond the base checkout\""
+        },
+        {
+          "name": "nothing was pushed",
+          "shell": "[ -z \"$(git -C \"$ORIGIN\" for-each-ref --format='%(refname)' refs/heads/ | grep -vx refs/heads/main)\" ] || fail \"a branch reached origin despite the stop\""
+        },
+        {
+          "name": "local and origin main are unchanged",
+          "shell": "{ [ \"$(git -C \"$REPO\" rev-parse main)\" = \"$BASE_MAIN\" ] && [ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$BASE_MAIN\" ]; } || fail \"main moved\""
+        },
+        {
+          "name": "the implementation is committed on the worktree branch",
+          "shell": "commits_touch \"$WT\" tinytask"
+        },
+        {
+          "name": "the worktree branch is named for issue 3",
+          "shell": "git -C \"$WT\" branch --show-current 2>/dev/null | grep -q '^issue-3-' || fail \"the worktree branch is not issue-3-<slug>\""
+        },
+        {
+          "name": "the fixture's tests pass in the worktree",
+          "shell": "(cd \"$WT\" && TMPDIR=\"$WORK\" python3 -m unittest discover -q 2>/dev/null) || fail \"fixture tests fail in $WT\""
+        },
+        {
+          "name": "no occurrence of the old flag remains",
+          "shell": "[ -z \"$(git -C \"$WT\" grep -n -e '--all' -- tinytask/cli.py tests/test_cli.py README.md)\" ] || fail \"the old flag is still named\""
+        },
+        {
+          "name": "no spec or plan was written",
+          "shell": "dirs_empty \"$WT/${SPEC_DIR#\"$REPO\"/}\" \"$WT/${PLAN_DIR#\"$REPO\"/}\" || fail \"a spec or plan was written on the direct lane\""
+        },
+        {
+          "name": "the worktree is left clean",
+          "shell": "[ -z \"$(git -C \"$WT\" status --porcelain)\" ] || fail \"uncommitted changes left in $WT\""
+        }
+      ]
+    }
+  ]
+}
