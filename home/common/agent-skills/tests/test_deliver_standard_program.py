@@ -38,6 +38,7 @@ HUMAN = {"id": "AC3", "text": "looks right", "kind": "human",
          "verify": {"ac": "AC3", "kind": "human", "host": "h1", "when": {"days_after": {"event": "deployed", "days": 1}},
                     "run": {"ask": "Does the page render right on the phone"}, "reason": "senses"},
          "lint": OK_LINT}
+NOTE = {"id": "AC4", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
 RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
 
 
@@ -540,10 +541,11 @@ class OwnerAnswerTest(unittest.TestCase):
     def test_plan_reviews_can_cite_every_rule(self):
         rules = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
         ids = re.findall(r"^- \*\*(R\d+)\.", rules.read_text(encoding="utf-8"), re.M)
-        self.assertIn("R8", ids)
+        self.assertIn("R9", ids)
         _, calls = run()
         review = next(c for c in calls if c["label"] == "plan-review")
         self.assertEqual(review["schema"]["properties"]["findings"]["items"]["properties"]["rule"]["enum"], ids)
+        self.assertIn(f"every rule {ids[0]}-{ids[-1]} of", prompt(calls, "plan"))
         text = PROGRAM.read_text(encoding="utf-8")
         self.assertRegex(text, r"label: 'plan-rules-review'[^}]*schema: PLAN_REVIEW")
 
@@ -865,6 +867,12 @@ class PlanRulesTest(unittest.TestCase):
         ("R5", criterion(EVIDENCE, metric=True)),
         ("R5", dict(PLAN["acceptance"][0], id="AC2", metric=True)),
     )
+    NOTE_ROWS = (
+        ("R9", criterion(NOTE, verify={"ac": "AC4", "kind": "note", "host": "h1",
+                                       "when": {"deployed_includes": SHA}, "run": {"script": "scripts/check-live"}},
+                         lint=OK_LINT)),
+        ("R9", criterion(NOTE, script="scripts/check-live")),
+    )
     RULE_FINDING = {"verdict": "findings",
                     "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
 
@@ -897,7 +905,7 @@ class PlanRulesTest(unittest.TestCase):
         return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan})
 
     def test_each_rule_violation_stops_at_plan_review_naming_the_rule(self):
-        for rule, bad in self.ROWS:
+        for rule, bad in self.ROWS + self.NOTE_ROWS:
             with self.subTest(rule=rule, ac=bad["id"]):
                 plan = with_criteria(bad)
                 result, calls = self.gate(plan)
@@ -911,6 +919,40 @@ class PlanRulesTest(unittest.TestCase):
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-revise"))
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-rules-revise"))
                 self.assertNotIn("impl-1", labels(calls))
+
+    def test_a_note_without_verify_or_script_passes_plan_rules(self):
+        """#736 AC1: a plan with a note criterion and no script passes planRules; the planner learns the kind."""
+        result, calls = run(replies={"plan": with_criteria(NOTE)}, patch={"close-out": {"notes_posted": True}})
+        kinds = schema_of(calls, "plan")["properties"]["acceptance"]["items"]["properties"]["kind"]["enum"]
+        self.assertEqual(kinds, ["code", "evidence", "human", "note"])
+        self.assertNotIn("plan-revise", labels(calls))
+        self.assertNotIn("plan-rules-review", labels(calls))
+        self.assertIn("impl-1", labels(calls))
+        self.assertNotEqual(result["stage"], "plan-review")
+        _, direct = run(args=dict(ARGS, lane="direct"))
+        for text in (prompt(calls, "plan"), prompt(direct, "direct-impl")):
+            for kind in kinds:
+                self.assertIn(f"{kind} if ", text)
+
+    def test_a_note_with_a_verify_block_or_script_is_refused_naming_r9(self):
+        """#736 AC1: planRules refuses a note carrying a verify block or a script."""
+        for _, bad in self.NOTE_ROWS:
+            with self.subTest(bad=sorted(bad)):
+                result, _ = self.gate(with_criteria(bad))
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertEqual([(r["rule"], r["ac"]) for r in result["rules"]], [("R9", "AC4")])
+
+    def test_a_metric_note_is_still_an_r5_refusal(self):
+        result, _ = self.gate(with_criteria(criterion(NOTE, metric=True)))
+        self.assertIn(("R5", "AC4"), [(r["rule"], r["ac"]) for r in result["rules"]])
+
+    def test_the_planner_never_tags_a_note_as_a_metric(self):
+        """#736 (D8): an owner-designated latency observation is a note, so the metric instruction exempts notes."""
+        _, calls = run()
+        text = prompt(calls, "plan")
+        metric = text[text.index("set metric true"):]
+        metric = metric[:metric.index(". ")]
+        self.assertIn("never on a note", metric)
 
     def test_pre_merge_only_evidence_stops_at_plan_review_naming_r1(self):
         # The issue's demo: a planner reply with a pre-merge-only evidence criterion.
