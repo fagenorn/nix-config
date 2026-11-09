@@ -96,8 +96,7 @@ V3_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes"
     "delivery_observations", "requested_scope", "recovery", "verification"}
 CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
 SKILL_TREES = (REPO_ROOT / "home/common/agent-skills/skills",
-               REPO_ROOT / "home/common/claude-code/skills",
-               REPO_ROOT / "home/common/codex/skills")
+               REPO_ROOT / "home/common/claude-code/skills")
 NOW_FLAG = re.compile(r"(?<![\w-])--now(?![\w-])")
 NOW_KEY = re.compile(r'"now"\s*:')
 V2_OWNER_KEYS = {"interface_version", "kind", "ledger_repo_root", "run_id", "issue",

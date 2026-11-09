@@ -49,16 +49,16 @@ def fixture_model():
     return {
         "frame": "agent-guidance/AGENTS.md",
         "profiles": [
-            {"id": "demo", "entry": "demo", "hosts": ["claude", "codex"], "prompt": None,
+            {"id": "demo", "entry": "demo", "hosts": ["claude"], "prompt": None,
              "hot": ["demo/SKILL.md"],
              "conditional": ["demo/EXTRA.md", "demo/NEW.md", "solo/SKILL.md"],
-             "unread": {}, "ceiling_bytes": {"claude": 51, "codex": 51},
-             "conditional_ceiling_bytes": {"claude": 38, "codex": 26},
+             "unread": {}, "ceiling_bytes": {"claude": 51},
+             "conditional_ceiling_bytes": {"claude": 38},
              "note": "fixture entry"},
-            {"id": "demo-reviewer", "launch": ["demo-review"], "hosts": ["claude", "codex"],
+            {"id": "demo-reviewer", "launch": ["demo-review"], "hosts": ["claude"],
              "prompt": "demo/SKILL.md", "hot": ["agents/reviewer.md"], "conditional": [],
-             "unread": {}, "ceiling_bytes": {"claude": 14, "codex": 0},
-             "conditional_ceiling_bytes": {"claude": 0, "codex": 0},
+             "unread": {}, "ceiling_bytes": {"claude": 14},
+             "conditional_ceiling_bytes": {"claude": 0},
              "note": "fixture reviewer"},
         ],
         "excluded_sites": {"demo-plugin": "a plugin agent outside both trees"},
@@ -70,10 +70,10 @@ def dict_reader(files):
     return lambda path: files.get(path)
 
 
-# HEAD_FILES plus a Codex skill with a description, and two files the corpus skips.
+# HEAD_FILES plus a shared skill with a description, and two files the corpus skips.
 CORPUS_FILES = {
     **HEAD_FILES,
-    "home/common/codex/skills/stub/SKILL.md":
+    "home/common/agent-skills/skills/stub/SKILL.md":
         b"---\nname: stub\ndescription: Stubs. Use when testing.\n---\nstub body\n",
     "home/common/agent-skills/skills/demo/evals/evals.md": b"not counted\n",
     "home/common/claude-code/agents/notes.txt": b"not markdown\n",
@@ -148,13 +148,13 @@ class ModelCoreTest(unittest.TestCase):
         demo = self.profile("demo")
         demo["extra"] = 1
         demo["note"] = " "
-        del demo["ceiling_bytes"]["codex"]
+        demo["ceiling_bytes"]["other"] = 1
         self.profile("demo-reviewer")["id"] = "demo"
         self.model["surplus"] = True
         self.assertEqual(self.violations(), [
             "model: unknown key 'surplus'",
             "profile demo: unknown key 'extra'",
-            "profile demo: ceiling_bytes hosts ['claude'] differ from hosts ['claude', 'codex']",
+            "profile demo: ceiling_bytes hosts ['claude', 'other'] differ from hosts ['claude']",
             "profile demo: empty note",
             "profile demo: duplicate id",
         ])
@@ -192,15 +192,11 @@ class ModelCoreTest(unittest.TestCase):
         measurement = instruction_load.measure(self.model, dict_reader(self.files))
         demo = measurement["profiles"]["demo"]
         self.assertEqual(demo["claude"]["hot"], {"members": ["demo/SKILL.md"], "bytes": 51, "words": 9})
-        self.assertEqual(demo["codex"]["hot"], {"members": ["demo/SKILL.md"], "bytes": 51, "words": 9})
         self.assertEqual(demo["claude"]["conditional"]["bytes"], 38)
         self.assertEqual(demo["claude"]["conditional"]["words"], 7)
-        self.assertEqual(demo["codex"]["conditional"],
-                         {"members": ["demo/EXTRA.md", "demo/NEW.md"], "bytes": 26, "words": 5})
         reviewer = measurement["profiles"]["demo-reviewer"]
         self.assertEqual(reviewer["claude"]["hot"],
                          {"members": ["agents/reviewer.md"], "bytes": 14, "words": 2})
-        self.assertEqual(reviewer["codex"]["hot"], {"members": [], "bytes": 0, "words": 0})
         self.assertEqual(measurement["frame"], {"bytes": 11, "words": 2, "absent": False})
 
     def test_an_absent_member_measures_zero_and_is_marked(self):
@@ -216,7 +212,6 @@ class ModelCoreTest(unittest.TestCase):
         grown = instruction_load.measure(self.model, dict_reader(self.files))
         self.assertEqual(instruction_load.over_ceiling(self.model, grown), [
             "profile demo on claude: hot 52 bytes exceed ceiling 51 (demo/SKILL.md 52)",
-            "profile demo on codex: hot 52 bytes exceed ceiling 51 (demo/SKILL.md 52)",
         ])
 
     def test_the_tree_reader_matches_names_exactly(self):
@@ -276,17 +271,10 @@ class CeilingTest(unittest.TestCase):
             ("profile demo on claude: hot", ("profiles", "demo", hot, "claude"), 51, 51),
             ("profile demo on claude: conditional",
              ("profiles", "demo", conditional, "claude"), 38, 38),
-            ("profile demo on codex: hot", ("profiles", "demo", hot, "codex"), 51, 51),
-            ("profile demo on codex: conditional",
-             ("profiles", "demo", conditional, "codex"), 26, 26),
             ("profile demo-reviewer on claude: hot",
              ("profiles", "demo-reviewer", hot, "claude"), 14, 14),
             ("profile demo-reviewer on claude: conditional",
              ("profiles", "demo-reviewer", conditional, "claude"), 0, 0),
-            ("profile demo-reviewer on codex: hot",
-             ("profiles", "demo-reviewer", hot, "codex"), 0, 0),
-            ("profile demo-reviewer on codex: conditional",
-             ("profiles", "demo-reviewer", conditional, "codex"), 0, 0),
             ("corpus", ("corpus_ceiling_bytes",), 181, 181),
             ("descriptions", ("description_ceiling_bytes",), 24, 24),
         ])
@@ -294,12 +282,11 @@ class CeilingTest(unittest.TestCase):
     def test_a_breach_of_each_new_ceiling_is_found_and_over_ceiling_stays_hot_only(self):
         files = dict(CORPUS_FILES)
         files["home/common/agent-skills/skills/demo/EXTRA.md"] += b"x"
-        files["home/common/codex/skills/stub/SKILL.md"] = (
+        files["home/common/agent-skills/skills/stub/SKILL.md"] = (
             b"---\nname: stub\ndescription: Stubs. Use when testing!!\n---\nstub body\n")
         found = instruction_load.breached(self.all_ceilings(files=files))
         self.assertEqual([c.label for c in found], [
-            "profile demo on claude: conditional", "profile demo on codex: conditional",
-            "corpus", "descriptions"])
+            "profile demo on claude: conditional", "corpus", "descriptions"])
         model = fixture_model()
         self.assertEqual(
             instruction_load.over_ceiling(model, instruction_load.measure(model, files.get)), [])
@@ -307,7 +294,7 @@ class CeilingTest(unittest.TestCase):
     def test_the_new_ceilings_are_required_and_typed(self):
         model = fixture_model()
         del model["profiles"][0]["conditional_ceiling_bytes"]
-        model["profiles"][1]["conditional_ceiling_bytes"] = {"claude": -1, "codex": True}
+        model["profiles"][1]["conditional_ceiling_bytes"] = {"claude": -1}
         del model["corpus_ceiling_bytes"]
         model["description_ceiling_bytes"] = 1.5
         self.assertEqual(instruction_load.validate(model, dict_reader(HEAD_FILES)), [
@@ -316,15 +303,14 @@ class CeilingTest(unittest.TestCase):
             "profile demo: missing key 'conditional_ceiling_bytes'",
             "profile demo: conditional_ceiling_bytes must map hosts to byte counts",
             "profile demo-reviewer: conditional_ceiling_bytes claude must be a non-negative integer",
-            "profile demo-reviewer: conditional_ceiling_bytes codex must be a non-negative integer",
         ])
 
     def test_conditional_ceiling_hosts_must_match_the_profile_hosts(self):
         model = fixture_model()
-        del model["profiles"][0]["conditional_ceiling_bytes"]["codex"]
+        model["profiles"][0]["conditional_ceiling_bytes"]["other"] = 1
         self.assertEqual(instruction_load.validate(model, dict_reader(HEAD_FILES)), [
-            "profile demo: conditional_ceiling_bytes hosts ['claude'] differ from hosts "
-            "['claude', 'codex']"])
+            "profile demo: conditional_ceiling_bytes hosts ['claude', 'other'] differ from hosts "
+            "['claude']"])
 
 
 GIT_LOCATION_VARS = (
@@ -391,13 +377,11 @@ class ReportCommandTest(unittest.TestCase):
         self.assertEqual(demo["hosts"]["claude"]["hot"]["head"], {"bytes": 51, "words": 9})
         self.assertEqual(demo["hosts"]["claude"]["hot"]["delta"], {"bytes": 13, "words": 2})
         self.assertTrue(demo["hosts"]["claude"]["hot"]["affected"])
-        self.assertEqual(demo["hosts"]["codex"]["conditional"]["delta"], {"bytes": 9, "words": 2})
         self.assertEqual(demo["hosts"]["claude"]["conditional"]["delta"], {"bytes": 9, "words": 2})
         self.assertEqual(demo["hosts"]["claude"]["ceiling_bytes"], 51)
         reviewer = next(p for p in data["profiles"] if p["id"] == "demo-reviewer")
         self.assertEqual(reviewer["hosts"]["claude"]["hot"]["delta"], {"bytes": 0, "words": 0})
         self.assertFalse(reviewer["hosts"]["claude"]["hot"]["affected"])
-        self.assertEqual(reviewer["hosts"]["codex"]["hot"]["members"], [])
         new = next(d for d in data["documents"] if d["member"] == "demo/NEW.md")
         self.assertEqual(new["base"], {"bytes": 0, "words": 0, "absent": True})
         self.assertEqual(new["head"], {"bytes": 9, "words": 2, "absent": False})
@@ -418,7 +402,7 @@ class ReportCommandTest(unittest.TestCase):
             self.assertIn(heading, text)
         lines = text.splitlines()
         self.assertIn("| demo | claude | 38 | 51 | +13 | 7 | 9 | +2 | yes | fixture entry |", lines)
-        self.assertIn("| `demo/NEW.md` | claude, codex | absent | 9 | +9 | 0 | 2 | +2 |", lines)
+        self.assertIn("| `demo/NEW.md` | claude | absent | 9 | +9 | 0 | 2 | +2 |", lines)
 
     def test_the_output_is_a_function_of_the_two_shas(self):
         first = self.report("--base", self.base, "--head", self.head)
@@ -469,19 +453,19 @@ class ReportCommandTest(unittest.TestCase):
 
 
 ROSTER = {
-    "from-issue-controller": ["claude", "codex"],
+    "from-issue-controller": ["claude"],
     "orchestration-dispatcher": ["claude"],
-    "design-and-grill-owner": ["claude", "codex"],
-    "planning-owner": ["claude", "codex"],
-    "implementation-owner": ["claude", "codex"],
-    "ship-owner": ["claude", "codex"],
-    "release-owner": ["claude", "codex"],
-    "researcher": ["claude", "codex"],
-    "architecture-scan-owner": ["claude", "codex"],
-    "research": ["claude", "codex"],
-    "wayfind": ["claude", "codex"],
-    "to-issues": ["claude", "codex"],
-    "ship-release": ["claude", "codex"],
+    "design-and-grill-owner": ["claude"],
+    "planning-owner": ["claude"],
+    "implementation-owner": ["claude"],
+    "ship-owner": ["claude"],
+    "release-owner": ["claude"],
+    "researcher": ["claude"],
+    "architecture-scan-owner": ["claude"],
+    "research": ["claude"],
+    "wayfind": ["claude"],
+    "to-issues": ["claude"],
+    "ship-release": ["claude"],
 }
 BREACH = re.compile(r"^profile (\S+) on (\S+): ")
 
@@ -544,7 +528,7 @@ class LiveModelTest(unittest.TestCase):
             self.profile(m, "to-issues")["id"] = "research"
 
         def ceiling_host(m):
-            del self.profile(m, "research")["ceiling_bytes"]["codex"]
+            self.profile(m, "research")["ceiling_bytes"]["other"] = 1
 
         def empty_note(m):
             self.profile(m, "research")["note"] = ""
@@ -567,9 +551,9 @@ class LiveModelTest(unittest.TestCase):
              "which the profile does not list"),
             ("an unknown key", unknown_key, live, "profile research: unknown key 'extra'"),
             ("a duplicate profile id", duplicate_id, live, "profile research: duplicate id"),
-            ("a ceiling host missing", ceiling_host, live,
-             "profile research: ceiling_bytes hosts ['claude'] differ from hosts "
-             "['claude', 'codex']"),
+            ("a ceiling host unknown", ceiling_host, live,
+             "profile research: ceiling_bytes hosts ['claude', 'other'] differ from hosts "
+             "['claude']"),
             ("an empty note", empty_note, live, "profile research: empty note"),
         )
         for label, mutate, read, expected in cases:
@@ -617,7 +601,7 @@ LOOSE = "home/common/agent-skills/skills/demo/LOOSE.md"
 GATE_SITE = {"id": "demo-plugin", "path": DEMO,
              "call": 'Agent(subagent_type="codex:codex-rescue", model="sonnet", effort="medium") '
                      'transports.'}
-# A lint-clean three-tree repository carrying the gate workflow; GATE_MODEL's
+# A lint-clean two-tree repository carrying the gate workflow; GATE_MODEL's
 # ceilings are hand-counted: demo 75, solo 74, stub 74, frame 11; descriptions 31 each.
 GATE_TREE = {
     "home/common/agent-skills/model-matrix.json": json.dumps(
@@ -625,7 +609,7 @@ GATE_TREE = {
     DEMO: b"---\nname: demo\ndescription: Demos things. Use when testing.\n---\nsee `solo`\n",
     "home/common/claude-code/skills/solo/SKILL.md":
         b"---\nname: solo\ndescription: Solos things. Use when testing.\n---\nsolo body\n",
-    "home/common/codex/skills/stub/SKILL.md":
+    "home/common/agent-skills/skills/stub/SKILL.md":
         b"---\nname: stub\ndescription: Stubs things. Use when testing.\n---\nstub body\n",
     "home/common/agent-guidance/AGENTS.md": b"frame text\n",
     WORKFLOW: b"name: Instruction Budget\n",
@@ -637,10 +621,10 @@ WAIVER = "revert it, or have a human apply the instruction-budget-raise label"
 def gate_model():
     return {
         "frame": "agent-guidance/AGENTS.md",
-        "profiles": [{"id": "demo", "entry": "demo", "hosts": ["claude", "codex"],
+        "profiles": [{"id": "demo", "entry": "demo", "hosts": ["claude"],
                       "prompt": None, "hot": ["demo/SKILL.md"], "conditional": ["solo/SKILL.md"],
-                      "unread": {}, "ceiling_bytes": {"claude": 75, "codex": 75},
-                      "conditional_ceiling_bytes": {"claude": 74, "codex": 0},
+                      "unread": {}, "ceiling_bytes": {"claude": 75},
+                      "conditional_ceiling_bytes": {"claude": 74},
                       "note": "gate fixture"}],
         "excluded_sites": {"demo-plugin": "a plugin agent outside both trees"},
         "corpus_ceiling_bytes": 234,
@@ -680,8 +664,8 @@ class CheckTest(unittest.TestCase):
         def move_to_conditional(m):
             profile = m["profiles"][0]
             profile["hot"], profile["conditional"] = [], ["demo/SKILL.md", "solo/SKILL.md"]
-            profile["ceiling_bytes"] = {"claude": 0, "codex": 0}
-            profile["conditional_ceiling_bytes"] = {"claude": 149, "codex": 75}
+            profile["ceiling_bytes"] = {"claude": 0}
+            profile["conditional_ceiling_bytes"] = {"claude": 149}
 
         def new_profile(m):
             m["profiles"].append({
@@ -728,8 +712,8 @@ class CheckTest(unittest.TestCase):
         def moved(m):
             profile = m["profiles"][0]
             profile["hot"], profile["conditional"] = [], ["demo/SKILL.md", "solo/SKILL.md"]
-            profile["ceiling_bytes"] = {"claude": 0, "codex": 0}
-            profile["conditional_ceiling_bytes"] = {"claude": 149, "codex": 75}
+            profile["ceiling_bytes"] = {"claude": 0}
+            profile["conditional_ceiling_bytes"] = {"claude": 149}
 
         model_line = (f"raise: {instruction_load.MODEL_PATH} changes more than lowering a "
                       f"ceiling; {WAIVER}")
@@ -788,7 +772,6 @@ class CheckTest(unittest.TestCase):
         head = gate_files(extra={DEMO: GATE_TREE[DEMO] + b" "})
         expected = [
             "ceiling: profile demo on claude: hot measures 76 bytes, above its ceiling 75",
-            "ceiling: profile demo on codex: hot measures 76 bytes, above its ceiling 75",
             "ceiling: corpus measures 235 bytes, above its ceiling 234",
         ]
         self.assertEqual([line.split(";")[0] for line in self.check(head)], expected)
@@ -875,6 +858,23 @@ class LiveBudgetTest(unittest.TestCase):
     def test_the_live_tree_passes_steps_one_to_three(self):
         self.assertEqual(
             instruction_load.run_check(skill_lint.working_tree(REPO_ROOT), None, False), [])
+
+
+class ClaudeOnlyHostTest(unittest.TestCase):
+    """#687 D1: Codex is a reviewer only, so the budget measures the Claude host alone."""
+
+    def test_the_gate_knows_only_the_claude_host_and_trees(self):
+        self.assertEqual(instruction_load.HOSTS, ("claude",))
+        self.assertEqual(skill_lint.TREE_ROOTS, (skill_lint.SHARED_TREE, skill_lint.CLAUDE_TREE))
+        self.assertFalse(hasattr(skill_lint, "CODEX_TREE"))
+
+    def test_the_live_model_names_no_codex_host(self):
+        model = json.loads((REPO_ROOT / instruction_load.MODEL_PATH).read_text(encoding="utf-8"))
+        for profile in model["profiles"]:
+            with self.subTest(profile=profile["id"]):
+                self.assertEqual(profile["hosts"], ["claude"])
+                self.assertEqual(set(profile["ceiling_bytes"]), {"claude"})
+                self.assertEqual(set(profile["conditional_ceiling_bytes"]), {"claude"})
 
 
 if __name__ == "__main__":

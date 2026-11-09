@@ -39,7 +39,7 @@ from agent_tools.skill_lint import (
 MODEL_PATH = "home/common/agent-skills/instruction-load.json"
 FRAME_MEMBER = "agent-guidance/AGENTS.md"
 FRAME_PATH = "home/common/agent-guidance/AGENTS.md"
-HOSTS = ("claude", "codex")
+HOSTS = ("claude",)
 TOP_LEVEL_KEYS = (
     "frame",
     "profiles",
@@ -670,11 +670,11 @@ def run_check(head: Snapshot, base: Optional[Snapshot], raise_label: bool) -> li
 PREFACE = (
     "Bytes are UTF-8 lengths and words are whitespace-separated tokens; neither is a token "
     "count. A hot member loads on every run of its profile's standard route and a conditional "
-    "member only on a named branch. A shared-tree member counts on both hosts; a "
-    "Claude-only-tree member or an agent definition counts on Claude only.",
+    "member only on a named branch. A shared-tree member, a Claude-only-tree member and an "
+    "agent definition all count on the Claude host.",
     "Not measured: received prompts (each profile names its prompt's source document), the "
     "harness system prompt and skill listing, project instructions, and plugin or generated "
-    "skills. The frame, the global guidance file installed for both hosts, is reported once "
+    "skills. The frame, the global guidance file, is reported once "
     "and kept out of every profile total.",
 )
 SIZE_COLUMNS = ("Base bytes", "Head bytes", "Δ bytes", "Base words", "Head words", "Δ words")
