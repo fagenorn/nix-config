@@ -355,10 +355,15 @@ const LAND_SYNC_SCHEMA = {
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
 const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
 const MAX_SYNCS = 3
+// A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable (#716).
+const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
+const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, renew: RENEW_SCHEMA, ...extra }, required: ['renew'] })
+const complete = (r, schema) => !!r && schema.required.every(k => r[k] !== undefined && r[k] !== null)
+const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 
 // The landing of one ready issue (D10). The order is: renew, open or re-adopt the PR at the ready head,
-// take the land lock with --wait, resync, the checks loop, renew, the one-shot pre-merge acquire, merge,
-// release, close out (#677). Every exit goes through the wrapper at the bottom: a landing that holds the
+// take the land lock with --wait (one agent call, land-pr), resync, the checks loop, renew, the one-shot
+// pre-merge acquire and the merge (one agent call, land-merge), release, close out (#677, #716). Every exit goes through the wrapper at the bottom: a landing that holds the
 // lock releases it exactly once, at the last sha it was held at (P8), and a failed landing keeps the
 // claim and its cont (D9).
 const land = async (n, ready) => {
@@ -371,32 +376,20 @@ const land = async (n, ready) => {
   let pr = null
   let lockHeld = false
   let lockSha = null
-  const c = { sync: 0, syncReview: 0, lock: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0 }
+  // A move of the lock whose answer may have been lost (P10): the sha it may now be held at, released after lockSha.
+  let lockMaybe = null
+  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0 }
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
   const cheap = { model: 'sonnet', effort: 'low' }
 
-  const renew = async at => {
-    const label = `renew-${n}-${at}`
-    const r = await call(`Renew the claim of issue #${n} of ${SLUG} (the git repository at ${REPO}) before the landing step ${at}.
-Run alone and exactly: forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B}
-Return its verdict (renewed, not_held, or error on any other exit), by and detail. Run nothing else.
-${RULES}`, label, { ...cheap, schema: RENEW_SCHEMA })
-    if (!r) return out('stopped', { stage: 'renew', detail: `${label} returned nothing` })
+  const RENEW_FIRST = `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by and detail as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew.`
+  // The nested renew of a folded reply: a row ends the landing, null continues.
+  const renewed = (r, label) => {
+    if (!r) return out('stopped', { stage: 'renew', detail: `${label} returned no renew` })
     if (r.verdict === 'renewed') return null
     if (r.verdict === 'not_held') return out('claim-lost', { by: r.by })
     return out('stopped', { stage: 'renew', detail: r.detail || r.verdict })
-  }
-
-  // The land lock; the verdict string, or null when the agent returned nothing.
-  const lock = async wait => {
-    c.lock++
-    const label = `land-lock-${n}-${c.lock}`
-    const r = await call(`Take the cross-host landing lock of the branch ${INT} for PR #${pr} of issue #${n} of ${SLUG} at the head ${expected}.
-Run alone and exactly: ${LAND_ACQUIRE(expected, wait)}
-${LOCK_RETURN} Run nothing else.
-${RULES}`, label, { ...cheap, schema: LOCK_SCHEMA })
-    return r ? r.verdict : null
   }
 
   const unlock = async () => {
@@ -405,7 +398,7 @@ ${RULES}`, label, { ...cheap, schema: LOCK_SCHEMA })
     await call(`Release the cross-host landing lock of the branch ${INT} held for issue #${n} of ${SLUG}.
 Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}
 released and not_held are both fine. Return its verdict and any detail. Run nothing else.
-${RULES}`, `land-unlock-${n}`, { ...cheap, schema: RELEASE_SCHEMA })
+${lockMaybe && lockMaybe !== lockSha ? RELEASE_AGAIN(lockMaybe) : ''}${RULES}`, `land-unlock-${n}`, { ...cheap, schema: RELEASE_SCHEMA })
   }
 
   // D12: only an unattended run posts the marker; a session-launched run returns the same items on its row.
@@ -427,18 +420,25 @@ ${RULES}`, `land-ask-${n}`, { ...cheap, schema: ASK_SCHEMA })
   const advance = async () => {
     c.record++
     const label = `land-record-${n}-${c.record}`
+    // The move may land and its answer be lost: the release then also tries expected (P10).
+    if (expected !== lockSha) lockMaybe = expected
     const rec = await call(`The head of PR #${pr} of issue #${n} of ${SLUG} changed to ${expected} and passed its gate. Record it in the PR body.
 1. Run gh pr view ${pr} --repo ${SLUG} --json body,headRefOid and confirm headRefOid is ${expected}. If it is not, change nothing and return ok false with the head it shows.
 2. Make a fresh directory with mktemp -d and write the body to a file in it, rewriting only the Accepted head line (the last line of the Evidence section) to exactly this text, everything else unchanged:
 Accepted head: ${expected}
 3. Run gh pr edit ${pr} --repo ${SLUG} --body-file <that file>. When the line already reads exactly so, change nothing.
 Return ok true and head (the headRefOid you read).
-${RULES}`, label, { ...cheap, schema: RECORD_SCHEMA })
+Only when ok is true, move the cross-host landing lock of the branch ${INT} to the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
+${LOCK_RETURN} Return it as lock; otherwise return lock null.
+${RULES}`, label, { ...cheap, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA) } } })
+    const lv = rec && rec.lock ? rec.lock.verdict : null
+    if (HOLDING(lv)) {
+      lockHeld = true
+      lockSha = expected
+      lockMaybe = null
+    } else if (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to' || (rec && rec.ok === false && !rec.lock)) lockMaybe = null
     if (!rec || rec.ok !== true || rec.head !== expected) return out('stopped', { stage: 'land-record', detail: rec ? rec.detail : `${label} returned nothing`, head: rec ? rec.head : undefined })
-    const v = await lock(false)
-    if (v !== 'moved' && v !== 'already_held' && v !== 'acquired') return out('land-contended', { detail: `the lock did not move to ${expected}` })
-    lockHeld = true
-    lockSha = expected
+    if (!HOLDING(lv)) return out('land-contended', { detail: `the lock did not move to ${expected}` })
     return null
   }
 
@@ -498,23 +498,33 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
     // resync, check or merge happens outside the lock. A resync that changes the head pushes it and
     // advance() moves the lock; lockSha changes only on a holding verdict, so the release below always
     // names the last sha the lock was held at, even when a move fails.
-    const lostA = await renew('land')
-    if (lostA) return lostA
-
-    const prR = await call(`Open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${B} (worktree ${W}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
+    // The pr call may take the lock (--wait) after opening the PR: mark the ready head as possibly held before it, so a lost reply still reaches the release (P5).
+    lockHeld = true
+    lockSha = expected
+    const prR = await call(`${RENEW_FIRST}
+Then open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${B} (worktree ${W}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
 1. Push the branch: git -C ${W} push origin ${B}.
 2. If an open PR with head ${B} exists (a re-run), reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
 Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
 Return pr (number) and head (the full sha of the pushed head).
-${RULES}`, `land-pr-${n}`, { model: 'sonnet', schema: LAND_PR_SCHEMA })
-    if (!prR || !prR.pr) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
+Take the cross-host landing lock of the branch ${INT} for that PR at the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
+${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null.
+${RULES}`, `land-pr-${n}`, { model: 'sonnet', schema: withRenew(LAND_PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) })
+    if (!prR) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
+    // A renew that ended ran nothing after it; a refused lock holds nothing (P5). Otherwise the lock stays marked held at expected (O2).
+    if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
+    const v1 = prR.lock ? prR.lock.verdict : null
+    const refused = v1 === 'land-contended' || v1 === 'held_by' || v1 === 'lost_to'
+    if (refused) lockHeld = false
+    const lostA = renewed(prR.renew, `land-pr-${n}`)
+    if (lostA) return lostA
+    if (!complete(prR, LAND_PR_SCHEMA)) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
     pr = prR.pr
     if (prR.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: prR.head })
-
-    const v1 = await lock(true)
-    if (v1 === 'acquired' || v1 === 'already_held' || v1 === 'moved') { lockHeld = true; lockSha = expected }
-    else if (v1 === 'land-contended' || v1 === 'held_by' || v1 === 'lost_to') return out('land-contended', { detail: `the land lock is held by another landing (${v1})` })
-    else return out('stopped', { stage: 'land-lock', detail: v1 === null ? `land-lock-${n}-1 returned nothing` : v1 })
+    if (!HOLDING(v1)) {
+      if (refused) return out('land-contended', { detail: `the land lock is held by another landing (${v1})` })
+      return out('stopped', { stage: 'land-lock', detail: v1 === null ? `land-pr-${n} returned no lock verdict` : v1 })
+    }
 
     const first = await resync()
     if (first) return first
@@ -563,28 +573,34 @@ ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
       const missingNames = DECLARED.filter(d => !have.includes(d))
       if (missingNames.length) return out('stopped', { stage: 'checks', missing: missingNames })
 
-      const lostB = await renew('merge')
-      if (lostB) return lostB
-      const v2 = await lock(false)
-      if (v2 === 'already_held' || v2 === 'moved') break
-      if (v2 === 'acquired') {
-        // The lock was lost and retaken, so the base may have moved: resync first.
+      // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first), then the merge (O3).
+      const mg = await call(`${RENEW_FIRST}
+Then re-check the cross-host landing lock of the branch ${INT} for PR #${pr}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
+${LOCK_RETURN} Return it as lock.
+Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
+1. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json state,mergeCommit. When state is already MERGED, skip step 2.
+2. Otherwise run, alone and exactly: ${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${expected}${SETUP.delete_branch ? ' --delete-branch' : ''}
+3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
+Return merged, merge_commit and notes. On any other lock verdict run nothing else and return merged false with the verdict in notes.
+${RULES}`, `land-merge-${n}`, { ...cheap, schema: withRenew(LAND_MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) })
+      if (!mg) return out('stopped', { stage: 'merge', detail: `land-merge-${n} returned nothing` })
+      const v2 = mg.lock ? mg.lock.verdict : null
+      if (HOLDING(v2)) {
         lockHeld = true
         lockSha = expected
+      }
+      const lostB = renewed(mg.renew, `land-merge-${n}`)
+      if (lostB) return lostB
+      if (v2 === 'acquired') {
+        // The lock was lost and retaken, so the base may have moved: resync first.
         const r = await behind()
         if (r) return r
         continue
       }
-      return out('land-contended', { detail: `the land lock was not held before the merge (${v2})` })
+      if (v2 !== 'already_held' && v2 !== 'moved') return out('land-contended', { detail: `the land lock was not held before the merge (${v2})` })
+      if (!complete(mg, LAND_MERGE_SCHEMA) || mg.merged !== true) return out('stopped', { stage: 'merge', detail: mg.notes })
+      break
     }
-
-    const mg = await call(`Merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
-1. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json state,mergeCommit. When state is already MERGED, skip step 2.
-2. Otherwise run, alone and exactly: ${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${expected}${SETUP.delete_branch ? ' --delete-branch' : ''}
-3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
-Return merged, merge_commit and notes.
-${RULES}`, `land-merge-${n}`, { ...cheap, schema: LAND_MERGE_SCHEMA })
-    if (!mg || mg.merged !== true) return out('stopped', { stage: 'merge', detail: mg ? mg.notes : `land-merge-${n} returned nothing` })
     await unlock()
     // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
     if (!CONTS[n]) CONTS[n] = { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }
