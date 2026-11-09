@@ -470,12 +470,7 @@ class ReportCommandTest(unittest.TestCase):
 
 
 ROSTER = {
-    "from-issue-controller": ["claude"],
     "orchestration-dispatcher": ["claude"],
-    "design-and-grill-owner": ["claude"],
-    "planning-owner": ["claude"],
-    "implementation-owner": ["claude"],
-    "ship-owner": ["claude"],
     "release-owner": ["claude"],
     "researcher": ["claude"],
     "architecture-scan-owner": ["claude"],
@@ -497,6 +492,12 @@ class LiveModelTest(unittest.TestCase):
     def profile(self, model, profile_id):
         return next(p for p in model["profiles"] if p["id"] == profile_id)
 
+    def test_the_committed_profiles_are_the_live_ones(self):
+        self.assertEqual({p["id"] for p in self.model["profiles"]}, {
+            "orchestration-dispatcher", "release-owner", "researcher", "architecture-scan-owner",
+            "research", "wayfind", "to-issues", "ship-release", "design-explorer",
+            "grill-explorer", "planning-explorer", "grounding-explorer"})
+
     def test_the_live_model_validates_clean(self):
         self.assertEqual(instruction_load.validate(self.model, self.read), [])
 
@@ -511,7 +512,7 @@ class LiveModelTest(unittest.TestCase):
         measured = instruction_load.measure(self.model, self.read)
         hot = measured["profiles"]["orchestration-dispatcher"]["claude"]["hot"]["bytes"]
         self.assertLessEqual(hot, self.BATCH_BASE_HOT_BYTES - 15 * 1024)
-        self.assertNotIn("orchestrated-issue-owner", {p["id"] for p in self.model["profiles"]})
+        self.assertNotIn("orchestrated-" "issue-" "owner", {p["id"] for p in self.model["profiles"]})
 
     def test_the_roster_profiles_are_modelled_on_their_hosts(self):
         hosts = {p["id"]: p["hosts"] for p in self.model["profiles"]}
@@ -527,10 +528,10 @@ class LiveModelTest(unittest.TestCase):
                 "agent-skills/skills", "claude-code/skills") else live(p)
 
         def drop_site(m):
-            self.profile(m, "sdd-final-rereviewer")["launch"].remove("sdd-final-correctness-rereview")
+            m["profiles"].remove(self.profile(m, "researcher"))
 
         def unknown_member(m):
-            self.profile(m, "research")["conditional"].append("from-issue/NOPE.md")
+            self.profile(m, "research")["conditional"].append("missing/NOPE.md")
 
         def unnamed_member(m):
             self.profile(m, "research")["conditional"].append("to-issues/WIDE-REFACTORS.md")
@@ -554,9 +555,9 @@ class LiveModelTest(unittest.TestCase):
         deepening = "home/common/agent-skills/skills/codebase-design/DEEPENING.md"
         cases = (
             ("a matrix site dropped", drop_site, live,
-             "matrix site sdd-final-correctness-rereview is in no profile"),
+             "matrix site research-background-researcher is in no profile"),
             ("an unknown member", unknown_member, live,
-             "profile research: from-issue/NOPE.md resolves to no document"),
+             "profile research: missing/NOPE.md resolves to no document"),
             ("an ambiguous member", None, with_copy(deepening),
              "profile architecture-scan-owner: codebase-design/DEEPENING.md resolves to "
              "2 documents"),
@@ -592,7 +593,7 @@ class LiveModelTest(unittest.TestCase):
 
     def test_growing_a_hot_member_breaches_exactly_the_pairs_that_count_it(self):
         measurement = instruction_load.measure(self.model, self.read)
-        for member in ("from-issue/AUTO.md", "agents/reviewer.md"):
+        for member in ("ship-release/SKILL.md", "doc-grounded-questions/SKILL.md"):
             with self.subTest(member=member):
                 counting = {
                     (profile["id"], host)

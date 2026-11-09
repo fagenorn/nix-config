@@ -7,10 +7,10 @@ Measurement harness for the skills in `../skills/` (shared tree) and
 The runner searches the shared tree first, then the Claude-only tree.
 
 ```sh
-just evals from-issue 3      # pipeline eval: sandbox, run, grade, verdict
-just evals ship-issue 1      # plan-only eval: prints prompt + expected output
-EVAL_MODEL=opus just evals from-issue 1
-EVAL_TRIALS=5 just evals from-issue 1   # repeat 5x: pass rate + p50/p90 wall time
+just evals deliver-direct 1  # pipeline eval: sandbox, run, grade, verdict
+just evals writing-plans 2   # plan-only eval: prints prompt + expected output
+EVAL_MODEL=opus just evals deliver-direct 1
+EVAL_TRIALS=5 just evals deliver-direct 1   # repeat 5x: pass rate + p50/p90 wall time
 ```
 
 ## Two kinds of eval
@@ -33,7 +33,7 @@ same name). Editing a skill therefore means: commit, `just switch`, then run the
 failed parity run is one `git revert` + re-switch away from the previous behavior. The
 row records `tree: "deployed"` with `tree_rev`, `tree_dirty` and `tree_mode` null.
 
-**Working tree.** `EVAL_TREE=. just evals from-issue 1` evaluates a checkout without a
+**Working tree.** `EVAL_TREE=. just evals deliver-direct 1` evaluates a checkout without a
 switch, under your normal login: the runner never sets `CLAUDE_CONFIG_DIR`. It resolves
 the eval from that checkout's two skill roots, then, for a pipeline eval, makes the
 checkout's instructions the sandbox repo's project copies. Right after the fixture's
@@ -96,55 +96,6 @@ A row from tree mode records `tree` (the checkout's absolute path), `tree_rev` (
 instruction paths: both skill roots, `home/common/claude-code/agents` and
 `home/common/agent-guidance/AGENTS.md`, ignoring each skill's own `evals/`).
 
-## Cheap-first
-
-The `from-issue` pipeline cases stop the flow after Phase 5 and grade the artifacts — spec,
-plan, worktree placement, decision logs. The implementation never runs. A full end-to-end
-run costs an order of magnitude more and is reserved for risky landings. A pipeline case
-of another skill names its own stop in its prompt.
-
-## Eval 8: lifecycle-owner economics
-
-`from-issue` eval 8, `lifecycle-owner-economics`, is the one full-flow case. It runs
-`/from-issue 4 --auto` (the direct route, so the owner has lifecycle identity) on a seeded
-issue, `fixture-repo/issues/004-priorities-and-due-dates.md`: one feature across the model,
-store, CLI and docs, whose last criterion needs `tests/test_acceptance.py` to pass. That
-test takes about 330 s and is skipped unless `TINYTASK_ACCEPTANCE=1`, so it gives the owner
-a long child wait and the ordinary suite stays fast. The case takes no parameters, and its
-prompt names no phase to stop at: the run ends when ship-issue stops at the forge boundary.
-
-Its setup kind, `tracked-issue`, runs `setups/tracked-issue/setup.sh <WORK> <REPO>`:
-
-- It writes `$WORK/bin/gh`, a wrapper around `setups/tracked-issue/gh.py`, a read-only
-  stand-in for `gh`. `run-eval.sh` puts `$WORK/bin` first on the claude run's `PATH`, so
-  every agent of the run inherits it, and every call is appended to `$WORK/gh-calls.jsonl`
-  as `{"argv": [...], "exit": n}`.
-- The shim serves `issue view` for the issue files under `issues/` (as text, or as
-  `--json <fields>` with an optional `--jq`, always open with no labels or comments),
-  answers `[]` to `pr list` and to the `api` sub-issue and dependency reads, reports no pull
-  request for `pr view`, and succeeds on `auth status`, `issue comment` and `issue edit`.
-  Every other verb, `pr create` and `pr merge` included, exits 1 with
-  `gh shim: <verb> is not available in this sandbox`.
-- It rewrites the sandbox's `.agents/project.json` so the tracker binding is `github` and
-  its capability is supported, then commits and pushes that on the sandbox's `main`.
-
-The asserts read the owner report of the trial's transcripts (`owner_report` in
-`assert-lib.sh` copies the project directories of the sandbox path to `$WORK/projects`
-and runs the tree's `agent_tools.agent_costs --report owners --format json`), so eval 8
-needs `EVAL_TREE`; without it the asserts fail with `eval 8 needs EVAL_TREE (tree mode)`.
-The first five check issue 4's lineages (a ledger phase of at least 6, every owner gate
-call measured, an owner call of at least 110,000 tokens of context, Phase 7 entered and an
-owner long child wait); the sixth checks the feature branch's suite and `--priority`.
-
-```sh
-EVAL_MODEL=opus EVAL_TIMEOUT=7200 EVAL_MAX_USD=40 EVAL_TRIALS=2 EVAL_TREE=. \
-  EVAL_SETTINGS=<settings> [EVAL_POLICY=<spec>] just evals from-issue 8
-```
-
-A trial is bounded by `EVAL_MAX_USD` (a trial costs tens of dollars and takes up to two
-hours), so two trials can cost twice that. Compare arms from the rows with
-`just agent-costs --report owners --eval-results results/results.jsonl --eval from-issue:8`.
-
 ## Conventions
 
 - `"expected_today": "fail"` plus a `note` marks a case that documents a gap not yet closed.
@@ -152,7 +103,7 @@ hours), so two trials can cost twice that. Compare arms from the rows with
   `UNEXPECTED-PASS` telling you to drop the flag.
 - `fixture-repo/` is `tinytask`, a stdlib-only python3 CLI with docs, an ADR, a
   complete `.agents/project.json` contract, and four issue fixtures under `issues/` (well-specified,
-  fuzzy, mechanical, and eval 8's priorities and due dates, with its slow `tests/test_acceptance.py`). It also ships one pre-charted decision map,
+  fuzzy, mechanical, and priorities and due dates, with a slow `tests/test_acceptance.py`). It also ships one pre-charted decision map,
   `.claude/wayfind/concurrent-shells/` — the markdown-tracker shape `wayfind` falls back to
   when its tracker capability is unsupported: a map, an unblocked ticket, a ticket blocked by it, and
   fog. The wayfind evals work it; every other eval must leave it untouched. Verify the fixture
@@ -161,7 +112,7 @@ hours), so two trials can cost twice that. Compare arms from the rows with
   `shippable-worktree`, `planned-worktree`, `release-ready` and `tracked-issue`. The
   middle three take no parameters and read their inputs (the issue-3 spec, plan package and
   `implementation.patch`) from the committed `setups/issue-3/`; `tracked-issue` takes none
-  either and is described under Eval 8 above; `fixture-repo/` itself
+  either; `fixture-repo/` itself
   stays unchanged. Every pipeline assert also sees `BASE_MAIN`, local `main`'s SHA right
   after the setup, `PRE_WT_HEAD`, the pre-created worktree's HEAD right after the setup
   (empty when the setup makes none), and `ORIGIN_REFS`, the origin's full ref set right
@@ -210,6 +161,6 @@ prints a summary — pass rate and nearest-rank p50/p90 wall time. Comparing run
 after a skill edit is one `jq` away:
 
 ```sh
-jq -r 'select(.skill=="from-issue" and .id==1 and .input_tokens != null) | [.ts, .model, (.tree_rev // "deployed"), .verdict, .wall_s, .input_tokens] | @tsv' \
+jq -r 'select(.skill=="deliver-direct" and .id==1 and .input_tokens != null) | [.ts, .model, (.tree_rev // "deployed"), .verdict, .wall_s, .input_tokens] | @tsv' \
   results/results.jsonl
 ```

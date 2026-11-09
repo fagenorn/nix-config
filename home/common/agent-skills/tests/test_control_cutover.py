@@ -474,7 +474,7 @@ class IndexResolutionTest(Cutover, unittest.TestCase):
         """`direct-owner` for issue 41 with every fact a first launch needs."""
         worktree = str(self.root / ".worktrees/worktree-issue-41-direct")
         built = self.build("contract", self.contract_input(
-            issue=41, worktree=worktree, now=at(0), source_reference="invocation:/from-issue 41"))
+            issue=41, worktree=worktree, now=at(0), source_reference="invocation:/deliver-standard 41"))
         request = self.direct_request(
             issue=41, now=at(minute), delivery_contract=built["contract"],
             authorization_intents=[built["initial_intent"]],

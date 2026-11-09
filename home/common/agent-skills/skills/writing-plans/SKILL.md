@@ -28,7 +28,7 @@ When the file map depends on one bounded repository fact, keep the planning judg
 <!-- agent-dispatch: id=planning-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only repository lookup without choosing task boundaries.
 
-If the lookup turns open-ended or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high, recording the escalation in the plan phase's fixed-schema report.
+If the lookup turns open-ended or judgment-bearing, stop the cheap-tier run and re-dispatch it to a `general-purpose` agent on Opus/high, recording the escalation in the plan phase's fixed-schema report.
 
 ## Task size
 
@@ -41,7 +41,7 @@ The root holds the header below, no numbered task bodies, no copied ledger ratio
 ```markdown
 # <Feature> Implementation Plan
 
-> **For agentic workers:** execute this plan with the `sdd` skill — one implementer
+> **For agentic workers:** execute this plan one implementer
 > per task, reviewed between tasks. Steps use `- [ ]` checkboxes.
 
 **Goal:** <one sentence>
@@ -152,7 +152,7 @@ git commit -m "feat: add specific feature"
 
 **Every task has a verification line that can fail**: a command and the observation that would show the task incomplete, confirmed by hand at the commit the implementer starts from. `set -e` exempts a `!`-inverted command, so write `if grep -q <forbidden> <file>; then exit 1; fi`, not `! grep`; a terminal `grep -c` exits 1 on zero matches, the passing case.
 
-**Each task names its focused test commands**, red then green, plus the project's build check only when the task changes files that check evaluates. No task runs the full declared verification; sdd's final gate runs it once on the final head.
+**Each task names its focused test commands**, red then green, plus the project's build check only when the task changes files that check evaluates. No task runs the full declared verification; the delivery's final gate runs it once on the final head.
 
 **Scope every gate to the plan's files.** Give diffs a pathspec (`git diff --stat BASE..HEAD -- <the plan's Files: paths>`) or assert on file content; never expect a raw commit range, because plan and spec commits and a ship-time sync merge land in it too. Where commit shape is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`), exempting artifact and review-fixup subjects.
 

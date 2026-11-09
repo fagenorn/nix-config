@@ -31,7 +31,7 @@ else:
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
 # The module the thin `SCRIPT` entry point imports (issue 612).
 MODULE = Path(__file__).parents[1] / "scripts" / "workflow_state.py"
-SDD_WORKSPACE = Path(__file__).parents[1] / "skills" / "sdd" / "scripts" / "sdd-workspace"
+SDD_WORKSPACE = Path(__file__).parents[1] / "scripts" / "sdd-workspace"
 MODEL = Path(__file__).parents[1] / "scripts" / "delivery_model" / "__init__.py"
 MODEL_FIXTURES = Path(__file__).with_name("_delivery_model_fixtures.py")
 ARTIFACT_BUDGET = Path(__file__).parents[1] / "scripts" / "artifact_budget.py"
@@ -4546,7 +4546,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "interface_version": 1, "kind": "terminal", "issue": 73,
                     "run_id": None, "source": "tracker", "reason": reason,
                     "blockers": blockers, "result": None,
-                    "reentry": "/from-issue 73 --auto",
+                    "reentry": "/deliver-standard 73",
                 })
                 self.assertFalse(
                     self.direct_state_path("direct-73-000002").exists()
@@ -4574,7 +4574,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "interface_version": 1, "kind": "terminal", "issue": 73,
                     "run_id": None, "source": "tracker", "reason": reason,
                     "blockers": blockers, "result": None,
-                    "reentry": "/from-issue 73 --auto",
+                    "reentry": "/deliver-standard 73",
                 })
                 self.assertEqual(self.run_dirs(), [])
 
@@ -5141,7 +5141,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "interface_version": 1, "kind": "terminal", "issue": 32,
             "run_id": owner["run_id"], "source": "lifecycle", "reason": "merged",
             "blockers": [], "result": attempt["result"],
-            "reentry": "/from-issue 32 --auto",
+            "reentry": "/deliver-standard 32",
         })
         self.assertEqual(attempt["state"], "merged")
         self.assertEqual(attempt["result_source"], "superseded")
@@ -5363,7 +5363,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "interface_version": 1, "kind": "terminal", "issue": 73,
             "run_id": merged_owner["run_id"], "source": "lifecycle",
             "reason": "merged", "blockers": [], "result": merged,
-            "reentry": "/from-issue 73 --auto",
+            "reentry": "/deliver-standard 73",
         })
 
         stopped_owner = self.acquire_direct(issue=74)
@@ -5380,7 +5380,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "interface_version": 1, "kind": "terminal", "issue": 74,
             "run_id": stopped_owner["run_id"], "source": "lifecycle",
             "reason": "stopped", "blockers": [], "result": stopped,
-            "reentry": "/from-issue 74 --auto",
+            "reentry": "/deliver-standard 74",
         })
 
     def test_direct_and_control_project_the_same_one_issue_retry_policy(self):
@@ -5442,7 +5442,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "interface_version": 2, "kind": "suspended", "run_id": self.run_id,
             "issue": 15, "custody": {"kind": "implementation", "attempt": 1,
                                      "launch": 1, "action_id": "15:1:1"},
-            "blocked_on": "usage_limit", "reentry": "/from-issue 15 --auto",
+            "blocked_on": "usage_limit", "reentry": "/deliver-standard 15",
         })
         attempt = self.read_state()["issues"]["15"]["attempts"][-1]
         self.assertEqual(attempt["state"], "suspended")
@@ -5483,7 +5483,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "interface_version": 2, "kind": "terminal", "issue": 16,
             "run_id": self.run_id, "source": "lifecycle", "reason": "stopped",
             "blockers": [], "result": attempt["result"],
-            "reentry": "/from-issue 16 --auto",
+            "reentry": "/deliver-standard 16",
         })
 
     def test_suspend_rejects_a_nonactive_attempt_and_the_reserved_cause(self):
@@ -5526,7 +5526,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "interface_version": 2, "kind": "suspended", "run_id": self.run_id,
             "issue": 19, "custody": {"kind": "implementation", "attempt": 1,
                                      "launch": 1, "action_id": "19:1:1"},
-            "blocked_on": "agent_dispatch", "reentry": "/from-issue 19 --auto",
+            "blocked_on": "agent_dispatch", "reentry": "/deliver-standard 19",
         })
         issue = self.read_state()["issues"]["19"]
         self.assertEqual([attempt["attempt"] for attempt in issue["attempts"]], [1])
@@ -5583,8 +5583,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             [a["attempt"] for a in self.read_state()["issues"]["48"]["attempts"]], [1])
 
     def test_direct_reentry_resumes_an_agent_dispatch_suspension_in_place(self):
-        # A direct owner always carries human_directed, so `/from-issue N
-        # --auto` clears `agent_dispatch` on the same attempt and worktree,
+        # A direct owner always carries human_directed, so `/deliver-standard N`
+        # clears `agent_dispatch` on the same attempt and worktree,
         # opening no second attempt and no second run (per D6).
         owner = self.acquire_direct()
         self.run_id = owner["run_id"]
@@ -5628,7 +5628,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "interface_version": 2, "kind": "suspended", "run_id": self.run_id,
             "issue": 21, "custody": {"kind": "implementation", "attempt": 1,
                                      "launch": 1, "action_id": "21:1:1"},
-            "blocked_on": "deadline", "reentry": "/from-issue 21 --auto",
+            "blocked_on": "deadline", "reentry": "/deliver-standard 21",
         })
         issue = self.read_state()["issues"]["21"]
         self.assertEqual([attempt["attempt"] for attempt in issue["attempts"]], [1])
@@ -6570,7 +6570,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "interface_version": 1, "kind": "terminal", "issue": 73,
             "run_id": owner["run_id"], "source": "lifecycle",
             "reason": "stopped", "blockers": [], "result": outcome,
-            "reentry": "/from-issue 73 --auto",
+            "reentry": "/deliver-standard 73",
         })
         attempts = state["issues"]["73"]["attempts"]
         self.assertEqual(len(attempts), 1)
@@ -7281,7 +7281,7 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
             "interface_version": 2, "kind": "terminal", "issue": 16,
             "run_id": self.run_id, "source": "lifecycle", "reason": "stopped",
             "blockers": [], "result": attempt["result"],
-            "reentry": "/from-issue 16 --auto",
+            "reentry": "/deliver-standard 16",
         })
 
     def stall_through(self, between):

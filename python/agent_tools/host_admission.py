@@ -45,7 +45,7 @@ REASON_CODES = (
     "declaration_missing",
     "declaration_invalid",
 )
-UNSUPPORTED_ALTERNATIVE = "/from-issue <issue> --auto"
+UNSUPPORTED_ALTERNATIVE = "/deliver-standard <issue>"
 
 _DECLARATION_MEMBERS = frozenset({"schema_version", "routes"})
 _SUPPORTED_MEMBERS = frozenset({"support", "agent_slots"})

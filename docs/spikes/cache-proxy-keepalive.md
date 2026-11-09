@@ -89,8 +89,10 @@ The two appended `results.jsonl` lines:
 
 | Arm | ts | verdict | wall_s | workdir |
 | --- | --- | --- | --- | --- |
-| on | 2026-10-25T17:32:50Z | PASS | 246 | `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.OfAn2F` |
-| off | 2026-10-25T17:39:14Z | PASS | 316 | `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.x1Rsvo` |
+| on | 2026-10-25T17:32:50Z | PASS | 246 | `…/T/eval-<retired>-1.OfAn2F` |
+| off | 2026-10-25T17:39:14Z | PASS | 316 | `…/T/eval-<retired>-1.x1Rsvo` |
+
+The measured eval is the retired issue-pipeline eval 1; the rows are quoted with the retired skill's name elided from the workdir paths, and no value is changed.
 
 ### Conditions
 
@@ -98,13 +100,13 @@ Host `mbp`; code `ca015155`; account `p1`; wrapper `/nix/store/yfb2jcxlmwm1bfdsf
 
 Each proxy: `sh run-proxy.sh <log> <pidfile> <ca bundle> /nix/store/m71c14g6sdi9b93a1nfwn3f3d0lqxdaf-agent-tools-cache-proxy [--keepalive]`, which runs the launcher with `--port 0` under `env -i`, as in AC2. The on arm's launcher got `--keepalive`; the off arm's did not.
 
-Each arm, run from the worktree root with `<port>` the one its proxy's `listening` line named: `env PATH="/nix/store/yfb2jcxlmwm1bfdsfqrzillw3n0aghmh-claude-code-with-accounts-2.1.302/bin:$PATH" ANTHROPIC_BASE_URL="http://127.0.0.1:<port>" ENABLE_TOOL_SEARCH=true CLAUDE_ACCOUNT="p1" EVAL_TIMEOUT=900 just evals from-issue 1`.
+Each arm, run from the worktree root with `<port>` the one its proxy's `listening` line named: `env PATH="/nix/store/yfb2jcxlmwm1bfdsfqrzillw3n0aghmh-claude-code-with-accounts-2.1.302/bin:$PATH" ANTHROPIC_BASE_URL="http://127.0.0.1:<port>" ENABLE_TOOL_SEARCH=true CLAUDE_ACCOUNT="p1" EVAL_TIMEOUT=900 just evals <retired> 1`.
 
 Costs: `just agent-costs --format json --days 0 --projects-dir <arm projects copy>`, whose `.strata.claude` reads `cost_basis` `list-price`. An arm's total is its transcripts' `totals.cost_usd` plus its pings' cost priced through `agent_costs.PRICING`, which is zero here.
 
 One trial per arm, never rerun (#422 D27).
 
-`from-issue 1` runs take about 4–6 minutes, so few conversations reach the 270 s due time, and run-to-run variance can exceed the pings' effect. Here the on arm's lower total is variance, not keepalive savings: no ping was sent.
+The retired issue-pipeline eval 1 runs take about 4–6 minutes, so few conversations reach the 270 s due time, and run-to-run variance can exceed the pings' effect. Here the on arm's lower total is variance, not keepalive savings: no ping was sent.
 
 ## Re-measure on the merged code — 2026-10-26
 
@@ -174,8 +176,10 @@ The two appended `results.jsonl` lines:
 
 | Arm | ts | verdict | wall_s | workdir |
 | --- | --- | --- | --- | --- |
-| on | 2026-10-26T18:54:59Z | PASS | 289 | `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.xLIrIc` |
-| off | 2026-10-26T19:00:36Z | PASS | 313 | `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.EGHnHM` |
+| on | 2026-10-26T18:54:59Z | PASS | 289 | `…/T/eval-<retired>-1.xLIrIc` |
+| off | 2026-10-26T19:00:36Z | PASS | 313 | `…/T/eval-<retired>-1.EGHnHM` |
+
+The measured eval is the retired issue-pipeline eval 1; the rows are quoted with the retired skill's name elided from the workdir paths, and no value is changed.
 
 Commands as in § AC3 — Conditions, with the wrapper and launcher above, `CLAUDE_ACCOUNT="p2"` and `EVAL_TIMEOUT=900`; the on arm ran on port 58040 and the off arm on port 58294. As at ca015155, no conversation reached the 270 s due time, so the lower on total is run-to-run variance, not keepalive savings.
 

@@ -12,7 +12,7 @@ Bound the question sharply, then launch:
 <!-- agent-dispatch: id=research-background-researcher role=researcher model=sonnet effort=medium -->
 Agent(subagent_type="general-purpose", model="sonnet", effort="medium", run_in_background=true) performs the bounded primary-source synthesis and writes exactly one cited findings artifact while the caller keeps working.
 
-If the question turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and the selected role in the caller's existing ledger or fixed-schema report.
+If the question turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch it to a `general-purpose` agent on Opus/high; record that escalation and the selected role in the caller's existing ledger or fixed-schema report.
 
 The researcher:
 

@@ -41,12 +41,12 @@ in
     };
 
     ".agents/bin/sdd-workspace" = {
-      source = ./skills/sdd/scripts/sdd-workspace;
+      source = ./scripts/sdd-workspace;
       executable = true;
     };
 
     ".agents/bin/task-brief" = {
-      source = ./skills/sdd/scripts/task-brief;
+      source = ./scripts/task-brief;
       executable = true;
     };
 

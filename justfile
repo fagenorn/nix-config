@@ -233,6 +233,7 @@ agent-workflow-tests *args:
     tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
     tests/test_agent_gate_corpus.py \
+    tests/test_retired_surfaces.py \
     tests/test_promotion_documents.py \
     tests/test_promotion_lifecycle.py \
     tests/test_promotion_deployment.py \
@@ -248,7 +249,7 @@ agent-workflow-tests *args:
     tests/test_retained_root_copy.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
-# Validate every explicit pipeline dispatch and print the three-family demo trace.
+# Validate every explicit pipeline dispatch and print the representative trace.
 agent-model-matrix:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix validate
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_matrix trace representative

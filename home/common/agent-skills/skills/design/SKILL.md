@@ -30,11 +30,11 @@ Model the design as a tree of decisions. The **frontier** is every question whos
 <!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
 
-An in-flight lookup blocks only the questions downstream of it; ask the rest now. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and the selected role in the phase's existing fixed-schema report.
+An in-flight lookup blocks only the questions downstream of it; ask the rest now. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch it to a `general-purpose` agent on Opus/high; record that escalation and the selected role in the phase's existing fixed-schema report.
 
 ## Authorized autonomous decisions
 
-When the caller has authorized autonomous decisions within a stated scope (literal `from-issue --auto` among others), **the `➡️` recommendation is the answer**: post no round and wait for nothing. Rounds still run in frontier order. Record each non-obvious decision in the spec's `## Decision ledger`; a decision that expands the approved scope returns to the caller.
+When the caller has authorized autonomous decisions within a stated scope (a delivery program's `decisions` among others), **the `➡️` recommendation is the answer**: post no round and wait for nothing. Rounds still run in frontier order. Record each non-obvious decision in the spec's `## Decision ledger`; a decision that expands the approved scope returns to the caller.
 
 ## Guards
 

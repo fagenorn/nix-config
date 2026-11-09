@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).parents[4]
-TASK_BRIEF = ROOT / "home/common/agent-skills/skills/sdd/scripts/task-brief"
+TASK_BRIEF = ROOT / "home/common/agent-skills/scripts/task-brief"
 BUDGET = ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
 WRAPPER = ROOT / "home/common/agent-skills/scripts/artifact-budget"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"

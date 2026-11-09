@@ -31,43 +31,29 @@ EVENT_FIELDS = {"workflow", "dispatch", "role", "model", "effort", "requires"}
 REVIEWER_LITE_REREVIEW_REQUIREMENTS = {"named-prior-findings", "bounded-fix-diff"}
 REVIEWER_LITE_LANE_REQUIREMENTS = {"risk-lane-mechanical-or-low", "bounded-task-diff"}
 EXPECTED_ROLE_TIERS = {
-    "issue-owner": ("opus", "high"),
-    "auto-owner": ("opus", "xhigh"),
+    "owner": ("opus", "high"),
     "ship-owner": ("opus", "high"),
     "implementer": ("opus", "high"),
-    "task-implementer": ("sonnet", "high"),
     "reviewer": ("opus", "high"),
-    "conformance-reviewer": ("opus", "high"),
     "reviewer-lite": ("sonnet", "medium"),
-    "mechanic": ("sonnet", "high"),
-    "bookkeeper": ("haiku", "low"),
     "explorer": ("sonnet", "medium"),
     "researcher": ("sonnet", "medium"),
     "clerk": ("sonnet", "low"),
     "planner": ("opus", "high"),
 }
 ALLOWED_SUBAGENT_TYPES = {
-    "issue-owner": {"issue-owner", "general-purpose"},
-    "auto-owner": {"issue-owner"},
-    "ship-owner": {"issue-owner", "general-purpose"},
+    "owner": {"general-purpose"},
+    "ship-owner": {"general-purpose"},
     "implementer": {"implementer"},
-    "task-implementer": {"implementer"},
     "reviewer": {"reviewer"},
-    "conformance-reviewer": {"reviewer"},
     "reviewer-lite": {"reviewer-lite"},
-    "mechanic": {"mechanic"},
-    "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
     "clerk": {"clerk"},
     "planner": {"planner"},
 }
-CUSTOM_AGENT_ROLES = {
-    "implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic", "clerk", "planner",
-}
+CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite", "clerk", "planner"}
 WORKFLOW_FAMILIES = {
-    "from-issue",
-    "sdd",
     "shipping",
     "improve-codebase-architecture",
 }
@@ -447,8 +433,7 @@ def _matrix_errors(root: Path, data: dict[str, Any]) -> list[str]:
                 )
                 prior_full_review = any(
                     prior.get("workflow") == workflow
-                    and prior.get("role")
-                    in ("reviewer", "conformance-reviewer")
+                    and prior.get("role") == "reviewer"
                     and isinstance(prior.get("dispatch"), str)
                     and (
                         "first-pass" in prior["dispatch"]

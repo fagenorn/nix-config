@@ -17,7 +17,7 @@ Surface architectural friction and propose **deepening opportunities**: refactor
 
 Then launch one fresh scan owner:
 
-<!-- agent-dispatch: id=improve-architecture-scan-owner role=issue-owner model=opus effort=high -->
+<!-- agent-dispatch: id=improve-architecture-scan-owner role=owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") performs the one read-only architecture scan and returns evidence-backed deepening candidates without writing to the repository.
 
 If the host cannot dispatch, run the same bounded scan inline and disclose the fallback. Discovery writes nothing to the repository and at most one findings artifact under the OS temporary directory.

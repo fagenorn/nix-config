@@ -321,7 +321,7 @@ def _host_route(value: Any) -> dict[str, Any]:
     elif value["support"] == "unsupported":
         if value["agent_slots"] is not None: _reject()
         if value["reason_code"] not in {"declared_unsupported", "route_undeclared", "declaration_missing", "declaration_invalid"}: _reject()
-        if value["alternative"] != "/from-issue <issue> --auto": _reject()
+        if value["alternative"] != "/deliver-standard <issue>": _reject()
     else: _reject()
     return value
 

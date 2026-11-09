@@ -75,10 +75,8 @@ let
       '';
 
   # `claude` on PATH starts under the account the current project is bound to,
-  # for interactive and non-interactive callers alike. `claude-orchestrate` is the
-  # same launch with claude.ai connectors off, for orchestration sessions (issue 425);
-  # plain `claude` keeps them. All three entries are scripts, not links: the
-  # launcher finds the mod relative to its own real location.
+  # for interactive and non-interactive callers alike. Both entries are scripts,
+  # not links, because the launcher finds the mod relative to its own real location.
   claudeWithAccounts = pkgs.symlinkJoin {
     name = "claude-code-with-accounts-${claudeUnwrapped.version}";
     paths = [ claudeUnwrapped ];
@@ -86,8 +84,7 @@ let
       rm "$out/bin/claude"
       printf '%s\n' '#!${pkgs.runtimeShell}' 'exec ${accountsMod}/bin/claude-account run "$@"' > "$out/bin/claude"
       printf '%s\n' '#!${pkgs.runtimeShell}' 'exec ${accountsMod}/bin/claude-account "$@"' > "$out/bin/claude-account"
-      printf '%s\n' '#!${pkgs.runtimeShell}' 'export ENABLE_CLAUDEAI_MCP_SERVERS=false' 'exec ${accountsMod}/bin/claude-account run "$@"' > "$out/bin/claude-orchestrate"
-      chmod +x "$out/bin/claude" "$out/bin/claude-account" "$out/bin/claude-orchestrate"
+      chmod +x "$out/bin/claude" "$out/bin/claude-account"
     '';
     inherit (claudeUnwrapped) meta version;
   };
@@ -531,18 +528,11 @@ in
 
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
   # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
-  # subagents dispatch explicitly as reviewer (opus/high), implementer
-  # (sonnet/high for a planned sdd task and its first fix rounds, opus/high
-  # for stuck-task escalation and the final-review fixer), mechanic
-  # (sonnet/high) or reviewer-lite (sonnet/medium). from-issue launches its
-  # issue owners as issue-owner (opus/high,
-  # xhigh for the autonomous design and planning owners), a definition with
-  # no body that blocks the Artifact tools and the claude.ai Docs connector.
-  # The Workflow programs' steps run as clerk (sonnet/low; Bash, Read and
-  # Skill only, for judgment-free steps) and planner (opus/high; the plan
-  # step). implementer, mechanic and issue-owner carry trimmed tool lists.
-  # Skills reference them by name; home/common/agent-skills/model-matrix.json
-  # owns every tier.
+  # subagents dispatch explicitly as implementer (opus/high), reviewer
+  # (opus/high) or reviewer-lite (sonnet/medium). The Workflow programs' steps
+  # run as clerk (sonnet/low; Bash, Read and Skill only, for judgment-free
+  # steps) and planner (opus/high; the plan step). Skills reference them by
+  # name; home/common/agent-skills/model-matrix.json owns every tier.
   home.file.".claude/agents" = {
     source = ./agents;
     recursive = true;

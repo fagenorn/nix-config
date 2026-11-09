@@ -18,7 +18,7 @@ WORKFLOW = SCRIPTS / "workflow-state.py"
 ARTIFACT_BUDGET = SCRIPTS / "artifact_budget.py"
 POLICY = REPO / "home/common/agent-skills/artifact-budget-policy.json"
 COMMITTED_DECLARATION = REPO / "home/common/agent-skills/host-declaration.json"
-ALTERNATIVE = "/from-issue <issue> --auto"
+ALTERNATIVE = "/deliver-standard <issue>"
 
 
 def declaration(**routes):
@@ -66,6 +66,10 @@ class HostRouteTest(unittest.TestCase):
         return {"interface_version": 1, "kind": "host_route", "route": route,
                 "support": "unsupported", "agent_slots": None,
                 "reason_code": reason, "alternative": ALTERNATIVE}
+
+    def test_the_alternative_points_at_deliver_standard(self):
+        from agent_tools import host_admission
+        self.assertEqual(host_admission.UNSUPPORTED_ALTERNATIVE, "/deliver-standard <issue>")
 
     def test_committed_declaration_is_the_designed_host_budget(self):
         committed = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))

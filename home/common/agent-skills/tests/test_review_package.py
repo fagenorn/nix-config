@@ -73,7 +73,7 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertEqual(budget_path, Path(env["HOME"]) / "bin/artifact-budget")
             self.assertIn(str(MODULE), budget_path.read_text())
             self.assertEqual(workspace_path.resolve(),
-                ROOT / "home/common/agent-skills/skills/sdd/scripts/sdd-workspace")
+                ROOT / "home/common/agent-skills/scripts/sdd-workspace")
             lines = [f"context {n}\n" for n in range(40)]
             (repo / "a.txt").write_text("".join(lines))
             (repo / "binary").write_bytes(b"\0before")
@@ -208,7 +208,7 @@ class ReviewPackageCliTest(unittest.TestCase):
         budget = bin_dir / "artifact-budget"
         budget.write_text(f"#!{sys.executable}\nimport os, sys\nos.execv(sys.executable, [sys.executable, {str(MODULE)!r}, *sys.argv[1:]])\n")
         budget.chmod(0o755)
-        (bin_dir / "sdd-workspace").symlink_to(ROOT / "home/common/agent-skills/skills/sdd/scripts/sdd-workspace")
+        (bin_dir / "sdd-workspace").symlink_to(ROOT / "home/common/agent-skills/scripts/sdd-workspace")
         (share / "artifact-budget-policy.json").symlink_to(POLICY)
         env.update({"HOME": str(home), "PYTHONPATH": str(ROOT / "python"), "PATH": str(bin_dir) + os.pathsep + env["PATH"],
                     "GIT_AUTHOR_DATE": "2026-08-19T12:00:00Z",

@@ -75,27 +75,10 @@ AGENT_CLAUSES = ("own-commands",)
 
 
 CARRIERS = (
-    Carrier("sdd/implementer-prompt.md", "shared", "fence"),
-    Carrier("sdd/task-reviewer-prompt.md", "shared", "fence"),
-    Carrier("sdd/re-review-prompt.md", "shared", "fence"),
-    Carrier("sdd/correctness-reviewer-prompt.md", "shared", "fence"),
-    Carrier("sdd/conformance-reviewer-prompt.md", "shared", "fence"),
-    Carrier("from-issue/ship-handoff.md", "shared", "fence"),
-    Carrier(
-        "from-issue/SKILL.md", "shared", "section",
-        "## Dispatch, phase-budget and attempt-budget rules",
-    ),
-    Carrier("sdd/SKILL.md", "shared", "section", "## Agent tiers"),
     Carrier("implementer.md", "agents", "body", contracts=AGENT_CLAUSES),
-    Carrier("mechanic.md", "agents", "body", contracts=AGENT_CLAUSES),
     Carrier("reviewer.md", "agents", "body", contracts=AGENT_CLAUSES),
     Carrier("reviewer-lite.md", "agents", "body", contracts=AGENT_CLAUSES),
 )
-
-# The remainder ship-owner prompt in ship-handoff.md forwards the leaf-agent
-# clauses through a placeholder line rather than a copy (per D13).
-REMAINDER_PLACEHOLDER = "<the four leaf-agent clauses of the ship-owner prompt above, verbatim>"
-STALE_REMAINDER_WORDING = "two leaf-agent sentences"
 
 # Wording #317 retired: the commands-only turn-end tail and the false premise
 # that the host wakes a dispatched owner (per D1, D2, D6).
@@ -103,13 +86,6 @@ STALE_TURN_END_WORDING = (
     "never end your turn while a command you started",
     "host wakes you",
 )
-
-# Documents under these skills whose body holds exactly one unlabeled fence are
-# dispatch templates and must be enrolled as fence carriers, except the
-# declared set: from-issue/SKILL.md's one fence is its `## The flow` diagram.
-ENROLMENT_SKILLS = ("from-issue", "sdd")
-NON_TEMPLATE_SINGLE_FENCE_DOCS = frozenset({"from-issue/SKILL.md"})
-
 
 class RegionError(ValueError):
     """A carrier's rendered region is missing or ambiguous."""
@@ -295,8 +271,6 @@ class StrayCopyGuardTest(unittest.TestCase):
         clause = CONTRACTS["launch-by-type"]
         for label, mutate in (
             ("shared:worktrees/SKILL.md", lambda text: text + "\n\n" + clause + "\n"),
-            ("shared:sdd/implementer-prompt.md", lambda text: clause + "\n\n" + text),
-            ("shared:from-issue/SKILL.md", lambda text: text + "\n\n" + clause + "\n"),
             ("agent-guidance/AGENTS.md", lambda text: text + "\n" + clause + "\n"),
         ):
             with self.subTest(document=label):
@@ -470,19 +444,6 @@ class CheckerMutationTest(unittest.TestCase):
                            + self.removed(carrier, _live(carrier), contract_id))
                 self.assertEqual(missing_contracts(carrier, mutated), {contract_id})
 
-    def test_relocating_a_clause_into_the_dispatch_header_misses_exactly_that_contract(self):
-        headed = [carrier for carrier in CARRIERS
-                  if carrier.kind == "fence" and "prompt: |" in _live(carrier)]
-        self.assertTrue(headed, "no fence carrier declares `prompt: |`")
-        for carrier in headed:
-            for contract_id in carrier.contracts:
-                with self.subTest(carrier=carrier.relative, contract=contract_id):
-                    text = self.removed(carrier, _live(carrier), contract_id)
-                    line_start = text.rindex("\n", 0, text.index("prompt: |")) + 1
-                    mutated = (text[:line_start] + "  " + CONTRACTS[contract_id]
-                               + "\n" + text[line_start:])
-                    self.assertEqual(missing_contracts(carrier, mutated), {contract_id})
-
     def test_duplicating_a_clause_inside_the_region_misses_exactly_that_contract(self):
         for carrier, contract_id in self.cases():
             with self.subTest(carrier=carrier.relative, contract=contract_id):
@@ -513,54 +474,17 @@ class CarrierDeclarationTest(unittest.TestCase):
         bodied = {p.name for p in AGENT_DEFINITIONS.glob("*.md") if _has_body(p)}
         self.assertEqual(set(enrolled), bodied)
         self.assertEqual(
-            {p.name for p in AGENT_DEFINITIONS.glob("*.md")} - bodied,
-            {"clerk.md", "issue-owner.md", "planner.md"},
+            {p.name for p in AGENT_DEFINITIONS.glob("*.md")} - bodied, {"clerk.md", "planner.md"}
         )
         for carrier in enrolled.values():
             with self.subTest(carrier=carrier.relative):
                 self.assertEqual((carrier.kind, carrier.contracts), ("body", AGENT_CLAUSES))
-
-    def test_every_skill_carrier_holds_all_four_clauses(self):
-        skill_carriers = [c for c in CARRIERS if c.tree != "agents"]
-        self.assertEqual(len(skill_carriers), 8)
-        for carrier in skill_carriers:
-            with self.subTest(carrier=carrier.relative):
-                self.assertEqual(carrier.contracts, tuple(CONTRACTS))
-                self.assertEqual(len(carrier.contracts), 4)
-
-    def test_the_remainder_prompt_placeholder_names_four_clauses(self):
-        text = (SHARED_TREE / "from-issue/ship-handoff.md").read_text(encoding="utf-8")
-        self.assertIn(REMAINDER_PLACEHOLDER, text)
-        self.assertNotIn(STALE_REMAINDER_WORDING, text)
-
-
-class EnrolmentGuardTest(unittest.TestCase):
-    def test_every_single_fence_template_is_an_enrolled_fence_carrier(self):
-        discovered = set()
-        for skill in ENROLMENT_SKILLS:
-            for path in sorted((SHARED_TREE / skill).glob("*.md")):
-                relative = f"{skill}/{path.name}"
-                if relative in NON_TEMPLATE_SINGLE_FENCE_DOCS:
-                    continue
-                if len(_unlabeled_fenced_blocks(path.read_text(encoding="utf-8"))) == 1:
-                    discovered.add(relative)
-        enrolled = {carrier.relative for carrier in CARRIERS if carrier.kind == "fence"}
-        self.assertEqual(
-            discovered, enrolled,
-            "a single-unlabeled-fence document under from-issue/ or sdd/ is not "
-            "an enrolled fence carrier, or an enrolled one stopped carrying "
-            "exactly one unlabeled fence",
-        )
 
 
 # The dispatch-marker inventory across both skill source trees (#272 D12) has
 # one pin, #274's DISPATCH_MARKER_TOTAL below: these tests add the uniqueness
 # check over the same count.
 MARKER_LINE = re.compile(r"^<!-- agent-dispatch: id=([a-z0-9-]+) ", re.M)
-CONFORMANCE_MARKER = ("<!-- agent-dispatch: id=sdd-final-conformance-review "
-                      "role=conformance-reviewer model=opus effort=high -->")
-CONFORMANCE_CALL = ('Agent(subagent_type="reviewer", model="opus", effort="high") '
-                    "performs the first-pass whole-branch conformance review.")
 
 
 class MarkerInventoryTest(unittest.TestCase):
@@ -576,18 +500,11 @@ class MarkerInventoryTest(unittest.TestCase):
         self.assertEqual(len(markers), DISPATCH_MARKER_TOTAL)
         self.assertEqual(len(set(markers)), DISPATCH_MARKER_TOTAL)
 
-    def test_the_final_conformance_marker_selects_opus_high(self):
-        text = (SHARED_TREE / "sdd/conformance-reviewer-prompt.md").read_text(encoding="utf-8")
-        markers = [line for line in text.splitlines()
-                   if line.startswith("<!-- agent-dispatch:")]
-        self.assertEqual(markers, [CONFORMANCE_MARKER])
-        self.assertIn(CONFORMANCE_CALL, text)
-
 
 # Every `<!-- agent-dispatch:` marker across the source skill trees, pinned at
 # #274's base. A change that adds or removes a dispatch site updates this literal
 # in the same commit, which is the point of the pin (#274 D8).
-DISPATCH_MARKER_TOTAL = 36
+DISPATCH_MARKER_TOTAL = 7
 
 
 class DispatchMarkerInventoryTest(unittest.TestCase):
