@@ -1,9 +1,9 @@
 """Installed-layout seam for the Impeccable skill (#238 D3, D4, D6, D7, D9).
 
 Run: just agent-installed-skill-tests. That recipe builds first and passes the
-built home-manager-files tree as AGENT_SKILLS_INSTALLED_HOME. Codex gets the
-derived tree as one directory link, Claude as a recursive copy of links, and
-both launchers must answer `engine-probe` from the tree's own sibling engine
+built home-manager-files tree as AGENT_SKILLS_INSTALLED_HOME. Claude gets the
+derived tree as a recursive copy of links, Codex gets no skill view, and both
+launchers must answer `engine-probe` from the tree's own sibling engine
 without touching ~/.impeccable/bin.
 """
 
@@ -20,7 +20,7 @@ INSTALLED_RECIPE = "just agent-installed-skill-tests"
 SKILL = "impeccable"
 OPT_IN_SKILLS = ("sdd", "from-issue")
 RETIRED_SKILLS = ("ui-ux-pro-max", "orchestrate-issues")
-SKILL_ROOTS = (".agents/skills", ".claude/skills")
+SKILL_ROOTS = (".claude/skills",)
 SLOTS = {("Darwin", "arm64"): "darwin-arm64", ("Linux", "x86_64"): "linux-x64"}
 TIMEOUT_SECONDS = 60
 
@@ -53,7 +53,6 @@ class ImpeccableInstalledTest(unittest.TestCase):
             self.root.is_absolute() and self.root.is_dir(),
             f"{INSTALLED_HOME_ENV}={str(self.root)!r} is not an absolute directory",
         )
-        self.codex = self.root / ".agents/skills" / SKILL
         self.claude = self.root / ".claude/skills" / SKILL
 
     def slot(self):
@@ -63,7 +62,7 @@ class ImpeccableInstalledTest(unittest.TestCase):
         return SLOTS[key]
 
     def version(self):
-        return (self.codex / "scripts/VERSION").read_text(encoding="utf-8").strip()
+        return (self.claude / "scripts/VERSION").read_text(encoding="utf-8").strip()
 
     def probe(self, executable):
         """Run `<executable> engine-probe` isolated from ~/.impeccable and PATH engines."""
@@ -85,17 +84,14 @@ class ImpeccableInstalledTest(unittest.TestCase):
         )
         return result.stdout.strip()
 
-    def test_codex_view_is_a_whole_directory_link(self):
-        self.assertTrue(self.codex.is_symlink(), f"{self.codex} is not a link")
-        self.assertTrue(self.codex.is_dir())
-        skill_md = self.codex / "SKILL.md"
-        self.assertTrue(skill_md.is_file() and not skill_md.is_symlink())
+    def test_no_shared_agents_skill_view(self):
+        self.assertFalse(os.path.lexists(self.root / ".agents/skills"))
 
     def test_claude_view_has_skill_md(self):
         self.assertTrue((self.claude / "SKILL.md").is_file())
 
     def test_sibling_engine_answers_tree_version(self):
-        engine = self.codex / "scripts/bin" / self.slot() / SKILL
+        engine = self.claude / "scripts/bin" / self.slot() / SKILL
         self.assertTrue(os.access(engine, os.X_OK), f"{engine} is not executable")
         self.assertEqual(self.probe(engine), f"impeccable-engine {self.version()}")
 

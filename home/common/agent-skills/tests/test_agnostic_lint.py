@@ -29,7 +29,7 @@ class AgnosticTest(unittest.TestCase):
         "justfile": b"# c\nbuild host=x:\n    echo\n@ship:\n    echo\nvar := 1\n",
         "home/common/agent-skills/skills/a/SKILL.md": b"clean text just building\n",
         "home/common/claude-code/skills/b/SKILL.md": b"ok\n",
-        "home/common/codex/skills/c/SKILL.md": b"ok\n",
+        "home/common/claude-code/skills/c/SKILL.md": b"ok\n",
         "home/common/claude-code/agents/r.md": b"ok\n",
         "home/common/agent-skills/standards/s.md": b"ok\n",
         "home/common/agent-guidance/AGENTS.md": b"ok\n",
@@ -49,7 +49,7 @@ class AgnosticTest(unittest.TestCase):
     def test_each_token_is_caught_in_each_corpus_root(self):
         tokens = ["fagenorn/nix-config", "nix-config", "Gate One", "boxen", "anis-desktop", "just build", "just ship",
                   "origin/main", "--base main", "home/common/x", "python/agent_tools/x"]
-        roots = {"home/common/codex/skills/c/SKILL.md", "home/common/claude-code/skills/b/SKILL.md", "home/common/claude-code/agents/r.md",
+        roots = {"home/common/claude-code/skills/c/SKILL.md", "home/common/claude-code/skills/b/SKILL.md", "home/common/claude-code/agents/r.md",
                  "home/common/agent-skills/standards/s.md", "home/common/agent-guidance/AGENTS.md",
                  "home/common/agent-skills/skills/a/ref.md"}
         for token in tokens:

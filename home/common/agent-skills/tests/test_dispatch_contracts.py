@@ -348,6 +348,15 @@ class SourceTreeContractsTest(unittest.TestCase):
         self.assert_contract_held("no-wait-loops")
 
 
+class InstalledViewsTest(unittest.TestCase):
+    def test_only_the_claude_view_is_installed(self):
+        # #687 D1: Codex gets no skill view; the installed-view tests check Claude's alone.
+        self.assertEqual(
+            [(view, skills_dir) for view, skills_dir, _ in INSTALLED_VIEWS],
+            [("claude", ".claude/skills")],
+        )
+
+
 class InstalledTreeContractsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -577,7 +586,7 @@ class MarkerInventoryTest(unittest.TestCase):
 # Every `<!-- agent-dispatch:` marker across the source skill trees, pinned at
 # #274's base. A change that adds or removes a dispatch site updates this literal
 # in the same commit, which is the point of the pin (#274 D8).
-DISPATCH_MARKER_TOTAL = 38
+DISPATCH_MARKER_TOTAL = 36
 
 
 class DispatchMarkerInventoryTest(unittest.TestCase):

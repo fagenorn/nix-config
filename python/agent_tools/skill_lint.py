@@ -16,8 +16,7 @@ from agent_tools.agent_model_matrix import AGENTS_PATH, MATRIX_PATH, parse_matri
 
 SHARED_TREE = "home/common/agent-skills/skills"
 CLAUDE_TREE = "home/common/claude-code/skills"
-CODEX_TREE = "home/common/codex/skills"
-TREE_ROOTS = (SHARED_TREE, CLAUDE_TREE, CODEX_TREE)
+TREE_ROOTS = (SHARED_TREE, CLAUDE_TREE)
 AGENTS_DIR = AGENTS_PATH.as_posix()
 EXCLUDED_DIRS = ("evals", "scripts")
 REFLOW_WIDTH = 100

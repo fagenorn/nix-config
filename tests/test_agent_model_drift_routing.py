@@ -94,7 +94,7 @@ class RoutingEvaluationTest(DriftCliCase):
     def test_a_known_dispatch_resolves_an_absent_role_from_its_site(self):
         # agent-costs leaves the role absent for the implementer agent type,
         # which serves two roles; the carried dispatch still names the site.
-        item = observation(self.matrix, "sdd-post-rescue-implementation")
+        item = observation(self.matrix, "sdd-rescue-fallback-implementation")
         item["declaration"].update(role=None, authority="unknown")
         code, out, err = self.run_observations([item])
         self.assertEqual((code, err), (0, ""))
@@ -105,7 +105,7 @@ class RoutingEvaluationTest(DriftCliCase):
                          "implementer")
 
     def test_an_unknown_dispatch_with_an_absent_role_is_drift(self):
-        item = observation(self.matrix, "sdd-post-rescue-implementation")
+        item = observation(self.matrix, "sdd-rescue-fallback-implementation")
         item["declaration"].update(dispatch_id="unknown-dispatch", role=None,
                                    authority="unknown")
         code, out, _ = self.run_observations([item])

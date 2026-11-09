@@ -14,18 +14,6 @@ let
   # left in it is not Home Manager's to delete.
   retiredSkillNames = [ "ui-ux-pro-max" "orchestrate-issues" ];
 
-  # Home Manager's recursive directory mode creates real directories whose
-  # individual files are store symlinks. Codex ignores a skill when SKILL.md
-  # itself is a symlink, but supports a symlink to the whole skill directory.
-  localSkillSources = lib.filterAttrs (_: type: type == "directory") (builtins.readDir ./skills);
-  localSkillNames = builtins.attrNames localSkillSources;
-  localSkillFiles = lib.mapAttrs' (
-    name: _:
-    lib.nameValuePair ".agents/skills/${name}" {
-      source = ./skills + "/${name}";
-    }
-  ) localSkillSources;
-
   # Each command-table row of lib/agent-tools.nix becomes ~/.agents/bin/<name>.
   # It enters home.file as a separate definition, so a leftover hand-written
   # entry for the same command is a conflicting definition, not a silent win.
@@ -34,10 +22,9 @@ let
   ) agentTools.launchers;
 in
 {
-  # Keep ~/.agents/skills writable while linking each complete skill directory.
-  # Claude Code consumes the same authored sources through skillsDir below.
-  home.file = lib.mkMerge [ (localSkillFiles // {
-    ".agents/skills/impeccable".source = impeccable.skill;
+  # Claude Code consumes the authored skill sources through skillsDir
+  # (home/common/claude-code); nothing here installs a skill view for Codex.
+  home.file = lib.mkMerge [ {
     ".agents/bin/impeccable".source = impeccable.launcher;
 
     # Layers 0 and 1 of the standards architecture, machine-global so every
@@ -99,55 +86,13 @@ in
       source = impeccable.skill;
       recursive = true;
     };
-  }) agentToolFiles ];
+  } agentToolFiles ];
 
   # Nix owns the Impeccable version, and the store is read-only (#238 D5).
   home.sessionVariables.IMPECCABLE_NO_UPDATE_CHECK = "1";
 
-  # One-time migration from the previous `recursive = true` layout. Those
-  # generations leave a real directory at each target, which would collide
-  # with the new whole-directory link before Home Manager gets to old-link
-  # cleanup. Remove a directory only when every leaf is demonstrably one of
-  # Home Manager's old store links; refuse to touch user-authored content.
-  home.activation.migrateCodexSkillLinks = lib.hm.dag.entryBefore [ "checkLinkTargets" ] ''
-    migrateCodexSkillLink() {
-      skillName="$1"
-      target="$HOME/.agents/skills/$skillName"
-
-      if [ ! -d "$target" ] || [ -L "$target" ]; then
-        return 0
-      fi
-
-      while IFS= read -r -d "" entry; do
-        if [ -d "$entry" ] && [ ! -L "$entry" ]; then
-          continue
-        fi
-
-        if [ -L "$entry" ]; then
-          linkTarget=$(${pkgs.coreutils}/bin/readlink "$entry")
-          case "$linkTarget" in
-            /nix/store/*-home-manager-files/.agents/skills/"$skillName"/*)
-              continue
-              ;;
-          esac
-        fi
-
-        errorEcho "Refusing to replace $target because it contains content not owned by the previous Home Manager skill layout: $entry"
-        return 1
-      done < <(${pkgs.findutils}/bin/find "$target" -mindepth 1 -print0)
-
-      verboseEcho "Replacing legacy recursive skill directory $target"
-      run ${pkgs.coreutils}/bin/rm -rf -- "$target"
-    }
-
-    for skillName in ${lib.escapeShellArgs localSkillNames}; do
-      migrateCodexSkillLink "$skillName" || exit 1
-    done
-    unset -f migrateCodexSkillLink
-  '';
-
   home.activation.reportRetiredSkills = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
-    for skillRoot in "$HOME/.agents/skills" "$HOME/.claude/skills"; do
+    for skillRoot in "$HOME/.claude/skills"; do
       for skillName in ${lib.escapeShellArgs retiredSkillNames}; do
         target="$skillRoot/$skillName"
         if [ ! -e "$target" ] && [ ! -L "$target" ]; then

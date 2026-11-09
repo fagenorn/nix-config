@@ -888,7 +888,7 @@ class NoUpgradeStructureTest(unittest.TestCase):
 
     def test_the_verdict_authority_sees_only_the_evidence(self):
         self.assertEqual(list(inspect.signature(gate.decide).parameters),
-                         ["evidence"])
+                         ["evidence", "gate"])
 
     def test_no_authorization_name_reaches_the_verdict_authority(self):
         # Literal, and prose counts: a docstring naming the flag is one rename
@@ -994,6 +994,321 @@ class ModuleEntryPointTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertTrue(completed.stdout.startswith("usage: agent-gate-bundle "),
                         completed.stdout[:200])
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+COMMITTED = ("promotion-127", "release-128", "cutover-579")
+
+
+def claude_only_manifest(tmp, cases):
+    manifest = make_manifest(tmp, cases)
+    del manifest["identity"]["pinned"]["builds"]["codex"]
+    return manifest
+
+
+def claude_cases(tmp, base=(1000, 1000, 1000), candidate=(800, 800, 800), quality=None):
+    return [make_case(tmp, klass, klass, {"claude": (list(base), list(candidate))},
+                      quality=quality)
+            for klass in gate.CORE_CASE_CLASSES]
+
+
+def run_cli_text(argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = gate.main(argv)
+        except SystemExit as exit_:
+            code = exit_.code
+    return code, out.getvalue(), err.getvalue()
+
+
+class GateVersionOneUnchangedTest(unittest.TestCase):
+    def test_the_default_cli_reproduces_every_committed_bundle_id(self):
+        for name in COMMITTED:
+            with self.subTest(name=name):
+                trials = REPO_ROOT / f".agents/artifacts/evidence/{name}-trials.json"
+                committed = json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-bundle.json")
+                                       .read_text(encoding="utf-8"))
+                code, out, _ = run_cli_text(["--trials", str(trials)])
+                self.assertEqual(code, 3)
+                emitted = json.loads(out)
+                self.assertEqual(emitted["bundle_id"], committed["bundle_id"])
+                self.assertEqual(emitted["gate_version"], 1)
+                self.assertNotIn("bundle_kind", emitted)
+
+    def test_committed_bundles_verify_the_same_with_or_without_a_reader_kind(self):
+        for name in COMMITTED:
+            with self.subTest(name=name):
+                committed = json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-bundle.json")
+                                       .read_text(encoding="utf-8"))
+                self.assertEqual(gate.verify_bundle(committed), "unmeasured")
+                self.assertEqual(gate.verify_bundle(committed, kind="cutover"), "unmeasured")
+
+    def test_an_approved_version_one_bundle_ignores_the_reader_kind(self):
+        tmp = Path(tempfile.mkdtemp())
+        manifest = make_manifest(tmp, full_cases(tmp))
+        evidence, diagnostics = gate.resolve_trials(manifest)
+        bundle = gate.assemble_bundle(manifest, evidence, diagnostics, None, "approved")
+        for kind in (None,) + gate.BUNDLE_KINDS:
+            with self.subTest(kind=kind):
+                self.assertEqual(gate.verify_bundle(bundle, kind=kind), "approved")
+
+    def test_the_version_one_profile(self):
+        self.assertEqual(gate.gate_profile(), gate.GateProfile(1, ("claude", "codex"), "savings", None))
+        self.assertEqual(gate.DEFAULT_GATE, gate.gate_profile(1))
+        with self.assertRaises(ValueError):
+            gate.gate_profile(1, "cutover")
+        with self.assertRaises(ValueError):
+            gate.gate_profile(3)
+
+
+class ClaudeOnlyGateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.promotion = gate.gate_profile(2, "promotion")
+
+    def write(self, manifest):
+        path = self.tmp / "trials.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def test_the_version_two_profile(self):
+        self.assertEqual(self.promotion, gate.GateProfile(2, ("claude",), "savings", "promotion"))
+        for bad in (None, "other"):
+            with self.subTest(kind=bad), self.assertRaises(ValueError):
+                gate.gate_profile(2, bad)
+
+    def test_a_claude_only_manifest_loads_under_version_two_only(self):
+        path = self.write(claude_only_manifest(self.tmp, claude_cases(self.tmp)))
+        self.assertEqual(gate.load_manifest(path, self.promotion)["kind"], "agent-gate-trials")
+        with self.assertRaises(gate.ManifestError):
+            gate.load_manifest(path)
+
+    def test_a_codex_stratum_or_build_is_a_document_fault(self):
+        with_stratum = claude_only_manifest(self.tmp, claude_cases(self.tmp))
+        with_stratum["cases"][0]["strata"]["codex"] = with_stratum["cases"][0]["strata"]["claude"]
+        with_build = claude_only_manifest(self.tmp, claude_cases(self.tmp))
+        with_build["identity"]["pinned"]["builds"]["codex"] = IDENTITY["pinned"]["builds"]["codex"]
+        for manifest, path in ((with_stratum, "$.cases[0].strata.codex"),
+                               (with_build, "$.identity.pinned.builds.codex")):
+            with self.subTest(path=path):
+                with self.assertRaises(gate.ManifestError) as caught:
+                    gate.load_manifest(self.write(manifest), self.promotion)
+                self.assertIn(("FIELD_UNKNOWN", path),
+                              {(d.code, d.path) for d in caught.exception.diagnostics})
+                code, out, _ = run_cli_text(["--trials", str(self.write(manifest)),
+                                        "--gate-version", "2", "--kind", "promotion"])
+                self.assertEqual((code, out), (2, ""))
+
+    def test_a_missing_claude_stratum_is_unmeasured(self):
+        cases = claude_cases(self.tmp)
+        cases[0]["strata"] = {}
+        manifest = claude_only_manifest(self.tmp, cases)
+        evidence, diagnostics = gate.resolve_trials(manifest, gate=self.promotion)
+        self.assertIsNone(evidence)
+        self.assertIn(("STRATUM_MISSING", "$.cases[0].strata.claude"),
+                      {(d.code, d.path) for d in diagnostics})
+        self.assertIn("every declared stratum (claude) is required evidence",
+                      {d.message for d in diagnostics})
+        code, out, _ = run_cli_text(["--trials", str(self.write(manifest)),
+                                "--gate-version", "2", "--kind", "promotion"])
+        self.assertEqual(code, 3)
+        bundle = json.loads(out)
+        self.assertEqual((bundle["state"], bundle["gate_version"], bundle["bundle_kind"]),
+                         ("unmeasured", 2, "promotion"))
+        self.assertTrue(any(line.startswith("STRATUM_MISSING $.cases[0].strata.claude")
+                            for line in bundle["diagnostics"]))
+
+    def test_a_saving_claude_only_promotion_bundle_is_approved_and_kind_bound(self):
+        manifest = claude_only_manifest(self.tmp, claude_cases(self.tmp))
+        code, out, _ = run_cli_text(["--trials", str(self.write(manifest)),
+                                "--gate-version", "2", "--kind", "promotion"])
+        self.assertEqual(code, 0)
+        bundle = json.loads(out)
+        self.assertEqual(set(bundle["gates"]["context"]), {"claude"})
+        self.assertEqual(gate.verify_bundle(bundle, kind="promotion"), "approved")
+        for kind in (None, "release", "cutover"):
+            with self.subTest(kind=kind), self.assertRaises(gate.BundleIntegrityError):
+                gate.verify_bundle(bundle, kind=kind)
+
+    def test_tampered_version_two_bundles_are_refused(self):
+        manifest = claude_only_manifest(self.tmp, claude_cases(self.tmp))
+        evidence, diagnostics = gate.resolve_trials(manifest, gate=self.promotion)
+        bundle = gate.assemble_bundle(manifest, evidence, diagnostics, None, "approved",
+                                      self.promotion)
+        relabelled = dict(bundle, bundle_kind="release")
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(relabelled, kind="release")
+        widened = json.loads(json.dumps(bundle))
+        widened["evidence"]["cases"][0]["strata"]["codex"] = \
+            widened["evidence"]["cases"][0]["strata"]["claude"]
+        body = {k: v for k, v in widened.items() if k not in ("bundle_id", "generated_at")}
+        widened["bundle_id"] = telemetry_digest(body)
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(widened, kind="promotion")
+        self.assertEqual(gate.decide(widened["evidence"], self.promotion), "unmeasured")
+
+    def test_the_cli_pairs_gate_version_and_kind(self):
+        path = self.write(claude_only_manifest(self.tmp, claude_cases(self.tmp)))
+        for argv in (["--gate-version", "2"], ["--kind", "cutover"],
+                     ["--gate-version", "1", "--kind", "cutover"], ["--gate-version", "3"]):
+            with self.subTest(argv=argv):
+                code, out, _ = run_cli_text(["--trials", str(path)] + argv)
+                self.assertEqual((code, out), (2, ""))
+
+
+class NoRegressionCriterionTest(unittest.TestCase):
+    QUALITY = {"critical_all_pass": True, "evaluator_stability": "stable",
+               "noncritical_median": {"base": 87.0, "candidate": 87.0}}
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cutover = gate.gate_profile(2, "cutover")
+
+    def bundle(self, base, candidate, quality=None):
+        manifest = claude_only_manifest(self.tmp, claude_cases(
+            self.tmp, base, candidate, quality=quality or self.QUALITY))
+        path = self.tmp / "trials.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        code, out, err = run_cli_text(["--trials", str(path), "--gate-version", "2", "--kind", "cutover"])
+        self.assertIn(code, (0, 3), err)
+        return code, json.loads(out)
+
+    def test_the_cutover_kind_alone_is_no_regression(self):
+        self.assertEqual(self.cutover.criterion, "no_regression")
+        for kind in ("promotion", "release"):
+            self.assertEqual(gate.gate_profile(2, kind).criterion, "savings")
+
+    def test_a_flat_candidate_is_approved_without_any_saving(self):
+        code, bundle = self.bundle((1000, 1000, 1000), (1000, 1000, 1000))
+        self.assertEqual((code, bundle["state"]), (0, "approved"))
+        self.assertFalse(bundle["gates"]["context"]["claude"]["fired"])
+        self.assertEqual(bundle["gates"]["no_regression"],
+                         {"passed": True, "quality_failing": [], "context_breaching": []})
+        self.assertEqual(gate.verify_bundle(bundle, kind="cutover"), "approved")
+
+    def test_the_same_evidence_under_the_savings_criterion_is_rejected(self):
+        _, bundle = self.bundle((1000, 1000, 1000), (1000, 1000, 1000))
+        self.assertEqual(gate.decide(bundle["evidence"], gate.gate_profile(2, "promotion")),
+                         "rejected")
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(bundle, kind="promotion")
+
+    def test_any_noncritical_fall_is_rejected(self):
+        quality = dict(self.QUALITY, noncritical_median={"base": 87.0, "candidate": 86.9})
+        code, bundle = self.bundle((1000,) * 3, (1000,) * 3, quality)
+        self.assertEqual((code, bundle["state"]), (3, "rejected"))
+        self.assertEqual(len(bundle["gates"]["no_regression"]["quality_failing"]), 4)
+
+    def test_a_new_critical_failure_is_rejected(self):
+        quality = dict(self.QUALITY, critical_all_pass=False)
+        self.assertEqual(self.bundle((1000,) * 3, (1000,) * 3, quality)[1]["state"], "rejected")
+
+    def test_the_context_bound_is_conjunctive(self):
+        table = (((10000,) * 3, (10300,) * 3, "rejected"),   # +3 %, +300 tokens
+                 ((4000,) * 3, (4100,) * 3, "approved"),     # +2.5 %, +100 tokens
+                 ((20000,) * 3, (20200,) * 3, "approved"))   # +1 %, +200 tokens
+        for base, candidate, state in table:
+            with self.subTest(base=base[0], candidate=candidate[0]):
+                self.assertEqual(self.bundle(base, candidate)[1]["state"], state)
+
+    def test_a_straddling_case_is_unmeasured(self):
+        code, bundle = self.bundle((1000, 1000, 1000), (400, 1000, 1200))
+        self.assertEqual((code, bundle["state"]), (3, "unmeasured"))
+
+    def test_tampered_no_regression_bundles_are_refused(self):
+        _, bundle = self.bundle((1000,) * 3, (1000,) * 3)
+        relabelled = dict(bundle, state="rejected")
+        worse = json.loads(json.dumps(bundle))
+        worse["evidence"]["cases"][0]["strata"]["claude"]["quality"]["critical_all_pass"] = False
+        worse["bundle_id"] = telemetry_digest(
+            {k: v for k, v in worse.items() if k not in ("bundle_id", "generated_at")})
+        for document in (relabelled, worse):
+            with self.assertRaises(gate.BundleIntegrityError):
+                gate.verify_bundle(document, kind="cutover")
+
+    def cross_side_manifest(self):
+        manifest = claude_only_manifest(self.tmp, claude_cases(
+            self.tmp, (1000,) * 3, (1000,) * 3, quality=self.QUALITY))
+        claude = manifest["cases"][0]["strata"]["claude"]
+        claude["candidate"] = json.loads(json.dumps(claude["base"]))
+        return manifest
+
+    def test_a_run_cited_on_both_sides_is_an_evidence_fault(self):
+        evidence, diagnostics = gate.resolve_trials(self.cross_side_manifest(), gate=self.cutover)
+        self.assertIsNone(evidence)
+        self.assertIn(("TRIALS_CROSS_SIDE", "$.cases[0].strata.claude.candidate"),
+                      {(d.code, d.path) for d in diagnostics})
+        path = self.tmp / "cross.json"
+        path.write_text(json.dumps(self.cross_side_manifest()), encoding="utf-8")
+        code, out, _ = run_cli_text(["--trials", str(path), "--gate-version", "2",
+                                     "--kind", "cutover"])
+        self.assertEqual((code, json.loads(out)["state"]), (3, "unmeasured"))
+
+    def producer_cases(self, strata=("claude",)):
+        """Every trial of every core case carries the run_id agent_costs emits for
+        an eval sandbox, `<stratum>:repo:none`, in a record of its own."""
+        cases = []
+        for case_index, klass in enumerate(gate.CORE_CASE_CLASSES):
+            block = {}
+            for stratum in strata:
+                run_id = f"{stratum}:repo:none"
+                sides = {}
+                for side, offset in (("base", 0), ("candidate", 3)):
+                    trials = []
+                    for index in range(3):
+                        total = 1000 + 100 * case_index + 10 * index + offset
+                        path, document = make_record(
+                            self.tmp, f"{klass}-{stratum}-{side}-{index}.json",
+                            {stratum: [(run_id, total)]})
+                        trials.append(trial(path, document, stratum, run_id))
+                    sides[side] = trials
+                sides["quality"] = dict(self.QUALITY)
+                block[stratum] = sides
+            cases.append({"case_id": klass, "case_class": klass, "strata": block})
+        return cases
+
+    def test_trials_sharing_a_producer_run_id_are_distinct_by_their_records(self):
+        manifest = claude_only_manifest(self.tmp, self.producer_cases())
+        evidence, diagnostics = gate.resolve_trials(manifest, gate=self.cutover)
+        self.assertEqual(diagnostics, [])
+        self.assertIsNotNone(evidence)
+        self.assertTrue(gate.evidence_trials_distinct(evidence, self.cutover.strata))
+        self.assertEqual(gate.decide(evidence, self.cutover), "approved")
+
+    def test_version_one_resolves_trials_sharing_a_producer_run_id(self):
+        manifest = make_manifest(self.tmp, self.producer_cases(("claude", "codex")))
+        evidence, diagnostics = gate.resolve_trials(manifest)
+        self.assertEqual(diagnostics, [])
+        self.assertIsNotNone(evidence)
+
+    def test_the_savings_criterion_still_allows_cross_side_reuse(self):
+        manifest = make_manifest(self.tmp, full_cases(self.tmp))
+        for stratum in ("claude", "codex"):
+            block = manifest["cases"][0]["strata"][stratum]
+            block["candidate"] = json.loads(json.dumps(block["base"]))
+        evidence, diagnostics = gate.resolve_trials(manifest)
+        self.assertEqual(diagnostics, [])
+        self.assertIsNotNone(evidence)
+
+    def test_a_bundle_whose_evidence_reuses_runs_is_refused(self):
+        _, bundle = self.bundle((1000,) * 3, (1000,) * 3)
+        def overlapping(trials):
+            trials["candidate"] = json.loads(json.dumps(trials["base"]))
+        def short(trials):
+            trials["base"], trials["candidate"] = trials["base"][:1], trials["candidate"][:1]
+        def reused_across_cases(trials, donor=bundle):
+            trials["base"] = json.loads(json.dumps(
+                donor["evidence"]["cases"][1]["strata"]["claude"]["context"]["trials"]["base"]))
+        for tamper in (overlapping, short, reused_across_cases):
+            with self.subTest(tamper=tamper.__name__):
+                forged = json.loads(json.dumps(bundle))
+                tamper(forged["evidence"]["cases"][0]["strata"]["claude"]["context"]["trials"])
+                forged["bundle_id"] = telemetry_digest(
+                    {k: v for k, v in forged.items() if k not in ("bundle_id", "generated_at")})
+                self.assertEqual(gate.decide(forged["evidence"], self.cutover), "unmeasured")
+                with self.assertRaises(gate.BundleIntegrityError):
+                    gate.verify_bundle(forged, kind="cutover")
 
 
 if __name__ == "__main__":

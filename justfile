@@ -231,6 +231,7 @@ agent-workflow-tests *args:
     tests/test_agent_model_drift_scheduling.py \
     tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
+    tests/test_agent_gate_corpus.py \
     tests/test_promotion_documents.py \
     tests/test_promotion_lifecycle.py \
     tests/test_promotion_deployment.py \

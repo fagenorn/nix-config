@@ -27,7 +27,6 @@ EXPECTED_TIERS = {
     "bookkeeper": ("haiku", "low"),
     "explorer": ("sonnet", "medium"),
     "researcher": ("sonnet", "medium"),
-    "codex-transport": ("sonnet", "medium"),
 }
 
 EXPECTED_SUBAGENT_TYPES = {
@@ -43,7 +42,6 @@ EXPECTED_SUBAGENT_TYPES = {
     "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
-    "codex-transport": {"codex:codex-rescue", "codex:codex-reviewer"},
 }
 
 EXPECTED_OWNER_SITES = {
@@ -184,20 +182,6 @@ EXPECTED_SDD_SITES = {
         "home/common/agent-skills/skills/sdd/fix-loop.md",
         "task-implementer",
         "sonnet",
-        "high",
-        [],
-    ),
-    "sdd-codex-rescue-transport": (
-        "home/common/agent-skills/skills/sdd/fix-loop.md",
-        "codex-transport",
-        "sonnet",
-        "medium",
-        [],
-    ),
-    "sdd-post-rescue-implementation": (
-        "home/common/agent-skills/skills/sdd/fix-loop.md",
-        "implementer",
-        "opus",
         "high",
         [],
     ),
@@ -541,7 +525,6 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertEqual(
             by_role["implementer"],
             {
-                "sdd-post-rescue-implementation",
                 "sdd-rescue-fallback-implementation",
                 "sdd-round-five-implementation",
                 "sdd-blocked-reasoning-escalation",
@@ -561,7 +544,7 @@ class AgentModelMatrixTest(unittest.TestCase):
                 scenario,
             )
 
-    def test_shipping_and_codex_dispatches_select_exact_tiers(self):
+    def test_shipping_dispatches_select_exact_tiers(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         sites = {site["id"]: site for site in data["dispatch_sites"]}
         self.assertEqual(set(EXPECTED_SHIPPING_SITES) - set(sites), set())
@@ -1047,6 +1030,32 @@ class AgentModelMatrixTest(unittest.TestCase):
             path.write_text('{"schema_version": 1, "schema_version": 1}', encoding="utf-8")
             errors = agent_model_matrix.validate(root)
         self.assertIn("duplicate JSON key 'schema_version'", "\n".join(errors))
+
+
+class CodexReviewOnlyMatrixTest(unittest.TestCase):
+    """#687 D6: Codex is a reviewer only, so the matrix routes no Codex rescue."""
+
+    RETIRED_SITES = {"sdd-codex-rescue-transport", "sdd-post-rescue-implementation"}
+
+    def test_the_matrix_has_no_codex_role_or_rescue_site(self):
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        self.assertNotIn("codex-transport", data["roles"])
+        self.assertEqual({site["id"] for site in data["dispatch_sites"]} & self.RETIRED_SITES, set())
+        events = [event for events in data["scenarios"].values() for event in events]
+        self.assertEqual({event["dispatch"] for event in events} & self.RETIRED_SITES, set())
+        self.assertNotIn("codex-transport", agent_model_matrix.EXPECTED_ROLE_TIERS)
+        self.assertNotIn("codex-transport", agent_model_matrix.ALLOWED_SUBAGENT_TYPES)
+
+    def test_the_stuck_breaker_goes_straight_to_the_opus_fallback(self):
+        text = (REPO_ROOT / "home/common/agent-skills/skills/sdd/fix-loop.md").read_text(encoding="utf-8")
+        self.assertNotIn("codex", text.lower())
+        self.assertIn("id=sdd-rescue-fallback-implementation", text)
+
+    def test_the_fix_loop_eval_expects_no_codex_pass(self):
+        evals = json.loads((REPO_ROOT / "home/common/agent-skills/skills/sdd/evals/evals.json").read_text(encoding="utf-8"))
+        [loop] = [e for e in evals["evals"] if e["name"] == "task-loop-and-fix-loop-discipline"]
+        self.assertNotIn("codex", loop["expected_output"].lower())
+        self.assertIn("Opus/high", loop["expected_output"])
 
 
 if __name__ == "__main__":
