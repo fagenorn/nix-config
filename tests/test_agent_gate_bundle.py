@@ -984,6 +984,209 @@ class VerifyBundleTest(unittest.TestCase):
         self.assertEqual(gate.verify_bundle(bundle), "rejected")
 
 
+CLAUDE_ONLY = {"strata": ["claude"], "criterion": "no_regression"}
+
+
+def claude_only_manifest(tmp, totals=None, gate_mode=None, cases=None):
+    """A Claude-only manifest (issue 725): `builds` and every case carry claude alone."""
+    totals = totals or {"claude": ([1000, 1000, 1000], [1000, 1000, 1000])}
+    manifest = make_manifest(tmp, cases if cases is not None else
+                             [make_case(tmp, klass, klass, totals, quality())
+                              for klass in gate.CORE_CASE_CLASSES])
+    del manifest["identity"]["pinned"]["builds"]["codex"]
+    manifest["gate_mode"] = dict(gate_mode or CLAUDE_ONLY)
+    return manifest
+
+
+def moded(value, mode=None):
+    """Resolved evidence carrying a gate mode, as `resolve_trials` returns it."""
+    return dict(value, gate_mode=dict(mode or CLAUDE_ONLY))
+
+
+def claude_case(ctx, qual=None):
+    return evidence(("c1", "cold-resolution", {"claude": stratum(ctx, qual)}))
+
+
+class GateModeDocumentTest(unittest.TestCase):
+    """Issue 725 (a): the manifest chooses its strata; a malformed choice is a document fault."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def load(self, manifest):
+        path = self.tmp / "trials.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return gate.load_manifest(path)
+
+    def test_a_claude_only_manifest_loads(self):
+        self.assertEqual(self.load(claude_only_manifest(self.tmp))["gate_mode"], CLAUDE_ONLY)
+
+    def test_a_malformed_gate_mode_is_a_manifest_error(self):
+        for mode in ({"strata": [], "criterion": "no_regression"},
+                     {"strata": ["claude", "claude"], "criterion": "no_regression"},
+                     {"strata": ["gemini"], "criterion": "no_regression"},
+                     {"strata": "claude", "criterion": "no_regression"},
+                     {"strata": ["claude"], "criterion": "anything"},
+                     {"strata": ["claude"]},
+                     {"strata": ["claude"], "criterion": "savings", "required": False}):
+            with self.subTest(mode=mode), self.assertRaises(gate.ManifestError):
+                self.load(claude_only_manifest(self.tmp, gate_mode=mode))
+
+    def test_an_undeclared_stratum_in_a_case_is_a_manifest_error(self):
+        manifest = claude_only_manifest(self.tmp)
+        manifest["cases"][0]["strata"]["codex"] = manifest["cases"][0]["strata"]["claude"]
+        with self.assertRaises(gate.ManifestError) as caught:
+            self.load(manifest)
+        self.assertIn("FIELD_UNKNOWN $.cases[0].strata.codex",
+                      gate.render(caught.exception.diagnostics)[0])
+
+    def test_builds_must_cover_every_declared_stratum(self):
+        manifest = claude_only_manifest(self.tmp)
+        manifest["identity"]["pinned"]["builds"] = {
+            "codex": {"agent": {"base": "a2", "candidate": "a2"},
+                      "model": {"base": "m2", "candidate": "m2"}}}
+        with self.assertRaises(gate.ManifestError):
+            self.load(manifest)
+
+
+class GateModeResolveTest(unittest.TestCase):
+    """Issue 725 (a): every declared stratum is still required evidence."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_a_claude_only_manifest_resolves_and_carries_its_mode(self):
+        evidence_value, diagnostics = gate.resolve_trials(claude_only_manifest(self.tmp))
+        self.assertEqual(diagnostics, [])
+        self.assertEqual(evidence_value["gate_mode"], CLAUDE_ONLY)
+        self.assertEqual({tuple(case["strata"]) for case in evidence_value["cases"]},
+                         {("claude",)})
+
+    def test_a_missing_declared_stratum_fails_closed(self):
+        manifest = claude_only_manifest(self.tmp)
+        del manifest["cases"][1]["strata"]["claude"]
+        evidence_value, diagnostics = gate.resolve_trials(manifest)
+        self.assertIsNone(evidence_value)
+        self.assertIn("STRATUM_MISSING $.cases[1].strata.claude: "
+                      "every declared stratum is required evidence", gate.render(diagnostics))
+
+    def test_without_a_gate_mode_both_strata_stay_required(self):
+        manifest = make_manifest(self.tmp, full_cases(self.tmp))
+        del manifest["cases"][0]["strata"]["codex"]
+        _, diagnostics = gate.resolve_trials(manifest)
+        self.assertIn("STRATUM_MISSING $.cases[0].strata.codex: "
+                      "both strata are required evidence", gate.render(diagnostics))
+
+    def test_without_a_gate_mode_the_evidence_carries_none(self):
+        evidence_value, _ = gate.resolve_trials(make_manifest(self.tmp, full_cases(self.tmp)))
+        self.assertNotIn("gate_mode", evidence_value)
+
+
+class NoRegressionDecideTest(unittest.TestCase):
+    """Issue 725 (c): a removal-only candidate is approved on no regression alone."""
+
+    def test_a_flat_candidate_is_approved(self):
+        self.assertEqual(gate.decide(moded(claude_case(context(1000, 1000)))), "approved")
+
+    def test_a_rise_clearing_only_one_bound_is_not_a_regression(self):
+        for base, candidate in ((1000, 1100), (100000, 101000)):
+            with self.subTest(base=base, candidate=candidate):
+                self.assertEqual(gate.decide(moded(claude_case(context(base, candidate)))),
+                                 "approved")
+
+    def test_a_rise_over_both_bounds_is_rejected(self):
+        self.assertEqual(gate.decide(moded(claude_case(context(10000, 10300)))), "rejected")
+
+    def test_a_new_critical_failure_is_rejected(self):
+        value = claude_case(context(1000, 1000), quality(critical=False))
+        self.assertEqual(gate.decide(moded(value)), "rejected")
+
+    def test_any_fall_of_the_noncritical_median_is_rejected(self):
+        value = claude_case(context(1000, 1000), quality(base=87.0, candidate=86.9))
+        self.assertEqual(gate.decide(moded(value)), "rejected")
+        value = claude_case(context(1000, 1000), quality(base=87.0, candidate=90.0))
+        self.assertEqual(gate.decide(moded(value)), "approved")
+
+    def test_straddling_pairs_stay_unmeasured(self):
+        ctx = context(1000, 1000, [1000, 1000, 1000], [400, 1000, 1500])
+        self.assertEqual(gate.decide(moded(claude_case(ctx))), "unmeasured")
+
+    def test_the_savings_criterion_still_needs_a_saving_in_a_single_stratum(self):
+        savings = {"strata": ["claude"], "criterion": "savings"}
+        self.assertEqual(gate.decide(moded(claude_case(context(1000, 800)), savings)),
+                         "approved")
+        self.assertEqual(gate.decide(moded(claude_case(context(1000, 1000)), savings)),
+                         "rejected")
+
+    def test_a_malformed_mode_in_evidence_is_never_an_approval(self):
+        for mode in ({"strata": [], "criterion": "no_regression"},
+                     {"strata": ["claude"], "criterion": "lenient"}, "claude"):
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                gate.decide(dict(claude_case(context(1000, 1000)), gate_mode=mode))
+
+    def test_gate_results_report_the_no_regression_verdict(self):
+        gates = gate.gate_results(moded(claude_case(context(10000, 10300))))
+        self.assertEqual(gates["criterion"], "no_regression")
+        self.assertEqual(gates["no_regression"],
+                         {"passed": False, "breaching_cases": ["c1/claude"]})
+        self.assertEqual(sorted(gates["context"]), ["claude"])
+
+
+class GateModeBundleTest(unittest.TestCase):
+    """Issue 725 (a): a moded bundle is gate_version 2 and re-decides from its own evidence."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def emit(self, manifest):
+        path = self.tmp / "trials.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return run_cli("--trials", str(path))
+
+    def test_a_claude_only_no_regression_bundle_is_approved_and_verifies(self):
+        code, bundle = self.emit(claude_only_manifest(self.tmp))
+        self.assertEqual((code, bundle["state"], bundle["gate_version"]), (0, "approved", 2))
+        self.assertEqual(bundle["evidence"]["gate_mode"], CLAUDE_ONLY)
+        self.assertEqual(gate.verify_bundle(bundle), "approved")
+
+    def test_a_noncritical_fall_rejects_a_claude_only_bundle(self):
+        manifest = claude_only_manifest(self.tmp)
+        manifest["cases"][2]["strata"]["claude"]["quality"] = quality(87.0, 86.0)
+        code, bundle = self.emit(manifest)
+        self.assertEqual((code, bundle["state"]), (3, "rejected"))
+        self.assertEqual(bundle["gates"]["quality"]["failing"], ["fuzzy-design/claude"])
+        self.assertEqual(gate.verify_bundle(bundle), "rejected")
+
+    def test_a_claude_only_bundle_missing_a_stratum_is_unmeasured(self):
+        manifest = claude_only_manifest(self.tmp)
+        del manifest["cases"][0]["strata"]["claude"]
+        code, bundle = self.emit(manifest)
+        self.assertEqual((code, bundle["state"], bundle["gate_version"]), (3, "unmeasured", 2))
+        self.assertEqual(bundle["evidence"], {"cases": [], "gate_mode": CLAUDE_ONLY})
+        self.assertEqual(gate.verify_bundle(bundle), "unmeasured")
+
+    def test_dropping_or_swapping_the_mode_is_refused(self):
+        _, bundle = self.emit(claude_only_manifest(
+            self.tmp, {"claude": ([1000, 1000, 1000], [1000, 1000, 1000])}))
+        for mutate in (lambda b: b["evidence"].pop("gate_mode"),
+                       lambda b: b["evidence"]["gate_mode"].update(criterion="savings"),
+                       lambda b: b.update(gate_version=1)):
+            tampered = json.loads(json.dumps(bundle))
+            mutate(tampered)
+            tampered["bundle_id"] = body_digest(tampered)
+            with self.assertRaises(gate.BundleIntegrityError):
+                gate.verify_bundle(tampered)
+
+    def test_a_bundle_without_a_mode_stays_gate_version_one(self):
+        code, bundle = self.emit(make_manifest(self.tmp, full_cases(self.tmp)))
+        self.assertEqual((code, bundle["gate_version"]), (0, 1))
+        self.assertNotIn("gate_mode", bundle["evidence"])
+        self.assertNotIn("criterion", bundle["gates"])
+
+
 class ModuleEntryPointTest(unittest.TestCase):
     """The recipe runs the tool with `-m`; every other test calls main() in process."""
 

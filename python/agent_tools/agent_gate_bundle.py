@@ -14,6 +14,16 @@ no bundle. An *evidence* fault — missing strata, unpaired, miscounted or
 repeated trials, an unstable evaluator, a mismatched identity, an unreadable,
 tampered or wrong-shaped record — is returned as a diagnostic and resolves the
 bundle to `unmeasured`.
+
+Issue 725 adds an optional `gate_mode` ({"strata": [...], "criterion":
+"savings" | "no_regression"}) to the manifest. Without it nothing changes: both
+strata, the savings criterion and `gate_version` 1. With it, only the declared
+strata are evidence (each still required, so a missing one is `unmeasured`), an
+undeclared stratum is a document fault, the mode is carried inside the resolved
+evidence so `decide` and `verify_bundle` re-read it, and the bundle is
+`gate_version` 2. Under `no_regression`, meant for a candidate that only removes
+code, `approved` needs no saving: no new critical failure, no fall of any
+noncritical median and no case over the context no-regression bound.
 """
 
 import argparse
@@ -35,6 +45,7 @@ BUNDLE_KIND = "agent-gate-bundle"
 RECORD_KIND = "agent-cost-record"
 GATE_CONTRACT = "issue-70"
 GATE_VERSION = 1
+MODED_GATE_VERSION = 2
 
 STRATA = ("claude", "codex")
 SIDES = ("base", "candidate")
@@ -49,12 +60,16 @@ CASE_CLASSES = (
 )
 CORE_CASE_CLASSES = CASE_CLASSES[:4]
 RUBRIC_MAX = 100.0
+CRITERIA = ("savings", "no_regression")
+GATE_MODE_FIELDS = ("strata", "criterion")
+DEFAULT_GATE_MODE = {"strata": list(STRATA), "criterion": "savings"}
 EVALUATOR_STABILITY = ("stable", "unstable")
 
 # Manifest schema, level by level: every key a level allows, and of those the
 # subset it requires. An unknown key is a document fault, so no `required` flag
 # can be smuggled in beside them (D20, D31).
 TOP_FIELDS = ("schema_version", "kind", "identity", "expansion", "cases")
+OPTIONAL_TOP_FIELDS = ("gate_mode",)
 IDENTITY_FIELDS = ("bound", "pinned")
 BOUND_FIELDS = ("commit", "project_contract_version", "shared_platform_version")
 PINNED_STRING_FIELDS = ("evaluator_version", "rubric_version",
@@ -168,7 +183,58 @@ def _pair(parent, key, path, scalar, diagnostics):
             scalar(pair[side], f"{path}.{key}.{side}", diagnostics)
 
 
-def _validate_identity(root, diagnostics):
+def gate_mode_faults(mode):
+    """Contract: why `mode` is not a gate mode, as (suffix, message) pairs; [] if it is."""
+    if not isinstance(mode, dict):
+        return [("", "expected an object")]
+    faults = [(f".{key}", "unknown field") for key in sorted(set(mode) - set(GATE_MODE_FIELDS))]
+    faults += [(f".{key}", "field is required") for key in GATE_MODE_FIELDS if key not in mode]
+    strata = mode.get("strata")
+    if "strata" in mode:
+        if not isinstance(strata, list) or not strata:
+            faults.append((".strata", "expected a non-empty array"))
+        elif (not all(isinstance(name, str) and name in STRATA for name in strata)
+              or len(set(strata)) != len(strata)):
+            faults.append((".strata", f"expected distinct values from {list(STRATA)}"))
+    if "criterion" in mode and mode["criterion"] not in CRITERIA:
+        faults.append((".criterion", f"expected one of {list(CRITERIA)}"))
+    return faults
+
+
+def declared_mode(holder):
+    """The gate mode a manifest or a resolved evidence declares; the default when absent.
+
+    A present but malformed mode raises ValueError: evidence never falls back to
+    the default, so a forged mode can only fail verification (issue 725).
+    """
+    if "gate_mode" not in holder:
+        return DEFAULT_GATE_MODE
+    mode = holder["gate_mode"]
+    if gate_mode_faults(mode):
+        raise ValueError(f"malformed gate_mode {mode!r}")
+    return mode
+
+
+def _declared_strata(mode):
+    """The declared strata in STRATA order, so reports never depend on manifest order."""
+    return tuple(name for name in STRATA if name in mode["strata"])
+
+
+def _validate_gate_mode(root, diagnostics):
+    """The declared strata, or every stratum when the mode is absent or malformed."""
+    if "gate_mode" not in root:
+        return STRATA
+    faults = gate_mode_faults(root["gate_mode"])
+    for suffix, message in faults:
+        code = {"unknown field": "FIELD_UNKNOWN",
+                "field is required": "FIELD_REQUIRED"}.get(message, "FIELD_VALUE")
+        if message.startswith("expected an object"):
+            code = "FIELD_TYPE"
+        _add(diagnostics, code, f"$.gate_mode{suffix}", message)
+    return STRATA if faults else _declared_strata(root["gate_mode"])
+
+
+def _validate_identity(root, diagnostics, strata=STRATA):
     identity = _child(root, "identity", "$", IDENTITY_FIELDS, IDENTITY_FIELDS,
                       diagnostics)
     if identity is None:
@@ -184,10 +250,10 @@ def _validate_identity(root, diagnostics):
         return
     for key in PINNED_STRING_FIELDS:
         _pair(pinned, key, "$.identity.pinned", _string, diagnostics)
-    builds = _child(pinned, "builds", "$.identity.pinned", STRATA, STRATA, diagnostics)
+    builds = _child(pinned, "builds", "$.identity.pinned", STRATA, strata, diagnostics)
     if builds is None:
         return
-    for stratum in STRATA:
+    for stratum in strata:
         path = "$.identity.pinned.builds"
         build = _child(builds, stratum, path, BUILD_FIELDS, BUILD_FIELDS, diagnostics)
         if build is None:
@@ -270,7 +336,7 @@ def _validate_stratum(value, path, diagnostics):
     _validate_maintenance(stratum, path, diagnostics)
 
 
-def _validate_case(value, path, diagnostics):
+def _validate_case(value, path, diagnostics, declared=STRATA):
     case = _object(value, path, CASE_FIELDS, CASE_FIELDS, diagnostics)
     if case is None:
         return
@@ -281,31 +347,32 @@ def _validate_case(value, path, diagnostics):
              f"expected one of {list(CASE_CLASSES)}")
     # A stratum may be absent here: that is an evidence fault for
     # `resolve_trials`, not a document fault (D11, D31).
-    strata = _child(case, "strata", path, STRATA, (), diagnostics)
+    strata = _child(case, "strata", path, declared, (), diagnostics)
     if strata is None:
         return
-    for name in sorted(set(strata) & set(STRATA)):
+    for name in sorted(set(strata) & set(declared)):
         _validate_stratum(strata[name], f"{path}.strata.{name}", diagnostics)
 
 
 def _validate_manifest(document):
     """Every violation in one pass, sorted — never the first one only."""
     diagnostics = []
-    root = _object(document, "$", TOP_FIELDS, TOP_FIELDS, diagnostics)
+    root = _object(document, "$", TOP_FIELDS + OPTIONAL_TOP_FIELDS, TOP_FIELDS, diagnostics)
     if root is None:
         return sorted(diagnostics)
+    declared = _validate_gate_mode(root, diagnostics)
     if "schema_version" in root and (not is_int(root["schema_version"])
                                      or root["schema_version"] != SCHEMA_VERSION):
         _add(diagnostics, "FIELD_VALUE", "$.schema_version",
              f"expected {SCHEMA_VERSION}")
     if "kind" in root and root["kind"] != TRIALS_KIND:
         _add(diagnostics, "FIELD_VALUE", "$.kind", f"expected {TRIALS_KIND!r}")
-    _validate_identity(root, diagnostics)
+    _validate_identity(root, diagnostics, declared)
     _validate_expansion(root, diagnostics)
     if "cases" in root:
         if isinstance(root["cases"], list):
             for index, case in enumerate(root["cases"]):
-                _validate_case(case, f"$.cases[{index}]", diagnostics)
+                _validate_case(case, f"$.cases[{index}]", diagnostics, declared)
         else:
             _add(diagnostics, "FIELD_TYPE", "$.cases", "expected an array")
     return sorted(diagnostics)
@@ -409,7 +476,7 @@ def validate_record(document, stratum, run_id):
 # --- Evidence resolution (D14, D31) -----------------------------------------
 
 
-def _identity_leaves(manifest):
+def _identity_leaves(manifest, strata=STRATA):
     """(path, pair, pinned) for every identity leaf, `builds` walked two deeper."""
     identity = manifest.get("identity")
     identity = identity if isinstance(identity, dict) else {}
@@ -424,7 +491,7 @@ def _identity_leaves(manifest):
             leaves.append((f"$.identity.pinned.{key}", pinned.get(key), True))
         builds = pinned.get("builds")
         if isinstance(builds, dict):
-            for stratum in STRATA:
+            for stratum in strata:
                 build = builds.get(stratum)
                 if not isinstance(build, dict):
                     continue
@@ -434,9 +501,9 @@ def _identity_leaves(manifest):
     return leaves
 
 
-def _check_identity(manifest, diagnostics):
+def _check_identity(manifest, diagnostics, strata=STRATA):
     """Bound leaves must be present; pinned leaves must also be equal (D19)."""
-    for path, pair, pinned in _identity_leaves(manifest):
+    for path, pair, pinned in _identity_leaves(manifest, strata):
         if not isinstance(pair, dict):
             _add(diagnostics, "IDENTITY_INCOMPLETE", path,
                  "field is required and must be non-empty")
@@ -635,7 +702,9 @@ def resolve_trials(manifest, loader=load_record):
     and never an exception for bad evidence (D14, D31).
     """
     diagnostics = []
-    _check_identity(manifest, diagnostics)
+    mode = declared_mode(manifest)
+    required_strata = _declared_strata(mode)
+    _check_identity(manifest, diagnostics, required_strata)
     _check_expansion(manifest, diagnostics)
     allowed = ({MIN_TRIALS, EXPANDED_TRIALS} if _expanded(manifest)
                else {MIN_TRIALS})
@@ -657,12 +726,13 @@ def resolve_trials(manifest, loader=load_record):
         declared_strata = case.get("strata")
         declared_strata = declared_strata if isinstance(declared_strata, dict) else {}
         strata = {}
-        for stratum in STRATA:
+        for stratum in required_strata:
             path = f"{case_path}.strata.{stratum}"
             block = declared_strata.get(stratum)
             if not isinstance(block, dict):
                 _add(diagnostics, "STRATUM_MISSING", path,
-                     "both strata are required evidence")
+                     "both strata are required evidence" if "gate_mode" not in manifest
+                     else "every declared stratum is required evidence")
                 continue
             entry = _resolve_stratum(block, stratum, path, allowed, loader,
                                      diagnostics)
@@ -675,7 +745,10 @@ def resolve_trials(manifest, loader=load_record):
 
     if diagnostics:
         return None, sorted(diagnostics)
-    return {"cases": _assemble(resolved)}, []
+    resolved_evidence = {"cases": _assemble(resolved)}
+    if "gate_mode" in manifest:
+        resolved_evidence["gate_mode"] = copy.deepcopy(mode)
+    return resolved_evidence, []
 
 
 # --- The #70 gate (D13, D21) -------------------------------------------------
@@ -784,16 +857,35 @@ def _declared_axis(blocks, key, saves):
     return {"fired": bool(firing), "cases": firing}
 
 
+def quality_regresses(quality):
+    """Contract: the no-regression veto (issue 725) — a new critical failure, or any
+    fall of the noncritical median. There is no allowance: a fall of any size vetoes."""
+    if not quality:
+        return True
+    if quality.get("critical_all_pass") is not True:
+        return True
+    median = quality["noncritical_median"]
+    return median["candidate"] < median["base"]
+
+
 def gate_results(evidence):
-    """Contract: the bundle's `gates` block — every axis reported per stratum."""
+    """Contract: the bundle's `gates` block — every axis reported per stratum.
+
+    A moded evidence (issue 725) reports its declared strata only, names its
+    `criterion`, and under `no_regression` adds the `no_regression` verdict.
+    """
+    mode = declared_mode(evidence)
+    declared = _declared_strata(mode)
+    no_regression = mode["criterion"] == "no_regression"
+    veto = quality_regresses if no_regression else quality_fails
     cases = evidence["cases"]
     failing = sorted(f"{case['case_id']}/{stratum}"
                      for case in cases
                      for stratum, block in case["strata"].items()
-                     if quality_fails(block["quality"]))
+                     if veto(block["quality"]))
 
     context, checks, maintenance = {}, {}, {}
-    for stratum in STRATA:
+    for stratum in declared:
         blocks = [(case["case_id"], case["strata"][stratum]) for case in cases
                   if stratum in case["strata"]]
         saving = [case_id for case_id, block in blocks
@@ -809,14 +901,22 @@ def gate_results(evidence):
                                               maintenance_saves)
 
     cross = {}
-    for stratum in STRATA:
+    for stratum in declared:
         other = any(context[name]["breaching_cases"]
-                    for name in STRATA if name != stratum)
+                    for name in declared if name != stratum)
         cross[stratum] = {"qualifies": not other, "other_breaches": other}
 
-    return {"quality": {"passed": not failing, "failing": failing},
-            "context": context, "checks": checks, "maintenance": maintenance,
-            "cross_stratum": cross}
+    results = {"quality": {"passed": not failing, "failing": failing},
+               "context": context, "checks": checks, "maintenance": maintenance,
+               "cross_stratum": cross}
+    if "gate_mode" in evidence:
+        results["criterion"] = mode["criterion"]
+    if no_regression:
+        breaching = sorted(f"{case_id}/{stratum}" for stratum in declared
+                           for case_id in context[stratum]["breaching_cases"])
+        results["no_regression"] = {"passed": not breaching,
+                                    "breaching_cases": breaching}
+    return results
 
 
 def decide(evidence):
@@ -829,7 +929,9 @@ def decide(evidence):
     gates = gate_results(evidence)
     if not gates["quality"]["passed"]:
         return "rejected"
-    for stratum in STRATA:
+    if "no_regression" in gates:
+        return "approved" if gates["no_regression"]["passed"] else "rejected"
+    for stratum in _declared_strata(declared_mode(evidence)):
         if not gates["cross_stratum"][stratum]["qualifies"]:
             continue
         if any(gates[axis][stratum]["fired"]
@@ -873,6 +975,8 @@ def assemble_bundle(manifest, evidence, diagnostics, override, state):
     earn is refused rather than written (D14).
     """
     resolved = evidence if evidence else {"cases": []}
+    if "gate_mode" in manifest and "gate_mode" not in resolved:
+        resolved = dict(resolved, gate_mode=copy.deepcopy(declared_mode(manifest)))
 
     reasons = list(diagnostics)
     if state == "unmeasured" and evidence:
@@ -887,7 +991,7 @@ def assemble_bundle(manifest, evidence, diagnostics, override, state):
         "schema_version": SCHEMA_VERSION,
         "kind": BUNDLE_KIND,
         "gate_contract": GATE_CONTRACT,
-        "gate_version": GATE_VERSION,
+        "gate_version": MODED_GATE_VERSION if "gate_mode" in resolved else GATE_VERSION,
         "state": state,
         "identity": manifest["identity"],
         "expansion": manifest["expansion"],
@@ -917,13 +1021,15 @@ def verify_bundle(document: object) -> str:
         raise BundleIntegrityError(f"schema_version is not {SCHEMA_VERSION}")
     if document.get("gate_contract") != GATE_CONTRACT:
         raise BundleIntegrityError(f"gate_contract is not {GATE_CONTRACT!r}")
-    if (type(document.get("gate_version")) is not int
-            or document["gate_version"] != GATE_VERSION):
-        raise BundleIntegrityError(f"gate_version is not {GATE_VERSION}")
     missing = [key for key in ("bundle_id", "state", "evidence")
                if key not in document]
     if missing:
         raise BundleIntegrityError(f"bundle lacks {', '.join(missing)}")
+    moded = isinstance(document["evidence"], dict) and "gate_mode" in document["evidence"]
+    version = MODED_GATE_VERSION if moded else GATE_VERSION
+    if (type(document.get("gate_version")) is not int
+            or document["gate_version"] != version):
+        raise BundleIntegrityError(f"gate_version is not {version}")
     body = {key: value for key, value in document.items()
             if key not in ("bundle_id", "generated_at")}
     if document["bundle_id"] != telemetry_digest(body):
