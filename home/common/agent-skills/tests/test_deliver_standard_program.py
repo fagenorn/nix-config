@@ -113,6 +113,15 @@ RENEW_READ = {"verdict", "by", "detail"}
 FOLDED_READ = {
     "owner-answer": ({"verdict", "decisions", "comment_id", "questions"}, {"renew": RENEW_READ}),
     "verify": ({"head", "clean", "results"}, {"renew": RENEW_READ, "results[]": {"id", "status", "summary"}}),
+    "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
+               "worktree_path", "head", "merged_pr", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
+               "existing", "unset_env", "merge_strategy", "delete_branch", "review", "review_state", "knowledge",
+               "verification", "holder", "acquire", "claim"},
+              {"existing": {"local_branch", "remote_branch", "worktree", "dirty", "status"},
+               "review": {"code", "plan"}, "review_state": {"code", "plan"},
+               "knowledge": {"standards", "hints", "rejections"},
+               "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason"},
+               "acquire": {"verdict", "by", "detail"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"}}),
 }
 
 
@@ -135,10 +144,58 @@ class FoldTest(unittest.TestCase):
                 self.assertLessEqual(top, set(schema["properties"]))
                 for name, fields in nested.items():
                     branch = member(schema, name)
+                    if name in ("acquire", "claim", "lock"):
+                        self.assertIn({"type": "null"}, schema["properties"][name]["anyOf"])
                     self.assertLessEqual(fields, set(branch["properties"]), name)
                     if name == "renew":
                         self.assertEqual(branch, renew)
                         self.assertEqual(schema["required"], ["renew"])
+
+    def test_gate_failure_after_a_folded_claim_keeps_a_claim_incomplete_cont(self):
+        derive = "Derive branch from bindings.vcs.branch_pattern"
+        # gate: (setup patch, stage, the resume re-derives the location)
+        cases = {
+            "ok-false": ({"ok": False, "reason": "worktree add failed"}, "setup", False),
+            "missing": ({"merge_strategy": None}, "setup", False),
+            "missing-branch": ({"branch": None}, "setup", True),
+            "missing-worktree-path": ({"worktree_path": None}, "setup", True),
+            "holder": ({"holder": "h2/session-s1"}, "setup", False),
+            "review-blocked": ({"review_state": {"code": "blocked", "plan": "available"}}, "review-blocked", False),
+        }
+        for gate, (patch, stage, rederive) in cases.items():
+            with self.subTest(gate=gate):
+                result, calls = run(patch={"setup": patch})
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual(labels(calls), ["setup"])
+                cont = result["cont"]
+                self.assertTrue(cont["claim_incomplete"])
+                self.assertEqual(cont["setup"]["holder"], HOLDER)
+                for nested in ("acquire", "claim"):
+                    self.assertNotIn(nested, cont["setup"])
+                resumed, calls = run(args=dict(ARGS, cont=cont))
+                self.assertEqual(resumed["stage"], "done")
+                self.assertEqual(labels(calls)[:3], ["setup", "acquire", "worktree"])
+                self.assertEqual(derive in prompt(calls, "setup"), rederive)
+                self.assertIn("--branch issue-9-x", prompt(calls, "acquire"))
+                self.assertIn("/r/.wt/w-issue-9-x", prompt(calls, "worktree"))
+        # No claim taken: a refusal still stops with no cont.
+        result, calls = run(patch={"setup": {"ok": False, "reason": "closed", "acquire": None, "claim": None}})
+        self.assertEqual(result["stage"], "setup")
+        self.assertNotIn("cont", result)
+
+    def test_fresh_setup_claims_after_its_reads_and_before_the_worktree(self):
+        _, calls = run()
+        text = prompt(calls, "setup")
+        acquire = "forge-claim acquire --repo <slug> --issue 9 --holder <host>/session-s1 --branch <branch>"
+        self.assertIn(acquire, text)
+        self.assertLess(text.index("no-longer-applies"), text.index(acquire))
+        self.assertLess(text.index(acquire), text.index("worktree add --no-track -b <branch> <worktree_path> origin/<integration_branch>"))
+        self.assertIn("keep ok true", text)
+        for needle in ("worktree add <worktree_path> <branch>", "worktree add --no-track -b <branch> <worktree_path> origin/<branch>",
+                       "rev-parse --absolute-git-dir", "skip a step already done"):
+            self.assertIn(needle, text)
+        _, calls = run(args={"repo_root": "/r", "issue": 9, "batch_id": "b7"})
+        self.assertIn("--holder <host>/b7 ", prompt(calls, "setup"))
 
     def test_a_kept_unreviewed_plan_renews_alone(self):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
@@ -157,7 +214,7 @@ class HappyPathTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         self.assertTrue(result["merged"])
         self.assertEqual(labels(calls), [
-            "setup", "acquire", "worktree", "owner-answer", "plan", "plan-codex", "plan-review", "renew-tasks",
+            "setup", "owner-answer", "plan", "plan-codex", "plan-review", "renew-tasks",
             "impl-1", "review-1", "renew-final-review", "final-codex", "final-1", "verify",
             "renew-ship", "pr", "land-lock-1", "renew-checks-1", "checks-1", "renew-merge", "land-lock-2", "merge",
             "land-unlock", "hold", "close-out"])
@@ -235,10 +292,9 @@ class ContractTest(unittest.TestCase):
                        "--state all --search 9"):
             self.assertIn(needle, setup)
         self.assertNotIn("--add-label", setup)
-        claim = prompt(calls, "worktree")
-        for needle in ("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x origin/dev",
+        for needle in ("worktree add --no-track -b <branch> <worktree_path> origin/<integration_branch>",
                        "rev-parse --absolute-git-dir"):
-            self.assertIn(needle, claim)
+            self.assertIn(needle, setup)
 
     def test_only_gh_commands_carry_the_credential_prefix(self):
         _, calls = run(patch={"setup": {"unset_env": ["GH_TOKEN"]}})
@@ -252,9 +308,9 @@ class ContractTest(unittest.TestCase):
         for reply in ({"ok": False, "reason": "worktree add failed"},
                       {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "base_sha": SHA}):
             with self.subTest(reply=reply):
-                result, calls = run(replies={"worktree": reply})
+                result, calls = run(patch={"setup": {"claim": reply}})
                 self.assertEqual(result["stage"], "claim")
-                self.assertEqual(labels(calls), ["setup", "acquire", "worktree"])
+                self.assertEqual(labels(calls), ["setup"])
                 cont = result["cont"]
                 self.assertTrue(cont["claim_incomplete"])
                 result, calls = run(args=dict(ARGS, cont=cont))
@@ -265,7 +321,7 @@ class ContractTest(unittest.TestCase):
                 self.assertIn("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x", prompt(calls, "worktree"))
 
     def test_blocked_capability_during_an_unfinished_claim_keeps_the_claim_cont(self):
-        result, _ = run(replies={"worktree": {"ok": False, "reason": "x"}})
+        result, _ = run(patch={"setup": {"claim": {"ok": False, "reason": "x"}}})
         result, _ = run(args=dict(ARGS, cont=result["cont"]),
                         patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
         self.assertEqual(result["stage"], "review-blocked")
@@ -284,7 +340,7 @@ class ContractTest(unittest.TestCase):
         result, calls = run(patch={"setup": {"review_state": {"code": "blocked", "plan": "available"}}})
         self.assertEqual(result["stage"], "review-blocked")
         self.assertEqual(result["review"], "code")
-        self.assertNotIn("cont", result)
+        self.assertTrue(result["cont"]["claim_incomplete"])
         self.assertEqual(labels(calls), ["setup"])
 
     def test_unsupported_review_capability_skips_codex(self):
@@ -312,7 +368,7 @@ class OwnerAnswerTest(unittest.TestCase):
         result, calls = run(replies={"owner-answer": ANSWER})
         self.assertEqual(result["stage"], "done")
         ls = labels(calls)
-        self.assertLess(ls.index("acquire"), ls.index("owner-answer"))
+        self.assertLess(ls.index("setup"), ls.index("owner-answer"))
         answer = prompt(calls, "owner-answer")
         self.assertIn(RENEW, answer)
         self.assertLess(answer.index(RENEW), answer.index("forge-claim owner-action status"))
@@ -410,17 +466,22 @@ class ClaimTest(unittest.TestCase):
     def test_claim_held_elsewhere_stops_before_any_worktree(self):
         for verdict in ("held_by", "lost_to"):
             with self.subTest(verdict=verdict):
-                result, calls = run(replies={"acquire": {"verdict": verdict, "by": "h2/b1", "comment_id": 5}})
+                result, calls = run(patch={"setup": {"acquire": {"verdict": verdict, "by": "h2/b1", "comment_id": 5},
+                                                     "claim": None}})
                 self.assertEqual((result["stage"], result["verdict"], result["by"]), ("claimed", verdict, "h2/b1"))
                 self.assertNotIn("cont", result)
-                self.assertEqual(labels(calls), ["setup", "acquire"])
+                self.assertEqual(labels(calls), ["setup"])
 
     def test_acquire_names_the_holder_and_branch(self):
-        _, calls = run()
+        stopped, calls = run(patch={"setup": {"claim": {"ok": False, "reason": "x"}}})
+        self.assertIn("forge-claim acquire --repo <slug> --issue 9 --holder <host>/session-s1 --branch <branch>",
+                      prompt(calls, "setup"))
+        self.assertEqual(stopped["cont"]["setup"]["holder"], HOLDER)
+        _, calls = run(args=dict(ARGS, cont=stopped["cont"]))
         self.assertIn(f"forge-claim acquire --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x",
                       prompt(calls, "acquire"))
         _, calls = run(args={"repo_root": "/r", "issue": 9, "batch_id": "b7"})
-        self.assertIn("--holder h1/b7 ", prompt(calls, "acquire"))
+        self.assertIn("--holder <host>/b7 ", prompt(calls, "setup"))
 
     def test_already_held_continues(self):
         result, _ = run(replies={"acquire": {"verdict": "already_held", "comment_id": 5}})
@@ -429,10 +490,10 @@ class ClaimTest(unittest.TestCase):
     def test_acquire_error_stops_with_a_cont_that_finishes_the_claim(self):
         for reply in ({"verdict": "error", "detail": "forge down"}, None):
             with self.subTest(reply=reply):
-                result, calls = run(replies={"acquire": reply})
+                result, calls = run(patch={"setup": {"acquire": reply}})
                 self.assertEqual(result["stage"], "claim")
                 self.assertTrue(result["cont"]["claim_incomplete"])
-                self.assertEqual(labels(calls), ["setup", "acquire"])
+                self.assertEqual(labels(calls), ["setup"])
 
     def test_renew_runs_before_every_stage_boundary(self):
         _, calls = run()
@@ -497,9 +558,11 @@ class ClaimTest(unittest.TestCase):
         _, calls = run()
         setup = prompt(calls, "setup")
         self.assertNotIn("assignee", setup)
-        self.assertNotIn("in-progress", setup)
+        self.assertNotIn("--add-label", setup)
+        # Only the acquire step names the label, saying forge-claim adds it itself.
+        self.assertEqual(setup.count("in-progress"), 1)
+        self.assertIn("adds the in-progress label itself", setup)
         self.assertIn("parked", setup)
-        self.assertNotIn("--add-label", prompt(calls, "worktree"))
 
     def test_close_out_releases_the_claim(self):
         _, calls = run()
@@ -527,13 +590,11 @@ class SetupIdempotenceTest(unittest.TestCase):
     def test_dirty_existing_worktree_is_readopted_without_reset(self):
         result, calls = run(patch={"setup": {"existing": self.EXISTING}})
         self.assertEqual(result["stage"], "dirty")
-        self.assertEqual(labels(calls), ["setup", "acquire", "worktree"])
+        self.assertEqual(labels(calls), ["setup"])
         self.assertIn(" M home/x.py", result["details"])
         self.assertEqual(result["cont"]["setup"]["worktree"], "/r/.wt/w-issue-9-x")
         self.assertNotIn("claim_incomplete", result["cont"])
-        worktree = prompt(calls, "worktree")
-        self.assertIn("adopt", worktree)
-        self.assertNotIn("worktree add", worktree)
+        self.assertIn("adopt <worktree_path> as it is and run no worktree command", prompt(calls, "setup"))
         for call in calls:
             for banned in self.BANNED:
                 self.assertNotIn(banned, call["prompt"], call["label"])
@@ -547,24 +608,23 @@ class SetupIdempotenceTest(unittest.TestCase):
     def test_clean_existing_worktree_is_adopted_and_delivered(self):
         result, calls = run(patch={"setup": {"existing": dict(self.EXISTING, dirty=False, status="")}})
         self.assertEqual(result["stage"], "done")
-        worktree = prompt(calls, "worktree")
-        self.assertIn("merge-base origin/dev HEAD", worktree)
-        self.assertNotIn("worktree add", worktree)
-        self.assertIn("Never reset, clean, restore or stash anything in it.", worktree)
+        setup = prompt(calls, "setup")
+        self.assertIn("merge-base origin/<integration_branch> HEAD", setup)
+        self.assertIn("when existing.worktree is true, adopt <worktree_path> as it is and run no worktree command", setup)
+        self.assertIn("Never reset, clean, restore or stash anything in it.", setup)
 
     def test_existing_local_branch_gets_a_worktree_without_a_new_branch(self):
         existing = dict(self.EXISTING, worktree=False, remote_branch=False, dirty=False, status="")
         result, calls = run(patch={"setup": {"existing": existing}})
         self.assertEqual(result["stage"], "done")
-        worktree = prompt(calls, "worktree")
-        self.assertIn("git -C /r worktree add /r/.wt/w-issue-9-x issue-9-x", worktree)
-        self.assertNotIn("-b issue-9-x", worktree)
+        self.assertIn("when existing.local_branch is true, git -C /r worktree add <worktree_path> <branch> (adopt the local branch)",
+                      prompt(calls, "setup"))
 
     def test_remote_only_branch_is_checked_out_from_origin(self):
         existing = dict(self.EXISTING, worktree=False, local_branch=False, dirty=False, status="")
         _, calls = run(patch={"setup": {"existing": existing}})
-        self.assertIn("git -C /r worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x origin/issue-9-x",
-                      prompt(calls, "worktree"))
+        self.assertIn("when existing.remote_branch is true, git -C /r worktree add --no-track -b <branch> <worktree_path> origin/<branch>",
+                      prompt(calls, "setup"))
 
     def test_merged_pr_referencing_the_issue_stops_as_a_duplicate(self):
         result, calls = run(replies={"setup": {"ok": False, "reason": "duplicate", "duplicate_pr": 41}})
@@ -576,8 +636,7 @@ class SetupIdempotenceTest(unittest.TestCase):
 
     def test_failed_adoption_resumes_by_adopting_again(self):
         local = dict(self.EXISTING, worktree=False, remote_branch=False, dirty=False, status="")
-        failed, _ = run(patch={"setup": {"existing": local}},
-                        replies={"worktree": {"ok": False, "notes": "worktree add failed"}})
+        failed, _ = run(patch={"setup": {"existing": local, "claim": {"ok": False, "reason": "worktree add failed"}}})
         self.assertEqual(failed["stage"], "claim")
         self.assertTrue(failed["cont"]["claim_incomplete"])
         result, calls = run(args=dict(ARGS, cont=failed["cont"]), patch={"setup": {"existing": local}})
@@ -588,7 +647,7 @@ class SetupIdempotenceTest(unittest.TestCase):
         self.assertNotIn("-b issue-9-x", worktree)
 
     def test_resume_of_a_half_made_worktree_adopts_it(self):
-        failed, _ = run(replies={"worktree": {"ok": False, "notes": "plan_dir failed"}})
+        failed, _ = run(patch={"setup": {"claim": {"ok": False, "reason": "plan_dir failed"}}})
         made = dict(self.EXISTING, dirty=False, status="")
         result, calls = run(args=dict(ARGS, cont=failed["cont"]), patch={"setup": {"existing": made}})
         self.assertEqual(result["stage"], "done")
@@ -2306,12 +2365,12 @@ class DirectLaneTest(unittest.TestCase):
         self.assertIn("direct-review", labels(calls))
 
     def test_claim_failures_keep_the_lane(self):
-        failures = {"acquire": {"verdict": "error", "detail": "forge down"},
-                    "worktree": {"ok": False, "notes": "worktree add failed"}}
+        failures = {"acquire": {"acquire": {"verdict": "error", "detail": "forge down"}},
+                    "worktree": {"claim": {"ok": False, "reason": "worktree add failed"}}}
         for lane in ("standard", "direct"):
             for label, reply in failures.items():
                 with self.subTest(lane=lane, label=label):
-                    stopped, _ = run(args=dict(ARGS, lane=lane), replies={label: reply})
+                    stopped, _ = run(args=dict(ARGS, lane=lane), patch={"setup": reply})
                     self.assertEqual(stopped["stage"], "claim")
                     self.assertEqual(stopped["cont"]["lane"], lane)
                     for args in (dict(ARGS, cont=stopped["cont"]), dict(ARGS, lane=lane, cont=stopped["cont"])):

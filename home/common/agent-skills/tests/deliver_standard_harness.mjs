@@ -3,7 +3,8 @@
 //   { "args": {...}, "replies": { "<label>": reply | [reply per call] }, "patch": { "<label>": {...} } }
 // A label with no reply gets the default for its kind (DEFAULTS below); a patch
 // is merged over that default. A folded label (NESTED) given an explicit object reply with no own key for a nested step
-// gets that step's default; a key present with null stays null. Prints { result, calls: [{label, agentType, model, schema, prompt}] }.
+// gets that step's default; a key present with null stays null. The fresh setup prompt (it names `--holder <host>/<id> `)
+// also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire and claim; a resume setup gets none. Prints { result, calls: [{label, agentType, model, schema, prompt}] }.
 import { readFileSync } from 'node:fs'
 
 const program = readFileSync(process.argv[2], 'utf8')
@@ -18,6 +19,13 @@ const SETUP = {
   knowledge: { standards: ['/r/docs/standards'], hints: ['/r/.hints'], rejections: ['/r/.rej'] },
   verification: [{ id: 'build', argv: ['make', 'build'], cwd: '.' }],
 }
+// The folded claim of a fresh setup prompt: the id its acquire command names, or null for a resume prompt.
+const HOLDER_ID = prompt => { const m = /--holder <host>\/([A-Za-z0-9._-]+) /.exec(prompt); return m ? m[1] : null }
+const FOLDED_SETUP = {
+  acquire: { verdict: 'acquired', comment_id: 7 },
+  claim: { ok: true, worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard' },
+}
+const holderOf = (host, prompt) => (typeof host === 'string' && host ? { holder: `${host}/${HOLDER_ID(prompt)}` } : {})
 const PLAN = {
   status: 'planned', plan_root: '/r/.git/worktrees/w/deliver-standard/plan.md',
   acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }],
@@ -35,7 +43,7 @@ const DEFAULTS = [
   [/^land-unlock$/, { verdict: 'released' }],
   [/^renew-/, { verdict: 'renewed', comment_id: 7 }],
   [/^acquire$/, { verdict: 'acquired', comment_id: 7 }],
-  [/^setup$/, SETUP],
+  [/^setup$/, prompt => (HOLDER_ID(prompt) ? { ...SETUP, ...holderOf(SETUP.host, prompt), ...FOLDED_SETUP } : SETUP)],
   [/^worktree$/, { ok: true, worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard' }],
   [/^plan(-revise|-rules-revise)?$/, PLAN],
   [/^direct-impl$/, { ...DONE, acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }], sensitive: false, ineligible: false }],
@@ -54,11 +62,13 @@ const DEFAULTS = [
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok' }],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^(owner-answer|verify)$/, ['renew']]]
-const defaultOf = (label, prompt) => {
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim']]]
+const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)
-  return typeof hit[1] === 'function' ? hit[1](prompt) : hit[1]
+  const base = typeof hit[1] === 'function' ? hit[1](prompt) : hit[1]
+  // A fresh setup's holder follows the explicit reply's own host.
+  return label === 'setup' && HOLDER_ID(prompt) && 'host' in over ? { ...base, ...holderOf(over.host, prompt) } : base
 }
 
 const calls = []
@@ -72,14 +82,21 @@ async function agent(prompt, opts = {}) {
     const r = replies[label]
     const out = structuredClone(Array.isArray(r) ? r[Math.min(n, r.length) - 1] : r)
     const row = NESTED.find(([re]) => re.test(label))
-    if (row && out && typeof out === 'object' && !Array.isArray(out)) {
-      const base = defaultOf(label, prompt)
+    if (row && out && typeof out === 'object' && !Array.isArray(out) && (label !== 'setup' || (out.ok === true && HOLDER_ID(prompt)))) {
+      const base = defaultOf(label, prompt, out)
       for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
     }
     return out
   }
   const base = defaultOf(label, prompt)
-  return structuredClone({ ...base, ...((scenario.patch || {})[label] || {}) })
+  const patch = (scenario.patch || {})[label] || {}
+  const merged = { ...base, ...patch }
+  // A fresh setup's holder is computed after the patch is merged, from the merged host.
+  if (label === 'setup' && HOLDER_ID(prompt) && !('holder' in patch)) {
+    delete merged.holder
+    Object.assign(merged, holderOf(merged.host, prompt))
+  }
+  return structuredClone(merged)
 }
 const parallel = thunks => Promise.all(thunks.map(t => Promise.resolve().then(t).catch(() => null)))
 const pipeline = () => { throw new Error('pipeline is not stubbed') }
