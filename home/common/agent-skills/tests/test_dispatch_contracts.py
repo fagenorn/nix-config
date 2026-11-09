@@ -513,7 +513,8 @@ class CarrierDeclarationTest(unittest.TestCase):
         bodied = {p.name for p in AGENT_DEFINITIONS.glob("*.md") if _has_body(p)}
         self.assertEqual(set(enrolled), bodied)
         self.assertEqual(
-            {p.name for p in AGENT_DEFINITIONS.glob("*.md")} - bodied, {"issue-owner.md"}
+            {p.name for p in AGENT_DEFINITIONS.glob("*.md")} - bodied,
+            {"clerk.md", "issue-owner.md", "planner.md"},
         )
         for carrier in enrolled.values():
             with self.subTest(carrier=carrier.relative):

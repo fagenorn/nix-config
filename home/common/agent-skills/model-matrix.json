@@ -108,6 +108,29 @@
         "ambiguous implementation"
       ]
     },
+    "clerk": {
+      "model": "sonnet",
+      "effort": "low",
+      "eligible": [
+        "judgment-free Workflow program steps (shell, read, a named skill)"
+      ],
+      "prohibited": [
+        "implementation",
+        "review",
+        "planning"
+      ]
+    },
+    "planner": {
+      "model": "opus",
+      "effort": "high",
+      "eligible": [
+        "Workflow program planning: one plan and its task files"
+      ],
+      "prohibited": [
+        "implementation",
+        "review"
+      ]
+    },
     "bookkeeper": {
       "model": "haiku",
       "effort": "low",

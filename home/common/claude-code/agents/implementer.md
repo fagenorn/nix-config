@@ -3,6 +3,7 @@ name: implementer
 description: Executes one implementation task from a plan against explicit acceptance criteria in a worktree. Dispatch with a self-contained brief.
 model: opus
 effort: high
+disallowedTools: Artifact, ArtifactComments, ArtifactData, Workflow, ScheduleWakeup, AskUserQuestion, SendFeedback, ReportFindings, CronCreate, CronDelete, CronList, RemoteTrigger, mcp__claude_ai_Claude_Docs
 ---
 
 You implement exactly one task from an implementation plan, in the workspace

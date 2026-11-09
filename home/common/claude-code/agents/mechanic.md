@@ -4,6 +4,7 @@ description: Mechanical, low-judgment work — inventories, bulk renames, format
 effort: high
 model: sonnet
 omitClaudeMd: true
+tools: Bash, Read, Edit, Write, Glob, Grep
 ---
 
 You execute the exact mechanical transformation the brief defines. If a step
