@@ -422,13 +422,15 @@ const closeOut = async (PR, mergeCommit, W, prHead) => {
   const held = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Hold the issue's acceptance after the merge, by ~/.agents/standards/acceptance-planning.md (its "Linting a hold" section is the procedure). Skip the posting steps an earlier attempt already finished (an existing hold comment with a verify fence, the label, a split issue already filed and held for that criterion), but never skip the evidence you return: lint and verify_run are always fresh results of this attempt, so on such a retry take block from the posted verify fence, lint that block, run the once-run, and return all three. Each command in its own Bash call:
 1. Run git -C ${REPO} fetch origin. Merge commit: ${merged}${mergeCommit ? '' : ' (and read headRefOid, the PR head)'}. Confirm git -C ${REPO} cat-file -e <merge commit>^{commit} succeeds and return the result as merge_commit_local; if it fails, stop here. Criteria: ${JSON.stringify(acceptance)}
 2. Regrade each code criterion once against the merge commit and the PR's passed required checks. Return the unmet ids as code_unmet and, if any, stop here: post nothing and add no label.
-3. ${allCode ? 'Every criterion is of kind code: post nothing, add no label; return issue_state read from the tracker.' : 'The criteria left are not of kind code; continue with steps 4 to 6.'}${heldBlock}
+3. ${allCode ? 'Every criterion is of kind code: post nothing, add no label; return issue_state read from the tracker.' : 'The criteria left are not of kind code. When gh issue view ' + ISSUE + ' --repo ' + SLUG + ' --json state shows the issue already CLOSED, post nothing, add no label, run no verify-pending command and return issue_state CLOSED; otherwise continue with steps 4 to 6.'}${heldBlock}
 ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: HOLD_SCHEMA })
   if (!held) return stop('hold', { pr: PR })
   if (held.merge_commit_local !== true) return stop('hold', { pr: PR, hold: held })
   if (!Array.isArray(held.code_unmet)) return stop('hold', { pr: PR, hold: held })
   if (held.code_unmet.length) return stop('code-unmet', { pr: PR, code_unmet: held.code_unmet })
-  if (!allCode) {
+  // An issue closed by the once-run, or already closed at hold time, has nothing left to hold: close-out runs on the read-back state, unless a split still has to be checked.
+  const settled = held.issue_state === 'CLOSED' && !(Array.isArray(held.blocks) && held.blocks.length) && !(Array.isArray(held.split) && held.split.length)
+  if (!allCode && !settled) {
     if (!Array.isArray(held.blocks) || !Array.isArray(held.split)) return stop('hold', { pr: PR, hold: held })
     const splitIds = held.split.map(x => x && x.ac)
     if (held.blocks.length) {
