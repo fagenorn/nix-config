@@ -1884,7 +1884,6 @@ CODEBASE_DESIGN_FILES = (
     "DEEPENING.md",
     "DESIGN-IT-TWICE.md",
     "LICENSE",
-    "agents/openai.yaml",
 )
 def skill_frontmatter(text):
     """Return a SKILL.md's YAML frontmatter as a flat ``key -> value`` dict.
@@ -2321,7 +2320,7 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
 
 RETRO_DIR = REPO_ROOT / "home/common/agent-skills/skills/retro"
 RETRO_REVISION = "a7d038f6bf7f01b516408e95e2fb56e0b338fa6f"
-RETRO_FILES = ("SKILL.md", "LICENSE", "agents/openai.yaml")
+RETRO_FILES = ("SKILL.md", "LICENSE")
 
 
 class RetroSkillContractsTest(unittest.TestCase):
@@ -2331,14 +2330,12 @@ class RetroSkillContractsTest(unittest.TestCase):
     def setUpClass(cls):
         cls.skill = (RETRO_DIR / "SKILL.md").read_text(encoding="utf-8")
         cls.notice = (RETRO_DIR / "LICENSE").read_text(encoding="utf-8")
-        cls.manifest = (RETRO_DIR / "agents/openai.yaml").read_text(encoding="utf-8")
 
     def test_structure_and_explicit_only_metadata(self):
         self.assertEqual(sorted(str(p.relative_to(RETRO_DIR)) for p in RETRO_DIR.rglob("*") if p.is_file()), sorted(RETRO_FILES))
         frontmatter = skill_frontmatter(self.skill)
         self.assertEqual(frontmatter.get("name"), "retro")
         self.assertEqual(frontmatter.get("disable-model-invocation"), "true")
-        self.assertIn("allow_implicit_invocation: false", self.manifest)
         self.assertNotIn("Agent(", self.skill)
 
     def test_license_records_provenance_and_the_upstream_notice(self):
@@ -2351,7 +2348,7 @@ class RetroSkillContractsTest(unittest.TestCase):
 
 IMPROVE_DIR = REPO_ROOT / "home/common/agent-skills/skills/improve-codebase-architecture"
 IMPROVE_REVISION = "9c9f36ccd3995266cd675468af71639c8dde1ec5"
-IMPROVE_FILES = ("SKILL.md", "HTML-REPORT.md", "LICENSE", "agents/openai.yaml", "evals/evals.json")
+IMPROVE_FILES = ("SKILL.md", "HTML-REPORT.md", "LICENSE", "evals/evals.json")
 IMPROVE_MARKER = "<!-- agent-dispatch: id=improve-architecture-scan-owner role=issue-owner model=opus effort=high -->"
 IMPROVE_CALL = ('Agent(subagent_type="general-purpose", model="opus", effort="high") '
                 "performs the one read-only architecture scan and returns evidence-backed "
@@ -2390,7 +2387,6 @@ class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
         cls.skill = (IMPROVE_DIR / "SKILL.md").read_text(encoding="utf-8")
         cls.report = (IMPROVE_DIR / "HTML-REPORT.md").read_text(encoding="utf-8")
         cls.notice = (IMPROVE_DIR / "LICENSE").read_text(encoding="utf-8")
-        cls.manifest = (IMPROVE_DIR / "agents/openai.yaml").read_text(encoding="utf-8")
         cls.evals = json.loads((IMPROVE_DIR / "evals/evals.json").read_text(encoding="utf-8"))
 
     def assert_ordered(self, text, *anchors):
@@ -2435,7 +2431,6 @@ path_unchanged_since() { return 0; }
         self.assertEqual(frontmatter["name"], IMPROVE_DIR.name)
         self.assertTrue(frontmatter["description"].strip())
         self.assertEqual(frontmatter["disable-model-invocation"], "true")
-        self.assertEqual(self.manifest, 'interface:\n  display_name: "Improve Codebase Architecture"\n  short_description: "Find and grill architecture improvements"\npolicy:\n  allow_implicit_invocation: false\n')
         root = IMPROVE_DIR.resolve()
         checked = 0
         for name, text in {"SKILL.md": self.skill, "HTML-REPORT.md": self.report}.items():
@@ -3631,6 +3626,26 @@ class BatchRoutingTest(unittest.TestCase):
     def test_the_lead_stops_a_relaunch_that_repeats_the_last_one(self):
         text = (REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md").read_text(encoding="utf-8")
         self.assertRegex(text, r"(?s)non-null `relaunch`.*?unless its args equal the previous run.*?stop, reporting")
+
+
+class CodexEntryRetirementTest(unittest.TestCase):
+    """#687 AC1: no tracked file outside the artifact store names a retired Codex entry surface."""
+
+    # Built by concatenation so this file does not match its own scan.
+    RETIRED = ("home/common/codex/" + "skills", "openai" + ".yaml", "migrateCodex" + "SkillLinks")
+
+    def test_no_tracked_file_names_a_retired_codex_surface(self):
+        args = ["git", "-C", str(REPO_ROOT), "grep", "-n", "-F"]
+        for pattern in self.RETIRED:
+            args += ["-e", pattern]
+        found = subprocess.run(args + ["--", ".", ":!.agents/artifacts"],
+                               capture_output=True, text=True, check=False)
+        self.assertEqual((found.returncode, found.stdout), (1, ""), found.stderr)
+
+    def test_no_skill_package_ships_a_codex_manifest(self):
+        for tree in SKILL_TREES:
+            with self.subTest(tree=str(tree)):
+                self.assertEqual(sorted(tree.rglob("openai" + ".yaml")), [])
 
 
 if __name__ == "__main__":
