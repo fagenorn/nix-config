@@ -2060,8 +2060,10 @@ class SkillNamedReplyTest(DeliveredCustody, unittest.TestCase):
         self.merge_checkpoint(custody, 1)
         return self.checkpoint_reply
 
-    def test_the_drivers_cover_exactly_the_skill_named_replies(self):
-        self.assertEqual(set(self.drivers()), skill_named_workflow_responses())
+    def test_the_drivers_cover_every_skill_named_reply(self):
+        # The retired issue pipeline was the only skill text naming these subcommands, so the
+        # named set is empty today; a skill that names one later must bring a driver with it.
+        self.assertLessEqual(skill_named_workflow_responses(), set(self.drivers()))
 
     def test_every_skill_named_reply_passes_the_workflow_response_boundary(self):
         for name, reply in sorted(self.drivers().items()):
@@ -2073,17 +2075,14 @@ class SkillNamedReplyTest(DeliveredCustody, unittest.TestCase):
 
     def test_every_explicit_validator_pipe_names_the_workflow_response_boundary(self):
         replies = skill_named_workflow_responses()
-        piped = []
         for path, text in skill_texts():
             for line in text.splitlines():
                 for call in SKILL_CALL.finditer(line):
                     pipe = VALIDATOR_PIPE.search(line, call.end())
                     if call[1] not in replies or pipe is None:
                         continue
-                    piped.append((path.name, call[1]))
                     with self.subTest(document=path.name, subcommand=call[1]):
                         self.assertIn("--boundary workflow-response", pipe["arguments"])
-        self.assertTrue(piped)
 
 
 if __name__ == "__main__":
