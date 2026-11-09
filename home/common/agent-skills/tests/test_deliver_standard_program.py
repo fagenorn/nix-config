@@ -2189,6 +2189,12 @@ class NoteCloseOutTest(unittest.TestCase):
                                   **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
         self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC4"]))
         self.assertNotIn("close-out", labels(calls))
+        extra = dict(HoldTest.CHILD, block={"v": 1, "merge": self.MERGE, "checks": [
+            {"ac": "AC3", "kind": "human"}, {"ac": "AC4", "kind": "evidence", "run": {"script": "scripts/check-live"}}]})
+        result, calls = self.ship(HUMAN, NOTE, hold=dict(HoldTest.HOLD, blocks=[12], split=[extra]),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
 
     def test_an_unrecognised_kind_never_closes_ungraded(self):
         """#736 DR-002: a typo kind is neither open nor a note, so no path may close the issue on it."""
