@@ -1023,7 +1023,7 @@ class RetroSkillContractsTest(unittest.TestCase):
 IMPROVE_DIR = REPO_ROOT / "home/common/agent-skills/skills/improve-codebase-architecture"
 IMPROVE_REVISION = "9c9f36ccd3995266cd675468af71639c8dde1ec5"
 IMPROVE_FILES = ("SKILL.md", "HTML-REPORT.md", "LICENSE", "evals/evals.json")
-IMPROVE_MARKER = "<!-- agent-dispatch: id=improve-architecture-scan-owner role=issue-owner model=opus effort=high -->"
+IMPROVE_MARKER = "<!-- agent-dispatch: id=improve-architecture-scan-owner role=owner model=opus effort=high -->"
 IMPROVE_CALL = ('Agent(subagent_type="general-purpose", model="opus", effort="high") '
                 "performs the one read-only architecture scan and returns evidence-backed "
                 "deepening candidates without writing to the repository.")
@@ -1141,8 +1141,8 @@ path_unchanged_since() { return 0; }
     def test_dispatch_registration_and_standalone_scenario(self):
         data = json.loads((REPO_ROOT / "home/common/agent-skills/model-matrix.json").read_text(encoding="utf-8"))
         site = {item["id"]: item for item in data["dispatch_sites"]}["improve-architecture-scan-owner"]
-        self.assertEqual((site["path"], site["marker"], site["call"], site["role"], site["model"], site["effort"], site["requires"]), ("home/common/agent-skills/skills/improve-codebase-architecture/SKILL.md", IMPROVE_MARKER, IMPROVE_CALL, "issue-owner", "opus", "high", []))
-        self.assertEqual(data["scenarios"]["improve-codebase-architecture"], [{"workflow": "improve-codebase-architecture", "dispatch": "improve-architecture-scan-owner", "role": "issue-owner", "model": "opus", "effort": "high", "requires": []}])
+        self.assertEqual((site["path"], site["marker"], site["call"], site["role"], site["model"], site["effort"], site["requires"]), ("home/common/agent-skills/skills/improve-codebase-architecture/SKILL.md", IMPROVE_MARKER, IMPROVE_CALL, "owner", "opus", "high", []))
+        self.assertEqual(data["scenarios"]["improve-codebase-architecture"], [{"workflow": "improve-codebase-architecture", "dispatch": "improve-architecture-scan-owner", "role": "owner", "model": "opus", "effort": "high", "requires": []}])
 
     def test_eval_assertion_shells_are_unique_and_behavioral(self):
         self.assertEqual(self.evals["skill_name"], "improve-codebase-architecture")

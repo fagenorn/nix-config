@@ -15,90 +15,26 @@ MATRIX = REPO_ROOT / "home/common/agent-skills/model-matrix.json"
 AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 
 EXPECTED_TIERS = {
-    "issue-owner": ("opus", "high"),
-    "auto-owner": ("opus", "xhigh"),
+    "owner": ("opus", "high"),
     "ship-owner": ("opus", "high"),
     "implementer": ("opus", "high"),
-    "task-implementer": ("sonnet", "high"),
     "reviewer": ("opus", "high"),
-    "conformance-reviewer": ("opus", "high"),
     "reviewer-lite": ("sonnet", "medium"),
-    "mechanic": ("sonnet", "high"),
-    "bookkeeper": ("haiku", "low"),
     "explorer": ("sonnet", "medium"),
     "researcher": ("sonnet", "medium"),
 }
 
 EXPECTED_SUBAGENT_TYPES = {
-    "issue-owner": {"issue-owner", "general-purpose"},
-    "auto-owner": {"issue-owner"},
-    "ship-owner": {"issue-owner", "general-purpose"},
+    "owner": {"general-purpose"},
+    "ship-owner": {"general-purpose"},
     "implementer": {"implementer"},
-    "task-implementer": {"implementer"},
     "reviewer": {"reviewer"},
-    "conformance-reviewer": {"reviewer"},
     "reviewer-lite": {"reviewer-lite"},
-    "mechanic": {"mechanic"},
-    "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
 }
 
 EXPECTED_OWNER_SITES = {
-    "from-issue-phase-delegate": (
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
-        "issue-owner",
-        "opus",
-        "high",
-    ),
-    "from-issue-design-grill": (
-        "home/common/agent-skills/skills/from-issue/AUTO.md",
-        "auto-owner",
-        "opus",
-        "xhigh",
-    ),
-    "from-issue-planning": (
-        "home/common/agent-skills/skills/from-issue/AUTO.md",
-        "auto-owner",
-        "opus",
-        "xhigh",
-    ),
-    "from-issue-plan-review": (
-        "home/common/agent-skills/skills/from-issue/standards-review.md",
-        "reviewer",
-        "opus",
-        "high",
-    ),
-    "from-issue-mechanical-implementation": (
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
-        "mechanic",
-        "sonnet",
-        "high",
-    ),
-    "from-issue-ledger-remainder": (
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
-        "bookkeeper",
-        "haiku",
-        "low",
-    ),
-    "from-issue-mechanical-review": (
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
-        "reviewer",
-        "opus",
-        "high",
-    ),
-    "from-issue-ship-owner": (
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
-        "ship-owner",
-        "opus",
-        "high",
-    ),
-    "from-issue-inline-ship-review": (
-        "home/common/agent-skills/skills/from-issue/ship-handoff.md",
-        "reviewer",
-        "opus",
-        "high",
-    ),
     "design-bounded-fact-lookup": (
         "home/common/agent-skills/skills/design/SKILL.md",
         "explorer",
@@ -130,125 +66,6 @@ EXPECTED_OWNER_SITES = {
         "medium",
     ),
 }
-OWNER_ROLES = {"issue-owner", "auto-owner", "ship-owner"}
-OWNER_SKILL_DIRECTORIES = (
-    "home/common/agent-skills/skills/from-issue",
-)
-
-EXPECTED_SDD_SITES = {
-    "sdd-mechanic-implementation": (
-        "home/common/agent-skills/skills/sdd/implementer-prompt.md",
-        "mechanic",
-        "sonnet",
-        "high",
-        [],
-    ),
-    "sdd-lane-task-verification": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
-        "reviewer-lite",
-        "sonnet",
-        "medium",
-        ["risk-lane-mechanical-or-low", "bounded-task-diff"],
-    ),
-    "sdd-blocked-reasoning-escalation": (
-        "home/common/agent-skills/skills/sdd/SKILL.md",
-        "implementer",
-        "opus",
-        "high",
-        [],
-    ),
-    "sdd-nonmechanical-implementation": (
-        "home/common/agent-skills/skills/sdd/implementer-prompt.md",
-        "task-implementer",
-        "sonnet",
-        "high",
-        [],
-    ),
-    "sdd-first-pass-task-review": (
-        "home/common/agent-skills/skills/sdd/task-reviewer-prompt.md",
-        "reviewer",
-        "opus",
-        "high",
-        [],
-    ),
-    "sdd-scoped-task-rereview": (
-        "home/common/agent-skills/skills/sdd/re-review-prompt.md",
-        "reviewer-lite",
-        "sonnet",
-        "medium",
-        ["named-prior-findings", "bounded-fix-diff"],
-    ),
-    "sdd-task-fix-redispatch": (
-        "home/common/agent-skills/skills/sdd/fix-loop.md",
-        "task-implementer",
-        "sonnet",
-        "high",
-        [],
-    ),
-    "sdd-rescue-fallback-implementation": (
-        "home/common/agent-skills/skills/sdd/fix-loop.md",
-        "implementer",
-        "opus",
-        "high",
-        [],
-    ),
-    "sdd-round-five-implementation": (
-        "home/common/agent-skills/skills/sdd/fix-loop.md",
-        "implementer",
-        "opus",
-        "high",
-        [],
-    ),
-    "sdd-task-rereview-escalation": (
-        "home/common/agent-skills/skills/sdd/fix-loop.md",
-        "reviewer",
-        "opus",
-        "high",
-        [],
-    ),
-    "sdd-final-rereview-escalation": (
-        "home/common/agent-skills/skills/sdd/final-review.md",
-        "reviewer",
-        "opus",
-        "high",
-        [],
-    ),
-    "sdd-final-conformance-review": (
-        "home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md",
-        "conformance-reviewer",
-        "opus",
-        "high",
-        [],
-    ),
-    "sdd-final-correctness-review": (
-        "home/common/agent-skills/skills/sdd/correctness-reviewer-prompt.md",
-        "reviewer",
-        "opus",
-        "high",
-        [],
-    ),
-    "sdd-final-review-fixer": (
-        "home/common/agent-skills/skills/sdd/final-review.md",
-        "implementer",
-        "opus",
-        "high",
-        [],
-    ),
-    "sdd-final-conformance-rereview": (
-        "home/common/agent-skills/skills/sdd/final-review.md",
-        "reviewer-lite",
-        "sonnet",
-        "medium",
-        ["named-prior-findings", "bounded-fix-diff"],
-    ),
-    "sdd-final-correctness-rereview": (
-        "home/common/agent-skills/skills/sdd/final-review.md",
-        "reviewer-lite",
-        "sonnet",
-        "medium",
-        ["named-prior-findings", "bounded-fix-diff"],
-    ),
-}
 
 EXPECTED_SHIPPING_SITES = {
     "ship-release-owner": (
@@ -257,34 +74,6 @@ EXPECTED_SHIPPING_SITES = {
         "opus",
         "high",
         [],
-    ),
-    "ship-issue-merge-delta-review": (
-        "home/common/agent-skills/skills/ship-issue/SKILL.md",
-        "reviewer",
-        "opus",
-        "high",
-        [],
-    ),
-    "ship-issue-full-conformance-review": (
-        "home/common/agent-skills/skills/ship-issue/SKILL.md",
-        "reviewer",
-        "opus",
-        "high",
-        [],
-    ),
-    "ship-issue-full-correctness-fallback": (
-        "home/common/agent-skills/skills/ship-issue/SKILL.md",
-        "reviewer",
-        "opus",
-        "high",
-        [],
-    ),
-    "ship-issue-scoped-fix-rereview": (
-        "home/common/agent-skills/skills/ship-issue/SKILL.md",
-        "reviewer-lite",
-        "sonnet",
-        "medium",
-        ["named-prior-findings", "bounded-fix-diff"],
     ),
 }
 
@@ -309,7 +98,7 @@ def write_fixture(root: Path, data: dict) -> None:
     matrix_path.write_text(json.dumps(data), encoding="utf-8")
     agents = root / "home/common/claude-code/agents"
     agents.mkdir(parents=True)
-    for role in ("implementer", "issue-owner", "mechanic", "reviewer", "reviewer-lite"):
+    for role in ("implementer", "reviewer", "reviewer-lite"):
         model, effort = EXPECTED_TIERS[role]
         (agents / f"{role}.md").write_text(
             f"---\nname: {role}\nmodel: {model}\neffort: {effort}\n---\n",
@@ -318,6 +107,20 @@ def write_fixture(root: Path, data: dict) -> None:
 
 
 class AgentModelMatrixTest(unittest.TestCase):
+    def test_no_site_role_or_scenario_serves_a_retired_skill(self):
+        matrix = agent_model_matrix.load_matrix(REPO_ROOT)
+        retired = ("skills/" + "from-" "issue/", "skills/" + "sdd/", "skills/" + "ship-" "issue/")
+        self.assertEqual(
+            [s["id"] for s in matrix["dispatch_sites"] if any(r in s["path"] for r in retired)], []
+        )
+        self.assertEqual(
+            set(matrix["roles"]),
+            {"owner", "ship-owner", "implementer", "reviewer", "reviewer-lite", "explorer", "researcher"},
+        )
+        self.assertEqual(
+            set(matrix["scenarios"]), {"shipping", "improve-codebase-architecture", "representative"}
+        )
+
     def test_executable_subagent_type_mapping_is_exhaustive(self):
         module = agent_model_matrix
         self.assertEqual(module.ALLOWED_SUBAGENT_TYPES, EXPECTED_SUBAGENT_TYPES)
@@ -347,23 +150,16 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertIn("more than one artifact", researcher["prohibited"])
         self.assertIn("uncited artifact", researcher["prohibited"])
 
-    def test_from_issue_trace_includes_bounded_researcher(self):
-        data = json.loads(MATRIX.read_text(encoding="utf-8"))
-        events = {
-            event["dispatch"]: event for event in data["scenarios"]["from-issue"]
-        }
-        event = events["research-background-researcher"]
-        self.assertEqual(
-            (event["role"], event["model"], event["effort"]),
-            ("researcher", "sonnet", "medium"),
-        )
-
     def test_every_custom_agent_explicitly_matches_its_matrix_role(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         files = sorted(AGENTS.glob("*.md"))
         self.assertEqual(
             [path.name for path in files],
-            ["implementer.md", "issue-owner.md", "mechanic.md", "reviewer-lite.md", "reviewer.md"],
+            ["implementer.md", "reviewer-lite.md", "reviewer.md"],
+        )
+        self.assertEqual(
+            agent_model_matrix.CUSTOM_AGENT_ROLES,
+            {"implementer", "reviewer", "reviewer-lite"},
         )
         for path in files:
             metadata = frontmatter(path)
@@ -383,32 +179,10 @@ class AgentModelMatrixTest(unittest.TestCase):
             found,
             {
                 "implementer": None,
-                "issue-owner": None,
-                "mechanic": "true",
                 "reviewer": None,
                 "reviewer-lite": "true",
             },
         )
-
-    def test_issue_owner_blocks_exactly_the_listed_tools(self):
-        # Issue 447 (D1, D2): named tools, never an allowlist; no body, so the
-        # definition loads no instruction text into the owner profiles.
-        path = AGENTS / "issue-owner.md"
-        metadata = frontmatter(path)
-        self.assertEqual(
-            set(metadata), {"name", "description", "model", "effort", "disallowedTools"}
-        )
-        self.assertEqual(metadata["name"], "issue-owner")
-        blocked = [entry.strip() for entry in metadata["disallowedTools"].split(",")]
-        self.assertEqual(
-            blocked,
-            ["Artifact", "ArtifactComments", "ArtifactData", "mcp__claude_ai_Claude_Docs"],
-        )
-        for kept in ("Agent", "Skill", "Bash", "Read", "Edit", "Write", "Glob", "Grep",
-                     "NotebookEdit", "ToolSearch", "mcp__*"):
-            self.assertNotIn(kept, blocked)
-        body = path.read_text(encoding="utf-8").split("\n---\n", 1)[1]
-        self.assertEqual(body.strip(), "")
 
     def test_repository_contract_validates(self):
         module = agent_model_matrix
@@ -433,117 +207,6 @@ class AgentModelMatrixTest(unittest.TestCase):
             )
             self.assertIn("Agent(", site["call"], site_id)
 
-    def test_from_issue_owner_sites_launch_issue_owner(self):
-        # Issue 447 (D4, D5): the four owner sites of from-issue
-        # launch the issue-owner type, none general-purpose.
-        data = json.loads(MATRIX.read_text(encoding="utf-8"))
-        owner_sites = {
-            site["id"]: site
-            for site in data["dispatch_sites"]
-            if site["role"] in OWNER_ROLES
-            and any(site["path"].startswith(f"{d}/") for d in OWNER_SKILL_DIRECTORIES)
-        }
-        self.assertEqual(
-            set(owner_sites),
-            {
-                "from-issue-phase-delegate",
-                "from-issue-design-grill",
-                "from-issue-planning",
-                "from-issue-ship-owner",
-            },
-        )
-        for site_id, site in owner_sites.items():
-            self.assertTrue(
-                site["call"].startswith('Agent(subagent_type="issue-owner", '), site_id
-            )
-            text = (REPO_ROOT / site["path"]).read_text(encoding="utf-8")
-            self.assertIn(site["call"], text, site_id)
-        for directory in OWNER_SKILL_DIRECTORIES:
-            for path in sorted((REPO_ROOT / directory).rglob("*")):
-                if path.is_file():
-                    text = path.read_text(encoding="utf-8", errors="replace")
-                    self.assertNotIn('subagent_type="general-purpose"', text, path)
-
-    def test_sdd_dispatches_select_exact_tiers(self):
-        data = json.loads(MATRIX.read_text(encoding="utf-8"))
-        sites = {site["id"]: site for site in data["dispatch_sites"]}
-        self.assertEqual(set(EXPECTED_SDD_SITES) - set(sites), set())
-        for site_id, (path, role, model, effort, requires) in EXPECTED_SDD_SITES.items():
-            site = sites[site_id]
-            self.assertEqual(site["path"], path, site_id)
-            self.assertEqual(
-                (site["role"], site["model"], site["effort"], site["requires"]),
-                (role, model, effort, requires),
-                site_id,
-            )
-            self.assertEqual(
-                site["marker"],
-                f"<!-- agent-dispatch: id={site_id} role={role} "
-                f"model={model} effort={effort} -->",
-            )
-
-    def test_task_implementer_is_a_sonnet_role_on_the_opus_implementer_type(self):
-        data = json.loads(MATRIX.read_text(encoding="utf-8"))
-        roles = data["roles"]
-        self.assertEqual(
-            roles["task-implementer"]["eligible"],
-            ["planned task implementation", "task fix rounds 1–3"],
-        )
-        self.assertEqual(
-            roles["task-implementer"]["prohibited"],
-            ["deterministic mechanical work", "stuck-task escalation"],
-        )
-        self.assertEqual(
-            roles["implementer"]["eligible"],
-            ["non-mechanical implementation", "stuck-task escalation"],
-        )
-        # No new agent file: an implementer dispatch that omitted its model
-        # still runs on the definition's Opus/high.
-        self.assertEqual(
-            agent_model_matrix.CUSTOM_AGENT_ROLES,
-            {"implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic"},
-        )
-        definition = frontmatter(AGENTS / "implementer.md")
-        self.assertEqual((definition["model"], definition["effort"]), ("opus", "high"))
-
-        by_role = {}
-        for site in data["dispatch_sites"]:
-            by_role.setdefault(site["role"], set()).add(site["id"])
-            if site["role"] in ("task-implementer", "implementer"):
-                model = "sonnet" if site["role"] == "task-implementer" else "opus"
-                self.assertTrue(
-                    site["call"].startswith(
-                        f'Agent(subagent_type="implementer", model="{model}", '
-                        'effort="high")'
-                    ),
-                    site["id"],
-                )
-        self.assertEqual(
-            by_role["task-implementer"],
-            {"sdd-nonmechanical-implementation", "sdd-task-fix-redispatch"},
-        )
-        self.assertEqual(
-            by_role["implementer"],
-            {
-                "sdd-rescue-fallback-implementation",
-                "sdd-round-five-implementation",
-                "sdd-blocked-reasoning-escalation",
-                "sdd-final-review-fixer",
-            },
-        )
-        for scenario in ("sdd", "representative"):
-            events = [
-                event
-                for event in agent_model_matrix.trace(REPO_ROOT, scenario)
-                if event["dispatch"] == "sdd-nonmechanical-implementation"
-            ]
-            self.assertEqual(len(events), 1, scenario)
-            self.assertEqual(
-                (events[0]["role"], events[0]["model"], events[0]["effort"]),
-                ("task-implementer", "sonnet", "high"),
-                scenario,
-            )
-
     def test_shipping_dispatches_select_exact_tiers(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         sites = {site["id"]: site for site in data["dispatch_sites"]}
@@ -563,15 +226,15 @@ class AgentModelMatrixTest(unittest.TestCase):
             )
             self.assertIn("Agent(", site["call"], site_id)
 
-    def test_representative_trace_covers_every_issue_delivery_workflow_with_safe_rereviews(self):
+    def test_representative_trace_covers_every_workflow_family(self):
         module = agent_model_matrix
-        data = json.loads(MATRIX.read_text(encoding="utf-8"))
-        events = data["scenarios"]["representative"]
         trace = module.trace(REPO_ROOT, "representative")
 
         self.assertEqual(
-            {event["workflow"] for event in trace},
-            {"from-issue", "sdd", "shipping"},
+            {event["workflow"] for event in trace}, module.WORKFLOW_FAMILIES
+        )
+        self.assertEqual(
+            module.WORKFLOW_FAMILIES, {"shipping", "improve-codebase-architecture"}
         )
         self.assertTrue(
             all(
@@ -586,45 +249,6 @@ class AgentModelMatrixTest(unittest.TestCase):
                 for event in trace
             )
         )
-        for index, event in enumerate(events):
-            if event["role"] != "reviewer-lite":
-                continue
-            self.assertEqual(
-                event["requires"],
-                ["named-prior-findings", "bounded-fix-diff"],
-            )
-            self.assertTrue(
-                any(
-                    prior["workflow"] == event["workflow"]
-                    and prior["role"] == "reviewer"
-                    and "review" in prior["dispatch"]
-                    for prior in events[:index]
-                ),
-                event,
-            )
-
-    def test_shipping_traces_use_the_ship_issue_owner_before_ship_issue_reviews(self):
-        data = json.loads(MATRIX.read_text(encoding="utf-8"))
-        for scenario in ("shipping", "representative"):
-            events = [
-                event
-                for event in data["scenarios"][scenario]
-                if event["workflow"] == "shipping"
-            ]
-            dispatches = [event["dispatch"] for event in events]
-            self.assertIn("from-issue-ship-owner", dispatches, scenario)
-            self.assertNotIn("ship-release-owner", dispatches, scenario)
-            owner_index = dispatches.index("from-issue-ship-owner")
-            review_indices = [
-                index
-                for index, dispatch in enumerate(dispatches)
-                if dispatch.startswith("ship-issue-") and "review" in dispatch
-            ]
-            self.assertTrue(review_indices, scenario)
-            self.assertTrue(
-                all(owner_index < review_index for review_index in review_indices),
-                scenario,
-            )
 
     def test_reviewer_lite_cannot_be_a_first_pass_reviewer(self):
         module = agent_model_matrix
@@ -661,29 +285,67 @@ class AgentModelMatrixTest(unittest.TestCase):
             any("reviewer-lite requires" in error for error in errors), errors
         )
 
-    def test_reviewer_lite_lane_verification_is_legal_without_prior_full_review(self):
-        module = agent_model_matrix
+    def reviewer_lite_fixture(self, root, requires, dispatch):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
-        sites = {site["id"]: site for site in data["dispatch_sites"]}
-        lane_site = sites["sdd-lane-task-verification"]
-        self.assertEqual(
-            lane_site["requires"],
-            ["risk-lane-mechanical-or-low", "bounded-task-diff"],
+        marker = (
+            f"<!-- agent-dispatch: id={dispatch} role=reviewer-lite "
+            "model=sonnet effort=medium -->"
         )
-        sdd_events = data["scenarios"]["sdd"]
-        lane_index = next(
-            index
-            for index, event in enumerate(sdd_events)
-            if event["dispatch"] == "sdd-lane-task-verification"
+        call = (
+            'Agent(subagent_type="reviewer-lite", model="sonnet", '
+            'effort="medium") verifies a bounded diff.'
         )
-        self.assertFalse(
-            any(
-                event["role"] == "reviewer"
-                for event in sdd_events[:lane_index]
-            ),
-            "lane verification must be legal before any full review dispatch",
+        (root / "workflow.md").write_text(f"{marker}\n{call}\n", encoding="utf-8")
+        site = {
+            "id": dispatch,
+            "path": "workflow.md",
+            "marker": marker,
+            "call": call,
+            "role": "reviewer-lite",
+            "model": "sonnet",
+            "effort": "medium",
+            "requires": requires,
+        }
+        event = {
+            "workflow": "shipping",
+            "dispatch": dispatch,
+            "role": "reviewer-lite",
+            "model": "sonnet",
+            "effort": "medium",
+            "requires": requires,
+        }
+        data["dispatch_sites"] = [site]
+        data["scenarios"] = {
+            "shipping": [],
+            "improve-codebase-architecture": [],
+            "representative": [event],
+        }
+        write_fixture(root, data)
+
+    def test_reviewer_lite_lane_verification_is_legal_without_prior_full_review(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.reviewer_lite_fixture(
+                root,
+                ["risk-lane-mechanical-or-low", "bounded-task-diff"],
+                "lane-verification",
+            )
+            errors = agent_model_matrix.validate(root)
+        self.assertEqual(errors, [])
+
+    def test_reviewer_lite_rereview_needs_a_prior_full_review_in_its_workflow(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.reviewer_lite_fixture(
+                root,
+                ["named-prior-findings", "bounded-fix-diff"],
+                "scoped-rereview",
+            )
+            errors = agent_model_matrix.validate(root)
+        self.assertTrue(
+            any("reviewer-lite must follow a named first-pass" in e for e in errors),
+            errors,
         )
-        self.assertEqual(module.validate(REPO_ROOT), [])
 
     def test_reviewer_lite_partial_lane_requirements_fail(self):
         module = agent_model_matrix
@@ -903,11 +565,11 @@ class AgentModelMatrixTest(unittest.TestCase):
             root = Path(temporary)
             data = json.loads(MATRIX.read_text(encoding="utf-8"))
             marker = (
-                "<!-- agent-dispatch: id=mismatched role=mechanic "
+                "<!-- agent-dispatch: id=mismatched role=implementer "
                 "model=sonnet effort=medium -->"
             )
             call = (
-                'Agent(subagent_type="mechanic", model="sonnet", '
+                'Agent(subagent_type="implementer", model="sonnet", '
                 'effort="medium") performs the review.'
             )
             manifest = root / "workflow.md"
@@ -986,8 +648,8 @@ class AgentModelMatrixTest(unittest.TestCase):
 
     def test_trace_is_deterministic_and_rejects_unknown_scenario(self):
         module = agent_model_matrix
-        first = module.trace(REPO_ROOT, "sdd")
-        second = module.trace(REPO_ROOT, "sdd")
+        first = module.trace(REPO_ROOT, "shipping")
+        second = module.trace(REPO_ROOT, "shipping")
         self.assertEqual(first, second)
         self.assertTrue(first)
         self.assertTrue(
@@ -1006,21 +668,21 @@ class AgentModelMatrixTest(unittest.TestCase):
         expected_site = {
             "id": "improve-architecture-scan-owner",
             "path": "home/common/agent-skills/skills/improve-codebase-architecture/SKILL.md",
-            "marker": "<!-- agent-dispatch: id=improve-architecture-scan-owner role=issue-owner model=opus effort=high -->",
+            "marker": "<!-- agent-dispatch: id=improve-architecture-scan-owner role=owner model=opus effort=high -->",
             "call": 'Agent(subagent_type="general-purpose", model="opus", effort="high") performs the one read-only architecture scan and returns evidence-backed deepening candidates without writing to the repository.',
-            "role": "issue-owner", "model": "opus", "effort": "high", "requires": [],
+            "role": "owner", "model": "opus", "effort": "high", "requires": [],
         }
         expected_event = {
             "workflow": "improve-codebase-architecture",
             "dispatch": "improve-architecture-scan-owner",
-            "role": "issue-owner", "model": "opus", "effort": "high", "requires": [],
+            "role": "owner", "model": "opus", "effort": "high", "requires": [],
         }
         self.assertIn("improve-codebase-architecture", module.WORKFLOW_FAMILIES)
         sites = {site["id"]: site for site in data["dispatch_sites"]}
         self.assertEqual(sites["improve-architecture-scan-owner"], expected_site)
         self.assertEqual(data["scenarios"]["improve-codebase-architecture"], [expected_event])
         self.assertEqual(module.trace(REPO_ROOT, "improve-codebase-architecture"), [{key: expected_event[key] for key in ("workflow", "dispatch", "role", "model", "effort")}])
-        self.assertEqual({event["workflow"] for event in module.trace(REPO_ROOT, "representative")}, {"from-issue", "sdd", "shipping"})
+        self.assertEqual({event["workflow"] for event in module.trace(REPO_ROOT, "representative")}, {"shipping", "improve-codebase-architecture"})
 
     def test_a_duplicate_matrix_key_is_refused(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1046,16 +708,6 @@ class CodexReviewOnlyMatrixTest(unittest.TestCase):
         self.assertNotIn("codex-transport", agent_model_matrix.EXPECTED_ROLE_TIERS)
         self.assertNotIn("codex-transport", agent_model_matrix.ALLOWED_SUBAGENT_TYPES)
 
-    def test_the_stuck_breaker_goes_straight_to_the_opus_fallback(self):
-        text = (REPO_ROOT / "home/common/agent-skills/skills/sdd/fix-loop.md").read_text(encoding="utf-8")
-        self.assertNotIn("codex", text.lower())
-        self.assertIn("id=sdd-rescue-fallback-implementation", text)
-
-    def test_the_fix_loop_eval_expects_no_codex_pass(self):
-        evals = json.loads((REPO_ROOT / "home/common/agent-skills/skills/sdd/evals/evals.json").read_text(encoding="utf-8"))
-        [loop] = [e for e in evals["evals"] if e["name"] == "task-loop-and-fix-loop-discipline"]
-        self.assertNotIn("codex", loop["expected_output"].lower())
-        self.assertIn("Opus/high", loop["expected_output"])
 
 
 if __name__ == "__main__":

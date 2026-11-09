@@ -518,15 +518,9 @@ in
 
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
   # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
-  # subagents dispatch explicitly as reviewer (opus/high), implementer
-  # (sonnet/high for a planned sdd task and its first fix rounds, opus/high
-  # for stuck-task escalation and the final-review fixer), mechanic
-  # (sonnet/high) or reviewer-lite (sonnet/medium). from-issue launches its
-  # issue owners as issue-owner (opus/high,
-  # xhigh for the autonomous design and planning owners), a definition with
-  # no body that blocks the Artifact tools and the claude.ai Docs connector.
-  # Skills reference them by name; home/common/agent-skills/model-matrix.json
-  # owns every tier.
+  # subagents dispatch explicitly as implementer (opus/high), reviewer
+  # (opus/high) or reviewer-lite (sonnet/medium). Skills reference them by
+  # name; home/common/agent-skills/model-matrix.json owns every tier.
   home.file.".claude/agents" = {
     source = ./agents;
     recursive = true;
