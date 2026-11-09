@@ -37,6 +37,21 @@ named N whose status is online and whose labels include `self-hosted` and every 
 it is online but lacks one (a wrong registration), and not yet when it is unlisted or not online.
 It only reads one paginated runner listing and refuses a truncated or malformed one.
 
+`guard-policy-fleet [--repo-root R] [--branch B] [--registry FILE]` (issue 765, C13.a) is met (0, `green`)
+when, with the candidate's own `python/` and platform manifest unpacked from origin's candidate branch into a
+temporary `HOME`, `python -m agent_tools.guard_policy derive --repository S` exits 0 with a derived row for
+every slug S named by a registry entry's `origin` (the host's own registry unless `--registry` names another
+file). Any other exit, outcome or unreadable answer makes that row, and the check, 1 (`red`); a candidate
+branch that does not exist is 75 (`absent`) and an unreadable registry or unpackable candidate is 75
+(`unreadable`). The installed bridge is never asked: it still accepts what the candidate refuses. Like the
+lifecycle guard, `derive` writes the objects and remote-tracking refs it fetches into the registered checkouts.
+
+`registry-agreement --registry HOST=FILE... [--intentional PROJECT_ID]...` (issue 765, C13.b) is met (0,
+`green`) when every project registered on more than one of the named hosts carries the same `branch_override`
+(absent counts as a value) in each of those registries; a project whose registries differ is `red` (1)
+unless its id is named by `--intentional`, which records the difference as `intentional`. It reads only the
+files, and exits 2 on a file it cannot read.
+
 `worktree-mapping [--red-pending] --repo-root R...` (issue 585) states the #130 checklist C7 rule
 over each root through `agent_tools.worktree_mapping`, read-only, using the verdicts of
 `workflow-state migrate --repo-root R`. It exits 0 when every root is green, 1 when one is red,
@@ -78,7 +93,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from agent_tools import forge_markers
+from agent_tools import forge_markers, github_remote
 from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver, validate_manifest
 from agent_tools.agent_costs import parse_rfc3339_utc
@@ -526,14 +541,7 @@ def cutover_preflight(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
     _, manifest = manifest_verdict(main, candidate)
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp).resolve()
-        archive = _git(repo_root, "archive", "--format=tar", sha, "python", MANIFEST_PATH,
-                       environ=environ, text=False)
-        if archive.returncode != 0:
-            return _preflight_failure("unreadable", sha, "candidate", manifest)
-        try:
-            with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
-                tar.extractall(tmp_path, filter="data")
-        except (tarfile.TarError, OSError):
+        if not _unpack_candidate(repo_root, sha, tmp_path, environ):
             return _preflight_failure("unreadable", sha, "candidate", manifest)
         bridge_env = {key: value for key, value in environ.items() if key != "PYTHONPATH"}
         bridge_bin = shutil.which("resolve-project", path=environ.get("PATH"))
@@ -831,6 +839,146 @@ def _rfc3339(value: str) -> datetime:
         raise argparse.ArgumentTypeError("must be an RFC 3339 instant with Z or an offset") from None
 
 
+GUARD_DERIVE_TIMEOUT = 300
+
+
+def _unpack_candidate(repo_root: Path, sha: str, destination: Path,
+                      environ: Mapping[str, str]) -> bool:
+    """Unpack `python/` and the manifest at `sha` into `destination`; False when it cannot."""
+    archive = _git(repo_root, "archive", "--format=tar", sha, "python", MANIFEST_PATH,
+                   environ=environ, text=False)
+    if archive.returncode != 0:
+        return False
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+            tar.extractall(destination, filter="data")
+    except (tarfile.TarError, OSError):
+        return False
+    return True
+
+
+def _registry_entries(path: Path) -> list[dict] | None:
+    """The `projects` of the registry file at `path` ([] when absent), or None when unreadable."""
+    try:
+        document = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        return None
+    projects = document.get("projects") if isinstance(document, dict) else None
+    ok = isinstance(projects, list) and all(isinstance(p, dict) for p in projects)
+    return projects if ok else None
+
+
+def _entry_slug(entry: dict, environ: Mapping[str, str]) -> str | None:
+    """The github slug of the entry's `origin` fetch url, read in the entry's own root."""
+    root = entry.get("root")
+    if not isinstance(root, str):
+        return None
+    try:
+        done = subprocess.run(["git", "remote", "get-url", "origin"], cwd=root,
+                              env=dict(environ), capture_output=True, text=True,
+                              timeout=C11_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return github_remote.github_slug(done.stdout) if done.returncode == 0 else None
+
+
+def _candidate_env(environ: Mapping[str, str], candidate_home: Path,
+                   candidate_python: Path) -> dict[str, str]:
+    """`environ` with the candidate's `HOME` and `PYTHONPATH`. The temporary `HOME` must not
+    strand the forge and git configuration the host reads from its real one."""
+    env = {**environ, "HOME": str(candidate_home), "PYTHONPATH": str(candidate_python)}
+    home = environ.get("HOME")
+    if home and "GH_CONFIG_DIR" not in env:
+        env["GH_CONFIG_DIR"] = str(Path(home) / ".config/gh")
+    if home and "GIT_CONFIG_GLOBAL" not in env and (Path(home) / ".gitconfig").is_file():
+        env["GIT_CONFIG_GLOBAL"] = str(Path(home) / ".gitconfig")
+    return env
+
+
+def _derive_row(slug: str, child_env: Mapping[str, str], cwd: Path) -> dict:
+    row: dict = {"repository": slug, "exit": None, "outcome": "unreadable", "reason_codes": []}
+    try:
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.guard_policy", "derive", "--repository", slug],
+            env=dict(child_env), cwd=cwd, capture_output=True, text=True,
+            timeout=GUARD_DERIVE_TIMEOUT, check=False)
+        report = json.loads(done.stdout)
+        outcome, refused = report["outcome"], report["refused"]
+        row.update(exit=done.returncode, outcome=outcome,
+                   reason_codes=sorted({r["reason_code"] for r in refused}))
+        derived = done.returncode == 0 and outcome == "derived" and isinstance(report["row"], dict)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        derived = False
+    row["verdict"] = "green" if derived else "red"
+    return row
+
+
+def guard_policy_fleet(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
+                       environ: Mapping[str, str],
+                       registry: Path | None = None) -> tuple[int, dict]:
+    """C13.a: the candidate's own `guard-policy derive` yields a row for every registered slug.
+
+    Raises GitError when git cannot be driven; the caller exits 2."""
+    sha = _candidate_sha(repo_root, branch, environ)
+    report: dict = {"verdict": "absent", "candidate": None, "rows": []}
+    if sha is None:
+        return 75, report
+    report["candidate"] = sha
+    _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "origin", sha, environ=environ)
+    home = environ.get("HOME", "")
+    entries = _registry_entries(registry or Path(home) / ".agents/state/fleet/registry.json")
+    if entries is None:
+        return 75, {**report, "verdict": "unreadable", "side": "registry"}
+    slugs: dict[str, None] = {}
+    rows: list[dict] = []
+    for entry in entries:
+        slug = _entry_slug(entry, environ)
+        if slug is None:
+            rows.append({"repository": None, "project_id": entry.get("project_id"),
+                         "exit": None, "outcome": "origin_unproven", "reason_codes": [],
+                         "verdict": "red"})
+        else:
+            slugs[slug] = None
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp).resolve()
+        if not _unpack_candidate(repo_root, sha, tmp_path, environ):
+            return 75, {**report, "verdict": "unreadable", "side": "candidate"}
+        candidate_home = tmp_path / "home"
+        manifest = candidate_home / ".agents/share/platform-manifest.json"
+        manifest.parent.mkdir(parents=True)
+        shutil.copy(tmp_path / MANIFEST_PATH, manifest)
+        registry_copy = candidate_home / ".agents/state/fleet/registry.json"
+        registry_copy.parent.mkdir(parents=True)
+        registry_copy.write_text(json.dumps({"schema_version": 1, "projects": entries}),
+                                 encoding="utf-8")
+        child_env = _candidate_env(environ, candidate_home, tmp_path / "python")
+        rows.extend(_derive_row(slug, child_env, tmp_path) for slug in slugs)
+    rows.sort(key=lambda r: (r["repository"] is None, r["repository"] or ""))
+    green = all(row["verdict"] == "green" for row in rows)
+    return (0 if green else 1), {**report, "verdict": "green" if green else "red", "rows": rows}
+
+
+def registry_agreement(registries: Mapping[str, Sequence[Mapping]],
+                       intentional: Sequence[str] = ()) -> tuple[int, dict]:
+    """C13.b: each project on more than one host has the same `branch_override` on all of them."""
+    seen: dict[str, dict[str, object]] = {}
+    for host, entries in registries.items():
+        for entry in entries:
+            seen.setdefault(str(entry.get("project_id")), {})[host] = entry.get("branch_override")
+    rows = []
+    for project_id, overrides in sorted(seen.items()):
+        if len(overrides) < 2:
+            continue
+        distinct = {json.dumps(value, sort_keys=True) for value in overrides.values()}
+        verdict = ("green" if len(distinct) == 1
+                   else "intentional" if project_id in intentional else "red")
+        rows.append({"project_id": project_id, "branch_override": overrides, "verdict": verdict})
+    red = any(row["verdict"] == "red" for row in rows)
+    return (1 if red else 0), {"verdict": "red" if red else "green", "rows": rows}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verify-checks")
     checks = parser.add_subparsers(dest="check", required=True)
@@ -869,7 +1017,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     retired.add_argument("--repo-root", type=Path, action="append", required=True)
     retired.add_argument("--watch-adapter")
     retired.add_argument("--red-pending", action="store_true")
+    fleet = checks.add_parser(
+        "guard-policy-fleet",
+        help="issue 765 C13.a: the candidate derives a guard policy row for every registered slug")
+    fleet.add_argument("--repo-root", type=Path, default=Path("."))
+    fleet.add_argument("--branch", default=CANDIDATE_BRANCH)
+    fleet.add_argument("--registry", type=Path)
+    agreement = checks.add_parser(
+        "registry-agreement",
+        help="issue 765 C13.b: registries agree on branch_override per project across hosts")
+    agreement.add_argument("--registry", nargs="+", required=True, metavar="HOST=FILE")
+    agreement.add_argument("--intentional", action="append", default=[], metavar="PROJECT_ID")
     args = parser.parse_args(argv)
+    if args.check == "registry-agreement":
+        registries: dict[str, list[dict]] = {}
+        for spec in args.registry:
+            host, _, path = spec.partition("=")
+            entries = _registry_entries(Path(path)) if host and path else None
+            if entries is None:
+                print(f"verify-checks: tool_error: {spec!r} is not a readable HOST=FILE registry",
+                      file=sys.stderr)
+                return 2
+            registries[host] = entries
+        code, report = registry_agreement(registries, args.intentional)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "guard-policy-fleet":
+        try:
+            code, report = guard_policy_fleet(args.repo_root, args.branch, environ=os.environ,
+                                              registry=args.registry)
+        except GitError as error:
+            print(f"verify-checks: git_error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "deprecations-retired":
         try:
             code, report = deprecations_retired_check(
