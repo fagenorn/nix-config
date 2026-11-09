@@ -25,7 +25,9 @@ D6, `acquire` needs an open pull request whose head is the caller's sha before a
 D7, every call prints one JSON object; exit 0 success, 3 contention, 1 forge error, 2 usage.
 
 D8, `--wait` attempts at offsets 0, `POLL`, ... `BOUND` and then answers `land-contended`
-(exit 3); a `gh_failed`/`gh_timeout` poll counts as failed and `FAILED_POLLS` in a row are fatal.
+(exit 3); a `gh_failed`/`gh_timeout` poll counts as failed and `FAILED_POLLS` in a row are fatal;
+every poll, the first included, reads the caller's eligible pull requests (D6) inside the poll, so
+a failed read is a failed poll (issue 740).
 
 D9, `release` is a compare-and-swap delete sent without a prior read, then re-read.
 """
@@ -170,12 +172,13 @@ def usage_result(argv: list[str], detail: str) -> dict[str, Any]:
             "waited_s": None, "error": "usage", "detail": detail}
 
 
-def wait_acquire(args: Any, mine: list[fm.Pull], node: Callable[[], str],
+def wait_acquire(args: Any, node: Callable[[], str],
                  eligible: Callable[[], list[fm.Pull]]) -> tuple[int, dict[str, Any]]:
     """D4, D8: poll `acquire_once` until it succeeds, the bound passes or polls keep failing.
 
-    D6 holds at every attempt: `mine` is read again before each poll after the first, and a
-    caller whose pull request no longer has its sha as head stops with `no_open_pr`.
+    D6 holds at every attempt: `mine` is read inside every poll, the first included, so a failed
+    read is a failed poll (issue 740), and a caller whose pull request no longer has its sha as
+    head stops with `no_open_pr`.
     """
     start = monotonic()
     watch: list[Any] = [object(), None]  # [oid or None, first seen]; the sentinel matches nothing
@@ -190,12 +193,9 @@ def wait_acquire(args: Any, mine: list[fm.Pull], node: Callable[[], str],
         seen(lock)
         return monotonic() - watch[1] >= IDLE_AFTER
 
-    first = True
     while True:
         try:
-            if not first:
-                mine = eligible()
-            first = False
+            mine = eligible()
             if not mine:
                 return _no_open_pr(args)
             outcome = acquire_once(args.repo, args.branch, args.sha, mine, idle, node, seen)
@@ -228,9 +228,6 @@ def _acquire(args: Any) -> tuple[int, dict[str, Any]]:
         return [p for p in fm.commit_pulls(args.repo, args.sha)
                 if p.state == "open" and p.base_ref == args.branch and p.head_sha == args.sha]
 
-    mine = eligible()
-    if not mine:
-        return _no_open_pr(args)
     cached: list[str] = []
 
     def node() -> str:
@@ -239,7 +236,10 @@ def _acquire(args: Any) -> tuple[int, dict[str, Any]]:
         return cached[0]
 
     if args.wait:
-        return wait_acquire(args, mine, node, eligible)
+        return wait_acquire(args, node, eligible)
+    mine = eligible()
+    if not mine:
+        return _no_open_pr(args)
     outcome = acquire_once(args.repo, args.branch, args.sha, mine, lambda _: False, node)
     if outcome.verdict in ("acquired", "already_held", "moved"):
         return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,

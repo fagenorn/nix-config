@@ -720,6 +720,46 @@ class WaitTest(Base):
         self.assertEqual((code, out["error"]), (2, "usage"))
 
 
+class WaitFirstReadTest(Base):
+    """Issue 740 D3: --wait reads its first eligibility inside its bounded polls (D8)."""
+
+    def wait(self, clock):
+        with mock.patch.object(land_lock, "monotonic", clock.monotonic), \
+                mock.patch.object(land_lock, "sleep", clock.sleep):
+            return run(*land("acquire", A, "--wait"))
+
+    def test_a_failed_first_read_is_a_failed_poll_then_acquires(self):
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        self.world.outage(1)
+        clock = FakeClock()
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(clock.slept, [land_lock.POLL])
+        self.assertEqual(self.slept, [])  # the whole-verb retry never wraps --wait
+
+    def test_first_reads_failing_every_poll_are_fatal_on_the_third_and_write_nothing(self):
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        self.world.outage()
+        clock = FakeClock()
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["error"], out["transient"]),
+                         (1, "error", "gh_failed", True))
+        self.assertEqual(clock.slept, [land_lock.POLL, land_lock.POLL])
+        self.assertEqual(self.world.refs(), {})
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.slept, [])
+
+    def test_no_open_pr_on_the_first_read_stops_at_once(self):
+        self.lock()
+        self.pulls(A)
+        clock = FakeClock()
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "no_open_pr"))
+        self.assertEqual(clock.slept, [])
+
+
 class IdleRaceTest(Base):
     def test_concurrent_idle_stealers_one_wins(self):
         self.lock(C, schedule=["get", "get", "cas", "cas"])
