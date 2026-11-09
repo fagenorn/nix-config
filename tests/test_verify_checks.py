@@ -861,7 +861,43 @@ def emitted(state, candidate):
         value, [], None, state)
 
 
+def emitted_claude_only(state, candidate, kind="cutover"):
+    """A real version-2 bundle: claude-only evidence, bound to `candidate`, of reader kind `kind`."""
+    identity = json.loads(json.dumps(IDENTITY))
+    identity["bound"]["commit"]["candidate"] = candidate
+    identity["pinned"]["builds"].pop("codex", None)
+    profile = agent_gate_bundle.gate_profile(2, kind)
+    value = {"approved": {"cases": [
+                 dict(case, strata={"claude": case["strata"]["claude"]})
+                 for case in flat(stratum(context(1000, 1000)))["cases"]]},
+             "unmeasured": None}[state]
+    return agent_gate_bundle.assemble_bundle(
+        {"identity": identity, "expansion": {"expanded": False, "checkpoint_ref": None}},
+        value, [], None, state, profile)
+
+
 class BundleVerdictTest(unittest.TestCase):
+    def test_an_approved_claude_only_cutover_bundle_is_green(self):
+        code, report = verify_checks.bundle_verdict(
+            {"cutover-130-bundle.json": emitted_claude_only("approved", SHA),
+             "release-128-bundle.json": emitted("unmeasured", "b" * 40)}, SHA)
+        self.assertEqual((code, report["verdict"], report["approved"]),
+                         (0, "green", ["cutover-130-bundle.json"]))
+
+    def test_a_version_two_bundle_of_another_kind_is_unreadable(self):
+        for kind in ("promotion", "release"):
+            with self.subTest(kind=kind):
+                code, report = verify_checks.bundle_verdict(
+                    {"x-bundle.json": emitted_claude_only("unmeasured", SHA, kind)}, SHA)
+                self.assertEqual((code, report["approved"]), (75, []))
+                self.assertEqual([u["path"] for u in report["unreadable"]], ["x-bundle.json"])
+
+    def test_a_relabelled_claude_only_bundle_is_unreadable(self):
+        tampered = emitted_claude_only("approved", SHA)
+        tampered["bundle_kind"] = "promotion"
+        code, report = verify_checks.bundle_verdict({"x-bundle.json": tampered}, SHA)
+        self.assertEqual((code, report["approved"]), (75, []))
+
     def test_an_approved_bundle_binding_the_candidate_is_green(self):
         code, report = verify_checks.bundle_verdict(
             {"a-bundle.json": emitted("approved", SHA),

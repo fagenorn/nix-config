@@ -29,7 +29,8 @@ under `.agents/artifacts/evidence/` at origin's main verifies, through `agent_ga
 as `approved` and binds the commit at the tip of origin's candidate branch. The state is the verifier's
 return value, never the document's own `state` field; a bundle the verifier refuses is `unreadable` and
 never counts. It is 75 otherwise (`absent` when the branch does not exist) and 2 when git cannot be
-driven. It only reads: it fetches objects, and writes no ref.
+driven. It only reads: it fetches objects, and writes no ref. A gate-version-2 (claude-only) bundle is
+verified as the cutover kind, under the no-regression criterion.
 
 `self-hosted-runner --repo R --runner N --label L...` (issue 680) is met when R lists a runner
 named N whose status is online and whose labels include `self-hosted` and every L; not met when
@@ -550,6 +551,7 @@ def cutover_preflight(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
 
 
 EVIDENCE_DIR = ".agents/artifacts/evidence"
+CUTOVER_BUNDLE_KIND = "cutover"
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}")
 
 
@@ -558,14 +560,15 @@ def bundle_verdict(bundles: Mapping[str, object], candidate_sha: str) -> tuple[i
 
     Each value goes through `verify_bundle`, the one verifier of an emitted bundle: the id is
     recomputed over the body and the state re-decided from the bundle's own evidence. The state
-    read is its return value, never `document["state"]`."""
+    read is its return value, never `document["state"]`. The check is the cutover reader, so a
+    gate-version-2 bundle verifies only as the cutover kind (issue 725): any other kind is unreadable."""
     approved: list[str] = []
     other: list[dict] = []
     unreadable: list[dict] = []
     for path in sorted(bundles):
         document = bundles[path]
         try:
-            state = verify_bundle(document)
+            state = verify_bundle(document, kind=CUTOVER_BUNDLE_KIND)
             bound = document["identity"]["bound"]["commit"]["candidate"]  # type: ignore[index]
             if not (isinstance(bound, str) and _COMMIT_ID.fullmatch(bound)):
                 raise BundleIntegrityError("identity.bound.commit.candidate is not a commit id")
