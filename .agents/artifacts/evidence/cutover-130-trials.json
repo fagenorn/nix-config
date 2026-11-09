@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "kind": "agent-gate-trials",
+  "identity": {
+    "bound": {
+      "commit": {
+        "base": "e1d4db56718b9c4cdc330888de41fbed6d8a4c10",
+        "candidate": "6543ed0b37c927c936791e173fc1d728f2f7fbbf"
+      },
+      "project_contract_version": {
+        "base": "2",
+        "candidate": "2"
+      },
+      "shared_platform_version": {
+        "base": "1.2.0",
+        "candidate": "2.0.0"
+      }
+    },
+    "pinned": {
+      "evaluator_version": {
+        "base": "run-eval-blobs:593dfc433c5fa4b1",
+        "candidate": "run-eval-blobs:593dfc433c5fa4b1"
+      },
+      "rubric_version": {
+        "base": "issue-725-r1",
+        "candidate": "issue-725-r1"
+      },
+      "environment_fingerprint": {
+        "base": "env:aec4793d92901a8c",
+        "candidate": "env:aec4793d92901a8c"
+      },
+      "builds": {
+        "claude": {
+          "agent": {
+            "base": "2.1.316 (Claude Code)",
+            "candidate": "2.1.316 (Claude Code)"
+          },
+          "model": {
+            "base": "sonnet",
+            "candidate": "sonnet"
+          }
+        }
+      }
+    }
+  },
+  "expansion": {
+    "expanded": false,
+    "checkpoint_ref": null
+  },
+  "cases": [
+    {
+      "case_id": "cold-resolution",
+      "case_class": "cold-resolution",
+      "strata": {
+        "claude": {
+          "base": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/cold-resolution-base-1.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:590372635cb4f6538bd3d594c0be67739d45c2cc7d3f1368e0406f7ae9e9facf"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/cold-resolution-base-2.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:7543b5ebb68ac083f6fe917a339b0318480a9cabb253b911823c47610aee4923"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/cold-resolution-base-3.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:c2586821cbadcdc9e918f39501a3054dc33c54966dd44f5569f4982a157490dd"
+            }
+          ],
+          "candidate": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/cold-resolution-candidate-1.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:8fafce48f0fae35a727c0f5fbe9c95d01459eb2fea44eff0b0082c5321d813b0"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/cold-resolution-candidate-2.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:74c35cac88293ddbf275f897bc2e22500e7644abe67191d6dcb7f01e9877088c"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/cold-resolution-candidate-3.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:5490450b0b7a956b5d0ccccb442478dc4961a7bc9263fd22ee56e0bd440776c3"
+            }
+          ],
+          "quality": {
+            "critical_all_pass": true,
+            "evaluator_stability": "stable",
+            "noncritical_median": {
+              "base": 100.0,
+              "candidate": 100.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "case_id": "routine-issue",
+      "case_class": "routine-issue",
+      "strata": {
+        "claude": {
+          "base": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/routine-issue-base-1.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:88d78998fd251b610d0838f1b500f96b0b2a228276545fbc8aee0eab73eaa73a"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/routine-issue-base-2.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:7b7a7011de380e7adcd529c9191d571cc1bd219e9dd970ef2dfe403b9fb72b5b"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/routine-issue-base-3.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:3642af1502789e6ed1de1daccef498882035bf9a67f484f131350f1faf9dce97"
+            }
+          ],
+          "candidate": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/routine-issue-candidate-1.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:deda789e47b751f765bce3859141e879a5dffa17ed2f6ab994abda44f93d5425"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/routine-issue-candidate-2.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:252fdb763546a82bfcb4083af694a0e8824434891798f8ff8a75c2118cf470f7"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/routine-issue-candidate-3.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:2229b6911c7f131c85cecdec145ec36bc24ed6260f4edb67dcd0bb6da5069420"
+            }
+          ],
+          "quality": {
+            "critical_all_pass": true,
+            "evaluator_stability": "stable",
+            "noncritical_median": {
+              "base": 80.0,
+              "candidate": 80.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "case_id": "fuzzy-design",
+      "case_class": "fuzzy-design",
+      "strata": {
+        "claude": {
+          "base": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/fuzzy-design-base-1.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:4bf11f0f7182a526d5765173b70c658fd868ebc539f184e69c1970b87fb2ad7d"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/fuzzy-design-base-2.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:9867936b3488a8183a57c756d31eb9b1926a705d913ebd2e236477772c64d36a"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/fuzzy-design-base-3.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:e051c6207b85e015b2dc31493516eb268f82126674d267126797722283168228"
+            }
+          ],
+          "candidate": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/fuzzy-design-candidate-1.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:f2524666b66783eb1572ccd2c2e9e009313620931324141604001363ead6cf04"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/fuzzy-design-candidate-2.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:211bb9fa6c65375ecb630bbd8f2449a168dab1ee6693968d2a3b01949fe064a8"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/fuzzy-design-candidate-3.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:80c03d57a09a83315247f70c4f9677fe83d965a790b29cbdbeb9dad1b9fa0d71"
+            }
+          ],
+          "quality": {
+            "critical_all_pass": true,
+            "evaluator_stability": "stable",
+            "noncritical_median": {
+              "base": 100.0,
+              "candidate": 100.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "case_id": "review-ship",
+      "case_class": "review-ship",
+      "strata": {
+        "claude": {
+          "base": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/review-ship-base-1.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:8447ab9a1a73102c11bd854a837b82fbbed1da66e7ba983cb4918bc2ce90f766"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/review-ship-base-2.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:004173d9689b26c9ef010145e8425c9133229b375df554cdfcad31e44f5fec7d"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/review-ship-base-3.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:9ed430b32f3fc7967d99347e81348412f9454adc23203a05e18835b9d0d24217"
+            }
+          ],
+          "candidate": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/review-ship-candidate-1.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:da91352f9cebec080bf670b5dc276aaf4acfd75e01c00597f3de16e45cd18921"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/review-ship-candidate-2.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:438ed5a25e8494dc3a523fcbf8edffee68d79226fbe10e2867614488f0134d45"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-records/review-ship-candidate-3.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:fb518450c7131dd523e241ecc287472c459e406f60c3ba5204ba4c0c34285710"
+            }
+          ],
+          "quality": {
+            "critical_all_pass": true,
+            "evaluator_stability": "stable",
+            "noncritical_median": {
+              "base": 100.0,
+              "candidate": 100.0
+            }
+          }
+        }
+      }
+    }
+  ]
+}

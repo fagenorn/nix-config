@@ -4,7 +4,7 @@
 // A label with no reply gets the default for its kind (DEFAULTS below); a patch
 // is merged over that default; a reply "throw" throws, and a program throw prints { result: null, error, calls }. A folded label (NESTED) given an explicit object reply with no own key for a nested step
 // gets that step's default; a key present with null stays null. The fresh setup prompt (it names `--holder <host>/<id> `)
-// also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire and claim; a resume setup gets none. Prints { result, calls: [{label, agentType, model, schema, prompt}] }.
+// also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire and claim; a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}] }.
 import { readFileSync } from 'node:fs'
 
 const program = readFileSync(process.argv[2], 'utf8')
@@ -75,7 +75,7 @@ const calls = []
 const seen = {}
 async function agent(prompt, opts = {}) {
   const label = opts.label
-  calls.push({ label, agentType: opts.agentType || null, model: opts.model || null, schema: opts.schema || null, prompt })
+  calls.push({ label, agentType: opts.agentType || null, model: opts.model || null, effort: opts.effort || null, schema: opts.schema || null, prompt })
   const n = seen[label] = (seen[label] || 0) + 1
   const replies = scenario.replies || {}
   if (Object.prototype.hasOwnProperty.call(replies, label)) {

@@ -385,14 +385,17 @@ let
         "Agent"
       ];
       ask = [ ];
-      deny = [ ];
+      # Issue 735: the claude.ai Claude Docs connector is never used. A server-wide deny
+      # removes all its tools and keeps the other claude.ai connectors
+      # (disableClaudeAiConnectors would drop them all).
+      deny = [ "mcp__claude_ai_Claude_Docs" ];
     };
 
     # Hidden from the model's skill listing, each still runnable as /<name> (issue 425):
     # skills synced from claude.ai by their full `anthropic-skills:` name, which Claude
     # Code matches before the bare one, bundled skills by their bare name. A plugin's
     # skills ignore this map, so the skill-creator kept listed is the plugin's (below).
-    skillOverrides = lib.genAttrs [
+    skillOverrides = (lib.genAttrs [
       "artifact-design"
       "artifact-diagramming"
       "artifact-capabilities"
@@ -405,7 +408,17 @@ let
       "anthropic-skills:morning"
       "anthropic-skills:import-memory"
       "anthropic-skills:skill-creator"
-    ] (_: "user-invocable-only");
+    ] (_: "user-invocable-only"))
+    // (
+      # Issue 735: synced skills never used here, off for the model and for /<name>.
+      lib.genAttrs [
+        "anthropic-skills:docs"
+        "anthropic-skills:chrome-browser"
+        "anthropic-skills:built-in-browser"
+        "anthropic-skills:computer-use"
+        "anthropic-skills:deep-research"
+      ] (_: "off")
+    );
 
     # Plugins + their marketplaces, declared so the setup is portable to a fresh machine.
     # The patched plugin sources are Nix store paths; Claude's install/cache state under
@@ -516,7 +529,9 @@ in
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
   # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
   # subagents dispatch explicitly as implementer (opus/high), reviewer
-  # (opus/high) or reviewer-lite (sonnet/medium). Skills reference them by
+  # (opus/high) or reviewer-lite (sonnet/medium). The Workflow programs' steps
+  # run as clerk (sonnet/low; Bash, Read and Skill only, for judgment-free
+  # steps) and planner (opus/high; the plan step). Skills reference them by
   # name; home/common/agent-skills/model-matrix.json owns every tier.
   home.file.".claude/agents" = {
     source = ./agents;

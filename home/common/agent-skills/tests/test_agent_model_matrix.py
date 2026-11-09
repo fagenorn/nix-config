@@ -14,6 +14,22 @@ REPO_ROOT = Path(__file__).parents[4]
 MATRIX = REPO_ROOT / "home/common/agent-skills/model-matrix.json"
 AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 
+# Issue 734: the tool schemas no delivery agent may load or call.
+CLOSED_TOOLS = [
+    "Artifact", "ArtifactComments", "ArtifactData", "Workflow", "ScheduleWakeup",
+    "AskUserQuestion", "SendFeedback", "ReportFindings", "CronCreate", "CronDelete",
+    "CronList", "RemoteTrigger", "mcp__claude_ai_Claude_Docs",
+]
+
+
+def tool_list(value):
+    return [entry.strip() for entry in value.split(",")]
+
+
+def body_of(path):
+    return path.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+
+
 EXPECTED_TIERS = {
     "owner": ("opus", "high"),
     "ship-owner": ("opus", "high"),
@@ -22,6 +38,8 @@ EXPECTED_TIERS = {
     "reviewer-lite": ("sonnet", "medium"),
     "explorer": ("sonnet", "medium"),
     "researcher": ("sonnet", "medium"),
+    "clerk": ("sonnet", "low"),
+    "planner": ("opus", "high"),
 }
 
 EXPECTED_SUBAGENT_TYPES = {
@@ -32,6 +50,8 @@ EXPECTED_SUBAGENT_TYPES = {
     "reviewer-lite": {"reviewer-lite"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
+    "clerk": {"clerk"},
+    "planner": {"planner"},
 }
 
 EXPECTED_OWNER_SITES = {
@@ -98,12 +118,50 @@ def write_fixture(root: Path, data: dict) -> None:
     matrix_path.write_text(json.dumps(data), encoding="utf-8")
     agents = root / "home/common/claude-code/agents"
     agents.mkdir(parents=True)
-    for role in ("implementer", "reviewer", "reviewer-lite"):
+    for role in ("implementer", "reviewer", "reviewer-lite", "clerk", "planner"):
         model, effort = EXPECTED_TIERS[role]
         (agents / f"{role}.md").write_text(
             f"---\nname: {role}\nmodel: {model}\neffort: {effort}\n---\n",
             encoding="utf-8",
         )
+
+
+class AgentToolSetTest(unittest.TestCase):
+    """Issue 734: each program-facing agent type carries an exact, narrow tool set."""
+
+    def test_clerk_runs_on_shell_read_and_skills_only(self):
+        path = AGENTS / "clerk.md"
+        metadata = frontmatter(path)
+        self.assertEqual(set(metadata), {"name", "description", "model", "effort", "tools"})
+        self.assertEqual((metadata["name"], metadata["model"], metadata["effort"]),
+                         ("clerk", "sonnet", "low"))
+        self.assertEqual(tool_list(metadata["tools"]), ["Bash", "Read", "Skill"])
+        self.assertEqual(body_of(path).strip(), "")
+
+    def test_planner_reads_writes_plan_files_and_loads_skills(self):
+        path = AGENTS / "planner.md"
+        metadata = frontmatter(path)
+        self.assertEqual(set(metadata), {"name", "description", "model", "effort", "tools"})
+        self.assertEqual((metadata["name"], metadata["model"], metadata["effort"]),
+                         ("planner", "opus", "high"))
+        self.assertEqual(tool_list(metadata["tools"]),
+                         ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "Skill"])
+        self.assertEqual(body_of(path).strip(), "")
+
+    def test_implementer_blocks_the_closed_tools_and_keeps_its_own(self):
+        metadata = frontmatter(AGENTS / "implementer.md")
+        self.assertNotIn("tools", metadata)
+        blocked = tool_list(metadata["disallowedTools"])
+        self.assertEqual(blocked, CLOSED_TOOLS)
+        for kept in ("Agent", "SendMessage", "Skill", "Bash", "Read", "Edit", "Write",
+                     "Glob", "Grep", "ToolSearch"):
+            self.assertNotIn(kept, blocked)
+
+    def test_no_program_agent_type_runs_on_the_default_tool_set(self):
+        for name in ("clerk", "planner", "implementer", "reviewer", "reviewer-lite"):
+            with self.subTest(agent=name):
+                metadata = frontmatter(AGENTS / f"{name}.md")
+                self.assertTrue("tools" in metadata or "disallowedTools" in metadata)
 
 
 class AgentModelMatrixTest(unittest.TestCase):
@@ -115,7 +173,10 @@ class AgentModelMatrixTest(unittest.TestCase):
         )
         self.assertEqual(
             set(matrix["roles"]),
-            {"owner", "ship-owner", "implementer", "reviewer", "reviewer-lite", "explorer", "researcher"},
+            {
+                "owner", "ship-owner", "implementer", "reviewer", "reviewer-lite", "explorer",
+                "researcher", "clerk", "planner",
+            },
         )
         self.assertEqual(
             set(matrix["scenarios"]), {"shipping", "improve-codebase-architecture", "representative"}
@@ -155,11 +216,11 @@ class AgentModelMatrixTest(unittest.TestCase):
         files = sorted(AGENTS.glob("*.md"))
         self.assertEqual(
             [path.name for path in files],
-            ["implementer.md", "reviewer-lite.md", "reviewer.md"],
+            ["clerk.md", "implementer.md", "planner.md", "reviewer-lite.md", "reviewer.md"],
         )
         self.assertEqual(
             agent_model_matrix.CUSTOM_AGENT_ROLES,
-            {"implementer", "reviewer", "reviewer-lite"},
+            {"implementer", "reviewer", "reviewer-lite", "clerk", "planner"},
         )
         for path in files:
             metadata = frontmatter(path)
@@ -178,6 +239,8 @@ class AgentModelMatrixTest(unittest.TestCase):
         self.assertEqual(
             found,
             {
+                "clerk": None,
+                "planner": None,
                 "implementer": None,
                 "reviewer": None,
                 "reviewer-lite": "true",

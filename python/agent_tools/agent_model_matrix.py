@@ -38,6 +38,8 @@ EXPECTED_ROLE_TIERS = {
     "reviewer-lite": ("sonnet", "medium"),
     "explorer": ("sonnet", "medium"),
     "researcher": ("sonnet", "medium"),
+    "clerk": ("sonnet", "low"),
+    "planner": ("opus", "high"),
 }
 ALLOWED_SUBAGENT_TYPES = {
     "owner": {"general-purpose"},
@@ -47,8 +49,10 @@ ALLOWED_SUBAGENT_TYPES = {
     "reviewer-lite": {"reviewer-lite"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
+    "clerk": {"clerk"},
+    "planner": {"planner"},
 }
-CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite"}
+CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite", "clerk", "planner"}
 WORKFLOW_FAMILIES = {
     "shipping",
     "improve-codebase-architecture",

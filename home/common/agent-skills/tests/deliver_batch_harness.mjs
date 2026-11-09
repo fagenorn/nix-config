@@ -4,7 +4,7 @@
 //     "children": {"<issue>": child result | [one per call] | "throw"} }
 // A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A reply
 // of null is returned as null (a dead agent). Prints { result, calls, max_active }: calls lists
-// agents ({kind: 'agent', label, prompt, schema, agentType, model, facts_pending}) and children ({kind: 'workflow',
+// agents ({kind: 'agent', label, prompt, schema, agentType, model, effort, facts_pending}) and children ({kind: 'workflow',
 // label: 'child-<issue>', script, args}) in start order; max_active is the most children at once.
 // A reply equal to "throw" makes the stub agent throw after its call was recorded (land() catches it and releases).
 // A folded label (NESTED) given an explicit object reply with no own key for one of its nested steps gets that
@@ -50,7 +50,7 @@ let factsPending = 0 // facts agents started and not yet answered
 const seen = {}
 async function agent(prompt, opts = {}) {
   const label = opts.label
-  calls.push({ kind: 'agent', label, prompt, schema: opts.schema || null, agentType: opts.agentType || null, model: opts.model || null, facts_pending: factsPending })
+  calls.push({ kind: 'agent', label, prompt, schema: opts.schema || null, agentType: opts.agentType || null, model: opts.model || null, effort: opts.effort || null, facts_pending: factsPending })
   const isFacts = /^facts-/.test(label)
   if (isFacts) factsPending++
   // A facts agent answers later the higher its issue number, so a program that does not wait for every
