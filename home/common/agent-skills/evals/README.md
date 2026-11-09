@@ -163,7 +163,8 @@ hours), so two trials can cost twice that. Compare arms from the rows with
   `implementation.patch`) from the committed `setups/issue-3/`; `tracked-issue` takes none
   either and is described under Eval 8 above; `fixture-repo/` itself
   stays unchanged. Every pipeline assert also sees `BASE_MAIN`, local `main`'s SHA right
-  after the setup.
+  after the setup, and `PRE_WT_HEAD`, the pre-created worktree's HEAD right after the setup
+  (empty when the setup makes none).
 - Env: `EVAL_MODEL` (default `sonnet`), `EVAL_TIMEOUT` seconds (default 2700),
   `EVAL_MAX_USD` (optional ceiling), `EVAL_TRIALS` (default 1), `EVAL_TREE` (a checkout
   to evaluate instead of the deployed skills), `EVAL_SETTINGS` (the settings file tree mode

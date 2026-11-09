@@ -807,5 +807,130 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
             self.assertNotEqual(self.grade("no spec or plan was written", repo, env).returncode, 0)
 
 
+class NativeReviewEvalCaseTest(unittest.TestCase):
+    """#725: codex-collaboration case 4, the review-ship corpus case, grades a crafted sandbox."""
+
+    NAMES = ("nothing was pushed", "local and origin main are unchanged",
+             "the branch still carries the implementation",
+             "the worktree is left exactly as committed",
+             "the run names the native route for the unsupported capability",
+             "the run prints the Critical, Important and Minor sections")
+    GOOD_OUT = ("diff-review: capabilities.review.code is unsupported, so no Codex call; "
+                "native route review of main...worktree-issue-3-rename-flag.\n"
+                "Critical\n- none\nImportant\n- none\nMinor\n- README wording\n")
+
+    IDENT = ["git", "-c", "user.name=eval", "-c", "user.email=eval@example.invalid"]
+
+    def good_run(self, tmp, out=GOOD_OUT):
+        repo, git, env = published_sandbox(tmp)
+        pre_wt = tmp / "worktree-issue-3-rename-flag"
+        wgit = implement_issue_three(git, pre_wt, "worktree-issue-3-rename-flag")
+        (tmp / "out.txt").write_text(out, encoding="utf-8")
+        head = subprocess.run(wgit + ["rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        env.update(PRE_WT=str(pre_wt), PRE_WT_HEAD=head, WT=str(pre_wt), WT_COUNT="1",
+                   OUT=str(tmp / "out.txt"))
+        return repo, wgit, env
+
+    def grade(self, name, repo, env):
+        return run_assert(case_assert("codex-collaboration", 4, name), repo, **env)
+
+    def test_the_case_is_a_scripted_pipeline_case(self):
+        case = find_case("codex-collaboration", 4)
+        self.assertEqual((case["name"], case["mode"], case["setup"]),
+                         ("native-diff-review-before-ship", "pipeline",
+                          {"kind": "shippable-worktree"}))
+        self.assertEqual(tuple(check["name"] for check in case["asserts"]), self.NAMES)
+        self.assertIn("ResolvedProject", case["prompt"])
+        self.assertIn("diff-review", case["prompt"])
+        self.assertRegex(case["prompt"].lower(), r"\bstop\b")
+
+    def test_every_assert_passes_on_a_good_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            for name in self.NAMES:
+                with self.subTest(name=name):
+                    done = self.grade(name, repo, env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_pushed_branch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(wgit + ["push", "-q", "origin", "worktree-issue-3-rename-flag"],
+                           check=True, env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+
+    def test_an_edited_worktree_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            (Path(env["PRE_WT"]) / "README.md").write_text("edited\n", encoding="utf-8")
+            self.assertNotEqual(
+                self.grade("the worktree is left exactly as committed", repo, env).returncode, 0)
+
+    def test_a_committed_revert_fails(self):
+        """A clean tree and a tinytask commit are not enough: HEAD must still be the setup tip."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(wgit + ["revert", "--no-edit", "HEAD"], check=True,
+                           capture_output=True, env={**os.environ, **QUIET_GIT})
+            for name in ("the branch still carries the implementation",
+                         "the worktree is left exactly as committed"):
+                with self.subTest(name=name):
+                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_a_committed_edit_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            (Path(env["PRE_WT"]) / "README.md").write_text("edited\n", encoding="utf-8")
+            subprocess.run(wgit + ["commit", "-qam", "review edit"], check=True,
+                           env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(
+                self.grade("the branch still carries the implementation", repo, env).returncode, 0)
+
+    def test_an_untracked_file_in_the_worktree_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            (Path(env["PRE_WT"]) / "NOTES.wip").write_text("scratch\n", encoding="utf-8")
+            self.assertNotEqual(
+                self.grade("the worktree is left exactly as committed", repo, env).returncode, 0)
+
+    def test_a_moved_main_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(self.IDENT + ["-C", str(repo), "commit", "-q", "--allow-empty",
+                                         "-m", "moved"], check=True,
+                           env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(
+                self.grade("local and origin main are unchanged", repo, env).returncode, 0)
+
+    def test_a_moved_origin_main_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            git = self.IDENT + ["-C", str(repo)]
+            quiet = {**os.environ, **QUIET_GIT}
+            moved = subprocess.run(git + ["commit-tree", "main^{tree}", "-p", "main", "-m", "moved"],
+                                   capture_output=True, text=True, check=True, env=quiet).stdout.strip()
+            subprocess.run(git + ["push", "-q", "origin", f"{moved}:refs/heads/main"], check=True,
+                           env=quiet)
+            self.assertNotEqual(
+                self.grade("local and origin main are unchanged", repo, env).returncode, 0)
+
+    def test_an_output_missing_one_severity_section_fails(self):
+        name = "the run prints the Critical, Important and Minor sections"
+        for missing in ("Critical", "Important", "Minor"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                out = "".join(f"{word}\n- none\n" for word in ("Critical", "Important", "Minor")
+                              if word != missing)
+                repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+                self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_an_output_without_the_route_or_sections_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve(), out="Looks good to me.\n")
+            for name in self.NAMES[4:]:
+                with self.subTest(name=name):
+                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

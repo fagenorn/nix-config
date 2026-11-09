@@ -425,6 +425,11 @@ run_trial() {
   esac
   local BASE_MAIN
   BASE_MAIN=$(git -C "$REPO" rev-parse main) || die "setup: could not read main"
+  local PRE_WT_HEAD=""
+  if [ -n "$PRE_WT" ]; then
+    PRE_WT_HEAD=$(git -C "$PRE_WT" rev-parse HEAD) ||
+      die "setup: could not read the pre-created worktree's HEAD"
+  fi
 
   # --- run --------------------------------------------------------------------
 
@@ -492,7 +497,7 @@ run_trial() {
 
   # --- grade ------------------------------------------------------------------
 
-  export WORK REPO ORIGIN OUT BASE_MAIN WT WT_COUNT PRE_WT SPEC_DIR PLAN_DIR CLAUDE_EXIT
+  export WORK REPO ORIGIN OUT BASE_MAIN PRE_WT_HEAD WT WT_COUNT PRE_WT SPEC_DIR PLAN_DIR CLAUDE_EXIT
 
   echo
   echo "--- asserts ---"
