@@ -601,7 +601,7 @@ const takePlan = (p, label) => {
   return null
 }
 
-const FOCUSED = 'Run only the tests that cover the files you changed; do not run the full test suite or the project\'s declared verification (that runs once later).'
+const FOCUSED = `Run only the tests that cover the files you changed; do not run the full test suite or the project's declared verification (that runs once later). Before committing, run the project's formatter or lint fix on the files you changed, as the project's standards (${list(K.standards)}) name it; when they name none, skip this step.`
 let ACS = null, PLAN_REF = null
 // The last head this run knows for each declared branch (#713); read only through own().
 const branchTips = Object.create(null)
