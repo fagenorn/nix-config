@@ -31,11 +31,34 @@ return value, never the document's own `state` field; a bundle the verifier refu
 never counts. It is 75 otherwise (`absent` when the branch does not exist) and 2 when git cannot be
 driven. It only reads: it fetches objects, and writes no ref.
 
+`self-hosted-runner --repo R --runner N --label L...` (issue 680) is met when R lists a runner
+named N whose status is online and whose labels include `self-hosted` and every L; not met when
+it is online but lacks one (a wrong registration), and not yet when it is unlisted or not online.
+It only reads one paginated runner listing and refuses a truncated or malformed one.
+
 `worktree-mapping [--red-pending] --repo-root R...` (issue 585) states the #130 checklist C7 rule
 over each root through `agent_tools.worktree_mapping`, read-only, using the verdicts of
 `workflow-state migrate --repo-root R`. It exits 0 when every root is green, 1 when one is red,
 75 when none is red and one is human-pending, and 2 on a tool error. Under `--red-pending` any
 root that is not green exits 75.
+
+Issue 710 adds the `forge` class (reasons `claim`, `open_pr`, `declared`), read through
+`agent_tools.worktree_forge`: only a path the ledgers leave `unmapped` is upgraded, and only
+when its branch is named by (D5) the winning claim marker of an open `in-progress` issue, whose
+author association is `OWNER` or `MEMBER` (a released or `end`-ed claim and an untrusted
+author's claim map nothing), (D6) an open pull request headed in the same repository (a fork's
+pull request maps nothing), or (D7) a branch of the declared table (`cutover-130-candidate`
+for `fagenorn/nix-config`) whose declaring issue is still open. The forge reads are GET-only,
+and a root without a GitHub `origin` reads no forge. A forge failure or a malformed payload is
+a tool error, exit 2 (`verify-checks: forge_error:`), never an unmapped reading.
+
+`deprecations-retired [--red-pending] [--watch-adapter A] --repo-root R...` (issue 582) states the
+#130 checklist C11 rule over each root, read-only: no deprecated use reported by
+`resolve-project platform-status` (a), no tracked legacy skills config (b), `bindings.deploy.adapter`
+resolved to `none` (c), and no skill text naming the retired command (d); with `--watch-adapter A`
+it also reads whether the release target A is adopted and available. It exits 0 when every root is
+green, 1 when one is red, 75 when none is red and one is pending, and 2 on a tool error. Under
+`--red-pending` any root that is not green exits 75.
 """
 from __future__ import annotations
 
@@ -56,9 +79,10 @@ from urllib.parse import quote
 
 from agent_tools import forge_markers
 from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
-from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver
+from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver, validate_manifest
 from agent_tools.agent_costs import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
+from agent_tools import worktree_forge
 from agent_tools.worktree_mapping import MappingError, classify_root
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -198,6 +222,34 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
     return (0 if not report["missing"] else 1), report
 
 
+def self_hosted_runner(repo: str, runner: str, labels: Sequence[str]) -> tuple[int, dict]:
+    """Met when `runner` is listed on `repo`, online, and carries `self-hosted` and every label."""
+    required = {"self-hosted", *labels}
+    entries = _counted_pages(forge_markers.api_pages(
+        f"repos/{repo}/actions/runners?per_page=100"), "runners", "runner listing")
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            raise _invalid("runner entry has no name")
+    report: dict = {"repo": repo, "runner": runner, "required": sorted(required), "found": False,
+                    "status": None, "labels": [], "missing": []}
+    found = next((entry for entry in entries if entry["name"] == runner), None)  # type: ignore[index]
+    if found is None:
+        report["missing"] = sorted(required)
+        return 75, report
+    status, listed = found.get("status"), found.get("labels")
+    if not isinstance(status, str):
+        raise _invalid("runner has no status")
+    if (not isinstance(listed, list)
+            or not all(isinstance(label, dict) and isinstance(label.get("name"), str)
+                       for label in listed)):
+        raise _invalid("runner labels are not a list of named objects")
+    names = {label["name"] for label in listed}
+    report.update(found=True, status=status, labels=sorted(names), missing=sorted(required - names))
+    if status != "online":
+        return 75, report
+    return (0 if not report["missing"] else 1), report
+
+
 MANAGED_HOOKS_SUFFIX = "-agent-git-hooks"
 PRE_PUSH_REFUSAL = "lifecycle guard pre-push: unsafe push: refusing to push the default branch main"
 CONTROL_BRANCH = "verify-pre-push-control"
@@ -267,8 +319,11 @@ _OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
 def _manifest_facts(manifest: object) -> tuple[str, list[dict], list[dict]] | None:
-    """The version, deprecations and removals of a readable manifest, else None."""
-    if not isinstance(manifest, dict):
+    """The version, deprecations and removals of a readable manifest, else None.
+
+    Readable means the platform's own manifest validator accepts it, so a
+    manifest missing a required member is unreadable however its records compare."""
+    if not isinstance(manifest, dict) or validate_manifest(manifest):
         return None
     version = manifest.get("platform_version")
     if parse_semver(version) is None:
@@ -600,9 +655,147 @@ def worktree_mapping_check(roots: Sequence[Path], environ: Mapping[str, str], *,
     for root in roots:
         report = _migrate_report(root, environ)
         try:
-            rows.append(classify_root(root, report))
+            rows.append(classify_root(root, report, forge=worktree_forge.forge_facts))
         except MappingError as error:
             raise ToolError("mapping_error", str(error)) from None
+        except forge_markers.ForgeError as error:
+            raise ToolError("forge_error", str(error)) from None
+    verdicts = [row["verdict"] for row in rows]
+    green = all(v == "green" for v in verdicts)
+    if green:
+        code = 0
+    elif red_pending:
+        code = 75
+    elif "red" in verdicts:
+        code = 1
+    else:
+        code = 75
+    return code, {"met": green, "roots": rows}
+
+
+SKILLS_CONFIG = ".claude/skills.config.json"
+RETIRED_COMMAND = "release deploy inspect"
+C11D_DEFAULT_SCOPE = (".", ":!.agents/artifacts")
+# The #130 checklist (.agents/artifacts/evidence/cutover-130-checklist.md, C11) documents the
+# per-root pathspec: "for `fagenorn/nix-config` its pathspec is `home/common/agent-skills/skills`".
+# Keyed on the resolved `project.id`, so the command's own constant, this adapter and the tests
+# never count as users of the retired command.
+C11D_SCOPES = {"fagenorn/nix-config": ("home/common/agent-skills/skills",)}
+C11_TIMEOUT = 120
+C11_MAX_HITS = 20
+
+
+def _run_child(argv: Sequence[str], environ: Mapping[str, str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(list(argv), env=dict(environ), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=C11_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ToolError("tool_error", f"{Path(argv[0]).name} failed: {error}") from None
+
+
+def _c11_git(root: Path, environ: Mapping[str, str], *args: str) -> subprocess.CompletedProcess:
+    git_bin = shutil.which("git", path=environ.get("PATH"))
+    if git_bin is None:
+        raise ToolError("tool_error", "git not found")
+    return _run_child([git_bin, "--no-optional-locks", "-C", str(root), *args], environ)
+
+
+def _as_object(text: str, what: str) -> dict:
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        raise ToolError("tool_error", f"{what} printed non-JSON") from None
+    if not isinstance(parsed, dict):
+        raise ToolError("tool_error", f"{what} did not print an object")
+    return parsed
+
+
+def _deprecated_uses_reading(binary: str, root: Path, environ: Mapping[str, str]) -> dict:
+    done = _run_child([binary, "platform-status", "--repo-root", str(root)], environ)
+    project = _as_object(done.stdout, "resolve-project platform-status").get("project")
+    uses = project.get("deprecated_uses") if isinstance(project, dict) else None
+    if not isinstance(uses, list):
+        raise ToolError("tool_error", "platform-status has no project.deprecated_uses list")
+    return {"exit": done.returncode, "deprecated_uses": uses,
+            "status": "green" if not uses else "red"}
+
+
+def _legacy_config_reading(root: Path, environ: Mapping[str, str]) -> dict:
+    done = _c11_git(root, environ, "ls-files", "--", SKILLS_CONFIG)
+    if done.returncode != 0:
+        raise ToolError("tool_error", f"git ls-files exit {done.returncode}: {done.stderr.strip()}")
+    tracked = done.stdout.split()
+    return {"tracked": tracked, "status": "green" if not tracked else "red"}
+
+
+def _resolve_reading(binary: str, root: Path,
+                     environ: Mapping[str, str]) -> tuple[dict, dict | None]:
+    """Reading `c` and the snapshot it came from (None unless the resolve exited 0 with an object)."""
+    done = _run_child([binary, "resolve", "--repo-root", str(root)], environ)
+    snapshot = None
+    try:
+        parsed = json.loads(done.stdout)
+        if isinstance(parsed, dict):
+            snapshot = parsed
+    except ValueError:
+        pass
+    if done.returncode == 0 and snapshot is None:
+        raise ToolError("tool_error", "resolve-project resolve printed no JSON object")
+    if done.returncode != 0:
+        snapshot = None
+    bindings = snapshot.get("bindings") if snapshot else None
+    deploy = bindings.get("deploy") if isinstance(bindings, dict) else None
+    adapter = deploy.get("adapter") if isinstance(deploy, dict) else None
+    green = done.returncode == 0 and adapter == "none"
+    return ({"exit": done.returncode, "adapter": adapter,
+             "status": "green" if green else "red"}, snapshot)
+
+
+def _retired_command_reading(root: Path, environ: Mapping[str, str],
+                             snapshot: dict | None) -> dict:
+    project = snapshot.get("project") if snapshot else None
+    project_id = project.get("id") if isinstance(project, dict) else None
+    scope = C11D_SCOPES.get(project_id, C11D_DEFAULT_SCOPE) if isinstance(project_id, str) \
+        else C11D_DEFAULT_SCOPE
+    done = _c11_git(root, environ, "grep", "-n", "-F", RETIRED_COMMAND, "--", *scope)
+    if done.returncode not in (0, 1):
+        raise ToolError("tool_error", f"git grep exit {done.returncode}: {done.stderr.strip()}")
+    hits = done.stdout.splitlines()[:C11_MAX_HITS] if done.returncode == 0 else []
+    return {"scope": list(scope), "hits": hits, "status": "green" if done.returncode == 1 else "red"}
+
+
+def _watch_reading(snapshot: dict | None, adapter: str) -> dict:
+    release = snapshot.get("release") if snapshot else None
+    targets = release.get("targets") if isinstance(release, dict) else None
+    adopted = [t for t in targets or [] if isinstance(t, dict) and t.get("adapter") == adapter]
+    if not adopted:
+        return {"adapter": adapter, "status": "pending"}
+    capabilities = snapshot.get("capabilities") if snapshot else None
+    state_row = capabilities.get("release") if isinstance(capabilities, dict) else None
+    row = state_row if isinstance(state_row, dict) else {}
+    state = row.get("state")
+    return {"adapter": adapter, "state": state, "reason_code": row.get("reason_code"),
+            "status": "green" if state == "available" else "red"}
+
+
+def deprecations_retired_check(roots: Sequence[Path], environ: Mapping[str, str], *,
+                               watch_adapter: str | None, red_pending: bool) -> tuple[int, dict]:
+    """The C11 rule over each root. Raises ToolError when a root cannot be judged."""
+    binary = shutil.which("resolve-project", path=environ.get("PATH"))
+    if binary is None:
+        raise ToolError("tool_error", "resolve-project not found")
+    rows = []
+    for root in roots:
+        readings: dict = {"a": _deprecated_uses_reading(binary, root, environ),
+                          "b": _legacy_config_reading(root, environ)}
+        readings["c"], snapshot = _resolve_reading(binary, root, environ)
+        readings["d"] = _retired_command_reading(root, environ, snapshot)
+        readings["watch"] = (_watch_reading(snapshot, watch_adapter)
+                             if watch_adapter is not None else None)
+        statuses = [r["status"] for r in readings.values() if r is not None]
+        verdict = ("red" if "red" in statuses
+                   else "pending" if "pending" in statuses else "green")
+        rows.append({"root": str(root), "readings": readings, "verdict": verdict})
     verdicts = [row["verdict"] for row in rows]
     green = all(v == "green" for v in verdicts)
     if green:
@@ -619,6 +812,12 @@ def worktree_mapping_check(roots: Sequence[Path], environ: Mapping[str, str], *,
 def _repo(value: str) -> str:
     if not REPO.match(value):
         raise argparse.ArgumentTypeError("must be OWNER/NAME")
+    return value
+
+
+def _nonempty(value: str) -> str:
+    if not value:
+        raise argparse.ArgumentTypeError("must not be empty")
     return value
 
 
@@ -650,12 +849,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         cutover.add_argument("--branch", default=CANDIDATE_BRANCH)
         if name == "cutover-manifest":
             cutover.add_argument("--main-ref", default=None)
+    runner = checks.add_parser(
+        "self-hosted-runner",
+        help="issue 680: a named self-hosted runner is registered, online and labelled")
+    runner.add_argument("--repo", type=_repo, required=True)
+    runner.add_argument("--runner", type=_nonempty, required=True)
+    runner.add_argument("--label", type=_nonempty, action="append", required=True)
     mapping = checks.add_parser(
         "worktree-mapping",
-        help="issue 585: every retained worktree has a strict-path ledger mapping (C7)")
+        help="issue 585/710: every retained worktree has a ledger mapping, a live claim, an open PR or a declared branch (C7)")
     mapping.add_argument("--repo-root", type=Path, action="append", required=True)
     mapping.add_argument("--red-pending", action="store_true")
+    retired = checks.add_parser(
+        "deprecations-retired",
+        help="issue 582: the deprecated paths have zero users in every root (C11)")
+    retired.add_argument("--repo-root", type=Path, action="append", required=True)
+    retired.add_argument("--watch-adapter")
+    retired.add_argument("--red-pending", action="store_true")
     args = parser.parse_args(argv)
+    if args.check == "deprecations-retired":
+        try:
+            code, report = deprecations_retired_check(
+                args.repo_root, os.environ, watch_adapter=args.watch_adapter,
+                red_pending=args.red_pending)
+        except ToolError as error:
+            print(f"verify-checks: {error.kind}: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check in ("cutover-manifest", "cutover-preflight", "cutover-bundle"):
         try:
             if args.check == "cutover-manifest":
@@ -691,7 +912,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(report, sort_keys=True))
         return code
     try:
-        code, report = required_checks(args.repo, args.base, args.since)
+        if args.check == "self-hosted-runner":
+            code, report = self_hosted_runner(args.repo, args.runner, args.label)
+        else:
+            code, report = required_checks(args.repo, args.base, args.since)
     except forge_markers.ForgeError as error:
         print(f"verify-checks: forge_error: {error.code}", file=sys.stderr)
         return 2

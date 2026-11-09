@@ -52,6 +52,7 @@ let
     "diff-scope"
     "fallback-audit"
     "forge-claim"
+    "forge-issue"
     "guard-policy"
     "lane-triage"
     "ledger-archive"

@@ -371,6 +371,12 @@ def create_issue(slug: str, title: str, body: str, labels: Sequence[str] = ()) -
     return number
 
 
+def add_blocked_by(slug: str, issue: int, blocker_id: int) -> None:
+    """Record that `issue` is blocked by the issue whose database id is `blocker_id`."""
+    _gh(["api", "--method", "POST", f"repos/{slug}/issues/{issue}/dependencies/blocked_by",
+         "-F", f"issue_id={blocker_id}"])
+
+
 def list_issues(slug: str, label: str, since: datetime) -> list[dict]:
     """Every issue (any state) carrying `label` and updated since `since`, across all pages."""
     pages = api_pages(f"repos/{slug}/issues?labels={quote(label)}&state=all"

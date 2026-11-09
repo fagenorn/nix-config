@@ -740,7 +740,9 @@ class LedgerArchiveTest(MigrationFixtures, unittest.TestCase):
                                             "archived": 0, "skipped": 0})
         self.assertEqual(set(report["ledgers"][0]), {
             "ledger", "run_id", "schema_version", "dialect", "issues", "reason",
-            "disposition", "redeliver", "destination", "verdict", "skip_reason"})
+            "disposition", "redeliver", "destination", "verdict", "skip_reason",
+            "source_verdict"})
+        self.assertEqual({row["source_verdict"] for row in report["ledgers"]}, {"refused"})
         self.assertEqual({row["disposition"] for row in report["ledgers"]}, {None})
         self.assertEqual(self.tree_snapshot(), before)
         self.assertFalse((self.root / ".superpowers" / "archive").exists())
@@ -775,6 +777,47 @@ class LedgerArchiveTest(MigrationFixtures, unittest.TestCase):
         counts, verdicts = self.migrate_counts()
         self.assertEqual(counts["refused"], 0)
         self.assertEqual(verdicts, {"orchestrate-17": "migrate"})
+
+    def labels_with_migrate(self):
+        labels = {handle: {"disposition": "archived", "redeliver": []} for handle in self.refused}
+        labels["orchestrate-17"] = {"disposition": "abandoned", "redeliver": [17]}
+        self.write_labels(labels)
+
+    def test_a_labelled_migrate_ledger_is_listed_only_with_include_migrate(self):
+        self.labels_with_migrate()
+        plain = self.archive("--labels", str(self.labels_path))
+        self.assertNotIn("orchestrate-17", {row["ledger"] for row in plain["ledgers"]})
+        report = self.archive("--labels", str(self.labels_path), "--include-migrate")
+        rows = {row["ledger"]: row for row in report["ledgers"]}
+        self.assertEqual((rows["orchestrate-17"]["verdict"], rows["orchestrate-17"]["source_verdict"]),
+                         ("would_archive", "migrate"))
+        self.assertEqual({rows[h]["source_verdict"] for h in self.refused}, {"refused"})
+
+    def test_include_migrate_archives_the_labelled_migrate_ledger_byte_for_byte(self):
+        self.labels_with_migrate()
+        files = self.ledger_bytes(self.workflows_dir, "orchestrate-17")
+        report = self.archive("--apply", "--include-migrate")
+        self.assertEqual(report["counts"]["archived"], len(self.refused) + 1)
+        self.assertTrue(report["post_check"]["passed"])
+        self.assertFalse((self.workflows_dir / "orchestrate-17").exists())
+        self.assertEqual(self.ledger_bytes(self.archive_dir, "orchestrate-17"), files)
+        record = json.loads((self.archive_dir / "orchestrate-17.archived.json").read_text(encoding="utf-8"))
+        self.assertEqual((record["source_verdict"], record["disposition"], record["redeliver"]),
+                         ("migrate", "abandoned", [17]))
+        counts, verdicts = self.migrate_counts()
+        self.assertEqual((counts["migrate"], verdicts), (0, {}))
+
+    def test_include_migrate_leaves_an_unlabelled_migrate_ledger_alone(self):
+        kept = self.ledger_bytes(self.workflows_dir, "orchestrate-17")
+        report = self.archive("--apply", "--include-migrate")  # default labels: refused only
+        self.assertNotIn("orchestrate-17", {row["ledger"] for row in report["ledgers"]})
+        self.assertEqual(self.ledger_bytes(self.workflows_dir, "orchestrate-17"), kept)
+
+    def test_include_migrate_needs_labels(self):
+        before = self.tree_snapshot()
+        self.archive("--include-migrate", code=2)
+        self.assertEqual(self.shim_calls(), 0)
+        self.assertEqual(self.tree_snapshot(), before)
 
     def test_apply_again_archives_nothing(self):
         self.archive("--apply")

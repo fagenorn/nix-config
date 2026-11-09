@@ -615,19 +615,48 @@ class PlanRulesTest(unittest.TestCase):
     RULE_FINDING = {"verdict": "findings",
                     "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
 
+    REVISED = with_criteria(HUMAN, tasks=[{"n": 1, "title": "revised", "file": "/g/task-1.md", "risk": "standard"}])
+
+    def test_planner_gets_the_reviewer_rubric_and_setup_facts(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        found = re.search(r"const PLAN_RUBRIC = `([^`]*)`", source)
+        self.assertIsNotNone(found, "PLAN_RUBRIC is not a shared constant")
+        rubric = found.group(1)
+        self.assertEqual(source.count(rubric), 1)
+        facts = "setup-facts-token-712"
+        _, calls = run(patch={"setup": {"details": facts}}, replies={"plan-review": self.RULE_FINDING})
+        self.assertIn(rubric, prompt(calls, "plan-review"))
+        for label in ("plan", "plan-revise"):
+            text = prompt(calls, label)
+            self.assertIn(rubric, text, label)
+            self.assertIn(facts, text, label)
+        _, calls = run()
+        self.assertNotIn(facts, prompt(calls, "plan"))
+        self.assertNotIn("undefined", prompt(calls, "plan"))
+        self.assertIn(rubric, prompt(calls, "plan"))
+
+    def keep_stop(self):
+        plan = with_criteria(HUMAN)
+        return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": self.REVISED,
+                            "plan-review": self.RULE_FINDING, "plan-rules-review": self.RULE_FINDING})
+
     def gate(self, plan):
-        return run(replies={"plan": plan, "plan-revise": plan})
+        return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan})
 
     def test_each_rule_violation_stops_at_plan_review_naming_the_rule(self):
         for rule, bad in self.ROWS:
             with self.subTest(rule=rule, ac=bad["id"]):
-                result, calls = self.gate(with_criteria(bad))
+                plan = with_criteria(bad)
+                result, calls = self.gate(plan)
                 self.assertEqual(result["stage"], "plan-review")
                 self.assertIn((rule, bad["id"]), [(r["rule"], r["ac"]) for r in result["rules"]])
-                self.assertIsNone(result["cont"]["plan"])
+                self.assertEqual(result["cont"]["plan"], plan)
                 self.assertFalse(result["cont"]["plan_reviewed"])
+                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
                 self.assertEqual(labels(calls).count("plan-revise"), 1)
+                self.assertEqual(labels(calls).count("plan-rules-revise"), 1)
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-revise"))
+                self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-rules-revise"))
                 self.assertNotIn("impl-1", labels(calls))
 
     def test_pre_merge_only_evidence_stops_at_plan_review_naming_r1(self):
@@ -662,22 +691,162 @@ class PlanRulesTest(unittest.TestCase):
         self.assertEqual(labels(calls).count("plan-rules-review"), 1)
         self.assertIn("impl-1", labels(calls))
 
-    def test_reviewer_rule_violation_surviving_an_unchanged_revision_stops(self):
-        # A violation only a reviewer can see (an approval written as an act run) is re-checked after revision.
-        plan = with_criteria(HUMAN)
-        result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
-                                     "plan-rules-review": self.RULE_FINDING})
+    def test_rules_stop_keeps_the_revised_plan(self):
+        # A violation only a reviewer can see survives the full revise and one rules revise: the revised plan is kept.
+        result, calls = self.keep_stop()
+        names = labels(calls)
         self.assertEqual(result["stage"], "plan-review")
         self.assertEqual([r["rule"] for r in result["rules"]], ["R2"])
-        self.assertIsNone(result["cont"]["plan"])
-        self.assertNotIn("impl-1", labels(calls))
+        self.assertEqual(result["cont"]["plan"], self.REVISED)
+        self.assertFalse(result["cont"]["plan_reviewed"])
+        kept = result["cont"]["plan_findings"]
+        self.assertEqual(kept["rounds"], 1)
+        self.assertEqual([r["rule"] for r in kept["rules"]], ["R2"])
+        self.assertEqual([f["rule"] for f in kept["findings"]], ["R2"])
+        self.assertEqual((names.count("plan-revise"), names.count("plan-rules-revise"), names.count("plan-rules-review")), (1, 1, 2))
+        self.assertLess(names.index("plan-revise"), names.index("plan-rules-revise"))
+        self.assertIn('"rule":"R2"', prompt(calls, "plan-rules-revise"))
         self.assertIn('"rule":"R2"', prompt(calls, "plan-rules-review"))
+        self.assertNotIn("impl-1", names)
+        # A clean rules re-review after the full revise proceeds with no rules revise.
+        plan = with_criteria(HUMAN)
         _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING},
                        patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertNotIn("plan-rules-revise", labels(calls))
         self.assertIn("impl-1", labels(calls))
-        result, _ = run(replies={"plan": plan, "plan-review": self.RULE_FINDING, "plan-rules-review": None})
+        # A silent rules re-reviewer keeps the revised plan, re-targeting the findings the revise was given (D6).
+        result, calls = run(replies={"plan": plan, "plan-review": self.RULE_FINDING, "plan-rules-review": None})
         self.assertEqual(result["stage"], "plan-review")
+        self.assertIsNotNone(result["cont"]["plan"])
+        self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
+        self.assertEqual([r["rule"] for r in result["cont"]["plan_findings"]["rules"]], ["R2"])
+        self.assertNotIn("plan-rules-revise", labels(calls))
+
+    def test_resume_runs_one_rules_revise_with_decisions(self):
+        first, _ = self.keep_stop()
+        decision = "D: keep the act run and name the senses reason."
+        result, calls = run(args=dict(ARGS, cont=first["cont"], decisions=decision))
+        names = labels(calls)
+        for label in ("plan", "plan-revise", "plan-review", "plan-codex"):
+            self.assertNotIn(label, names)
+        self.assertEqual(names.count("owner-answer"), 1)
+        self.assertEqual(names.count("plan-rules-revise"), 1)
+        self.assertLess(names.index("renew-plan"), names.index("owner-answer"))
+        self.assertLess(names.index("owner-answer"), names.index("plan-rules-revise"))
+        self.assertLess(names.index("plan-rules-revise"), names.index("plan-rules-review"))
+        revise = prompt(calls, "plan-rules-revise")
+        self.assertIn(decision, revise)
+        self.assertIn('"rule":"R2"', revise)
+        self.assertIn("impl-1", names)
+        self.assertNotIn("plan_findings", result.get("cont") or {})
+
+    def test_resume_plans_again_when_a_non_rule_finding_was_kept(self):
+        # A silent rules re-reviewer keeps every finding of the full review, including ones no rules revise may clear;
+        # the kept plan has spent its one full revise, so the resume plans again with the owner's answer.
+        plan = with_criteria(HUMAN)
+        interface = {"verdict": "findings", "findings": [{"severity": "important", "summary": "interface mismatch"}]}
+        codex = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "s", "source": "codex"}]}
+        for kept in (interface, codex):
+            with self.subTest(kept=kept["findings"][0]["summary"]):
+                first, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-review": kept, "plan-rules-review": None})
+                self.assertEqual(first["stage"], "plan-review")
+                self.assertIsNotNone(first["cont"]["plan_findings"])
+                result, calls = run(args=dict(ARGS, cont=first["cont"]))
+                names = labels(calls)
+                self.assertNotIn("plan-rules-revise", names)
+                self.assertEqual(names.count("plan"), 1)
+                self.assertEqual(names.count("plan-revise"), 0)
+                self.assertIn("plan-review", names)
+                self.assertEqual(names.count("owner-answer"), 1)
+                self.assertNotIn("plan_findings", result.get("cont") or {})
+
+    def test_a_stuck_plan_with_a_ruleless_finding_stays_within_the_revise_bound(self):
+        # Plan bound: at most one full revise and two rules revises per plan, however many resumes a ruleless finding takes.
+        plan = with_criteria(HUMAN)
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC3 breaks a rule"}]}
+        replies = {"plan": plan, "plan-revise": plan, "plan-rules-revise": plan, "plan-review": self.RULE_FINDING,
+                   "plan-rules-review": [self.RULE_FINDING, bare]}
+        result, calls = run(replies=replies)
+        self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
+        for _ in range(4):
+            result, calls = run(args=dict(ARGS, cont=result["cont"]), replies=replies)
+            names = labels(calls)
+            # Each resume plans a fresh plan: it is that plan's only full revise, and the kept plan is never revised again.
+            self.assertEqual(names.count("plan"), 1)
+            self.assertEqual(names.count("plan-revise"), 1)
+            self.assertLessEqual(names.count("plan-rules-revise"), 2)
+            self.assertLess(names.index("plan"), names.index("plan-revise"))
+            self.assertEqual(result["stage"], "plan-review")
+            self.assertNotIn("impl-1", names)
+
+    def test_a_kept_finding_survives_an_unread_owner_answer(self):
+        plan = with_criteria(HUMAN)
+        interface = {"verdict": "findings", "findings": [{"severity": "important", "summary": "interface mismatch"}]}
+        first, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-review": interface, "plan-rules-review": None})
+        kept = first["cont"]["plan_findings"]
+        self.assertIsNotNone(kept)
+        for answer in (None, {"verdict": "answered", "comment_id": 1, "questions": [], "decisions": " "}):
+            with self.subTest(answer=answer):
+                result, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"owner-answer": answer})
+                self.assertEqual(result["stage"], "owner-answer")
+                self.assertEqual(result["cont"]["plan"], plan)
+                self.assertEqual(result["cont"]["plan_findings"], kept)
+                self.assertNotIn("plan-review", labels(calls))
+                again, calls = run(args=dict(ARGS, cont=result["cont"]), replies={"owner-answer": {
+                    "verdict": "answered", "comment_id": 1, "questions": [], "decisions": "D: pick one"}})
+                self.assertEqual(labels(calls).count("owner-answer"), 1)
+                self.assertIn("plan-review", labels(calls))
+                self.assertIn("D: pick one", prompt(calls, "plan"))
+
+    def test_a_codex_finding_re_reported_without_source_gets_no_rules_only_revise(self):
+        # The rules re-review keeps neither source nor finding identity, so it may re-report a Codex finding under any rule id
+        # or none; a Codex-triggered plan never gets a Claude-only second revise.
+        plan = with_criteria(HUMAN)
+        def report(**kw):
+            return {"verdict": "findings", "findings": [dict({"severity": "important", "summary": "AC1 is not observable"}, **kw)]}
+        for name, codex, rereview in (("ruled", report(rule="R2"), report(rule="R2")),
+                                      ("ruleless", report(), report(rule="R2")),
+                                      ("other-rule", report(rule="R2"), report(rule="R6"))):
+            with self.subTest(codex=name):
+                replies = {"plan": plan, "plan-revise": plan, "plan-codex": {"available": True, **codex},
+                           "plan-rules-review": [rereview, {"verdict": "pass", "findings": []}]}
+                result, calls = run(replies=replies)
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertNotIn("plan-rules-revise", labels(calls))
+                self.assertEqual(labels(calls).count("plan-rules-review"), 1)
+                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
+                self.assertNotIn("impl-1", labels(calls))
+                # The resume does not run a rules-only revise either: the plan is planned again and reviewed in full.
+                again, calls = run(args=dict(ARGS, cont=result["cont"]))
+                self.assertNotIn("plan-rules-revise", labels(calls))
+                self.assertEqual(labels(calls).count("plan"), 1)
+                self.assertIn("plan-review", labels(calls))
+
+    def test_second_rules_failure_on_resume_drops_the_plan(self):
+        first, _ = self.keep_stop()
+        result, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"plan-rules-review": self.RULE_FINDING})
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual(labels(calls).count("plan-rules-revise"), 1)
         self.assertIsNone(result["cont"]["plan"])
+        self.assertFalse(result["cont"]["plan_reviewed"])
+        self.assertNotIn("plan_findings", result["cont"])
+        self.assertNotIn("impl-1", labels(calls))
+        _, calls = run(args=dict(ARGS, cont=result["cont"]))
+        self.assertIn("plan", labels(calls))
+
+    def test_codex_finding_left_gets_no_second_revise(self):
+        plan = with_criteria(HUMAN)
+        echoed = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "s", "source": "codex"}]}
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC3 breaks a rule"}]}
+        for left in (echoed, bare):
+            with self.subTest(left=left["findings"][0]["summary"]):
+                result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
+                                             "plan-rules-review": left})
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertNotIn("plan-rules-revise", labels(calls))
+                self.assertEqual(result["cont"]["plan"], plan)
+                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
+                self.assertNotIn("impl-1", labels(calls))
 
     def test_rules_rereview_finding_without_a_rule_still_blocks(self):
         plan = with_criteria(HUMAN)
@@ -687,6 +856,7 @@ class PlanRulesTest(unittest.TestCase):
         self.assertEqual(result["stage"], "plan-review")
         self.assertEqual([r["summary"] for r in result["rules"]], ["AC3 breaks a rule"])
         self.assertNotIn("impl-1", labels(calls))
+        self.assertNotIn("plan-rules-revise", labels(calls))
         minor = {"verdict": "findings", "findings": [{"severity": "minor", "summary": "style"}]}
         _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
                                 "plan-rules-review": minor}, patch={"close-out": {"issue_state": "OPEN"}})
@@ -802,6 +972,13 @@ class ResumeTest(unittest.TestCase):
     def test_cont_without_plan_plans_again(self):
         _, calls = run(args=dict(ARGS, cont={"setup": self.cont()["setup"], "plan": None, "done": []}))
         self.assertIn("plan", labels(calls))
+        # The cont an old child wrote at a plan-review stop: plan dropped, no plan_findings.
+        old = {"setup": self.cont()["setup"], "plan": None, "plan_reviewed": False, "done": [], "fix_waves": 0}
+        _, calls = run(args=dict(ARGS, cont=old))
+        names = labels(calls)
+        for label in ("owner-answer", "plan", "plan-review", "impl-1"):
+            self.assertIn(label, names)
+        self.assertNotIn("plan-rules-revise", names)
 
 
 class ReviewAndVerifyTest(unittest.TestCase):
@@ -1446,6 +1623,19 @@ class HoldTest(unittest.TestCase):
         self.assertLess(hold.index("git -C /r fetch origin"), hold.index("verify-pending lint --input"))
         self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
         self.assertLess(labels(calls).index("hold"), labels(calls).index("close-out"))
+        self.assertNotIn("gh issue create", hold)
+        split = hold[hold.index("(forge-issue create --repo owner/repo"):]
+        self.assertNotIn("--block", split[:split.index(")")])  # the split issue carries no edge (R7)
+
+    def test_every_ruled_step_files_issues_through_forge_issue(self):
+        """#697 D11: an issue a plan's task declares is filed by forge-issue with native edges."""
+        _, calls = self.ship(EVIDENCE)
+        _, direct = run(args=dict(ARGS, lane="direct"))
+        for found, label in ((calls, "plan"), (calls, "impl-1"), (calls, "hold"), (direct, "direct-impl")):
+            with self.subTest(label=label):
+                text = prompt(found, label)
+                for argv in ("forge-issue create", "--blocked-by <n>", "--blocks <n>", "forge-issue link"):
+                    self.assertIn(argv, text)
 
     def test_passing_verify_run_closes_instead_of_holding(self):
         result, _ = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="CLOSED")
@@ -2139,6 +2329,317 @@ class SourceTest(unittest.TestCase):
         meta = text[:text.index("\n}\n")]
         for arg in ("session_id", "batch_id", "mode?", "lane?"):
             self.assertIn(arg, meta)
+
+
+BR = {"name": "cand", "worktree": "/r/.wt/cand", "base": "origin/dev", "head": "b" * 40,
+      "current": "cand", "toplevel": "/r/.wt/cand", "common_dir": "/r/.git", "clean": True}
+BR_PUSH = "git -C /r/.wt/cand push origin cand"
+NO_FORCE = "Never push with --force, --force-with-lease or a +refspec, and never push dev or main."
+TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug on the candidate"}]}
+REVIEWERS = ("reviewer", "reviewer-lite")
+
+
+def bplan(branches=..., task_branch="cand", **top):
+    """A two-task plan whose second task commits to the declared branch cand (#713)."""
+    second = {"n": 2, "title": "two", "file": "/g/task-2.md", "risk": "standard"}
+    if task_branch is not None:
+        second["branch"] = task_branch
+    return dict(PLAN, branches=[dict(BR)] if branches is ... else branches,
+                tasks=[dict(PLAN["tasks"][0]), second], **top)
+
+
+def at(path, **more):
+    """BR moved to another worktree path whose facts agree with it."""
+    return dict(BR, worktree=path, toplevel=path, **more)
+
+
+class DeclaredBranchTest(unittest.TestCase):
+    """#713 (#685 item 3): a plan may declare extra branches its fix agents edit and push, never forced."""
+
+    def test_declared_branch_grants_non_force_push_to_its_fix_agent(self):
+        result, calls = run(replies={"plan": bplan(), "review-2": TASK_FINDING})
+        self.assertEqual(result["stage"], "done")
+        planner = prompt(calls, "plan")
+        self.assertIn("--git-common-dir", planner)
+        self.assertIn("status --porcelain", planner)
+        cut = labels(calls).index("plan-review") + 1
+        post = calls[cut:]
+        granted = {c["label"] for c in post if c["agentType"] not in REVIEWERS}
+        self.assertLessEqual({"renew-tasks", "impl-1", "impl-2", "fix-2-1", "renew-final-review", "final-codex",
+                              "verify", "pr", "land-lock-1", "checks-1", "merge", "land-unlock", "hold",
+                              "close-out"}, granted)
+        for c in post:
+            with self.subTest(label=c["label"]):
+                if c["agentType"] in REVIEWERS:
+                    self.assertNotIn("push origin", c["prompt"])
+                else:
+                    self.assertIn(BR_PUSH, c["prompt"])
+                    self.assertIn(NO_FORCE, c["prompt"])
+        for c in calls[:cut]:
+            with self.subTest(label=c["label"]):
+                self.assertNotIn(BR_PUSH, c["prompt"])
+        _, plain = run()
+        for call in plain:
+            self.assertNotIn("--force-with-lease", call["prompt"], call["label"])
+        # D7: the merged-PR re-adopt closes out before the resumed plan is validated, and pushes nothing.
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": bplan(), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}, {"n": 2, "commit": "d" * 40}]}
+        merged, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
+        self.assertEqual(merged["stage"], "done")
+        for label in ("hold", "close-out"):
+            self.assertNotIn(BR_PUSH, prompt(calls, label))
+
+    def test_a_declared_branch_task_runs_in_its_worktree(self):
+        one, two, three = "1" * 40, "2" * 40, "3" * 40
+        result, calls = run(replies={"plan": bplan(), "review-2": TASK_FINDING},
+                            patch={"impl-2": {"start_head": one, "commit": two},
+                                   "fix-2-1": {"start_head": two, "commit": three}})
+        self.assertEqual(result["stage"], "done")
+        here = "Task 2 commits to the declared branch cand in the worktree /r/.wt/cand"
+        push = "After each commit, push it alone with git -C /r/.wt/cand push origin cand."
+        for label in ("impl-2", "review-2", "fix-2-1", "rereview-2-1"):
+            with self.subTest(label=label):
+                self.assertIn(here, prompt(calls, label))
+        for label in ("impl-2", "fix-2-1"):
+            self.assertIn(push, prompt(calls, label))
+        for label in ("review-2", "rereview-2-1"):
+            self.assertNotIn("push origin", prompt(calls, label))
+        self.assertIn(f"git -C /r/.wt/cand diff {one}..{two}", prompt(calls, "review-2"))
+        self.assertIn(f"git -C /r/.wt/cand diff {two}..{three}", prompt(calls, "rereview-2-1"))
+        self.assertNotIn("commits to the declared branch", prompt(calls, "impl-1"))
+        self.assertIn("git -C /r/.wt/w-issue-9-x diff b0..c0ffee", prompt(calls, "review-1"))
+        self.assertEqual(result["tasks"][1], {"n": 2, "commit": three, "review_rounds": 1,
+                                              "reviewer": "reviewer", "branch": "cand"})
+        self.assertNotIn("branch", result["tasks"][0])
+
+    def test_declaring_the_integration_branch_is_invalid(self):
+        bad = {
+            "integration": bplan([dict(BR, name="dev", current="dev")], task_branch="dev"),
+            "default": bplan([dict(BR, name="main", current="main")], task_branch="main"),
+            "issue branch": bplan([dict(BR, name="issue-9-x", current="issue-9-x")], task_branch="issue-9-x"),
+            "case alias": bplan([dict(BR, name="DEV", current="DEV")], task_branch="DEV"),
+            "namespaced": bplan([dict(BR, name="refs/heads/main", current="refs/heads/main")], task_branch="refs/heads/main"),
+            "heads alias": bplan([dict(BR, name="heads/cand", current="heads/cand")], task_branch="heads/cand"),
+            "lock": bplan([dict(BR, name="cand.lock", current="cand.lock")], task_branch="cand.lock"),
+            "dot component": bplan([dict(BR, name="a/.b", current="a/.b")], task_branch="a/.b"),
+            "trailing dot": bplan([dict(BR, name="cand.", current="cand.")], task_branch="cand."),
+            "HEAD": bplan([dict(BR, name="HEAD", current="HEAD")], task_branch="HEAD"),
+            "refspec": bplan([dict(BR, name="+cand", current="+cand")], task_branch="+cand"),
+            "shell": bplan([dict(BR, name="cand;x", current="cand;x")], task_branch="cand;x"),
+            "delivery worktree": bplan([at("/r/.wt/w-issue-9-x")]),
+            "delivery worktree, slash": bplan([at("/r/.wt/w-issue-9-x/")]),
+            "shared checkout": bplan([at("/r")]),
+            "shared checkout, slash": bplan([at("/r/")]),
+            "shared checkout, dot": bplan([at("/r/.")]),
+            "shared checkout, case": bplan([at("/R")]),
+            "dot-dot worktree": bplan([at("/r/.wt/../cand")]),
+            "relative worktree": bplan([at("wt/cand")]),
+            "on another branch": bplan([dict(BR, current="issue-9-x")]),
+            "not its own checkout": bplan([dict(BR, worktree="/r/sub", toplevel="/r")]),
+            "dirty": bplan([dict(BR, clean=False)]),
+            "no clean": bplan([{k: v for k, v in BR.items() if k != "clean"}]),
+            "other repository": bplan([dict(BR, common_dir="/other/.git")]),
+            "no common dir": bplan([{k: v for k, v in BR.items() if k != "common_dir"}]),
+            "no toplevel": bplan([{k: v for k, v in BR.items() if k != "toplevel"}]),
+            "no head": bplan([{k: v for k, v in BR.items() if k != "head"}]),
+            "short head": bplan([dict(BR, head="b" * 7)]),
+            "bad base": bplan([dict(BR, base="x..y")]),
+            "shell base": bplan([dict(BR, base="origin/dev;x")]),
+            "twice": bplan([dict(BR), at("/r/.wt/cand2")]),
+            "shared worktree": bplan([dict(BR), dict(BR, name="cand2", current="cand2")]),
+            "undeclared task branch": bplan(task_branch="other"),
+            "task branch not a string": bplan(task_branch=5),
+            "not a list": bplan("cand"),
+            "entry not an object": bplan(["cand"]),
+            "null entry": bplan([None]),
+            "list entry": bplan([[dict(BR)]]),
+        }
+        for name, reply in bad.items():
+            with self.subTest(name=name):
+                result, calls = run(replies={"plan": reply})
+                self.assertEqual((result["stage"], result["step"]), ("plan", "plan"))
+                self.assertTrue(result["branch_problems"])
+                self.assertIsNone(result["cont"]["plan"])
+                self.assertNotIn("plan-review", labels(calls))
+                self.assertNotIn("impl-1", labels(calls))
+        ok, _ = run(replies={"plan": bplan([dict(BR), at("/r/.wt/cand2", name="cand2", current="cand2")])})
+        self.assertEqual(ok["stage"], "done")
+        result, calls = run(replies={"plan-review": TASK_FINDING,
+                                     "plan-revise": bplan([dict(BR, name="dev", current="dev")], task_branch="dev")})
+        self.assertEqual((result["stage"], result["step"]), ("plan", "plan-revise"))
+        self.assertTrue(result["branch_problems"])
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},
+                "plan": bplan([dict(BR, name="dev", current="dev")], task_branch="dev"), "plan_reviewed": True, "done": []}
+        facts = [{"name": "dev", "head": "b" * 40, "current": "dev", "toplevel": "/r/.wt/cand", "common_dir": "/r/.git"}]
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"branch_heads": facts}})
+        self.assertEqual((result["stage"], result["step"]), ("plan", "resume"))
+        self.assertTrue(result["branch_problems"])
+        self.assertNotIn("impl-1", labels(calls))
+
+    def test_a_kept_plan_with_an_invalid_declaration_is_dropped_on_resume_whatever_the_facts_read(self):
+        """The plan check comes before the branch-fact check: honest facts of an invalid declaration must not stop setup."""
+        cont_of = lambda plan: {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},
+                                "plan": plan, "plan_reviewed": True, "done": []}
+        honest = {
+            "delivery worktree": (at("/r/.wt/w-issue-9-x"), {"current": "issue-9-x", "toplevel": "/r/.wt/w-issue-9-x"}),
+            "shared checkout": (at("/r"), {"current": "main", "toplevel": "/r"}),
+            "relative worktree": (at("wt/cand"), {"toplevel": "/r/wt/cand"}),
+            "dot-dot worktree": (at("/r/.wt/../cand"), {"toplevel": "/r/.wt/cand"}),
+            "on another branch": (dict(BR, current="issue-9-x"), {"current": "issue-9-x"}),
+            "not its own checkout": (dict(BR, worktree="/r/sub", toplevel="/r"), {"toplevel": "/r"}),
+            "integration branch": (dict(BR, name="dev", current="dev"), {"name": "dev", "current": "dev"}),
+            "dirty": (dict(BR, clean=False), {}),
+            "unread": (dict(BR, common_dir="/other/.git"), None),
+        }
+        for name, (entry, read) in honest.items():
+            with self.subTest(name=name):
+                tb = entry["name"]
+                cont = cont_of(bplan([entry], task_branch=tb))
+                fact = None if read is None else dict(self.facts("b" * 40, name=tb)[0], **read)
+                patch = {"head": TIP} if fact is None else {"head": TIP, "branch_heads": [fact]}
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": patch})
+                self.assertEqual((result["stage"], result["step"]), ("plan", "resume"))
+                self.assertTrue(result["branch_problems"])
+                self.assertIsNone(result["cont"]["plan"])
+                self.assertNotIn("impl-1", labels(calls))
+
+    def test_a_kept_plan_the_resume_drops_demands_no_branch_facts(self):
+        """A plan-review stop keeps an unreviewed plan; when the resume will drop and replan it, a vanished worktree must not stop setup."""
+        setup = {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"}
+        interface = {"severity": "important", "summary": "interface mismatch"}
+        codex = {"severity": "important", "rule": "R2", "summary": "s", "source": "codex"}
+        rule = {"severity": "important", "rule": "R2", "summary": "s"}
+        for name, kept in (("non-rule finding", interface), ("codex finding", codex)):
+            with self.subTest(name=name):
+                cont = {"setup": setup, "plan": bplan(), "plan_reviewed": False,
+                        "plan_findings": {"rules": [kept], "findings": [kept], "rounds": 0}, "done": []}
+                result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
+                self.assertNotEqual(result["stage"], "setup")
+                self.assertEqual(labels(calls).count("plan"), 1)
+                self.assertNotIn("plan-rules-revise", labels(calls))
+        # A rules-only kept plan is revised in place and still reads its facts first.
+        cont = {"setup": setup, "plan": bplan(), "plan_reviewed": False,
+                "plan_findings": {"rules": [rule], "findings": [rule], "rounds": 0}, "done": []}
+        result, _ = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP}})
+        self.assertEqual(result["stage"], "setup")
+        self.assertEqual(result["missing"], ["branch_heads.cand"])
+
+    RANGE = "git -C /r/.wt/cand diff origin/dev...cand"
+    FINAL_FINDING = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "candidate drops a key"}]}
+
+    def test_final_review_covers_the_declared_branch_range(self):
+        stopped, calls = run(replies={"plan": bplan(), "verify": None},
+                             patch={"impl-1": {"commit": TIP}, "impl-2": {"start_head": "1" * 40, "commit": "d" * 40}})
+        self.assertEqual(stopped["stage"], "verify")
+        for label in ("final-codex", "final-1"):
+            with self.subTest(label=label):
+                self.assertIn(self.RANGE, prompt(calls, label))
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "branches": {"cand": "d" * 40}})
+        chunked = bplan()
+        chunked["tasks"] = tasks(3) + [dict(chunked["tasks"][1], n=4, file="/g/task-4.md")]
+        _, calls = run(replies={"plan": chunked})
+        for label in ("final-1", "final-2", "final-integration"):
+            with self.subTest(label=label):
+                self.assertIn(self.RANGE, prompt(calls, label))
+        _, plain = run()
+        self.assertNotIn("declared branches", prompt(plain, "final-1"))
+        self.assertNotIn(self.RANGE, prompt(plain, "final-codex"))
+
+    def test_fix_wave_records_and_rereviews_the_declared_branch_heads(self):
+        moved = {"start_head": TIP, "commit": TIP, "branch_heads": [{"name": "cand", "head": "e" * 40}]}
+        stopped, calls = run(replies={"plan": bplan(), "final-1": self.FINAL_FINDING, "verify": None},
+                             patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}, "fix-wave": moved})
+        self.assertEqual(stopped["stage"], "verify")
+        self.assertIn("branch_heads", prompt(calls, "fix-wave"))
+        wave = prompt(calls, "fix-wave")
+        self.assertIn("git -C /r/.wt/w-issue-9-x rev-parse HEAD", wave)
+        self.assertIn("never a declared branch's commit", wave)
+        self.assertNotIn("(git rev-parse HEAD before", wave)
+        self.assertIn(f"git -C /r/.wt/cand diff {'d' * 40}..{'e' * 40}", prompt(calls, "fix-wave-review"))
+        self.assertNotIn("push origin", prompt(calls, "fix-wave-review"))
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "branches": {"cand": "e" * 40}})
+        for heads in (None, [], [{"name": "cand", "head": "e" * 7}], [None, "cand"]):
+            with self.subTest(heads=heads):
+                wave = {"start_head": TIP, "commit": TIP} if heads is None else {"start_head": TIP, "commit": TIP, "branch_heads": heads}
+                stopped, _ = run(replies={"plan": bplan(), "final-1": self.FINAL_FINDING},
+                                 patch={"impl-2": {"commit": "d" * 40}, "fix-wave": wave})
+                self.assertEqual(stopped["stage"], "fix-wave")
+                self.assertNotIn("final_reviewed", stopped["cont"])
+
+
+    @staticmethod
+    def facts(head, name="cand", **more):
+        return [dict({"name": name, "head": head, "current": name, "toplevel": "/r/.wt/cand", "common_dir": "/r/.git"}, **more)]
+
+    def test_resume_where_only_the_declared_branch_changed_reviews_again(self):
+        stopped, _ = run(replies={"plan": bplan(), "verify": None},
+                         patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}})
+        cont = stopped["cont"]
+        same, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP, "branch_heads": self.facts("d" * 40)}})
+        self.assertEqual(same["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+        self.assertIn("verify", labels(calls))
+        self.assertIn("cand in /r/.wt/cand", prompt(calls, "setup"))
+        self.assertIn("branch_heads", prompt(calls, "setup"))
+        self.assertIn("branch --show-current", prompt(calls, "setup"))
+        self.assertIn("--git-common-dir", prompt(calls, "setup"))
+        moved, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40)}})
+        self.assertEqual(moved["stage"], "done")
+        self.assertIn("final-1", labels(calls))
+        again, _ = run(args=dict(ARGS, cont=cont), replies={"verify": None},
+                       patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40)}})
+        self.assertEqual(again["cont"]["final_reviewed"], {"head": TIP, "branches": {"cand": "e" * 40}})
+        wrong = {"unread": None, "short head": self.facts("d" * 7),
+                 "on another branch": self.facts("d" * 40, current="issue-9-x"),
+                 "not its own checkout": self.facts("d" * 40, toplevel="/r"),
+                 "another repository": self.facts("d" * 40, common_dir="/other/.git"),
+                 "no common dir": self.facts("d" * 40, common_dir=None),
+                 "another name": self.facts("d" * 40, name="other")}
+        for name, heads in wrong.items():
+            with self.subTest(name=name):
+                patch = {"head": TIP} if heads is None else {"head": TIP, "branch_heads": heads}
+                bad, calls = run(args=dict(ARGS, cont=cont), patch={"setup": patch})
+                self.assertEqual(bad["stage"], "setup")
+                self.assertIn("branch_heads.cand", bad["missing"])
+                self.assertEqual(bad["cont"], cont)
+                self.assertEqual(labels(calls), ["setup"])
+        ready, _ = run(args=dict(ARGS, mode="ready"), replies={"plan": bplan()}, patch={"impl-2": {"commit": "d" * 40}})
+        self.assertEqual(ready["cont"]["verified"]["branches"], {"cand": "d" * 40})
+        _, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA, "branch_heads": self.facts("d" * 40)}})
+        self.assertNotIn("final-1", labels(calls))
+        self.assertNotIn("verify", labels(calls))
+        _, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA, "branch_heads": self.facts("e" * 40)}})
+        self.assertIn("final-1", labels(calls))
+        self.assertIn("verify", labels(calls))
+
+    def test_claim_lost_resume_rereads_the_declared_heads(self):
+        stopped, _ = run(replies={"plan": bplan(), "renew-final-review": {"verdict": "error", "detail": "forge down"}},
+                         patch={"impl-2": {"commit": "d" * 40}})
+        self.assertEqual((stopped["stage"], stopped["at"]), ("claim-lost", "final-review"))
+        cont = stopped["cont"]
+        self.assertTrue(cont["claim_incomplete"])
+        self.assertEqual(cont["plan"]["branches"], [BR])
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"acquire": {"verdict": "already_held", "comment_id": 7}},
+                            patch={"setup": {"branch_heads": self.facts("d" * 40)}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:3], ["setup", "acquire", "worktree"])
+        self.assertIn("branch_heads", prompt(calls, "setup"))
+        self.assertIn(self.RANGE, prompt(calls, "final-1"))
+        unread, calls = run(args=dict(ARGS, cont=cont))
+        self.assertEqual(unread["stage"], "setup")
+        self.assertIn("branch_heads.cand", unread["missing"])
+        self.assertEqual(unread["cont"], cont)
+
+    def test_a_branch_named_like_an_object_key_is_tracked_on_resume(self):
+        odd = dict(BR, name="constructor", current="constructor")
+        stopped, _ = run(replies={"plan": bplan([odd], task_branch="constructor"), "verify": None},
+                         patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}})
+        self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "branches": {"constructor": "d" * 40}})
+        again, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"verify": None},
+                           patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40, name="constructor")}})
+        self.assertIn("final-1", labels(calls))
+        self.assertEqual(again["cont"]["final_reviewed"], {"head": TIP, "branches": {"constructor": "e" * 40}})
 
 
 if __name__ == "__main__":

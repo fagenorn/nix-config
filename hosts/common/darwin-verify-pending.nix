@@ -29,6 +29,15 @@ in
     };
   };
 
+  # Issue 705: skip nix-darwin's user-agent reload when the gui domain is absent (nobody
+  # logged in at the console), with one log line, instead of aborting the switch. The
+  # guard function is defined at the start of the `userLaunchd` script and removed at its
+  # end; see the guard file.
+  system.activationScripts.userLaunchd.text = lib.mkMerge [
+    (lib.mkBefore (builtins.readFile ./darwin-user-agent-reload-guard.sh))
+    (lib.mkAfter "unset -f launchctl\n")
+  ];
+
   # Last postActivation entry (home-manager's activation runs earlier in the same
   # script). The `launchctl asuser ... sudo -u ... --set-home` form reaches the
   # user's GUI domain as home-manager does; `|| true` keeps the `set -e` activation

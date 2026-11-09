@@ -3,8 +3,8 @@
   "kind": "agent-gate-trials",
   "identity": {
     "bound": {
-      "commit": {"base": "f70a164245b486dd068a3b9455a6597533425ecf",
-                 "candidate": "6b98674402994180a2a1f1852cf71f18fd1aa0ca"},
+      "commit": {"base": "304aef7f742a9413348428f3007d75e2ee8e8deb",
+                 "candidate": "720c67e538670562ed9a096716ee978dc07377ee"},
       "project_contract_version": {"base": "1", "candidate": "2"},
       "shared_platform_version": {"base": "1.2.0", "candidate": "2.0.0"}
     },

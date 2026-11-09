@@ -87,6 +87,40 @@ def watched_merge_profile(**config: object) -> dict:
     return _watch(merge_profile(), config)
 
 
+RAILWAY_CONFIG = {"project": "nodo-prod", "environment": "production",
+                  "services": ["api", "admin"]}
+
+
+def _railway(profile: dict) -> dict:
+    """`profile` plus a railway-deploy activation unit `deploy` on alias `railway` (issue 582)."""
+    profile["requirements"]["adapters"]["railway"] = {"min_inclusive": "1.0.0",
+                                                      "max_exclusive": "2.0.0"}
+    bindings = profile["bindings"]
+    bindings["adapters"]["railway"] = {"adapter": "railway-deploy"}
+    bindings["targets"]["railway-site"] = {"adapter": "railway", "kind": "github_repository",
+                                           "repository": "fagenorn/nix-config", "branch": "main"}
+    bindings["credentials"]["railway-cli"] = {"adapter": "railway", "class": "railway_cli"}
+    profile["activation"] = {"units": [{
+        "id": "deploy", "mode": "publication_triggered", "adapter": "railway",
+        "operation": "deploy", "target": "railway-site", "principal": "maintainer",
+        "credential": "railway-cli", "effect": "reversible_no_incremental_spend",
+        "config_schema_version": 1, "config": copy.deepcopy(RAILWAY_CONFIG), "deps": [],
+        "observation_deadline_ms": 600000}]}
+    profile["recovery"]["units"]["deploy"] = {"posture": "supersedable_only", "anchor": None,
+                                              "compatibility": None, "edges": []}
+    return profile
+
+
+def railway_watched_profile() -> dict:
+    """The forge profile whose deploy is a railway-deploy watch (issue 582)."""
+    return _railway(forge_profile())
+
+
+def railway_watched_merge_profile() -> dict:
+    """The JarBird shape (`pr_merge` -> `tag` -> `github-release`), then the Railway watch."""
+    return _railway(merge_profile())
+
+
 def publication_free_profile() -> dict:
     return _load("publication-free-profile.json")
 

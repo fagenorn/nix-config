@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify check for issue 582: the #130 checklist C11 rule (deprecated paths have zero
+# users) over each --repo-root, optionally with a release watch adapter adopted. Read-only.
+# verify-pending runs it from the repository root at the commit the block names;
+# ~/.agents/bin is not on the runner's PATH.
+PATH="$HOME/.agents/bin:$PATH" PYTHONPATH=python exec python3 -m agent_tools.verify_checks deprecations-retired "$@"

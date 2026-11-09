@@ -182,6 +182,27 @@ class MigrateTest(AdoptTestCase):
         self.assertEqual((root / ".agents/project.json").read_bytes(), contract_before)
         self.assertEqual(git(root, "status", "--porcelain"), "")
 
+    def test_a_target_that_is_a_symlink_inside_the_checkout_refuses_and_keeps_the_link(self):
+        # The projection writer would replace the link with a regular file, and a
+        # restore of the followed bytes alone would leave that file behind.
+        root = make_project_root(source_contract())
+        (root / "elsewhere.md").write_text("linked\n", encoding="utf-8")
+        (root / "AGENTS.md").unlink()
+        (root / "AGENTS.md").symlink_to("elsewhere.md")
+        commit_all(root)
+        contract_before = (root / ".agents/project.json").read_bytes()
+        code, out, _ = run("migrate", "--migration", MIGRATION,
+                           "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 2)
+        error = json.loads(out)["error"]
+        self.assertEqual((error["repair_id"], error["violations"][0]["pointer"]),
+                         ("adopt.migration.symlink_target", "/AGENTS.md"))
+        self.assertTrue((root / "AGENTS.md").is_symlink())
+        self.assertEqual(os.readlink(root / "AGENTS.md"), "elsewhere.md")
+        self.assertEqual((root / "elsewhere.md").read_text(encoding="utf-8"), "linked\n")
+        self.assertEqual((root / ".agents/project.json").read_bytes(), contract_before)
+        self.assertEqual(git(root, "status", "--porcelain"), "")
+
     def test_a_target_through_a_symlink_out_of_the_checkout_refuses_and_writes_nothing(self):
         contract = source_contract()
         for entry in contract["projections"]:

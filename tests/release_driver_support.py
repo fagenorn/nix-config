@@ -4,7 +4,8 @@ import os
 import tempfile
 from pathlib import Path
 
-from agent_tools import actions_health_adapter, forge_adapter, release_driver, release_profile
+from agent_tools import (actions_health_adapter, forge_adapter, railway_deploy_adapter,
+                         release_driver, release_profile)
 from . import release_test_support as support
 from .forge_world import CANONICAL, ROWS
 
@@ -189,6 +190,46 @@ class ScriptedWatch:
                 "observed_subject": {"commit": None,
                                      "run": None if outcome == "absent" else WATCH_RUN},
                 "references": references, "observed_at": 1, "facts": {}}
+
+    def invoke(self, request):
+        raise AssertionError("a publication_triggered unit is never invoked")
+
+
+RAILWAY_REFERENCE = "railway:nodo-prod/production/api/d1"
+
+
+class ScriptedRailway:
+    """`railway-deploy` for registry injection (issue 582): the real descriptor and scripted
+    answers in the real adapter's per-outcome shape, with the contract of `ScriptedWatch`.
+    Every non-`absent` effect names one deployment reference; `invoke` is a defect, because the
+    driver never invokes a publication_triggered unit."""
+
+    def __init__(self, *effects, running="satisfied"):
+        self.effects = list(effects) or [("satisfied", "deployed")]
+        self.running = running
+        self.requests = []
+        self.environments = []
+        self.crash_next_inspect = False
+
+    def describe(self):
+        return railway_deploy_adapter.describe()
+
+    def inspect(self, request):
+        self.requests.append(copy.deepcopy(request))
+        self.environments.append(dict(os.environ))
+        if self.crash_next_inspect:
+            self.crash_next_inspect = False
+            raise Crash("deploy inspect")
+        if request["kind"] == "predicate":
+            reason = "running" if self.running == "satisfied" else "subject_mismatch"
+            return {"outcome": self.running, "reason": reason, "references": [RAILWAY_REFERENCE],
+                    "observed_at": 1}
+        outcome, reason = self.effects.pop(0) if len(self.effects) > 1 else self.effects[0]
+        return {"outcome": outcome, "reason": reason,
+                "observed_subject": {"commit": None,
+                                     "deployments": {"api": None if outcome == "absent" else "d1"}},
+                "references": [] if outcome == "absent" else [RAILWAY_REFERENCE],
+                "observed_at": 1, "facts": {}}
 
     def invoke(self, request):
         raise AssertionError("a publication_triggered unit is never invoked")

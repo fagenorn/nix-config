@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import agent_gate_bundle, forge_markers, verify_checks
-from agent_tools.verify_checks import required_checks
+from agent_tools.verify_checks import required_checks, self_hosted_runner
 
 from .pre_push_world import PrePushWorld
 from .test_agent_gate_bundle import IDENTITY, context, flat, stratum  # the emitted-bundle builders
@@ -347,6 +347,126 @@ class ManagedPrePushHookTest(unittest.TestCase):
                          "100755")
 
 
+FAKE_RESOLVE = """#!/bin/sh
+# fake resolve-project: answers from $FAKE_RESOLVE_DIR/<subcommand>.json and .exit
+dir="$FAKE_RESOLVE_DIR"
+cat "$dir/$1.json"
+exit "$(cat "$dir/$1.exit" 2>/dev/null || echo 0)"
+"""
+
+
+class DeprecationsRetiredTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        self.root, self.answers, bin_dir = base / "root", base / "answers", base / "bin"
+        for path in (self.root, self.answers, bin_dir):
+            path.mkdir()
+        fake = bin_dir / "resolve-project"
+        fake.write_text(FAKE_RESOLVE)
+        fake.chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "FAKE_RESOLVE_DIR": str(self.answers)}
+        git = ["git", "-C", str(self.root)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        (self.root / "README.md").write_text("nodo\n")
+        subprocess.run([*git, "add", "README.md"], check=True)
+        subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                        "commit.gpgsign=false", "commit", "-qm", "init"], check=True)
+        self.answer(deprecated=[], adapter="none")
+
+    def answer(self, *, deprecated, adapter, targets=(), state="unsupported", resolve_exit=0,
+               project_id="elevenyellow/nodocom"):
+        (self.answers / "platform-status.json").write_text(
+            json.dumps({"project": {"deprecated_uses": deprecated}}))
+        (self.answers / "resolve.json").write_text(json.dumps({
+            "project": {"id": project_id, "root": str(self.root)},
+            "bindings": {"deploy": {"adapter": adapter}},
+            "capabilities": {"release": {"state": state, "reason_code": None, "repair_id": None}},
+            "release": {"targets": [{"adapter": a} for a in targets]}}))
+        (self.answers / "resolve.exit").write_text(str(resolve_exit))
+
+    def check(self, **kwargs):
+        options = {"watch_adapter": None, "red_pending": False, **kwargs}
+        return verify_checks.deprecations_retired_check([self.root], self.env, **options)
+
+    def commit(self, path, text):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        subprocess.run(["git", "-C", str(self.root), "add", path], check=True)
+
+    def test_a_clean_root_is_green(self):
+        code, report = self.check()
+        self.assertEqual((code, report["met"], report["roots"][0]["verdict"]), (0, True, "green"))
+
+    def test_each_reading_turns_the_root_red(self):
+        cases = (
+            lambda: self.answer(deprecated=["legacy-skills-config"], adapter="none"),
+            lambda: self.commit(".claude/skills.config.json", "{}"),
+            lambda: self.answer(deprecated=[], adapter="railway"),
+            lambda: self.answer(deprecated=[], adapter="none", resolve_exit=2),
+            lambda: self.commit("docs/deploy.md", "run release deploy inspect --commit x\n"),
+        )
+        for index, make_red in enumerate(cases):
+            with self.subTest(case=index):
+                self.setUp()
+                make_red()
+                code, report = self.check()
+                self.assertEqual((code, report["roots"][0]["verdict"]), (1, "red"))
+                self.assertEqual(self.check(red_pending=True)[0], 75)
+
+    def test_a_hit_under_the_artifact_directory_is_not_a_user(self):
+        self.commit(".agents/artifacts/evidence/old.md", "release deploy inspect\n")
+        self.assertEqual(self.check()[0], 0)
+
+    def test_the_nix_config_root_is_scoped_to_its_skills(self):
+        self.answer(deprecated=[], adapter="none", project_id="fagenorn/nix-config")
+        self.commit("python/agent_tools/verify_checks.py", 'RETIRED_COMMAND = "release deploy inspect"\n')
+        self.commit("tests/test_verify_checks.py", "release deploy inspect\n")
+        code, report = self.check()
+        self.assertEqual((code, report["roots"][0]["verdict"]), (0, "green"))
+        self.assertEqual(report["roots"][0]["readings"]["d"]["scope"],
+                         ["home/common/agent-skills/skills"])
+        self.commit("home/common/agent-skills/skills/ship-release/SKILL.md",
+                    "run release deploy inspect\n")
+        self.assertEqual(self.check()[0], 1)
+
+    def test_another_root_greps_the_whole_tree(self):
+        self.commit("python/tool.py", "release deploy inspect\n")
+        code, report = self.check()
+        self.assertEqual((code, report["roots"][0]["readings"]["d"]["scope"]),
+                         (1, [".", ":!.agents/artifacts"]))
+
+    def test_the_watch_adapter_is_pending_until_adopted_and_available(self):
+        self.assertEqual(self.check(watch_adapter="railway-deploy")[0], 75)
+        self.answer(deprecated=[], adapter="none", targets=("github-forge", "railway-deploy"),
+                    state="blocked")
+        code, report = self.check(watch_adapter="railway-deploy")
+        self.assertEqual((code, report["roots"][0]["verdict"]), (1, "red"))
+        self.answer(deprecated=[], adapter="none", targets=("github-forge", "railway-deploy"),
+                    state="available")
+        self.assertEqual(self.check(watch_adapter="railway-deploy")[0], 0)
+
+    def test_an_unreadable_platform_status_is_a_tool_error(self):
+        (self.answers / "platform-status.json").write_text("not json")
+        with self.assertRaises(verify_checks.ToolError):
+            self.check()
+
+
+class DeprecationsRetiredWrapperTest(unittest.TestCase):
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/deprecations-retired"), "100755")
+
+    def test_the_command_line_exits_two_on_a_tool_error(self):
+        with tempfile.TemporaryDirectory() as home:
+            done = run_from_root([str(ROOT / CHECKS / "deprecations-retired"),
+                                  "--repo-root", home], {"HOME": home, "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin"})
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("verify-checks: tool_error:", done.stderr)
+
+
 def fleet(version, rows):
     return {"platform": {"platform_version": version}, "fleet": rows}
 
@@ -362,8 +482,12 @@ def entry(i):
 
 
 def manifests(main_ids=(1, 2), removal_ids=(1, 2), main="1.2.0", cand="2.0.0"):
-    return ({"platform_version": main, "deprecations": [entry(i) for i in main_ids], "removals": []},
-            {"platform_version": cand, "deprecations": [], "removals": [entry(i) for i in removal_ids]})
+    shape = {"schema_version": 1, "project_schema_versions": [1, 2],
+             "resolved_schema_version": 1, "migrations": []}
+    return ({**shape, "platform_version": main,
+             "deprecations": [entry(i) for i in main_ids], "removals": []},
+            {**shape, "platform_version": cand,
+             "deprecations": [], "removals": [entry(i) for i in removal_ids]})
 
 
 GREEN_MANIFEST = {"verdict": "green"}
@@ -387,10 +511,12 @@ class ManifestVerdictTest(unittest.TestCase):
         self.assertEqual(verify_checks.manifest_verdict(main, cand)[1]["undeclared"], ["d1"])
 
     def test_every_one_of_the_six_members_must_be_equal(self):
-        for member in ("id", "kind", "subject", "since", "successor", "migration"):
+        valid_change = {"id": "changed", "kind": "project_file", "subject": "changed",
+                        "since": "1.9.0", "successor": "changed", "migration": "changed"}
+        for member, changed in valid_change.items():
             with self.subTest(member=member):
                 main, cand = manifests(main_ids=(1,), removal_ids=(1,))
-                cand["removals"][0][member] = "changed"
+                cand["removals"][0][member] = changed
                 code, report = verify_checks.manifest_verdict(main, cand)
                 self.assertEqual(code, 75)
                 self.assertEqual(len(report["undeclared"]), 1)
@@ -413,6 +539,20 @@ class ManifestVerdictTest(unittest.TestCase):
                     pair = list(manifests())
                     del pair[side][member]
                     self.assertEqual(verify_checks.manifest_verdict(*pair)[0], 2)
+
+
+    def test_a_manifest_the_validator_rejects_is_usage_even_when_the_records_match(self):
+        for member in ("project_schema_versions", "resolved_schema_version",
+                       "schema_version", "migrations"):
+            for side in (0, 1):
+                with self.subTest(member=member, side=side):
+                    pair = list(manifests())
+                    del pair[side][member]
+                    code, report = verify_checks.manifest_verdict(*pair)
+                    self.assertEqual((code, report["verdict"]), (2, "unreadable"))
+        pair = list(manifests())
+        pair[1]["removals"][0]["kind"] = "not-a-kind"
+        self.assertEqual(verify_checks.manifest_verdict(*pair)[0], 2)
 
 
 class PreflightVerdictTest(unittest.TestCase):
@@ -797,3 +937,104 @@ class CutoverBundleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+RUNNERS = "repos/elevenyellow/jarbird/actions/runners?per_page=100"
+WANTED = ("nix", "eleven-m5", "jarbird")
+
+
+def runner_entry(name="eleven-m5-jarbird", status="online",
+                 labels=("self-hosted", "macOS", "ARM64", "nix", "eleven-m5", "jarbird")):
+    return {"id": 1, "name": name, "status": status, "busy": False,
+            "labels": [{"id": i, "name": label, "type": "custom"} for i, label in enumerate(labels)]}
+
+
+def judge_runner(entries, total=None):
+    get, pages = forge({}, {RUNNERS: [{"total_count": len(entries) if total is None else total,
+                                       "runners": list(entries)}]})
+    with get, pages:
+        return self_hosted_runner("elevenyellow/jarbird", "eleven-m5-jarbird", WANTED)
+
+
+class SelfHostedRunnerTest(unittest.TestCase):
+    def test_an_online_runner_with_every_label_is_met(self):
+        code, report = judge_runner([runner_entry(name="other"), runner_entry()])
+        self.assertEqual(code, 0)
+        self.assertEqual((report["found"], report["status"], report["missing"]), (True, "online", []))
+        self.assertEqual(report["required"], ["eleven-m5", "jarbird", "nix", "self-hosted"])
+
+    def test_a_missing_label_is_not_met(self):
+        code, report = judge_runner([runner_entry(labels=("self-hosted", "nix", "eleven-m5"))])
+        self.assertEqual((code, report["missing"]), (1, ["jarbird"]))
+
+    def test_an_offline_runner_is_not_yet(self):
+        self.assertEqual(judge_runner([runner_entry(status="offline")])[0], 75)
+
+    def test_an_unlisted_runner_is_not_yet(self):
+        code, report = judge_runner([runner_entry(name="eleven-m5-arcwave")])
+        self.assertEqual((code, report["found"], report["status"]), (75, False, None))
+
+    def test_a_truncated_listing_is_refused(self):
+        with self.assertRaises(forge_markers.ForgeError):
+            judge_runner([runner_entry()], total=2)
+
+    def test_malformed_entries_are_refused(self):
+        bad_labels = runner_entry()
+        bad_labels["labels"] = ["jarbird"]
+        no_status = runner_entry()
+        del no_status["status"]
+        for entries in (["eleven-m5-jarbird"], [{"status": "online"}], [bad_labels], [no_status]):
+            with self.subTest(entries=entries):
+                with self.assertRaises(forge_markers.ForgeError):
+                    judge_runner(entries)
+
+
+class SelfHostedRunnerCommandTest(unittest.TestCase):
+    ARGS = ["--repo", "elevenyellow/jarbird", "--runner", "eleven-m5-jarbird",
+            "--label", "nix", "--label", "eleven-m5", "--label", "jarbird"]
+
+    def test_wrapper_maps_a_forge_error_to_exit_2(self):
+        # PATH holds only python3, so the wrapper finds its interpreter and gh is missing.
+        with tempfile.TemporaryDirectory() as tmp:
+            os.symlink(sys.executable, Path(tmp) / "python3")
+            done = run_from_root(["/bin/sh", str(ROOT / CHECKS / "self-hosted-runner"), *self.ARGS],
+                                 {"PATH": tmp})
+        self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+        self.assertIn("forge_error", done.stderr)
+
+    def test_a_malformed_listing_exits_2_through_main(self):
+        get, pages = forge({}, {RUNNERS: [{"total_count": 1, "runners": [{"status": "online"}]}]})
+        with get, pages, mock.patch("sys.stdout") as out, mock.patch("sys.stderr") as err:
+            code = verify_checks.main(["self-hosted-runner", *self.ARGS])
+        self.assertEqual(code, 2)
+        out.write.assert_not_called()
+        self.assertIn("forge_error: payload_invalid", "".join(c.args[0] for c in err.write.call_args_list))
+
+    def test_bad_arguments_never_reach_the_forge(self):
+        cases = (["--repo", "jarbird", *self.ARGS[2:]],
+                 [*self.ARGS[:2], "--runner", "", *self.ARGS[4:]],
+                 [*self.ARGS[:4], "--label", ""],
+                 self.ARGS[:4])
+        for argv in cases:
+            with self.subTest(argv=argv):
+                with mock.patch.object(verify_checks, "self_hosted_runner",
+                                       side_effect=AssertionError("reached the forge")):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(["self-hosted-runner", *argv])
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_main_prints_the_report_and_returns_the_code(self):
+        with mock.patch.object(verify_checks, "self_hosted_runner", return_value=(75, {"found": False})) as called:
+            with mock.patch("sys.stdout") as out:
+                code = verify_checks.main(["self-hosted-runner", *self.ARGS])
+        self.assertEqual(code, 75)
+        called.assert_called_once_with("elevenyellow/jarbird", "eleven-m5-jarbird", ["nix", "eleven-m5", "jarbird"])
+        out.write.assert_any_call('{"found": false}')
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/self-hosted-runner"), "100755")
+
+    def test_the_readme_documents_the_check(self):
+        readme = (ROOT / "python" / "README.md").read_text(encoding="utf-8")
+        for needle in ("self-hosted-runner --repo R --runner N --label L", "verify_checks.self_hosted_runner"):
+            self.assertIn(needle, readme)
