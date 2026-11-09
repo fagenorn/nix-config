@@ -920,8 +920,9 @@ const VERIFY = {
   properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' } }, required: ['id', 'status', 'summary'] } } },
   required: ['head', 'clean', 'results'],
 }
-const verifyBody = `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(setup.verification)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. Do not change any file.
+const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. Do not change any file.
 ${RULES}`
+const verifyBody = verifyBodyFor(setup.verification)
 const verifyPrompt = `${CTX}\n${verifyBody}`
 // The first verification also renews the claim (#716); the reruns do not.
 const verifyFirst = `${CTX}\n${RENEW_FIRST}\n${verifyBody}`
@@ -937,6 +938,32 @@ const verifyProblems = v => {
   if (!v.clean) out.push({ id: '?', summary: 'the worktree has uncommitted changes, so the verified tree is not the pushed head' })
   return out
 }
+// #741: `git diff -b --ignore-blank-lines` and the extension allow-list are a prefilter only. Carrying passes
+// forward also needs the reviewer's attestation, because whitespace inside a literal can change behaviour.
+const WS_INSENSITIVE = /\.(c|cc|cpp|cxx|h|hh|hpp|cs|css|scss|less|dart|go|java|js|jsx|mjs|cjs|ts|tsx|mts|cts|json|kt|kts|rs|scala|swift|php|html|xml|vue|svelte|sql|proto)$/i
+const WS_CHECK = { type: 'object', properties: { whitespace_exit: { type: 'integer' }, changed_paths: STRS }, required: ['whitespace_exit', 'changed_paths'] }
+const WS_REVIEW = { ...FINDINGS, properties: { ...FINDINGS.properties, whitespace_insignificant: { type: 'boolean' }, whitespace_evidence: { type: 'string' } }, required: [...FINDINGS.required, 'whitespace_insignificant', 'whitespace_evidence'] }
+const wsOnly = c => !!c && c.whitespace_exit === 0 && Array.isArray(c.changed_paths) && c.changed_paths.length > 0 && c.changed_paths.every(p => typeof p === 'string' && WS_INSENSITIVE.test(p.trim()))
+const attested = fr => !!fr && fr.whitespace_insignificant === true && typeof fr.whitespace_evidence === 'string' && fr.whitespace_evidence.trim().length > 0
+const rerunIds = (v, fix) => {
+  if (!v || !v.clean || !sameSha(v.head, fix.start_head)) return null
+  if (!verifyProblems(v).every(p => p.status === 'fail' && VERIFY_IDS.includes(p.id))) return null
+  const statusOf = id => { const rs = v.results.filter(r => r.id === id); return rs.length === 1 ? rs[0].status : null }
+  if (!VERIFY_IDS.some(id => statusOf(id) === 'pass')) return null
+  return VERIFY_IDS.filter(id => statusOf(id) !== 'pass')
+}
+const carry = (prev, next, rerun) => {
+  const carried = prev.results.filter(r => r.status === 'pass' && !rerun.includes(r.id) && !next.results.some(n => n.id === r.id)).map(r => ({ ...r, carried_from: r.carried_from || prev.head }))
+  return { ...next, results: [...next.results, ...carried] }
+}
+const wsCheckPrompt = f => `${CTX}
+Report two facts about the verification fix ${f.start_head}..${f.commit} and change nothing. Run, alone:
+git -C ${W} diff -b --ignore-blank-lines --quiet ${f.start_head} ${f.commit}
+Return its exit status as whitespace_exit (0 means the fix changes only whitespace amounts and blank lines). Then run, alone:
+git -C ${W} diff --no-renames --name-only ${f.start_head} ${f.commit}
+Return its output lines as changed_paths. Run nothing else.
+${RULES}`
+const wsAsk = ws => ` The fix changes only whitespace amounts and blank lines, in ${ws.changed_paths.map(p => p.trim()).join(', ')}. Also judge whether each of its whitespace changes is insignificant: outside every string, template, character and regex literal, heredoc and raw block, and in no construct where whitespace changes behaviour or output. Return whitespace_insignificant true only when you read every hunk and that holds, with whitespace_evidence naming each changed path and why it holds there; otherwise return false, with whitespace_evidence naming the hunk where the whitespace matters.`
 let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results } : null
 if (!VERIFY_CACHED) {
 verify = await call(verifyFirst, { label: 'verify', phase: 'Verify', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(VERIFY) })
@@ -950,9 +977,15 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
   const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
   if (!implDone(fix)) return stop('verify-fix', { verify, fix })
-  const fr = await call(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; implementer notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
+  const pre = rerunIds(verify, fix)
+  const ws = pre ? await call(wsCheckPrompt(fix), { label: `ws-check-${vRounds}`, phase: 'Verify', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: WS_CHECK }) : null
+  const asked = pre && wsOnly(ws) ? pre : null
+  const fr = await call(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; implementer notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.${asked ? wsAsk(ws) : ''}`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: asked ? WS_REVIEW : FINDINGS })
   if (!fr || findingsOf(fr).length) return stop('verify-fix-review', { review: fr })
-  verify = await call(verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: VERIFY })
+  const rerun = asked && attested(fr) ? asked : null
+  const next = await call(rerun ? `${CTX}\nA whitespace-only fix followed the verification at ${verify.head}; the declared ids not listed below passed there and are carried forward, so run only the listed ones.\n${verifyBodyFor(setup.verification.filter(e => rerun.includes(e.id)))}` : verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: VERIFY })
+  if (rerun && next && !sameSha(next.head, fix.commit)) return stop('verify', { verify: next, problems: [{ id: '?', summary: `the narrowed verification ran at ${next.head}, not at the whitespace-only fix ${fix.commit}, so no result was carried` }] })
+  verify = rerun && next && Array.isArray(next.results) ? carry(verify, next, rerun) : next
 }
 }
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })

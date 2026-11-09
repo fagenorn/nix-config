@@ -1311,6 +1311,160 @@ class ReviewAndVerifyTest(unittest.TestCase):
                          ["verify-fix-1", "verify-fix-review-1", "verify-fix-2", "verify-fix-review-2"])
 
 
+TWO_IDS = [{"id": "lint", "argv": ["make", "lint"], "cwd": "."}, {"id": "test", "argv": ["make", "test"], "cwd": "."}]
+FULL = json.dumps(TWO_IDS, separators=(",", ":"))
+LINT_ONLY = json.dumps([TWO_IDS[0]], separators=(",", ":"))
+FIXED = "c" * 40
+LINT_RED = {"head": SHA, "clean": True, "results": [{"id": "lint", "status": "fail", "summary": "3 whitespace errors"},
+                                                   {"id": "test", "status": "pass", "summary": "ok"}]}
+LINT_GREEN = {"head": FIXED, "clean": True, "results": [{"id": "lint", "status": "pass", "summary": "ok"}]}
+BOTH_GREEN = {"head": FIXED, "clean": True, "results": [{"id": "lint", "status": "pass", "summary": "ok"},
+                                                       {"id": "test", "status": "pass", "summary": "ok"}]}
+WS_ONLY = {"whitespace_exit": 0, "changed_paths": ["src/a.test.ts"]}
+ATTESTED = {"verdict": "pass", "findings": [], "whitespace_insignificant": True,
+            "whitespace_evidence": "src/a.test.ts: trailing spaces and blank lines between statements"}
+WS_SCENARIO = {"args": dict(ARGS, mode="ready"),
+               "replies": {"verify": LINT_RED, "ws-check-1": WS_ONLY, "verify-fix-review-1": ATTESTED,
+                           "verify-2": LINT_GREEN},
+               "patch": {"setup": {"verification": TWO_IDS}, "verify-fix-1": {"start_head": SHA, "commit": FIXED}}}
+
+
+class WhitespaceCarryForwardTest(unittest.TestCase):
+    """#741: after a whitespace-only verify fix whose whitespace the reviewer attests insignificant, only the ids
+    that did not pass re-run and the passes carry forward."""
+
+    @staticmethod
+    def scenario(ws, verify2=LINT_GREEN, fix=None, first=LINT_RED, review=ATTESTED, more=None):
+        return run(args=dict(ARGS, mode="ready"),
+                   replies={"verify": first, "ws-check-1": ws, "verify-fix-review-1": review, "verify-2": verify2,
+                            **(more or {})},
+                   patch={"setup": {"verification": TWO_IDS},
+                          "verify-fix-1": fix or {"start_head": SHA, "commit": FIXED}})
+
+    def assert_full_rerun(self, calls, result):
+        self.assertIn(FULL, prompt(calls, "verify-2"))
+        self.assertEqual(result["verify"], BOTH_GREEN["results"])
+
+    def test_a_whitespace_only_fix_reruns_only_the_failed_id_and_carries_the_pass(self):
+        result, calls = self.scenario(WS_ONLY)
+        verify2 = prompt(calls, "verify-2")
+        self.assertIn(LINT_ONLY, verify2)
+        self.assertNotIn('"id":"test"', verify2)
+        self.assertIn("verify-fix-review-1", labels(calls))
+        self.assertEqual((result["stage"], result["head"]), ("ready", FIXED))
+        self.assertEqual(len(result["verify"]), 2)
+        by_id = {r["id"]: r for r in result["verify"]}
+        self.assertEqual(by_id["lint"], {"id": "lint", "status": "pass", "summary": "ok"})
+        self.assertEqual((by_id["test"]["status"], by_id["test"]["carried_from"]), ("pass", SHA))
+        self.assertEqual(result["cont"]["verified"]["head"], FIXED)
+
+    def test_the_ws_check_is_a_clerk_reading_the_fix_range(self):
+        _, calls = self.scenario(WS_ONLY)
+        check = [c for c in calls if c["label"] == "ws-check-1"]
+        self.assertEqual([c["agentType"] for c in check], ["clerk"])
+        text = check[0]["prompt"]
+        self.assertIn(f"git -C /r/.wt/w-issue-9-x diff -b --ignore-blank-lines --quiet {SHA} {FIXED}\n", text)
+        self.assertIn(f"git -C /r/.wt/w-issue-9-x diff --no-renames --name-only {SHA} {FIXED}\n", text)
+
+    def test_only_a_prefiltered_fix_review_must_attest(self):
+        _, calls = self.scenario(WS_ONLY)
+        schema = schema_of(calls, "verify-fix-review-1")
+        for key in ("whitespace_insignificant", "whitespace_evidence"):
+            self.assertIn(key, schema["properties"])
+            self.assertIn(key, schema["required"])
+        self.assertIn("src/a.test.ts", prompt(calls, "verify-fix-review-1"))
+        _, plain = self.scenario({"whitespace_exit": 1, "changed_paths": ["src/a.ts"]}, verify2=BOTH_GREEN)
+        self.assertNotIn("whitespace_insignificant", schema_of(plain, "verify-fix-review-1")["properties"])
+        self.assertEqual([c["agentType"] for c in calls + plain if c["label"] == "verify-fix-review-1"],
+                         ["reviewer", "reviewer"])
+
+    def test_a_fix_that_is_not_whitespace_only_reruns_every_id(self):
+        cases = {
+            "content change": {"whitespace_exit": 1, "changed_paths": ["src/a.ts"]},
+            "whitespace-significant path": {"whitespace_exit": 0, "changed_paths": ["src/a.ts", "tools/b.py"]},
+            "extensionless path": {"whitespace_exit": 0, "changed_paths": ["Makefile"]},
+            "no changed path": {"whitespace_exit": 0, "changed_paths": []},
+            "dead ws-check": None,
+        }
+        for name, ws in cases.items():
+            with self.subTest(case=name):
+                # The review attests anyway: an attestation the program did not ask for counts for nothing.
+                result, calls = self.scenario(ws, verify2=BOTH_GREEN)
+                self.assertIn("ws-check-1", labels(calls))
+                self.assertIn("verify-fix-review-1", labels(calls))
+                self.assert_full_rerun(calls, result)
+        # A full re-run that omits test does not inherit its earlier pass.
+        result, _ = self.scenario(cases["content change"], more={"verify-3": LINT_GREEN})
+        self.assertEqual(result["stage"], "verify")
+        self.assertIn("test", [p["id"] for p in result["problems"]])
+
+    def test_whitespace_that_matters_reruns_every_id(self):
+        # -b --ignore-blank-lines exits 0 for a doubled space inside a regex literal of an allowed file type.
+        regex = {"whitespace_exit": 0, "changed_paths": ["src/match.mjs"]}
+        reviews = {
+            "regex whitespace": {"verdict": "pass", "findings": [], "whitespace_insignificant": False,
+                                 "whitespace_evidence": "src/match.mjs: the hunk doubles a space inside a regex"},
+            "blank evidence": dict(ATTESTED, whitespace_evidence="  "),
+            "no attestation": {"verdict": "pass", "findings": []},
+        }
+        for name, review in reviews.items():
+            with self.subTest(case=name):
+                result, calls = self.scenario(regex, verify2=BOTH_GREEN, review=review)
+                self.assertIn("whitespace_insignificant", schema_of(calls, "verify-fix-review-1")["properties"])
+                self.assert_full_rerun(calls, result)
+                self.assertFalse(any("carried_from" in r for r in result["verify"]))
+
+    def test_no_carry_without_its_preconditions(self):
+        cases = {
+            "fix starts elsewhere": ({"start_head": "d" * 40, "commit": FIXED}, LINT_RED),
+            "dirty first verify": (None, dict(LINT_RED, clean=False)),
+            "nothing passed": (None, {"head": SHA, "clean": True,
+                                      "results": [{"id": "lint", "status": "fail", "summary": "x"},
+                                                  {"id": "test", "status": "fail", "summary": "y"}]}),
+            "a missing result": (None, {"head": SHA, "clean": True,
+                                        "results": [{"id": "lint", "status": "fail", "summary": "x"}]}),
+        }
+        for name, (fix, first) in cases.items():
+            with self.subTest(case=name):
+                result, calls = self.scenario(WS_ONLY, verify2=BOTH_GREEN, fix=fix, first=first)
+                self.assertNotIn("ws-check-1", labels(calls))
+                self.assertIn("verify-fix-review-1", labels(calls))
+                self.assert_full_rerun(calls, result)
+
+    def test_a_narrowed_verify_at_another_head_stops(self):
+        moved = dict(LINT_GREEN, head="d" * 40)
+        result, calls = self.scenario(WS_ONLY, verify2=moved)
+        self.assertEqual(result["stage"], "verify")
+        problems = json.dumps(result["problems"])
+        self.assertIn("d" * 40, problems)
+        self.assertIn(FIXED, problems)
+        self.assertNotIn("verify-fix-2", labels(calls))
+
+    def test_a_fresh_result_wins_over_a_carried_pass(self):
+        fresh = {"head": FIXED, "clean": True, "results": [{"id": "lint", "status": "pass", "summary": "ok"},
+                                                           {"id": "test", "status": "fail", "summary": "test broke"}]}
+        result, _ = self.scenario(WS_ONLY, verify2=fresh, more={"verify-fix-2": {"status": "blocked", "notes": "x"}})
+        self.assertEqual(result["stage"], "verify-fix")
+        self.assertEqual([r for r in result["verify"]["results"] if r["id"] == "test"],
+                         [{"id": "test", "status": "fail", "summary": "test broke"}])
+
+    def test_a_second_whitespace_fix_keeps_the_original_carried_from(self):
+        again = "e" * 40
+        result, calls = run(args=dict(ARGS, mode="ready"),
+                            replies={"verify": LINT_RED, "ws-check-1": WS_ONLY, "ws-check-2": WS_ONLY,
+                                     "verify-fix-review-1": ATTESTED, "verify-fix-review-2": ATTESTED,
+                                     "verify-2": dict(LINT_GREEN, results=[{"id": "lint", "status": "fail",
+                                                                            "summary": "1 more"}]),
+                                     "verify-3": dict(LINT_GREEN, head=again)},
+                            patch={"setup": {"verification": TWO_IDS},
+                                   "verify-fix-1": {"start_head": SHA, "commit": FIXED},
+                                   "verify-fix-2": {"start_head": FIXED, "commit": again}})
+        self.assertEqual((result["stage"], result["head"]), ("ready", again))
+        self.assertNotIn('"id":"test"', prompt(calls, "verify-3"))
+        by_id = {r["id"]: r for r in result["verify"]}
+        self.assertEqual((by_id["test"]["status"], by_id["test"]["carried_from"]), ("pass", SHA))
+
+
 class ShipTest(unittest.TestCase):
     def test_checks_wait_uses_the_required_names_rule(self):
         _, calls = run()
@@ -2919,8 +3073,8 @@ CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer",
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex",
-             "verify", "verify-", "land-lock-", "land-unlock", "land-push-", "pr", "checks-", "merge", "hold",
-             "close-out")),
+             "verify", "verify-", "ws-check-", "land-lock-", "land-unlock", "land-push-", "pr", "checks-", "merge",
+             "hold", "close-out")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-",
             "fix-sync-")),
@@ -2957,6 +3111,7 @@ SCENARIOS = (
      "patch": CONFLICT},
     {"args": DIRECT, "replies": {"direct-review": BAD}},
     {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
+    WS_SCENARIO,
 )
 
 
