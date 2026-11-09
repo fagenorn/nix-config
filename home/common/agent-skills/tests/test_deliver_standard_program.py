@@ -484,7 +484,12 @@ class ClaimTest(unittest.TestCase):
         self.assertIn("--holder <host>/b7 ", prompt(calls, "setup"))
 
     def test_already_held_continues(self):
-        result, _ = run(replies={"acquire": {"verdict": "already_held", "comment_id": 5}})
+        folded = {"setup": {"acquire": {"verdict": "already_held", "comment_id": 5}}}
+        result, calls = run(patch=folded)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("acquire", labels(calls))
+        # A batch acquires with its own holder before it starts the child, so its folded acquire is already_held.
+        result, _ = run(args={"repo_root": "/r", "issue": 9, "batch_id": "b7"}, patch=folded)
         self.assertEqual(result["stage"], "done")
 
     def test_acquire_error_stops_with_a_cont_that_finishes_the_claim(self):
