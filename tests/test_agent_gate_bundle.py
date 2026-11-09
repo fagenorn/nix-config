@@ -888,7 +888,7 @@ class NoUpgradeStructureTest(unittest.TestCase):
 
     def test_the_verdict_authority_sees_only_the_evidence(self):
         self.assertEqual(list(inspect.signature(gate.decide).parameters),
-                         ["evidence"])
+                         ["evidence", "gate"])
 
     def test_no_authorization_name_reaches_the_verdict_authority(self):
         # Literal, and prose counts: a docstring naming the flag is one rename
@@ -994,6 +994,167 @@ class ModuleEntryPointTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertTrue(completed.stdout.startswith("usage: agent-gate-bundle "),
                         completed.stdout[:200])
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+COMMITTED = ("promotion-127", "release-128", "cutover-579")
+
+
+def claude_only_manifest(tmp, cases):
+    manifest = make_manifest(tmp, cases)
+    del manifest["identity"]["pinned"]["builds"]["codex"]
+    return manifest
+
+
+def claude_cases(tmp, base=(1000, 1000, 1000), candidate=(800, 800, 800), quality=None):
+    return [make_case(tmp, klass, klass, {"claude": (list(base), list(candidate))},
+                      quality=quality)
+            for klass in gate.CORE_CASE_CLASSES]
+
+
+def run_cli_text(argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = gate.main(argv)
+        except SystemExit as exit_:
+            code = exit_.code
+    return code, out.getvalue(), err.getvalue()
+
+
+class GateVersionOneUnchangedTest(unittest.TestCase):
+    def test_the_default_cli_reproduces_every_committed_bundle_id(self):
+        for name in COMMITTED:
+            with self.subTest(name=name):
+                trials = REPO_ROOT / f".agents/artifacts/evidence/{name}-trials.json"
+                committed = json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-bundle.json")
+                                       .read_text(encoding="utf-8"))
+                code, out, _ = run_cli_text(["--trials", str(trials)])
+                self.assertEqual(code, 3)
+                emitted = json.loads(out)
+                self.assertEqual(emitted["bundle_id"], committed["bundle_id"])
+                self.assertEqual(emitted["gate_version"], 1)
+                self.assertNotIn("bundle_kind", emitted)
+
+    def test_committed_bundles_verify_the_same_with_or_without_a_reader_kind(self):
+        for name in COMMITTED:
+            with self.subTest(name=name):
+                committed = json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-bundle.json")
+                                       .read_text(encoding="utf-8"))
+                self.assertEqual(gate.verify_bundle(committed), "unmeasured")
+                self.assertEqual(gate.verify_bundle(committed, kind="cutover"), "unmeasured")
+
+    def test_an_approved_version_one_bundle_ignores_the_reader_kind(self):
+        tmp = Path(tempfile.mkdtemp())
+        manifest = make_manifest(tmp, full_cases(tmp))
+        evidence, diagnostics = gate.resolve_trials(manifest)
+        bundle = gate.assemble_bundle(manifest, evidence, diagnostics, None, "approved")
+        for kind in (None,) + gate.BUNDLE_KINDS:
+            with self.subTest(kind=kind):
+                self.assertEqual(gate.verify_bundle(bundle, kind=kind), "approved")
+
+    def test_the_version_one_profile(self):
+        self.assertEqual(gate.gate_profile(), gate.GateProfile(1, ("claude", "codex"), "savings", None))
+        self.assertEqual(gate.DEFAULT_GATE, gate.gate_profile(1))
+        with self.assertRaises(ValueError):
+            gate.gate_profile(1, "cutover")
+        with self.assertRaises(ValueError):
+            gate.gate_profile(3)
+
+
+class ClaudeOnlyGateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.promotion = gate.gate_profile(2, "promotion")
+
+    def write(self, manifest):
+        path = self.tmp / "trials.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def test_the_version_two_profile(self):
+        self.assertEqual(self.promotion, gate.GateProfile(2, ("claude",), "savings", "promotion"))
+        for bad in (None, "other"):
+            with self.subTest(kind=bad), self.assertRaises(ValueError):
+                gate.gate_profile(2, bad)
+
+    def test_a_claude_only_manifest_loads_under_version_two_only(self):
+        path = self.write(claude_only_manifest(self.tmp, claude_cases(self.tmp)))
+        self.assertEqual(gate.load_manifest(path, self.promotion)["kind"], "agent-gate-trials")
+        with self.assertRaises(gate.ManifestError):
+            gate.load_manifest(path)
+
+    def test_a_codex_stratum_or_build_is_a_document_fault(self):
+        with_stratum = claude_only_manifest(self.tmp, claude_cases(self.tmp))
+        with_stratum["cases"][0]["strata"]["codex"] = with_stratum["cases"][0]["strata"]["claude"]
+        with_build = claude_only_manifest(self.tmp, claude_cases(self.tmp))
+        with_build["identity"]["pinned"]["builds"]["codex"] = IDENTITY["pinned"]["builds"]["codex"]
+        for manifest, path in ((with_stratum, "$.cases[0].strata.codex"),
+                               (with_build, "$.identity.pinned.builds.codex")):
+            with self.subTest(path=path):
+                with self.assertRaises(gate.ManifestError) as caught:
+                    gate.load_manifest(self.write(manifest), self.promotion)
+                self.assertIn(("FIELD_UNKNOWN", path),
+                              {(d.code, d.path) for d in caught.exception.diagnostics})
+                code, out, _ = run_cli_text(["--trials", str(self.write(manifest)),
+                                        "--gate-version", "2", "--kind", "promotion"])
+                self.assertEqual((code, out), (2, ""))
+
+    def test_a_missing_claude_stratum_is_unmeasured(self):
+        cases = claude_cases(self.tmp)
+        cases[0]["strata"] = {}
+        manifest = claude_only_manifest(self.tmp, cases)
+        evidence, diagnostics = gate.resolve_trials(manifest, gate=self.promotion)
+        self.assertIsNone(evidence)
+        self.assertIn(("STRATUM_MISSING", "$.cases[0].strata.claude"),
+                      {(d.code, d.path) for d in diagnostics})
+        self.assertIn("every declared stratum (claude) is required evidence",
+                      {d.message for d in diagnostics})
+        code, out, _ = run_cli_text(["--trials", str(self.write(manifest)),
+                                "--gate-version", "2", "--kind", "promotion"])
+        self.assertEqual(code, 3)
+        bundle = json.loads(out)
+        self.assertEqual((bundle["state"], bundle["gate_version"], bundle["bundle_kind"]),
+                         ("unmeasured", 2, "promotion"))
+        self.assertTrue(any(line.startswith("STRATUM_MISSING $.cases[0].strata.claude")
+                            for line in bundle["diagnostics"]))
+
+    def test_a_saving_claude_only_promotion_bundle_is_approved_and_kind_bound(self):
+        manifest = claude_only_manifest(self.tmp, claude_cases(self.tmp))
+        code, out, _ = run_cli_text(["--trials", str(self.write(manifest)),
+                                "--gate-version", "2", "--kind", "promotion"])
+        self.assertEqual(code, 0)
+        bundle = json.loads(out)
+        self.assertEqual(set(bundle["gates"]["context"]), {"claude"})
+        self.assertEqual(gate.verify_bundle(bundle, kind="promotion"), "approved")
+        for kind in (None, "release", "cutover"):
+            with self.subTest(kind=kind), self.assertRaises(gate.BundleIntegrityError):
+                gate.verify_bundle(bundle, kind=kind)
+
+    def test_tampered_version_two_bundles_are_refused(self):
+        manifest = claude_only_manifest(self.tmp, claude_cases(self.tmp))
+        evidence, diagnostics = gate.resolve_trials(manifest, gate=self.promotion)
+        bundle = gate.assemble_bundle(manifest, evidence, diagnostics, None, "approved",
+                                      self.promotion)
+        relabelled = dict(bundle, bundle_kind="release")
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(relabelled, kind="release")
+        widened = json.loads(json.dumps(bundle))
+        widened["evidence"]["cases"][0]["strata"]["codex"] = \
+            widened["evidence"]["cases"][0]["strata"]["claude"]
+        body = {k: v for k, v in widened.items() if k not in ("bundle_id", "generated_at")}
+        widened["bundle_id"] = telemetry_digest(body)
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(widened, kind="promotion")
+        self.assertEqual(gate.decide(widened["evidence"], self.promotion), "unmeasured")
+
+    def test_the_cli_pairs_gate_version_and_kind(self):
+        path = self.write(claude_only_manifest(self.tmp, claude_cases(self.tmp)))
+        for argv in (["--gate-version", "2"], ["--kind", "cutover"],
+                     ["--gate-version", "1", "--kind", "cutover"], ["--gate-version", "3"]):
+            with self.subTest(argv=argv):
+                code, out, _ = run_cli_text(["--trials", str(path)] + argv)
+                self.assertEqual((code, out), (2, ""))
 
 
 if __name__ == "__main__":

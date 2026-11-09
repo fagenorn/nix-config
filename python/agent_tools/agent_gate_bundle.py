@@ -14,6 +14,13 @@ no bundle. An *evidence* fault — missing strata, unpaired, miscounted or
 repeated trials, an unstable evaluator, a mismatched identity, an unreadable,
 tampered or wrong-shaped record — is returned as a diagnostic and resolves the
 bundle to `unmeasured`.
+
+Gate version 2 is the claude-only profile: the identity pins and every case
+carry the `claude` stratum alone, and a `codex` key is a document fault. It is
+chosen on the command line (`--gate-version 2 --kind <kind>`), never by the
+manifest, and the bundle it emits is bound to its kind: `bundle_kind` sits
+inside the `bundle_id` digest, and `verify_bundle` accepts a version-2 bundle
+only from a reader that names that same kind. Version 1 is unchanged.
 """
 
 import argparse
@@ -37,6 +44,31 @@ GATE_CONTRACT = "issue-70"
 GATE_VERSION = 1
 
 STRATA = ("claude", "codex")
+
+# Gate version 2 is the claude-only profile: one stratum, and a bundle bound to
+# the kind of reader it was emitted for. `GATE_VERSION` stays 1 because
+# `promotion_lifecycle` and `promotion_schema` import it.
+GATE_VERSIONS = (1, 2)
+CLAUDE_ONLY_GATE_VERSION = 2
+CLAUDE_ONLY_STRATA = ("claude",)
+BUNDLE_KINDS = ("cutover", "promotion", "release")
+NO_REGRESSION_KINDS = ()
+
+GateProfile = namedtuple("GateProfile", "version strata criterion kind")
+
+
+def gate_profile(version=GATE_VERSION, kind=None):
+    """Contract: the profile one gate version runs under, or ValueError."""
+    if version == GATE_VERSION and kind is None:
+        return GateProfile(GATE_VERSION, STRATA, "savings", None)
+    if version == CLAUDE_ONLY_GATE_VERSION and kind in BUNDLE_KINDS:
+        return GateProfile(CLAUDE_ONLY_GATE_VERSION, CLAUDE_ONLY_STRATA,
+                           "no_regression" if kind in NO_REGRESSION_KINDS
+                           else "savings", kind)
+    raise ValueError(f"no gate profile for version {version!r} and kind {kind!r}")
+
+
+DEFAULT_GATE = gate_profile()
 SIDES = ("base", "candidate")
 MIN_TRIALS = 3
 EXPANDED_TRIALS = 10
@@ -168,7 +200,7 @@ def _pair(parent, key, path, scalar, diagnostics):
             scalar(pair[side], f"{path}.{key}.{side}", diagnostics)
 
 
-def _validate_identity(root, diagnostics):
+def _validate_identity(root, diagnostics, strata):
     identity = _child(root, "identity", "$", IDENTITY_FIELDS, IDENTITY_FIELDS,
                       diagnostics)
     if identity is None:
@@ -184,10 +216,10 @@ def _validate_identity(root, diagnostics):
         return
     for key in PINNED_STRING_FIELDS:
         _pair(pinned, key, "$.identity.pinned", _string, diagnostics)
-    builds = _child(pinned, "builds", "$.identity.pinned", STRATA, STRATA, diagnostics)
+    builds = _child(pinned, "builds", "$.identity.pinned", strata, strata, diagnostics)
     if builds is None:
         return
-    for stratum in STRATA:
+    for stratum in strata:
         path = "$.identity.pinned.builds"
         build = _child(builds, stratum, path, BUILD_FIELDS, BUILD_FIELDS, diagnostics)
         if build is None:
@@ -270,7 +302,7 @@ def _validate_stratum(value, path, diagnostics):
     _validate_maintenance(stratum, path, diagnostics)
 
 
-def _validate_case(value, path, diagnostics):
+def _validate_case(value, path, diagnostics, strata_allowed):
     case = _object(value, path, CASE_FIELDS, CASE_FIELDS, diagnostics)
     if case is None:
         return
@@ -281,14 +313,14 @@ def _validate_case(value, path, diagnostics):
              f"expected one of {list(CASE_CLASSES)}")
     # A stratum may be absent here: that is an evidence fault for
     # `resolve_trials`, not a document fault (D11, D31).
-    strata = _child(case, "strata", path, STRATA, (), diagnostics)
+    strata = _child(case, "strata", path, strata_allowed, (), diagnostics)
     if strata is None:
         return
-    for name in sorted(set(strata) & set(STRATA)):
+    for name in sorted(set(strata) & set(strata_allowed)):
         _validate_stratum(strata[name], f"{path}.strata.{name}", diagnostics)
 
 
-def _validate_manifest(document):
+def _validate_manifest(document, gate=DEFAULT_GATE):
     """Every violation in one pass, sorted — never the first one only."""
     diagnostics = []
     root = _object(document, "$", TOP_FIELDS, TOP_FIELDS, diagnostics)
@@ -300,18 +332,18 @@ def _validate_manifest(document):
              f"expected {SCHEMA_VERSION}")
     if "kind" in root and root["kind"] != TRIALS_KIND:
         _add(diagnostics, "FIELD_VALUE", "$.kind", f"expected {TRIALS_KIND!r}")
-    _validate_identity(root, diagnostics)
+    _validate_identity(root, diagnostics, gate.strata)
     _validate_expansion(root, diagnostics)
     if "cases" in root:
         if isinstance(root["cases"], list):
             for index, case in enumerate(root["cases"]):
-                _validate_case(case, f"$.cases[{index}]", diagnostics)
+                _validate_case(case, f"$.cases[{index}]", diagnostics, gate.strata)
         else:
             _add(diagnostics, "FIELD_TYPE", "$.cases", "expected an array")
     return sorted(diagnostics)
 
 
-def load_manifest(path):
+def load_manifest(path, gate=DEFAULT_GATE):
     """Parse and structurally validate a trials manifest, or raise ManifestError."""
     try:
         text = Path(path).read_text(encoding="utf-8")
@@ -323,7 +355,7 @@ def load_manifest(path):
     except (json.JSONDecodeError, ValueError) as error:
         raise ManifestError(
             [Diagnostic("JSON_INVALID", "$", str(error))]) from error
-    diagnostics = _validate_manifest(document)
+    diagnostics = _validate_manifest(document, gate)
     if diagnostics:
         raise ManifestError(diagnostics)
     return document
@@ -409,7 +441,7 @@ def validate_record(document, stratum, run_id):
 # --- Evidence resolution (D14, D31) -----------------------------------------
 
 
-def _identity_leaves(manifest):
+def _identity_leaves(manifest, strata):
     """(path, pair, pinned) for every identity leaf, `builds` walked two deeper."""
     identity = manifest.get("identity")
     identity = identity if isinstance(identity, dict) else {}
@@ -424,7 +456,7 @@ def _identity_leaves(manifest):
             leaves.append((f"$.identity.pinned.{key}", pinned.get(key), True))
         builds = pinned.get("builds")
         if isinstance(builds, dict):
-            for stratum in STRATA:
+            for stratum in strata:
                 build = builds.get(stratum)
                 if not isinstance(build, dict):
                     continue
@@ -434,9 +466,9 @@ def _identity_leaves(manifest):
     return leaves
 
 
-def _check_identity(manifest, diagnostics):
+def _check_identity(manifest, diagnostics, strata):
     """Bound leaves must be present; pinned leaves must also be equal (D19)."""
-    for path, pair, pinned in _identity_leaves(manifest):
+    for path, pair, pinned in _identity_leaves(manifest, strata):
         if not isinstance(pair, dict):
             _add(diagnostics, "IDENTITY_INCOMPLETE", path,
                  "field is required and must be non-empty")
@@ -588,7 +620,7 @@ def _assemble(cases):
     return assembled
 
 
-def _check_case_reuse(cases, diagnostics):
+def _check_case_reuse(cases, diagnostics, strata):
     """No cited measurement may stand as evidence for two different cases.
 
     `_resolve_stratum` rejects a measurement cited twice *within* one side, but
@@ -606,7 +638,7 @@ def _check_case_reuse(cases, diagnostics):
         declared_strata = case.get("strata")
         declared_strata = declared_strata if isinstance(declared_strata, dict) else {}
         seen = set()
-        for stratum in STRATA:
+        for stratum in strata:
             block = declared_strata.get(stratum)
             if not isinstance(block, dict):
                 continue
@@ -628,18 +660,21 @@ def _check_case_reuse(cases, diagnostics):
                              f"$.cases[{owner}]")
 
 
-def resolve_trials(manifest, loader=load_record):
+def resolve_trials(manifest, loader=load_record, gate=DEFAULT_GATE):
     """Resolve a manifest's cited records into the evidence `decide` consumes.
 
     Returns `(evidence, [])` or `(None, diagnostics)` — never a partial result,
     and never an exception for bad evidence (D14, D31).
     """
     diagnostics = []
-    _check_identity(manifest, diagnostics)
+    _check_identity(manifest, diagnostics, gate.strata)
     _check_expansion(manifest, diagnostics)
     allowed = ({MIN_TRIALS, EXPANDED_TRIALS} if _expanded(manifest)
                else {MIN_TRIALS})
 
+    missing_message = ("both strata are required evidence" if gate.version == 1
+                       else f"every declared stratum ({', '.join(gate.strata)}) "
+                            "is required evidence")
     cases = manifest.get("cases")
     cases = cases if isinstance(cases, list) else []
     if not cases:
@@ -657,12 +692,11 @@ def resolve_trials(manifest, loader=load_record):
         declared_strata = case.get("strata")
         declared_strata = declared_strata if isinstance(declared_strata, dict) else {}
         strata = {}
-        for stratum in STRATA:
+        for stratum in gate.strata:
             path = f"{case_path}.strata.{stratum}"
             block = declared_strata.get(stratum)
             if not isinstance(block, dict):
-                _add(diagnostics, "STRATUM_MISSING", path,
-                     "both strata are required evidence")
+                _add(diagnostics, "STRATUM_MISSING", path, missing_message)
                 continue
             entry = _resolve_stratum(block, stratum, path, allowed, loader,
                                      diagnostics)
@@ -671,7 +705,7 @@ def resolve_trials(manifest, loader=load_record):
         resolved.append({"case_id": case.get("case_id"),
                          "case_class": case.get("case_class"), "strata": strata})
 
-    _check_case_reuse(cases, diagnostics)
+    _check_case_reuse(cases, diagnostics, gate.strata)
 
     if diagnostics:
         return None, sorted(diagnostics)
@@ -784,7 +818,7 @@ def _declared_axis(blocks, key, saves):
     return {"fired": bool(firing), "cases": firing}
 
 
-def gate_results(evidence):
+def gate_results(evidence, gate=DEFAULT_GATE):
     """Contract: the bundle's `gates` block — every axis reported per stratum."""
     cases = evidence["cases"]
     failing = sorted(f"{case['case_id']}/{stratum}"
@@ -793,7 +827,7 @@ def gate_results(evidence):
                      if quality_fails(block["quality"]))
 
     context, checks, maintenance = {}, {}, {}
-    for stratum in STRATA:
+    for stratum in gate.strata:
         blocks = [(case["case_id"], case["strata"][stratum]) for case in cases
                   if stratum in case["strata"]]
         saving = [case_id for case_id, block in blocks
@@ -809,9 +843,9 @@ def gate_results(evidence):
                                               maintenance_saves)
 
     cross = {}
-    for stratum in STRATA:
+    for stratum in gate.strata:
         other = any(context[name]["breaching_cases"]
-                    for name in STRATA if name != stratum)
+                    for name in gate.strata if name != stratum)
         cross[stratum] = {"qualifies": not other, "other_breaches": other}
 
     return {"quality": {"passed": not failing, "failing": failing},
@@ -819,17 +853,20 @@ def gate_results(evidence):
             "cross_stratum": cross}
 
 
-def decide(evidence):
+def decide(evidence, gate=DEFAULT_GATE):
     """Contract: the sole verdict authority. Takes the resolved evidence and
     nothing else — no authorization block, no manifest, no clock (D14)."""
     if not evidence or not evidence.get("cases"):
         return "unmeasured"
+    if gate.version != 1 and any(set(case["strata"]) != set(gate.strata)
+                                 for case in evidence["cases"]):
+        return "unmeasured"
     if straddling_cases(evidence):
         return "unmeasured"
-    gates = gate_results(evidence)
+    gates = gate_results(evidence, gate)
     if not gates["quality"]["passed"]:
         return "rejected"
-    for stratum in STRATA:
+    for stratum in gate.strata:
         if not gates["cross_stratum"][stratum]["qualifies"]:
             continue
         if any(gates[axis][stratum]["fired"]
@@ -865,7 +902,8 @@ def _generated_at():
         "+00:00", "Z")
 
 
-def assemble_bundle(manifest, evidence, diagnostics, override, state):
+def assemble_bundle(manifest, evidence, diagnostics, override, state,
+                    gate=DEFAULT_GATE):
     """Contract: the bundle document, or BundleIntegrityError and no document.
 
     `state` is `decide`'s and only `decide`'s; the body is re-decided against
@@ -887,16 +925,18 @@ def assemble_bundle(manifest, evidence, diagnostics, override, state):
         "schema_version": SCHEMA_VERSION,
         "kind": BUNDLE_KIND,
         "gate_contract": GATE_CONTRACT,
-        "gate_version": GATE_VERSION,
+        "gate_version": gate.version,
         "state": state,
         "identity": manifest["identity"],
         "expansion": manifest["expansion"],
         "evidence": resolved,
-        "gates": gate_results(resolved),
+        "gates": gate_results(resolved, gate),
         "override": override,
         "diagnostics": lines,
     }
-    earned = decide(body["evidence"])
+    if gate.version != 1:
+        body["bundle_kind"] = gate.kind
+    earned = decide(body["evidence"], gate)
     if earned != body["state"]:
         raise BundleIntegrityError(
             f"the bundle's own evidence earns {earned!r}, not {body['state']!r}")
@@ -904,10 +944,13 @@ def assemble_bundle(manifest, evidence, diagnostics, override, state):
                 generated_at=_generated_at())
 
 
-def verify_bundle(document: object) -> str:
+def verify_bundle(document: object, kind=None) -> str:
     """Contract: the recorded `state` of a bundle this module emitted, or
     BundleIntegrityError. The id is recomputed over the body without `bundle_id`
-    and `generated_at`, and the state is re-decided from the bundle's own evidence."""
+    and `generated_at`, and the state is re-decided from the bundle's own evidence.
+
+    The reader names its `kind`. A version-1 bundle ignores it; a version-2
+    bundle is refused unless it was emitted for exactly that kind."""
     if not isinstance(document, dict):
         raise BundleIntegrityError("a bundle is a JSON object")
     if document.get("kind") != BUNDLE_KIND:
@@ -918,8 +961,20 @@ def verify_bundle(document: object) -> str:
     if document.get("gate_contract") != GATE_CONTRACT:
         raise BundleIntegrityError(f"gate_contract is not {GATE_CONTRACT!r}")
     if (type(document.get("gate_version")) is not int
-            or document["gate_version"] != GATE_VERSION):
-        raise BundleIntegrityError(f"gate_version is not {GATE_VERSION}")
+            or document["gate_version"] not in GATE_VERSIONS):
+        raise BundleIntegrityError(f"gate_version is not one of {list(GATE_VERSIONS)}")
+    if document["gate_version"] == GATE_VERSION:
+        profile = DEFAULT_GATE
+    else:
+        if kind is None:
+            raise BundleIntegrityError(
+                "a gate-version-2 bundle is verified only for a named reader kind")
+        if document.get("bundle_kind") != kind:
+            raise BundleIntegrityError(f"bundle_kind is not {kind!r}")
+        try:
+            profile = gate_profile(document["gate_version"], kind)
+        except ValueError as error:
+            raise BundleIntegrityError(str(error)) from error
     missing = [key for key in ("bundle_id", "state", "evidence")
                if key not in document]
     if missing:
@@ -929,7 +984,7 @@ def verify_bundle(document: object) -> str:
     if document["bundle_id"] != telemetry_digest(body):
         raise BundleIntegrityError("bundle_id does not match the bundle body")
     try:
-        earned = decide(document["evidence"])
+        earned = decide(document["evidence"], profile)
     except (TypeError, KeyError, AttributeError, ValueError,
             ArithmeticError) as error:
         raise BundleIntegrityError(
@@ -954,7 +1009,18 @@ def main(argv=None):
     ap.add_argument("--override-at", metavar="RFC3339",
                     help="when --override was authorized, e.g. 2026-09-02T12:00:00Z; "
                          "declared, not sampled, so the bundle id stays reproducible")
+    ap.add_argument("--gate-version", type=int, choices=GATE_VERSIONS,
+                    default=GATE_VERSION,
+                    help="1 adjudicates both strata; 2 is the claude-only profile")
+    ap.add_argument("--kind", choices=BUNDLE_KINDS,
+                    help="the bundle kind; required by, and only valid with, "
+                         "--gate-version 2")
     args = ap.parse_args(argv)
+    if args.gate_version == CLAUDE_ONLY_GATE_VERSION and args.kind is None:
+        ap.error("--gate-version 2 requires --kind")
+    if args.gate_version == GATE_VERSION and args.kind is not None:
+        ap.error("--kind is valid only with --gate-version 2")
+    gate = gate_profile(args.gate_version, args.kind)
 
     # Presence is `is not None`: absence is what waives the companions, and an
     # unexpanded shell variable is a present flag with no value, not an absent
@@ -975,19 +1041,19 @@ def main(argv=None):
             ap.error("--override-at must be RFC3339 UTC, e.g. 2026-09-02T12:00:00Z")
 
     try:
-        manifest = load_manifest(Path(args.trials))
+        manifest = load_manifest(Path(args.trials), gate)
     except ManifestError as error:
         for line in render(error.diagnostics):
             print(line, file=sys.stderr)
         return 2
 
-    evidence, diagnostics = resolve_trials(manifest)
-    state = decide(evidence)
+    evidence, diagnostics = resolve_trials(manifest, gate=gate)
+    state = decide(evidence, gate)
     try:
         bundle = assemble_bundle(
             manifest, evidence, diagnostics,
             build_override(args.override, args.override_by, args.override_at),
-            state)
+            state, gate)
     except BundleIntegrityError as error:
         print(str(error), file=sys.stderr)
         return 2
