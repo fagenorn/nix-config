@@ -1,8 +1,8 @@
 """Rendering contract of `agent_tools.sdd_brief` (issue 353, spec D5).
 
-The rendering functions are imported (agent-helpers rule 5). The shipped
-templates are rendered and compared with a body this file derives on its own;
-no test holds a copy of their prose (rule 6).
+The rendering functions are imported (agent-helpers rule 5). The tests render
+fixture templates this file builds itself; none holds a copy of a shipped
+template's prose (rule 6).
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from agent_tools import sdd_brief
 from agent_tools.sdd_brief import BriefError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SDD = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 TOKENS = frozenset({"[BRIEF_FILE]", "[CONTEXT]", "[REPORT_FILE]"})
 VALUES = {"[BRIEF_FILE]": "/w/brief.md", "[REPORT_FILE]": "/w/report.md", "[CONTEXT]": "ctx"}
 HEADER = ("Subagent:", '  description: "x"', "  prompt: |")
@@ -28,14 +27,6 @@ RENDERED = ("Read /w/brief.md then /w/report.md.\n\nctx\n\n"
 def template(*body, header=HEADER):
     return "\n".join(["# Fixture", "", "Outside [NOT_A_SLOT].", "", "```", *header, *body,
                       "```", "", "After.", ""])
-
-
-def independent_body(text):
-    """The fence lines after `prompt: |`, their first four characters removed (spec seam 2)."""
-    lines = text.split("\n")
-    opening, closing = [i for i, line in enumerate(lines) if line.startswith("```")]
-    start = next(i for i in range(opening, closing) if lines[i].strip() == "prompt: |")
-    return "\n".join(line[4:] for line in lines[start + 1:closing]) + "\n"
 
 
 class RenderTest(unittest.TestCase):
@@ -108,14 +99,6 @@ class ShippedTemplateTest(unittest.TestCase):
             "[BASE_SHA]", "[HEAD_SHA]", "[MANIFEST_ROOT]", "[ROOT_BYTES]", "[TOTAL_BYTES]",
             "[FILE_COUNT]", "[LARGEST_MEMBER_BYTES]"})
         self.assertEqual(sdd_brief.OPTIONAL_TOKENS, {"[CONTEXT]", "[LIFECYCLE_WORKER]"})
-
-    def test_filling_each_token_with_itself_reproduces_the_prompt_body(self):
-        for name, tokens in ((sdd_brief.IMPLEMENTER_TEMPLATE, sdd_brief.IMPLEMENTER_TOKENS),
-                             (sdd_brief.REVIEWER_TEMPLATE, sdd_brief.REVIEWER_TOKENS)):
-            with self.subTest(template=name):
-                text = (SDD / name).read_text(encoding="utf-8")
-                self.assertEqual(sdd_brief.render(text, tokens, {token: token for token in tokens}),
-                                 independent_body(text))
 
 
 PLAN = "\n".join([

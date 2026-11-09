@@ -2,8 +2,7 @@
 #
 # Run one skill eval and grade it.
 #
-#   run-eval.sh <skill> <eval-id>     e.g. run-eval.sh from-issue 3
-#   run-eval.sh <eval-id>             shorthand for skill=from-issue
+#   run-eval.sh <skill> <eval-id>     e.g. run-eval.sh deliver-direct 1
 #
 # Skills are resolved from BOTH skill roots: the shared tree (../skills) and the
 # Claude-only tree (../../claude-code/skills, home of codex-collaboration,
@@ -63,9 +62,8 @@ EVAL_TRIALS=${EVAL_TRIALS:-1}
 die() { echo "run-eval: $*" >&2; exit 2; }
 
 case $# in
-  1) SKILL=from-issue; ID=$1 ;;
   2) SKILL=$1; ID=$2 ;;
-  *) die "usage: run-eval.sh [<skill>] <eval-id>" ;;
+  *) die "usage: run-eval.sh <skill> <eval-id>" ;;
 esac
 
 case "$EVAL_TRIALS" in

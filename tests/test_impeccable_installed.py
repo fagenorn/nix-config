@@ -18,7 +18,6 @@ from pathlib import Path
 INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 SKILL = "impeccable"
-OPT_IN_SKILLS = ("sdd", "from-issue")
 RETIRED_SKILLS = ("ui-ux-pro-max", "orchestrate-issues")
 SKILL_ROOTS = (".claude/skills",)
 SLOTS = {("Darwin", "arm64"): "darwin-arm64", ("Linux", "x86_64"): "linux-x64"}
@@ -103,19 +102,6 @@ class ImpeccableInstalledTest(unittest.TestCase):
         ):
             with self.subTest(launcher=str(launcher)):
                 self.assertEqual(self.probe(launcher), expected)
-
-    def test_workflow_skills_do_not_name_impeccable(self):
-        for skills_dir in SKILL_ROOTS:
-            for name in OPT_IN_SKILLS:
-                tree = self.root / skills_dir / name
-                with self.subTest(tree=str(tree)):
-                    self.assertTrue((tree / "SKILL.md").is_file(), f"{tree} missing")
-                    for dirpath, _, files in os.walk(tree, followlinks=True):
-                        for file_name in files:
-                            path = Path(dirpath) / file_name
-                            self.assertNotIn(
-                                b"impeccable", path.read_bytes().lower(), str(path)
-                            )
 
     def test_retired_skills_are_not_installed(self):
         for skills_dir in SKILL_ROOTS:

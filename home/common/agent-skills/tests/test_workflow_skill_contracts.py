@@ -1,11 +1,9 @@
-import ast
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -15,11 +13,6 @@ from agent_tools.skill_lint import working_tree
 
 
 REPO_ROOT = Path(__file__).parents[4]
-FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
-AUTO = REPO_ROOT / "home/common/agent-skills/skills/from-issue/AUTO.md"
-ROLLOVER = REPO_ROOT / "home/common/agent-skills/skills/from-issue/rollover.md"
-DELEGATED_OWNER = REPO_ROOT / "home/common/agent-skills/skills/from-issue/delegated-owner.md"
-INVESTIGATE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/investigate.md"
 HANDOFF = REPO_ROOT / "home/common/agent-skills/skills/handoff/SKILL.md"
 DESIGN = REPO_ROOT / "home/common/agent-skills/skills/design/SKILL.md"
 GRILL = REPO_ROOT / "home/common/agent-skills/skills/grill-with-docs/SKILL.md"
@@ -34,147 +27,28 @@ PLAN_REVIEW = (
 )
 RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
 WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
-SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
-FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
-ACQUIRE_DISPATCHER = FROM_ISSUE_DIR / "acquire-dispatcher.md"
-ACQUIRE_DIRECT = FROM_ISSUE_DIR / "acquire-direct.md"
-ACQUIRE_INTERACTIVE = FROM_ISSUE_DIR / "acquire-interactive.md"
-ACQUIRE_DURABLE = FROM_ISSUE_DIR / "acquire-durable.md"
-RESUME_PACK = FROM_ISSUE_DIR / "resume-pack.md"
-SHIP_HANDOFF_DOC = FROM_ISSUE_DIR / "ship-handoff.md"
-SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
-SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
-SHIP_ISSUE_HUMAN_GATE = (
-    REPO_ROOT / "home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md"
-)
-SHIP_ISSUE_DELIVERY_LOOP = SHIP_ISSUE.parent / "DELIVERY-LOOP.md"
-SHIP_ISSUE_REMAINDER = SHIP_ISSUE.parent / "REMAINDER.md"
-SHIP_ISSUE_POST_SELECTION_SYNC = SHIP_ISSUE.parent / "POST-SELECTION-SYNC.md"
 SMALL_BUDGET_FIXTURE = (
     REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/small-issue.json"
 )
 OVERSIZED_BUDGET_FIXTURE = (
     REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/oversized-issue.json"
 )
-SHIP_ISSUE_EVALS = (
-    REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json"
-)
 WRITING_PLANS = REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md"
 ACCEPTANCE_RULES = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
 ACCEPTANCE_RULES_POINTER = "`~/.agents/standards/acceptance-planning.md`"
-SDD = SDD_DIR / "SKILL.md"
-PHASE_5_REVIEW_CONTRACT = FROM_ISSUE_DIR / "REVIEW-CONTRACT.md"
 
-REQUIRED_WATCH = "timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30"
-ALL_CHECKS_WATCH = "timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30"
-ADVISORY_CALL = "gh pr checks <pr-num> --json name,bucket"
-# Issue 478: Phase 6 re-observes pending acceptance rows before any merge.
-REQUIRED_CHECKS_CALL = "gh pr checks <pr-num> --required --json name,bucket,link"
-REOBSERVE_CALL = ("acceptance-record reobserve --record <record-path> --head <HEAD_SHA>"
-                  " --checks <file>")
-PHASE_SEVEN_MERGE = "gh pr merge <pr-num> --repo <resolved-repository> --merge --subject"
 
 SKILL_ROOTS = (
     REPO_ROOT / "home/common/agent-skills/skills",
     REPO_ROOT / "home/common/claude-code/skills",
 )
 
-LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-issue").glob("*.md")),
-                  *sorted(SHIP_ISSUE.parent.glob("*.md")))
-# The closed capability-gap line ship-issue returns when its Phase-0 probe finds
-# no subagent-launch tool, spelled once for the module (per D4).
-CAPABILITY_GAP_LINE = "capability_gap: agent_dispatch"
-DELEGATED_RETURN_LINE = "Delegated owner: return the ship handoff"
-FROM_ISSUE_EVALS = FROM_ISSUE_DIR / "evals/evals.json"
-DELEGATED_SHIP_EVALS = (
-    "delegated-owner-returns-ship-handoff",
-    "delegating-owner-handles-delegated-return",
-    "no-subagent-launch-ships-inline",
-)
-INPUT_FLAG_RE = re.compile(
-    r"(--request-file|--checkpoint-file|--summary-file|--verification-input|--input)\s+(\S+)")
-V3_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes",
-    "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
-    "authorization_intents", "authority_observations", "reevaluation_evidence",
-    "delivery_observations", "requested_scope", "recovery", "verification"}
 CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
 SKILL_TREES = (REPO_ROOT / "home/common/agent-skills/skills",
                REPO_ROOT / "home/common/claude-code/skills")
 NOW_FLAG = re.compile(r"(?<![\w-])--now(?![\w-])")
 NOW_KEY = re.compile(r'"now"\s*:')
-V2_OWNER_KEYS = {"interface_version", "kind", "ledger_repo_root", "run_id", "issue",
-    "attempt", "owner", "action_id", "launch_kind", "worktree", "handoff_path",
-    "deadline_at", "custody", "contract", "contract_digest", "pending_stage_ids",
-    "requirements", "authority_evaluation", "requested_scope"}
-SHIP_HANDOFF_V2_KEYS = {"interface_version", "state", "ledger_repo_root", "run_id",
-    "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path",
-    "spec_artifact", "plan_artifact", "head_sha", "review_state", "acceptance_state", "auto", "report_path",
-    "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents",
-    "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids",
-    "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs",
-    "requested_scope"}
-SHIP_SUMMARY_V2_KEYS = {"interface_version", "issue", "state", "custody",
-    "historical_owner_result", "delivery_contract_digest", "delivery_observations",
-    "authority_observations", "reevaluation_evidence", "detail_state", "report_path",
-    "notes"}
 
-WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
-               "--worker-id <worker_id>")
-WORKER_EXEC_ARGV = ("launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
-                    "--worker-id <worker_id> -- <argv>")
-WORKER_SCRATCH_ARGV = ("launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
-                       "--worker-id <worker_id>")
-PRODUCER_VALIDATION = "artifact-budget validate-report --boundary producer --input -"
-WHOLE_FILE_POLICY = "stable-first-fit-whole-file"
-GENERATED_EVIDENCE_KINDS = ("ef-core-migration-designer", "whole-file-deletion")
-
-# Machine-consumed text each sdd document must carry (#291 D6): helper argv, the
-# report fields its validator reads, the review-package packing policy id, the
-# generated-evidence kinds and the payload placeholders the controller fills. No
-# guidance sentence is pinned.
-SDD_MACHINE_TEXT = {
-    SDD: (
-        "validate-report --boundary sdd", 'detail_state: "none"', "report_path: null",
-        "validate-detail-input", 'detail_state: "unpublished"',
-        "sdd-gate next PLAN_FILE --skill-dir <skill-dir> --task N",
-        "sdd-gate review PLAN_FILE --skill-dir <skill-dir> --task N", PRODUCER_VALIDATION,
-        "`<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`",
-        "workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--action-id <action_id>",
-        WORKER_LINE,
-        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id> --event returned",
-        "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--action-id <action_id>",
-        "workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--action-id <action_id>",
-        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV, "launch fence refused:",
-    ),
-    SDD_DIR / "final-review.md": (
-        "review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD",
-        "`verified-tree check`",
-        "verified-tree record --tree <the checked tree>",
-        "verified-tree fresh --since <Commit> --record <record path>",
-        "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id> -- <git commit arguments>",
-        "<tracker-cli> issue view <num> --repo <repo_slug> --json body",
-    ),
-    SDD_DIR / "implementer-prompt.md": (
-        "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id> -- ",
-        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV, "launch fence refused:",
-    ),
-    SDD_DIR / "task-reviewer-prompt.md": (WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS),
-    SDD_DIR / "re-review-prompt.md": (WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS),
-    SDD_DIR / "conformance-reviewer-prompt.md": (
-        WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS, "[ACCEPTANCE_CRITERIA]",
-        "verified-tree fresh --since <Commit> --record <record path>",
-    ),
-    SDD_DIR / "correctness-reviewer-prompt.md": (
-        WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS,
-        "git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'",
-    ),
-}
 
 REPORT_CANDIDATE_MKTEMP = 'mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"'
 REPORT_CANDIDATE_VALIDATION = (
@@ -213,108 +87,6 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
     PLAN_REVIEW: ("`Blocking`", "`Should fix`", "`Discussion`"),
 }
 
-# Machine-consumed text each ship-issue document must carry (#291 D6): helper
-# argv, the command constants above, and the closed lines a later agent reads
-# back from the PR body or an issue comment. No guidance sentence is pinned.
-SHIP_ISSUE_MACHINE_TEXT = {
-    SHIP_ISSUE: (
-        "validate-report --boundary ship-summary",
-        "review-range --integration-ref origin/<integration> --head $HEAD_SHA"
-        " --final-review-head <final-review head> --max-lines 1000 --max-files 20"
-        " --artifact-path <spec_path> --artifact-path <plan_path>",
-        "~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> "
-        "--run-id <run-id> --action-id <issue:attempt:launch>",
-        "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id> -- ",
-        "--parent <worker_id>", "git merge --no-commit --no-ff origin/<integration>",
-        "git push -u origin <branch>",
-        'gh pr create --repo <resolved-repository> --base <integration> '
-        '--head <branch> --title "<title>" --body',
-        "Lifecycle worker:",
-        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
-        "`verified-tree check`",
-        "verified-tree record --tree <the checked tree>",
-        REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL, REQUIRED_CHECKS_CALL, REOBSERVE_CALL,
-        "Acceptance state: <effective acceptance state>",
-        "Acceptance record: <record-path or none>", "Closes #<num>",
-        "Held for verification: <PR URL>",
-        "gh label list --repo <resolved-repository> --search needs-verification --json name",
-        "gh label create needs-verification", "gh issue reopen <num>",
-        "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
-        "gh issue close <num>",
-    ),
-    SHIP_ISSUE_DELIVERY_LOOP: (
-        "workflow-state checkpoint-delivery --repo-root <ledger_repo_root> "
-        "--run-id <run-id> --checkpoint-file -", "--worker-id <worker_id>",
-        "workflow-state current-launch --repo-root <ledger_repo_root> "
-        "--run-id <run-id> --action-id <custody action_id>",
-    ),
-    SHIP_ISSUE_REMAINDER: (
-        "workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary-file -",
-        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id> --event returned",
-        "gh pr view <pr-num> --repo <resolved-repository> --json body",
-        "Held for verification: <PR URL>",
-    ),
-    SHIP_ISSUE_REVIEW: (
-        "validate-detail-input", 'detail_state: "unpublished"',
-        ".superpowers/ship-review/<issue>/retained-detail.json",
-    ),
-    SHIP_ISSUE_POST_SELECTION_SYNC: (
-        "launch-commit", "gh pr view <pr-num> --json state,headRefOid,mergeable",
-        "git merge --no-commit --no-ff origin/<integration>",
-        "git merge-base --is-ancestor <second-parent> origin/<integration>",
-        "git show --cc <merge-sha>", "`merge-delta-empty`", "`merge-delta-clean`",
-    ),
-    SHIP_ISSUE_HUMAN_GATE: (
-        "gh issue close <num>", "gh issue reopen <num>", "gh label create needs-verification",
-        "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
-        "git push origin --delete refs/heads/<branch>", "git ls-remote --heads origin <branch>",
-        "git worktree remove <worktree-path>", "git branch -d <branch>",
-        "validate-report --boundary ship-summary", "## Never route around a denial",
-    ),
-}
-
-# The ship-issue PR body template (#494 D2, D3, D9): the one fenced
-# `gh pr create` whose double-quoted body the agent renders verbatim. Its
-# markup is pinned in reading order; no placeholder sentence is.
-PR_BODY_TEMPLATE_RE = re.compile(r'```\ngh pr create [^\n]*--body "(.*?)"\n```', re.S)
-PR_BODY_MARKUP = (
-    "## Why", "## What changes", "## Evidence", "## Merge danger",
-    "<details><summary>Delivery record</summary>", "Spec: ", "plan: ", "## Acceptance",
-    "Acceptance state: <effective acceptance state>",
-    "Acceptance record: <record-path or none>", "<acceptance table>",
-    "<review and verification notes>", "</details>", "Closes #<num>",
-)
-# The blank lines the template keeps around its HTML: GitHub renders Markdown
-# inside `<details>` only after a blank line, and resumes it after `</details>`
-# only after another.
-PR_BODY_BLANK_LINE_BOUNDARIES = (
-    "<details><summary>Delivery record</summary>\n\n", "</details>\n\n",
-)
-PR_BODY_ONCE = (
-    "Acceptance state: <effective acceptance state>",
-    "Acceptance record: <record-path or none>", "<acceptance table>", "Closes #<num>",
-)
-# The printable characters the lifecycle guard refuses in a pr-create body.
-PR_BODY_UNSAFE = ('"', "$", "`", "\\")
-INLINE_FALLBACK_MARKUP = (
-    "`## Why`", "`## What changes`", "`## Evidence`", "`## Merge danger`", "`<details>`",
-    "Delivery record",
-)
-
-# Each closed note line and the document that sends it to the PR body
-# (#494 D6, D9): the paragraph or list item holding it names the Delivery record.
-NOTE_DESTINATION_ANCHORS = {
-    SHIP_ISSUE: ("`verification skipped: <id> (<reason>)`", "`verification reused: tree <id>`"),
-    SHIP_ISSUE_REVIEW: ("`review range: delta", "`unmeasured`"),
-}
-
-
-def note_blocks(text):
-    """Paragraphs and list items: the unit a note's destination sentence lives in."""
-    return re.split(r"\n\s*\n|\n(?=\d+\. |- )", text)
-
 
 # "sibling <=2 words> candidate" — the in-working-tree prescription being
 # removed. The bounded gap keeps it off handoff's legitimate
@@ -328,12 +100,6 @@ SDD_SCRIPTS = REPO_ROOT / "home/common/agent-skills/scripts"
 # primary-checkout move (D3).
 REPO_ROOT_WORKSPACE_LITERAL = "<repo-root>/.superpowers/sdd"
 
-# Every `.superpowers/` home the corpus is allowed to name, spelled once (D10).
-SUPERPOWERS_SEGMENTS = {"workflows", "issue-delivery", "sdd", "ship-review"}
-SUPERPOWERS_SEGMENT_RE = re.compile(r"\.superpowers/([A-Za-z0-9_.-]+)")
-
-# The orphaned-bucket prune, spelled once (D5, D8).
-WORKTREE_BUCKET_LITERAL = "`<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`"
 
 GITIGNORE = REPO_ROOT / ".gitignore"
 
@@ -385,10 +151,8 @@ SHARED_POLICY_ENTRIES = {
     "deliver-direct/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.review.code", "bindings.workflow.verification"),
     "design/SKILL.md": ("bindings.paths.artifacts.specs",),
     "doc-grounded-questions/SKILL.md": ("bindings.paths.context", "bindings.paths.standards", "bindings.paths.architecture", "bindings.paths.hints"),
-    "from-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
     "grill-with-docs/SKILL.md": ("bindings.paths.context",),
     "research/SKILL.md": ("bindings.paths.artifacts.specs",),
-    "ship-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.review.code", "bindings.workflow.verification"),
     "ship-release/SKILL.md": ("bindings.tracker", "bindings.vcs"),
     "to-issues/SKILL.md": ("bindings.tracker", "bindings.paths"),
     "wayfind/SKILL.md": ("bindings.tracker",),
@@ -520,9 +284,15 @@ def assert_single_resolution_statement(case, text):
     )
 
 
+# Entries of skills being retired (#688) that a tree may still hold until the
+# directories are deleted or a rebuilt home replaces them; spelled in pieces (D9).
+RETIRING_POLICY_ENTRIES = frozenset({"from-" "issue/SKILL.md", "ship-" "issue/SKILL.md"})
+
+
 def assert_policy_entries(case, root, entries, require_refusal_reporting=False):
     actual = {str(path.relative_to(root)) for path in root.glob("*/SKILL.md")
               if "resolve-project resolve" in path.read_text(encoding="utf-8")}
+    actual -= RETIRING_POLICY_ENTRIES
     case.assertEqual(actual, set(entries))
     for relative, fields in entries.items():
         text = (root / relative).read_text(encoding="utf-8")
@@ -746,9 +516,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
 
     def test_live_evals_grade_strict_policy_and_direct_review(self):
         paths = (
-            REPO_ROOT / "home/common/agent-skills/skills/from-issue/evals/evals.json",
-            REPO_ROOT / "home/common/agent-skills/skills/sdd/evals/evals.json",
-            REPO_ROOT / "home/common/agent-skills/skills/ship-issue/evals/evals.json",
             REPO_ROOT / "home/common/agent-skills/skills/ship-release/evals/evals.json",
             REPO_ROOT / "home/common/agent-skills/skills/wayfind/evals/evals.json",
             REPO_ROOT / "home/common/agent-skills/skills/writing-plans/evals/evals.json",
@@ -814,36 +581,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         self.assertIn("home/common/agent-skills/skills/grill-with-docs/SKILL.md", found)
         self.assertIn("home/common/agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md", found)
 
-    def test_build_delivery_callers_name_the_sanctioned_resolution_exception(self):
-        exception = ("only sanctioned exception is `workflow-state build-delivery`, "
-                     "which performs its own sealed, read-only resolution")
-        scoped = "home/common/agent-skills/skills/from-issue/"
-        callers = []
-        for root in (REPO_ROOT / "home/common/agent-skills/skills",
-                     REPO_ROOT / "home/common/claude-code/skills"):
-            for path in sorted(root.rglob("*.md")):
-                relative = path.relative_to(REPO_ROOT).as_posix()
-                if relative.startswith(scoped) and relative != scoped + "SKILL.md":
-                    continue
-                text = normalized(path.read_text(encoding="utf-8"))
-                if "build-delivery" not in text:
-                    continue
-                callers.append(relative)
-                with self.subTest(path=relative):
-                    self.assertIn(exception, text)
-        self.assertEqual(sorted(callers), [
-            "home/common/agent-skills/skills/from-issue/SKILL.md",
-            "home/common/agent-skills/skills/ship-issue/SKILL.md",
-        ])
-
-    def test_from_issue_has_no_bindings_or_grounding_reference_file(self):
-        directory = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
-        for name in ("bindings.md", "grounding.md"):
-            with self.subTest(name=name):
-                self.assertFalse((directory / name).exists())
-                for path in sorted(directory.glob("*.md")):
-                    self.assertNotIn(name, path.read_text(encoding="utf-8"), path.name)
-
 
 def corpus_documents():
     """Every skill document in both skill trees, as (path, text) pairs."""
@@ -852,43 +589,15 @@ def corpus_documents():
             yield path, path.read_text(encoding="utf-8")
 
 
-def nested_workflow_documents():
-    for directory in (FROM_ISSUE_DIR, SDD_DIR):
-        for path in sorted(directory.glob("*.md")):
-            yield path, path.read_text(encoding="utf-8")
-
-
-def json_block(text):
-    match = re.search(r"```json\n(\{.*?\})\n```", text, re.DOTALL)
-    if match is None:
-        raise AssertionError("missing json block")
-    return json.loads(match.group(1))
-
-
 class WorkflowSkillContractsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.from_issue = FROM_ISSUE.read_text(encoding="utf-8")
-        cls.auto = AUTO.read_text(encoding="utf-8")
-        cls.investigate = INVESTIGATE.read_text(encoding="utf-8")
         cls.handoff = HANDOFF.read_text(encoding="utf-8")
         cls.design = DESIGN.read_text(encoding="utf-8")
         cls.grill = GRILL.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
-        cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
-        cls.ship_review = SHIP_ISSUE_REVIEW.read_text(encoding="utf-8")
-        cls.ship_human_gate = SHIP_ISSUE_HUMAN_GATE.read_text(encoding="utf-8")
-        cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
         cls.writing_plans = WRITING_PLANS.read_text(encoding="utf-8")
-        cls.sdd = SDD.read_text(encoding="utf-8")
-        cls.phase_5_review_contract = PHASE_5_REVIEW_CONTRACT.read_text(encoding="utf-8")
-        cls.standards_review = (FROM_ISSUE_DIR / "standards-review.md").read_text(
-            encoding="utf-8"
-        )
-        cls.ship_handoff = (FROM_ISSUE_DIR / "ship-handoff.md").read_text(
-            encoding="utf-8"
-        )
         cls.small_budget_fixture = json.loads(
             SMALL_BUDGET_FIXTURE.read_text(encoding="utf-8")
         )
@@ -896,220 +605,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             OVERSIZED_BUDGET_FIXTURE.read_text(encoding="utf-8")
         )
 
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertNotEqual(next_position, -1, f"missing anchor: {anchor!r}")
-            self.assertGreater(next_position, position, f"out-of-order anchor: {anchor!r}")
-            position = next_position
-
-    def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
-        documents = {
-            str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
-            for path in (FROM_ISSUE.parent / "ship-handoff.md",)
-        }
-        corpus = " ".join(documents.values())
-        for phrase in ("workflow-response", "custody",
-                       "requested_scope", "ship-summary/v2", "delivery_remainder"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, corpus)
-        self.assertIn("checkpoint-delivery", corpus)
-        self.assertNotIn("infer the next stage from tracker", corpus.lower())
-        self.assertNotIn("unfinished delivery as failed", corpus.lower())
-        terminal = normalized(self.section(
-            FROM_ISSUE.read_text(encoding="utf-8"),
-            "## Terminal return procedure", "## Suspension procedure"
-        ))
-        self.assertIn("--summary-file", terminal)
-        self.assertNotIn("--result-file <path>", terminal)
-
-    def test_direct_and_control_requests_carry_their_interfaces(self):
-        direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")
-        request = json_block(direct)
-        self.assertEqual((set(request), request["interface_version"], request["verification"]),
-                         (V3_DIRECT_REQUEST_KEYS, 3, []))
-        for anchor in ("`delivery_contract`", "--kind contract", "`authorization_intents`",
-                       "kind: delivery_remainder", "--request-file -"):
-            self.assertIn(anchor, normalized(direct))
-        self.assertIn('`host_route: "direct"`',
-                      normalized(ACQUIRE_DURABLE.read_text(encoding="utf-8")))
-
-    def test_ship_handoff_v2_ship_summary_v2_and_remainder_prompt(self):
-        line = next(item for item in self.ship_handoff.splitlines()
-                    if item.startswith('{"interface_version":2'))
-        self.assertLessEqual(SHIP_HANDOFF_V2_KEYS, set(re.findall(r'"([a-z_]+)":', line)))
-        for key in SHIP_SUMMARY_V2_KEYS:
-            self.assertIn(f"`{key}`", self.ship_handoff)
-        for anchor in ("--kind initial-intent", "--boundary ship-summary",
-                       "## Remainder owner prompt"):
-            self.assertIn(anchor, self.ship_handoff)
-
-    def test_the_ship_prompt_returns_the_gap_line_and_the_remainder_prompt_never_does(self):
-        prompt = normalized(self.ship_handoff.split("## Ship report handling", 1)[0])
-        self.assertIn(f"return only `{CAPABILITY_GAP_LINE}`", prompt)
-        remainder = self.ship_handoff.split("## Remainder owner prompt", 1)[1]
-        self.assertNotIn("capability_gap", remainder)
-
-    def test_capability_gap_line_is_spelled_identically_everywhere(self):
-        # One closed line, compared byte for byte and never decoded (per D4).
-        pattern = r"capability_gap[^`\n]*"
-        self.assertIn(CAPABILITY_GAP_LINE, self.ship_issue)
-        self.assertEqual(set(re.findall(pattern, self.ship_issue)), {CAPABILITY_GAP_LINE})
-        carriers = set()
-        for path in sorted(FROM_ISSUE_DIR.glob("*.md")):
-            spellings = set(re.findall(pattern, path.read_text(encoding="utf-8")))
-            with self.subTest(document=path.name):
-                self.assertLessEqual(spellings, {CAPABILITY_GAP_LINE})
-            if spellings:
-                carriers.add(path.name)
-        self.assertLessEqual({"ship-handoff.md", "delegated-owner.md"}, carriers)
-
-    def test_delegated_return_line_is_spelled_identically_everywhere(self):
-        # #352 D6: one closed prompt line, matched byte for byte.
-        pattern = r"Delegated owner:[^`\n]*"
-        carriers = set()
-        for path in sorted(FROM_ISSUE_DIR.glob("*.md")):
-            spellings = set(re.findall(pattern, path.read_text(encoding="utf-8")))
-            with self.subTest(document=path.name):
-                self.assertLessEqual(spellings, {DELEGATED_RETURN_LINE})
-            if spellings:
-                carriers.add(path.name)
-        self.assertEqual(carriers, {"SKILL.md", "delegated-owner.md"})
-
-    def test_generic_delegated_owner_returns_the_handoff_without_a_terminal_write(self):
-        # #352 D1-D3: argv and boundary names only (agent-helpers rule 6).
-        delegated = DELEGATED_OWNER.read_text(encoding="utf-8")
-        self.assertEqual(delegated.count("## Generic delegate"), 1)
-        generic = delegated.split("## Generic delegate", 1)[1]
-        self.assert_ordered(generic, f"`{DELEGATED_RETURN_LINE}`", "release-worker",
-                            "--boundary ship-handoff")
-        for forbidden in ("workflow-state finish", "--boundary ship-summary"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, generic)
-
-    def test_delegate_action_checks_the_return_before_it_ships(self):
-        # #352 D2: the delegator tries the terminal reply before the handoff.
-        action = self.section(self.from_issue, "4. **`delegate`**",
-                              "## Terminal return procedure")
-        self.assert_ordered(
-            action, "id=from-issue-phase-delegate", f"`{DELEGATED_RETURN_LINE}`",
-            "--boundary workflow-response", "--boundary ship-handoff",
-            "workflow-state progress", "id=from-issue-ledger-remainder")
-
-    def test_from_issue_evals_cover_the_delegated_ship_route(self):
-        # #352 D8: three plan-only cases, two at orchestrated depth.
-        cases = {case["name"]: case
-                 for case in json.loads(FROM_ISSUE_EVALS.read_text(encoding="utf-8"))["evals"]}
-        for name in DELEGATED_SHIP_EVALS:
-            with self.subTest(case=name):
-                self.assertIn(name, cases)
-                self.assertEqual(cases[name]["mode"], "plan-only")
-                self.assertTrue(cases[name]["prompt"].strip())
-                self.assertTrue(cases[name]["expected_output"].strip())
-
-    def test_from_issue_phase_seven_ships_inline_on_the_dispatch_gap(self):
-        # The fallback ends in the suspension procedure, never a direct
-        # `workflow-state suspend` (the verb stays in that procedure).
-        phase_seven = self.section(self.from_issue, "\n## Phase 7", "## Notes")
-        handling = self.section(self.ship_handoff, "## Ship report handling",
-                                "## Inline fallback (no ship-issue skill)")
-        for text in (phase_seven, handling):
-            self.assertNotIn("workflow-state suspend", text)
-
-    def test_suspension_procedure_admits_agent_dispatch(self):
-        suspension = normalized(self.section(
-            self.from_issue, "## Suspension procedure", "## Phase 0"))
-        self.assert_ordered(
-            suspension, "`human_gate`", "`external`", "`agent_dispatch`",
-            "`deadline`", "`verification`", "(the reaper alone owns `unknown`)",
-        )
-
-    def test_the_verification_cause_feeds_the_failure_on_stdin(self):
-        """Issue 546 D5, D18: the one `suspend` template stays; the lifecycle-call rule lists
-        `--verification-input -`, and sdd's declaration route feeds the printed failure there."""
-        suspends = [line for line in self.from_issue.splitlines()
-                    if line.startswith("workflow-state suspend ")]
-        self.assertEqual(len(suspends), 1)
-        rule = next(block for block in self.from_issue.split("\n\n")
-                    if block.startswith("Every lifecycle call is one command"))
-        self.assertIn("`--verification-input -`", rule)
-        review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
-        self.assert_ordered(review, "verification-observe failure", "Exit 0: suspend per from-issue",
-                            "`blocked_on=verification`", "`--verification-input -`")
-
-    def test_sdd_states_the_deadline_suspension_order(self):
-        # #281 D5, D9: the one paragraph of `### Lifecycle workers` naming
-        # `blocked_on=deadline` releases workers, records progress, fences
-        # the launch (final review C-001: `suspend` is not launch-fenced),
-        # then suspends with that value, pinned by argv and value, not prose.
-        workers = self.section(self.sdd, "### Lifecycle workers",
-                               "### 1. Dispatch the implementer")
-        paragraphs = [normalized(p) for p in re.split(r"\n\s*\n", workers)
-                      if "`blocked_on=deadline`" in p]
-        self.assertEqual(len(paragraphs), 1, paragraphs)
-        self.assert_ordered(
-            paragraphs[0],
-            "`deadline_at`",
-            "workflow-state release-worker --repo-root <ledger_repo_root> "
-            "--run-id <run-id> --worker-id <worker_id>",
-            "workflow-state mark-progress --repo-root <ledger_repo_root> "
-            "--run-id <run-id> --action-id <action_id>",
-            "workflow-state check-launch --repo-root <ledger_repo_root> "
-            "--run-id <run-id> --action-id <action_id>",
-            "`current: false`",
-            "`/from-issue <num> --auto`",
-            "`current: true`",
-            "`blocked_on=deadline`",
-        )
-
-    def test_final_verification_declares_a_blocker_the_adapter_accepts(self):
-        """Issue 546 D5: final-review's declaration, each placeholder filled with a valid
-        value, is one the source `normalize_declaration` accepts, and unclassified it is not."""
-        review = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
-        (line,) = [line.strip() for line in review.splitlines()
-                   if line.strip().startswith('{"command_id": ')]
-        for placeholder, value in (("<id>", "nix-build"), ("<class>", "dependency"),
-                                   ("<worktree>", "/tmp/wt"), ("<name>", "flake-lock"),
-                                   ("<path>", "flake.lock")):
-            line = line.replace(f'"{placeholder}"', json.dumps(value))
-        declaration = json.loads(line)
-        done = normalize_declaration(declaration)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        unclassified = {key: value for key, value in declaration.items()
-                        if key != "failure_class"}
-        self.assertIn("unclassified", normalize_declaration(unclassified).stderr)
-
-    def test_auto_names_the_dispatch_gap_fallback_and_relays_closed_lines(self):
-        # The delegated owner keeps the closed gap line; the earlier controller
-        # matches two closed lines byte for byte before it validates (per D5, D10).
-        delegated = normalized(DELEGATED_OWNER.read_text(encoding="utf-8"))
-        self.assert_ordered(delegated, f"`{CAPABILITY_GAP_LINE}`", "`ship-summary/v2`",
-                            "workflow-state finish")
-        earlier = normalized(ROLLOVER.read_text(encoding="utf-8")
-                             .split("## Earlier controller stop", 1)[1])
-        self.assert_ordered(
-            earlier,
-            "`/from-issue <num> --auto`",
-            "`Suspended (blocked_on=<value>). Resume: /from-issue <num> --auto`",
-            "artifact-budget validate-report --boundary workflow-response",
-        )
-
-    def test_auto_continuation_and_bookkeeper_are_interface_two(self):
-        owner = json_block(ROLLOVER.read_text(encoding="utf-8"))["owner"]
-        self.assertEqual((set(owner), owner["interface_version"]), (V2_OWNER_KEYS, 2))
-        self.assert_ordered(normalized(DELEGATED_OWNER.read_text(encoding="utf-8")),
-                            "workflow-state check-launch",
-                            "workflow-state finish --summary-file -")
-
-    def test_lifecycle_calls_are_single_stdin_commands_on_interface_two(self):
-        for path in LIFECYCLE_DOCS:
-            text = normalized(path.read_text(encoding="utf-8"))
-            with self.subTest(path=path.name):
-                self.assertNotIn('"interface_version": 1', text)
-                for flag, value in INPUT_FLAG_RE.findall(text):
-                    self.assertEqual(value.strip("`.,;"), "-", flag)
-                self.assertLessEqual(text.count("--result-file"), 1)
 
     def test_no_module_installs_a_codex_entry_surface(self):
         # #687 D1: Codex is a reviewer only; it gets no skills, guidance or config splice.
@@ -1137,24 +632,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn('SKILL_ROOTS = (".claude/skills",)', impeccable)
         self.assertNotIn("test_codex_view_is_a_whole_directory_link", impeccable)
 
-    def section(self, text, heading, next_heading):
-        start = text.index(heading)
-        end = text.index(next_heading, start + len(heading))
-        return text[start:end]
-
-    def test_nested_workflow_documents_never_dispatch_in_the_background(self):
-        for path, text in nested_workflow_documents():
-            with self.subTest(path=str(path)):
-                self.assertNotIn("run_in_background", text)
-
-    def test_nested_dispatches_stay_unnamed_and_foreground(self):
-        for path, text in nested_workflow_documents():
-            for line_number, line in enumerate(text.splitlines(), 1):
-                if "Agent(" not in line:
-                    continue
-                with self.subTest(path=f"{path}:{line_number}"):
-                    self.assertNotIn("name=", line)
-                    self.assertNotIn("run_in_background", line)
 
     def test_plan_package_contract_is_root_only_and_fail_closed(self):
         self.assertIn("<stem>.tasks/task-1.md", self.writing_plans)
@@ -1178,8 +655,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_shared_entries_use_the_project_resolver(self):
         for name in (
-            "research", "doc-grounded-questions", "design", "ship-issue",
-            "to-issues", "from-issue", "grill-with-docs", "ship-release",
+            "research", "doc-grounded-questions", "design",
+            "to-issues", "grill-with-docs", "ship-release",
             "wayfind", "worktrees", "writing-plans",
         ):
             path = (REPO_ROOT / "home/common/agent-skills/skills"
@@ -1221,102 +698,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
-    def test_autonomous_reports_and_ship_handoff_are_root_plus_metrics(self):
-        for text in (self.auto, self.ship_handoff):
-            for field in ("state", "artifact", "kind", "path", "metrics", "budget_status"):
-                self.assertIn(field, text)
-        self.assertIn("spec_artifact", self.ship_handoff)
-        self.assertIn("plan_artifact", self.ship_handoff)
-        self.assertIn('"action_id"', self.ship_handoff)
-        for forbidden in ("decisions:", "open_items:", "adr_paths:", "summary:"):
-            self.assertNotRegex(self.auto, rf"(?m)^\s*{re.escape(forbidden)}")
-            self.assertNotRegex(self.ship_handoff, rf"(?m)^\s*{re.escape(forbidden)}")
-        self.assertIn("discussion_items: []", self.ship_handoff)
-        self.assertIn("report_path", self.ship_handoff)
-        self.assertIn("phase_reports.notes_max_characters", self.ship_handoff)
-        self.assertIn("validate-report --boundary ship-handoff", self.ship_handoff)
-        self.assertIn("validate-report --boundary ship-summary", self.ship_handoff)
-
-    def test_autonomous_over_budget_reports_include_required_violations(self):
-        for kind in ("design-spec", "implementation-plan"):
-            complete = (
-                f'{{"state":"complete","artifact":{{"kind":"{kind}"'
-            )
-            over = (
-                f'{{"state":"decompose_required","artifact":{{"kind":"{kind}"'
-            )
-            self.assertIn(complete, self.auto)
-            self.assertIn(over, self.auto)
-        self.assertEqual(self.auto.count('"violations":["root_bytes"]'), 2)
-
-    def test_sdd_report_is_exact_and_mechanically_validated(self):
-        for field in ("state", "review_state", "conformance_verdict",
-                      "correctness_verdict", "verification_state", "base_sha",
-                      "head_sha", "acceptance_state", "detail_state", "report_path",
-                      "notes"):
-            self.assertIn(field, self.sdd)
-        self.assertIn("validate-report --boundary sdd", self.sdd)
-        for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
-            self.assertNotRegex(self.sdd, rf"(?m)^\s*{re.escape(forbidden)}")
-
-    def test_received_reports_cross_the_same_json_wire_seam(self):
-        self.assertIn("validate-report --boundary sdd --input -", self.from_issue)
-
-    def test_both_plan_review_routes_revalidate_received_reports_in_the_caller(self):
-        for text in (self.from_issue, self.standards_review):
-            self.assertIn("validate-report --boundary producer --input -", text)
-
-    def test_standards_review_gate_validates_before_it_checks_the_plan(self):
-        gate = self.standards_review.split("## Caller input gate", 1)[1]
-        gate = normalized(gate.split("## Dispositioning findings", 1)[0])
-        self.assert_ordered(gate, "validate-report --boundary producer --input -",
-                            "artifact-budget check --kind implementation-plan --root")
-
-    def test_standards_review_stops_a_blocked_plan_review_capability(self):
-        self.assert_ordered(self.standards_review, "capabilities.review.plan", "reason_code",
-                            "repair_id")
-
-    def assert_publication_precedes_cleanup(self, section, publication, cleanups):
-        published = section.find(publication)
-        self.assertNotEqual(published, -1, f"missing publication anchor: {publication!r}")
-        for cleanup in cleanups:
-            removed = section.find(cleanup)
-            self.assertNotEqual(removed, -1, f"missing cleanup anchor: {cleanup!r}")
-            self.assertLess(published, removed,
-                            f"{cleanup!r} precedes detail publication {publication!r}")
-
-    def test_durable_review_detail_precedes_every_removable_cleanup(self):
-        self.assertIn(".superpowers/issue-delivery/", self.sdd)
-        self.assertIn(".superpowers/issue-delivery/", self.ship_review)
-        sdd_finish = normalized(self.sdd.split("\n## Finish\n", 1)[1])
-        self.assert_publication_precedes_cleanup(
-            sdd_finish, "`delivery-detail` mode", ("rm -rf <workspace>",))
-        ship_cleanup = self.ship_issue.split("\n## Phase 8 \u2014 Cleanup\n", 1)[1].split(
-            "\n## Notes\n", 1)[0]
-        self.assert_publication_precedes_cleanup(
-            ship_cleanup, "`delivery-detail` mode",
-            ("git worktree remove <worktree-path>", "git worktree prune", "git branch -d <branch>",
-             "remove only `$BUCKET`", 'ExitWorktree action: "remove"'))
-        before_remove = ship_cleanup.split("2. Remove the worktree", 1)[0]
-        self.assertIn("`delivery-detail` mode", before_remove)
-
-    def test_detail_order_check_fails_when_cleanup_precedes_publication(self):
-        swapped = "rm -rf <workspace> then publish in `delivery-detail` mode"
-        with self.assertRaises(AssertionError):
-            self.assert_publication_precedes_cleanup(
-                swapped, "`delivery-detail` mode", ("rm -rf <workspace>",))
-        with self.assertRaises(AssertionError):
-            self.assert_publication_precedes_cleanup(
-                "publish in `delivery-detail` mode", "`delivery-detail` mode", ("rm -rf <workspace>",))
-
-    def test_phase_five_remeasures_every_artifact_it_mutates(self):
-        remeasure = normalized(self.standards_review.split("## Accepted-edit remeasurement", 1)[1])
-        self.assert_ordered(remeasure, "artifact-budget check --kind implementation-plan",
-                            "artifact-budget check --kind design-spec", "decompose_required")
-        for heading in ("## Accepted-edit remeasurement", "## Caller pre-dispatch boundary"):
-            with self.subTest(heading=heading):
-                self.assertNotIn(heading, self.phase_5_review_contract)
-
     def test_fixture_producer_states_supplement_behavioral_cli_cases(self):
         self.assertTrue(all(item["expected"]["producer_state"] == "complete"
                             for item in self.small_budget_fixture["artifacts"]))
@@ -1326,325 +707,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(expected[("implementation-plan", "plan-ninth-member")], "decompose_required")
         self.assertEqual(expected[("handoff", "handoff-root-plus-one")], "stopped")
         self.assertEqual(expected[("review-package", "review-member-plus-one")], "decompose_required")
-        for value in ("complete", "within_budget"):
-            self.assertIn(value, self.auto)
-            self.assertIn(value, self.sdd)
-
-    def test_owner_persists_exact_terminal_result_before_return(self):
-        owner_return_section = self.section(
-            self.from_issue, "## Terminal return procedure", "## Phase 0"
-        )
-        self.assertIn("workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> "
-                      "--summary-file -", owner_return_section)
-        for field in ("custody", "delivery_contract_digest", "historical_owner_result"):
-            self.assertIn(f"`{field}`", owner_return_section)
-
-    def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
-        rollover = ROLLOVER.read_text(encoding="utf-8")
-        transfer = self.section(rollover, "## Mandatory transfer gate", "## Earlier controller stop")
-        self.assert_ordered(
-            transfer,
-            "artifact-budget check --kind design-spec",
-            "artifact-budget check --kind implementation-plan",
-            "within_budget",
-            "workflow-state progress",
-            "next_needs_context=false",
-            "artifacts_sufficient=true",
-            "remainder_self_contained=true",
-        )
-        continuation = json_block(transfer)
-        self.assertEqual(set(continuation), {
-            "owner", "reviewed_head_sha", "spec_artifact", "plan_artifact",
-        })
-        self.assertEqual(set(continuation["owner"]), V2_OWNER_KEYS)
-        self.assertEqual(continuation["owner"]["kind"], "owner")
-        self.assertRegex(continuation["reviewed_head_sha"], r"^[0-9a-f]{40}$")
-        artifact_fields = {"kind", "path", "metrics", "budget_status"}
-        metric_fields = {
-            "root_bytes", "total_bytes", "file_count", "largest_member_bytes",
-        }
-        for block, kind in (
-            ("spec_artifact", "design-spec"),
-            ("plan_artifact", "implementation-plan"),
-        ):
-            artifact = continuation[block]
-            self.assertEqual(set(artifact), artifact_fields)
-            self.assertEqual(artifact["kind"], kind)
-            self.assertEqual(set(artifact["metrics"]), metric_fields)
-            self.assertTrue(all(type(value) is int
-                                for value in artifact["metrics"].values()))
-            self.assertEqual(artifact["budget_status"], "within_budget")
-        delegated = DELEGATED_OWNER.read_text(encoding="utf-8")
-        self.assert_ordered(
-            delegated,
-            "artifact-budget validate-report --boundary workflow-response --input -",
-            "git -C owner.worktree branch --show-current",
-            "artifact-budget check",
-            "workflow-state progress",
-            "launch-scope reap",
-            "workflow-state check-launch",
-            "workflow-state finish",
-        )
-        self.assertNotIn("--boundary ship-summary", rollover)
-
-    def test_auto_blocked_on_values_are_the_closed_set(self):
-        self.assertEqual(
-            sorted(set(re.findall(r"blocked_on[:=] ?(\w+)", normalized(self.auto)))),
-            ["human_gate"],
-        )
-
-    def test_auto_persists_a_terminal_result_with_finish(self):
-        self.assertIn("workflow-state finish", self.auto)
-
-    def test_human_gate_carries_no_affirmative_bypass_instruction(self):
-        # AC3 (per D14). The closed negative list under
-        # `## Never route around a denial` is the file's ONLY home for these
-        # spellings; anywhere else they would read as an instruction. A
-        # line-local grep cannot see this, because the list's "must not:"
-        # lead-in sits on the introduction line and each banned verb on its
-        # own bullet.
-        gate = self.ship_human_gate
-        split = gate.index("## Never route around a denial")
-        outside = gate[:split]
-        for bypass in (
-            "--admin",
-            "--force",
-            "--force-with-lease",
-            "git merge",
-            "git push origin <integration>",
-            "git reset",
-            "git rebase",
-        ):
-            with self.subTest(bypass=bypass):
-                self.assertNotIn(bypass, outside)
-
-    def test_owner_has_executable_phase_gate_and_action_semantics(self):
-        self.assertIn("workflow-state progress", self.from_issue)
-        # Issue 432: the gate and the suspension are literal templates whose identity is
-        # the action id alone.
-        templates = {line.split()[1]: line.split(" | ")[0].split()
-                     for line in self.from_issue.splitlines()
-                     if line.startswith(("workflow-state progress ", "workflow-state suspend "))}
-        self.assertEqual(
-            [word for word in templates["progress"] if word.startswith("--")],
-            ["--repo-root", "--run-id", "--action-id", "--phase", "--next-needs-context",
-             "--artifacts-sufficient", "--remainder-self-contained"])
-        self.assertEqual(
-            [word for word in templates["suspend"] if word.startswith("--")],
-            ["--repo-root", "--run-id", "--action-id", "--blocked-on"])
-        # Issue 424: the ceilings live in agent_tools.phase_budget and the context meter
-        # supplies the count, so no from-issue document restates either.
-        for document in sorted(FROM_ISSUE_DIR.glob("*.md")):
-            text = document.read_text(encoding="utf-8")
-            for argv in ("--turn-ceiling", "--turn-headroom", "--context-ceiling",
-                         "--context-headroom", "--context-tokens"):
-                with self.subTest(document=document.name, argv=argv):
-                    self.assertNotIn(argv, text)
-
-    def test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops(self):
-        identity = self.section(
-            self.from_issue, "## Lifecycle identity", "## The flow"
-        )
-        for field in ("run_id", "attempt", "owner", "action_id", "worktree", "ledger_repo_root"):
-            self.assertIn(f"`{field}`", identity)
-        self.assertIn("--repo-root <ledger_repo_root>", identity)
-        phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
-        self.assertIn("workflow-state finish", phase_zero)
-
-    def test_from_issue_revalidates_its_launch_before_the_terminal_finish(self):
-        handling = normalized(self.section(
-            SHIP_HANDOFF_DOC.read_text(encoding="utf-8"),
-            "## Ship report handling", "## Dispatch-gap fallback"))
-        self.assert_ordered(
-            handling,
-            "validate-report --boundary ship-summary --input -",
-            "~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> "
-            "--run-id <run-id> --action-id <issue:attempt:launch>",
-            "/from-issue <num> --auto",
-            "workflow-state finish --summary-file -",
-        )
-        fallback = normalized(self.section(
-            SHIP_HANDOFF_DOC.read_text(encoding="utf-8"),
-            "## Dispatch-gap fallback", "## Inline fallback (no ship-issue skill)"))
-        self.assert_ordered(fallback, "check-launch", "`ship-issue`",
-                            f"`{CAPABILITY_GAP_LINE}`", "`agent_dispatch`")
-
-    def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
-        # The guard lives inside the bookkeeper's own command sequence, not in
-        # the parent that dispatches it (per D9).
-        delegated = DELEGATED_OWNER.read_text(encoding="utf-8")
-        self.assert_ordered(normalized(delegated), "check-launch", "workflow-state finish")
-        self.assertIn("/from-issue <num> --auto", delegated)
-        self.assertNotIn("workflow-state suspend", delegated)
-
-    def test_from_issue_handoff_resume_is_acquisition_mode_specific(self):
-        phase_gate = self.section(
-            self.from_issue, "## Dispatch, phase-budget and attempt-budget rules",
-            "## Terminal return procedure",
-        )
-        self.assertNotIn("workflow-state launch", phase_gate)
-
-    def test_from_issue_standalone_modes_use_live_lifecycle_interfaces(self):
-        durable = ACQUIRE_DURABLE.read_text(encoding="utf-8")
-        self.assert_ordered(
-            durable, "workflow-state init-run", "max_parallel: 1",
-            "workflow-state control", "first `spawn` envelope",
-        )
-        self.assertIn("workflow-state init-run --creation-key from-issue:<num>:<unix-ts>",
-                      durable)
-
-    def test_direct_auto_acquires_only_through_direct_owner(self):
-        identity = self.section(
-            self.from_issue, "## Lifecycle identity", "### Resume pack"
-        )
-        self.assert_ordered(
-            identity, "acquire-dispatcher.md", "acquire-direct.md",
-            "acquire-durable.md", "acquire-interactive.md",
-        )
-        direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")
-        self.assertIn("workflow-state direct-owner", direct)
-        self.assertIn("--repo-root <ledger_repo_root>", direct)
-        self.assertIn("--request-file -", direct)
-        self.assertNotIn("workflow-state init-run", direct)
-        self.assertNotIn("workflow-state control", direct)
-
-    def test_direct_auto_handoff_relaunches_itself_instead_of_stopping(self):
-        # A top-level `/from-issue <num> --auto` has no dispatcher to relaunch it:
-        # its handoff dispatches a fresh `--auto` owner (whose own `direct-owner`
-        # call resumes the handed-off attempt) instead of asking the user to
-        # re-enter; every other owner returns the closed `Handed off` line.
-        line = "Handed off (<exact-handoff-path>). Resume: /from-issue <num> --auto"
-        gate = normalized(self.from_issue.split("3. **`handoff`**", 1)[1]
-                          .split("4. **`delegate`**", 1)[0])
-        self.assert_ordered(
-            gate, "--handoff-path <exact-path>",
-            "A direct `--auto` invocation not prompted `Relaunched owner` never stops",
-            "a child's `Handed off (…)` line", "`from-issue-phase-delegate`",
-            "prompted only `/from-issue <num> --auto` and `Relaunched owner`",
-            "relays its return", f"Any other owner returns only `{line}` and stops",
-        )
-        self.assertNotIn("persist the handoff, and stop", gate)
-        # Every relay of a child's return defers a `Handed off` line to the
-        # handoff action, so the top-level run relaunches instead of stopping.
-        delegate = normalized(self.from_issue.split("4. **`delegate`**", 1)[1])
-        self.assertIn("Except at the rollover or a relaunch the prompt has the line", delegate)
-        self.assert_ordered(
-            delegate, "a `Suspended (…)` line or a `Handed off (…)` line",
-            "relay it (a `Handed off (…)` per the `handoff` action), write nothing and stop",
-        )
-        auto = normalized(self.auto)
-        self.assertIn("durable handoff, obey `SKILL.md`'s `handoff` action.", auto)
-        self.assertNotIn("finalize it through `workflow-state progress`, and stop", auto)
-        earlier = normalized(ROLLOVER.read_text(encoding="utf-8")
-                             .split("## Earlier controller stop", 1)[1])
-        self.assert_ordered(
-            earlier, "validate, relay, self-relaunch, and stop",
-            f"`{line}` line takes `SKILL.md`'s `handoff` action's relaunch, or its relay",
-            "dispatch a second owner but that relaunch",
-        )
-        self.assertNotIn("dispatch a second owner,", earlier)
-
-    def test_direct_auto_observe_owner_terminal_loop_is_closed(self):
-        direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")
-        self.assert_ordered(
-            direct,
-            "kind: observe",
-            "tracker",
-            "recorded_worktree",
-            "candidate_worktree",
-            "kind: owner",
-            "kind: delivery_remainder",
-            "kind: terminal",
-            "kind: suspended",
-        )
-        text = normalized(direct)
-        for shape in (
-            "`interface_version`, `kind`, `issue`, nullable `run_id`, and `requirements`",
-            "`interface_version`, `kind`, `issue`, nullable `run_id`, `source`, `reason`, "
-            "`blockers`, nullable `result`, and `reentry`",
-        ):
-            self.assertIn(shape, text)
-        for field in (
-            "ledger_repo_root", "run_id", "issue", "attempt", "owner",
-            "action_id", "launch_kind", "worktree", "handoff_path",
-            "deadline_at",
-        ):
-            self.assertIn(field, direct)
-        observe = text[text.index("**`kind: observe`**"):text.index("**`kind: owner`**")]
-        expects = module_constants(REPO_ROOT / "python/agent_tools/attempt_observations.py",
-                                   "EXPECTS_MEMBERS")["EXPECTS_MEMBERS"]
-        for name in ("expects", *expects):
-            self.assertIn(f"`{name}`", observe)
-
-    def test_direct_acquisition_relays_a_suspended_reply(self):
-        """Issue 546 D6, D18: item 5 stops before Phase 1 and installs no waiter as item 4 does,
-        but without item 4's `kind: terminal` key check, and prints the canonical line from
-        members that the source workflow-response validator requires of a `suspended` reply
-        (issue 544 D16), so the reply's shape is the validator's, not restated here."""
-        text = normalized(ACQUIRE_DIRECT.read_text(encoding="utf-8"))
-        item = text[text.index("**`kind: suspended`**"):]
-        item = item[:item.index("Clear the retained")]
-        self.assertIn("stop before Phase 1 with no waiter", item)
-        self.assertNotIn("item 4", item)
-        self.assertNotIn("require exactly", item)
-        self.assertIn("`Suspended (blocked_on=<blocked_on>). Resume: <reentry>`", item)
-        members = re.findall(r"<([a-z_]+)>", item)
-        self.assertEqual(members, ["blocked_on", "reentry"])
-        reply = {"interface_version": 2, "kind": "suspended", "run_id": "run-1", "issue": 151,
-                 "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
-                             "action_id": "151:1:1"},
-                 "blocked_on": "verification", "reentry": "/from-issue 151 --auto"}
-        done = validate_workflow_response(reply)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        for name in members:
-            with self.subTest(dropped=name):
-                less = {key: value for key, value in reply.items() if key != name}
-                self.assertEqual(validate_workflow_response(less).returncode, 2)
-
-    def test_adjacent_from_issue_acquisition_modes_remain_unchanged(self):
-        for route in (ACQUIRE_DISPATCHER, ACQUIRE_INTERACTIVE, ACQUIRE_DURABLE):
-            self.assertNotIn("direct-owner", route.read_text(encoding="utf-8"))
-
-    def test_suspension_procedure_pins_verb_line_and_distinction(self):
-        suspension = self.section(
-            self.from_issue, "## Suspension procedure", "## Phase 0"
-        )
-        self.assertIn(
-            "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--action-id <action_id> --blocked-on <value>",
-            suspension,
-        )
-        self.assertIn(
-            "Suspended (blocked_on=<value>). Resume: <reentry from the envelope>",
-            suspension,
-        )
-        self.assert_ordered(
-            suspension, "workflow-state suspend", "Suspended (blocked_on=",
-        )
-
-    def test_suspension_validates_its_reply_and_replays_a_stall_bound_terminal(self):
-        """#191 D6, D8: suspend's reply is validated; a `terminal` reply is a replay."""
-        suspension = self.section(
-            self.from_issue, "## Suspension procedure", "## Phase 0"
-        )
-        self.assertIn(
-            "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--action-id <action_id> --blocked-on <value> "
-            "| artifact-budget validate-report --boundary workflow-response --input -\n",
-            suspension,
-        )
-        self.assert_ordered(
-            normalized(suspension), "`kind: terminal`", "`kind: suspended`",
-            "Suspended (blocked_on=<value>). Resume: <reentry from the envelope>",
-        )
-
-    def test_terminal_replay_relays_reentry(self):
-        terminal = self.section(
-            self.from_issue,
-            "## Terminal return procedure",
-            "## Suspension procedure",
-        )
-        self.assertIn("`reentry`", terminal)
 
     def test_codex_collaboration_has_exactly_one_companion_tail(self):
         blocks = re.findall(r"```text\n(.*?)```", self.collaboration, re.S)
@@ -1661,113 +723,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 with self.subTest(path=path.name, item=item):
                     self.assertIn(item, text)
 
-    def test_ship_issue_documents_carry_their_machine_text(self):
-        for path, items in SHIP_ISSUE_MACHINE_TEXT.items():
-            text = normalized(path.read_text(encoding="utf-8"))
-            for item in items:
-                with self.subTest(path=path.name, item=item):
-                    self.assertIn(item, text)
-
-    def test_ship_issue_pr_body_reads_first_then_records(self):
-        bodies = PR_BODY_TEMPLATE_RE.findall(self.ship_issue)
-        self.assertEqual(len(bodies), 1)
-        body = bodies[0]
-        self.assert_ordered(body, *PR_BODY_MARKUP)
-        for boundary in PR_BODY_BLANK_LINE_BOUNDARIES:
-            with self.subTest(boundary=boundary):
-                self.assertIn(boundary, body)
-        self.assertNotIn("## Summary", body)
-        for line in PR_BODY_ONCE:
-            with self.subTest(line=line):
-                self.assertEqual(body.count(line), 1)
-        for character in PR_BODY_UNSAFE:
-            with self.subTest(character=character):
-                self.assertNotIn(character, body)
-
-    def test_inline_fallback_names_the_readable_body(self):
-        fallback = self.section(self.ship_handoff, "## Inline fallback (no ship-issue skill)",
-                                "## Remainder owner prompt")
-        self.assert_ordered(normalized(fallback), *INLINE_FALLBACK_MARKUP)
-
-    def test_ship_issue_notes_go_to_the_delivery_record(self):
-        for path, anchors in NOTE_DESTINATION_ANCHORS.items():
-            blocks = note_blocks(path.read_text(encoding="utf-8"))
-            for anchor in anchors:
-                with self.subTest(document=path.name, anchor=anchor):
-                    holders = [block for block in blocks if anchor in block]
-                    self.assertEqual(len(holders), 1)
-                    self.assertIn("Delivery record", normalized(holders[0]))
-                    self.assertNotIn("Summary", holders[0])
-
-    def test_sdd_documents_carry_their_machine_text(self):
-        for path, items in SDD_MACHINE_TEXT.items():
-            text = normalized(path.read_text(encoding="utf-8"))
-            for item in items:
-                with self.subTest(path=path.name, item=item):
-                    self.assertIn(item, text)
-
-    def test_phase_five_merge_delta_dispatch_and_handoff_reviewer_count(self):
-        self.assertIn("<!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer"
-                      " model=opus effort=high -->", self.ship_issue)
-
-    def test_phase_six_reobserves_pending_rows_between_the_watch_and_the_merge(self):
-        # Issue 478 AC3: the helper runs after the required watch and before Phase 7's merge.
-        text = normalized(self.ship_issue)
-        self.assertEqual(text.count(REOBSERVE_CALL), 1)
-        self.assertLess(text.index(REQUIRED_WATCH), text.index(REQUIRED_CHECKS_CALL))
-        self.assertLess(text.index(REQUIRED_CHECKS_CALL), text.index(REOBSERVE_CALL))
-        self.assertLess(text.index(REOBSERVE_CALL), text.index(PHASE_SEVEN_MERGE))
-
-    def test_phase_six_waits_on_required_checks_and_lists_advisory_states(self):
-        # #264 D6-D8: the blocking watch is its own fence; the handoff names it.
-        self.assertIn(f"```\n{REQUIRED_WATCH}\n```", self.ship_issue)
-        self.assertIn("block on `<tracker-cli> pr checks --required --watch`",
-                      normalized(self.ship_handoff))
-
-    def test_ship_issue_eval_restates_the_required_ci_wait(self):
-        expected = next(case for case in self.ship_issue_evals["evals"]
-                        if case["id"] == 1)["expected_output"]
-        for command in (REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL):
-            with self.subTest(command=command):
-                self.assertIn(command, expected)
-
-    def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
-        optional_subject = (
-            'gh pr merge <pr-num> --repo <resolved-repository> --merge '
-            '[--subject "<rendered subject>"] --match-head-commit <reviewed HEAD_SHA> '
-            '--delete-branch'
-        )
-        rendered_subject = (
-            'gh pr merge <pr-num> --repo <resolved-repository> --merge '
-            '--subject "<rendered subject>" --match-head-commit <reviewed HEAD_SHA> '
-            '--delete-branch'
-        )
-        # Every merge spelling is one of the two forms the lifecycle guard
-        # validates, and the rendered form stands on a line of its own.
-        lines = [line.strip() for line in self.ship_issue.splitlines()
-                 if "gh pr merge" in line]
-        self.assertIn(rendered_subject, lines)
-        for line in lines:
-            with self.subTest(line=line):
-                self.assertTrue(optional_subject in line or rendered_subject in line, line)
-
     def test_helper_binaries_resolve_from_bare_names(self):
-        # Skills invoke workflow-state/agent-evidence by bare name. The Nix
-        # module must put ~/.agents/bin on PATH, and each contract must anchor
-        # the full path as fallback for shells that skip profile init.
+        # Skills invoke agent-evidence by bare name. The Nix module must put
+        # ~/.agents/bin on PATH, and each contract must anchor the full path as
+        # fallback for shells that skip profile init.
         nix_module = (
             REPO_ROOT / "home/common/agent-skills/default.nix"
         ).read_text(encoding="utf-8")
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
-        for name, text in (("from-issue", self.from_issue),
-                           ("ship-issue", self.ship_issue)):
-            with self.subTest(skill=name):
-                self.assertIn("~/.agents/bin/workflow-state", text)
         for name, text in (("research", self.research),):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/agent-evidence", text)
-        with self.subTest(skill="ship-issue"):
-            self.assertIn("~/.agents/bin/review-range", self.ship_issue)
         # The packaged detail producer and external workspace command are both
         # published by bare name; review-package has one command-table owner.
         command_table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
@@ -1777,17 +743,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn('".agents/bin/task-brief"', nix_module)
         self.assertIn("source = ./scripts/sdd-workspace;", nix_module)
         self.assertIn("source = ./scripts/task-brief;", nix_module)
-        with self.subTest(skill="ship-issue detail producer"):
-            self.assertIn("~/.agents/bin/review-package", self.ship_issue)
-
-    def test_ship_issue_phase_five_dispatch_ids_are_unchanged(self):
-        for dispatch_id in (
-            "ship-issue-full-conformance-review",
-            "ship-issue-full-correctness-fallback",
-            "ship-issue-scoped-fix-rereview",
-        ):
-            with self.subTest(dispatch_id=dispatch_id):
-                self.assertIn(dispatch_id, self.ship_issue)
 
     def test_no_document_or_script_claims_a_repo_root_workspace(self):
         offenders = [
@@ -1802,29 +757,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             and REPO_ROOT_WORKSPACE_LITERAL in path.read_text(encoding="utf-8")
         ]
         self.assertEqual(offenders, [])
-
-    def test_superpowers_homes_are_a_closed_allowlist(self):
-        found: dict[str, set[str]] = {}
-        for path, text in corpus_documents():
-            for match in SUPERPOWERS_SEGMENT_RE.finditer(text):
-                found.setdefault(match.group(1), set()).add(
-                    str(path.relative_to(REPO_ROOT))
-                )
-        self.assertEqual(set(found), SUPERPOWERS_SEGMENTS, found)
-
-    def test_ship_review_is_the_single_documented_exception(self):
-        carriers = [
-            str(path.relative_to(REPO_ROOT))
-            for path, text in corpus_documents()
-            if ".superpowers/ship-review" in text
-        ]
-        self.assertEqual(
-            carriers, ["home/common/agent-skills/skills/ship-issue/REVIEW.md"]
-        )
-
-    def test_ship_issue_prunes_the_removed_worktrees_sdd_bucket(self):
-        text = normalized(self.ship_issue)
-        self.assertIn(WORKTREE_BUCKET_LITERAL, text)
 
     def test_gitignore_is_tracked_and_carries_the_backstop(self):
         subprocess.run(
@@ -1928,317 +860,6 @@ def relative_markdown_links(text):
         if not target or target.startswith(("http://", "https://")):
             continue
         yield target
-
-
-class LaunchFencedWorkerContractsTest(unittest.TestCase):
-    """#222: writing dispatches register, commit through launch-commit, release."""
-
-    WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
-                   "--worker-id <worker_id>")
-    REGISTER = ("workflow-state register-worker --repo-root <ledger_repo_root> "
-                "--run-id <run-id> --action-id <action_id>")
-    RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
-               "--run-id <run-id> --worker-id <worker_id> --event returned")
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def read(path):
-        return normalized(path.read_text(encoding="utf-8"))
-
-    def test_from_issue_phase_6_hands_sdd_its_lifecycle_identity(self):
-        self.assert_ordered(
-            self.read(FROM_ISSUE), "## Phase 6 — Execute", "### Lifecycle workers",
-            "`deadline_at`", "workflow-state register-worker", "## Phase 7 — Ship")
-
-    def test_from_issue_registers_writers_and_releases_before_every_exit(self):
-        text = self.read(FROM_ISSUE)
-        self.assert_ordered(
-            text, "## Dispatch, phase-budget and attempt-budget rules",
-            "**Writing workers.**", self.REGISTER, self.WORKER_LINE,
-            "--event returned", "--event stopped",
-            "## Terminal return procedure", "## Suspension procedure", "live workers:")
-
-    def test_auto_subagents_commit_through_launch_commit_and_the_bookkeeper_is_unregistered(self):
-        text = self.read(FROM_ISSUE_DIR / "AUTO.md")
-        self.assert_ordered(text, "`Lifecycle worker:`", "launch-commit")
-
-    def test_the_ship_prompt_carries_the_worker_line_outside_the_handoff(self):
-        self.assert_ordered(
-            self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Ship-owner subagent prompt",
-            self.WORKER_LINE)
-
-    def test_the_remainder_prompt_releases_itself_before_its_finish(self):
-        self.assert_ordered(
-            self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Remainder owner prompt",
-            self.WORKER_LINE, self.RELEASE,
-            "workflow-state finish --summary-file -")
-
-
-class ProgressMarkerContractsTest(unittest.TestCase):
-    """#250: the Phase 6 owner records a progress marker after each completed task."""
-
-    MARK = ("workflow-state mark-progress --repo-root <ledger_repo_root> "
-            "--run-id <run-id> --action-id <action_id>")
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def read(path):
-        return normalized(path.read_text(encoding="utf-8"))
-
-    def test_from_issue_phase_6_names_the_marker_on_both_routes(self):
-        self.assert_ordered(
-            self.read(FROM_ISSUE), "## Phase 6 — Execute", self.MARK, "## Phase 7 — Ship")
-
-
-class ResumePackContractsTest(unittest.TestCase):
-    """#265: relaunchers carry a resume pack and owners verify it before use."""
-
-    PACK = ("workflow-state resume-pack --repo-root <ledger_repo_root> "
-            "--run-id <run-id> --action-id <action_id>")
-
-    def test_the_lifecycle_call_rule_exempts_build_delivery_and_the_pack(self):
-        """Issue 473 D5: the only skill-named workflow-state stdout never piped through the
-        workflow-response boundary."""
-        text = FROM_ISSUE.read_text(encoding="utf-8")  # raw: the rule is one line
-        section = text[text.index("## Lifecycle identity"):text.index("### Resume pack")]
-        [rule] = [line for line in section.splitlines()
-                  if "--boundary workflow-response" in line]
-        for name in ("`build-delivery`", "`resume-pack`"):
-            self.assertIn(name, rule)
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def read(path):
-        return normalized(path.read_text(encoding="utf-8"))
-
-    def test_both_skills_exempt_the_pack_from_workflow_response_validation(self):
-        self.assert_ordered(
-            self.read(FROM_ISSUE), "## Lifecycle identity",
-            "artifact-budget validate-report --boundary workflow-response", "`resume-pack`",
-            "### Resume pack")
-
-    def test_from_issue_direct_reentry_and_delegate_carry_the_pack(self):
-        self.assert_ordered(
-            self.read(ACQUIRE_DIRECT), "**`kind: owner`**", "`launch_kind` is `resume`",
-            self.PACK, "**`kind: delivery_remainder`**")
-        self.assert_ordered(
-            self.read(FROM_ISSUE), "4. **`delegate`** —", self.PACK,
-            "Exception — **ledger-only remainder**")
-
-    def test_auto_rollover_passes_the_pack_beside_the_continuation(self):
-        self.assertIn(self.PACK, self.read(ROLLOVER))
-
-
-def validate_workflow_response(value):
-    """The source `artifact-budget validate-report --boundary workflow-response` over `value`, in
-    a child with `PYTHONPATH` set to `python/` and a temporary `HOME` holding the source policy,
-    because the installed-mode run has no package on its path (issue 505 D8, issue 546)."""
-    with tempfile.TemporaryDirectory() as home:
-        share = Path(home) / ".agents/share"
-        share.mkdir(parents=True)
-        (share / "artifact-budget-policy.json").symlink_to(
-            REPO_ROOT / "home/common/agent-skills/artifact-budget-policy.json")
-        return subprocess.run(
-            [sys.executable, str(REPO_ROOT / "home/common/agent-skills/scripts/artifact_budget.py"),
-             "validate-report", "--boundary", "workflow-response", "--input", "-"],
-            input=json.dumps(value), capture_output=True, text=True, timeout=60, check=False,
-            env={**os.environ, "HOME": home, "PYTHONPATH": str(REPO_ROOT / "python")})
-
-
-def normalize_declaration(declaration):
-    """The source `verification_blocker.normalize_declaration` over `declaration` in a child with
-    `PYTHONPATH` set to `python/` (issue 505 D8, issue 546): exit 0 when it accepts it."""
-    return subprocess.run(
-        [sys.executable, "-c", "import json, sys\n"
-         "from agent_tools.verification_blocker import normalize_declaration\n"
-         "normalize_declaration(json.load(sys.stdin))\n"],
-        input=json.dumps(declaration), capture_output=True, text=True, timeout=60,
-        check=False, env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")})
-
-
-def skill_sections(document, *sections):
-    """Run the source tree's `skill-sections` on `document` (issue 505 D8): a child process with
-    `PYTHONPATH` set to `python/`, because the installed-mode run has no package on its path."""
-    return subprocess.run(
-        [sys.executable, "-m", "agent_tools.skill_sections", str(document), *sections],
-        capture_output=True, text=True, timeout=60, check=False,
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")})
-
-
-class SlimBootContractsTest(unittest.TestCase):
-    """Issue 448: the fresh-owner boot reads only what its phase needs."""
-
-    @staticmethod
-    def read(path):
-        return normalized(path.read_text(encoding="utf-8"))
-
-    @staticmethod
-    def section(text, heading, next_heading):
-        start = text.index(heading)
-        return text[start:text.index(next_heading, start + len(heading))]
-
-    def test_phase_6_hands_sdd_the_reviewed_token_and_sdd_skips_the_package_read(self):
-        phase_6 = self.section(self.read(FROM_ISSUE), "## Phase 6 — Execute", "## Phase 7 — Ship")
-        self.assertIn("`--reviewed`", phase_6)
-        setup = self.section(self.read(SDD), "## Setup", "### Cumulative delivery gate")
-        self.assertIn("`--reviewed`", setup)
-        self.assertIn("`<plan stem>.tasks/task-<N>.md`", setup)
-        delegated = self.section(self.read(DELEGATED_OWNER), "## Checks and Phases 6–7",
-                                 "## Generic delegate")
-        self.assertIn("`--reviewed`", delegated)
-
-    CHECK_LAUNCH = ("workflow-state check-launch --repo-root <ledger_repo_root> "
-                    "--run-id <run-id> --action-id <action_id>")
-    ENTRY = "<from-issue-dir>/resume-pack.md"
-    INDEX_CALL = "skill-sections --opening <from-issue-dir>/SKILL.md 'Files beside this one'"
-
-    def test_pack_carrying_prompts_name_the_resume_entry(self):
-        resume = self.section(self.read(FROM_ISSUE), "### Resume pack", "## The flow")
-        self.assertIn(self.ENTRY, resume)
-
-    def test_the_entry_runs_its_checks_before_any_skill_section(self):
-        entry = self.read(RESUME_PACK)
-        position = -1
-        for anchor in (ResumePackContractsTest.PACK, self.CHECK_LAUNCH,
-                       "artifact-budget validate-report --boundary workflow-response --input -",
-                       "`reviewed_head_sha`",
-                       "`git -C <worktree> rev-parse HEAD`", "`worktree.head`",
-                       "`git -C <worktree> status --porcelain`", "`worktree.dirty_paths`",
-                       f"`{self.INDEX_CALL}`"):
-            position = entry.find(anchor, position + 1)
-            self.assertGreaterEqual(position, 0, anchor)
-        self.assertIn("`action_id`", entry)
-
-    def bullet(self, name):
-        index = self.section(self.read(FROM_ISSUE), "## Files beside this one",
-                             "## Lifecycle identity")
-        start = index.index(f"- **`{name}`**")
-        end = index.find(" - **`", start + 1)
-        return index[start:] if end < 0 else index[start:end]
-
-    def test_every_section_and_file_the_verified_pack_reads_exists(self):
-        for name, document in (("AUTO.md", AUTO), ("resume-pack.md", FROM_ISSUE),
-                               ("delegated-owner.md", DELEGATED_OWNER),
-                               ("ship-handoff.md", FROM_ISSUE)):
-            sections = []
-            for span in re.findall(r"`([^`]+)`", self.bullet(name)):
-                if span.endswith(".md"):
-                    with self.subTest(bullet=name, span=span):
-                        self.assertTrue((FROM_ISSUE_DIR / span).is_file())
-                elif not (span.startswith("-") or "<" in span or span in ("sdd", "ship-issue")):
-                    sections.append(span.removeprefix("## "))
-            with self.subTest(bullet=name, sections=sections):
-                self.assertTrue(sections)
-                printed = skill_sections(document, *sections)
-                self.assertEqual(printed.returncode, 0, printed.stderr)
-        for heading in ("`## Checks and Phases 6–7`", "`## Generic delegate`"):
-            self.assertIn(heading, self.bullet("delegated-owner.md"))
-
-    def test_the_resume_read_list_names_producer_reports_and_every_phase_resolves(self):
-        index = self.bullet("resume-pack.md")
-        for span in ("`Producer reports`", "`Phase <n>`"):
-            self.assertIn(span, index)
-        printed = skill_sections(FROM_ISSUE, *(f"Phase {n}" for n in range(8)))
-        self.assertEqual(printed.returncode, 0, printed.stderr)
-
-    def test_producer_report_rules_left_the_always_read_dispatch_section(self):
-        text = self.read(FROM_ISSUE)
-        dispatch = self.section(text, "## Dispatch, phase-budget and attempt-budget rules",
-                                "## Terminal return procedure")
-        producer = self.section(text, "## Producer reports", "## Phase 2 — Brainstorm")
-        self.assertNotIn("--boundary producer", dispatch)
-        self.assertIn("artifact-budget validate-report --boundary producer --input -", producer)
-        self.assertNotIn("review-feasibility", producer)
-
-    def test_phases_6_7_read_neither_the_stop_rules_nor_the_ship_handoff(self):
-        auto = self.bullet("AUTO.md")
-        stop_rules = "`When *not* to auto-resolve`"
-        self.assertEqual(auto.count(stop_rules), 1)
-        position = -1
-        for span in (stop_rules, "`Phases 2–4 run as subagents`", "`Other Phase 5–7 routes`",
-                     "`Interface_version 2 delivery relay`"):
-            position = auto.find(span, position + 1)
-            self.assertGreaterEqual(position, 0, span)
-        self.assertIn("`## Phase 7 — Ship`", self.bullet("ship-handoff.md"))
-        for name in ("AUTO.md", "resume-pack.md", "delegated-owner.md"):
-            self.assertNotIn("`ship-handoff.md`", self.bullet(name))
-
-
-class InterimChildResultContractsTest(unittest.TestCase):
-    """#261: an owner treats a child's interim return as still running."""
-
-    HEAD = "**Interim child results.**"
-    OWNERS = (SDD, FROM_ISSUE, SHIP_ISSUE)
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def read(path):
-        return normalized(path.read_text(encoding="utf-8"))
-
-    @classmethod
-    def paragraph(cls, path):
-        text = path.read_text(encoding="utf-8")
-        start = text.index(cls.HEAD)
-        end = text.find("\n\n", start)
-        return normalized(text[start:] if end < 0 else text[start:end]).strip()
-
-    def test_each_owner_skill_carries_the_paragraph_once(self):
-        for path in self.OWNERS:
-            with self.subTest(path=path.parent.name):
-                self.assertEqual(path.read_text(encoding="utf-8").count(self.HEAD), 1)
-
-    def test_the_paragraph_copies_stay_identical(self):
-        canonical = self.paragraph(SDD)
-        for path in (FROM_ISSUE, SHIP_ISSUE):
-            with self.subTest(path=path.parent.name):
-                self.assertEqual(self.paragraph(path), canonical)
-
-    def test_the_paragraph_states_the_rule_in_order(self):
-        self.assert_ordered(
-            self.paragraph(SDD), self.HEAD,
-            "(its own background work still running, or a result that may be interim) "
-            "is not a completion.",
-            "Re-engage that same child by its recorded agent identity",
-            "and wait for that report within your turn.",
-            "Never answer an interim result with a text-only reply",
-            "never suspend for it (it is not an `external` wait)",
-            "never dispatch a replacement or stop the child.",
-            "stays registered under its existing worker id and registers nothing new",
-            "an interim result is not its `returned` event.",
-            "If the message cannot be delivered or its reply cannot be awaited "
-            "in your turn, follow from-issue's **Writing workers** route",
-            "release `--event stopped`",
-            "the one case that may lead to a fresh dispatch.",
-            "Only the child's final hand-back counts as its result.")
-
-    def test_the_suspension_and_auto_pointers_route_to_the_paragraph(self):
-        self.assert_ordered(
-            self.read(AUTO), "## Phases 2–4 run as subagents", "**Interim child results**",
-            "### Design subagent — Phases 2 + 3")
 
 
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
@@ -2895,33 +1516,6 @@ class InstalledOrchestrateRoutesTest(unittest.TestCase):
         self.assertEqual(installed, source.read_text(encoding="utf-8"))
 
 
-class AcceptanceGradingContractsTest(unittest.TestCase):
-    """#272: the conformance axis grades every acceptance criterion on Opus/high."""
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def read(path):
-        return normalized(path.read_text(encoding="utf-8"))
-
-    def test_both_handoff_templates_carry_acceptance_state(self):
-        raw = (FROM_ISSUE_DIR / "ship-handoff.md").read_text(encoding="utf-8")
-        templates = [line for line in raw.splitlines()
-                     if line.startswith('{"interface_version":2')
-                     or line.startswith('{"state":"complete"')]
-        self.assertEqual(len(templates), 2)
-        for line in templates:
-            with self.subTest(template=line[:30]):
-                self.assertIn('"review_state":"clean|residuals",'
-                              '"acceptance_state":"met|unmet|human_pending|not_applicable",',
-                              line)
-
-
 class ToIssuesCriterionLineContractsTest(unittest.TestCase):
     """#274 AC1: every to-issues criterion line is typed and located (D1, D9)."""
 
@@ -3023,25 +1617,16 @@ class AcceptanceMapContractsTest(unittest.TestCase):
     """#274 AC2: plans carry an Acceptance map and plan review blocks a gap (D2-D5)."""
 
     WRITING_PLANS = REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md"
-    REVIEW_CONTRACT = (
-        REPO_ROOT / "home/common/agent-skills/skills/from-issue/REVIEW-CONTRACT.md")
 
     @classmethod
     def setUpClass(cls):
         cls.plans = cls.WRITING_PLANS.read_text(encoding="utf-8")
-        cls.review = cls.REVIEW_CONTRACT.read_text(encoding="utf-8")
 
     @staticmethod
     def section(text, heading):
         start = text.index("\n" + heading + "\n") + 1
         end = text.find("\n## ", start + len(heading))
         return text[start:] if end < 0 else text[start:end]
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(position, 0, anchor)
 
     def test_the_plan_template_carries_one_task_index_and_one_acceptance_map(self):
         headings = [line for line in self.plans.splitlines() if line.startswith("## ")]
@@ -3054,15 +1639,6 @@ class AcceptanceMapContractsTest(unittest.TestCase):
                      "`<kind> (classified)`"):
             with self.subTest(form=form):
                 self.assertIn(form, mapping)
-
-    def test_review_contract_blocks_a_missing_or_duplicated_row(self):
-        self.assert_ordered(
-            self.review, "## Reviewer instructions\n", "## Acceptance map check\n",
-            "## Common-miss checklist\n", "## Output\n")
-        check = normalized(self.section(self.review, "## Acceptance map check"))
-        for kind in ("`code`", "`evidence`", "`human`"):
-            with self.subTest(kind=kind):
-                self.assertIn(kind, check)
 
     def test_the_map_and_self_review_apply_the_acceptance_planning_rules(self):
         """#633 AC2: self-review points to the shared rules; the planning-owner hot file
@@ -3122,7 +1698,6 @@ class AcceptanceMapEvalGradingTest(unittest.TestCase):
     FIXTURE = (REPO_ROOT
                / "home/common/agent-skills/evals/fixture-repo/issues/001-well-specified.md")
     EVALS = (
-        REPO_ROOT / "home/common/agent-skills/skills/from-issue/evals/evals.json",
         REPO_ROOT / "home/common/agent-skills/skills/writing-plans/evals/evals.json",
     )
     ASSERT_NAME = "the plan's acceptance map has one row per issue criterion"
@@ -3217,8 +1792,7 @@ class AcceptanceMapEvalGradingTest(unittest.TestCase):
 
     def test_both_eval_assert_shells_grade_a_plan_under_harness_paths(self):
         # run-eval.sh exports PLAN_DIR as the resolver's ABSOLUTE path under
-        # $REPO and runs each shell as `cd $REPO && bash -c "source lib; …"`;
-        # from-issue's plan lands in the worktree at the same relative suffix.
+        # $REPO and runs each shell as `cd $REPO && bash -c "source lib; …"`.
         full = self.plan(*((f"AC{n}", "code") for n in range(1, 8)))
         short = self.plan(*((f"AC{n}", "code") for n in range(1, 7)))
         for path in self.EVALS:
@@ -3235,9 +1809,8 @@ class AcceptanceMapEvalGradingTest(unittest.TestCase):
                     (repo / "issues").mkdir(parents=True)
                     (repo / "issues/001-well-specified.md").write_text(
                         self.FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
-                    owner = (worktree if path.parent.parent.name == "from-issue" else repo)
-                    (owner / ".agents/artifacts/plans").mkdir(parents=True)
-                    (owner / ".agents/artifacts/plans/plan.md").write_text(text, encoding="utf-8")
+                    (repo / ".agents/artifacts/plans").mkdir(parents=True)
+                    (repo / ".agents/artifacts/plans/plan.md").write_text(text, encoding="utf-8")
                     env = dict(os.environ, REPO=str(repo), WT=str(worktree),
                                PLAN_DIR=str(plan_dir))
                     result = subprocess.run(
@@ -3247,110 +1820,10 @@ class AcceptanceMapEvalGradingTest(unittest.TestCase):
                                      result.stdout + result.stderr)
 
 
-class LaunchScopeWiringContractsTest(unittest.TestCase):
-    """#276: owners and writing workers run long commands in a launch scope; owners self-reap."""
-
-    WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
-                   "--worker-id <worker_id>")
-    WORKER_EXEC = ("Run each long command, every verification command included, as "
-                   "`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
-                   "--worker-id <worker_id> -- <argv>`, still in the foreground.")
-    OWNER_EXEC = ("run each long command, every verification command included, as "
-                  "`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
-                  "--action-id <action_id> -- <argv>`, still in the foreground")
-    WORKER_SCRATCH = ("Create every scratch directory or scratch worktree under the path that "
-                      "`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
-                      "--worker-id <worker_id>` prints.")
-    OWNER_SCRATCH = ("Create every scratch directory or scratch worktree under the path that "
-                     "`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
-                     "--action-id <action_id>` prints.")
-    REAP = ("launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--action-id <action_id>")
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def read(path):
-        return normalized(path.read_text(encoding="utf-8"))
-
-    def test_the_owner_runs_long_commands_through_exec(self):
-        self.assert_ordered(self.read(FROM_ISSUE), "## Lifecycle identity", self.OWNER_EXEC,
-                            self.OWNER_SCRATCH, "### Resume pack")
-
-    def test_the_worker_sentence_follows_every_composed_worker_line(self):
-        self.assert_ordered(self.read(FROM_ISSUE), "**Writing workers.**", self.WORKER_LINE,
-                            self.WORKER_EXEC, self.WORKER_SCRATCH, "launch-commit",
-                            "**Self-reap.**")
-        handoff = self.read(FROM_ISSUE_DIR / "ship-handoff.md")
-        self.assert_ordered(handoff, "## Ship-owner subagent prompt", self.WORKER_LINE,
-                            self.WORKER_EXEC, self.WORKER_SCRATCH, "Your task:")
-        self.assert_ordered(handoff, "## Remainder owner prompt", self.WORKER_LINE,
-                            self.WORKER_EXEC, self.WORKER_SCRATCH, "Your task:")
-        self.assert_ordered(self.read(AUTO), "`Lifecycle worker:`", "launch-commit")
-
-    def test_every_owner_exit_reaps_between_release_and_write(self):
-        text = self.read(FROM_ISSUE)
-        self.assert_ordered(
-            text, "**Self-reap.**", self.REAP, self.REAP, "--handoff-path",
-            "## Terminal return procedure", self.REAP, "workflow-state finish --repo-root",
-            "## Suspension procedure", self.REAP, "workflow-state suspend --repo-root")
-
-    def test_the_bookkeeper_route_reaps_before_dispatch(self):
-        self.assert_ordered(self.read(DELEGATED_OWNER), self.REAP,
-                            "workflow-state check-launch", "workflow-state finish")
-
-    def test_the_leaf_clauses_do_not_name_launch_scope(self):
-        text = self.read(FROM_ISSUE)
-        start = text.index("**Leaf-agent clauses.**")
-        self.assertNotIn("launch-scope", text[start:text.index("**Writing workers.**", start)])
-
-
-def module_constants(path, *names):
-    """The literal module-level assignments `names` in `path`, read without importing it."""
-    found = {}
-    for node in ast.parse(path.read_text(encoding="utf-8")).body:
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name) and node.targets[0].id in names):
-            found[node.targets[0].id] = ast.literal_eval(node.value)
-    assert set(found) == set(names), (path, names, sorted(found))
-    return found
-
-
-WORKFLOW_STATE = REPO_ROOT / "home/common/agent-skills/scripts/workflow_state.py"
-# The direct-owner refusal markers acquire-direct.md branches on (issue 475 D10).
-DIRECT_REFUSAL_MARKERS = {"TAKEOVER_REFUSAL": "owner_unavailable refused: live workers:",
-                          "HOLD_REFUSAL": " is held by orchestrated run "}
-
-
-class OrchestratedReentryContractsTest(unittest.TestCase):
-    """Issue 475: the re-entry argv and refusal markers have their home in workflow-state."""
-
-    def setUp(self):
-        self.helper = module_constants(WORKFLOW_STATE, "HELD_RUN_RESUME",
-                                       *DIRECT_REFUSAL_MARKERS)
-
-    def test_acquire_direct_names_each_refusal_direct_owner_prints(self):
-        text = normalized(ACQUIRE_DIRECT.read_text(encoding="utf-8"))
-        for constant, marker in DIRECT_REFUSAL_MARKERS.items():
-            with self.subTest(constant=constant):
-                self.assertIn(marker, self.helper[constant])
-                self.assertIn(f"`{marker}`", text)
-
-
 class DirectLaneRoutingTest(unittest.TestCase):
     """#572: eligible issues route to deliver-direct, which spells the guard-accepted forms."""
 
     DELIVER_DIRECT = REPO_ROOT / "home/common/agent-skills/skills/deliver-direct/SKILL.md"
-
-    def test_phase_zero_routes_to_deliver_direct(self):
-        text = normalized(FROM_ISSUE.read_text(encoding="utf-8"))
-        start = text.index("## Phase 0 — Investigate")
-        self.assertIn("`deliver-direct`", text[start:text.index("## Phase 1 — Worktree", start)])
 
     def test_deliver_direct_spells_the_guard_accepted_ship_forms(self):
         text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
@@ -3435,7 +1908,6 @@ class DirectLaneRoutingTest(unittest.TestCase):
             with self.subTest(rule=rule):
                 self.assertIn(rule, step4)
 
-
     def test_deliver_direct_holds_only_on_a_linted_verify_block(self):
         """#633 AC1: step 7 regrades code criteria, closes when none is left open, else
         holds only on a lint-accepted verify block and runs verify-pending once for this
@@ -3471,27 +1943,13 @@ class HandBuiltTimeContractsTest(unittest.TestCase):
 
 
 class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
-    """#474: no skill document chains a check onto a foreground `sleep`, each
-    former no-wait-loops site names both Claude-compatible waits, and from-issue
-    ends the turn on a blocker another session owns."""
+    """#474: no skill document chains a check onto a foreground `sleep`."""
 
     QUOTE_MARKER = re.compile(r"(?m)^[ \t]*>[ \t]?")
     # The retired "`sleep N`, then check once" family, read whitespace-normalized.
     CHAINED_CHECK = re.compile(r"`sleep [^`]*`, then check")
     # A `sleep <arg>` opening a command, at a line or code-span start, chained by && || ;
     CHAINED_SHELL = re.compile(r"(?:^[ \t]*|`)sleep[ \t]+[^\s`;&|]+[ \t]*(?:&&|\|\||;)", re.M)
-    FORMER_SITES = (
-        "home/common/agent-skills/skills/sdd/implementer-prompt.md",
-        "home/common/agent-skills/skills/sdd/task-reviewer-prompt.md",
-        "home/common/agent-skills/skills/sdd/re-review-prompt.md",
-        "home/common/agent-skills/skills/sdd/correctness-reviewer-prompt.md",
-        "home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md",
-        "home/common/agent-skills/skills/from-issue/ship-handoff.md",
-        "home/common/agent-skills/skills/from-issue/SKILL.md",
-        "home/common/agent-skills/skills/sdd/SKILL.md",
-    )
-    WAIT_FORMS = ("Monitor with an until-condition", "a background Bash command")
-    END_THE_TURN = "a blocker another session owns: end the turn, never poll"
 
     @classmethod
     def unquoted(cls, text):
@@ -3537,33 +1995,8 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
                     self.assertEqual(self.chained_waits(path.read_text(encoding="utf-8")), [])
         self.assertGreater(checked, 20)
 
-    def test_each_former_site_names_both_claude_compatible_waits(self):
-        for relative in self.FORMER_SITES:
-            text = normalized(self.unquoted((REPO_ROOT / relative).read_text(encoding="utf-8")))
-            for form in self.WAIT_FORMS:
-                with self.subTest(site=relative, form=form):
-                    self.assertIn(form, text)
 
-    def test_from_issue_ends_the_turn_on_another_sessions_blocker(self):
-        text = FROM_ISSUE.read_text(encoding="utf-8")
-        start = text.index("\n## Suspension procedure\n")
-        end = text.index("\n## ", start + 1)
-        self.assertIn(self.END_THE_TURN, normalized(text[start:end]))
-
-
-# Machine-consumed text only (agent-helpers rule 6, D22): helper argv and report JSON the
-# validators read. No English phrase. Planners no longer forecast (Stage 2c, #572).
-PROJECTION_MACHINE_TEXT = {
-    FROM_ISSUE_DIR / "AUTO.md": (
-        '{"state":"complete","artifact":{"kind":"implementation-plan"',
-        '"largest_member_bytes":<int>},"budget_status":"within_budget"},"notes":',
-        '{"state":"decompose_required","artifact":{"kind":"implementation-plan"'),
-}
-PLANNING_DOCUMENTS = (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md", FROM_ISSUE_DIR / "standards-review.md",
-                      PHASE_5_REVIEW_CONTRACT)
-PROJECTION_MACHINE_TEXT[SDD] = (
-    "sdd-gate next --completed N", "artifact-budget check --kind review-package", "**Chunked review**")
-PROJECTION_MACHINE_TEXT[FROM_ISSUE_DIR / "delegated-owner.md"] = ("decompose_required",)
+PLANNING_DOCUMENTS = (WRITING_PLANS,)
 BUDGET_BASE = "8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc"
 
 
@@ -3579,12 +2012,6 @@ def assert_no_larger_than_base(test, paths):
 
 
 class ProjectionCallerContractsTest(unittest.TestCase):
-    def test_projection_callers_carry_their_machine_text(self):
-        for path, items in PROJECTION_MACHINE_TEXT.items():
-            text = normalized(path.read_text(encoding="utf-8"))
-            for item in items:
-                with self.subTest(path=path.name, item=item):
-                    self.assertIn(item, text)
 
     def test_planning_neither_forecasts_nor_runs_the_change(self):
         for path in PLANNING_DOCUMENTS:
@@ -3595,50 +2022,14 @@ class ProjectionCallerContractsTest(unittest.TestCase):
         self.assertIn("failing test is the only run", normalized(WRITING_PLANS.read_text(encoding="utf-8")))
 
     def test_edited_planning_documents_do_not_grow(self):
-        assert_no_larger_than_base(self, (WRITING_PLANS, FROM_ISSUE_DIR / "AUTO.md",
-                                          FROM_ISSUE_DIR / "standards-review.md", PHASE_5_REVIEW_CONTRACT,
-                                          FROM_ISSUE_DIR / "SKILL.md"))
+        assert_no_larger_than_base(self, (WRITING_PLANS,))
 
 
 class ExecutionCallerContractsTest(unittest.TestCase):
-    def test_sdd_no_longer_records_or_projects_and_phase_6_fails_a_projection(self):
-        sdd = normalized(SDD.read_text(encoding="utf-8"))
-        for retired in ("sdd-gate record", "review-feasibility", "projected_overflow", "plan: record task",
-                        "actual_overage"):
-            self.assertNotIn(retired, sdd)
-        phase6 = normalized((FROM_ISSUE_DIR / "SKILL.md").read_text(encoding="utf-8")
-                            .split("## Phase 6", 1)[1].split("## Phase 7", 1)[0])
-        self.assertNotIn("review-feasibility", phase6)
-        self.assertIn("`projected_overflow` or a disagreement is `failed`", phase6)
 
-    def test_an_oversized_range_is_chunked_with_its_literal_diff_protocol(self):
-        review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
-        chunked = review.split("## Chunked review", 1)[1].split("\n## ", 1)[0]
-        for item in ("git diff --no-renames --name-only <base>..<head>", "git diff --stat <base>..<head>",
-                     "git diff <base>..<head> -- ':(literal)<path>'"):
-            with self.subTest(item=item):
-                self.assertIn(item, chunked)
+    def test_the_diff_review_does_not_cap_the_range_listing(self):
         diff_review = normalized(DIFF_REVIEW.read_text(encoding="utf-8"))
         self.assertNotIn("the first 20 entries", diff_review)
-
-    def test_final_review_reuses_a_published_package_instead_of_republishing_it(self):
-        # #528: review-package refuses a range whose package exists (exit 2), and
-        # `sdd-gate next` already published DELIVERY_BASE..DELIVERY_HEAD.
-        review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
-        first = review.split("## First pass", 1)[1].split("Pass both axes", 1)[0]
-        fix = review.split("## Fix wave", 1)[1].split("## Acceptance record", 1)[0]
-        for name, text in (("first pass", first), ("fix wave", fix)):
-            with self.subTest(section=name):
-                self.assertIn("review-<base7>..<head7>.json", text)
-                self.assertIn(".report.json", text)
-                self.assertIn("reuse", text)
-        self.assertIn("review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD", first)
-        self.assertIn("review-package PLAN_FILE FIX_BASE HEAD", fix)
-        self.assertIn("once", fix.split("review-package PLAN_FILE FIX_BASE HEAD", 1)[1].split("Supply", 1)[0])
-
-    def test_edited_execution_documents_do_not_grow(self):
-        assert_no_larger_than_base(self, (SDD, FROM_ISSUE_DIR / "SKILL.md",
-                                          FROM_ISSUE_DIR / "delegated-owner.md"))
 
 
 class BatchRoutingTest(unittest.TestCase):
@@ -3694,7 +2085,7 @@ class CodexCollaborationContractTest(unittest.TestCase):
 
     SKILL_DIR = REPO_ROOT / "home/common/claude-code/skills/codex-collaboration"
     CONTROLLER = REPO_ROOT / "home/common/claude-code/skills/deliver-standard/deliver-standard.js"
-    RETIRED = ("from-issue", "sdd", "REVIEW-CONTRACT", "artifact-budget")
+    RETIRED = ("from-" "issue", "sdd", "REVIEW-CONTRACT", "artifact-budget")
     LEGACY = ("producer", "manifest", "metrics", "rubric", "Phase", "--auto",
               "native fallback", "Claude fallback")
 

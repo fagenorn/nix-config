@@ -21,7 +21,7 @@ SKILL_ROOTS = (
 BUDGET = REPO_ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
 POLICY = REPO_ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 SETUP_KINDS = {"dirty-worktree", "shippable-worktree", "planned-worktree", "release-ready", "tracked-issue"}
-PIPELINE_SKILLS = ("from-issue", "ship-issue", "sdd", "ship-release")
+PIPELINE_SKILLS = ("ship-release",)
 ASSERT_LIB = EVALS_DIR / "assert-lib.sh"
 
 
@@ -172,24 +172,6 @@ class EvalCasesTest(unittest.TestCase):
             for relative in ("tinytask/cli.py", "README.md", "tests/test_cli.py"):
                 with self.subTest(file=relative):
                     self.assertNotIn("--all", (work / relative).read_text(encoding="utf-8"))
-
-    def test_eval_eight_is_the_tracked_issue_owner_economics_pipeline(self):
-        case = find_case("from-issue", 8)
-        self.assertEqual(case["name"], "lifecycle-owner-economics")
-        self.assertEqual(case["mode"], "pipeline")
-        self.assertEqual(case["setup"], {"kind": "tracked-issue"})
-        self.assertIn("/from-issue 4 --auto", case["prompt"])
-        self.assertEqual(len(case["asserts"]), 6)
-        reading = [check for check in case["asserts"] if "owner_report" in check["shell"]]
-        self.assertEqual(len(reading), 5)
-        self.assertTrue((EVALS_DIR / "fixture-repo/issues/004-priorities-and-due-dates.md").is_file())
-        fixture = EVALS_DIR / "fixture-repo"
-        done = subprocess.run(
-            [sys.executable, "-m", "unittest", "tests.test_acceptance"], cwd=fixture,
-            env={"PATH": os.environ["PATH"], "PYTHONDONTWRITEBYTECODE": "1"},
-            capture_output=True, text=True, timeout=60)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("OK (skipped=1)", done.stderr)
 
     def test_each_pipeline_skill_has_a_scripted_pipeline_case(self):
         for skill in PIPELINE_SKILLS:
@@ -342,72 +324,6 @@ class EvalCasesTest(unittest.TestCase):
             root.write_text("# Plan\n\n### Task 1: x\n\nExpected: ok\n", encoding="utf-8")
             with self.subTest(case="a legacy single-file plan"):
                 self.assertEqual(plan_tasks_verifiable(root).returncode, 0)
-
-    def test_from_issue_no_artifact_asserts_treat_empty_and_missing_dirs_as_empty(self):
-        name = "no spec or plan was written"
-        for case_id in (2, 3):
-            shell = case_assert("from-issue", case_id, name)
-            with tempfile.TemporaryDirectory() as tmp:
-                repo, pre_wt = Path(tmp) / "repo", Path(tmp) / "pre"
-                repo.mkdir()
-                pre_wt.mkdir()
-                env = {"REPO": str(repo), "PRE_WT": str(pre_wt),
-                       "SPEC_DIR": str(repo / "docs/specs"), "PLAN_DIR": str(repo / "docs/plans")}
-                with self.subTest(case=case_id, dirs="missing"):
-                    done = run_assert(shell, repo, **env)
-                    self.assertEqual(done.returncode, 0, done.stdout)
-                for base in (repo, pre_wt):
-                    (base / "docs/specs").mkdir(parents=True)
-                    (base / "docs/plans").mkdir(parents=True)
-                with self.subTest(case=case_id, dirs="present and empty"):
-                    done = run_assert(shell, repo, **env)
-                    self.assertEqual(done.returncode, 0, done.stdout)
-                (repo / "docs/plans/p.md").write_text("plan\n", encoding="utf-8")
-                with self.subTest(case=case_id, dirs="a plan was written"):
-                    self.assertNotEqual(run_assert(shell, repo, **env).returncode, 0)
-
-    def test_from_issue_fog_gate_case_fails_on_an_acquisition_stop(self):
-        # D22: case 2 keeps --auto, so on main it stops at direct-owner acquisition
-        # (tracker kind none) before the fog gate; an assert must see that stop.
-        case = find_case("from-issue", 2)
-        self.assertIn("--auto", case["prompt"])
-        self.assertEqual(case.get("expected_today"), "fail")
-        self.assertRegex(case.get("note", ""), r"tracker")
-        shell = case_assert("from-issue", 2, "the run reached the fog gate rather than stopping at acquisition")
-        transcripts = {
-            "the opus acquisition stop": (
-                "I stopped issue 2 during acquisition, before Phase 0 formally began.\n"
-                '{"interface_version":2,"issue":2,"kind":"observe","requirements":[{"kind":"tracker"}],"run_id":null}\n',
-                False),
-            "the sonnet acquisition stop": (
-                "I stopped at the Phase 0 fog gate.\n**Acquisition:** the first `workflow-state direct-owner` "
-                "call returned `observe` with a `tracker` requirement and no `run_id`.\n", False),
-            "a builder refusal": ("build-delivery refused: tracker kind 'none' is unsupported\n", False),
-            "a bare acquisition-blocked stop": (
-                "Cannot proceed: acquisition is blocked because the tracker capability is unsupported.\n",
-                False),
-            "a stop that names no fog decision": (
-                "Cannot proceed: the tracker capability is unsupported, so I am stopping here.\n", False),
-            "a fog-gate stop": (
-                "I stopped at the Phase 0 fog gate: the issue bundles five asks and has no "
-                "acceptance criteria.\n", True),
-        }
-        for label, (text, passes) in transcripts.items():
-            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
-                out = Path(tmp) / "output.txt"
-                out.write_text(text, encoding="utf-8")
-                done = run_assert(shell, tmp, OUT=str(out))
-                self.assertEqual(done.returncode == 0, passes, done.stdout + done.stderr)
-
-    def test_from_issue_preflight_case_takes_the_ledger_free_route(self):
-        # D22 (after D20): the Phase 0 pre-flight runs on every route, so case 3 drops
-        # the literal --auto token and authorizes autonomous decisions instead.
-        for case_id in (1, 3):
-            prompt = find_case("from-issue", case_id)["prompt"]
-            with self.subTest(case=case_id):
-                self.assertNotIn("--auto", prompt)
-                self.assertIn("I authorize you to make every design and plan decision yourself", prompt)
-                self.assertIn("**Stop after Phase 5.**", prompt)
 
 
 class WritingPlansPipelineAssertsTest(unittest.TestCase):
