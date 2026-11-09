@@ -43,7 +43,6 @@ EXPECTED_ROLE_TIERS = {
     "bookkeeper": ("haiku", "low"),
     "explorer": ("sonnet", "medium"),
     "researcher": ("sonnet", "medium"),
-    "codex-transport": ("sonnet", "medium"),
 }
 ALLOWED_SUBAGENT_TYPES = {
     "issue-owner": {"issue-owner", "general-purpose"},
@@ -58,7 +57,6 @@ ALLOWED_SUBAGENT_TYPES = {
     "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
-    "codex-transport": {"codex:codex-rescue", "codex:codex-reviewer"},
 }
 CUSTOM_AGENT_ROLES = {"implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic"}
 WORKFLOW_FAMILIES = {

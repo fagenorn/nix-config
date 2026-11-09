@@ -8,17 +8,7 @@ A round is one fix dispatch plus one scoped re-review. Five rounds maximum:
 
 <!-- agent-dispatch: id=sdd-task-fix-redispatch role=task-implementer model=sonnet effort=high -->
 Agent(subagent_type="implementer", model="sonnet", effort="high") takes over fix rounds 1–3 when the original task implementer cannot be resumed.
-- **Round 4 — the stuck-breaker.** Three failures on the same context escalate the model: from here every fix dispatch is Opus/high. Use the bounded Codex transport with the failing command or test, the diff so far (`BASE..HEAD`), the brief and report paths, and the open findings:
-
-<!-- agent-dispatch: id=sdd-codex-rescue-transport role=codex-transport model=sonnet effort=medium -->
-Agent(subagent_type="codex:codex-rescue", model="sonnet", effort="medium") transports the bounded stuck-breaker diagnosis to the external Codex runtime without selecting that runtime's model.
-
-  **Verify its diagnosis against the live worktree before acting on it**, then escalate to a fresh Opus/high implementer:
-
-<!-- agent-dispatch: id=sdd-post-rescue-implementation role=implementer model=opus effort=high -->
-Agent(subagent_type="implementer", model="opus", effort="high") applies the verified rescue diagnosis plus the open findings.
-
-  Codex unavailable → the same Opus/high escalation, framed "a prior implementer attempted this task 3 times; you own it now — read the report file for what was tried":
+- **Round 4 — the stuck-breaker.** Three failures on the same context escalate the model: from here every fix dispatch is Opus/high, a fresh-context implementer given the failing command or test, the diff so far (`BASE..HEAD`), the brief and report paths, and the open findings, framed "a prior implementer attempted this task 3 times; you own it now — read the report file for what was tried":
 
 <!-- agent-dispatch: id=sdd-rescue-fallback-implementation role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") owns the fresh-context rescue fallback.
