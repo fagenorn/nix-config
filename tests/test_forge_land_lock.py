@@ -55,6 +55,10 @@ def finish(proc):
 
 class Base(unittest.TestCase):
     def setUp(self):
+        self.slept = []
+        patcher = mock.patch.object(forge_claim, "sleep", self.slept.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.world = ForgeWorld(self)
 
     def lock(self, sha=None, **kwargs):
@@ -380,6 +384,87 @@ class CasTransportTest(Base):
         error = self.raised("release", None)
         self.assertEqual((error.code, error.transient), ("gh_failed", False))
         self.assertEqual(self.world.refs(), {REF: A})
+
+
+class TransientRetryTest(Base):
+    """Issue 740 D3: one-shot land acquire and land release retry whole; --wait and status run once."""
+
+    def test_acquire_after_two_network_failures_is_acquired(self):
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        self.world.outage(2)
+        code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(self.slept, [20, 40])
+
+    def test_acquire_retried_after_its_create_lost_its_reply_is_already_held(self):
+        self.lock(lose_reply=["create"])
+        self.pulls(A, pull(11, sha=A))
+        code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "already_held", A))
+        self.assertEqual(self.world.refs(), {REF: A})
+        self.assertEqual(self.slept, [20])
+
+    def test_release_retried_after_its_reread_lost_its_reply_is_released(self):
+        self.lock(A, lose_reply=["get"])
+        code, out = run(*land("release", A))
+        self.assertEqual((code, out["verdict"]), (0, "released"))
+        self.assertEqual(self.world.refs(), {})
+        self.assertEqual(self.slept, [20])
+
+    def bad_gateway_once(self):
+        """`cas_ref` whose first swap answers HTTP 502 and does not apply; later swaps are real."""
+        real, failed = fm.cas_ref, []
+
+        def cas(*args):
+            if not failed:
+                failed.append(True)
+                return fm.ForgeError("gh_failed", "gh: Bad Gateway (HTTP 502)", transient=True)
+            return real(*args)
+        return mock.patch.object(fm, "cas_ref", cas)
+
+    def test_release_retried_after_an_unapplied_502_swap_is_released(self):
+        self.lock(A)
+        with self.bad_gateway_once():
+            code, out = run(*land("release", A))
+        self.assertEqual((code, out["verdict"]), (0, "released"))
+        self.assertEqual(self.world.refs(), {})
+        self.assertEqual(self.slept, [20])
+
+    def test_acquire_retried_after_an_unapplied_502_swap_takes_the_closed_lock(self):
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(12, state="closed", merged=True, sha=B))
+        with self.bad_gateway_once():
+            code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(self.world.refs(), {REF: A})
+        self.assertEqual(self.slept, [20])
+
+    def test_a_lasting_outage_is_error_transient_after_three_tries(self):
+        for argv in (land("acquire", A), land("release", A)):
+            with self.subTest(action=argv[1]):
+                self.slept.clear()
+                self.world.reset()
+                self.lock(A)
+                self.pulls(A, pull(11, sha=A))
+                self.world.outage()
+                code, out = run(*argv)
+                self.assertEqual((code, out["verdict"], out["transient"]), (1, "error", True))
+                self.assertEqual(self.slept, [20, 40])
+
+    def test_wait_and_status_run_once(self):
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.world.outage()
+        clock = FakeClock()
+        with mock.patch.object(land_lock, "monotonic", clock.monotonic), \
+                mock.patch.object(land_lock, "sleep", clock.sleep):
+            code, out = run(*land("acquire", A, "--wait"))
+        self.assertEqual((code, out["verdict"], out["transient"]), (1, "error", True))
+        code, out = run(*land("status", A))
+        self.assertEqual((code, out["verdict"], out["transient"]), (1, "error", True))
+        self.assertEqual(self.slept, [])
 
 
 class ConcurrencyTest(Base):
