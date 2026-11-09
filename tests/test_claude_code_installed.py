@@ -122,24 +122,21 @@ class ClaudeLaunchersInstalledTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(record.read_text(encoding="utf-8"))
 
-    def test_claude_orchestrate_turns_claude_ai_connectors_off(self):
-        seen = self.launch("claude-orchestrate", {CONNECTORS: "true"})
-        self.assertEqual(seen["argv"], ["--version"])
-        self.assertEqual(seen["env"].get(CONNECTORS), "false")
-
     def test_plain_claude_leaves_claude_ai_connectors_alone(self):
         seen = self.launch("claude", {})
         self.assertEqual(seen["argv"], ["--version"])
         self.assertNotIn(CONNECTORS, seen["env"])
 
-    def test_claude_orchestrate_launches_through_the_account_run(self):
-        orchestrated = self.launch("claude-orchestrate", {})["env"]
-        plain = self.launch("claude", {})["env"]
-        self.assertIn("CLAUDE_ACCOUNT_LAUNCHER", orchestrated)
-        self.assertIn("CLAUDE_CODE_PLUGIN_DIRS", plain)
-        self.assertEqual(
-            orchestrated.get("CLAUDE_CODE_PLUGIN_DIRS"), plain["CLAUDE_CODE_PLUGIN_DIRS"]
-        )
+    def test_only_the_two_launchers_are_installed(self):
+        names = {"claude", "claude-account", "claude-" "orchestrate"}
+        self.assertEqual({p.name for p in self.bin.iterdir()} & names, {"claude", "claude-account"})
+
+
+class LauncherSourceTest(unittest.TestCase):
+    def test_the_module_writes_no_orchestration_launcher(self):
+        text = (Path(__file__).resolve().parents[1] / "home/common/claude-code/default.nix").read_text(encoding="utf-8")
+        self.assertNotIn("claude-" "orchestrate", text)
+        self.assertNotIn("ENABLE_CLAUDEAI_MCP_SERVERS", text)
 
 
 class GitHooksInstalledTest(unittest.TestCase):

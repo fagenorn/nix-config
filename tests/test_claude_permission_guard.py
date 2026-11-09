@@ -984,7 +984,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
         # A PR creation holding the word in its quoted text, with a slugged head
-        # and with or without the ship-issue scrub, is admitted outright: it
+        # and with or without the scrub, is admitted outright: it
         # clears the detaching check and the lifecycle grammar.
         repo = self.make_repo("https://github.com/fagenorn/argus.git")
         create = ('gh pr create --repo fagenorn/argus --base main '
@@ -1737,7 +1737,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stderr)
 
     def test_prefixed_merge_reaches_acceptance_on_the_integration_base(self):
-        # The real-world shape that motivated the prefix: a nodocom ship-issue
+        # The real-world shape that motivated the prefix: a nodocom ship-stage
         # merge onto the declared integration branch `dev`. The integration
         # base is exempt from the protection demand, so the protection stage is
         # poisoned here to prove the guard never even consults it.
@@ -2531,7 +2531,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
     def test_the_remote_deletion_form_deletes_only_the_named_branch(self):
         """Issue 458 D1, D5: run by git against a local bare remote that holds a branch
-        and a tag of one name, ship-issue's filled spelling deletes the branch alone."""
+        and a tag of one name, the ship stage's filled spelling deletes the branch alone."""
         form = next(form for form in self.SHAPES["skill_forms"]
                     if form["id"] == "branch.remote")
         command = self.shape_command(form["template"])
@@ -2660,7 +2660,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             timeout=5, repository="fagenorn/nix-config")
         self.assertEqual("cannot resolve origin's push URL", module.push_url_problem(context))
 
-    # Guarded command shapes (#351): the forms ship-issue spells and the dressed
+    # Guarded command shapes (#351): the forms a delivery spells and the dressed
     # shapes agents reach for, from the fixture the shell-example suite also reads.
     SHAPES = json.loads((Path(__file__).parent / "fixtures/guarded-command-shapes.json")
                         .read_text(encoding="utf-8"))
@@ -3840,10 +3840,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         # Every form the shipped skills, deliver-standard and the forge adapter emit.
         for command, cwd in (
             (f"git -C {here} push origin {topic}", there),                   # deliver-*
-            (f"git push origin {topic}", here),                               # ship-issue
-            (f"git push -u origin {topic}", here),                            # ship-issue
-            (f"git push origin --delete refs/heads/{topic}", here),           # ship-issue
-            (f"git branch -d {topic}", here),                                 # ship-issue
+            (f"git push origin {topic}", here),                               # the ship stage
+            (f"git push -u origin {topic}", here),                            # the ship stage
+            (f"git push origin --delete refs/heads/{topic}", here),           # the ship stage
+            (f"git branch -d {topic}", here),                                 # the ship stage
             (f"git -C {here} branch -d {topic}", there),                      # deliver-standard
             (f"unset GITHUB_TOKEN && {create} --title 'Fix the guard' "
              "--body 'Why\n\nIt mattered.\n\nCloses #418'", here),            # deliver-*
@@ -3853,7 +3853,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"unset GITHUB_TOKEN && {merge} --match-head-commit {sha} --delete-branch", here),
             (f"{merge} --match-head-commit {sha} --delete-branch", here),     # deliver-*
             (f'{merge} --subject "Fix the guard (#418)" --match-head-commit {sha} '
-             "--delete-branch", here),                                        # ship-issue
+             "--delete-branch", here),                                        # the ship stage
             (f"cd {there} && git push origin {topic}", here),
             (f"unset GITHUB_TOKEN && cd {here} && {create} --title t --body b", there),
         ):
