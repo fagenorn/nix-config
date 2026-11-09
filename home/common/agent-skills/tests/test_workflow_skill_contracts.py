@@ -2188,6 +2188,12 @@ class LiveSkillsNameNoRetiredSkillTest(unittest.TestCase):
                 text = (root / name).read_text(encoding="utf-8")
                 self.assertEqual([m.group() for m in self.RETIRED.finditer(text)], [])
 
+    def test_wayfind_closing_note_names_the_whole_issue_delivery_command(self):
+        text = (REPO_ROOT / "home/common/agent-skills/skills/wayfind/SKILL.md").read_text(
+            encoding="utf-8")
+        self.assertIn("`/deliver-standard` (single-session build)", text)
+        self.assertNotIn("direct delivery", text)
+
 
 if __name__ == "__main__":
     unittest.main()
