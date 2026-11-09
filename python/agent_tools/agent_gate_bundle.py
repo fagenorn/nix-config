@@ -52,7 +52,7 @@ GATE_VERSIONS = (1, 2)
 CLAUDE_ONLY_GATE_VERSION = 2
 CLAUDE_ONLY_STRATA = ("claude",)
 BUNDLE_KINDS = ("cutover", "promotion", "release")
-NO_REGRESSION_KINDS = ()
+NO_REGRESSION_KINDS = ("cutover",)
 
 GateProfile = namedtuple("GateProfile", "version strata criterion kind")
 
@@ -538,8 +538,12 @@ def _resolve_trial(entry, stratum, path, loader, diagnostics):
             "input_total": run["tokens"]["input_total"], "peak_ctx": run["peak_ctx"]}
 
 
-def _resolve_stratum(block, stratum, path, allowed, loader, diagnostics):
-    """One case/stratum: its declarations checked, its cited trials resolved."""
+def _resolve_stratum(block, stratum, path, allowed, loader, diagnostics,
+                     distinct_sides=False):
+    """One case/stratum: its declarations checked, its cited trials resolved.
+
+    `distinct_sides` is the no-regression criterion's demand that the base and
+    the candidate be different runs."""
     quality = block.get("quality")
     if not isinstance(quality, dict):
         _add(diagnostics, "QUALITY_MISSING", f"{path}.quality",
@@ -568,16 +572,26 @@ def _resolve_stratum(block, stratum, path, allowed, loader, diagnostics):
     # A trial is identified by its cited (record_id, run_id): the same
     # measurement cited twice is one measurement, and a median over copies of it
     # buys the approval the exact cardinality of D36 exists to deny. Checked per
-    # side only — a run cited on both sides yields delta 0 and buys nothing.
+    # side only under the savings criterion — a run cited on both sides yields
+    # delta 0 and buys nothing there. The no-regression criterion refuses it
+    # (`distinct_sides`), because there delta 0 is what approves.
     # `repr` keys the pair without assuming the cited values are hashable.
+    sides = {}
     for side in SIDES:
         identities = [repr((entry.get("record_id"), entry.get("run_id")))
                       for entry in cited[side] if isinstance(entry, dict)]
-        distinct = len(set(identities))
+        sides[side] = set(identities)
+        distinct = len(sides[side])
         if distinct != len(identities):
             _add(diagnostics, "TRIALS_DUPLICATE", f"{path}.{side}",
                  f"{len(identities)} cited trials, "
                  f"{distinct} distinct (record_id, run_id)")
+    if distinct_sides:
+        shared = len(sides["base"] & sides["candidate"])
+        if shared:
+            _add(diagnostics, "TRIALS_CROSS_SIDE", f"{path}.candidate",
+                 f"{shared} cited trials appear on both sides; a no-regression "
+                 "gate needs distinct base and candidate runs")
 
     trials = {}
     for side in SIDES:
@@ -698,8 +712,9 @@ def resolve_trials(manifest, loader=load_record, gate=DEFAULT_GATE):
             if not isinstance(block, dict):
                 _add(diagnostics, "STRATUM_MISSING", path, missing_message)
                 continue
-            entry = _resolve_stratum(block, stratum, path, allowed, loader,
-                                     diagnostics)
+            entry = _resolve_stratum(
+                block, stratum, path, allowed, loader, diagnostics,
+                distinct_sides=(gate.criterion == "no_regression"))
             if entry is not None:
                 strata[stratum] = entry
         resolved.append({"case_id": case.get("case_id"),
@@ -760,6 +775,17 @@ def quality_fails(quality):
     return median["base"] - median["candidate"] > QUALITY_DROP_POINTS
 
 
+def quality_regresses(quality):
+    """Contract: the no-regression veto — any new critical failure, and any fall
+    of the noncritical median, with no point allowance (B2)."""
+    if not quality:
+        return True
+    if quality.get("critical_all_pass") is not True:
+        return True
+    median = quality["noncritical_median"]
+    return median["candidate"] < median["base"]
+
+
 def checks_save(checks):
     """Contract: no static fallback check survives, and preflight ops drop >=20%.
 
@@ -812,6 +838,29 @@ def straddling_cases(evidence):
     return sorted(straddling)
 
 
+def evidence_trials_distinct(evidence, strata):
+    """Contract: every case and stratum in `strata` cites at least MIN_TRIALS
+    trials per side, the same count on both sides, and no (record_id, run_id)
+    identity twice anywhere — not on one side, the other side or another case.
+    The no-regression criterion approves on delta 0, so a bundle whose evidence
+    reuses a run would approve itself (P10).
+    """
+    seen = set()
+    for case in evidence["cases"]:
+        for stratum in strata:
+            trials = case["strata"][stratum]["context"]["trials"]
+            if (len(trials["base"]) < MIN_TRIALS
+                    or len(trials["base"]) != len(trials["candidate"])):
+                return False
+            for side in SIDES:
+                for trial in trials[side]:
+                    identity = repr((trial["record_id"], trial["run_id"]))
+                    if identity in seen:
+                        return False
+                    seen.add(identity)
+    return True
+
+
 def _declared_axis(blocks, key, saves):
     """One optional-declaration axis over a stratum's cases: which fire, and whether."""
     firing = [case_id for case_id, block in blocks if saves(block[key])]
@@ -848,9 +897,22 @@ def gate_results(evidence, gate=DEFAULT_GATE):
                     for name in gate.strata if name != stratum)
         cross[stratum] = {"qualifies": not other, "other_breaches": other}
 
-    return {"quality": {"passed": not failing, "failing": failing},
-            "context": context, "checks": checks, "maintenance": maintenance,
-            "cross_stratum": cross}
+    results = {"quality": {"passed": not failing, "failing": failing},
+               "context": context, "checks": checks, "maintenance": maintenance,
+               "cross_stratum": cross}
+    if gate.criterion == "no_regression":
+        regressing = sorted(f"{case['case_id']}/{stratum}"
+                            for case in cases for stratum in gate.strata
+                            if quality_regresses(case["strata"][stratum]["quality"]))
+        breaching_cases = sorted(
+            f"{case['case_id']}/{stratum}"
+            for case in cases for stratum in gate.strata
+            if context_breaches(case["strata"][stratum]["context"]["delta_tokens"],
+                                case["strata"][stratum]["context"]["delta_pct"]))
+        results["no_regression"] = {
+            "passed": not regressing and not breaching_cases,
+            "quality_failing": regressing, "context_breaching": breaching_cases}
+    return results
 
 
 def decide(evidence, gate=DEFAULT_GATE):
@@ -863,7 +925,12 @@ def decide(evidence, gate=DEFAULT_GATE):
         return "unmeasured"
     if straddling_cases(evidence):
         return "unmeasured"
+    if (gate.criterion == "no_regression"
+            and not evidence_trials_distinct(evidence, gate.strata)):
+        return "unmeasured"
     gates = gate_results(evidence, gate)
+    if gate.criterion == "no_regression":
+        return "approved" if gates["no_regression"]["passed"] else "rejected"
     if not gates["quality"]["passed"]:
         return "rejected"
     for stratum in gate.strata:

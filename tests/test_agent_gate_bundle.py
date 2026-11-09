@@ -1157,5 +1157,122 @@ class ClaudeOnlyGateTest(unittest.TestCase):
                 self.assertEqual((code, out), (2, ""))
 
 
+class NoRegressionCriterionTest(unittest.TestCase):
+    QUALITY = {"critical_all_pass": True, "evaluator_stability": "stable",
+               "noncritical_median": {"base": 87.0, "candidate": 87.0}}
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cutover = gate.gate_profile(2, "cutover")
+
+    def bundle(self, base, candidate, quality=None):
+        manifest = claude_only_manifest(self.tmp, claude_cases(
+            self.tmp, base, candidate, quality=quality or self.QUALITY))
+        path = self.tmp / "trials.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        code, out, err = run_cli_text(["--trials", str(path), "--gate-version", "2", "--kind", "cutover"])
+        self.assertIn(code, (0, 3), err)
+        return code, json.loads(out)
+
+    def test_the_cutover_kind_alone_is_no_regression(self):
+        self.assertEqual(self.cutover.criterion, "no_regression")
+        for kind in ("promotion", "release"):
+            self.assertEqual(gate.gate_profile(2, kind).criterion, "savings")
+
+    def test_a_flat_candidate_is_approved_without_any_saving(self):
+        code, bundle = self.bundle((1000, 1000, 1000), (1000, 1000, 1000))
+        self.assertEqual((code, bundle["state"]), (0, "approved"))
+        self.assertFalse(bundle["gates"]["context"]["claude"]["fired"])
+        self.assertEqual(bundle["gates"]["no_regression"],
+                         {"passed": True, "quality_failing": [], "context_breaching": []})
+        self.assertEqual(gate.verify_bundle(bundle, kind="cutover"), "approved")
+
+    def test_the_same_evidence_under_the_savings_criterion_is_rejected(self):
+        _, bundle = self.bundle((1000, 1000, 1000), (1000, 1000, 1000))
+        self.assertEqual(gate.decide(bundle["evidence"], gate.gate_profile(2, "promotion")),
+                         "rejected")
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(bundle, kind="promotion")
+
+    def test_any_noncritical_fall_is_rejected(self):
+        quality = dict(self.QUALITY, noncritical_median={"base": 87.0, "candidate": 86.9})
+        code, bundle = self.bundle((1000,) * 3, (1000,) * 3, quality)
+        self.assertEqual((code, bundle["state"]), (3, "rejected"))
+        self.assertEqual(len(bundle["gates"]["no_regression"]["quality_failing"]), 4)
+
+    def test_a_new_critical_failure_is_rejected(self):
+        quality = dict(self.QUALITY, critical_all_pass=False)
+        self.assertEqual(self.bundle((1000,) * 3, (1000,) * 3, quality)[1]["state"], "rejected")
+
+    def test_the_context_bound_is_conjunctive(self):
+        table = (((10000,) * 3, (10300,) * 3, "rejected"),   # +3 %, +300 tokens
+                 ((4000,) * 3, (4100,) * 3, "approved"),     # +2.5 %, +100 tokens
+                 ((20000,) * 3, (20200,) * 3, "approved"))   # +1 %, +200 tokens
+        for base, candidate, state in table:
+            with self.subTest(base=base[0], candidate=candidate[0]):
+                self.assertEqual(self.bundle(base, candidate)[1]["state"], state)
+
+    def test_a_straddling_case_is_unmeasured(self):
+        code, bundle = self.bundle((1000, 1000, 1000), (400, 1000, 1200))
+        self.assertEqual((code, bundle["state"]), (3, "unmeasured"))
+
+    def test_tampered_no_regression_bundles_are_refused(self):
+        _, bundle = self.bundle((1000,) * 3, (1000,) * 3)
+        relabelled = dict(bundle, state="rejected")
+        worse = json.loads(json.dumps(bundle))
+        worse["evidence"]["cases"][0]["strata"]["claude"]["quality"]["critical_all_pass"] = False
+        worse["bundle_id"] = telemetry_digest(
+            {k: v for k, v in worse.items() if k not in ("bundle_id", "generated_at")})
+        for document in (relabelled, worse):
+            with self.assertRaises(gate.BundleIntegrityError):
+                gate.verify_bundle(document, kind="cutover")
+
+    def cross_side_manifest(self):
+        manifest = claude_only_manifest(self.tmp, claude_cases(
+            self.tmp, (1000,) * 3, (1000,) * 3, quality=self.QUALITY))
+        claude = manifest["cases"][0]["strata"]["claude"]
+        claude["candidate"] = json.loads(json.dumps(claude["base"]))
+        return manifest
+
+    def test_a_run_cited_on_both_sides_is_an_evidence_fault(self):
+        evidence, diagnostics = gate.resolve_trials(self.cross_side_manifest(), gate=self.cutover)
+        self.assertIsNone(evidence)
+        self.assertIn(("TRIALS_CROSS_SIDE", "$.cases[0].strata.claude.candidate"),
+                      {(d.code, d.path) for d in diagnostics})
+        path = self.tmp / "cross.json"
+        path.write_text(json.dumps(self.cross_side_manifest()), encoding="utf-8")
+        code, out, _ = run_cli_text(["--trials", str(path), "--gate-version", "2",
+                                     "--kind", "cutover"])
+        self.assertEqual((code, json.loads(out)["state"]), (3, "unmeasured"))
+
+    def test_the_savings_criterion_still_allows_cross_side_reuse(self):
+        manifest = make_manifest(self.tmp, full_cases(self.tmp))
+        for stratum in ("claude", "codex"):
+            block = manifest["cases"][0]["strata"][stratum]
+            block["candidate"] = json.loads(json.dumps(block["base"]))
+        evidence, diagnostics = gate.resolve_trials(manifest)
+        self.assertEqual(diagnostics, [])
+        self.assertIsNotNone(evidence)
+
+    def test_a_bundle_whose_evidence_reuses_runs_is_refused(self):
+        _, bundle = self.bundle((1000,) * 3, (1000,) * 3)
+        def overlapping(trials):
+            trials["candidate"] = json.loads(json.dumps(trials["base"]))
+        def short(trials):
+            trials["base"], trials["candidate"] = trials["base"][:1], trials["candidate"][:1]
+        def reused_across_cases(trials, donor=bundle):
+            trials["base"] = json.loads(json.dumps(
+                donor["evidence"]["cases"][1]["strata"]["claude"]["context"]["trials"]["base"]))
+        for tamper in (overlapping, short, reused_across_cases):
+            with self.subTest(tamper=tamper.__name__):
+                forged = json.loads(json.dumps(bundle))
+                tamper(forged["evidence"]["cases"][0]["strata"]["claude"]["context"]["trials"])
+                forged["bundle_id"] = telemetry_digest(
+                    {k: v for k, v in forged.items() if k not in ("bundle_id", "generated_at")})
+                self.assertEqual(gate.decide(forged["evidence"], self.cutover), "unmeasured")
+                with self.assertRaises(gate.BundleIntegrityError):
+                    gate.verify_bundle(forged, kind="cutover")
+
+
 if __name__ == "__main__":
     unittest.main()
