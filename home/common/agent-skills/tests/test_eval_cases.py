@@ -731,7 +731,8 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
 
     CRITICAL = ("a worktree was created", "nothing was pushed",
                 "local and origin main are unchanged",
-                "the implementation is committed on the worktree branch")
+                "the implementation is committed on the worktree branch",
+                "the renamed flag works through the CLI")
     NONCRITICAL = ("the worktree branch is named for issue 3",
                    "the fixture's tests pass in the worktree",
                    "no occurrence of the old flag remains", "no spec or plan was written",
@@ -797,6 +798,34 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
                          "the worktree is left clean"):
                 with self.subTest(name=name):
                     self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_a_consistent_rename_to_another_flag_fails_only_the_cli_check(self):
+        """Implementation, tests and README renamed together to --foo: every
+        candidate-editable assert still passes, the interface the issue names does not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+            worktree = Path(env["WT"])
+            for name in ("tinytask/cli.py", "tests/test_cli.py", "README.md"):
+                path = worktree / name
+                path.write_text(path.read_text(encoding="utf-8").replace("--include-done", "--foo")
+                    .replace("include_done", "foo"), encoding="utf-8")
+            subprocess.run(wgit + ["commit", "-qam", "rename to --foo"], check=True,
+                           env={**os.environ, **QUIET_GIT})
+            for name in self.NONCRITICAL[1:3] + self.CRITICAL[3:4]:
+                with self.subTest(name=name):
+                    self.assertEqual(self.grade(name, repo, env).returncode, 0)
+            self.assertNotEqual(self.grade("the renamed flag works through the CLI",
+                                           repo, env).returncode, 0)
+
+    def test_keeping_the_old_flag_fails_the_cli_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git, env = published_sandbox(Path(tmp).resolve())
+            worktree = repo / ".worktrees/issue-3-rename-flag"
+            subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
+                                  str(worktree), "main"], check=True)
+            env.update(WT=str(worktree), WT_COUNT="1")
+            self.assertNotEqual(self.grade("the renamed flag works through the CLI",
+                                           repo, env).returncode, 0)
 
     def test_a_spec_in_the_worktree_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -923,6 +952,26 @@ class NativeReviewEvalCaseTest(unittest.TestCase):
                               if word != missing)
                 repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
                 self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_a_review_declared_unperformed_fails_the_sections_check(self):
+        """Naming the severity words is not printing the sections: an output that says
+        it cannot produce them has reviewed nothing."""
+        name = "the run prints the Critical, Important and Minor sections"
+        for out in ("Native review unsupported; cannot produce Critical, Important or Minor "
+                    "sections\n",
+                    "Critical, Important and Minor: not run, the native route was unsupported.\n",
+                    "Critical\n- none\nImportant\n- none\nMinor\n- none\n"):
+            with self.subTest(out=out), tempfile.TemporaryDirectory() as tmp:
+                repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+                self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_markdown_section_headings_pass(self):
+        name = "the run prints the Critical, Important and Minor sections"
+        out = ("## Critical\n- none\n**Important**\n- tinytask/cli.py:23 help text\n"
+               "### Minor:\n- none\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+            self.assertEqual(self.grade(name, repo, env).returncode, 0)
 
     def test_an_output_without_the_route_or_sections_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

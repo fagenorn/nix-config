@@ -36,7 +36,8 @@
         "a worktree was created",
         "nothing was pushed",
         "local and origin main are unchanged",
-        "the implementation is committed on the worktree branch"
+        "the implementation is committed on the worktree branch",
+        "the renamed flag works through the CLI"
       ],
       "noncritical": [
         "the worktree branch is named for issue 3",

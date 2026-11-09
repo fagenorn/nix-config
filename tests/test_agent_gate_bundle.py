@@ -330,7 +330,7 @@ class ResolveTrialsTest(unittest.TestCase):
         self.assertIsNone(evidence)
         rendered = gate.render(diagnostics)
         self.assertIn("TRIALS_DUPLICATE $.cases[0].strata.claude.base: "
-                      "3 cited trials, 1 distinct (record_id, run_id)", rendered)
+                      "3 cited trials, 1 distinct runs", rendered)
 
     def test_a_partial_duplicate_is_caught_too(self):
         manifest = make_manifest(self.tmp, full_cases(self.tmp))
@@ -339,7 +339,7 @@ class ResolveTrialsTest(unittest.TestCase):
         evidence, diagnostics = gate.resolve_trials(manifest)
         self.assertIsNone(evidence)
         self.assertIn("TRIALS_DUPLICATE $.cases[0].strata.codex.candidate: "
-                      "3 cited trials, 2 distinct (record_id, run_id)",
+                      "3 cited trials, 2 distinct runs",
                       gate.render(diagnostics))
 
     def test_the_same_run_cited_across_sides_is_not_a_duplicate(self):
@@ -1244,6 +1244,62 @@ class NoRegressionCriterionTest(unittest.TestCase):
         code, out, _ = run_cli_text(["--trials", str(path), "--gate-version", "2",
                                      "--kind", "cutover"])
         self.assertEqual((code, json.loads(out)["state"]), (3, "unmeasured"))
+
+    def reexported(self, entry, days):
+        """The same run cited through a re-export of its record: another window,
+        hence another record_id, but the identical measurement."""
+        document = json.loads(Path(entry["record"]).read_text(encoding="utf-8"))
+        document["window"]["days"] = days
+        document["record_id"] = telemetry_digest(
+            {k: v for k, v in document.items() if k not in ("record_id", "generated_at")})
+        path = self.tmp / f"reexport-{days}-{entry['run_id'].replace(':', '_')}.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return dict(entry, record=str(path), record_id=document["record_id"])
+
+    def test_the_same_runs_re_exported_with_another_window_are_still_one_run(self):
+        manifest = claude_only_manifest(self.tmp, claude_cases(
+            self.tmp, (1000,) * 3, (1000,) * 3, quality=self.QUALITY))
+        claude = manifest["cases"][0]["strata"]["claude"]
+        claude["candidate"] = [self.reexported(entry, 14) for entry in claude["base"]]
+        self.assertNotEqual(claude["candidate"][0]["record_id"], claude["base"][0]["record_id"])
+        evidence, diagnostics = gate.resolve_trials(manifest, gate=self.cutover)
+        self.assertIsNone(evidence)
+        self.assertIn(("TRIALS_CROSS_SIDE", "$.cases[0].strata.claude.candidate"),
+                      {(d.code, d.path) for d in diagnostics})
+        path = self.tmp / "reexport.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        code, out, _ = run_cli_text(["--trials", str(path), "--gate-version", "2",
+                                     "--kind", "cutover"])
+        self.assertEqual((code, json.loads(out)["state"]), (3, "unmeasured"))
+
+    def test_a_run_cited_twice_through_re_exports_is_a_duplicate(self):
+        manifest = claude_only_manifest(self.tmp, claude_cases(
+            self.tmp, (1000,) * 3, (1000,) * 3, quality=self.QUALITY))
+        claude = manifest["cases"][0]["strata"]["claude"]
+        claude["base"] = [claude["base"][0], self.reexported(claude["base"][0], 14),
+                          self.reexported(claude["base"][0], 21)]
+        _, diagnostics = gate.resolve_trials(manifest, gate=self.cutover)
+        self.assertIn("TRIALS_DUPLICATE", {d.code for d in diagnostics})
+
+    def test_a_run_reused_across_cases_through_a_re_export_is_reuse(self):
+        manifest = claude_only_manifest(self.tmp, claude_cases(
+            self.tmp, (1000,) * 3, (1000,) * 3, quality=self.QUALITY))
+        donor = manifest["cases"][0]["strata"]["claude"]
+        manifest["cases"][1]["strata"]["claude"]["base"] = [
+            self.reexported(entry, 14) for entry in donor["base"]]
+        _, diagnostics = gate.resolve_trials(manifest, gate=self.cutover)
+        self.assertIn("TRIALS_REUSED", {d.code for d in diagnostics})
+
+    def test_a_bundle_citing_one_run_through_two_records_is_refused(self):
+        _, bundle = self.bundle((1000,) * 3, (1000,) * 3)
+        forged = json.loads(json.dumps(bundle))
+        trials = forged["evidence"]["cases"][0]["strata"]["claude"]["context"]["trials"]
+        trials["candidate"] = [dict(trial, record_id="f" * 64) for trial in trials["base"]]
+        forged["bundle_id"] = telemetry_digest(
+            {k: v for k, v in forged.items() if k not in ("bundle_id", "generated_at")})
+        self.assertEqual(gate.decide(forged["evidence"], self.cutover), "unmeasured")
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.verify_bundle(forged, kind="cutover")
 
     def test_the_savings_criterion_still_allows_cross_side_reuse(self):
         manifest = make_manifest(self.tmp, full_cases(self.tmp))

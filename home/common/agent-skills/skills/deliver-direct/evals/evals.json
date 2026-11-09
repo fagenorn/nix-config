@@ -26,6 +26,10 @@
           "shell": "commits_touch \"$WT\" tinytask"
         },
         {
+          "name": "the renamed flag works through the CLI",
+          "shell": "f=\"$WORK/flagcheck.json\"; rm -f \"$f\"; cli() { (cd \"$WORK\" && PYTHONPATH=\"$WT\" python3 -m tinytask --file \"$f\" \"$@\" 2>&1); }; { cli add x >/dev/null && cli done 1 >/dev/null && [ -z \"$(cli list)\" ] && [ \"$(cli list --include-done)\" = \"$(printf '1\\tdone\\tx')\" ] && ! cli list --all >/dev/null && cli list --help | grep -q -e --include-done && ! cli list --help | grep -q -e --all; } || fail \"the CLI in $WT does not behave as the issue's acceptance criteria say\""
+        },
+        {
           "name": "the worktree branch is named for issue 3",
           "shell": "git -C \"$WT\" branch --show-current 2>/dev/null | grep -q '^issue-3-' || fail \"the worktree branch is not issue-3-<slug>\""
         },

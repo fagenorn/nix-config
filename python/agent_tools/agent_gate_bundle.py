@@ -505,6 +505,17 @@ def _check_expansion(manifest, diagnostics):
              "a checkpoint is recorded but no expansion is declared")
 
 
+def _run_identity(stratum, run_id):
+    """The identity of one measurement: the run, in its stratum.
+
+    Never the record that carries it: re-exporting a record under another
+    reporting window changes its `record_id` and `generated_at` and leaves the run
+    untouched, so keying on the record would let one run pass as many.
+    `repr` keys the pair without assuming a cited value is hashable.
+    """
+    return repr((stratum, run_id))
+
+
 def _resolve_trial(entry, stratum, path, loader, diagnostics):
     """One cited record, verified and reduced to the measurements it vouches for."""
     citation = entry.get("record") if isinstance(entry, dict) else None
@@ -569,23 +580,23 @@ def _resolve_stratum(block, stratum, path, allowed, loader, diagnostics,
         _add(diagnostics, "TRIALS_CARDINALITY", path,
              f"{count} paired trials; allowed here: {sorted(allowed)}")
 
-    # A trial is identified by its cited (record_id, run_id): the same
+    # A trial is identified by its stratum and cited run_id, never by the record
+    # that carries it (`_run_identity`): the same
     # measurement cited twice is one measurement, and a median over copies of it
     # buys the approval the exact cardinality of D36 exists to deny. Checked per
     # side only under the savings criterion — a run cited on both sides yields
     # delta 0 and buys nothing there. The no-regression criterion refuses it
     # (`distinct_sides`), because there delta 0 is what approves.
-    # `repr` keys the pair without assuming the cited values are hashable.
     sides = {}
     for side in SIDES:
-        identities = [repr((entry.get("record_id"), entry.get("run_id")))
+        identities = [_run_identity(stratum, entry.get("run_id"))
                       for entry in cited[side] if isinstance(entry, dict)]
         sides[side] = set(identities)
         distinct = len(sides[side])
         if distinct != len(identities):
             _add(diagnostics, "TRIALS_DUPLICATE", f"{path}.{side}",
                  f"{len(identities)} cited trials, "
-                 f"{distinct} distinct (record_id, run_id)")
+                 f"{distinct} distinct runs")
     if distinct_sides:
         shared = len(sides["base"] & sides["candidate"])
         if shared:
@@ -662,7 +673,7 @@ def _check_case_reuse(cases, diagnostics, strata):
                 for position, entry in enumerate(entries):
                     if not isinstance(entry, dict):
                         continue
-                    identity = repr((entry.get("record_id"), entry.get("run_id")))
+                    identity = _run_identity(stratum, entry.get("run_id"))
                     if identity in seen:
                         continue
                     seen.add(identity)
@@ -840,8 +851,8 @@ def straddling_cases(evidence):
 
 def evidence_trials_distinct(evidence, strata):
     """Contract: every case and stratum in `strata` cites at least MIN_TRIALS
-    trials per side, the same count on both sides, and no (record_id, run_id)
-    identity twice anywhere — not on one side, the other side or another case.
+    trials per side, the same count on both sides, and no run
+    (stratum, run_id) twice anywhere — not on one side, the other side or another case.
     The no-regression criterion approves on delta 0, so a bundle whose evidence
     reuses a run would approve itself (P10).
     """
@@ -854,7 +865,7 @@ def evidence_trials_distinct(evidence, strata):
                 return False
             for side in SIDES:
                 for trial in trials[side]:
-                    identity = repr((trial["record_id"], trial["run_id"]))
+                    identity = _run_identity(stratum, trial["run_id"])
                     if identity in seen:
                         return False
                     seen.add(identity)

@@ -58,7 +58,7 @@
         },
         {
           "name": "the run prints the Critical, Important and Minor sections",
-          "shell": "out_matches 'critical' && out_matches 'important' && out_matches 'minor'"
+          "shell": "out_matches '^[[:space:]#*_-]*critical[[:space:]*_:]*$' && out_matches '^[[:space:]#*_-]*important[[:space:]*_:]*$' && out_matches '^[[:space:]#*_-]*minor[[:space:]*_:]*$' && out_matches 'README|test_cli|cli\\.py'"
         }
       ]
     }
