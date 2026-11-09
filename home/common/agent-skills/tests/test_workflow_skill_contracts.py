@@ -647,17 +647,13 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_installed_policy_surface_matches_source_contract(self):
         if os.environ.get("WORKFLOW_POLICY_SURFACE") == "source":
             self.skipTest("explicit pre-activation source-only verification")
-        agents_root = Path.home() / ".agents/skills"
         claude_root = Path.home() / ".claude/skills"
-        self.assertTrue(agents_root.is_dir(), "managed shared skill root is absent")
         self.assertTrue(claude_root.is_dir(), "managed Claude skill root is absent")
-        assert_policy_entries(self, agents_root, SHARED_POLICY_ENTRIES,
-                              require_refusal_reporting=True)
         assert_policy_entries(self, claude_root,
                               SHARED_POLICY_ENTRIES | CLAUDE_POLICY_ENTRIES,
                               require_refusal_reporting=True)
-        assert_retained_policy_support(self, agents_root, SHARED_POLICY_SUPPORT)
-        assert_retained_policy_support(self, agents_root, RETAINED_SUPPORT_CONTRACTS)
+        assert_retained_policy_support(self, claude_root, SHARED_POLICY_SUPPORT)
+        assert_retained_policy_support(self, claude_root, RETAINED_SUPPORT_CONTRACTS)
         self.assertFalse((Path.home() / ".agents/bin/resolve-bindings").exists())  # policy-gate-pattern
         installed_resolver = Path.home() / ".agents/bin/resolve-project"
         self.assertTrue(installed_resolver.is_file())
@@ -675,15 +671,13 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with mock.patch.dict(os.environ, {"WORKFLOW_POLICY_SURFACE": ""}, clear=False):
                 with mock.patch("pathlib.Path.home", return_value=Path(temporary)):
-                    with self.assertRaisesRegex(AssertionError, "managed shared skill root is absent"):
+                    with self.assertRaisesRegex(AssertionError, "managed Claude skill root is absent"):
                         self.test_installed_policy_surface_matches_source_contract()
 
     def _install_policy_surface_fixture(self, home):
-        agents_root = home / ".agents/skills"
         claude_root = home / ".claude/skills"
         shared_source = REPO_ROOT / "home/common/agent-skills/skills"
         claude_source = REPO_ROOT / "home/common/claude-code/skills"
-        shutil.copytree(shared_source, agents_root)
         shutil.copytree(shared_source, claude_root)
         shutil.copytree(claude_source, claude_root, dirs_exist_ok=True)
         helpers = {
@@ -1112,20 +1106,31 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                     self.assertEqual(value.strip("`.,;"), "-", flag)
                 self.assertLessEqual(text.count("--result-file"), 1)
 
-    def test_codex_gets_no_orchestrate_issues(self):
-        # #618: the Codex stub is retired (#572 S1); orchestrate-issues stays Claude-only.
-        self.assertFalse((REPO_ROOT / "home/common/codex/skills/orchestrate-issues").exists())
-        self.assertNotIn("orchestrate-issues", CODEX_MODULE.read_text(encoding="utf-8"))
-
-    def test_codex_deliver_standard_stub_is_linked_and_names_the_alternatives(self):
-        # #618: the standard-lane program needs Claude's Workflow tool.
-        raw = (REPO_ROOT / "home/common/codex/skills/deliver-standard/SKILL.md").read_text(encoding="utf-8")
-        self.assertTrue(raw.startswith("---\nname: deliver-standard\n"))
-        self.assertIn("`deliver-direct`", raw)
-        self.assertIn('home.file.".agents/skills/deliver-standard".source = '
-                      './skills/deliver-standard;', CODEX_MODULE.read_text(encoding="utf-8"))
-        self.assertFalse((REPO_ROOT / "home/common/agent-skills/skills/orchestrate-issues")
-                         .exists())
+    def test_no_module_installs_a_codex_entry_surface(self):
+        # #687 D1: Codex is a reviewer only; it gets no skills, guidance or config splice.
+        codex_module = CODEX_MODULE.read_text(encoding="utf-8")
+        guidance = (REPO_ROOT / "home/common/agent-guidance/default.nix").read_text(encoding="utf-8")
+        skills = (REPO_ROOT / "home/common/agent-skills/default.nix").read_text(encoding="utf-8")
+        self.assertFalse((REPO_ROOT / "home/common/codex" / "skills").exists())
+        self.assertIn("codexPackage", codex_module)
+        for name, text, forbidden in (
+            ("codex", codex_module, ".agents/skills"),
+            ("codex", codex_module, "model_reasoning_effort"),
+            ("codex", codex_module, "codexConfig"),
+            ("agent-guidance", guidance, ".codex/"),
+            ("agent-skills", skills, ".agents/skills"),
+            ("agent-skills", skills, "migrateCodex" + "SkillLinks"),
+            ("agent-skills", skills, "localSkillFiles"),
+        ):
+            with self.subTest(module=name, forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+        self.assertIn('for skillRoot in "$HOME/.claude/skills"; do', skills)
+        self.assertIn('".claude/skills/impeccable"', skills)
+        self.assertIn('".agents/standards".source', skills)
+        self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ];', skills)
+        impeccable = (REPO_ROOT / "tests/test_impeccable_installed.py").read_text(encoding="utf-8")
+        self.assertIn('SKILL_ROOTS = (".claude/skills",)', impeccable)
+        self.assertNotIn("test_codex_view_is_a_whole_directory_link", impeccable)
 
     def section(self, text, heading, next_heading):
         start = text.index(heading)
@@ -2880,9 +2885,8 @@ class InstalledOrchestrateRoutesTest(unittest.TestCase):
         cls.root = Path(root)
 
     def test_the_claude_tree_holds_deliver_batch_and_no_orchestrate_issues(self):
-        self.assertFalse((self.root / ".agents/skills/orchestrate-issues").exists())
+        self.assertFalse(os.path.lexists(self.root / ".agents/skills"))
         self.assertFalse((self.root / ".claude/skills/orchestrate-issues").exists())
-        self.assertTrue((self.root / ".agents/skills/deliver-standard/SKILL.md").is_file())
         self.assertTrue((self.root / ".claude/skills/deliver-standard/deliver-standard.js").is_file())
         installed = (self.root / ".claude/skills/deliver-batch/SKILL.md").read_text(encoding="utf-8")
         source = REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md"

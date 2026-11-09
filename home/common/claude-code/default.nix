@@ -490,8 +490,8 @@ in
     Install.WantedBy = [ "default.target" ];
   };
 
-  # Claude-only bridge orchestration. Keeping this outside the shared
-  # ~/.agents/skills tree prevents Codex from recursively invoking itself.
+  # Claude-only bridge orchestration: Codex is the reviewer this skill drives,
+  # so it is linked only into ~/.claude/skills.
   home.file.".claude/skills/codex-collaboration" = {
     source = ./skills/codex-collaboration;
     recursive = true;

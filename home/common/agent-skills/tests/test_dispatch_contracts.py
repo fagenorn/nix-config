@@ -348,6 +348,15 @@ class SourceTreeContractsTest(unittest.TestCase):
         self.assert_contract_held("no-wait-loops")
 
 
+class InstalledViewsTest(unittest.TestCase):
+    def test_only_the_claude_view_is_installed(self):
+        # #687 D1: Codex gets no skill view; the installed-view tests check Claude's alone.
+        self.assertEqual(
+            [(view, skills_dir) for view, skills_dir, _ in INSTALLED_VIEWS],
+            [("claude", ".claude/skills")],
+        )
+
+
 class InstalledTreeContractsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
