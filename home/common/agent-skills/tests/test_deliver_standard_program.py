@@ -401,21 +401,20 @@ class ContractTest(unittest.TestCase):
                 self.assertIn("an earlier claim stopped part way", prompt(calls, "setup"))
                 self.assertIn("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x", prompt(calls, "worktree"))
 
-    def test_a_lost_fresh_setup_reply_keeps_a_cont_that_finishes_the_claim(self):
-        # The folded setup acquires the claim itself: a reply lost after that leaves a claim whose holder only a cont can resume.
-        for reply in (None, "throw"):
-            with self.subTest(reply=reply):
-                result, calls = run(replies={"setup": reply})
-                self.assertEqual(result["stage"], "setup")
-                self.assertIsNone(result["result"])
-                self.assertEqual(result["dead_agents"], ["setup"])
-                self.assertEqual(labels(calls), ["setup"])
-                cont = result["cont"]
-                self.assertTrue(cont["claim_incomplete"])
-                resumed, calls = run(args=dict(ARGS, cont=cont))
-                self.assertEqual(resumed["stage"], "done")
-                self.assertEqual(labels(calls)[:3], ["setup", "acquire", "worktree"])
-                self.assertIn("--holder " + HOLDER, prompt(calls, "acquire"))
+    def test_a_lost_fresh_setup_reply_carries_no_cont(self):
+        # A cont would resume past the fresh refusal checks (parked, duplicate, open-pr, no-longer-applies) that the lost
+        # reply never showed passing: the stop carries none, and a rerun does the full fresh setup (the acquire is idempotent
+        # for the same holder).
+        result, calls = run(replies={"setup": None})
+        self.assertEqual(result["stage"], "setup")
+        self.assertIsNone(result["result"])
+        self.assertEqual(result["dead_agents"], ["setup"])
+        self.assertNotIn("cont", result)
+        self.assertEqual(labels(calls), ["setup"])
+        rerun, calls = run()
+        self.assertEqual(rerun["stage"], "done")
+        self.assertIn("Refuse (ok=false) with reason closed, parked", prompt(calls, "setup"))
+        self.assertIn("--holder <host>/session-s1", prompt(calls, "setup"))
 
     def test_a_lost_resume_setup_reply_adds_no_cont(self):
         cont = {"setup": {}, "lane": "standard", "plan": None, "plan_reviewed": False, "done": [], "fix_waves": 0,
