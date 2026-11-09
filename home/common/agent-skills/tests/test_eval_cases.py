@@ -482,6 +482,41 @@ def fixture_sandbox(tmp):
     return repo, git
 
 
+QUIET_GIT = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+
+
+def published_sandbox(tmp):
+    """fixture_sandbox plus a bare origin holding main: the runner's REPO/ORIGIN/BASE_MAIN."""
+    repo, git = fixture_sandbox(tmp)
+    origin = Path(tmp) / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(git + ["remote", "add", "origin", str(origin)], check=True)
+    subprocess.run(git + ["push", "-q", "origin", "main"], check=True,
+                   env={**os.environ, **QUIET_GIT})
+    base = subprocess.run(git + ["rev-parse", "main"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    refs = subprocess.run(["git", "-C", str(origin), "for-each-ref",
+                           "--format=%(refname) %(objectname)"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    env = {"WORK": str(tmp), "REPO": str(repo), "ORIGIN": str(origin), "BASE_MAIN": base,
+           "ORIGIN_REFS": refs,
+           "SPEC_DIR": str(repo / ".claude/specs"), "PLAN_DIR": str(repo / ".claude/plans"),
+           "WT": "", "WT_COUNT": "0", "PRE_WT": ""}
+    return repo, git, env
+
+
+def implement_issue_three(git, worktree, branch, start="main"):
+    """Add a linked worktree on `branch` holding the committed issue-3 implementation."""
+    subprocess.run(git + ["worktree", "add", "-q", "-b", branch, str(worktree), start], check=True)
+    wgit = ["git", "-C", str(worktree), "-c", "user.name=eval",
+            "-c", "user.email=eval@example.invalid", "-c", "commit.gpgsign=false"]
+    subprocess.run(wgit + ["apply", str(SETUP_INPUTS / "implementation.patch")], check=True)
+    subprocess.run(wgit + ["add", "-A"], check=True)
+    subprocess.run(wgit + ["commit", "-q", "-m", "feat: rename list --all to --include-done (#3)"],
+                   check=True)
+    return wgit
+
+
 class SpecFormatCheckTest(unittest.TestCase):
     """#354: spec_decisions_path_free reads only the Decisions section (D5)."""
 
@@ -693,6 +728,376 @@ class CodeMapEvalCasesTest(unittest.TestCase):
             done = run_assert(shell, repo, **env)
             self.assertNotEqual(done.returncode, 0, done.stdout)
             self.assertIn("NOTES.md", done.stdout)
+
+
+class DirectDeliveryEvalCaseTest(unittest.TestCase):
+    """#725: deliver-direct case 1, the routine-issue corpus case, grades a crafted sandbox."""
+
+    CRITICAL = ("a worktree was created", "nothing was pushed",
+                "local and origin main are unchanged",
+                "the implementation is committed on the worktree branch",
+                "the renamed flag works through the CLI")
+    NONCRITICAL = ("the worktree branch is named for issue 3",
+                   "the fixture's tests pass in the worktree",
+                   "no occurrence of the old flag remains", "no spec or plan was written",
+                   "the worktree is left clean")
+
+    def good_run(self, tmp):
+        repo, git, env = published_sandbox(tmp)
+        worktree = repo / ".worktrees/issue-3-rename-flag"
+        wgit = implement_issue_three(git, worktree, "issue-3-rename-flag")
+        env.update(WT=str(worktree), WT_COUNT="1")
+        return repo, git, wgit, env
+
+    def grade(self, name, repo, env):
+        return run_assert(case_assert("deliver-direct", 1, name), repo, **env)
+
+    def test_the_case_is_a_scripted_pipeline_case(self):
+        case = find_case("deliver-direct", 1)
+        self.assertEqual((case["name"], case["mode"]), ("direct-issue-through-test-first", "pipeline"))
+        self.assertNotIn("setup", case)
+        self.assertEqual(tuple(check["name"] for check in case["asserts"]),
+                         self.CRITICAL + self.NONCRITICAL)
+        self.assertIn("ResolvedProject", case["prompt"])
+        self.assertIn("issues/003-mechanical.md", case["prompt"])
+        self.assertRegex(case["prompt"].lower(), r"\bstop\b")
+
+    def test_every_assert_passes_on_a_good_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, _, env = self.good_run(Path(tmp).resolve())
+            for name in self.CRITICAL + self.NONCRITICAL:
+                with self.subTest(name=name):
+                    done = self.grade(name, repo, env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    OLD_FLAG = "no occurrence of the old flag remains"
+    REJECTION_TEST = (
+        "\n    def test_list_all_is_rejected(self):\n"
+        "        with self.assertRaises(SystemExit):\n"
+        "            run(\"--file\", self.path, \"list\", \"--all\")\n")
+
+    def commit_edit(self, wgit, worktree, name, edit, message):
+        path = worktree / name
+        path.write_text(edit(path.read_text(encoding="utf-8")), encoding="utf-8")
+        subprocess.run(wgit + ["commit", "-qam", message], check=True,
+                       env={**os.environ, **QUIET_GIT})
+
+    def test_every_assert_passes_with_a_test_that_asserts_the_old_flag_is_rejected(self):
+        """#750: criterion 2 makes a rejection test correct work, so it must not be penalized."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+            worktree = Path(env["WT"])
+            self.commit_edit(wgit, worktree, "tests/test_cli.py",
+                             lambda text: text.replace(
+                                 '\n\nif __name__ == "__main__":',
+                                 self.REJECTION_TEST + '\n\nif __name__ == "__main__":'),
+                             "test: list --all is rejected")
+            self.assertIn("--all", (worktree / "tests/test_cli.py").read_text(encoding="utf-8"))
+            for name in self.CRITICAL + self.NONCRITICAL:
+                with self.subTest(name=name):
+                    done = self.grade(name, repo, env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_the_old_flag_left_in_the_implementation_or_readme_fails(self):
+        for name, old, new in (("tinytask/cli.py", "--include-done", "--all"),
+                               ("README.md", "--include-done", "--all")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+                self.commit_edit(wgit, Path(env["WT"]), name,
+                                 lambda text: text.replace(old, new, 1), "restore old flag")
+                self.assertNotEqual(self.grade(self.OLD_FLAG, repo, env).returncode, 0)
+
+    def test_a_test_file_that_never_exercises_the_new_flag_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+            self.commit_edit(wgit, Path(env["WT"]), "tests/test_cli.py",
+                             lambda text: text.replace("--include-done", "--other"),
+                             "test no longer exercises the flag")
+            self.assertNotEqual(self.grade(self.OLD_FLAG, repo, env).returncode, 0)
+
+    def test_no_worktree_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = published_sandbox(Path(tmp).resolve())
+            self.assertNotEqual(self.grade("a worktree was created", repo, env).returncode, 0)
+
+    def test_a_pushed_branch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(wgit + ["push", "-q", "origin", "issue-3-rename-flag"], check=True,
+                           env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+
+    def test_a_moved_main_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git, _, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "moved"], check=True)
+            self.assertNotEqual(
+                self.grade("local and origin main are unchanged", repo, env).returncode, 0)
+
+    def test_an_uncommitted_implementation_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git, env = published_sandbox(Path(tmp).resolve())
+            worktree = repo / ".worktrees/issue-3-rename-flag"
+            subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
+                                  str(worktree), "main"], check=True)
+            subprocess.run(["git", "-C", str(worktree), "apply",
+                            str(SETUP_INPUTS / "implementation.patch")], check=True)
+            env.update(WT=str(worktree), WT_COUNT="1")
+            for name in ("the implementation is committed on the worktree branch",
+                         "the worktree is left clean"):
+                with self.subTest(name=name):
+                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_an_uncommitted_rename_behind_an_unrelated_commit_fails_the_commit_check(self):
+        """An unrelated docstring commit satisfies `commits_touch`; the rename left in
+        the working tree satisfies the CLI check. The commit check must still fail."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git, env = published_sandbox(Path(tmp).resolve())
+            worktree = repo / ".worktrees/issue-3-rename-flag"
+            subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
+                                  str(worktree), "main"], check=True)
+            wgit = ["git", "-C", str(worktree), "-c", "user.name=eval",
+                    "-c", "user.email=eval@example.invalid", "-c", "commit.gpgsign=false"]
+            init = worktree / "tinytask/__init__.py"
+            init.write_text('"""Tinytask."""\n' + init.read_text(encoding="utf-8"),
+                            encoding="utf-8")
+            subprocess.run(wgit + ["commit", "-qam", "docs: a docstring"], check=True)
+            subprocess.run(wgit + ["apply", str(SETUP_INPUTS / "implementation.patch")],
+                           check=True)
+            env.update(WT=str(worktree), WT_COUNT="1")
+            self.assertEqual(self.grade("the renamed flag works through the CLI",
+                                        repo, env).returncode, 0)
+            self.assertNotEqual(self.grade(
+                "the implementation is committed on the worktree branch", repo, env).returncode, 0)
+
+    def test_a_consistent_rename_to_another_flag_fails_only_the_cli_check(self):
+        """Implementation, tests and README renamed together to --foo: every
+        candidate-editable assert but the old-flag one (which wants `--include-done` exercised
+        by the tests) still passes, and the interface the issue names does not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+            worktree = Path(env["WT"])
+            for name in ("tinytask/cli.py", "tests/test_cli.py", "README.md"):
+                path = worktree / name
+                path.write_text(path.read_text(encoding="utf-8").replace("--include-done", "--foo")
+                    .replace("include_done", "foo"), encoding="utf-8")
+            subprocess.run(wgit + ["commit", "-qam", "rename to --foo"], check=True,
+                           env={**os.environ, **QUIET_GIT})
+            for name in self.NONCRITICAL[1:2] + self.CRITICAL[3:4]:
+                with self.subTest(name=name):
+                    self.assertEqual(self.grade(name, repo, env).returncode, 0)
+            self.assertNotEqual(self.grade("the renamed flag works through the CLI",
+                                           repo, env).returncode, 0)
+
+    def test_keeping_the_old_flag_fails_the_cli_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, git, env = published_sandbox(Path(tmp).resolve())
+            worktree = repo / ".worktrees/issue-3-rename-flag"
+            subprocess.run(git + ["worktree", "add", "-q", "-b", "issue-3-rename-flag",
+                                  str(worktree), "main"], check=True)
+            env.update(WT=str(worktree), WT_COUNT="1")
+            self.assertNotEqual(self.grade("the renamed flag works through the CLI",
+                                           repo, env).returncode, 0)
+
+    def test_a_spec_in_the_worktree_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, _, env = self.good_run(Path(tmp).resolve())
+            spec_dir = Path(env["WT"]) / ".claude/specs"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "s.md").write_text("# spec\n", encoding="utf-8")
+            self.assertNotEqual(self.grade("no spec or plan was written", repo, env).returncode, 0)
+
+
+class NativeReviewEvalCaseTest(unittest.TestCase):
+    """#725: codex-collaboration case 4, the review-ship corpus case, grades a crafted sandbox."""
+
+    NAMES = ("nothing was pushed", "local and origin main are unchanged",
+             "the branch still carries the implementation",
+             "the worktree is left exactly as committed",
+             "the run names the native route for the unsupported capability",
+             "the run prints the Critical, Important and Minor sections")
+    GOOD_OUT = ("diff-review: capabilities.review.code is unsupported, so no Codex call; "
+                "native route review of main...worktree-issue-3-rename-flag.\n"
+                "Critical\n- none\nImportant\n- none\nMinor\n- README wording\n")
+
+    IDENT = ["git", "-c", "user.name=eval", "-c", "user.email=eval@example.invalid"]
+
+    def good_run(self, tmp, out=GOOD_OUT):
+        repo, git, env = published_sandbox(tmp)
+        pre_wt = tmp / "worktree-issue-3-rename-flag"
+        wgit = implement_issue_three(git, pre_wt, "worktree-issue-3-rename-flag")
+        (tmp / "out.txt").write_text(out, encoding="utf-8")
+        head = subprocess.run(wgit + ["rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        env.update(PRE_WT=str(pre_wt), PRE_WT_HEAD=head, WT=str(pre_wt), WT_COUNT="1",
+                   OUT=str(tmp / "out.txt"))
+        return repo, wgit, env
+
+    def grade(self, name, repo, env):
+        return run_assert(case_assert("codex-collaboration", 4, name), repo, **env)
+
+    def test_the_case_is_a_scripted_pipeline_case(self):
+        case = find_case("codex-collaboration", 4)
+        self.assertEqual((case["name"], case["mode"], case["setup"]),
+                         ("native-diff-review-before-ship", "pipeline",
+                          {"kind": "shippable-worktree"}))
+        self.assertEqual(tuple(check["name"] for check in case["asserts"]), self.NAMES)
+        self.assertIn("ResolvedProject", case["prompt"])
+        self.assertIn("diff-review", case["prompt"])
+        self.assertRegex(case["prompt"].lower(), r"\bstop\b")
+
+    def test_every_assert_passes_on_a_good_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            for name in self.NAMES:
+                with self.subTest(name=name):
+                    done = self.grade(name, repo, env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_pushed_branch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(wgit + ["push", "-q", "origin", "worktree-issue-3-rename-flag"],
+                           check=True, env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+
+    def test_a_push_under_another_branch_name_fails(self):
+        """The branch ref stays absent, main unchanged and the worktree clean, yet the
+        review's commits reached origin under another name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            self.assertEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+            subprocess.run(wgit + ["push", "-q", "origin", "HEAD:refs/heads/review-result"],
+                           check=True, env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+
+    def test_a_pushed_tag_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(wgit + ["push", "-q", "origin", "HEAD:refs/tags/reviewed"],
+                           check=True, env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+
+    def test_an_edited_worktree_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            (Path(env["PRE_WT"]) / "README.md").write_text("edited\n", encoding="utf-8")
+            self.assertNotEqual(
+                self.grade("the worktree is left exactly as committed", repo, env).returncode, 0)
+
+    def test_a_committed_revert_fails(self):
+        """A clean tree and a tinytask commit are not enough: HEAD must still be the setup tip."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(wgit + ["revert", "--no-edit", "HEAD"], check=True,
+                           capture_output=True, env={**os.environ, **QUIET_GIT})
+            for name in ("the branch still carries the implementation",
+                         "the worktree is left exactly as committed"):
+                with self.subTest(name=name):
+                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_a_committed_edit_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            (Path(env["PRE_WT"]) / "README.md").write_text("edited\n", encoding="utf-8")
+            subprocess.run(wgit + ["commit", "-qam", "review edit"], check=True,
+                           env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(
+                self.grade("the branch still carries the implementation", repo, env).returncode, 0)
+
+    def test_an_untracked_file_in_the_worktree_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            (Path(env["PRE_WT"]) / "NOTES.wip").write_text("scratch\n", encoding="utf-8")
+            self.assertNotEqual(
+                self.grade("the worktree is left exactly as committed", repo, env).returncode, 0)
+
+    def test_a_moved_main_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(self.IDENT + ["-C", str(repo), "commit", "-q", "--allow-empty",
+                                         "-m", "moved"], check=True,
+                           env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(
+                self.grade("local and origin main are unchanged", repo, env).returncode, 0)
+
+    def test_an_edit_in_the_base_checkout_fails(self):
+        """A review is read-only: an uncommitted edit or a new file in $REPO breaks it
+        although main, origin and the review worktree are all untouched."""
+        name = "local and origin main are unchanged"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            self.assertEqual(self.grade(name, repo, env).returncode, 0)
+            readme = repo / "README.md"
+            readme.write_text(readme.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+            done = self.grade(name, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("README.md", done.stdout)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            (repo / "REVIEW-NOTES.md").write_text("findings\n", encoding="utf-8")
+            done = self.grade(name, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("REVIEW-NOTES.md", done.stdout)
+
+    def test_a_moved_origin_main_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve())
+            git = self.IDENT + ["-C", str(repo)]
+            quiet = {**os.environ, **QUIET_GIT}
+            moved = subprocess.run(git + ["commit-tree", "main^{tree}", "-p", "main", "-m", "moved"],
+                                   capture_output=True, text=True, check=True, env=quiet).stdout.strip()
+            subprocess.run(git + ["push", "-q", "origin", f"{moved}:refs/heads/main"], check=True,
+                           env=quiet)
+            self.assertNotEqual(
+                self.grade("local and origin main are unchanged", repo, env).returncode, 0)
+
+    def test_an_output_missing_one_severity_section_fails(self):
+        name = "the run prints the Critical, Important and Minor sections"
+        for missing in ("Critical", "Important", "Minor"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                out = "".join(f"{word}\n- none\n" for word in ("Critical", "Important", "Minor")
+                              if word != missing)
+                repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+                self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_a_review_declared_unperformed_fails_the_sections_check(self):
+        """Naming the severity words is not printing the sections: an output that says
+        it cannot produce them has reviewed nothing."""
+        name = "the run prints the Critical, Important and Minor sections"
+        for out in ("Native review unsupported; cannot produce Critical, Important or Minor "
+                    "sections\n",
+                    "Critical, Important and Minor: not run, the native route was unsupported.\n",
+                    "Critical\n- none\nImportant\n- none\nMinor\n- none\n"):
+            with self.subTest(out=out), tempfile.TemporaryDirectory() as tmp:
+                repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+                self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_markdown_section_headings_pass(self):
+        name = "the run prints the Critical, Important and Minor sections"
+        out = ("## Critical\n- none\n**Important**\n- tinytask/cli.py:23 help text\n"
+               "### Minor:\n- none\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+            self.assertEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_the_native_rubric_headings_pass(self):
+        """The native reviewer prompt's own headings carry a parenthetical."""
+        name = "the run prints the Critical, Important and Minor sections"
+        for out in ("### Critical (Must Fix)\n- none\n### Important (Should Fix)\n- none\n"
+                    "### Minor\n- tinytask/cli.py:23 help text\n",
+                    "**Critical (Must Fix)**\n- none\n**Important (Should Fix):**\n- none\n"
+                    "**Minor**\n- README wording\n"):
+            with self.subTest(out=out), tempfile.TemporaryDirectory() as tmp:
+                repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+                self.assertEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_an_output_without_the_route_or_sections_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, env = self.good_run(Path(tmp).resolve(), out="Looks good to me.\n")
+            for name in self.NAMES[4:]:
+                with self.subTest(name=name):
+                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
 
 
 if __name__ == "__main__":

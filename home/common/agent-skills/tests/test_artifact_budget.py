@@ -32,8 +32,7 @@ sys.path.insert(0, str(SCRIPT.parent))
 import artifact_budget
 
 WORKFLOW_STATE = ROOT / "home/common/agent-skills/scripts/workflow_state.py"
-SKILL_TREES = (ROOT / "home/common/agent-skills/skills", ROOT / "home/common/claude-code/skills",
-               ROOT / "home/common/codex/skills")
+SKILL_TREES = (ROOT / "home/common/agent-skills/skills", ROOT / "home/common/claude-code/skills")
 # Issue 473 D5: the skill-named subcommands whose stdout is no workflow response.
 NOT_WORKFLOW_RESPONSES = frozenset({"build-delivery", "resume-pack"})
 SKILL_CALL = re.compile(r"workflow-state ([a-z][a-z-]*)")
@@ -41,7 +40,7 @@ VALIDATOR_PIPE = re.compile(r"\|\s*artifact-budget validate-report(?P<arguments>
 
 
 def skill_texts():
-    """Every skill document of the shared, Claude-only and Codex trees, evals excluded."""
+    """Every skill document of the shared and Claude-only trees, evals excluded."""
     for tree in SKILL_TREES:
         for path in sorted(tree.rglob("*.md")):
             if "evals" not in path.relative_to(tree).parts:

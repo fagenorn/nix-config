@@ -22,7 +22,6 @@ INSTALLED_RECIPE = "just agent-installed-skill-tests"
 # (view, skill directory under the installed home, source trees it publishes)
 INSTALLED_VIEWS = (
     ("claude", ".claude/skills", frozenset({"shared", "claude-only"})),
-    ("codex", ".agents/skills", frozenset({"shared"})),
 )
 
 

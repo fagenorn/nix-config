@@ -1,6 +1,5 @@
 {
   inputs,
-  lib,
   pkgs,
   ...
 }:
@@ -10,37 +9,8 @@ in
 {
   # Native Codex CLI from the hourly-updated flake. The flake lock keeps each
   # deployed generation reproducible; `just update` advances it to the latest release.
+  # Codex runs only as the reviewer behind `codex-companion` (see
+  # home/common/claude-code/default.nix), so Nix installs the binary and nothing
+  # else: no skills, guidance or config splice for Codex.
   home.packages = [ codexPackage ];
-
-  # Skills reach Codex through the whole-directory links at ~/.agents/skills
-  # (see home/common/agent-skills). The former superpowers plugin and its
-  # personal marketplace were replaced by vendored skills in that shared tree.
-
-  # Codex-only `deliver-standard`: Claude's skill runs a Workflow-tool program
-  # Codex lacks, so this stub names the alternatives. A whole-directory link,
-  # because Codex ignores a skill whose SKILL.md is itself a symlink.
-  home.file.".agents/skills/deliver-standard".source = ./skills/deliver-standard;
-
-  # Keep Codex's runtime-managed config writable (plugins and marketplaces also
-  # use it), while declaratively enforcing the global default reasoning effort.
-  home.activation.codexConfig = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-    cfg="$HOME/.codex/config.toml"
-    run mkdir -p "$HOME/.codex"
-    tmp="$cfg.hm-tmp.$$"
-    input=/dev/null
-    [ -f "$cfg" ] && input="$cfg"
-
-    ${pkgs.gawk}/bin/awk '
-      BEGIN {
-        print "model_reasoning_effort = \"xhigh\""
-        in_top_level = 1
-      }
-      /^[[:space:]]*\[/ { in_top_level = 0 }
-      in_top_level && /^[[:space:]]*model_reasoning_effort[[:space:]]*=/ { next }
-      { print }
-    ' "$input" > "$tmp"
-
-    chmod 600 "$tmp"
-    mv -f "$tmp" "$cfg"
-  '';
 }

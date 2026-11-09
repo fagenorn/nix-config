@@ -17,7 +17,6 @@ from agent_tools import instruction_load, skill_lint
 REPO_ROOT = Path(__file__).parents[4]
 SHARED = "home/common/agent-skills/skills"
 CLAUDE = "home/common/claude-code/skills"
-CODEX = "home/common/codex/skills"
 ALPHA = f"{SHARED}/alpha"
 MATRIX = {
     "roles": {},
@@ -35,7 +34,7 @@ def skill(name, description="Does things. Use when testing.", body="body\n"):
 
 
 def clean_files():
-    """A lint-clean three-tree repository: one reference, two payloads, excluded dirs."""
+    """A lint-clean two-tree repository: one reference, two payloads, excluded dirs."""
     return {
         "home/common/agent-skills/model-matrix.json": json.dumps(MATRIX).encode(),
         f"{ALPHA}/SKILL.md": skill(
@@ -47,7 +46,6 @@ def clean_files():
         f"{ALPHA}/evals/notes.md": b"NOT.md is mentioned here\n",
         f"{ALPHA}/scripts/README.md": b"script docs\n",
         f"{CLAUDE}/beta/SKILL.md": skill("beta"),
-        f"{CODEX}/gamma/SKILL.md": skill("gamma"),
         "home/common/claude-code/agents/reviewer.md": b"reviewer body\n",
         "home/common/agent-guidance/AGENTS.md": b"frame text\n",
     }
@@ -125,7 +123,7 @@ class FoundationTest(unittest.TestCase):
     def test_skill_dirs_classify_references_and_payloads(self):
         dirs = skill_lint.skill_dirs(dict_snapshot(clean_files()))
         self.assertEqual([(d.tree, d.name) for d in dirs],
-                         [(SHARED, "alpha"), (CLAUDE, "beta"), (CODEX, "gamma")])
+                         [(SHARED, "alpha"), (CLAUDE, "beta")])
         alpha = dirs[0]
         self.assertEqual(alpha.path, ALPHA)
         self.assertEqual(alpha.skill_md, f"{ALPHA}/SKILL.md")
@@ -140,8 +138,8 @@ class FoundationTest(unittest.TestCase):
         self.assertEqual(orphan.references, (f"{SHARED}/orphan/NOTES.md",))
 
     def test_a_tree_root_without_any_skill_cannot_be_classified(self):
-        files = {p: d for p, d in clean_files().items() if not p.startswith(CODEX)}
-        with self.assertRaisesRegex(ValueError, CODEX):
+        files = {p: d for p, d in clean_files().items() if not p.startswith(CLAUDE)}
+        with self.assertRaisesRegex(ValueError, CLAUDE):
             skill_lint.skill_dirs(dict_snapshot(files))
 
     def test_an_unreadable_matrix_cannot_be_classified(self):
@@ -313,7 +311,7 @@ class NoExemptionTest(unittest.TestCase):
         files = clean_files()
         files[f"{ALPHA}/ORPHAN.md"] = b"orphan\n"
         files[f"{SHARED}/orphan/NOTES.md"] = b"notes\n"
-        files[f"{CODEX}/gamma/SKILL.md"] = skill("gamma", "Gammas things.")
+        files[f"{CLAUDE}/gamma/SKILL.md"] = skill("gamma", "Gammas things.")
         snapshot = dict_snapshot(files)
         found = skill_lint.violations(snapshot)
         self.assertEqual(len(found), 3)
@@ -351,8 +349,8 @@ class CommandTest(unittest.TestCase):
         orphaned = self.run_lint({**clean_files(), f"{ALPHA}/ORPHAN.md": b"orphan\n"})
         self.assertEqual((orphaned.returncode, orphaned.stdout),
                          (1, f"L4a {ALPHA}/ORPHAN.md: not named in its SKILL.md\n"))
-        no_codex = {p: d for p, d in clean_files().items() if not p.startswith(CODEX)}
-        broken = self.run_lint(no_codex)
+        no_claude_tree = {p: d for p, d in clean_files().items() if not p.startswith(CLAUDE)}
+        broken = self.run_lint(no_claude_tree)
         self.assertEqual((broken.returncode, broken.stdout), (2, ""))
         self.assertEqual(len(broken.stderr.splitlines()), 1, broken.stderr)
         self.assertTrue(broken.stderr.startswith("skill-lint: "))
