@@ -55,13 +55,9 @@ The run adds `--setting-sources project,local`, which drops the user-level sourc
 so `~/.claude/skills`, `~/.claude/agents` and `~/.claude/CLAUDE.md` no longer shadow the
 project copies — and `--settings "$TREE_ROOT/settings.json"`, which brings the user's
 generated settings back by flag, so its hooks (the lifecycle guard), permissions, env and
-enabled plugins still apply. That file is derived from `EVAL_SETTINGS` (default
-`$HOME/.claude/settings.json`, read only in tree mode): a copy in which every hook object
-of type `command` whose command ends in `-agent-tools-context-meter`, under any event and
-any matcher, runs the tree's `context-meter` shim instead of the store-path meter. Nothing
-else in the file changes. A missing or non-JSON file is an error before any sandbox, and so
-is a file with no such hook (`settings file has no context-meter hook`). The one
-limit: user-level settings and memory are replaced, not merged — the run sees the
+enabled plugins still apply. That file is a byte-identical copy of `EVAL_SETTINGS` (default
+`$HOME/.claude/settings.json`, read only in tree mode). A missing or non-JSON file is an
+error before any sandbox. The one limit: user-level settings and memory are replaced, not merged — the run sees the
 flag-passed settings file and the project copies above, and nothing else from
 `~/.claude` (user-level skills outside the checkout, such as `impeccable`, are not
 loaded).
@@ -69,27 +65,15 @@ loaded).
 The runner also builds a temporary root `${TMPDIR:-/tmp}/run-eval-tree.XXXXXX` whose
 `bin/` goes first on `PATH`: one shim per command in the tree's `lib/agent-tools.nix`
 table, each running `python3 -P -m agent_tools.<module>` from the tree's `python/`, so
-`resolve-project`, `context-meter` and the rest of the package commands are the tree's
-code, not the installed ones. `bin/workflow-state` is one more shim, running the tree's
-`home/common/agent-skills/scripts/workflow-state.py`, and the root also holds the derived
-`settings.json` above. That root is removed on every exit path: a normal end, an error, a
+`resolve-project` and the rest of the package commands are the tree's code, not the
+installed ones. The root also holds the copied `settings.json` above. That root is removed on every exit path: a normal end, an error, a
 non-zero claude exit, Ctrl-C (exit 130) and SIGTERM (exit 143). A plan-only eval creates
 none of it. The sandbox, with its `.claude/` links, is kept like any other.
 
-Tree mode does not cover the remaining flat helpers (`artifact-budget`, `sdd-workspace`),
-`~/.agents/standards` and `~/.agents/share`: those still come from the deployed home. A
-skill that calls `workflow-state` by name reaches the tree's shim, but an absolute
-`~/.agents/bin/workflow-state` call still reaches the deployed helper, as do the other
-absolute `~/.agents/bin/...` paths some skills name. Changes to those helpers are outside
-what this mode measures.
-
-`EVAL_POLICY=threshold=140000` sets a hand-off policy for the run. It is tree mode only
-(`EVAL_POLICY requires EVAL_TREE` otherwise) and takes the product knobs of
-`agent_tools.phase_budget`; the runner validates it with `phase_budget.parse` before any
-sandbox, so a spec the package rejects dies as `invalid EVAL_POLICY '<value>': <reason>`.
-It is exported as `AGENT_PHASE_BUDGET` to the claude run only, and the row records it as
-`policy`. The claude run carries `AGENT_PHASE_BUDGET` exactly when `EVAL_POLICY` is set: with
-it unset, an `AGENT_PHASE_BUDGET` inherited from the launching shell is removed.
+Tree mode does not cover the remaining flat helper (`artifact-budget`),
+`~/.agents/standards` and `~/.agents/share`: those still come from the deployed home. An
+absolute `~/.agents/bin/...` path some skills name still reaches the deployed helper.
+Changes to those helpers are outside what this mode measures.
 
 A row from tree mode records `tree` (the checkout's absolute path), `tree_rev` (its
 `HEAD`), `tree_mode` (`"project-skills"`, the layout above) and `tree_dirty` (whether `git status --porcelain` shows changes under the
@@ -119,16 +103,15 @@ instruction paths: both skill roots, `home/common/claude-code/agents` and
   after the setup, so a push under any branch or tag name is detectable.
 - Env: `EVAL_MODEL` (default `sonnet`), `EVAL_TIMEOUT` seconds (default 2700),
   `EVAL_MAX_USD` (optional ceiling), `EVAL_TRIALS` (default 1), `EVAL_TREE` (a checkout
-  to evaluate instead of the deployed skills), `EVAL_SETTINGS` (the settings file tree mode
-  derives its `--settings` from; default `$HOME/.claude/settings.json`) and `EVAL_POLICY`
-  (a phase-budget spec, tree mode only), all described above.
+  to evaluate instead of the deployed skills) and `EVAL_SETTINGS` (the settings file tree
+  mode copies as its `--settings`; default `$HOME/.claude/settings.json`), both described
+  above.
 - Every pipeline run keeps its session: the runner passes no `--no-session-persistence` and
   starts `claude` with `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`, because Claude Code writes
-  no transcript for a `-p` run started inside a Claude Code session without it, and the
-  context meter and `agent-costs` read transcripts. The sandbox's transcripts land in the
-  login's projects directory, `~/.claude/projects/`, under the sandbox path's project name
-  (every non-alphanumeric character of the path replaced by `-`), so `agent-costs` counts
-  eval spend. The run also gets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, so `-p` waits for
+  no transcript for a `-p` run started inside a Claude Code session without it, and
+  agent-run-profile and later reading of transcripts need one. The sandbox's transcripts
+  land in the login's projects directory, `~/.claude/projects/`, under the sandbox path's
+  project name (every non-alphanumeric character of the path replaced by `-`). The run also gets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, so `-p` waits for
   its background agents instead of stopping them 10 minutes after the last turn;
   `EVAL_TIMEOUT` still bounds it.
 - Sandboxes are kept after the run and their path is printed, so you can inspect the spec
@@ -144,7 +127,7 @@ and append-only (the rest of `results/` is gitignored). Fields: timestamp, skill
 id/name, mode, model (the root session's `EVAL_MODEL`; the models subagents used show
 under `models`), trial number, verdict, per-assert pass/fail, wall seconds, claude
 exit code, sandbox path, the `EVAL_MAX_USD` ceiling when one was set, the tree fields
-above, `policy` (the `EVAL_POLICY` spec, or `null` when it is unset or empty), and the usage the claude run reported (`--output-format json`):
+above, and the usage the claude run reported (`--output-format json`):
 
 - `input_tokens` = `uncached_input_tokens` + `cache_read_input_tokens` +
   `cache_creation_input_tokens`, each summed over every model in the result's
