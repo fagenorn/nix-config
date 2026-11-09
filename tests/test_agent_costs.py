@@ -1271,6 +1271,33 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
                 reasons = agent_costs.Counter()
                 self.assertEqual(agent_costs._declaration({"role": role}, reasons)["authority"], "unknown")
 
+    def test_a_recorded_role_outside_the_canonical_set_is_preserved_not_dropped(self):
+        # Historical transcripts carry spellings the source no longer emits.
+        # Dropping them would let the routing comparator reconstruct the role
+        # from the dispatch and miss the declaration mismatch.
+        for role in ("issue-" "owner", "mech" "anic", "auto-owner", "bookkeeper"):
+            with self.subTest(role=role):
+                reasons = agent_costs.Counter()
+                declared = agent_costs._declaration(
+                    {"role": role, "dispatch_id": "improve-architecture-scan-owner"}, reasons)
+                self.assertEqual(declared, {"dispatch_id": "improve-architecture-scan-owner",
+                                            "role": role, "authority": "unknown"})
+                self.assertEqual(reasons["role_ambiguous"], 1)
+        reasons = agent_costs.Counter()
+        self.assertEqual(agent_costs._declaration({"subagent_type": "implementer"}, reasons)["role"], None)
+
+    def test_a_preserved_retired_role_on_a_known_dispatch_is_a_declaration_mismatch(self):
+        from agent_tools import agent_model_drift_routing as routing
+        observation = {"declaration": {"dispatch_id": "improve-architecture-scan-owner",
+                                       "role": "issue-" "owner", "authority": "unknown"},
+                       "escalation": None}
+        matrix = {"roles": {"owner": {"model": "m", "effort": "high"}},
+                  "dispatch_sites": [{"id": "improve-architecture-scan-owner", "role": "owner",
+                                  "model": "m", "effort": "high"}],
+                  "_routing_dispatch_hosts": {"improve-architecture-scan-owner": "claude"}}
+        _, findings = routing.declaration_for(observation, matrix)
+        self.assertEqual(findings, ["REQUEST_DECLARATION_MISMATCH"])
+
     def test_the_renamed_owner_role_is_canonical(self):
         reasons = agent_costs.Counter()
         self.assertEqual(

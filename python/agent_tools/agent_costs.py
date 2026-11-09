@@ -1293,7 +1293,11 @@ def _declaration(value, reasons):
     reasons["role_ambiguous"] += 1
     if dispatch is None:
         reasons["dispatch_missing"] += 1
-    return {"dispatch_id": dispatch, "role": None, "authority": "unknown"}
+    # A recorded role the source no longer emits (a retired spelling in a
+    # historical transcript) is preserved, not dropped: reading it as absent
+    # would let the routing comparator reconstruct the role from the dispatch
+    # and miss the declaration mismatch. Its authority stays unknown.
+    return {"dispatch_id": dispatch, "role": role, "authority": "unknown"}
 
 
 def _escalation(value):
