@@ -550,12 +550,27 @@ These six items are `post` and `human-pending`: this attempt does not evaluate t
 
 | ID | Predicate |
 |----|-----------|
-| P1 | No static fallback ladder remains in the resolver, conformance or workflow-entry paths of any adopted project, and a missing contract fails closed with a closed error code (AC2; #69) |
+| P1 | No static fallback ladder remains in the resolver, conformance or workflow-entry paths of any adopted project, and a missing contract fails closed with a closed error code (AC2; #69). Reading approved 2026-11-09 under the owner's 130 delegation: "(1) The only findings outside nix-config may be `stale_exemption:*` entries that name nix-config's hard-coded exemption paths. Any other finding kind, on any root, is red. (2) nix-config is read on the candidate tree (06fb38b7), because main carries the bridge source until P5 merges the candidate." Rationale: `fallback-audit ladders` applies nix-config's exemption list to every repository, so every other root reports each absent nix-config path as a `stale_exemption` finding (#763), and the nix-config roots are main checkouts that hold the bridge source until P5 |
 | P2 | The bridge generation is retained, and rollback to it is exercised once before retirement (AC3; refresh) |
 | P3 | A Claude-driven ship completes on the strict path, against declared host capabilities with bounded admission (AC4; refresh; the Codex-driven ship was dropped by the owner's 2026-11-08 decision) |
 | P4 | The #71 retirement predicates: the active generation's identity matches its manifest; active and bridge fleet conformance are green; `workflow_entry` passes through both adapters; post-activation smoke is green; doctor reports no residue; traces show zero removed-fallback executions (#71) |
 | P5 | Implementation delivered, PR merged, tracker closed and cleanup postconditions reconciled before retirement (refresh) |
 | P6 | Retirement is recorded with the evidence that satisfied each strict predicate (AC5) |
+
+#### Post-activation readings on the agent hosts (gate step 5, partial)
+
+eleven-m5 was switched at 2026-11-09T17:22:57Z (done 17:24:04Z) and anis-desktop at 17:27:15Z (done 17:27:33Z), both from a detached `K_H/.worktrees/cutover-130` at 06fb38b718e050742e607b9b0feefd873e90c404, removed afterwards. The land locks of all five fleet repositories were free before each switch. The first anis-desktop attempt (17:25:34Z) failed before activation on an operator PATH error and changed nothing; the single retry is recorded on issue 130 as a deviation from the runbook (comment 6746762607). mbp is not switched: it is on system-325, the bridge, awaiting the owner's switch.
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| eleven-m5 | host | system-36 (bridge N_H 35) | identity; platform-status --fleet; host-route | 2026-11-09T17:24:10Z | 0; 0; 0; 0 | system-36 running, configurationRevision 06fb38b718e0; platform 2.0.0, schemas [2], 2/2 compatible, removed_uses []; claude-code supported (7 slots), codex declared_unsupported | green |
+| eleven-m5 | P1 | system-36 | resolve-project resolve (scratch repo); fallback-audit ladders | 2026-11-09T17:24:11Z | 2; 1; 1 | fail-closed `not_onboarded`; jarbird 7 findings, all `stale_exemption` on nix-config paths; nix-config read on the candidate tree 06fb38b7 at 17:24:39Z: clean true | green |
+| eleven-m5 | P4 | system-36 | conformance fleet and doctor per root; migrate; worktree-mapping; traces; bridge fleet | 2026-11-09T17:24:11Z to 17:25:09Z | 0 | fleet 13/13 and doctor 19/19 on both roots; migrate 0, refused 0; C7 green; 0 removed-fallback executions since 17:22:57Z; bridge resolve-project with its own manifest (yl4yfaps8kndji4qdnpy73vqk2cpcqmk) 1.2.0, 2/2 compatible | green |
+| anis-desktop | host | system-80 (bridge N_H 79) | identity; platform-status --fleet; host-route | 2026-11-09T17:27:40Z | 0; 0; 0; 0 | system-80 running, configurationRevision 06fb38b718e0; platform 2.0.0, schemas [2], 1/1 compatible, removed_uses []; claude-code supported (7 slots), codex declared_unsupported | green |
+| anis-desktop | P1 | system-80 | resolve-project resolve (scratch repo); fallback-audit ladders | 2026-11-09T17:27:40Z | 2; 1 | fail-closed `not_onboarded`; nodocom 7 findings, all `stale_exemption` on nix-config paths | green |
+| anis-desktop | P4 | system-80 | conformance fleet and doctor; migrate; worktree-mapping; traces; bridge fleet | 2026-11-09T17:27:40Z | 0 | nodocom fleet 13/13, doctor 19/19; migrate 0, refused 0; C7 green; 0 removed-fallback executions since 17:27:15Z; bridge resolve-project with its own manifest 1.2.0, 1/1 compatible | green |
+
+P2 (the rollback exercise), P3 (a Claude-driven ship), P5 and P6 are not evaluated yet.
 
 ## Dispositions
 
