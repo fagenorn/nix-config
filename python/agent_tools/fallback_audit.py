@@ -43,7 +43,11 @@ INVENTORY_MARKERS = (
 )
 
 # Each row exempts every hit of exactly that marker in exactly that path,
-# because the hit is not a resolution route. Nothing else is exempt.
+# because the hit is not a resolution route. Nothing else is exempt. The rows
+# belong to this repository: they apply only to a root whose contract declares
+# NON_LADDER_PROJECT_ID, so another project's audit neither inherits them nor
+# reports them as stale.
+NON_LADDER_PROJECT_ID = "fagenorn/nix-config"
 NON_LADDER_SITES = (
     ("python/agent_tools/adopt_inspection.py", "legacy-skills-config",
      "adoption classifies a legacy store it finds in a project being adopted; "
@@ -142,10 +146,25 @@ def _probe() -> dict[str, Any]:
     return {"code": code, "exit": result.returncode}
 
 
+def _declared_project_id(root: Path) -> str | None:
+    """The `project.id` the root's contract declares, or None when it declares
+    none it can be read as: an unreadable or malformed contract owns no exemption."""
+    try:
+        source = json.loads((root / resolve_project.CONTRACT_FILENAME).read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return resolve_project.declared_facts(source)["project_id"]
+
+
+def _exemption_sites(root: Path) -> tuple[tuple[str, str, str], ...]:
+    return NON_LADDER_SITES if _declared_project_id(root) == NON_LADDER_PROJECT_ID else ()
+
+
 def ladders(args: argparse.Namespace) -> int:
     root = Path(args.repo_root).resolve()
     markers = _marker_literals(Path(args.manifest) if args.manifest else None, root)
-    exempt_rows = {(path, marker_id): reason for path, marker_id, reason in NON_LADDER_SITES}
+    sites = _exemption_sites(root)
+    exempt_rows = {(path, marker_id): reason for path, marker_id, reason in sites}
     findings: list[dict[str, Any]] = []
     exempt: list[dict[str, Any]] = []
     matched: set[tuple[str, str]] = set()
@@ -156,7 +175,7 @@ def ladders(args: argparse.Namespace) -> int:
             exempt.append({**hit, "reason": exempt_rows[key]})
         else:
             findings.append(hit)
-    for path, marker_id, _reason in NON_LADDER_SITES:
+    for path, marker_id, _reason in sites:
         if (path, marker_id) not in matched:
             findings.append({"path": path, "line": None,
                              "marker_id": f"stale_exemption:{marker_id}"})
