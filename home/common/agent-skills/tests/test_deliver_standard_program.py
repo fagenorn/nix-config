@@ -2127,6 +2127,57 @@ class HoldTest(unittest.TestCase):
         self.assertEqual(result["stage"], "hold")
 
 
+class NoteCloseOutTest(unittest.TestCase):
+    """#736 AC2: a note is never held, and the close-out comment lists the note texts."""
+
+    MERGE = "d" * 40
+
+    def ship(self, *criteria, hold=None, **patch):
+        replies = {"plan": with_criteria(*criteria)}
+        if hold is not None:
+            replies["hold"] = hold
+        return run(replies=replies, patch=dict({"merge": {"merge_commit": self.MERGE},
+                                                "close-out": {"notes_posted": True}}, **patch))
+
+    def test_the_close_out_comment_lists_the_note_texts(self):
+        result, calls = self.ship(NOTE)
+        self.assertEqual(result["stage"], "done")
+        close = prompt(calls, "close-out")
+        self.assertIn(NOTE["text"], close)
+        self.assertIn("Orchestrator notes for PR 42", close)
+        self.assertIn("gh issue comment 9 --repo owner/repo --body-file", close)
+        self.assertLess(close.index("Orchestrator notes for PR 42"), close.index("gh issue close 9 --repo owner/repo"))
+        self.assertIn("Every criterion is of kind code or note: post nothing, add no label", prompt(calls, "hold"))
+        self.assertIn("never regraded, held or checked", prompt(calls, "hold"))
+
+    def test_a_code_and_note_plan_closes_like_an_all_code_plan(self):
+        result, calls = self.ship(NOTE, setup={"integration_branch": "main"})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("Closes #9", prompt(calls, "pr"))
+        self.assertNotIn("needs-verification", prompt(calls, "close-out"))
+
+    def test_unposted_notes_stop_the_close_out(self):
+        result, _ = self.ship(NOTE, **{"close-out": {"notes_posted": False}})
+        self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
+
+    def test_a_plan_without_notes_has_no_notes_step(self):
+        _, calls = run()
+        self.assertNotIn("Orchestrator notes", prompt(calls, "close-out"))
+
+    def test_a_note_beside_evidence_is_neither_checked_nor_missing(self):
+        hold = {"merge_commit_local": True, "code_unmet": [], "blocks": [], "split": [],
+                "block": {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]},
+                "lint": {"ok": True, "errors": []}, "verify_run": {"ran": True, "exit": 0},
+                "issue_state": "OPEN", "notes": "n"}
+        result, calls = self.ship(EVIDENCE, NOTE, hold=hold,
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("(evidence or human, not split)", prompt(calls, "hold"))
+        close = prompt(calls, "close-out")
+        self.assertIn(NOTE["text"], close)
+        self.assertNotIn("gh issue close", close)
+
+
 class FixWaveTest(unittest.TestCase):
     """#635 owner comment: a narrowing re-review earns a second wave; a new kind stops; waves are counted."""
 
