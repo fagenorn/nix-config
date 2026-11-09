@@ -443,6 +443,23 @@ class ReportCommandTest(unittest.TestCase):
         self.assertEqual(json.loads(completed.stdout)["head"], legacy)
         self.assertNotEqual(instruction_load.validate(model, dict_reader(HEAD_FILES)), [])
 
+    def test_a_model_naming_the_retired_codex_host_still_reports(self):
+        model = fixture_model()
+        for profile in model["profiles"]:
+            profile["hosts"] = ["claude", "codex"]
+            profile["ceiling_bytes"]["codex"] = profile["ceiling_bytes"]["claude"]
+            profile["conditional_ceiling_bytes"]["codex"] = (
+                profile["conditional_ceiling_bytes"]["claude"])
+        historical = self.commit(
+            {instruction_load.MODEL_PATH: json.dumps(model).encode()}, "historical")
+        completed = self.report("--base", self.base, "--head", historical, "--format", "json")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        demo = next(p for p in json.loads(completed.stdout)["profiles"] if p["id"] == "demo")
+        self.assertEqual(sorted(demo["hosts"]), ["claude", "codex"])
+        self.assertIn(
+            "profile demo: hosts must be a non-empty subset of ['claude']",
+            instruction_load.validate(model, dict_reader(HEAD_FILES)))
+
     def test_an_invalid_model_at_head_exits_2(self):
         model = fixture_model()
         del model["excluded_sites"]["demo-plugin"]

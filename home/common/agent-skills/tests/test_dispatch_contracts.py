@@ -586,7 +586,7 @@ class MarkerInventoryTest(unittest.TestCase):
 # Every `<!-- agent-dispatch:` marker across the source skill trees, pinned at
 # #274's base. A change that adds or removes a dispatch site updates this literal
 # in the same commit, which is the point of the pin (#274 D8).
-DISPATCH_MARKER_TOTAL = 38
+DISPATCH_MARKER_TOTAL = 36
 
 
 class DispatchMarkerInventoryTest(unittest.TestCase):

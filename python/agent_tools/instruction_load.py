@@ -40,6 +40,9 @@ MODEL_PATH = "home/common/agent-skills/instruction-load.json"
 FRAME_MEMBER = "agent-guidance/AGENTS.md"
 FRAME_PATH = "home/common/agent-guidance/AGENTS.md"
 HOSTS = ("claude",)
+# `report` regenerates reports for revisions that predate the Codex retirement,
+# whose models still name the Codex host; only the current tree is Claude-only.
+HISTORICAL_HOSTS = ("claude", "codex")
 TOP_LEVEL_KEYS = (
     "frame",
     "profiles",
@@ -200,7 +203,8 @@ def _ceiling_map_violations(key: str, value: object, hosts: object,
     return found
 
 
-def _profile_violations(profile: object, gate_fields: bool = True) -> list[str]:
+def _profile_violations(profile: object, gate_fields: bool = True,
+                        hosts_allowed: tuple[str, ...] = HOSTS) -> list[str]:
     """Unprefixed structural violations of one profile."""
     if not isinstance(profile, dict):
         return ["must be an object"]
@@ -228,11 +232,11 @@ def _profile_violations(profile: object, gate_fields: bool = True) -> list[str]:
     hosts_valid = (
         _is_string_list(hosts)
         and bool(hosts)
-        and set(hosts) <= set(HOSTS)
+        and set(hosts) <= set(hosts_allowed)
         and len(set(hosts)) == len(hosts)
     )
     if not hosts_valid:
-        found.append(f"hosts must be a non-empty subset of {list(HOSTS)}")
+        found.append(f"hosts must be a non-empty subset of {list(hosts_allowed)}")
     listed: list[str] = []
     for kind in ("hot", "conditional"):
         if _is_string_list(profile.get(kind)):
@@ -263,8 +267,8 @@ def _profile_violations(profile: object, gate_fields: bool = True) -> list[str]:
     return found
 
 
-def _structure_violations(profiles: list,
-                          gate_fields: bool = True) -> tuple[list[str], list[dict]]:
+def _structure_violations(profiles: list, gate_fields: bool = True,
+                          hosts_allowed: tuple[str, ...] = HOSTS) -> tuple[list[str], list[dict]]:
     """Every profile's structural violations, and the profiles that have none."""
     violations: list[str] = []
     sound: list[dict] = []
@@ -273,7 +277,7 @@ def _structure_violations(profiles: list,
         profile_id = profile.get("id") if isinstance(profile, dict) else None
         named = isinstance(profile_id, str) and bool(profile_id)
         label = profile_id if named else f"#{index}"
-        found = _profile_violations(profile, gate_fields)
+        found = _profile_violations(profile, gate_fields, hosts_allowed)
         if named:
             if profile_id in seen:
                 found.append("duplicate id")
@@ -387,16 +391,20 @@ def _member_violations(profile: dict, read: Reader, sites: Optional[list[dict]])
     return [f"profile {profile['id']}: {message}" for message in found]
 
 
-def validate(model: dict, read: Reader, *, gate_fields: bool = True) -> list[str]:
+def validate(model: dict, read: Reader, *, gate_fields: bool = True,
+             historical: bool = False) -> list[str]:
     """Every violation of the model, in report order; empty when it is sound.
 
     With ``gate_fields`` false, a model that predates the gate's ceilings is
-    still sound: ``report`` reads models committed before them.
+    still sound: ``report`` reads models committed before them. With
+    ``historical`` true, hosts retired since are still accepted: ``report``
+    reads models of revisions that predate their retirement.
     """
+    hosts_allowed = HISTORICAL_HOSTS if historical else HOSTS
     violations = _top_level_violations(model, read, gate_fields)
     profiles = model.get("profiles")
     profiles = profiles if isinstance(profiles, list) else []
-    structure, sound = _structure_violations(profiles, gate_fields)
+    structure, sound = _structure_violations(profiles, gate_fields, hosts_allowed)
     violations += structure
     matrix, sites = _matrix_sites(read)
     violations += matrix
@@ -706,13 +714,15 @@ def compare(model: dict, base_measurement: dict, head_measurement: dict,
     base_documents = base_measurement["documents"]
     head_documents = head_measurement["documents"]
     frame_base, frame_head = _side(base_measurement["frame"]), _side(head_measurement["frame"])
+    modelled = [host for host in HISTORICAL_HOSTS
+                if any(host in profile["hosts"] for profile in model["profiles"])]
     documents = []
     for member in sorted(head_documents):
         side_base, side_head = _side(base_documents[member]), _side(head_documents[member])
         tree = head_documents[member]["tree"]
         documents.append({
             "member": member,
-            "hosts": [host for host in HOSTS if _counts_on(tree, host)],
+            "hosts": [host for host in modelled if _counts_on(tree, host)],
             "base": side_base, "head": side_head, "delta": _delta(side_base, side_head),
         })
     profiles = []
@@ -859,7 +869,7 @@ def _report(args: argparse.Namespace) -> int:
         model = load_model(raw)
     except ValueError as error:
         raise ValueError(f"invalid model at {head}: {error}") from None
-    violations = validate(model, read_head, gate_fields=False)
+    violations = validate(model, read_head, gate_fields=False, historical=True)
     if violations:
         raise ValueError(f"invalid model at {head}: " + "; ".join(violations))
     report = compare(model, measure(model, read_base), measure(model, read_head), base, head)
