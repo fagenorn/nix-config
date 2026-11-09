@@ -81,7 +81,7 @@ from urllib.parse import quote
 from agent_tools import forge_markers
 from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver, validate_manifest
-from agent_tools.agent_costs import parse_rfc3339_utc
+from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
 from agent_tools import worktree_forge
 from agent_tools.worktree_mapping import MappingError, classify_root

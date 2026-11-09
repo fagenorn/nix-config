@@ -16,7 +16,8 @@ import sys
 import tempfile
 from typing import Any
 
-from agent_tools import agent_costs, agent_platform, resolve_project
+from agent_tools import agent_platform, resolve_project
+from agent_tools.canonical import parse_rfc3339_utc
 
 ENTRY_PATHSPECS = (
     "home/common/agent-skills/skills",
@@ -242,7 +243,7 @@ def _transcripts(root: Path) -> list[Path]:
 
 def traces(args: argparse.Namespace) -> int:
     try:
-        since = agent_costs.parse_rfc3339_utc(args.since)
+        since = parse_rfc3339_utc(args.since)
     except ValueError:
         print("fallback-audit: --since must be RFC 3339 with an offset", file=sys.stderr)
         return 2
@@ -276,7 +277,7 @@ def traces(args: argparse.Namespace) -> int:
                         if not calls:
                             continue
                         try:
-                            moment = agent_costs.parse_rfc3339_utc(record.get("timestamp"))
+                            moment = parse_rfc3339_utc(record.get("timestamp"))
                         except ValueError:
                             skipped += 1
                             continue

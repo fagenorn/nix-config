@@ -2,10 +2,9 @@
 
 The manifest (`kind: agent-gate-trials`) declares an identity block, an
 expansion declaration and a corpus of cases; every case cites, per stratum and
-per side, the `agent-cost-record` documents produced by
-`agent-costs --format json`. No measurement is read from the manifest: each
-cited record file is loaded, its `record_id` recomputed, and the cited run
-extracted by `run_id` (D10).
+per side, the `agent-cost-record` documents of the retired cost report. No
+measurement is read from the manifest: each cited record file is loaded, its
+`record_id` recomputed, and the cited run extracted by `run_id` (D10).
 
 Two failure classes stay apart (D31). A manifest *document* fault — unreadable
 file, invalid JSON, a duplicate or unknown key, a wrong type or a value outside
@@ -114,7 +113,7 @@ Diagnostic = namedtuple("Diagnostic", "code path message")
 
 
 def render(diagnostics):
-    """Contract: sorted 'CODE $.path: message' lines, the agent-evidence vocabulary."""
+    """Contract: sorted 'CODE $.path: message' lines, the shared diagnostic vocabulary."""
     return sorted(f"{d.code} {d.path}: {d.message}" for d in diagnostics)
 
 
@@ -508,7 +507,7 @@ def _check_expansion(manifest, diagnostics):
 def _run_identity(entry):
     """The identity of one cited trial: its record and its run.
 
-    A producer's run_id is not unique to a measurement: agent_costs builds it as
+    A producer's run_id is not unique to a measurement: the producer builds it as
     `<stratum>:<project>:<issue>`, and every eval sandbox is the same `repo`
     project, so all the paired trials of a case share one run_id. The record that
     carries each trial is what tells them apart.

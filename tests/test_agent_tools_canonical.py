@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from agent_tools.canonical import (reject_duplicate_keys, reject_nonfinite_literal,
                                    telemetry_digest)
@@ -44,3 +45,20 @@ class StrictLoadHookTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Rfc3339Test(unittest.TestCase):
+    def test_parse_returns_an_aware_utc_instant(self):
+        from agent_tools.canonical import parse_rfc3339_utc
+        self.assertEqual(parse_rfc3339_utc("2026-11-09T21:22:00Z"),
+                         datetime(2026, 11, 9, 21, 22, tzinfo=timezone.utc))
+        offset = parse_rfc3339_utc("2026-11-09T23:22:00.5+02:00")
+        self.assertEqual(offset, datetime(2026, 11, 9, 21, 22, 0, 500000, tzinfo=timezone.utc))
+        self.assertEqual(offset.utcoffset(), timedelta(0))
+
+    def test_parse_refuses_what_is_not_an_rfc3339_instant(self):
+        from agent_tools.canonical import parse_rfc3339_utc
+        for value in (None, 3, "2026-11-09", "2026-11-09T21:22:00", "2026-13-09T21:22:00Z",
+                      "2026-11-09 21:22:00Z"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_rfc3339_utc(value)

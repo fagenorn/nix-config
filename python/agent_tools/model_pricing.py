@@ -1,4 +1,4 @@
-"""Per-model list prices for the agent-costs reports (issue 432).
+"""Per-model list prices for the keepalive ping report (issue 432).
 
 Rates are dollars per million tokens, one row per model ID, from the Anthropic
 pricing page named by SOURCE_URL and fetched on SOURCE_DATE. An ID equal to a row's

@@ -221,15 +221,7 @@ agent-workflow-tests *args:
     tests/test_release_adapter_core.py \
     tests/test_codesigned_artifact_adapter.py \
     tests/test_launchd_agent_adapter.py \
-    tests/test_agent_costs.py \
     tests/test_run_profile.py \
-    tests/test_agent_owner_report.py \
-    tests/test_agent_owner_replay.py \
-    tests/test_agent_boot_report.py \
-    tests/test_agent_model_drift_schema.py \
-    tests/test_agent_model_drift_routing.py \
-    tests/test_agent_model_drift_scheduling.py \
-    tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
     tests/test_agent_gate_corpus.py \
     tests/test_retired_surfaces.py \
@@ -367,16 +359,9 @@ install IP:
     sh install-nix.sh\"'"
 
 
-# Report agent token spend per issue from the local Claude Code and Codex sessions
-agent-costs *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_costs {{args}}
-
 # Profile Workflow run dirs: fresh and cache-read tokens, wall time and tool calls per phase, agent, label family and delivered issue
 agent-run-profile *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.run_profile {{args}}
-
-agent-model-drift *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_drift {{args}}
 
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:

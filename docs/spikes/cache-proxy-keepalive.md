@@ -61,7 +61,7 @@ Each proxy: `sh run-proxy.sh <log> <pidfile> <ca bundle> /nix/store/m71c14g6sdi9
 
 Each arm: `/nix/store/yfb2jcxlmwm1bfdsfqrzillw3n0aghmh-claude-code-with-accounts-2.1.302/bin/claude -p <prompt> --model sonnet --dangerously-skip-permissions --output-format json`, with `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`, `ENABLE_TOOL_SEARCH=true`, `CLAUDE_ACCOUNT=p1`, `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`, `BASH_DEFAULT_TIMEOUT_MS=600000` and `BASH_MAX_TIMEOUT_MS=600000`. The off arm ran on port 60358 and the on arm on port 61430. The prompt is the plan's, except that child C's command is `python3 -c 'import time; time.sleep(480)'` in place of `sleep 480` (D30). The command is identical in both arms, which differ only in `--keepalive`.
 
-Cache report: `just agent-costs --report cache --projects-dir <arm projects copy> --events-since <window since> --events-before <window before>`.
+Cache report: produced by the cost report of the time (since retired) over the arm projects copy, bounded by the window since and before.
 
 ### Void attempts with `sleep 480` (D30)
 
@@ -102,7 +102,7 @@ Each proxy: `sh run-proxy.sh <log> <pidfile> <ca bundle> /nix/store/m71c14g6sdi9
 
 Each arm, run from the worktree root with `<port>` the one its proxy's `listening` line named: `env PATH="/nix/store/yfb2jcxlmwm1bfdsfqrzillw3n0aghmh-claude-code-with-accounts-2.1.302/bin:$PATH" ANTHROPIC_BASE_URL="http://127.0.0.1:<port>" ENABLE_TOOL_SEARCH=true CLAUDE_ACCOUNT="p1" EVAL_TIMEOUT=900 just evals <retired> 1`.
 
-Costs: `just agent-costs --format json --days 0 --projects-dir <arm projects copy>`, whose `.strata.claude` reads `cost_basis` `list-price`. An arm's total is its transcripts' `totals.cost_usd` plus its pings' cost priced through `agent_costs.PRICING`, which is zero here.
+Costs: the cost report of the time (since retired), run in JSON over the arm projects copy with no day limit, whose `.strata.claude` reads `cost_basis` `list-price`. An arm's total is its transcripts' `totals.cost_usd` plus its pings' cost priced through the price table of the time, which is zero here.
 
 One trial per arm, never rerun (#422 D27).
 
@@ -170,7 +170,7 @@ Commands as in § AC2 — Commands, with the wrapper and launcher above and `CLA
 | on | PASS (9/9 asserts) | 289 | 1 (e4ef323d-5e07-40b8-8516-a022aa6685f6, with one subagent transcript) | $1.0705 | 0 | none | $0.0000 | none | $1.0705 |
 | off | PASS (9/9 asserts) | 313 | 1 (db353820-1f11-4131-b165-f7a648fd6b98, with one subagent transcript) | $1.1537 | 0 | none | $0.0000 | none | $1.1537 |
 
-The on total is lower than the off total ($1.0705 against $1.1537), so the threshold is met. The on arm sent no ping: its proxy log holds one `listening` line carrying `keepalive: true`, 32 `/v1/messages` `request` lines, every one carrying a `keepalive` field, one `/api/hello` line (`untracked`), and no `ping` or `keepalive_end` line. The off arm's log holds one `listening` line without a `keepalive` key and 36 `/v1/messages` `request` lines, none carrying `keepalive`, and no `ping` line. Neither log holds a `handler_error` line. Costs come from `just agent-costs --format json --days 0 --projects-dir <arm projects copy>` (`cost_basis` `list-price`); a ping would be priced through `agent_tools.model_pricing.usage_cost`, where `PRICING` now lives, but there were none.
+The on total is lower than the off total ($1.0705 against $1.1537), so the threshold is met. The on arm sent no ping: its proxy log holds one `listening` line carrying `keepalive: true`, 32 `/v1/messages` `request` lines, every one carrying a `keepalive` field, one `/api/hello` line (`untracked`), and no `ping` or `keepalive_end` line. The off arm's log holds one `listening` line without a `keepalive` key and 36 `/v1/messages` `request` lines, none carrying `keepalive`, and no `ping` line. Neither log holds a `handler_error` line. Costs come from the cost report of the time (since retired), run in JSON over the arm projects copy with no day limit (`cost_basis` `list-price`); a ping would be priced through `agent_tools.model_pricing.usage_cost`, where `PRICING` now lives, but there were none.
 
 The two appended `results.jsonl` lines:
 
