@@ -261,7 +261,7 @@ class VerificationHarness(LedgerHarness):
         return {"interface_version": 2, "kind": "suspended", "run_id": self.run_id,
                 "issue": issue, "custody": {"kind": "implementation", "attempt": 1,
                                             "launch": 1, "action_id": f"{issue}:1:1"},
-                "blocked_on": "verification", "reentry": f"/from-issue {issue} --auto"}
+                "blocked_on": "verification", "reentry": f"/deliver-standard {issue}"}
 
 
 class SuspensionTest(VerificationHarness, unittest.TestCase):

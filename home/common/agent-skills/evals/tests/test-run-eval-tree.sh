@@ -110,10 +110,10 @@ runner_env() {
   RUNNER_ENV=(FAKE_STATE="$STATE" TMPDIR="$RUN_TMP" PATH="$FAKE_BIN:$PATH"
     EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE" EVAL_TIMEOUT=120)
 }
-# run_env [VAR=value...] — run the copied runner on from-issue 1 in the foreground.
+# run_env [VAR=value...] — run the copied runner on deliver-direct 1 in the foreground.
 run_env() {
   runner_env
-  env "${RUNNER_ENV[@]}" "$@" bash "$COPY/run-eval.sh" from-issue 1 >"$S/log" 2>&1
+  env "${RUNNER_ENV[@]}" "$@" bash "$COPY/run-eval.sh" deliver-direct 1 >"$S/log" 2>&1
 }
 recorded() { sed -n "s/^$1=//p" "$STATE/record" | head -n 1; }
 row_count() {
@@ -134,7 +134,7 @@ tmp_holds_only_sandboxes() {
   for entry in "$RUN_TMP"/* "$RUN_TMP"/.[!.]*; do
     [ -e "$entry" ] || continue
     case "$(basename "$entry")" in
-      eval-from-issue-1.*) ;;
+      eval-deliver-direct-1.*) ;;
       *) echo "left behind: $entry"; return 1 ;;
     esac
   done
@@ -318,7 +318,7 @@ check "policy without tree: claude -p never ran" test -z "$(recorded run)"
 # --- exit path 4: SIGTERM to the runner during the claude run ----------------------
 scenario sigterm
 runner_env
-env "${RUNNER_ENV[@]}" FAKE_HOLD=1 bash "$COPY/run-eval.sh" from-issue 1 >"$S/log" 2>&1 &
+env "${RUNNER_ENV[@]}" FAKE_HOLD=1 bash "$COPY/run-eval.sh" deliver-direct 1 >"$S/log" 2>&1 &
 pid=$!
 for _ in $(seq 1 300); do
   [ -e "$STATE/started" ] && break

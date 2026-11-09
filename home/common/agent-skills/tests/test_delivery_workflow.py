@@ -1824,7 +1824,7 @@ class BuilderHarness:
 
     def contract_input(self, **changes):
         value = {"issue": 171, "worktree": self.worktree, "source_kind": "explicit_user",
-                 "source_reference": "invocation:/from-issue 171 --auto", "now": NOW}
+                 "source_reference": "invocation:/deliver-standard 171", "now": NOW}
         value.update(changes)
         return value
 

@@ -42,8 +42,8 @@ class MixedSourceCoverageProducerIntegrationTest(DriftCliCase):
         sessions = self.root / "codex" / "2026" / "09" / "20"
         sessions.mkdir(parents=True)
         spawn = {"subagent": {"thread_spawn": {
-            "parent_thread_id": "parent", "depth": 1, "agent_role": "reviewer",
-            "dispatch_id": "from-issue-plan-review", "model": "opus", "effort": "high"}}}
+            "parent_thread_id": "parent", "depth": 1, "agent_role": "ship-owner",
+            "dispatch_id": "ship-release-owner", "model": "opus", "effort": "high"}}}
         (sessions / "assigned.jsonl").write_text(
             self._rollout(codex_meta("assigned", thread_source="subagent", source=spawn),
                           codex_turn_context("opus", "high"), codex_usage(10)),
@@ -67,7 +67,7 @@ class MixedSourceCoverageProducerIntegrationTest(DriftCliCase):
             self.matrix, self.matrix_digest,
             harness_versions={"claude": ["2.1.0"], "codex": ["0.1.0"]},
         )
-        baseline["dispatch_hosts"]["from-issue-plan-review"] = "codex"
+        baseline["dispatch_hosts"]["ship-release-owner"] = "codex"
         baseline["catalog"]["codex"] = {
             "models": {model: {"allowed": [model], "prohibited": []}
                        for model in sorted({role["model"] for role in self.matrix["roles"].values()})},

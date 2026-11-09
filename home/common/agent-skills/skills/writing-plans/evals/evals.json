@@ -1,6 +1,6 @@
 {
   "skill_name": "writing-plans",
-  "notes": "Eval 1 is a pipeline run against the shared tinytask fixture: the well-specified issue file stands in for a spec (the skill's own trigger is 'you have requirements for multi-step work'). Assertions grade behavioral outcomes against the landed plan contract: the spec owns the `## Decision ledger` (`| ID | Choice | Grounding | Rejected alternative |` rows) and the plan cites rows by ID — so with no specification artifact in this fixture, the ledger may land under the retained specifications directory or be hosted in the plan, and the decision assert searches both. Legacy `### <decision>` entries are still accepted. Eval 2 is plan-only and guards gate-scoping behavior. Eval 4 asks for the autonomous `from-issue` plan-subagent prompt and greps the transcript for the spec's code map file name (#354 D7); eval 1, which has no code map, is the check that an absent one changes nothing.",
+  "notes": "Eval 1 is a pipeline run against the shared tinytask fixture: the well-specified issue file stands in for a spec (the skill's own trigger is 'you have requirements for multi-step work'). Assertions grade behavioral outcomes against the landed plan contract: the spec owns the `## Decision ledger` (`| ID | Choice | Grounding | Rejected alternative |` rows) and the plan cites rows by ID — so with no specification artifact in this fixture, the ledger may land under the retained specifications directory or be hosted in the plan, and the decision assert searches both. Legacy `### <decision>` entries are still accepted. Eval 2 is plan-only and guards gate-scoping behavior.",
   "evals": [
     {
       "id": 1,
@@ -48,7 +48,7 @@
       "id": 2,
       "name": "verification-gates-scoped-to-plan-owned-paths",
       "mode": "plan-only",
-      "prompt": "You're writing the plan for a two-task feature in a repo where from-issue drives the flow: the plan and spec land as `docs(plans):`/`docs(specs):` commits on the same branch, and ship-time syncs merge the integration branch in. I want you to write the verification gate for the final task. Before you write it, explain what a BAD gate looks like here and why, then give me the exact gate you'd write instead. Plan-only — no files, just the reasoning and the gate text.",
+      "prompt": "You're writing the plan for a two-task feature in a repo where a delivery program drives the flow: the plan and spec land as `docs(plans):`/`docs(specs):` commits on the same branch, and ship-time syncs merge the integration branch in. I want you to write the verification gate for the final task. Before you write it, explain what a BAD gate looks like here and why, then give me the exact gate you'd write instead. Plan-only — no files, just the reasoning and the gate text.",
       "expected_output": "The answer must reject raw commit-range expectations — 'exactly N files changed between BASE..HEAD', 'every commit in the range is a feat:' — and explain the two concrete failure modes: the caller's spec/plan artifact commits land in the range, and a ship-time sync merge pulls in everything the integration branch advanced by, so an unscoped gate reads another issue's shipped work as scope creep. The good gate is scoped to the files the plan owns: a pathspec'd diff (`git diff --stat BASE..HEAD -- <paths from the plan's Files: blocks>`) or a direct file-content assertion; where commit shape genuinely is under test, restrict to the branch's own commits (`git log --no-merges BASE..HEAD ^origin/<integration-branch>`) and exempt the artifact and review-fixup subjects. The gate must also be falsifiable at the base commit — a criterion already true at BASE is how an implementer completes a no-op.",
       "files": []
     },
@@ -58,23 +58,6 @@
       "mode": "plan-only",
       "prompt": "Plan a six-task change that is likely to touch many policy files and grow into a large review. Plan-only: say what you will measure, build or run while writing the plan, and what the plan header says about delivery size.",
       "expected_output": "The planner does not forecast review size: no review-feasibility forecast or projection gate, no forecast blocks, no delivery-estimate header and no projection in the producer report. It does not build, prototype or run the change while planning; the only run is confirming each task's failing test. It still measures the plan package with artifact-budget check and splits the work into independently testable tasks, leaving review size to review time."
-    },
-    {
-      "id": 4,
-      "name": "auto-plan-dispatch-names-the-code-map",
-      "mode": "pipeline",
-      "prompt": "Change nothing in this repository: no file edit, no commit, no worktree, and dispatch no subagent.\n\nYou are the `from-issue` controller in autonomous mode (`--auto`) for issue 3, at the start of Phase 4, with the retained ResolvedProject already resolved. The worktree is `.worktrees/worktree-issue-3-rename-flag`. The design subagent returned this validated producer report:\n\n{\"state\":\"complete\",\"artifact\":{\"kind\":\"design-spec\",\"path\":\".claude/specs/2026-10-07-issue-3-rename-flag-design.md\",\"metrics\":{\"root_bytes\":1520,\"total_bytes\":1520,\"file_count\":1,\"largest_member_bytes\":0},\"budget_status\":\"within_budget\"},\"notes\":\"Spec committed and grilled; no ADR.\"}\n\nRead the `from-issue` skill's autonomous-mode instructions for the plan subagent, then print, in full, the exact prompt you would dispatch to that subagent. Then stop.",
-      "expected_output": "The full plan-subagent prompt as the autonomous `from-issue` controller would dispatch it. It hands over the validated spec root, metrics and notes, and names the spec's code map by file name, `2026-10-07-issue-3-rename-flag-design.code-map.md`, as a file in the worktree's git directory. Nothing in the repository changes and no subagent is dispatched.",
-      "asserts": [
-        {
-          "name": "the printed plan prompt names the spec's code map file",
-          "shell": "out_matches '2026-10-07-issue-3-rename-flag-design\\.code-map\\.md'"
-        },
-        {
-          "name": "the repository is unchanged",
-          "shell": "[ -z \"$(git -C \"$REPO\" status --porcelain)\" ] || { fail \"the working tree changed: $(git -C \"$REPO\" status --porcelain | tr '\\n' ' ')\"; exit 1; }; [ \"$(git -C \"$REPO\" rev-parse HEAD)\" = \"$BASE_MAIN\" ] || { fail \"HEAD moved off $BASE_MAIN\"; exit 1; }; [ \"$WT_COUNT\" -eq 0 ] || fail \"created $WT_COUNT worktree(s)\""
-        }
-      ]
     }
   ]
 }

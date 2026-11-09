@@ -24,7 +24,7 @@ Select the context map only from the retained `bindings.paths.context` list, in 
 <!-- agent-dispatch: id=doc-grounded-bounded-code-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only central-concept lookup without resolving the question.
 
-   If the codebase already commits to a pattern, the default option is to match it, and any divergence needs a reason. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and the selected role in the caller's existing ledger or fixed-schema report.
+   If the codebase already commits to a pattern, the default option is to match it, and any divergence needs a reason. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch it to a `general-purpose` agent on Opus/high; record that escalation and the selected role in the caller's existing ledger or fixed-schema report.
 
 Use the retained `bindings.paths.hints` only where the knowledge capability documents that route.
 

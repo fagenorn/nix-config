@@ -1027,7 +1027,7 @@ class DeliveryModelTest(unittest.TestCase):
         for name, bad in {
             "the unversioned reply": {"kind": "suspended", "issue": 151, "attempt": 1,
                                       "blocked_on": "usage_limit", "stalled_resumes": 0,
-                                      "reentry": "/from-issue 151 --auto"},
+                                      "reentry": "/deliver-standard 151"},
             "extra member": {**copy.deepcopy(suspended), "stalled_resumes": 0},
             "missing member": missing,
             "interface 1": {**copy.deepcopy(suspended), "interface_version": 1},

@@ -13,7 +13,6 @@ RUBRIC_MIN = 0.0
 RUBRIC_MAX = 100.0
 RUNNER = {"mode": "EVAL_TREE", "model": "sonnet", "trials_per_side": 3,
           "eval_max_usd": 2.5, "total_cap_usd": 60.0}
-RETIRED_SKILLS = ("from-issue", "sdd", "ship-issue")
 
 CorpusCase = namedtuple("CorpusCase",
                         "case_class skill eval_id eval_name critical noncritical")

@@ -38,6 +38,10 @@ def audit(*args, path_prefix=None):
     return result.returncode, (json.loads(result.stdout) if result.stdout.strip() else None), result.stderr
 
 
+NIX_CONFIG_CONTRACT = {".agents/project.json": json.dumps(
+    {"schema_version": 2, "project": {"id": "fagenorn/nix-config", "name": "nix-config"}})}
+
+
 class LaddersTest(unittest.TestCase):
     EXEMPT_ONLY = {
         "python/agent_tools/adopt_inspection.py": 'X = "skills.config.json"\n',
@@ -81,6 +85,10 @@ class LaddersTest(unittest.TestCase):
     def real(findings):
         return [f for f in findings if not f["marker_id"].startswith("stale_exemption:")]
 
+    @staticmethod
+    def stale(findings):
+        return [f for f in findings if f["marker_id"].startswith("stale_exemption:")]
+
     def test_a_marker_in_a_skill_is_a_finding(self):
         root = self.make_repo({"home/common/agent-skills/skills/x/SKILL.md":
                                "Use `~/.agents/bin/x` if the bare name does not resolve.\n"})
@@ -100,7 +108,8 @@ class LaddersTest(unittest.TestCase):
         self.assertEqual(self.real(report["findings"]), [])
 
     def test_a_listed_site_is_exempt_and_reported(self):
-        root = self.make_repo({"python/agent_tools/adopt_inspection.py":
+        root = self.make_repo({**NIX_CONFIG_CONTRACT,
+                               "python/agent_tools/adopt_inspection.py":
                                'X = (".claude/skills.config.json",)\n'})
         code, report, _ = self.ladders(root)
         self.assertEqual([(e["path"], e["marker_id"]) for e in report["exempt"]],
@@ -113,10 +122,51 @@ class LaddersTest(unittest.TestCase):
                       [f["marker_id"] for f in self.ladders(root)[1]["findings"]])
 
     def test_an_exemption_with_no_hit_is_stale(self):
-        root = self.make_repo({"README.md": "x\n"})
+        root = self.make_repo({**NIX_CONFIG_CONTRACT, "README.md": "x\n"})
         findings = self.ladders(root)[1]["findings"]
         self.assertIn({"path": "python/agent_tools/adopt_inspection.py", "line": None,
                        "marker_id": "stale_exemption:legacy-skills-config"}, findings)
+
+    def test_another_project_has_no_exemptions_and_no_stale_ones(self):
+        contract = json.dumps({"schema_version": 2,
+                               "project": {"id": "fagenorn/argus", "name": "argus"}})
+        root = self.make_repo({".agents/project.json": contract, "README.md": "x\n"})
+        code, report, _ = self.ladders(
+            root, stub_body="""echo '{"error":{"code":"not_onboarded"}}'; exit 2""")
+        self.assertEqual((code, report["findings"], report["exempt"], report["clean"]),
+                         (0, [], [], True))
+
+    def test_another_project_gets_no_exemption_for_a_nix_config_path(self):
+        contract = json.dumps({"schema_version": 2,
+                               "project": {"id": "fagenorn/argus", "name": "argus"}})
+        root = self.make_repo({".agents/project.json": contract,
+                               "python/agent_tools/adopt_inspection.py":
+                               'X = ".claude/skills.config.json"\n'})
+        report = self.ladders(root)[1]
+        self.assertEqual([(f["path"], f["marker_id"]) for f in report["findings"]],
+                         [("python/agent_tools/adopt_inspection.py", "legacy-skills-config")])
+        self.assertEqual(report["exempt"], [])
+
+    def test_a_repository_with_no_readable_contract_has_no_exemptions(self):
+        for contract in ("{not json", "[]", '{"project": {"id": 5}}'):
+            with self.subTest(contract=contract):
+                root = self.make_repo({".agents/project.json": contract, "README.md": "x\n"})
+                report = self.ladders(root)[1]
+                self.assertEqual(self.stale(report["findings"]), [])
+
+    def test_a_contract_with_a_non_finite_token_owns_no_exemption(self):
+        for token in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(token=token):
+                contract = ('{"schema_version": 2, "project": {"id": "fagenorn/nix-config", '
+                            '"name": "nix-config"}, "deploy": {"config": {"x": %s}}}' % token)
+                root = self.make_repo({".agents/project.json": contract,
+                                       "python/agent_tools/adopt_inspection.py":
+                                       'X = ".claude/skills.config.json"\n'})
+                report = self.ladders(root)[1]
+                self.assertEqual(report["exempt"], [])
+                self.assertEqual(self.stale(report["findings"]), [])
+                self.assertIn("legacy-skills-config",
+                              [f["marker_id"] for f in report["findings"]])
 
     def test_a_manifest_removal_subject_is_a_marker(self):
         manifest = json.loads((REPO / "home/common/agent-skills/platform-manifest.json").read_text("utf-8"))
@@ -138,7 +188,7 @@ class LaddersTest(unittest.TestCase):
         self.assertEqual(report["probe"], {"code": "not_onboarded", "exit": 2})
 
     def test_a_probe_code_outside_the_closed_set_is_not_clean(self):
-        root = self.make_repo(self.EXEMPT_ONLY)
+        root = self.make_repo({**NIX_CONFIG_CONTRACT, **self.EXEMPT_ONLY})
         code, report, _ = self.ladders(
             root, stub_body="""echo '{"error":{"code":"surprise"}}'; exit 2""")
         self.assertEqual((code, report["clean"], report["probe"]),
@@ -153,7 +203,7 @@ class LaddersTest(unittest.TestCase):
 
     @unittest.skipIf(os.geteuid() == 0, "root reads every file")
     def test_an_unreadable_tracked_file_is_a_finding_not_a_clean_scan(self):
-        files = dict(self.EXEMPT_ONLY)
+        files = {**NIX_CONFIG_CONTRACT, **self.EXEMPT_ONLY}
         files["home/common/agent-skills/skills/ship-release/SKILL.md"] = "resolve-bindings\n"
         root = self.make_repo(files)
         unreadable = root / "home/common/agent-skills/skills/ship-release/SKILL.md"
@@ -168,7 +218,7 @@ class LaddersTest(unittest.TestCase):
               "line": None, "marker_id": "unreadable_input"}])
 
     def test_a_clean_tree_with_a_closed_probe_exits_zero(self):
-        root = self.make_repo(self.EXEMPT_ONLY)
+        root = self.make_repo({**NIX_CONFIG_CONTRACT, **self.EXEMPT_ONLY})
         code, report, _ = self.ladders(
             root, stub_body="""echo '{"error":{"code":"not_onboarded"}}'; exit 2""")
         self.assertEqual((code, report["findings"], report["clean"]), (0, [], True))

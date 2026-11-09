@@ -58,7 +58,7 @@ ROW_CHECK_EXIT_STATUSES = {"derived": 0, "refused": 1, "unavailable": 2}
 # machine with no keyring auth still fails closed at the lookup.
 GH_ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
 # The scrub-prefix spelling a resolved exhaustive credential-name list yields
-# (`unset GITHUB_TOKEN && gh ...`), and the one the ship-issue skill check reads
+# (`unset GITHUB_TOKEN && gh ...`), and the one the skill-contract checks read
 # from this single assignment. SCRUB_PREFIXES below includes it.
 UNSET_GITHUB_TOKEN_PREFIX = "unset GITHUB_TOKEN && "
 # Every accepted credential-scrub prefix (issue 400 D1): `unset N && `,

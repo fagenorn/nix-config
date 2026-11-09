@@ -11,7 +11,7 @@ Select the context map only from the retained `bindings.paths.context` list, in 
 
 ## The interview
 
-Interview the user relentlessly about every aspect of the spec (`from-issue` invokes this on the spec, not the plan) until you share one understanding. Model the design as a tree of decisions; the **frontier** is every question whose prerequisites are settled. Ask the whole frontier as one numbered round of `❓ question / ➡️ recommended answer` pairs; a question depending on another open question waits for a later round. Recompute the frontier after each round; done when it is empty.
+Interview the user relentlessly about every aspect of the spec (run it on the spec, not the plan) until you share one understanding. Model the design as a tree of decisions; the **frontier** is every question whose prerequisites are settled. Ask the whole frontier as one numbered round of `❓ question / ➡️ recommended answer` pairs; a question depending on another open question waits for a later round. Recompute the frontier after each round; done when it is empty.
 
 When every question in a round carries a ➡️ recommendation, say once, at the first such round, that the user may reply with only the numbers they'd change: anything not named adopts its recommendation and is recorded as their decision. Three kinds of question never ride on silence: anything that redraws the destination or scope, anything hard to reverse, and anything that spends money or hands out a credential. Mark those and wait for an answer in words, however many rounds it takes.
 
@@ -20,7 +20,7 @@ A question a bounded read-only lookup in the code or docs can answer is explored
 <!-- agent-dispatch: id=grill-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
 
-Only questions downstream of a lookup wait for it. The decisions are the user's; the facts are yours. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and the selected role in the phase's existing fixed-schema report.
+Only questions downstream of a lookup wait for it. The decisions are the user's; the facts are yours. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch it to a `general-purpose` agent on Opus/high; record that escalation and the selected role in the phase's existing fixed-schema report.
 
 ## Domain docs
 

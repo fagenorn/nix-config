@@ -241,7 +241,7 @@ class InstalledIntentTest(unittest.TestCase):
             notes_max_characters=10_000)
         built = cls.runtime.build_delivery("contract", {
             "issue": 193, "worktree": "/repo/.worktrees/worktree-issue-193-legacy",
-            "source_kind": "explicit_user", "source_reference": "invocation:/from-issue 193",
+            "source_kind": "explicit_user", "source_reference": "invocation:/deliver-standard 193",
             "now": NOW}, policy=resolved_snapshot("/repo"))
         cls.derived, cls.derived_intent = built["contract"], built["initial_intent"]
 
@@ -389,7 +389,7 @@ def sealed_members(snapshot):
 class WorktreeBranchTest(unittest.TestCase):
     """#192 D2-D4, D19: a live branch names the contract only where the path cannot."""
 
-    SOURCE = {"kind": "explicit_user", "reference": "invocation:/from-issue 154 --auto"}
+    SOURCE = {"kind": "explicit_user", "reference": "invocation:/deliver-standard 154"}
 
     @classmethod
     def setUpClass(cls):
@@ -488,7 +488,7 @@ class CurrentSelectionTest(unittest.TestCase):
         contract = runtime.build_delivery("contract", {
             "issue": 154, "worktree": f"/repo/.worktrees/{LIVE}",
             "source_kind": "explicit_user",
-            "source_reference": "invocation:/from-issue 154 --auto", "now": NOW},
+            "source_reference": "invocation:/deliver-standard 154", "now": NOW},
             policy=resolved_snapshot("/repo"))["contract"]
         for label, delivery, reason in (
                 ("no ledger", None, "no ledger under the repo root installs this contract"),
@@ -506,8 +506,8 @@ class CurrentSelectionTest(unittest.TestCase):
 class TrackerHeldBuilderTest(unittest.TestCase):
     """#273: build-delivery builds tracker_held; the contract digest does not move."""
 
-    CONTRACT_DIGEST = "sha256:223862cffef7277068ea22489161662da51773609d3ea38d46ac59267e057d66"
-    INTENT_DIGEST = "sha256:201db7c9a963061a80d43af0673d2ce1c2a3c9245cca1fe9dd675765e67be9e5"
+    CONTRACT_DIGEST = "sha256:e72e7bf4de488f005b79b907b41444ede54eac2f418147fb7b3e5fdf0e6ad8e1"
+    INTENT_DIGEST = "sha256:ee146fc028b9d0e376501f69078144bfc470f80f2b6d72a8ddd8c411b7947eac"
     RECORD = ".agents/artifacts/plans/2026-10-07-issue-273-tracker-held.acceptance.md"
     COMMENT = "https://github.com/fagenorn/nix-config/issues/273#issuecomment-1"
 
@@ -517,7 +517,7 @@ class TrackerHeldBuilderTest(unittest.TestCase):
             notes_max_characters=10_000)
         cls.built = cls.runtime.build_delivery("contract", {
             "issue": 273, "worktree": "/repo/.worktrees/worktree-issue-273-held",
-            "source_kind": "explicit_user", "source_reference": "invocation:/from-issue 273",
+            "source_kind": "explicit_user", "source_reference": "invocation:/deliver-standard 273",
             "now": NOW}, policy=resolved_snapshot("/repo"))
 
     def held(self, **changes):

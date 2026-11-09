@@ -42,7 +42,6 @@ class CorpusPinTest(unittest.TestCase):
         pinned.pop("examples")
         self.assertEqual(corpus.corpus_document(), pinned)
         self.assertEqual(corpus.RUBRIC_VERSION, "issue-725-r1")
-        self.assertEqual(corpus.RETIRED_SKILLS, ("from-issue", "sdd", "ship-issue"))
         self.assertEqual(corpus.RUBRIC_MAX, gate.RUBRIC_MAX)
         self.assertEqual(corpus.RUNNER, {"mode": "EVAL_TREE", "model": "sonnet",
                                          "trials_per_side": 3, "eval_max_usd": 2.5,
@@ -54,13 +53,21 @@ class CorpusPinTest(unittest.TestCase):
     def test_each_case_is_a_surviving_pipeline_eval_with_an_exact_partition(self):
         for case in corpus.CORPUS:
             with self.subTest(case=case.case_class):
-                self.assertNotIn(case.skill, corpus.RETIRED_SKILLS)
                 found = eval_case(case.skill, case.eval_id)
                 self.assertEqual((found["name"], found["mode"]), (case.eval_name, "pipeline"))
                 names = [check["name"] for check in found["asserts"]]
                 self.assertEqual(sorted(names), sorted(case.critical + case.noncritical))
                 self.assertFalse(set(case.critical) & set(case.noncritical))
                 self.assertTrue(case.critical and case.noncritical)
+
+    def test_every_case_names_an_existing_skill(self):
+        for case in corpus.CORPUS:
+            with self.subTest(case=case.eval_name):
+                self.assertTrue(any((root / case.skill).is_dir() for root in SKILL_ROOTS),
+                                case.skill)
+
+    def test_the_corpus_keeps_no_retired_skill_list(self):
+        self.assertFalse(hasattr(corpus, "RETIRED_SKILLS"))
 
 
 class RubricTest(unittest.TestCase):
@@ -87,7 +94,7 @@ class RubricTest(unittest.TestCase):
         case = corpus.corpus_case("review-ship")
         good = row(case)
         bad = {
-            "wrong skill": dict(good, skill="ship-issue"),
+            "wrong skill": dict(good, skill="no-such-skill"),
             "wrong id": dict(good, id=3),
             "missing assert": dict(good, asserts=good["asserts"][1:]),
             "extra assert": dict(good, asserts=good["asserts"] + [{"name": "x", "pass": True}]),

@@ -9,7 +9,7 @@ Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entr
 
 One issue, worktree and PR; no spec, plan or ledger. `<slug>` is `bindings.tracker.repo_slug`, `<int>` is `vcs.integration_branch`, `<branch>` follows `vcs.branch_pattern`, `<dir>` is the worktree.
 
-**Eligibility.** Concrete, checkable criteria; a few-file fix needing no open design decision or preference. Else stop; recommend `from-issue`.
+**Eligibility.** Concrete, checkable criteria; a few-file fix needing no open design decision or preference. Else stop; recommend `deliver-standard`.
 
 1. **Claim.** Refuse on an open PR (`gh pr list --repo <slug> --search <n>`) or a `needs-verification` label. `forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id> --branch <branch>`; stop unless `acquired` or `already_held`. `forge-claim release` (no `--branch`) last. Fetch; confirm the issue still applies at `origin/<int>`; if not, comment the evidence, release, close it.
 2. **Worktree.** After a fetch, `git -C <checkout> worktree add --no-track -b <branch> <vcs.worktree.root>/<branch> origin/<int>`; work only there. Never `git stash` or `sed -i`.

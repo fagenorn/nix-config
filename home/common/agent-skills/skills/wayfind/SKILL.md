@@ -5,7 +5,7 @@ description: Charts a foggy effort as a map issue of decision tickets and resolv
 
 # Wayfind
 
-For a loose idea too big for one session whose **destination** isn't visible yet. Wayfind charts the way as a **shared map** on the tracker and works its **decision tickets** (questions resolved by decisions, not build slices) one at a time until nothing is left to decide. Then specs go to `to-issues` and builds to `from-issue`, whose slices cite **Decisions so far** in `## Decisions`.
+For a loose idea too big for one session whose **destination** isn't visible yet. Wayfind charts the way as a **shared map** on the tracker and works its **decision tickets** (questions resolved by decisions, not build slices) one at a time until nothing is left to decide. Then specs go to `to-issues` and builds to a delivery run, whose slices cite **Decisions so far** in `## Decisions`.
 
 This is **planning, not doing**: the pull to just do the work usually means the map is done. It replaces `prototype` when the open question isn't UI- or state-shaped. Read [DISCIPLINE.md](./DISCIPLINE.md) when a rule below feels skippable.
 
@@ -73,8 +73,4 @@ Resolving a ticket clears fog: graduate newly phrasable entries into tickets and
 3. Resolve it, opening related or closed tickets on demand and using the skills its type and the Notes name. Resolve at most one per session (research dispatches excepted).
 4. Record: a resolution comment, close the ticket, and append its gist to Decisions so far. Over the ~6k budget, compress now.
 5. Maintain, as part of resolving: graduate newly phrasable fog (create, then wire, then delete the entry), rule out-of-scope discoveries out, update or delete invalidated tickets. The one-per-session bound limits resolving, never this bookkeeping. Expect concurrent sessions.
-6. **Complete the map** when the frontier and Not yet specified are both empty. Re-dispose anything still open explicitly: resolved, out of scope, or a named **standing verification hook** with its reopen condition. Close the map (`kind: none`: `state` → `complete`) with a closing note under Destination: what was reached, a link (the spec, or Decisions so far), and the next command, `/to-issues` (multi-slice spec) or `/from-issue` (single-session build). If existing authorization covers delivering this decision record, deliver it and report; stop on an actual permission denial. Never start a second decision, issue slicing or implementation without separate authorization.
-
-## Inflow from the fog gate
-
-`from-issue --auto`'s Phase-0 fog gate emits one decision ticket per unphrasable question. File each under the existing map that covers the area, else create a minimal map (destination: the aborted issue's intent). The aborted issue gets a comment linking the tickets and is natively blocked by them.
+6. **Complete the map** when the frontier and Not yet specified are both empty. Re-dispose anything still open explicitly: resolved, out of scope, or a named **standing verification hook** with its reopen condition. Close the map (`kind: none`: `state` → `complete`) with a closing note under Destination: what was reached, a link (the spec, or Decisions so far), and the next command, `/to-issues` (multi-slice spec) or `/deliver-standard` (single-session build). If existing authorization covers delivering this decision record, deliver it and report; stop on an actual permission denial. Never start a second decision, issue slicing or implementation without separate authorization.

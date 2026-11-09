@@ -11,9 +11,9 @@ Guarantee an isolated workspace, then hand control back; the caller owns branchi
 
 ## Destructive operations
 
-Creating a worktree needs no confirmation. Removing one, discarding changes in one or deleting its branch happens only when the caller's flow authorizes it (from-issue's orphan cleanup, ship-issue's post-merge cleanup) or the user asks. Uncommitted work in a worktree you didn't create is never yours to discard: report it.
+Creating a worktree needs no confirmation. Removing one, discarding changes in one or deleting its branch happens only when the caller's flow authorizes it (a delivery program's post-merge cleanup) or the user asks. Uncommitted work in a worktree you didn't create is never yours to discard: report it.
 
-Never repair a worktree with `git reset --hard`, `git checkout --`, `git clean -fdx` or `git branch -D`; describe the situation instead. `git clean -fdx` also deletes ignored scratch a running flow needs: `ship-issue`'s retained Minor/Discussion detail in a feature worktree, every plan's SDD workspace in the primary checkout.
+Never repair a worktree with `git reset --hard`, `git checkout --`, `git clean -fdx` or `git branch -D`; describe the situation instead. `git clean -fdx` also deletes ignored files a running flow needs: a running flow's retained scratch, every plan's SDD workspace in the primary checkout.
 
 ## Already positioned? Skip the call
 
@@ -31,8 +31,8 @@ The checker runs a command only when it can verify it stays inside the worktree:
 - Create files with the file-writing tool and pass them by path (`--notes-file`, `-F <file>`), or pass a body as one literal quoted argument with no substitution.
 - Carry the directory in the invocation: absolute paths under the worktree, or a directory flag such as `git -C <path>`. A `cd` prelude is itself a refused chain.
 - Read a non-zero exit instead of suppressing stderr.
-- One chain is sanctioned: the `unset GITHUB_TOKEN && ` prefix that `ship-issue/SKILL.md`'s gh hygiene derives from `bindings.tracker.credential_env.unset_before_invocation`, spelled exactly as there.
-- One pipeline is sanctioned: a lifecycle helper call (one heredoc-fed `workflow-state` command, optionally piped into or out of `artifact-budget validate-report --input -`) exactly as `from-issue/SKILL.md`'s lifecycle-call rule spells it. Never copy that shape to another command. If the checker refuses one, report the refusal rather than reshape the call.
+- One chain is sanctioned: the `unset GITHUB_TOKEN && ` prefix that the resolved tracker credential policy (`bindings.tracker.credential_env.unset_before_invocation`) yields, spelled exactly so.
+- One pipeline is sanctioned: a lifecycle helper call (one heredoc-fed `workflow-state` command, optionally piped into or out of `artifact-budget validate-report --input -`) and no other shape. Never copy that shape to another command. If the checker refuses one, report the refusal rather than reshape the call.
 - On a refusal, change the shell form, never the isolation.
 
 ## Detect existing isolation

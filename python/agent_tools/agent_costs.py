@@ -10,7 +10,7 @@ Two counting rules are load-bearing (see the transcript-mining report):
   * Assistant records are written once per content block and every copy repeats
     the same message.usage. Usage is deduped by message.id; summing naively
     over-counts tokens ~2.5x.
-  * Subagent transcripts hold ~64% of all tokens. Proven issue-owner transcripts
+  * Subagent transcripts hold ~64% of all tokens. Proven owner transcripts
     follow their agreeing issue worktree; rooted helper, reviewer, ambiguous,
     and other non-owner transcripts remain overhead of the root session.
 
@@ -1275,26 +1275,31 @@ def _request_host(value, target, reasons):
 
 def _declaration(value, reasons):
     dispatch = value.get("dispatch_id") if isinstance(value.get("dispatch_id"), str) else None
-    role = value.get("role") if isinstance(value.get("role"), str) else None
+    # An empty role is an incomplete declaration, not a spelling: it is absent
+    # (null), because the drift schema rejects an empty string.
+    role = value.get("role") if isinstance(value.get("role"), str) and value["role"] else None
     subagent_type = value.get("subagent_type")
     # The matrix is deliberately not read here. These are the source's known
     # canonical role spellings; an agent type that serves several roles
-    # (implementer, mechanic, reviewer, and since issue 447 issue-owner, which
-    # serves issue-owner, auto-owner and ship-owner) stays ambiguous without a
+    # (implementer, reviewer) or a role served by general-purpose (owner,
+    # ship-owner) stays ambiguous without a
     # declared role.
-    canonical = {"auto-owner", "bookkeeper", "codex-transport", "conformance-reviewer", "explorer",
-                 "implementer", "issue-owner", "mechanic", "researcher", "reviewer",
-                 "reviewer-lite", "ship-owner", "task-implementer"}
+    canonical = {"codex-transport", "conformance-reviewer", "explorer", "implementer", "owner",
+                 "researcher", "reviewer", "reviewer-lite", "ship-owner", "task-implementer"}
     if role in canonical:
         authority = "structured-dispatch" if dispatch else "runtime-agent-type"
         return {"dispatch_id": dispatch, "role": role, "authority": authority}
-    if subagent_type in canonical - {"implementer", "issue-owner", "mechanic", "reviewer"}:
+    if subagent_type in canonical - {"implementer", "owner", "reviewer"}:
         return {"dispatch_id": dispatch, "role": subagent_type,
                 "authority": "runtime-agent-type"}
     reasons["role_ambiguous"] += 1
     if dispatch is None:
         reasons["dispatch_missing"] += 1
-    return {"dispatch_id": dispatch, "role": None, "authority": "unknown"}
+    # A recorded role the source no longer emits (a retired spelling in a
+    # historical transcript) is preserved, not dropped: reading it as absent
+    # would let the routing comparator reconstruct the role from the dispatch
+    # and miss the declaration mismatch. Its authority stays unknown.
+    return {"dispatch_id": dispatch, "role": role, "authority": "unknown"}
 
 
 def _escalation(value):

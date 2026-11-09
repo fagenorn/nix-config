@@ -2070,7 +2070,7 @@ def stop_attempt(
 
 def reentry_command(issue: int) -> str:
     """The single line that resumes one issue's run (per D14)."""
-    return f"/from-issue {issue} --auto"
+    return f"/deliver-standard {issue}"
 
 
 def suspended_reply(

@@ -117,7 +117,7 @@ _CATALOGUE: dict[str, dict[str, Any]] = {
         },
         "example": {"issue": 73, "worktree": _EXAMPLE_WORKTREE,
                     "source_kind": "explicit_user",
-                    "source_reference": "invocation:/from-issue 73 --auto"},
+                    "source_reference": "invocation:/deliver-standard 73"},
         "build": CONTRACT_BUILD,
     },
     "verification": {

@@ -22,6 +22,15 @@ ARGS = {"repo_root": "/r", "batch_id": "b1", "child_script": "/s/deliver-standar
 HOLDER = "h1/b1"
 
 
+PROGRAM_AGENT_TYPES = {"clerk", "planner", "implementer", "reviewer", "reviewer-lite"}
+
+
+def untyped(calls):
+    """Labels of agent calls that would run on the default tool set (#734)."""
+    return [c["label"] for c in calls
+            if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
+
+
 def run(args=None, replies=None, patch=None, children=None):
     node = shutil.which("node")
     if node is None:
@@ -33,6 +42,9 @@ def run(args=None, replies=None, patch=None, children=None):
     if done.returncode != 0:
         raise AssertionError(f"harness failed: {done.stderr}")
     out = json.loads(done.stdout)
+    bad = untyped(out["calls"])
+    if bad:
+        raise AssertionError(f"agent calls without a program agentType: {bad}")
     return out["result"], out["calls"], out["max_active"]
 
 
@@ -1337,6 +1349,77 @@ class SourceTest(unittest.TestCase):
         self.assertLessEqual(len(text.encode("utf-8")), 1056)
         self.assertIn("`deliver-batch`", text)
         self.assertNotIn("deliver-batch.js", text)
+
+
+CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
+EXPECTED = {stem: frozenset({kind}) for kind, stems in (
+    (CLERK, ("setup", "facts-", "release-", "lane-", "acquire-", "readopt-", "recover-end-", "ask-", "settle-",
+             "land-unlock-", "land-ask-", "land-record-", "land-pr-", "land-checks-", "land-merge-", "close-out-")),
+    (IMPL, ("land-sync-", "land-fix-")),
+    (REV, ("land-sync-review-", "land-fix-review-")),
+) for stem in stems}
+STEM_PATTERNS = (
+    r"\b(?:label|reviewLabel): (['`])([a-z][a-z0-9-]*)",
+    r"\b\w*[lL]abel = (['`])([a-z][a-z0-9-]*)",
+    r"`, (`)([a-z][a-z0-9-]*)(?=\$\{|`)",
+)
+HELD = {"claim": {"verdict": "held_by", "by": HOLDER}}
+CI_RED = {"state": "failed", "head": SHA, "failing": ["ci"]}
+SCENARIOS = (
+    {},
+    {"patch": {"facts-1": dict(HELD, state="CLOSED")}},
+    {"children": {"1": TASK_STOP}, "replies": {"settle-1": {"state": "CLOSED", "release": "released"}}},
+    {"args": dict(ARGS, unattended=True), "children": {"1": QUESTION}},
+    {"args": dict(ARGS, unattended=True),
+     "replies": {"land-checks-1-1": {"state": "needs_label", "head": SHA, "label": "raise-me", "failing": ["gate"]}}},
+    {"replies": {"land-checks-1-1": CI_RED, "land-record-1-1": {"ok": True, "head": FIX},
+                 "land-checks-1-2": {"state": "passed", "head": FIX, "passed": ["ci"]}}},
+    {"replies": {"land-sync-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B,
+                                   "resolved_files": ["x.py"], "tests": ["t"], "notes": "ok"},
+                 "land-checks-1-1": {"state": "passed", "head": B}}},
+    {"patch": {"facts-1": dict(HELD, open_pr=OPEN_PR)}},
+    {"args": dict(ARGS, conts={"1": {"setup": {}}}),
+     "patch": {"facts-1": dict(HELD, merged_pr=41)},
+     "children": {"1": {"stage": "done", "pr": 41, "merged": True,
+                        "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+                        "close_out": {"issue_state": "CLOSED", "released": True}}}},
+)
+
+
+def all_calls():
+    return [c for scenario in SCENARIOS for c in run(**scenario)[1]
+            if c.get("kind", "agent") == "agent"]
+
+
+class AgentTypeTest(unittest.TestCase):
+    """#734: every agent call names a program agent type, so none runs on the default tool set."""
+
+    @staticmethod
+    def stems(text):
+        return {m.group(2) for pattern in STEM_PATTERNS for m in re.finditer(pattern, text)}
+
+    @staticmethod
+    def stem_of(label):
+        found = [k for k in EXPECTED if label == k or (k.endswith("-") and label.startswith(k))]
+        return max(found, key=len) if found else None
+
+    def test_every_named_site_has_an_expected_type(self):
+        self.assertLessEqual(self.stems(PROGRAM.read_text(encoding="utf-8")), set(EXPECTED))
+
+    def test_every_site_is_reached_with_its_type(self):
+        reached = set()
+        for call in all_calls():
+            stem = self.stem_of(call["label"])
+            self.assertIsNotNone(stem, call["label"])
+            self.assertIn(call["agentType"], EXPECTED[stem], call["label"])
+            reached.add(stem)
+        self.assertEqual(reached, set(EXPECTED))
+
+    def test_d3_sites_keep_a_high_effort(self):
+        found = [c for c in all_calls() if c["label"].startswith("land-pr-")]
+        self.assertTrue(found)
+        for call in found:
+            self.assertEqual((call["agentType"], call["effort"]), ("clerk", "high"), call["label"])
 
 
 if __name__ == "__main__":
