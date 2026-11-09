@@ -44,6 +44,8 @@ class LaddersTest(unittest.TestCase):
         "python/agent_tools/review_issue100.py": 'X = "resolve-bindings"\n',
         "python/agent_tools/review_task7.py": 'X = "skills.config.json"\n',
         "home/common/agent-skills/skills/ship-release/CHANGELOG.md": "bindings.deploy\n",
+        "python/agent_tools/verify_checks.py":
+            'X = ("bindings.deploy", "skills.config.json", "release deploy inspect")\n',
     }
 
     def setUp(self):
@@ -170,7 +172,7 @@ class LaddersTest(unittest.TestCase):
         code, report, _ = self.ladders(
             root, stub_body="""echo '{"error":{"code":"not_onboarded"}}'; exit 2""")
         self.assertEqual((code, report["findings"], report["clean"]), (0, [], True))
-        self.assertEqual(len(report["exempt"]), 4)
+        self.assertEqual(len(report["exempt"]), 7)
 
 
 def claude_line(timestamp, command, usage=True):

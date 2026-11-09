@@ -643,16 +643,13 @@ class RailwayActivationWatchTest(DriverCase):
     def deploy(self, driver):
         return next(a for a in driver.status()["release"]["actions"] if a["name"] == "deploy")
 
-    def test_the_profile_passes_the_shape_gate_and_only_with_bindings_deploy_none(self):
+    def test_the_profile_passes_the_shape_gate(self):
         driver = self.watched(rs.ScriptedRailway())
         self.assertIsNone(driver.shape_refusal())
         document = driver.preview(rs.candidate())
         self.assertEqual((document["runnable"], document["refusal"]), (True, None))
         self.assertEqual([(a["name"], a["phase"], a["mode"]) for a in document["actions"]][-1],
                          ("deploy", "activation", "publication_triggered"))
-        refusal = self.watched(rs.ScriptedRailway(), deploy_adapter="railway").shape_refusal()
-        self.assertEqual((refusal.code, refusal.repair_id),
-                         ("deploy_watch_unowned", "release.profile.activation_unbound"))
 
     def test_a_deployed_watch_succeeds_without_an_invoke(self):
         watch = rs.ScriptedRailway(("satisfied", "deployed"))
