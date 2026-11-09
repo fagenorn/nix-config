@@ -3001,5 +3001,29 @@ class AgentTypeTest(unittest.TestCase):
             self.assertEqual((call["agentType"], call["model"], call["effort"]), ("planner", None, None), call["label"])
 
 
+class PromptCommandFormTest(unittest.TestCase):
+    """#738: a command ends at a line break, and a prompt that reads the issue body asks for it."""
+
+    BODY_READERS = ("plan", "plan-revise", "plan-rules-revise", "plan-review")
+
+    def test_no_command_is_followed_by_a_lone_dot_argument(self):
+        for call in all_calls():
+            self.assertIsNone(re.search(r"(?<=\S) \.(?=\s|$)", call["prompt"]), call["label"])
+
+    def test_body_readers_view_the_issue_as_json_with_body_and_comments(self):
+        seen = set()
+        for call in all_calls():
+            if call["label"] not in self.BODY_READERS:
+                continue
+            views = re.findall(r"gh issue view[^)\n]*", call["prompt"])
+            self.assertTrue(views, call["label"])
+            for view in views:
+                self.assertRegex(view, r"--json \S*\bbody\b", call["label"])
+                self.assertRegex(view, r"--json \S*\bcomments\b", call["label"])
+                self.assertNotIn("--comments", view, call["label"])
+            seen.add(call["label"])
+        self.assertEqual(seen, set(self.BODY_READERS))
+
+
 if __name__ == "__main__":
     unittest.main()
