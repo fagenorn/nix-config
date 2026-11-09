@@ -25,6 +25,7 @@ Owner decisions applied (issue 130, 2026-11-08T13:20:31Z): C8 (the Codex ship ha
 | C10 | `doctor` is clean on every adopted host | issue | pre | green | — |
 | C11 | Deprecation notices shipped in a bridge minor, and the fleet has zero users of the deprecated paths | issue; #66 | pre | green | — |
 | C12 | The bridge generation is identified per host and can be retained | issue; #66 | pre | green | — |
+| C13 | The candidate derives a guard policy row for every registered repository on every host, and the hosts' registry entries for one project agree on `branch_override` | #765 | pre | not run | added after the 130 activation for future cutovers; not counted in the 11 of 11 |
 | P1 | No static fallback ladder remains in the resolver, conformance or workflow-entry paths of any adopted project, and a missing contract fails closed with a closed error code | AC2; #69 | post | green | all three hosts, reading approved 2026-11-09 (P1 row below) |
 | P2 | The bridge generation is retained, and rollback to it is exercised once before retirement | AC3; refresh | post | green | rollback to the bridge and re-activation on all three hosts, 19:55Z to 20:30Z |
 | P3 | A Claude-driven ship completes on the strict path, against declared host capabilities with bounded admission | AC4; refresh | post | green | #763 shipped through deliver-standard on mbp's strict generation: PR 767, 6febd0a2 |
@@ -543,6 +544,30 @@ The three hosts run different bridge builds. eleven-m5 is at 6e2f9dde45cb, mbp a
 Earlier readings (2026-11-03 to 2026-11-08) and their re-read notes are in this file's history at origin/main 6e2f9dde45cb.
 
 Item verdict: **green**
+
+### C13 — Guard policy derives for every registered repository
+
+> the lifecycle guard's `guard-policy derive` yields a row for every slug in every host's registry, under the candidate's code and manifest, and the registry entries of one project agree across hosts (#765)
+
+Why this row exists: gate step 2 went green while anis-desktop's `nodocom` entry had no `branch_override` (mbp's carries `dev`, reason `default_contract_unresolved`). `guard-policy derive` reads the contract of the entry's branch, so on anis-desktop it read `origin/main`, which is project schema 1. C2 and C4 read the checkout's own contract (dev, schema 2) and stayed green. After the host switched to platform 2.0.0 (schema 2 only) the guard refused every nodocom push with `contract_unresolved: ... contract.schema_version.unsupported` (issue 753, comment 6747070046). The bridge still accepts what the candidate refuses, so C13 runs the candidate's code, as C4.b does.
+
+```text
+C13.a PYTHONPATH=python python3 -m agent_tools.verify_checks guard-policy-fleet [--repo-root K_H]
+C13.b PYTHONPATH=python python3 -m agent_tools.verify_checks registry-agreement --registry mbp=<mbp-registry> eleven-m5=<eleven-m5-registry> anis-desktop=<anis-desktop-registry> [--intentional <project_id>]
+```
+
+C13.a runs on every host, from origin/main's exported `python`, with `--repo-root` the host's `K_H`. It unpacks the candidate's `python/` and manifest (origin's `cutover-130-candidate` or `--branch B`) into a temporary `HOME`, and for every distinct slug named by a registry entry's `origin` runs the candidate's `python -m agent_tools.guard_policy derive --repository <slug>`. A row is green only when that exits 0 with `outcome` `derived` and a row; any other exit, outcome or unreadable answer is red, and an entry whose `origin` names no github slug is a red row with outcome `origin_unproven`. The check is green (exit 0) only when every row is green, red (exit 1) otherwise, and 75 when the candidate branch is absent or the registry or candidate cannot be read. Like the guard, `derive` writes the objects and remote-tracking refs it fetches into the registered checkouts.
+
+C13.b needs each host's `~/.agents/state/fleet/registry.json` copied to one place (read it over ssh, as the other rows do) and runs once. It is green (exit 0) when every project registered on more than one host carries the same `branch_override` on all of them, absent counting as a value. A project whose entries differ is red (exit 1) unless its id is named by `--intentional`, which records the difference in the report as `intentional`; that disposition must be written into the item's table here, with the reason. Exit 2 is an unreadable registry file.
+
+The item takes its worst row. A fixture registry that reproduces the anis-desktop `nodocom` entry (no `branch_override`, a schema-1 default branch with the schema-2 contract on `dev`) reads red on C13.a, with `contract_unresolved` for that slug, and the same entry with the override reads green; `tests/test_verify_checks.py` (`GuardPolicyFleetTest`, `RegistryAgreementTest`) holds both readings.
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+
+No reading has been taken for the 130 cutover: the cutover is complete and C13 was added afterwards for future cutovers. Step 2 of the human gate re-runs it with every other pre-activation item.
+
+Item verdict: **not run**
 
 ### P1–P6 — Post-activation items
 
