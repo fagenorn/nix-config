@@ -525,6 +525,9 @@ in
   # issue owners as issue-owner (opus/high,
   # xhigh for the autonomous design and planning owners), a definition with
   # no body that blocks the Artifact tools and the claude.ai Docs connector.
+  # The Workflow programs' steps run as clerk (sonnet/low; Bash, Read and
+  # Skill only, for judgment-free steps) and planner (opus/high; the plan
+  # step). implementer, mechanic and issue-owner carry trimmed tool lists.
   # Skills reference them by name; home/common/agent-skills/model-matrix.json
   # owns every tier.
   home.file.".claude/agents" = {
