@@ -95,7 +95,8 @@ from urllib.parse import quote
 
 from agent_tools import forge_markers, github_remote
 from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
-from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver, validate_manifest
+from agent_tools.agent_platform import (
+    DEPRECATION_MEMBERS, parse_semver, validate_manifest, validate_registry)
 from agent_tools.agent_costs import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
 from agent_tools import worktree_forge
@@ -857,17 +858,23 @@ def _unpack_candidate(repo_root: Path, sha: str, destination: Path,
     return True
 
 
-def _registry_entries(path: Path) -> list[dict] | None:
-    """The `projects` of the registry file at `path` ([] when absent), or None when unreadable."""
+def _read_registry(path: Path, *, absent_ok: bool = False) -> dict | None:
+    """The registry document at `path`, or None when it is unreadable or fails the guard's own
+    `validate_registry`. A missing file is the empty fleet only when `absent_ok` (the host's
+    implicit default registry); a path the operator named that is missing is unreadable."""
     try:
         document = json.loads(path.read_bytes())
     except FileNotFoundError:
-        return []
+        return {"schema_version": 1, "projects": []} if absent_ok else None
     except (OSError, ValueError):
         return None
-    projects = document.get("projects") if isinstance(document, dict) else None
-    ok = isinstance(projects, list) and all(isinstance(p, dict) for p in projects)
-    return projects if ok else None
+    return None if validate_registry(document) else document
+
+
+def _registry_entries(path: Path, *, absent_ok: bool = False) -> list[dict] | None:
+    """The `projects` of the registry file at `path`, or None when it is unreadable."""
+    document = _read_registry(path, absent_ok=absent_ok)
+    return None if document is None else document["projects"]
 
 
 def _entry_slug(entry: dict, environ: Mapping[str, str]) -> str | None:
@@ -928,9 +935,11 @@ def guard_policy_fleet(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
     report["candidate"] = sha
     _git_ok(repo_root, "fetch", "--quiet", "--no-tags", "origin", sha, environ=environ)
     home = environ.get("HOME", "")
-    entries = _registry_entries(registry or Path(home) / ".agents/state/fleet/registry.json")
-    if entries is None:
+    document = (_read_registry(registry) if registry is not None else
+                _read_registry(Path(home) / ".agents/state/fleet/registry.json", absent_ok=True))
+    if document is None:
         return 75, {**report, "verdict": "unreadable", "side": "registry"}
+    entries = document["projects"]
     slugs: dict[str, None] = {}
     rows: list[dict] = []
     for entry in entries:
@@ -951,8 +960,7 @@ def guard_policy_fleet(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
         shutil.copy(tmp_path / MANIFEST_PATH, manifest)
         registry_copy = candidate_home / ".agents/state/fleet/registry.json"
         registry_copy.parent.mkdir(parents=True)
-        registry_copy.write_text(json.dumps({"schema_version": 1, "projects": entries}),
-                                 encoding="utf-8")
+        registry_copy.write_text(json.dumps(document), encoding="utf-8")
         child_env = _candidate_env(environ, candidate_home, tmp_path / "python")
         rows.extend(_derive_row(slug, child_env, tmp_path) for slug in slugs)
     rows.sort(key=lambda r: (r["repository"] is None, r["repository"] or ""))

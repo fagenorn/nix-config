@@ -1170,6 +1170,31 @@ class GuardPolicyFleetTest(unittest.TestCase):
         code, report = self.world.fleet()
         self.assertEqual((code, report["verdict"]), (75, "unreadable"), report)
 
+    def test_a_named_registry_file_that_is_missing_is_unreadable(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        code, report = self.world.fleet(registry=self.world.tmp / "no-such-registry.json")
+        self.assertEqual((code, report["verdict"], report["side"], report["rows"]),
+                         (75, "unreadable", "registry", []))
+
+    def test_an_absent_default_registry_is_the_empty_fleet(self):
+        (self.world.home / ".agents/state/fleet/registry.json").unlink(missing_ok=True)
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"], report["rows"]), (0, "green", []))
+
+    def test_a_registry_the_guard_would_refuse_is_unreadable(self):
+        root = self.world.project("fixture/one", "fagenorn/one")
+        entries = [{"project_id": "fixture/one", "root": str(root)}]
+        for name, document in (
+                ("no-schema", {"projects": entries}),
+                ("wrong-schema", {"schema_version": "1", "projects": entries}),
+                ("extra-member", {"schema_version": 1, "projects": entries, "note": "x"})):
+            with self.subTest(name=name):
+                path = self.world.tmp / f"{name}.json"
+                path.write_text(json.dumps(document), encoding="utf-8")
+                code, report = self.world.fleet(registry=path)
+                self.assertEqual((code, report["verdict"], report["side"]),
+                                 (75, "unreadable", "registry"), report)
+
     def test_a_registry_file_replaces_the_hosts_own(self):
         self.world.project("fixture/one", "fagenorn/one")
         empty = self.world.tmp / "empty-registry.json"
@@ -1271,6 +1296,26 @@ class RegistryAgreementTest(unittest.TestCase):
             green = verify_checks.main(["registry-agreement", "--registry", *files,
                                         "--intentional", "elevenyellow/nodocom"])
         self.assertEqual((red, green), (1, 0))
+
+    def test_main_refuses_a_missing_registry_file(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        good = Path(tmp.name) / "good.json"
+        good.write_text(json.dumps({"schema_version": 1, "projects": self.entries()}),
+                        encoding="utf-8")
+        with mock.patch("sys.stderr"), mock.patch("sys.stdout"):
+            self.assertEqual(verify_checks.main(
+                ["registry-agreement", "--registry", f"mbp={good}",
+                 f"anis-desktop={Path(tmp.name) / 'absent.json'}"]), 2)
+
+    def test_main_refuses_a_registry_file_the_guard_would_refuse(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        bad = Path(tmp.name) / "no-schema.json"
+        bad.write_text(json.dumps({"projects": self.entries()}), encoding="utf-8")
+        with mock.patch("sys.stderr"), mock.patch("sys.stdout"):
+            self.assertEqual(verify_checks.main(
+                ["registry-agreement", "--registry", f"mbp={bad}", f"x={bad}"]), 2)
 
     def test_main_refuses_an_unreadable_registry_file(self):
         tmp = tempfile.TemporaryDirectory()
