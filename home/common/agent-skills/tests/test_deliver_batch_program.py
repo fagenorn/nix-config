@@ -1146,6 +1146,23 @@ class TransientTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIn(timeout, prompt(calls, label))
 
+    RETRIED = re.compile(r"forge-claim (?:acquire|renew|release|status|land acquire|land release|owner-action status)\b")
+
+    def test_every_prompt_that_runs_a_retried_forge_claim_command_gives_the_long_bash_timeout(self):
+        # Two 30 s timeouts plus the backoff use 120 s before the third try starts, so a command that
+        # forge-claim retries needs the long Bash timeout wherever any prompt runs it.
+        timeout = "a Bash timeout of 20 minutes (1200000 ms)"
+        closed = {"facts-1": {"state": "CLOSED", "claim": {"verdict": "held_by", "by": HOLDER}}}
+        seen = set()
+        for patch in ({}, closed):
+            _, calls, _ = run(patch=patch)
+            for call in calls:
+                if call["kind"] == "agent" and self.RETRIED.search(call["prompt"]):
+                    seen.add(call["label"])
+                    with self.subTest(label=call["label"]):
+                        self.assertIn(timeout, call["prompt"])
+        self.assertTrue({"facts-1", "release-1"} <= seen, seen)
+
 
 class LandOrderTest(unittest.TestCase):
     """#677: the land lock is taken, waiting, before the first resync, held through the merge,

@@ -60,6 +60,9 @@ then 40 s between them. The verb is retried whole, never one gh call inside it, 
 idempotent for its holder under a lost reply (#623). `land acquire --wait` keeps its own D8 bound
 and is never wrapped; `owner-action post`, `owner-action end` and `land status` run once. Every
 exit-1 line carries `transient`: true when the error was a transport error (the tries ran out).
+A retried `land acquire` that raised after it sent a create or a swap reports `acquired`, not
+`already_held`, for a lock then found at its sha: the programs recheck the base on `acquired`.
+A retried `renew` also sheds the `owner-action` label its lost-reply retirement left behind.
 """
 import argparse
 import json
@@ -340,7 +343,8 @@ def renew(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     again = fm.list_markers(args.repo, args.issue)
     if not any(m.comment_id == winner.comment_id and fm.is_live(m, again) for m in again):
         return CONTENDED, _result(args, "not_held", winner.comment_id)
-    retire_owner_actions(args.repo, args.issue, again, winner.comment_id, "renewed")
+    if not retire_owner_actions(args.repo, args.issue, again, winner.comment_id, "renewed"):
+        _retired_owner_action_label(args.repo, args.issue, again, winner.comment_id)  # a retried renew
     return 0, _result(args, "renewed", winner.comment_id)
 
 
@@ -471,12 +475,14 @@ def _error_result(args: argparse.Namespace, error: ForgeError) -> dict[str, Any]
 def run_verb(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     """Run the parsed verb once, or up to `TRIES` times when `retried` and the failure is transient."""
     tries = TRIES if retried(args) else 1
+    attempts = forge_land_lock.Attempts()
     for attempt in range(tries):
         try:
-            return (forge_land_lock.run(args) if args.command == "land"
+            return (forge_land_lock.run(args, attempts) if args.command == "land"
                     else forge_owner_action.run(args) if args.command == "owner-action"
                     else COMMANDS[args.command](args))
         except ForgeError as error:
+            attempts.failed()
             if not error.transient or attempt + 1 >= tries:
                 return FORGE_ERROR, _error_result(args, error)
             sleep(BACKOFF[attempt])

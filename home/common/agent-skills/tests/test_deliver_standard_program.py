@@ -801,6 +801,21 @@ class TransientTest(unittest.TestCase):
                        patch={"sync-1": {"merge_commit": merge}})
         self.assertIn(timeout, prompt(calls, "land-lock-2"))
 
+    RETRIED = re.compile(r"forge-claim (?:acquire|renew|release|status|land acquire|land release|owner-action status)\b")
+
+    def test_every_prompt_that_runs_a_retried_forge_claim_command_gives_the_long_bash_timeout(self):
+        # Two 30 s timeouts plus the backoff use 120 s before the third try starts, so a command that
+        # forge-claim retries needs the long Bash timeout wherever any prompt runs it.
+        timeout = "a Bash timeout of 20 minutes (1200000 ms)"
+        seen = set()
+        _, calls = run()
+        for call in calls:
+            if self.RETRIED.search(call["prompt"]):
+                seen.add(call["label"])
+                with self.subTest(label=call["label"]):
+                    self.assertIn(timeout, call["prompt"])
+        self.assertIn("close-out", seen)
+
 
 class SetupIdempotenceTest(unittest.TestCase):
     """#635: setup re-adopts an existing branch or worktree, never resets, stops on a merged duplicate."""

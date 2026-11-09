@@ -397,11 +397,13 @@ class TransientRetryTest(Base):
         self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
         self.assertEqual(self.slept, [20, 40])
 
-    def test_acquire_retried_after_its_create_lost_its_reply_is_already_held(self):
+    def test_acquire_retried_after_its_create_lost_its_reply_is_acquired(self):
+        # The retry cannot tell its own lost-reply create from a lock already held, so it reports
+        # acquired: the programs recheck the base before merging on acquired, never on already_held.
         self.lock(lose_reply=["create"])
         self.pulls(A, pull(11, sha=A))
         code, out = run(*land("acquire", A))
-        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "already_held", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
         self.assertEqual(self.world.refs(), {REF: A})
         self.assertEqual(self.slept, [20])
 

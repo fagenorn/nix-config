@@ -49,6 +49,24 @@ monotonic = time.monotonic
 sleep = time.sleep
 
 
+class Attempts:
+    """What earlier tries of one retried `acquire` may have written (issue 740).
+
+    `unsure` is true once a try sent a create or a swap that was not refused and then raised, so
+    its effect is unknown. A later try that finds the lock at its sha cannot tell its own write
+    from a lock already held, and reports `acquired`, which the programs recheck before they
+    merge, never `already_held`."""
+
+    def __init__(self) -> None:
+        self.wrote = False  # the running try has sent a write not yet known to be refused
+        self.unsure = False
+
+    def failed(self) -> None:
+        """The running try raised: a write it sent may have taken effect."""
+        self.unsure = self.unsure or self.wrote
+        self.wrote = False
+
+
 class Outcome(NamedTuple):
     verdict: str
     lock_sha: str | None
@@ -112,7 +130,8 @@ def _on_branch(slug: str, sha: str, branch: str) -> list[fm.Pull]:
 
 def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
                  idle: Callable[[str], bool], node: Callable[[], str],
-                 seen: Callable[[str | None], None] | None = None) -> Outcome:
+                 seen: Callable[[str | None], None] | None = None,
+                 attempts: Attempts | None = None) -> Outcome:
     """One acquire attempt (D1, D2, D3, D5); `idle(lock)` lets a `held` lock be taken over."""
     ref = lock_ref(branch)
 
@@ -124,21 +143,28 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
 
     lock = None
     for _ in range(CREATE_ROUNDS):
+        if attempts is not None:
+            attempts.wrote = True
         if fm.create_ref(slug, ref, sha):
             return Outcome("acquired", sha, pick_pr(mine), None)
+        if attempts is not None:
+            attempts.wrote = False
         lock = observe()
         if lock is not None:
             break
     if lock is None:
         raise fm.ForgeError("gh_failed", "ref create refused while the ref is absent")
     if lock == sha:
-        return Outcome("already_held", sha, pick_pr(mine), None)
+        verdict = "acquired" if attempts is not None and attempts.unsure else "already_held"
+        return Outcome(verdict, sha, pick_pr(mine), None)
     theirs = _on_branch(slug, lock, branch)
     kind, pr = classify(lock, theirs, {p.number for p in mine})
     if kind == "held":
         if not idle(lock):
             return Outcome("held_by", lock, pr, None)
         kind = "idle"
+    if attempts is not None:
+        attempts.wrote = True
     failure = fm.cas_ref(slug, node(), ref, lock, sha)
     after = observe()
     if after == sha:
@@ -223,7 +249,7 @@ def _no_open_pr(args: Any) -> tuple[int, dict[str, Any]]:
                      detail=f"no open pull request on {args.branch} has head {args.sha}")
 
 
-def _acquire(args: Any) -> tuple[int, dict[str, Any]]:
+def _acquire(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str, Any]]:
     def eligible() -> list[fm.Pull]:
         return [p for p in fm.commit_pulls(args.repo, args.sha)
                 if p.state == "open" and p.base_ref == args.branch and p.head_sha == args.sha]
@@ -240,7 +266,8 @@ def _acquire(args: Any) -> tuple[int, dict[str, Any]]:
     mine = eligible()
     if not mine:
         return _no_open_pr(args)
-    outcome = acquire_once(args.repo, args.branch, args.sha, mine, lambda _: False, node)
+    outcome = acquire_once(args.repo, args.branch, args.sha, mine, lambda _: False, node,
+                           attempts=attempts)
     if outcome.verdict in ("acquired", "already_held", "moved"):
         return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
                          took_over=outcome.took_over)
@@ -271,5 +298,8 @@ def _status(args: Any) -> tuple[int, dict[str, Any]]:
                      by=holder(args.repo, pr))
 
 
-def run(args: Any) -> tuple[int, dict[str, Any]]:
-    return {"acquire": _acquire, "release": _release, "status": _status}[args.action](args)
+def run(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str, Any]]:
+    """Run the parsed action; a caller that retries `acquire` passes the same `attempts` each try."""
+    if args.action == "acquire":
+        return _acquire(args, attempts)
+    return {"release": _release, "status": _status}[args.action](args)

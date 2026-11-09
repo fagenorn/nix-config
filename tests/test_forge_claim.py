@@ -642,6 +642,17 @@ class TransientRetryTest(Base):
         self.assertEqual([c["id"] for c in self.world.stored()], [5])
         self.assertEqual(self.live()[0].fields["renewed"], "2")
 
+    def test_renew_retried_after_its_owner_action_end_lost_its_reply_removes_the_label(self):
+        # The end marker landed, its reply was lost; the retry finds no live marker and must still
+        # shed the owner-action label before it reports renewed.
+        self.store(comment(5, claim_body(ME)), comment(30, oa_body(5, ME)), next_id=40, lose_reply=["post"])
+        code, out = run(*common("renew"))
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "renewed", 5))
+        self.assertEqual(self.slept, [20])
+        self.assertEqual(self.live("owner-action"), [])
+        self.assertEqual(self.mutations().count(post(fm.end_body(30, "renewed"))), 1)
+        self.assertEqual(self.mutations()[-1], OA_REMOVE)
+
     def test_release_retried_after_its_end_post_lost_its_reply_ends_once(self):
         self.store(comment(5, claim_body(ME)), lose_reply=["post"])
         code, out = run(*common("release"))
