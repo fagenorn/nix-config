@@ -4,8 +4,11 @@
 //     "children": {"<issue>": child result | [one per call] | "throw"} }
 // A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A reply
 // of null is returned as null (a dead agent). Prints { result, calls, max_active }: calls lists
-// agents ({kind: 'agent', label, prompt, agentType, model, facts_pending}) and children ({kind: 'workflow',
+// agents ({kind: 'agent', label, prompt, schema, agentType, model, facts_pending}) and children ({kind: 'workflow',
 // label: 'child-<issue>', script, args}) in start order; max_active is the most children at once.
+// A reply equal to "throw" makes the stub agent throw after its call was recorded (land() catches it and releases).
+// A folded label (NESTED) given an explicit object reply with no own key for one of its nested steps gets that
+// step's default; a key present with null stays null (the nested step did not run).
 import { readFileSync } from 'node:fs'
 
 const program = readFileSync(process.argv[2], 'utf8')
@@ -14,6 +17,7 @@ const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
 const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], notes: 'ok' }
 const AC = [{ id: 'AC1', text: 'works', kind: 'code' }]
+const promptHead = p => (p.match(/Accepted head: ([0-9a-f]+)/) || [])[1] || SHA
 const num = label => Number((label.match(/-(\d+)(?:-|$)/) || [])[1])
 // Ordered: the first matching pattern wins. A default gets the label and the prompt.
 const DEFAULTS = [
@@ -28,23 +32,25 @@ const DEFAULTS = [
   [/^recover-end-/, () => ({ verdict: 'ended' })],
   [/^readopt-/, l => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: AC })],
   [/^land-sync-review-|^land-fix-review-/, () => PASS],
-  [/^land-record-/, (l, p) => ({ ok: true, head: (p.match(/Accepted head: ([0-9a-f]+)/) || [])[1] || SHA })],
+  [/^land-record-/, (l, p) => { const head = promptHead(p); return { ok: true, head, lock: { verdict: 'moved', lock_sha: head } } }],
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
-  [/^land-pr-/, l => ({ pr: 40 + num(l), head: SHA })],
+  [/^land-pr-/, l => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } })],
   [/^land-lock-/, () => ({ verdict: 'already_held', lock_sha: SHA })],
   [/^land-checks-/, () => ({ state: 'passed', head: SHA, required: ['ci'], passed: ['ci'] })],
   [/^land-fix-/, () => DONE],
-  [/^land-merge-/, () => ({ merged: true, merge_commit: SHA, notes: 'merged' })],
+  [/^land-merge-/, () => ({ merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } })],
   [/^land-unlock-/, () => ({ verdict: 'released' })],
   [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, decision_ended: true, branch_deleted: true, notes: 'ok' })],
 ]
+// Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
+const NESTED = [[/^land-(pr|merge)-/, ['renew', 'lock']], [/^land-record-/, ['lock']]]
 
 const calls = []
 let factsPending = 0 // facts agents started and not yet answered
 const seen = {}
 async function agent(prompt, opts = {}) {
   const label = opts.label
-  calls.push({ kind: 'agent', label, prompt, agentType: opts.agentType || null, model: opts.model || null, facts_pending: factsPending })
+  calls.push({ kind: 'agent', label, prompt, schema: opts.schema || null, agentType: opts.agentType || null, model: opts.model || null, facts_pending: factsPending })
   const isFacts = /^facts-/.test(label)
   if (isFacts) factsPending++
   // A facts agent answers later the higher its issue number, so a program that does not wait for every
@@ -59,7 +65,16 @@ async function agent(prompt, opts = {}) {
   const replies = scenario.replies || {}
   if (Object.prototype.hasOwnProperty.call(replies, label)) {
     const r = replies[label]
-    return structuredClone(Array.isArray(r) ? r[Math.min(n, r.length) - 1] : r)
+    const out = structuredClone(Array.isArray(r) ? r[Math.min(n, r.length) - 1] : r)
+    if (out === 'throw') throw new Error(`stub agent ${label} threw`)
+    const row = NESTED.find(([re]) => re.test(label))
+    if (row && out && typeof out === 'object' && !Array.isArray(out)) {
+      const base = DEFAULTS.find(([re]) => re.test(label))[1](label, prompt)
+      // A record's default lock is moved at the head the reply itself reports.
+      if (/^land-record-/.test(label) && typeof out.head === 'string') base.lock = { verdict: 'moved', lock_sha: out.head }
+      for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
+    }
+    return out
   }
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)
