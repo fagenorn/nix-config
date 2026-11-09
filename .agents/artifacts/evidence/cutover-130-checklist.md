@@ -559,7 +559,7 @@ These six items are `post` and `human-pending`: this attempt does not evaluate t
 
 #### Post-activation readings on the agent hosts (gate step 5, partial)
 
-eleven-m5 was switched at 2026-11-09T17:22:57Z (done 17:24:04Z) and anis-desktop at 17:27:15Z (done 17:27:33Z), both from a detached `K_H/.worktrees/cutover-130` at 06fb38b718e050742e607b9b0feefd873e90c404, removed afterwards. The land locks of all five fleet repositories were free before each switch. The first anis-desktop attempt (17:25:34Z) failed before activation on an operator PATH error and changed nothing; the single retry is recorded on issue 130 as a deviation from the runbook (comment 6746762607). mbp is not switched: it is on system-325, the bridge, awaiting the owner's switch.
+eleven-m5 was switched at 2026-11-09T17:22:57Z (done 17:24:04Z) and anis-desktop at 17:27:15Z (done 17:27:33Z), both from a detached `K_H/.worktrees/cutover-130` at 06fb38b718e050742e607b9b0feefd873e90c404, removed afterwards. The land locks of all five fleet repositories were free before each switch. The first anis-desktop attempt (17:25:34Z) failed before activation on an operator PATH error and changed nothing; the single retry is recorded on issue 130 as a deviation from the runbook (comment 6746762607). mbp was switched by the owner afterwards (rows below).
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
@@ -569,6 +569,15 @@ eleven-m5 was switched at 2026-11-09T17:22:57Z (done 17:24:04Z) and anis-desktop
 | anis-desktop | host | system-80 (bridge N_H 79) | identity; platform-status --fleet; host-route | 2026-11-09T17:27:40Z | 0; 0; 0; 0 | system-80 running, configurationRevision 06fb38b718e0; platform 2.0.0, schemas [2], 1/1 compatible, removed_uses []; claude-code supported (7 slots), codex declared_unsupported | green |
 | anis-desktop | P1 | system-80 | resolve-project resolve (scratch repo); fallback-audit ladders | 2026-11-09T17:27:40Z | 2; 1 | fail-closed `not_onboarded`; nodocom 7 findings, all `stale_exemption` on nix-config paths | green |
 | anis-desktop | P4 | system-80 | conformance fleet and doctor; migrate; worktree-mapping; traces; bridge fleet | 2026-11-09T17:27:40Z | 0 | nodocom fleet 13/13, doctor 19/19; migrate 0, refused 0; C7 green; 0 removed-fallback executions since 17:27:15Z; bridge resolve-project with its own manifest 1.2.0, 1/1 compatible | green |
+
+| mbp | host | system-326 (bridge N_H 325) | identity; platform-status --fleet; host-route | 2026-11-09T18:33:50Z | 0; 0; 0; 0 | system-326 running (owner's switch, profile link 18:31:32Z), configurationRevision 06fb38b718e0; platform 2.0.0, schemas [2], 5/5 compatible, removed_uses []; claude-code supported (7 slots), codex declared_unsupported | green |
+| mbp | P1 | system-326 | resolve-project resolve (scratch repo); fallback-audit ladders | 2026-11-09T18:33:50Z | 2; 1 | fail-closed `not_onboarded`; arcwave, argus, jarbird and nodocom 7 findings each, all `stale_exemption` on nix-config paths; nix-config read on the candidate tree (clean true) | green |
+| mbp | P4 | system-326 | conformance fleet and doctor per root; migrate; worktree-mapping; traces; bridge fleet | 2026-11-09T18:33:50Z to 18:34:05Z | 0 | fleet 13/13 and doctor 19/19 on all 5 roots; migrate 0, refused 0; C7 green, no `.worktrees/cutover-130` left; 0 removed-fallback executions since 18:31:32Z; bridge resolve-project with its own manifest 1.2.0, 5/5 compatible | green |
+| mbp | guard rows | system-326 | guard-policy derive per slug; claude-guard-policy | 2026-11-09T18:34:08Z to 18:34:45Z | 0 | arcwave, nodocom and jarbird derive from origin/dev, argus and nix-config from origin/main; claude-guard-policy complete, 5 derived, 0 refused | green |
+| eleven-m5 | guard rows | system-36 | guard-policy derive per slug; claude-guard-policy | 2026-11-09T18:34:59Z | 0 | nix-config (origin/main) and jarbird (origin/dev) derived; complete, 0 refused | green |
+| anis-desktop | guard rows | system-80 | guard-policy derive; claude-guard-policy | 2026-11-09T18:35:13Z | 0 | nodocom derived from origin/dev after its re-registration with `branch_override` dev at 17:38:57Z (issue 753); complete, 0 refused | green |
+
+**Fleet activated.** All three hosts run the candidate 06fb38b718e050742e607b9b0feefd873e90c404: eleven-m5 35 to 36 (2026-11-09T17:24:04Z), anis-desktop 79 to 80 (17:27:33Z) and mbp 325 to 326 (owner, about 18:31:32Z). On anis-desktop, nodocom's pushes were refused from activation until 17:39Z: its registry entry lacked the `branch_override` mbp's has, so the guard derived from nodocom's schema-1 `origin/main` (fixed by re-registration; follow-up #765).
 
 P2 (the rollback exercise), P3 (a Claude-driven ship), P5 and P6 are not evaluated yet.
 
