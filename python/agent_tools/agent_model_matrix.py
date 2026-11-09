@@ -43,6 +43,8 @@ EXPECTED_ROLE_TIERS = {
     "bookkeeper": ("haiku", "low"),
     "explorer": ("sonnet", "medium"),
     "researcher": ("sonnet", "medium"),
+    "clerk": ("sonnet", "low"),
+    "planner": ("opus", "high"),
 }
 ALLOWED_SUBAGENT_TYPES = {
     "issue-owner": {"issue-owner", "general-purpose"},
@@ -57,8 +59,12 @@ ALLOWED_SUBAGENT_TYPES = {
     "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
+    "clerk": {"clerk"},
+    "planner": {"planner"},
 }
-CUSTOM_AGENT_ROLES = {"implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic"}
+CUSTOM_AGENT_ROLES = {
+    "implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic", "clerk", "planner",
+}
 WORKFLOW_FAMILIES = {
     "from-issue",
     "sdd",

@@ -66,6 +66,15 @@ def tasks(count, risk="standard"):
             for n in range(1, count + 1)]
 
 
+PROGRAM_AGENT_TYPES = {"clerk", "planner", "implementer", "reviewer", "reviewer-lite"}
+
+
+def untyped(calls):
+    """Labels of agent calls that would run on the default tool set (#734)."""
+    return [c["label"] for c in calls
+            if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
+
+
 def run(args=None, replies=None, patch=None):
     node = shutil.which("node")
     if node is None:
@@ -76,6 +85,9 @@ def run(args=None, replies=None, patch=None):
     if done.returncode != 0:
         raise AssertionError(f"harness failed: {done.stderr}")
     out = json.loads(done.stdout)
+    bad = untyped(out["calls"])
+    if bad:
+        raise AssertionError(f"agent calls without a program agentType: {bad}")
     return out["result"], out["calls"]
 
 
@@ -2901,6 +2913,92 @@ class DeclaredBranchTest(unittest.TestCase):
                            patch={"setup": {"head": TIP, "branch_heads": self.facts("e" * 40, name="constructor")}})
         self.assertIn("final-1", labels(calls))
         self.assertEqual(again["cont"]["final_reviewed"], {"head": TIP, "branches": {"constructor": "e" * 40}})
+
+
+CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
+EITHER = frozenset({REV, LITE})
+EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
+    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex",
+             "verify", "verify-", "land-lock-", "land-unlock", "land-push-", "pr", "checks-", "merge", "hold",
+             "close-out")),
+    (PLANNER, ("plan", "plan-revise", "plan-rules-revise")),
+    (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-",
+            "fix-sync-")),
+    (REV, ("plan-review", "plan-rules-review", "direct-review-full", "final-", "final-integration", "fix-wave-review",
+           "fix-wave-review-", "verify-fix-review-", "fix-ci-review", "sync-review-", "fix-sync-review-")),
+    (EITHER, ("review-", "direct-review")),
+    (LITE, ("direct-rereview", "rereview-")),
+) for stem in stems}
+STEM_PATTERNS = (
+    r"\b(?:label|reviewLabel): (['`])([a-z][a-z0-9-]*)",
+    r"\b\w*[lL]abel = (['`])([a-z][a-z0-9-]*)",
+    r"`, (`)([a-z][a-z0-9-]*)(?=\$\{|`)",
+)
+CONFLICT = {"sync-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
+            "fix-sync-1": {"start_head": MERGE, "commit": FIX}}
+VERIFY_RED = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
+NARROWING = {"verdict": "findings",
+             "findings": [{"severity": "critical", "summary": "race in release", "relation": "narrowing"}]}
+SCENARIOS = (
+    {},
+    {"replies": {"owner-answer": ANSWER}},
+    {"replies": {"plan": with_criteria(PlanRulesTest.ROWS[0][1]), "plan-revise": with_criteria(PlanRulesTest.ROWS[0][1]),
+                 "plan-rules-revise": with_criteria(PlanRulesTest.ROWS[0][1])}},
+    {"replies": {"plan-review": FINDING}},
+    {"args": dict(ARGS, cont={"claim_incomplete": True, "setup": {"holder": HOLDER}})},
+    {"replies": {"plan": dict(PLAN, tasks=tasks(1, "low"))}},
+    {"replies": {"review-1": BAD, "rereview-1-1": BAD, "rereview-1-2": BAD}},
+    {"replies": {"plan": dict(PLAN, tasks=tasks(4)), "final-1": FINDING, "fix-wave-review": NARROWING}},
+    {"replies": {"verify": VERIFY_RED}},
+    {"replies": {"checks-1": RED, "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
+     "patch": {"fix-ci": {"start_head": SHA, "commit": FIX}}},
+    {"replies": {"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING,
+                 "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
+     "patch": CONFLICT},
+    {"args": DIRECT, "replies": {"direct-review": BAD}},
+    {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
+)
+
+
+def all_calls():
+    return [c for scenario in SCENARIOS for c in run(**scenario)[1]]
+
+
+class AgentTypeTest(unittest.TestCase):
+    """#734: every agent call names a program agent type, so none runs on the default tool set."""
+
+    @staticmethod
+    def stems(text):
+        return {m.group(2) for pattern in STEM_PATTERNS for m in re.finditer(pattern, text)}
+
+    @staticmethod
+    def stem_of(label):
+        found = [k for k in EXPECTED if label == k or (k.endswith("-") and label.startswith(k))]
+        return max(found, key=len) if found else None
+
+    def test_every_named_site_has_an_expected_type(self):
+        self.assertLessEqual(self.stems(PROGRAM.read_text(encoding="utf-8")), set(EXPECTED))
+
+    def test_every_site_is_reached_with_its_type(self):
+        reached = set()
+        for call in all_calls():
+            stem = self.stem_of(call["label"])
+            self.assertIsNotNone(stem, call["label"])
+            self.assertIn(call["agentType"], EXPECTED[stem], call["label"])
+            reached.add(stem)
+        self.assertEqual(reached, set(EXPECTED))
+
+    def test_d3_sites_keep_a_high_effort(self):
+        found = [c for c in all_calls() if c["label"] in ("hold", "pr", "plan-codex", "direct-codex", "final-codex")]
+        self.assertEqual({c["label"] for c in found}, {"hold", "pr", "plan-codex", "direct-codex", "final-codex"})
+        for call in found:
+            self.assertEqual((call["agentType"], call["effort"]), ("clerk", "high"), call["label"])
+
+    def test_planner_sites_take_the_definition_tier(self):
+        found = [c for c in all_calls() if c["label"] in ("plan", "plan-revise", "plan-rules-revise")]
+        self.assertEqual({c["label"] for c in found}, {"plan", "plan-revise", "plan-rules-revise"})
+        for call in found:
+            self.assertEqual((call["agentType"], call["model"], call["effort"]), ("planner", None, None), call["label"])
 
 
 if __name__ == "__main__":
