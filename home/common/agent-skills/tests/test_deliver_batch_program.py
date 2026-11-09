@@ -676,7 +676,7 @@ class BookkeepingCountTest(unittest.TestCase):
         self.assertLessEqual(len(child_book) + len(batch_book), BOOKKEEPING_BASELINE * 0.6, (child_book, batch_book))
 
 
-RENEW_READ = {"verdict", "by", "detail"}
+RENEW_READ = {"verdict", "by", "detail", "transient"}
 FOLDED_READ = {
     "land-pr-1": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "land-merge-1": ({"merged", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
@@ -770,7 +770,7 @@ class LandTest(unittest.TestCase):
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n",
                       prompt(calls, "land-pr-1"))
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "land-merge-1"))
-        self.assertNotIn("--wait", prompt(calls, "land-merge-1"))
+        self.assertNotIn(" --wait\n", prompt(calls, "land-merge-1"))
         self.assertIn(f"gh pr merge 41 --repo owner/repo --merge --match-head-commit {SHA} --delete-branch",
                       prompt(calls, "land-merge-1"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}", prompt(calls, "land-unlock-1"))
@@ -818,7 +818,7 @@ class LandTest(unittest.TestCase):
             "land-checks-1-2": {"state": "passed", "head": FIX, "passed": ["ci"]}})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertIn(f"--sha {FIX}\n", prompt(calls, "land-record-1-1"))
-        self.assertNotIn("--wait", prompt(calls, "land-record-1-1"))
+        self.assertNotIn(" --wait\n", prompt(calls, "land-record-1-1"))
         self.assertIn(f"--sha {FIX}\n", prompt(calls, "land-merge-1"))
         self.assertIn(f"--match-head-commit {FIX}", prompt(calls, "land-merge-1"))
         ls = labels(calls)
@@ -1077,6 +1077,76 @@ class LandTest(unittest.TestCase):
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))
 
 
+TRANSIENT = {"verdict": "error", "detail": "gh_failed: dial tcp: connect: network is unreachable", "transient": True}
+
+
+class TransientTest(unittest.TestCase):
+    """#740 D6, D7: a transient acquire or renew is re-called once; a still-transient acquire row is re-queued once."""
+
+    def test_a_transient_acquire_is_called_once_more(self):
+        result, calls, _ = run(replies={"acquire-1": [TRANSIENT, {"verdict": "acquired", "comment_id": 7}]})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertEqual(labels(calls).count("acquire-1"), 2)
+
+    def test_a_row_still_transient_is_requeued_behind_the_waiting_issues(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]), patch={"setup": {"max_parallel": 1}},
+                               replies={"acquire-1": [TRANSIENT, TRANSIENT, {"verdict": "acquired", "comment_id": 7}]})
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3)], ["landed"] * 3)
+        ls = labels(calls)
+        third = [i for i, label in enumerate(ls) if label == "acquire-1"][2]
+        self.assertLess(ls.index("acquire-2"), third)
+        self.assertLess(ls.index("acquire-3"), third)
+
+    def test_a_requeued_row_still_transient_stops_at_acquire(self):
+        result, calls, _ = run(replies={"acquire-1": TRANSIENT})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"], row(result, 1)["transient"]),
+                         ("stopped", "acquire", True))
+        self.assertEqual(labels(calls).count("acquire-1"), 4)
+        self.assertNotIn("child-1", labels(calls))
+        self.assertNotIn("release-1", labels(calls))
+        self.assertEqual(result["relaunch"]["issues"], [1])
+
+    def test_contention_and_a_plain_error_are_never_called_again(self):
+        for reply in ({"verdict": "held_by", "by": "h2/b9"}, {"verdict": "error", "detail": "forge down"},
+                      {"verdict": "error", "detail": "forge down", "transient": False}):
+            with self.subTest(reply=reply):
+                result, calls, _ = run(replies={"acquire-1": reply})
+                self.assertEqual(labels(calls).count("acquire-1"), 1)
+                self.assertNotIn("transient", row(result, 1))
+
+    def test_a_transient_folded_renew_recalls_its_landing_step_once(self):
+        cases = {"land-pr-1": {"pr": 41, "head": SHA},
+                 "land-merge-1": {"merged": True, "merge_commit": SHA, "notes": "merged"}}
+        for label, second in cases.items():
+            with self.subTest(label=label, recovers=True):
+                result, calls, _ = run(replies={label: [{"renew": TRANSIENT, "lock": None}, second]})
+                self.assertEqual(row(result, 1)["outcome"], "landed")
+                self.assertEqual(labels(calls).count(label), 2)
+            with self.subTest(label=label, recovers=False):
+                result, calls, _ = run(replies={label: {"renew": TRANSIENT, "lock": None}})
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "renew"))
+                self.assertEqual(labels(calls).count(label), 2)
+
+    def test_a_not_held_folded_renew_is_never_called_again(self):
+        result, calls, _ = run(patch={"land-pr-1": {"renew": {"verdict": "not_held", "by": "h2/b9"}}})
+        self.assertEqual(row(result, 1)["outcome"], "claim-lost")
+        self.assertEqual(labels(calls).count("land-pr-1"), 1)
+
+    def test_acquire_and_renew_ask_for_transient(self):
+        _, calls, _ = run()
+        self.assertEqual(schema_of(calls, "acquire-1")["properties"]["transient"], {"type": "boolean"})
+        for label in ("acquire-1", "land-pr-1", "land-merge-1"):
+            with self.subTest(label=label):
+                self.assertIn("transient", prompt(calls, label))
+
+    def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
+        timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
+        _, calls, _ = run()
+        for label in ("acquire-1", "land-pr-1", "land-merge-1", "land-unlock-1"):
+            with self.subTest(label=label):
+                self.assertIn(timeout, prompt(calls, label))
+
+
 class LandOrderTest(unittest.TestCase):
     """#677: the land lock is taken, waiting, before the first resync, held through the merge,
     and the last held sha is released after it and on a stop."""
@@ -1120,7 +1190,7 @@ class LandOrderTest(unittest.TestCase):
         self.assertLess(ls.index("land-sync-1-1"), ls.index("land-record-1-1"))
         self.assertLess(ls.index("land-record-1-1"), ls.index("land-checks-1-1"))
         self.assertIn(f"--sha {B}\n", prompt(calls, "land-record-1-1"))
-        self.assertNotIn("--wait", prompt(calls, "land-record-1-1"))
+        self.assertNotIn(" --wait\n", prompt(calls, "land-record-1-1"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {B}",
                       prompt(calls, "land-unlock-1"))
 
