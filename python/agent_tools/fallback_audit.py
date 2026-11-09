@@ -150,8 +150,8 @@ def _declared_project_id(root: Path) -> str | None:
     """The `project.id` the root's contract declares, or None when it declares
     none it can be read as: an unreadable or malformed contract owns no exemption."""
     try:
-        source = json.loads((root / resolve_project.CONTRACT_FILENAME).read_text("utf-8"))
-    except (OSError, ValueError):
+        source = resolve_project.load_contract(root)
+    except resolve_project.ContractError:
         return None
     return resolve_project.declared_facts(source)["project_id"]
 

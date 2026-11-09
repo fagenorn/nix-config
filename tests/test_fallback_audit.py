@@ -151,6 +151,20 @@ class LaddersTest(unittest.TestCase):
                 report = self.ladders(root)[1]
                 self.assertEqual(self.stale(report["findings"]), [])
 
+    def test_a_contract_with_a_non_finite_token_owns_no_exemption(self):
+        for token in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(token=token):
+                contract = ('{"schema_version": 2, "project": {"id": "fagenorn/nix-config", '
+                            '"name": "nix-config"}, "deploy": {"config": {"x": %s}}}' % token)
+                root = self.make_repo({".agents/project.json": contract,
+                                       "python/agent_tools/adopt_inspection.py":
+                                       'X = ".claude/skills.config.json"\n'})
+                report = self.ladders(root)[1]
+                self.assertEqual(report["exempt"], [])
+                self.assertEqual(self.stale(report["findings"]), [])
+                self.assertIn("legacy-skills-config",
+                              [f["marker_id"] for f in report["findings"]])
+
     def test_a_manifest_removal_subject_is_a_marker(self):
         manifest = json.loads((REPO / "home/common/agent-skills/platform-manifest.json").read_text("utf-8"))
         manifest["removals"] = [{"id": "r1", "kind": "platform_behavior", "subject": "old verb",
