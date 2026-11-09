@@ -52,6 +52,7 @@ const DEFAULTS = [
   [/^owner-answer$/, { verdict: 'none', comment_id: null, questions: [], decisions: '', renew: { verdict: 'renewed' } }],
   [/review|^final-/, PASS],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],
+  [/^ws-check-/, { whitespace_exit: 1, changed_paths: ['src/a.js'] }],
   [/^verify-fix-/, DONE],
   [/^verify/, { head: SHA, clean: true, results: [{ id: 'build', status: 'pass', summary: 'ok' }], renew: { verdict: 'renewed' } }],
   [/^(impl|fix)-|^fix-wave$/, DONE],
