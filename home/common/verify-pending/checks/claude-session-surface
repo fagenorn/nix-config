@@ -1,5 +1,0 @@
-#!/bin/sh
-# Verify check for issue 735: a fresh Claude Code session lists none of the named tools or
-# skills. Runs one model request; verify-pending runs it from the repository root at the
-# commit the block names.
-PYTHONPATH=python exec python3 -m agent_tools.verify_checks claude-session-surface "$@"
