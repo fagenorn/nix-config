@@ -2659,15 +2659,19 @@ class SourceTest(unittest.TestCase):
             start = text.index(f"const {name} = ")
             return text[start:text.index("\n", start)]
 
+        def bare(text):
+            """The text without the #740 FORGE_TIMEOUT sentence (and its template-literal quoting), which each program adds in its own task."""
+            return text.replace(" ${FORGE_TIMEOUT}", "").replace("`", "'")
+
         for name in ("LAND_ACQUIRE", "LOCK_RETURN", "RELEASE_AGAIN"):
             with self.subTest(name=name):
-                self.assertEqual(line(mine, name), line(batch, name))
+                self.assertEqual(bare(line(mine, name)), bare(line(batch, name)))
         for needle in (
             "Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}",
             "released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail. Run nothing else.",
         ):
             with self.subTest(line=needle):
-                self.assertIn(needle, batch)
+                self.assertIn(bare(needle), bare(batch))
                 self.assertIn(needle, mine)
 
     def test_program_avoids_replay_breaking_builtins(self):
