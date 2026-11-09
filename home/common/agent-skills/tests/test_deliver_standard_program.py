@@ -38,6 +38,7 @@ HUMAN = {"id": "AC3", "text": "looks right", "kind": "human",
          "verify": {"ac": "AC3", "kind": "human", "host": "h1", "when": {"days_after": {"event": "deployed", "days": 1}},
                     "run": {"ask": "Does the page render right on the phone"}, "reason": "senses"},
          "lint": OK_LINT}
+NOTE = {"id": "AC4", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
 RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
 
 
@@ -540,10 +541,11 @@ class OwnerAnswerTest(unittest.TestCase):
     def test_plan_reviews_can_cite_every_rule(self):
         rules = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
         ids = re.findall(r"^- \*\*(R\d+)\.", rules.read_text(encoding="utf-8"), re.M)
-        self.assertIn("R8", ids)
+        self.assertIn("R9", ids)
         _, calls = run()
         review = next(c for c in calls if c["label"] == "plan-review")
         self.assertEqual(review["schema"]["properties"]["findings"]["items"]["properties"]["rule"]["enum"], ids)
+        self.assertIn(f"every rule {ids[0]}-{ids[-1]} of", prompt(calls, "plan"))
         text = PROGRAM.read_text(encoding="utf-8")
         self.assertRegex(text, r"label: 'plan-rules-review'[^}]*schema: PLAN_REVIEW")
 
@@ -982,6 +984,12 @@ class PlanRulesTest(unittest.TestCase):
         ("R5", criterion(EVIDENCE, metric=True)),
         ("R5", dict(PLAN["acceptance"][0], id="AC2", metric=True)),
     )
+    NOTE_ROWS = (
+        ("R9", criterion(NOTE, verify={"ac": "AC4", "kind": "note", "host": "h1",
+                                       "when": {"deployed_includes": SHA}, "run": {"script": "scripts/check-live"}},
+                         lint=OK_LINT)),
+        ("R9", criterion(NOTE, script="scripts/check-live")),
+    )
     RULE_FINDING = {"verdict": "findings",
                     "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
 
@@ -1014,7 +1022,7 @@ class PlanRulesTest(unittest.TestCase):
         return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan})
 
     def test_each_rule_violation_stops_at_plan_review_naming_the_rule(self):
-        for rule, bad in self.ROWS:
+        for rule, bad in self.ROWS + self.NOTE_ROWS:
             with self.subTest(rule=rule, ac=bad["id"]):
                 plan = with_criteria(bad)
                 result, calls = self.gate(plan)
@@ -1028,6 +1036,40 @@ class PlanRulesTest(unittest.TestCase):
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-revise"))
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-rules-revise"))
                 self.assertNotIn("impl-1", labels(calls))
+
+    def test_a_note_without_verify_or_script_passes_plan_rules(self):
+        """#736 AC1: a plan with a note criterion and no script passes planRules; the planner learns the kind."""
+        result, calls = run(replies={"plan": with_criteria(NOTE)}, patch={"close-out": {"notes_posted": True}})
+        kinds = schema_of(calls, "plan")["properties"]["acceptance"]["items"]["properties"]["kind"]["enum"]
+        self.assertEqual(kinds, ["code", "evidence", "human", "note"])
+        self.assertNotIn("plan-revise", labels(calls))
+        self.assertNotIn("plan-rules-review", labels(calls))
+        self.assertIn("impl-1", labels(calls))
+        self.assertNotEqual(result["stage"], "plan-review")
+        _, direct = run(args=dict(ARGS, lane="direct"))
+        for text in (prompt(calls, "plan"), prompt(direct, "direct-impl")):
+            for kind in kinds:
+                self.assertIn(f"{kind} if ", text)
+
+    def test_a_note_with_a_verify_block_or_script_is_refused_naming_r9(self):
+        """#736 AC1: planRules refuses a note carrying a verify block or a script."""
+        for _, bad in self.NOTE_ROWS:
+            with self.subTest(bad=sorted(bad)):
+                result, _ = self.gate(with_criteria(bad))
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertEqual([(r["rule"], r["ac"]) for r in result["rules"]], [("R9", "AC4")])
+
+    def test_a_metric_note_is_still_an_r5_refusal(self):
+        result, _ = self.gate(with_criteria(criterion(NOTE, metric=True)))
+        self.assertIn(("R5", "AC4"), [(r["rule"], r["ac"]) for r in result["rules"]])
+
+    def test_the_planner_never_tags_a_note_as_a_metric(self):
+        """#736 (D8): an owner-designated latency observation is a note, so the metric instruction exempts notes."""
+        _, calls = run()
+        text = prompt(calls, "plan")
+        metric = text[text.index("set metric true"):]
+        metric = metric[:metric.index(". ")]
+        self.assertIn("never on a note", metric)
 
     def test_pre_merge_only_evidence_stops_at_plan_review_naming_r1(self):
         # The issue's demo: a planner reply with a pre-merge-only evidence criterion.
@@ -1426,6 +1468,160 @@ class ReviewAndVerifyTest(unittest.TestCase):
         self.assertEqual(result["stage"], "verify")
         self.assertEqual([l for l in labels(calls) if l.startswith("verify-fix")],
                          ["verify-fix-1", "verify-fix-review-1", "verify-fix-2", "verify-fix-review-2"])
+
+
+TWO_IDS = [{"id": "lint", "argv": ["make", "lint"], "cwd": "."}, {"id": "test", "argv": ["make", "test"], "cwd": "."}]
+FULL = json.dumps(TWO_IDS, separators=(",", ":"))
+LINT_ONLY = json.dumps([TWO_IDS[0]], separators=(",", ":"))
+FIXED = "c" * 40
+LINT_RED = {"head": SHA, "clean": True, "results": [{"id": "lint", "status": "fail", "summary": "3 whitespace errors"},
+                                                   {"id": "test", "status": "pass", "summary": "ok"}]}
+LINT_GREEN = {"head": FIXED, "clean": True, "results": [{"id": "lint", "status": "pass", "summary": "ok"}]}
+BOTH_GREEN = {"head": FIXED, "clean": True, "results": [{"id": "lint", "status": "pass", "summary": "ok"},
+                                                       {"id": "test", "status": "pass", "summary": "ok"}]}
+WS_ONLY = {"whitespace_exit": 0, "changed_paths": ["src/a.test.ts"]}
+ATTESTED = {"verdict": "pass", "findings": [], "whitespace_insignificant": True,
+            "whitespace_evidence": "src/a.test.ts: trailing spaces and blank lines between statements"}
+WS_SCENARIO = {"args": dict(ARGS, mode="ready"),
+               "replies": {"verify": LINT_RED, "ws-check-1": WS_ONLY, "verify-fix-review-1": ATTESTED,
+                           "verify-2": LINT_GREEN},
+               "patch": {"setup": {"verification": TWO_IDS}, "verify-fix-1": {"start_head": SHA, "commit": FIXED}}}
+
+
+class WhitespaceCarryForwardTest(unittest.TestCase):
+    """#741: after a whitespace-only verify fix whose whitespace the reviewer attests insignificant, only the ids
+    that did not pass re-run and the passes carry forward."""
+
+    @staticmethod
+    def scenario(ws, verify2=LINT_GREEN, fix=None, first=LINT_RED, review=ATTESTED, more=None):
+        return run(args=dict(ARGS, mode="ready"),
+                   replies={"verify": first, "ws-check-1": ws, "verify-fix-review-1": review, "verify-2": verify2,
+                            **(more or {})},
+                   patch={"setup": {"verification": TWO_IDS},
+                          "verify-fix-1": fix or {"start_head": SHA, "commit": FIXED}})
+
+    def assert_full_rerun(self, calls, result):
+        self.assertIn(FULL, prompt(calls, "verify-2"))
+        self.assertEqual(result["verify"], BOTH_GREEN["results"])
+
+    def test_a_whitespace_only_fix_reruns_only_the_failed_id_and_carries_the_pass(self):
+        result, calls = self.scenario(WS_ONLY)
+        verify2 = prompt(calls, "verify-2")
+        self.assertIn(LINT_ONLY, verify2)
+        self.assertNotIn('"id":"test"', verify2)
+        self.assertIn("verify-fix-review-1", labels(calls))
+        self.assertEqual((result["stage"], result["head"]), ("ready", FIXED))
+        self.assertEqual(len(result["verify"]), 2)
+        by_id = {r["id"]: r for r in result["verify"]}
+        self.assertEqual(by_id["lint"], {"id": "lint", "status": "pass", "summary": "ok"})
+        self.assertEqual((by_id["test"]["status"], by_id["test"]["carried_from"]), ("pass", SHA))
+        self.assertEqual(result["cont"]["verified"]["head"], FIXED)
+
+    def test_the_ws_check_is_a_clerk_reading_the_fix_range(self):
+        _, calls = self.scenario(WS_ONLY)
+        check = [c for c in calls if c["label"] == "ws-check-1"]
+        self.assertEqual([c["agentType"] for c in check], ["clerk"])
+        text = check[0]["prompt"]
+        self.assertIn(f"git -C /r/.wt/w-issue-9-x diff -b --ignore-blank-lines --quiet {SHA} {FIXED}\n", text)
+        self.assertIn(f"git -C /r/.wt/w-issue-9-x diff --no-renames --name-only {SHA} {FIXED}\n", text)
+
+    def test_only_a_prefiltered_fix_review_must_attest(self):
+        _, calls = self.scenario(WS_ONLY)
+        schema = schema_of(calls, "verify-fix-review-1")
+        for key in ("whitespace_insignificant", "whitespace_evidence"):
+            self.assertIn(key, schema["properties"])
+            self.assertIn(key, schema["required"])
+        self.assertIn("src/a.test.ts", prompt(calls, "verify-fix-review-1"))
+        _, plain = self.scenario({"whitespace_exit": 1, "changed_paths": ["src/a.ts"]}, verify2=BOTH_GREEN)
+        self.assertNotIn("whitespace_insignificant", schema_of(plain, "verify-fix-review-1")["properties"])
+        self.assertEqual([c["agentType"] for c in calls + plain if c["label"] == "verify-fix-review-1"],
+                         ["reviewer", "reviewer"])
+
+    def test_a_fix_that_is_not_whitespace_only_reruns_every_id(self):
+        cases = {
+            "content change": {"whitespace_exit": 1, "changed_paths": ["src/a.ts"]},
+            "whitespace-significant path": {"whitespace_exit": 0, "changed_paths": ["src/a.ts", "tools/b.py"]},
+            "extensionless path": {"whitespace_exit": 0, "changed_paths": ["Makefile"]},
+            "no changed path": {"whitespace_exit": 0, "changed_paths": []},
+            "dead ws-check": None,
+        }
+        for name, ws in cases.items():
+            with self.subTest(case=name):
+                # The review attests anyway: an attestation the program did not ask for counts for nothing.
+                result, calls = self.scenario(ws, verify2=BOTH_GREEN)
+                self.assertIn("ws-check-1", labels(calls))
+                self.assertIn("verify-fix-review-1", labels(calls))
+                self.assert_full_rerun(calls, result)
+        # A full re-run that omits test does not inherit its earlier pass.
+        result, _ = self.scenario(cases["content change"], more={"verify-3": LINT_GREEN})
+        self.assertEqual(result["stage"], "verify")
+        self.assertIn("test", [p["id"] for p in result["problems"]])
+
+    def test_whitespace_that_matters_reruns_every_id(self):
+        # -b --ignore-blank-lines exits 0 for a doubled space inside a regex literal of an allowed file type.
+        regex = {"whitespace_exit": 0, "changed_paths": ["src/match.mjs"]}
+        reviews = {
+            "regex whitespace": {"verdict": "pass", "findings": [], "whitespace_insignificant": False,
+                                 "whitespace_evidence": "src/match.mjs: the hunk doubles a space inside a regex"},
+            "blank evidence": dict(ATTESTED, whitespace_evidence="  "),
+            "no attestation": {"verdict": "pass", "findings": []},
+        }
+        for name, review in reviews.items():
+            with self.subTest(case=name):
+                result, calls = self.scenario(regex, verify2=BOTH_GREEN, review=review)
+                self.assertIn("whitespace_insignificant", schema_of(calls, "verify-fix-review-1")["properties"])
+                self.assert_full_rerun(calls, result)
+                self.assertFalse(any("carried_from" in r for r in result["verify"]))
+
+    def test_no_carry_without_its_preconditions(self):
+        cases = {
+            "fix starts elsewhere": ({"start_head": "d" * 40, "commit": FIXED}, LINT_RED),
+            "dirty first verify": (None, dict(LINT_RED, clean=False)),
+            "nothing passed": (None, {"head": SHA, "clean": True,
+                                      "results": [{"id": "lint", "status": "fail", "summary": "x"},
+                                                  {"id": "test", "status": "fail", "summary": "y"}]}),
+            "a missing result": (None, {"head": SHA, "clean": True,
+                                        "results": [{"id": "lint", "status": "fail", "summary": "x"}]}),
+        }
+        for name, (fix, first) in cases.items():
+            with self.subTest(case=name):
+                result, calls = self.scenario(WS_ONLY, verify2=BOTH_GREEN, fix=fix, first=first)
+                self.assertNotIn("ws-check-1", labels(calls))
+                self.assertIn("verify-fix-review-1", labels(calls))
+                self.assert_full_rerun(calls, result)
+
+    def test_a_narrowed_verify_at_another_head_stops(self):
+        moved = dict(LINT_GREEN, head="d" * 40)
+        result, calls = self.scenario(WS_ONLY, verify2=moved)
+        self.assertEqual(result["stage"], "verify")
+        problems = json.dumps(result["problems"])
+        self.assertIn("d" * 40, problems)
+        self.assertIn(FIXED, problems)
+        self.assertNotIn("verify-fix-2", labels(calls))
+
+    def test_a_fresh_result_wins_over_a_carried_pass(self):
+        fresh = {"head": FIXED, "clean": True, "results": [{"id": "lint", "status": "pass", "summary": "ok"},
+                                                           {"id": "test", "status": "fail", "summary": "test broke"}]}
+        result, _ = self.scenario(WS_ONLY, verify2=fresh, more={"verify-fix-2": {"status": "blocked", "notes": "x"}})
+        self.assertEqual(result["stage"], "verify-fix")
+        self.assertEqual([r for r in result["verify"]["results"] if r["id"] == "test"],
+                         [{"id": "test", "status": "fail", "summary": "test broke"}])
+
+    def test_a_second_whitespace_fix_keeps_the_original_carried_from(self):
+        again = "e" * 40
+        result, calls = run(args=dict(ARGS, mode="ready"),
+                            replies={"verify": LINT_RED, "ws-check-1": WS_ONLY, "ws-check-2": WS_ONLY,
+                                     "verify-fix-review-1": ATTESTED, "verify-fix-review-2": ATTESTED,
+                                     "verify-2": dict(LINT_GREEN, results=[{"id": "lint", "status": "fail",
+                                                                            "summary": "1 more"}]),
+                                     "verify-3": dict(LINT_GREEN, head=again)},
+                            patch={"setup": {"verification": TWO_IDS},
+                                   "verify-fix-1": {"start_head": SHA, "commit": FIXED},
+                                   "verify-fix-2": {"start_head": FIXED, "commit": again}})
+        self.assertEqual((result["stage"], result["head"]), ("ready", again))
+        self.assertNotIn('"id":"test"', prompt(calls, "verify-3"))
+        by_id = {r["id"]: r for r in result["verify"]}
+        self.assertEqual((by_id["test"]["status"], by_id["test"]["carried_from"]), ("pass", SHA))
 
 
 class ShipTest(unittest.TestCase):
@@ -2031,6 +2227,70 @@ class HoldTest(unittest.TestCase):
         result, _ = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="OPEN")
         self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
 
+    def test_close_out_runs_when_the_once_run_closes_the_issue(self):
+        """#760 AC1: the hold posts a block, the single verify run closes the issue, and close-out still runs."""
+        result, calls = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[-2:], ["hold", "close-out"])
+        close_out = prompt(calls, "close-out")
+        self.assertIn("git -C /r worktree remove /r/.wt/w-issue-9-x", close_out)
+        self.assertIn("forge-claim release --repo owner/repo --issue 9 --holder", close_out)
+        self.assertEqual(prompt(calls, "hold").count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+
+    def test_close_out_runs_when_the_issue_is_already_closed_at_hold_time(self):
+        """#760 AC2: an issue closed before the hold posts nothing and runs nothing, and close-out still runs."""
+        already = {"issue_state": "CLOSED", "already_closed": True, "block": None, "lint": None, "verify_run": None}
+        result, calls = self.ship(EVIDENCE, hold=already, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[-2:], ["hold", "close-out"])
+        close_out = prompt(calls, "close-out")
+        self.assertIn("git -C /r worktree remove /r/.wt/w-issue-9-x", close_out)
+        self.assertIn("forge-claim release --repo owner/repo --issue 9 --holder", close_out)
+        self.assertIn("return already_closed true and issue_state CLOSED", prompt(calls, "hold"))
+        result, calls = self.ship(HUMAN, hold=already, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+
+    def test_closed_at_hold_time_still_checks_a_split_child(self):
+        child = dict(self.CHILD, verify_run={"ran": False, "exit": 0})
+        hold = {"issue_state": "CLOSED", "already_closed": True, "blocks": [12], "split": [child]}
+        result, calls = self.ship(HUMAN, hold=hold, close="CLOSED")
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+        result, calls = self.ship(HUMAN, hold=dict(hold, split=[]), close="CLOSED")
+        self.assertEqual((result["stage"], result["missing_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+        result, _ = self.ship(HUMAN, hold=dict(hold, split=[self.CHILD]), close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+
+    def test_the_hold_prompt_recovers_split_children_when_the_issue_is_already_closed(self):
+        """#760 R2: a resume that finds the parent closed still reads the blocked issues and the split children."""
+        _, calls = self.ship(HUMAN, hold={"issue_state": "CLOSED", "already_closed": True, "blocks": [], "split": []})
+        hold = prompt(calls, "hold")
+        self.assertIn("steps 4 and 5 still apply", hold)
+        self.assertLess(hold.index("steps 4 and 5 still apply"), hold.index("4. Read the issues this one blocks"))
+
+    def test_a_once_run_close_still_validates_the_hold_evidence(self):
+        """#760 R1: CLOSED after this attempt's own run is not already_closed: an uncovered criterion still stops."""
+        partial = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]}
+        for flag in ({}, {"already_closed": False}):
+            with self.subTest(flag=flag):
+                result, calls = self.ship(EVIDENCE, HUMAN, hold=dict({"issue_state": "CLOSED", "block": partial}, **flag),
+                                          close="CLOSED")
+                self.assertEqual((result["stage"], result["missing_checks"]), ("hold", ["AC3"]))
+                self.assertNotIn("close-out", labels(calls))
+        result, calls = self.ship(EVIDENCE, hold={"issue_state": "CLOSED", "lint": None, "verify_run": None},
+                                  close="CLOSED")
+        self.assertEqual(result["stage"], "hold")
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_closed_at_hold_time_still_needs_the_merge_and_the_code_rows(self):
+        already = {"issue_state": "CLOSED", "already_closed": True, "block": None, "lint": None, "verify_run": None}
+        for bad, stage in (({"merge_commit_local": False}, "hold"), ({"code_unmet": ["AC1"]}, "code-unmet")):
+            with self.subTest(bad=bad):
+                result, calls = self.ship(EVIDENCE, hold=dict(already, **bad), close="CLOSED")
+                self.assertEqual(result["stage"], stage)
+                self.assertNotIn("close-out", labels(calls))
+
     def test_refused_lint_or_failed_run_stops_without_close_out(self):
         for hold in ({"lint": {"ok": False, "errors": [{"code": "unverified_reference"}]}},
                      {"verify_run": {"ran": False, "exit": 0}}, {"verify_run": {"ran": True, "exit": 2}},
@@ -2136,6 +2396,91 @@ class HoldTest(unittest.TestCase):
         result, _ = run(args=dict(ARGS, cont=cont), replies={"hold": dict(self.HOLD, **stale)},
                         patch={"setup": {"merged_pr": 42}})
         self.assertEqual(result["stage"], "hold")
+
+
+class NoteCloseOutTest(unittest.TestCase):
+    """#736 AC2: a note is never held, and the close-out comment lists the note texts."""
+
+    MERGE = "d" * 40
+
+    def ship(self, *criteria, hold=None, **patch):
+        replies = {"plan": with_criteria(*criteria)}
+        if hold is not None:
+            replies["hold"] = hold
+        return run(replies=replies, patch=dict({"merge": {"merge_commit": self.MERGE},
+                                                "close-out": {"notes_posted": True}}, **patch))
+
+    def test_the_close_out_comment_lists_the_note_texts(self):
+        result, calls = self.ship(NOTE)
+        self.assertEqual(result["stage"], "done")
+        close = prompt(calls, "close-out")
+        self.assertIn(NOTE["text"], close)
+        self.assertIn("Orchestrator notes for PR 42", close)
+        self.assertIn("gh issue comment 9 --repo owner/repo --body-file", close)
+        self.assertLess(close.index("Orchestrator notes for PR 42"), close.index("gh issue close 9 --repo owner/repo"))
+        self.assertIn("Every criterion is of kind code or note: post nothing, add no label", prompt(calls, "hold"))
+        self.assertIn("never regraded, held or checked", prompt(calls, "hold"))
+
+    def test_a_code_and_note_plan_closes_like_an_all_code_plan(self):
+        result, calls = self.ship(NOTE, setup={"integration_branch": "main"})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("Closes #9", prompt(calls, "pr"))
+        self.assertNotIn("needs-verification", prompt(calls, "close-out"))
+
+    def test_unposted_notes_stop_the_close_out(self):
+        result, _ = self.ship(NOTE, **{"close-out": {"notes_posted": False}})
+        self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
+
+    def test_a_plan_without_notes_has_no_notes_step(self):
+        _, calls = run()
+        self.assertNotIn("Orchestrator notes", prompt(calls, "close-out"))
+
+    def test_a_note_beside_evidence_is_neither_checked_nor_missing(self):
+        hold = {"merge_commit_local": True, "code_unmet": [], "blocks": [], "split": [],
+                "block": {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]},
+                "lint": {"ok": True, "errors": []}, "verify_run": {"ran": True, "exit": 0},
+                "issue_state": "OPEN", "notes": "n"}
+        result, calls = self.ship(EVIDENCE, NOTE, hold=hold,
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("(evidence or human, not split)", prompt(calls, "hold"))
+        close = prompt(calls, "close-out")
+        self.assertIn(NOTE["text"], close)
+        self.assertNotIn("gh issue close", close)
+
+    def test_a_hold_that_checks_a_note_stops(self):
+        """#736 DR-001: a note is never held, so a hold block or split child that checks one is refused."""
+        both = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}, {"ac": "AC4", "kind": "note"}]}
+        result, calls = self.ship(EVIDENCE, NOTE, hold=dict(HoldTest.HOLD, block=both),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["note_checks"]), ("hold", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        note_child = dict(HoldTest.CHILD, ac="AC4", block={"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC4", "kind": "note"}]})
+        result, calls = self.ship(HUMAN, NOTE, hold=dict(HoldTest.HOLD, blocks=[12], split=[HoldTest.CHILD, note_child]),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        extra = dict(HoldTest.CHILD, block={"v": 1, "merge": self.MERGE, "checks": [
+            {"ac": "AC3", "kind": "human"}, {"ac": "AC4", "kind": "evidence", "run": {"script": "scripts/check-live"}}]})
+        result, calls = self.ship(HUMAN, NOTE, hold=dict(HoldTest.HOLD, blocks=[12], split=[extra]),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_an_unrecognised_kind_never_closes_ungraded(self):
+        """#736 DR-002: a typo kind is neither open nor a note, so no path may close the issue on it."""
+        typo = dict(NOTE, kind="evdience")
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": with_criteria(typo), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
+        self.assertEqual((result["stage"], result["bad_kinds"]), ("close-out", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        self.assertNotIn("hold", labels(calls))
+        result, calls = run(replies={"plan": with_criteria(typo)})
+        self.assertNotEqual(result["stage"], "done")
+        self.assertNotIn("pr", labels(calls))
+        self.assertNotIn("close-out", labels(calls))
 
 
 class FixWaveTest(unittest.TestCase):
@@ -3040,8 +3385,8 @@ CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer",
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex",
-             "verify", "verify-", "land-lock-", "land-unlock", "land-push-", "pr", "checks-", "merge", "hold",
-             "close-out")),
+             "verify", "verify-", "ws-check-", "land-lock-", "land-unlock", "land-push-", "pr", "checks-", "merge",
+             "hold", "close-out")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-",
             "fix-sync-")),
@@ -3078,6 +3423,7 @@ SCENARIOS = (
      "patch": CONFLICT},
     {"args": DIRECT, "replies": {"direct-review": BAD}},
     {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
+    WS_SCENARIO,
 )
 
 
@@ -3120,6 +3466,30 @@ class AgentTypeTest(unittest.TestCase):
         self.assertEqual({c["label"] for c in found}, {"plan", "plan-revise", "plan-rules-revise"})
         for call in found:
             self.assertEqual((call["agentType"], call["model"], call["effort"]), ("planner", None, None), call["label"])
+
+
+class PromptCommandFormTest(unittest.TestCase):
+    """#738: a command ends at a line break, and a prompt that reads the issue body asks for it."""
+
+    BODY_READERS = ("plan", "plan-revise", "plan-rules-revise", "plan-review")
+
+    def test_no_command_is_followed_by_a_lone_dot_argument(self):
+        for call in all_calls():
+            self.assertIsNone(re.search(r"(?<=\S) \.(?=\s|$)", call["prompt"]), call["label"])
+
+    def test_body_readers_view_the_issue_as_json_with_body_and_comments(self):
+        seen = set()
+        for call in all_calls():
+            if call["label"] not in self.BODY_READERS:
+                continue
+            views = re.findall(r"gh issue view[^)\n]*", call["prompt"])
+            self.assertTrue(views, call["label"])
+            for view in views:
+                self.assertRegex(view, r"--json \S*\bbody\b", call["label"])
+                self.assertRegex(view, r"--json \S*\bcomments\b", call["label"])
+                self.assertNotIn("--comments", view, call["label"])
+            seen.add(call["label"])
+        self.assertEqual(seen, set(self.BODY_READERS))
 
 
 if __name__ == "__main__":
