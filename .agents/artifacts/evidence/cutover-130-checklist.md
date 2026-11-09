@@ -4,8 +4,8 @@ Purpose: pre-activation predicates for the issue 130 strict cutover with fresh r
 Run: rel_01a1a1d8-7220-72a2-841e-df2806f78396; refreshed by the issue 130 overnight preparation, 2026-11-09
 Revisions: origin/main 6e2f9dde45cb76f363813801fb3b3b42b430545d (frozen for the cutover); candidate origin/cutover-130-candidate 953f9b4b29253720e9868ab71b456b0ed3a62f63
 Hosts: eleven-m5, mbp, anis-desktop
-Evidence window: 2026-11-09T01:30:03Z to @@WINDOW_END@@
-Activation readiness: activation not permitted — @@COUNTS@@ of 11 pre-activation items. C8 is retired, not counted.
+Evidence window: 2026-11-09T01:30:03Z to 2026-11-09T01:43:58Z
+Activation readiness: activation not permitted — 4 red, 7 human-pending, 0 green of 11 pre-activation items. C8 is retired, not counted.
 
 Owner decisions applied (issue 130, 2026-11-08T13:20:31Z): C8 (the Codex ship handoff) is no longer a cutover predicate. C3's live trials are Claude-only. AC4 and AC9 (P3) need a Claude-driven ship on the strict path only.
 
@@ -218,9 +218,7 @@ C6.a workflow-state migrate --repo-root R
 
 Earlier readings (2026-11-03 to 2026-11-08) and their re-read notes are in this file's history at origin/main 6e2f9dde45cb.
 
-Item verdict: **human-pending** (JarBird on mbp and eleven-m5 awaits gate step 1, and anis-desktop was unreachable; every other root is green)
-
-#### #584 disposition
+#### #584 disposition (2026-11-08 record, unchanged)
 
 Archive home: `R/.superpowers/archive/workflows/<ledger>`, with a sidecar `<ledger>.archived.json` in record schema ledger-archive-record/v1, which carries each ledger's disposition label (archived, abandoned or unresolved) and its re-delivery issues. Nothing was deleted. Every snapshot was taken behind the D9 fence: ledger-snapshot take holds every ledger state.lock, every workflows dot-lock and the transaction store locks, all non-blocking, and refuses busy or changed instead of waiting. All four takes exited 0.
 
@@ -341,7 +339,7 @@ Each issue below is re-delivered fresh on the strict path, and no archived ledge
 - /Users/anis/Projects/nodocom orch-1445-1446-1480 (abandoned): elevenyellow/nodocom#1480 open
 - /Users/anis/Projects/nodocom orch-1869-1870-1871-1872-1873 (abandoned): elevenyellow/nodocom#1871 open, elevenyellow/nodocom#1872 open
 
-Item verdict: **human-pending** (mbp JarBird `migrate 19` awaits gate step 1, and anis-desktop was unreachable; the four refused-ledger roots are green)
+Item verdict: **human-pending** (JarBird on mbp and eleven-m5 awaits gate step 1, and anis-desktop was unreachable; every other root is green)
 
 ### C7 — Retained worktrees have a strict-path mapping
 
@@ -351,14 +349,20 @@ Item verdict: **human-pending** (mbp JarBird `migrate 19` awaits gate step 1, an
 C7.r home/common/verify-pending/checks/worktree-mapping --repo-root R ...
 ```
 
-C7.r (issue 585, with the forge class of #710) states this item's rule in one read-only command. A worktree is `current` when a current ledger names it. It is `migrate` when only ledgers that still need migration name it, and `refused-only` when only refused ones do. It is `forge` when no ledger names it but an open in-progress claim, an open same-repository pull request or the declared `cutover-130-candidate` branch maps its branch. Otherwise it is `unmapped`. A root is red on any `unmapped` or `refused-only` path and human-pending on `migrate`. It ran from origin/main 6e2f9dde45cb on each host, @@C7_MBP_UTC@@ on mbp, after this run's own scratch worktree was removed and the evidence branch's pull request was opened.
+C7.r (issue 585, with the forge class of #710) states this item's rule in one read-only command. A worktree is `current` when a current ledger names it. It is `migrate` when only ledgers that still need migration name it, and `refused-only` when only refused ones do. It is `forge` when no ledger names it but an open in-progress claim, an open same-repository pull request or the declared `cutover-130-candidate` branch maps its branch. Otherwise it is `unmapped`. A root is red on any `unmapped` or `refused-only` path and human-pending on `migrate`. It ran from origin/main 6e2f9dde45cb on each host, 2026-11-09T01:43:45Z on mbp, after this run's own scratch worktree was removed and the evidence branch's pull request was opened.
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
 | anis-desktop | host | — | C1.c | 2026-11-09T01:30:03Z | 255 | unreachable (probed once) | human-pending |
-@@C7_ROWS@@
+| mbp | /Users/anis/Projects/arcwave | 2adb089868c5 dev 0 dirty | C7.r | 2026-11-09T01:43:45Z | 1 | worktrees 10: current 10, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
+| mbp | /Users/anis/Projects/argus | 21338cae51ea main 1 dirty | C7.r | 2026-11-09T01:43:45Z | 1 | worktrees 8: current 8, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
+| mbp | /Users/anis/tmp/nix-config | 6e2f9dde45cb main 0 dirty | C7.r | 2026-11-09T01:43:45Z | 1 | worktrees 9: current 6, forge 3, migrate 0, refused-only 0, unmapped 0; forge `cutover-130-candidate` (declared); forge `prep-130-main-baseline` (open_pr); forge `worktree-issue-687-retire-codex-driven-entry-surfaces-and-decouple-codex-collaboration-from-the-from-issue-pipeline` (claim, open_pr) | green |
+| mbp | /Users/anis/Projects/jarbird | 7837084d9845 dev 1 dirty | C7.r | 2026-11-09T01:43:45Z | 1 | worktrees 21: current 15, forge 4, migrate 0, refused-only 0, unmapped 2; forge `worktree-issue-238-switch-the-safety-policy-to-neutral-by-release-migration` (claim); forge `worktree-issue-243-persist-owner-escalations-and-pin-them-until-answered` (claim); forge `worktree-issue-332-revoke-a-relay-structured-output-capability-when-one-of-its-replies-breaks-the-schema` (claim); forge `worktree-issue-344-schedule-fidelity-probes-per-relay-pair-on-a-poisson-clock` (claim); unmapped `worktree-issue-487-cut-the-test-suite-from-19-minutes-by-isolating-database-tests-and-removing-real-time-waits`; unmapped `worktree-issue-499-find-and-fix-the-ci-resource-contention-that-made-parallel-test-runs-slower-on-the-2-vcpu-runner` | red |
+| mbp | /Users/anis/Projects/nodocom | 6eb54814447b dev 0 dirty | C7.r | 2026-11-09T01:43:45Z | 1 | worktrees 5: current 5, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
+| eleven-m5 | /Users/anis/Projects/nix-config | 6e2f9dde45cb main 0 dirty | C7.r | 2026-11-09T01:43:58Z | 75 | worktrees 0: current 0, forge 0, migrate 0, refused-only 0, unmapped 0 (after the empty ledger store; the 01:31:32Z read exited 2 before it existed) | green |
+| eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C7.r | 2026-11-09T01:43:58Z | 75 | worktrees 8: current 0, forge 0, migrate 8, refused-only 0, unmapped 0 | human-pending |
 
-@@C7_NOTES@@
+Exit is the check's exit over all of that host's roots: 1 when a root is red and 75 when the worst root is human-pending. On mbp, JarBird's two unmapped worktrees are the issue 487 and issue 499 worktrees that #585 kept for `operator` and that #700 tracks. jarbird#499 is held by another session, so its worktree was not touched. The four JarBird `forge` paths are live claims of another session. On nix-config, `cutover-130-candidate` is the declared candidate branch, the issue 687 worktree has an open claim and PR #723, and this refresh's evidence worktree (`prep-130-main-baseline`, branch `issue-130-overnight-checklist-refresh`) is mapped by its open pull request. The closed issue 705's worktree, unmapped at the 01:31:03Z read, was removed as recorded under the summary. eleven-m5's JarBird worktrees read `migrate` (they read `current` on 2026-11-03), because their schema-10 ledgers migrate at gate step 1.
 
 Earlier readings (2026-11-03 to 2026-11-08) and their re-read notes are in this file's history at origin/main 6e2f9dde45cb.
 
@@ -425,7 +429,7 @@ C11.a resolve-project platform-status
 C11.r home/common/verify-pending/checks/deprecations-retired --repo-root R ...
 ```
 
-C11.r (issue 582) states this item's per-root rule in one read-only command. Reading (a) is no `project.deprecated_uses`. Reading (b) is no tracked `.claude/skills.config.json`. Reading (c) is `resolve-project resolve` exiting 0 with `bindings.deploy.adapter` `none`. Reading (d) is no `release deploy inspect` outside `.agents/artifacts`, and for fagenorn/nix-config the pathspec is `home/common/agent-skills/skills`. It ran from origin/main 6e2f9dde45cb on each host.
+C11.r (issue 582) states this item's per-root rule in one read-only command. Reading (a) is no `project.deprecated_uses`. Reading (b) is no tracked `.claude/skills.config.json`. Reading (c) is `resolve-project resolve` exiting 0 with `bindings.deploy.adapter` `none`. Reading (d) is no `release deploy inspect` outside `.agents/artifacts`; for `fagenorn/nix-config` its pathspec is `home/common/agent-skills/skills`. It ran from origin/main 6e2f9dde45cb on each host.
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
@@ -490,7 +494,7 @@ Every row that is red at this refresh, and its route:
 |------|--------------|-------------|
 | C3 mbp and eleven-m5 origin/main .agents/artifacts/evidence/ | An `approved` Claude-only #70 bundle binding 953f9b4b2925, merged into origin/main | #725: Claude-only gate mode, trial corpus and paid trial; lands after the main freeze |
 | C4.b mbp fleet; C4.b eleven-m5 fleet; C11 every root on mbp and eleven-m5 | Land each fleet project's `bindings-deploy.retire` schema-2 migration commit | #724 filed (blocks #130); the nix-config commit waits for the main freeze to lift |
-| C7 mbp /Users/anis/Projects/jarbird | Reconcile the two kept JarBird worktrees (issue 487, issue 499) under the #585 procedure once their issues close or go quiet | #700; the issue 499 worktree belongs to a claim another session holds and was not touched |
+| C7 mbp /Users/anis/Projects/jarbird | Reconcile the two kept JarBird worktrees (issue 487, issue 499) under the #585 procedure once their issues close or go quiet | #700; jarbird#499 is held by another session, so its worktree was not touched |
 
 Rows that are human-pending and their owner action: every anis-desktop row (owner: host online); C6 and C7 JarBird on mbp and eleven-m5 (gate step 1, run in the activation session).
 
