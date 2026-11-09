@@ -52,7 +52,7 @@ The implementer carries the most context pressure (exploration, code, debugging)
 
 ### Files
 
-- **Always-loaded guidance**: in every agent's context, so reserve it for **navigation pointers**. Project `CLAUDE.md`/`AGENTS.md` come from `.agents/instructions/bootstrap.md` where it exists; the global `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` come from nix-config's `home/common/agent-guidance/AGENTS.md`.
+- **Always-loaded guidance**: in every agent's context, so reserve it for **navigation pointers**. Project `CLAUDE.md`/`AGENTS.md` come from `.agents/instructions/bootstrap.md` where it exists; the global `~/.claude/CLAUDE.md` comes from nix-config's `home/common/agent-guidance/AGENTS.md`.
 - **Standards**: read at review. Layer 0 (`the-bar.md`) and Layer 1 (`stacks/`) are global, in nix-config's `home/common/agent-skills/standards/`. Layer 2 is the project's `docs/standards/`: deltas only, behind an index of at most 40 lines. A rule true for every project on a stack belongs in Layer 1.
 - **Docs**: reference files pointed to from elsewhere; look for an existing doc before writing one.
 - **Skills**: for docs whose description earns its place in every context, or for user-invoked commands. Global skills live in nix-config's `home/common/agent-skills/skills/`, Claude-only ones in `home/common/claude-code/skills/`.

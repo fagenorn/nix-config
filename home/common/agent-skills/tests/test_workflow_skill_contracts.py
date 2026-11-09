@@ -29,6 +29,9 @@ COLLABORATION = (
 DIFF_REVIEW = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/DIFF-REVIEW.md"
 )
+PLAN_REVIEW = (
+    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/PLAN-REVIEW.md"
+)
 RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
 WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
 SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
@@ -96,8 +99,7 @@ V3_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes"
     "delivery_observations", "requested_scope", "recovery", "verification"}
 CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
 SKILL_TREES = (REPO_ROOT / "home/common/agent-skills/skills",
-               REPO_ROOT / "home/common/claude-code/skills",
-               REPO_ROOT / "home/common/codex/skills")
+               REPO_ROOT / "home/common/claude-code/skills")
 NOW_FLAG = re.compile(r"(?<![\w-])--now(?![\w-])")
 NOW_KEY = re.compile(r'"now"\s*:')
 V2_OWNER_KEYS = {"interface_version", "kind", "ledger_repo_root", "run_id", "issue",
@@ -206,7 +208,9 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
         "--artifact-path <specification-directory> --artifact-path <plan-directory>",
         "--format json", "`product.changed_files`", "`files[].path`",
         "`files[].changed_lines`", "`git diff <base>..<head> -- ':(literal)<path>'`",
+        "`git merge-base <left> <right>`", "`scope: <K> slices over <M> product files`",
     ),
+    PLAN_REVIEW: ("`Blocking`", "`Should fix`", "`Discussion`"),
 }
 
 # Machine-consumed text each ship-issue document must carry (#291 D6): helper
@@ -648,17 +652,13 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_installed_policy_surface_matches_source_contract(self):
         if os.environ.get("WORKFLOW_POLICY_SURFACE") == "source":
             self.skipTest("explicit pre-activation source-only verification")
-        agents_root = Path.home() / ".agents/skills"
         claude_root = Path.home() / ".claude/skills"
-        self.assertTrue(agents_root.is_dir(), "managed shared skill root is absent")
         self.assertTrue(claude_root.is_dir(), "managed Claude skill root is absent")
-        assert_policy_entries(self, agents_root, SHARED_POLICY_ENTRIES,
-                              require_refusal_reporting=True)
         assert_policy_entries(self, claude_root,
                               SHARED_POLICY_ENTRIES | CLAUDE_POLICY_ENTRIES,
                               require_refusal_reporting=True)
-        assert_retained_policy_support(self, agents_root, SHARED_POLICY_SUPPORT)
-        assert_retained_policy_support(self, agents_root, RETAINED_SUPPORT_CONTRACTS)
+        assert_retained_policy_support(self, claude_root, SHARED_POLICY_SUPPORT)
+        assert_retained_policy_support(self, claude_root, RETAINED_SUPPORT_CONTRACTS)
         self.assertFalse((Path.home() / ".agents/bin/resolve-bindings").exists())  # policy-gate-pattern
         installed_resolver = Path.home() / ".agents/bin/resolve-project"
         self.assertTrue(installed_resolver.is_file())
@@ -676,15 +676,13 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with mock.patch.dict(os.environ, {"WORKFLOW_POLICY_SURFACE": ""}, clear=False):
                 with mock.patch("pathlib.Path.home", return_value=Path(temporary)):
-                    with self.assertRaisesRegex(AssertionError, "managed shared skill root is absent"):
+                    with self.assertRaisesRegex(AssertionError, "managed Claude skill root is absent"):
                         self.test_installed_policy_surface_matches_source_contract()
 
     def _install_policy_surface_fixture(self, home):
-        agents_root = home / ".agents/skills"
         claude_root = home / ".claude/skills"
         shared_source = REPO_ROOT / "home/common/agent-skills/skills"
         claude_source = REPO_ROOT / "home/common/claude-code/skills"
-        shutil.copytree(shared_source, agents_root)
         shutil.copytree(shared_source, claude_root)
         shutil.copytree(claude_source, claude_root, dirs_exist_ok=True)
         helpers = {
@@ -1113,20 +1111,31 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                     self.assertEqual(value.strip("`.,;"), "-", flag)
                 self.assertLessEqual(text.count("--result-file"), 1)
 
-    def test_codex_gets_no_orchestrate_issues(self):
-        # #618: the Codex stub is retired (#572 S1); orchestrate-issues stays Claude-only.
-        self.assertFalse((REPO_ROOT / "home/common/codex/skills/orchestrate-issues").exists())
-        self.assertNotIn("orchestrate-issues", CODEX_MODULE.read_text(encoding="utf-8"))
-
-    def test_codex_deliver_standard_stub_is_linked_and_names_the_alternatives(self):
-        # #618: the standard-lane program needs Claude's Workflow tool.
-        raw = (REPO_ROOT / "home/common/codex/skills/deliver-standard/SKILL.md").read_text(encoding="utf-8")
-        self.assertTrue(raw.startswith("---\nname: deliver-standard\n"))
-        self.assertIn("`deliver-direct`", raw)
-        self.assertIn('home.file.".agents/skills/deliver-standard".source = '
-                      './skills/deliver-standard;', CODEX_MODULE.read_text(encoding="utf-8"))
-        self.assertFalse((REPO_ROOT / "home/common/agent-skills/skills/orchestrate-issues")
-                         .exists())
+    def test_no_module_installs_a_codex_entry_surface(self):
+        # #687 D1: Codex is a reviewer only; it gets no skills, guidance or config splice.
+        codex_module = CODEX_MODULE.read_text(encoding="utf-8")
+        guidance = (REPO_ROOT / "home/common/agent-guidance/default.nix").read_text(encoding="utf-8")
+        skills = (REPO_ROOT / "home/common/agent-skills/default.nix").read_text(encoding="utf-8")
+        self.assertFalse((REPO_ROOT / "home/common/codex" / "skills").exists())
+        self.assertIn("codexPackage", codex_module)
+        for name, text, forbidden in (
+            ("codex", codex_module, ".agents/skills"),
+            ("codex", codex_module, "model_reasoning_effort"),
+            ("codex", codex_module, "codexConfig"),
+            ("agent-guidance", guidance, ".codex/"),
+            ("agent-skills", skills, ".agents/skills"),
+            ("agent-skills", skills, "migrateCodex" + "SkillLinks"),
+            ("agent-skills", skills, "localSkillFiles"),
+        ):
+            with self.subTest(module=name, forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+        self.assertIn('for skillRoot in "$HOME/.claude/skills"; do', skills)
+        self.assertIn('".claude/skills/impeccable"', skills)
+        self.assertIn('".agents/standards".source', skills)
+        self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ];', skills)
+        impeccable = (REPO_ROOT / "tests/test_impeccable_installed.py").read_text(encoding="utf-8")
+        self.assertIn('SKILL_ROOTS = (".claude/skills",)', impeccable)
+        self.assertNotIn("test_codex_view_is_a_whole_directory_link", impeccable)
 
     def section(self, text, heading, next_heading):
         start = text.index(heading)
@@ -1880,7 +1889,6 @@ CODEBASE_DESIGN_FILES = (
     "DEEPENING.md",
     "DESIGN-IT-TWICE.md",
     "LICENSE",
-    "agents/openai.yaml",
 )
 def skill_frontmatter(text):
     """Return a SKILL.md's YAML frontmatter as a flat ``key -> value`` dict.
@@ -2317,7 +2325,7 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
 
 RETRO_DIR = REPO_ROOT / "home/common/agent-skills/skills/retro"
 RETRO_REVISION = "a7d038f6bf7f01b516408e95e2fb56e0b338fa6f"
-RETRO_FILES = ("SKILL.md", "LICENSE", "agents/openai.yaml")
+RETRO_FILES = ("SKILL.md", "LICENSE")
 
 
 class RetroSkillContractsTest(unittest.TestCase):
@@ -2327,14 +2335,12 @@ class RetroSkillContractsTest(unittest.TestCase):
     def setUpClass(cls):
         cls.skill = (RETRO_DIR / "SKILL.md").read_text(encoding="utf-8")
         cls.notice = (RETRO_DIR / "LICENSE").read_text(encoding="utf-8")
-        cls.manifest = (RETRO_DIR / "agents/openai.yaml").read_text(encoding="utf-8")
 
     def test_structure_and_explicit_only_metadata(self):
         self.assertEqual(sorted(str(p.relative_to(RETRO_DIR)) for p in RETRO_DIR.rglob("*") if p.is_file()), sorted(RETRO_FILES))
         frontmatter = skill_frontmatter(self.skill)
         self.assertEqual(frontmatter.get("name"), "retro")
         self.assertEqual(frontmatter.get("disable-model-invocation"), "true")
-        self.assertIn("allow_implicit_invocation: false", self.manifest)
         self.assertNotIn("Agent(", self.skill)
 
     def test_license_records_provenance_and_the_upstream_notice(self):
@@ -2347,7 +2353,7 @@ class RetroSkillContractsTest(unittest.TestCase):
 
 IMPROVE_DIR = REPO_ROOT / "home/common/agent-skills/skills/improve-codebase-architecture"
 IMPROVE_REVISION = "9c9f36ccd3995266cd675468af71639c8dde1ec5"
-IMPROVE_FILES = ("SKILL.md", "HTML-REPORT.md", "LICENSE", "agents/openai.yaml", "evals/evals.json")
+IMPROVE_FILES = ("SKILL.md", "HTML-REPORT.md", "LICENSE", "evals/evals.json")
 IMPROVE_MARKER = "<!-- agent-dispatch: id=improve-architecture-scan-owner role=issue-owner model=opus effort=high -->"
 IMPROVE_CALL = ('Agent(subagent_type="general-purpose", model="opus", effort="high") '
                 "performs the one read-only architecture scan and returns evidence-backed "
@@ -2386,7 +2392,6 @@ class ImproveCodebaseArchitectureSkillContractsTest(unittest.TestCase):
         cls.skill = (IMPROVE_DIR / "SKILL.md").read_text(encoding="utf-8")
         cls.report = (IMPROVE_DIR / "HTML-REPORT.md").read_text(encoding="utf-8")
         cls.notice = (IMPROVE_DIR / "LICENSE").read_text(encoding="utf-8")
-        cls.manifest = (IMPROVE_DIR / "agents/openai.yaml").read_text(encoding="utf-8")
         cls.evals = json.loads((IMPROVE_DIR / "evals/evals.json").read_text(encoding="utf-8"))
 
     def assert_ordered(self, text, *anchors):
@@ -2431,7 +2436,6 @@ path_unchanged_since() { return 0; }
         self.assertEqual(frontmatter["name"], IMPROVE_DIR.name)
         self.assertTrue(frontmatter["description"].strip())
         self.assertEqual(frontmatter["disable-model-invocation"], "true")
-        self.assertEqual(self.manifest, 'interface:\n  display_name: "Improve Codebase Architecture"\n  short_description: "Find and grill architecture improvements"\npolicy:\n  allow_implicit_invocation: false\n')
         root = IMPROVE_DIR.resolve()
         checked = 0
         for name, text in {"SKILL.md": self.skill, "HTML-REPORT.md": self.report}.items():
@@ -2881,9 +2885,8 @@ class InstalledOrchestrateRoutesTest(unittest.TestCase):
         cls.root = Path(root)
 
     def test_the_claude_tree_holds_deliver_batch_and_no_orchestrate_issues(self):
-        self.assertFalse((self.root / ".agents/skills/orchestrate-issues").exists())
+        self.assertFalse(os.path.lexists(self.root / ".agents/skills"))
         self.assertFalse((self.root / ".claude/skills/orchestrate-issues").exists())
-        self.assertTrue((self.root / ".agents/skills/deliver-standard/SKILL.md").is_file())
         self.assertTrue((self.root / ".claude/skills/deliver-standard/deliver-standard.js").is_file())
         installed = (self.root / ".claude/skills/deliver-batch/SKILL.md").read_text(encoding="utf-8")
         source = REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md"
@@ -3662,6 +3665,73 @@ class BatchRoutingTest(unittest.TestCase):
     def test_the_lead_stops_a_relaunch_that_repeats_the_last_one(self):
         text = (REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md").read_text(encoding="utf-8")
         self.assertRegex(text, r"(?s)non-null `relaunch`.*?unless its args equal the previous run.*?stop, reporting")
+
+
+class CodexEntryRetirementTest(unittest.TestCase):
+    """#687 AC1: no tracked file outside the artifact store names a retired Codex entry surface."""
+
+    # Built by concatenation so this file does not match its own scan.
+    RETIRED = ("home/common/codex/" + "skills", "openai" + ".yaml", "migrateCodex" + "SkillLinks")
+
+    def test_no_tracked_file_names_a_retired_codex_surface(self):
+        args = ["git", "-C", str(REPO_ROOT), "grep", "-n", "-F"]
+        for pattern in self.RETIRED:
+            args += ["-e", pattern]
+        found = subprocess.run(args + ["--", ".", ":!.agents/artifacts"],
+                               capture_output=True, text=True, check=False)
+        self.assertEqual((found.returncode, found.stdout), (1, ""), found.stderr)
+
+    def test_no_skill_package_ships_a_codex_manifest(self):
+        for tree in SKILL_TREES:
+            with self.subTest(tree=str(tree)):
+                self.assertEqual(sorted(tree.rglob("openai" + ".yaml")), [])
+
+
+class CodexCollaborationContractTest(unittest.TestCase):
+    """#687: codex-collaboration serves the plan path and diff range the deliver controllers send."""
+
+    SKILL_DIR = REPO_ROOT / "home/common/claude-code/skills/codex-collaboration"
+    CONTROLLER = REPO_ROOT / "home/common/claude-code/skills/deliver-standard/deliver-standard.js"
+    RETIRED = ("from-issue", "sdd", "REVIEW-CONTRACT", "artifact-budget")
+    LEGACY = ("producer", "manifest", "metrics", "rubric", "Phase", "--auto",
+              "native fallback", "Claude fallback")
+
+    def documents(self):
+        return sorted(p for p in self.SKILL_DIR.rglob("*") if p.is_file())
+
+    def test_the_skill_names_no_retired_pipeline(self):  # AC2
+        for path in self.documents():
+            text = path.read_text(encoding="utf-8")
+            for token in self.RETIRED + self.LEGACY:
+                with self.subTest(path=path.name, token=token):
+                    self.assertNotIn(token, text)
+
+    def test_the_results_carry_the_controllers_codex_schema(self):  # AC3 (key set only)
+        # Pins only what the controller consumes (agent-helpers rule 6): the
+        # CODEX result keys and the SEV enum of deliver-standard.js, read from
+        # the controller itself so the two cannot drift. No English phrase is pinned.
+        controller = self.CONTROLLER.read_text(encoding="utf-8")
+        sev = re.search(r"^const SEV = \{[^\n]*enum: \[([^\]]*)\]", controller, re.M)
+        codex = re.search(r"^const CODEX = \{\n  type: 'object',\n  properties: \{([^\n]*)\},\n", controller, re.M)
+        self.assertIsNotNone(sev)
+        self.assertIsNotNone(codex)
+        severities = re.findall(r"'([a-z]+)'", sev.group(1))
+        keys, depth = [], 0  # top-level property names only, not nested `type`/`enum`
+        for m in re.finditer(r"[{}]|(?<![\w'])([a-z_]+): ", codex.group(1)):
+            depth += {"{": 1, "}": -1}.get(m.group(0), 0)
+            if m.group(1) and depth == 0:
+                keys.append(m.group(1))
+        self.assertEqual(severities, ["critical", "important", "minor"])
+        self.assertEqual(keys, ["available", "verdict", "findings", "raw_summary"])
+        skill = normalized(COLLABORATION.read_text(encoding="utf-8"))
+        for key in keys:
+            with self.subTest(document="SKILL.md", key=key):
+                self.assertIn(f"`{key}`", skill)
+        for path in (PLAN_REVIEW, DIFF_REVIEW):
+            text = normalized(path.read_text(encoding="utf-8"))
+            for value in severities:
+                with self.subTest(document=path.name, severity=value):
+                    self.assertIn(f"`{value}`", text)
 
 
 if __name__ == "__main__":
