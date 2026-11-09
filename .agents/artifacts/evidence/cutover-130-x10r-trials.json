@@ -1,0 +1,532 @@
+{
+  "schema_version": 1,
+  "kind": "agent-gate-trials",
+  "identity": {
+    "bound": {
+      "commit": {
+        "base": "13a9f1212c702c005a4c0cb4a2c586786fb6d604",
+        "candidate": "06fb38b718e050742e607b9b0feefd873e90c404"
+      },
+      "project_contract_version": {
+        "base": "2",
+        "candidate": "2"
+      },
+      "shared_platform_version": {
+        "base": "1.2.0",
+        "candidate": "2.0.0"
+      }
+    },
+    "pinned": {
+      "evaluator_version": {
+        "base": "run-eval-blobs:941b129f4371079c",
+        "candidate": "run-eval-blobs:941b129f4371079c"
+      },
+      "rubric_version": {
+        "base": "issue-725-r1",
+        "candidate": "issue-725-r1"
+      },
+      "environment_fingerprint": {
+        "base": "env:aec4793d92901a8c",
+        "candidate": "env:aec4793d92901a8c"
+      },
+      "builds": {
+        "claude": {
+          "agent": {
+            "base": "2.1.316 (Claude Code)",
+            "candidate": "2.1.316 (Claude Code)"
+          },
+          "model": {
+            "base": "sonnet",
+            "candidate": "sonnet"
+          }
+        }
+      }
+    }
+  },
+  "expansion": {
+    "expanded": true,
+    "checkpoint_ref": "https://github.com/fagenorn/nix-config/issues/130#issuecomment-6742320235"
+  },
+  "cases": [
+    {
+      "case_id": "cold-resolution",
+      "case_class": "cold-resolution",
+      "strata": {
+        "claude": {
+          "base": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-1.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:06fca5ece5f67176c2946f245c737966b4f2725cb5341ba7866c9334e555b7d5"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-2.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:8e71d9ff0ef4c1777c7e35be711976ced787ce5baf1ea3bd318e9cabd92da7ff"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-3.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:03963efc394ddc4738d59c49f0e634022b14fe613c5af8177c0e2efab59cc2f2"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-4.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:5787868389a47a0b35a908eac901c7891d0fa18715c1021fe0d080e17424616d"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-5.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:ccf0fd018ead47e278e0611ad50434036acbcc187657b8a5de3d4b090549cf95"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-6.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:efdc37a7da57d758865a5512bb9c045c425c4f6cc7fbb551f561243c134cf06d"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-7.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:63a3c2aaf1607bb1ae0ee793a89d594ba155f435bce481149f1b5cd453cc5821"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-8.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:4c508c4a37580f5f46b5d96006d836d2f636c8aa9ca676ae835fec4d273fabe4"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-9.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:b0bb54e2c292f63eb01ff440bad246767dd188cfc7e56022605d1d7d62da29b8"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-base-10.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:a2ac08b2ea4afafb60b48939b7a1ccc04192262c97f36d7d26485ce82a475b22"
+            }
+          ],
+          "candidate": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-1.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:8828fffe20ef8d1a8ac12e377cc2cd8f70a8d4612552aa613db7d152a7e0980a"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-2.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:138ef860e070d261829cbe309768da966342422faf6a822fcfe19d7298cee099"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-3.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:0e10c09927e6ff0178d680ab556908cd2c721e43d3b604b25a9c6a20b8fac8f7"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-4.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:513f83d91c56512cc09666af1d2cf3461d24c5215d157988603fc2a498603581"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-5.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:04e5dfc9f23330b68e063a13a46f2e6d1e1eef06875e4438f9d2759c35a8c774"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-6.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:846848c8d5aa682d7bb6034a6281d75fd3e87a4c2bfb4c735d848bc3bf0c3ae3"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-7.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:d00dbdaaf7cfc1c07d07ed2927843b3bbea4f5a135707e245eba56fc3aa829b5"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-8.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:ad41414763e0c5c19074db365cbe148058ea00f34bc83e33b69fb6f97e06b204"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-9.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:7473554eb5cae6b1b40b3d1a266f7b91d456d38ee27aa80cff6c0aeb89788cfb"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/cold-resolution-candidate-10.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:fd0c843cb8e616bc5a6aa8d6bcf047d282e34adbd3706aa08e687b83a50efc36"
+            }
+          ],
+          "quality": {
+            "critical_all_pass": true,
+            "evaluator_stability": "stable",
+            "noncritical_median": {
+              "base": 100.0,
+              "candidate": 100.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "case_id": "routine-issue",
+      "case_class": "routine-issue",
+      "strata": {
+        "claude": {
+          "base": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-1.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:a0e3b2e298693de7fb88499c029b3fd65bc5191026e95d81710abc2c0ac7338a"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-2.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:bbf3cfe14c4c46fbb4969c77cd122a032508d747cf8b739bfb09ad9104bce33a"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-3.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:0304957f667c3ebd72891c470abbf3ee407d38fa9f9b732b789612dc91d546d1"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-4.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:31308d62da1fbc96ad1ab0652a35d841e5efb258efa4d74b0fb45d6c9d4b578b"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-5.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:9d70ddfda4b182747378de2db174562e4e9c7d6db559dd544a97ef9c44e5bf0f"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-6.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:7e6c2709e0e35ed81cbf1802a87989d9b67a2cc853f73be6c3106b1eeb403a3e"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-7.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:5ea0d61ad49d7d4576a84041744230c4963b905d092c84d3b1db8e4e0d8535fe"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-8.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:2bf67461aeaf51e0facd1588d66c99023fb7a42d6d936c835f0ee1226a98bfd6"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-9.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:1b275ed2e4cc8117f539a1abd5bc5e6aeafe411cc3534fcfc9b7c33d83171c92"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-base-10.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:1038ec0d3b1fe2f355f8ae6bd15d358ca05b692a0c43eccfae6a2c462053dd8e"
+            }
+          ],
+          "candidate": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-1.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:7520b1723233c8373eac8658de9e7500df72853a0b022d39fbe7dc8702ad79f7"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-2.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:1734ae8c6339149cd8f831e860c68e8f1d4fa014bed08cb853c63f7f13e430a1"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-3.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:410e6ac1951e2e7e296117ad06b2e97f07baa10a1df5cd01948dc12220bc1ecf"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-4.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:e59b7628010194eb39a16ee30629dc380fd7e9cfe2c15dcc29167e285312e574"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-5.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:6d3ae988803602bf573f4f16e11e321054db8f13a4d67123e3f9500bdefc89a6"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-6.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:52c7283fb13b10e8afa4f06b367e749eab485004aa81208ac3cd686e19d7f5ab"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-7.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:c552bb35ce462c324a66a44ed7bec1fb14fb4615f61da2392c66a1b991770410"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-8.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:ef928f37157dc54793242a2737365ee3b19e04fafba27764d7950d901e550a5e"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-9.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:0d64cc3c13f47aaa64ba475d59944a376ab65bebfe889a180ba17e2ca186ac47"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/routine-issue-candidate-10.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:9c9164e5a733d5430a43c95bd1ed5d7e7c2f1eb29a755f09e37aeb717eabe43b"
+            }
+          ],
+          "quality": {
+            "critical_all_pass": true,
+            "evaluator_stability": "stable",
+            "noncritical_median": {
+              "base": 100.0,
+              "candidate": 100.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "case_id": "fuzzy-design",
+      "case_class": "fuzzy-design",
+      "strata": {
+        "claude": {
+          "base": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-1.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:605b9e954bc020294fab844439b52ee262db57d5c4e88dcbb2fae6ce105d3e74"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-2.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:8790ff996cf44b535a46a91182e68d36cee40d41b7ef0c31ceac2132e8cd648a"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-3.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:066dd966ef8f27c4107f82bfce90e9b95ae1b2fd0596ff7e6fb540a3ae12e42c"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-4.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:7b716f507373f31a83352ab4cf99c88d4eb06d9d2e337e11e35f3f73d934982f"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-5.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:fbaf076b2b0499d01ec26251cbc11a5bbc40ed517d8463acf0f3236db2a1efc8"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-6.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:7409288171219b2d47f43af6366e4c8a3744c5758ca7f2567a285fc563babfe8"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-7.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:65f5ea73604fa1e6d4823cdab0823d15aacce73042db4c446ee5e0443319b0ac"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-8.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:e1e025fe94c25b3ff49de580e56117614ebb7e06dc830005a5322ab7053dfe2f"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-9.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:9bfd6c0c17a99fdcb0e395672986826fbc9a286bf641edd81568d3f8d0fd8e1a"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-base-10.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:28e39db489095b97b9e0788fcdc51202fcbe99059c2b19632900c1d4a6d71c53"
+            }
+          ],
+          "candidate": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-1.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:5ca9e8bea9ae67f39ce27972aef9a916ea50dc4d50721dc01d37611d524f8dee"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-2.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:7e70752ad25b4166bd82523705a97b796571fb813bb7606f2315f29060a6676b"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-3.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:1d5326d72c511def36a6ade288c73a7a0edb305611a9531cd11476d4637ffa69"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-4.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:9418c67199125965580d642e276040482f48b3af5e161e56baa142407e78f671"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-5.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:76c69ea2ad21732ed7910eb017867c714cd198cc5e8c6f63af858895cf663d4c"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-6.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:51a7c82b3ea89a58f5df2c97908b4cc1e028334061a3558053a1e4e5a564a754"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-7.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:521eab762f18902dfc67dfa14cde655f03c5ce2c877c6af540ecebe3d5078a44"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-8.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:bb6083440a5c58ecd21f3f53c7622ac26969ca5e7da8264a4266f85405daec1f"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-9.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:5687f3df936e78bc1986a05e9015127087b6ea6527e28b477387a3c0855ed1b5"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/fuzzy-design-candidate-10.json",
+              "run_id": "claude:repo:none",
+              "record_id": "sha256:6c55ffb4d199559b085a75db5d79600de18c1685bcc9ee5f02857b8398140977"
+            }
+          ],
+          "quality": {
+            "critical_all_pass": true,
+            "evaluator_stability": "stable",
+            "noncritical_median": {
+              "base": 100.0,
+              "candidate": 100.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "case_id": "review-ship",
+      "case_class": "review-ship",
+      "strata": {
+        "claude": {
+          "base": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-1.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:44d6c2d93c337ae88bc4682fa917756a550ce09ec5af05c1671c06c4c0c29d20"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-2.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:e2546aa7b2ed995c90d5bba2baee30e45a52c12a52211a62e3a050bbfdaa6ce6"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-3.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:d3107f8c6165ce127c363347ca6c041700017ef7b4e6040826b6c57a955be0dc"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-4.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:80da99e9ad613c23d19a3fc757a9b47203162f322f12e0ec9f715245176404e3"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-5.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:10791c3f0ea158bd8ed35b5785c7c1510c0f097934ab7c97cefd5ef620d57b1b"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-6.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:ba7e02c5c76e0085a84d01ead299ffb59635fd64bd3e0112ccfc1540c5b920f2"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-7.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:48e781fb7e546b968ae8401afe279dbabc99b345f52f5edc805ab6e5f6c9c765"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-8.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:7056ad12edee9ff2b853604f35bef5bc00ad8719bf72bea07a45e0336d548326"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-9.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:8b306ceb89d46fe69dd1a723dc73d18bc62416166766af8e3b3361c1f1965196"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-base-10.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:572b5036195e46a3abf5721cd3f57ad13de8e91f952ce6f30114efc9b8dbb882"
+            }
+          ],
+          "candidate": [
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-1.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:a3590e5bea510d391a8c4b77e7bb2099025b0e886c56e51d0367aae92f3de09b"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-2.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:60fe00441e25e173fbbd29f3015704d73ad09b5a558ea97a1c17c6f115b1a92f"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-3.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:4e03a25b8522a6ecaeebc8adf78c61576aecf35288a12b10038fa6499ab8e193"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-4.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:a31998b979e9764e18ed9e46fb9d72280fb23f51f5e645f4f867bb7ad55168a9"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-5.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:66303facb63b783dbcd07de16264d416083cfadd50ea95afe54bf04b7cff1af1"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-6.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:d5b6748c63e24659581e886c084f7dee9dcd9c73f9ca3cb53c54723692dc710d"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-7.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:9d2aa7f29268f008c187b0b67fe87c5cf67e6e1a9dab1799a8119a99a78f67b7"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-8.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:f974e9089636f4fd39e86f286afae36a8c706376df30b3831242592921bf8bfc"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-9.json",
+              "run_id": "claude:worktree-issue-3-rename-flag:3",
+              "record_id": "sha256:bb449485c5199a338a67a6e15dbda99f894174cf7fa508163d83dbaed43ec0bc"
+            },
+            {
+              "record": ".agents/artifacts/evidence/cutover-130-x10r-records/review-ship-candidate-10.json",
+              "run_id": "claude:repo:3",
+              "record_id": "sha256:8a0203bfa869db33dce31bb64e4b6a6fabccb308ba58bc73108604ef08008085"
+            }
+          ],
+          "quality": {
+            "critical_all_pass": true,
+            "evaluator_stability": "stable",
+            "noncritical_median": {
+              "base": 100.0,
+              "candidate": 100.0
+            }
+          }
+        }
+      }
+    }
+  ]
+}
