@@ -770,6 +770,51 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
                     done = self.grade(name, repo, env)
                     self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
+    OLD_FLAG = "no occurrence of the old flag remains"
+    REJECTION_TEST = (
+        "\n    def test_list_all_is_rejected(self):\n"
+        "        with self.assertRaises(SystemExit):\n"
+        "            run(\"--file\", self.path, \"list\", \"--all\")\n")
+
+    def commit_edit(self, wgit, worktree, name, edit, message):
+        path = worktree / name
+        path.write_text(edit(path.read_text(encoding="utf-8")), encoding="utf-8")
+        subprocess.run(wgit + ["commit", "-qam", message], check=True,
+                       env={**os.environ, **QUIET_GIT})
+
+    def test_every_assert_passes_with_a_test_that_asserts_the_old_flag_is_rejected(self):
+        """#750: criterion 2 makes a rejection test correct work, so it must not be penalized."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+            worktree = Path(env["WT"])
+            self.commit_edit(wgit, worktree, "tests/test_cli.py",
+                             lambda text: text.replace(
+                                 '\n\nif __name__ == "__main__":',
+                                 self.REJECTION_TEST + '\n\nif __name__ == "__main__":'),
+                             "test: list --all is rejected")
+            self.assertIn("--all", (worktree / "tests/test_cli.py").read_text(encoding="utf-8"))
+            for name in self.CRITICAL + self.NONCRITICAL:
+                with self.subTest(name=name):
+                    done = self.grade(name, repo, env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_the_old_flag_left_in_the_implementation_or_readme_fails(self):
+        for name, old, new in (("tinytask/cli.py", "--include-done", "--all"),
+                               ("README.md", "--include-done", "--all")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+                self.commit_edit(wgit, Path(env["WT"]), name,
+                                 lambda text: text.replace(old, new, 1), "restore old flag")
+                self.assertNotEqual(self.grade(self.OLD_FLAG, repo, env).returncode, 0)
+
+    def test_a_test_file_that_never_exercises_the_new_flag_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, wgit, env = self.good_run(Path(tmp).resolve())
+            self.commit_edit(wgit, Path(env["WT"]), "tests/test_cli.py",
+                             lambda text: text.replace("--include-done", "--other"),
+                             "test no longer exercises the flag")
+            self.assertNotEqual(self.grade(self.OLD_FLAG, repo, env).returncode, 0)
+
     def test_no_worktree_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, _, env = published_sandbox(Path(tmp).resolve())
@@ -827,7 +872,8 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
 
     def test_a_consistent_rename_to_another_flag_fails_only_the_cli_check(self):
         """Implementation, tests and README renamed together to --foo: every
-        candidate-editable assert still passes, the interface the issue names does not."""
+        candidate-editable assert but the old-flag one (which wants `--include-done` exercised
+        by the tests) still passes, and the interface the issue names does not."""
         with tempfile.TemporaryDirectory() as tmp:
             repo, _, wgit, env = self.good_run(Path(tmp).resolve())
             worktree = Path(env["WT"])
@@ -837,7 +883,7 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
                     .replace("include_done", "foo"), encoding="utf-8")
             subprocess.run(wgit + ["commit", "-qam", "rename to --foo"], check=True,
                            env={**os.environ, **QUIET_GIT})
-            for name in self.NONCRITICAL[1:3] + self.CRITICAL[3:4]:
+            for name in self.NONCRITICAL[1:2] + self.CRITICAL[3:4]:
                 with self.subTest(name=name):
                     self.assertEqual(self.grade(name, repo, env).returncode, 0)
             self.assertNotEqual(self.grade("the renamed flag works through the CLI",
