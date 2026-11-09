@@ -29,6 +29,8 @@ GIT_HOOK_NAMES = (
 )
 # Hidden from the model's skill listing while /<name> still runs it (issue 425 D1).
 HIDDEN = "user-invocable-only"
+# Removed from both the model's listing and /<name> (issue 735 D2).
+OFF = "off"
 EXPECTED_SKILL_OVERRIDES = {
     "artifact-design": HIDDEN,
     "artifact-diagramming": HIDDEN,
@@ -42,12 +44,19 @@ EXPECTED_SKILL_OVERRIDES = {
     "anthropic-skills:morning": HIDDEN,
     "anthropic-skills:import-memory": HIDDEN,
     "anthropic-skills:skill-creator": HIDDEN,
+    "anthropic-skills:docs": OFF,
+    "anthropic-skills:chrome-browser": OFF,
+    "anthropic-skills:built-in-browser": OFF,
+    "anthropic-skills:computer-use": OFF,
+    "anthropic-skills:deep-research": OFF,
 }
 # The plugin's skill-creator is the copy kept listed (issue 425 D2).
 EXPECTED_PLUGINS = {
     "skill-creator@claude-plugins-official": True,
     "codex@nix-codex": True,
 }
+# The one claude.ai connector removed by a server-wide deny rule; the others stay (issue 735 D1).
+EXPECTED_DENY = ["mcp__claude_ai_Claude_Docs"]
 PACKAGE_ENV = "CLAUDE_CODE_PACKAGE"
 CONNECTORS = "ENABLE_CLAUDEAI_MCP_SERVERS"
 # The calling session's account state, removed so it cannot steer a launch.
@@ -80,6 +89,14 @@ class ClaudeSettingsInstalledTest(unittest.TestCase):
 
     def test_skill_overrides_hide_exactly_the_listed_skills(self):
         self.assertEqual(self.settings.get("skillOverrides"), EXPECTED_SKILL_OVERRIDES)
+
+    def test_permissions_deny_exactly_the_claude_docs_connector(self):
+        self.assertEqual(self.settings["permissions"]["deny"], EXPECTED_DENY)
+
+    def test_claude_ai_connectors_stay_on_in_the_settings(self):
+        # Issue 735 D1: the deny rule is the narrow switch; the global ones would drop every connector.
+        self.assertNotIn("disableClaudeAiConnectors", self.settings)
+        self.assertNotIn(CONNECTORS, self.settings.get("env", {}))
 
     def test_the_kept_skill_creator_is_the_plugin_copy(self):
         self.assertEqual(self.settings.get("enabledPlugins"), EXPECTED_PLUGINS)
