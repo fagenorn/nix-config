@@ -97,14 +97,68 @@ def schema_of(calls, label):
     return found[-1]
 
 
+def object_branch(schema):
+    """A nested schema, read through the object branch of a nullable anyOf."""
+    if "anyOf" in schema:
+        found = [s for s in schema["anyOf"] if s.get("type") == "object"]
+        if len(found) != 1:
+            raise AssertionError(f"no single object branch: {schema}")
+        return found[0]
+    return schema
+
+
+RENEW_READ = {"verdict", "by", "detail"}
+# label: (top-level fields the program or a later prompt reads, {member: fields read inside it}); a member
+# named "<name>[]" is an array whose items object is checked.
+FOLDED_READ = {
+    "owner-answer": ({"verdict", "decisions", "comment_id", "questions"}, {"renew": RENEW_READ}),
+    "verify": ({"head", "clean", "results"}, {"renew": RENEW_READ, "results[]": {"id", "status", "summary"}}),
+}
+
+
+def member(schema, name):
+    """The object schema of a member: an array member's items, a nullable member's object branch."""
+    if name.endswith("[]"):
+        return schema["properties"][name[:-2]]["items"]
+    return object_branch(schema["properties"][name])
+
+
+class FoldTest(unittest.TestCase):
+    """#716: folded bookkeeping steps return nested results that keep every field the program reads."""
+
+    def test_folded_schemas_keep_every_read_field(self):
+        _, calls = run()
+        renew = schema_of(calls, "renew-tasks")
+        for label, (top, nested) in FOLDED_READ.items():
+            with self.subTest(label=label):
+                schema = schema_of(calls, label)
+                self.assertLessEqual(top, set(schema["properties"]))
+                for name, fields in nested.items():
+                    branch = member(schema, name)
+                    self.assertLessEqual(fields, set(branch["properties"]), name)
+                    if name == "renew":
+                        self.assertEqual(branch, renew)
+                        self.assertEqual(schema["required"], ["renew"])
+
+    def test_a_kept_unreviewed_plan_renews_alone(self):
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": PLAN, "plan_reviewed": False, "done": []}
+        result, calls = run(args=dict(ARGS, cont=cont))
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertNotIn("owner-answer", names)
+        self.assertLess(names.index("renew-plan"), names.index("plan-review"))
+
+
 class HappyPathTest(unittest.TestCase):
     def test_one_task_runs_every_stage_in_order(self):
         result, calls = run()
         self.assertEqual(result["stage"], "done")
         self.assertTrue(result["merged"])
         self.assertEqual(labels(calls), [
-            "setup", "acquire", "worktree", "renew-plan", "owner-answer", "plan", "plan-codex", "plan-review", "renew-tasks",
-            "impl-1", "review-1", "renew-final-review", "final-codex", "final-1", "renew-verify", "verify",
+            "setup", "acquire", "worktree", "owner-answer", "plan", "plan-codex", "plan-review", "renew-tasks",
+            "impl-1", "review-1", "renew-final-review", "final-codex", "final-1", "verify",
             "renew-ship", "pr", "land-lock-1", "renew-checks-1", "checks-1", "renew-merge", "land-lock-2", "merge",
             "land-unlock", "hold", "close-out"])
 
@@ -205,7 +259,7 @@ class ContractTest(unittest.TestCase):
                 self.assertTrue(cont["claim_incomplete"])
                 result, calls = run(args=dict(ARGS, cont=cont))
                 self.assertEqual(result["stage"], "done")
-                self.assertEqual(labels(calls)[:6], ["setup", "acquire", "worktree", "renew-plan", "owner-answer", "plan"])
+                self.assertEqual(labels(calls)[:5], ["setup", "acquire", "worktree", "owner-answer", "plan"])
                 self.assertIn("skip a step already done", prompt(calls, "worktree"))
                 self.assertIn("an earlier claim stopped part way", prompt(calls, "setup"))
                 self.assertIn("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x", prompt(calls, "worktree"))
@@ -259,7 +313,9 @@ class OwnerAnswerTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         ls = labels(calls)
         self.assertLess(ls.index("acquire"), ls.index("owner-answer"))
-        self.assertLess(ls.index("renew-plan"), ls.index("owner-answer"))
+        answer = prompt(calls, "owner-answer")
+        self.assertIn(RENEW, answer)
+        self.assertLess(answer.index(RENEW), answer.index("forge-claim owner-action status"))
         self.assertLess(ls.index("owner-answer"), ls.index("plan"))
         self.assertIn("forge-claim owner-action status --repo owner/repo --issue 9 --reason decision",
                       prompt(calls, "owner-answer"))
@@ -330,9 +386,22 @@ class OwnerAnswerTest(unittest.TestCase):
 
 
 RENEW = f"forge-claim renew --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x"
-BOUNDARIES = [("renew-plan", "owner-answer"), ("renew-tasks", "impl-1"), ("renew-final-review", "final-codex"),
-              ("renew-verify", "verify"), ("renew-ship", "pr"), ("renew-checks-1", "checks-1"),
-              ("renew-merge", "land-lock-2")]
+# (at, the call that renews, nested): a nested renew rides in that call's reply as renew.
+BOUNDARIES = [("plan", "owner-answer", True), ("tasks", "renew-tasks", False),
+              ("final-review", "renew-final-review", False), ("verify", "verify", True),
+              ("ship", "renew-ship", False), ("checks-1", "renew-checks-1", False),
+              ("merge", "renew-merge", False)]
+# The text each folded prompt runs after its renew.
+STEP_MARK = {"owner-answer": "forge-claim owner-action status", "verify": "Run the project's declared verification"}
+
+
+def boundary_reply(via, nested, renew):
+    return {"patch": {via: {"renew": renew}}} if nested else {"replies": {via: renew}}
+
+
+def next_guarded(happy, via):
+    """The first happy-path label after via that a stop there must not reach (the lock release always runs)."""
+    return next(l for l in happy[happy.index(via) + 1:] if l != "land-unlock")
 
 
 class ClaimTest(unittest.TestCase):
@@ -368,27 +437,32 @@ class ClaimTest(unittest.TestCase):
     def test_renew_runs_before_every_stage_boundary(self):
         _, calls = run()
         names = labels(calls)
-        self.assertEqual([l for l in names if l.startswith("renew-")], [b for b, _ in BOUNDARIES])
-        for boundary, first in BOUNDARIES:
-            with self.subTest(boundary=boundary):
-                self.assertIn(RENEW, prompt(calls, boundary))
-                self.assertEqual(names[names.index(first) - 1], boundary)
+        self.assertEqual([l for l in names if l.startswith("renew-")], [f"renew-{a}" for a, v, nested in BOUNDARIES if not nested])
+        for at, via, nested in BOUNDARIES:
+            with self.subTest(at=at):
+                text = prompt(calls, via)
+                self.assertIn(RENEW, text)
+                if nested:
+                    self.assertIn("When renew's verdict is not renewed, stop there", text)
+                    self.assertLess(text.index(RENEW), text.index(STEP_MARK[via]))
 
     def test_ended_claim_stops_at_its_boundary_with_no_cont(self):
-        for boundary, first in BOUNDARIES:
-            with self.subTest(boundary=boundary):
-                result, calls = run(replies={boundary: {"verdict": "not_held", "by": "h2/b1"}})
-                self.assertEqual((result["stage"], result["at"]), ("claim-lost", boundary[len("renew-"):]))
-                self.assertNotIn(first, labels(calls))
+        happy = labels(run()[1])
+        for at, via, nested in BOUNDARIES:
+            with self.subTest(at=at):
+                result, calls = run(**boundary_reply(via, nested, {"verdict": "not_held", "by": "h2/b1"}))
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", at))
+                self.assertNotIn(next_guarded(happy, via), labels(calls))
                 self.assertNotIn("cont", result)
 
     def test_unanswered_renew_stops_with_a_cont_that_reacquires(self):
-        for boundary, first in BOUNDARIES:
+        happy = labels(run()[1])
+        for at, via, nested in BOUNDARIES:
             for reply in ({"verdict": "error", "detail": "forge down"}, None):
-                with self.subTest(boundary=boundary, reply=reply):
-                    result, calls = run(replies={boundary: reply})
-                    self.assertEqual((result["stage"], result["at"]), ("claim-lost", boundary[len("renew-"):]))
-                    self.assertNotIn(first, labels(calls))
+                with self.subTest(at=at, reply=reply):
+                    result, calls = run(**boundary_reply(via, nested, reply))
+                    self.assertEqual((result["stage"], result["at"]), ("claim-lost", at))
+                    self.assertNotIn(next_guarded(happy, via), labels(calls))
                     self.assertTrue(result["cont"]["claim_incomplete"])
 
     def test_resume_after_an_unanswered_renew_reacquires_and_finishes(self):
@@ -439,7 +513,7 @@ class ClaimTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": "h9/b1"}, "plan": None, "plan_reviewed": False, "done": []}
         _, calls = run(args={"repo_root": "/r", "issue": 9, "cont": cont})
-        self.assertIn("--holder h9/b1 ", prompt(calls, "renew-plan"))
+        self.assertIn("--holder h9/b1 ", prompt(calls, "owner-answer"))
         self.assertNotIn("acquire", labels(calls))
 
 
@@ -731,7 +805,9 @@ class PlanRulesTest(unittest.TestCase):
             self.assertNotIn(label, names)
         self.assertEqual(names.count("owner-answer"), 1)
         self.assertEqual(names.count("plan-rules-revise"), 1)
-        self.assertLess(names.index("renew-plan"), names.index("owner-answer"))
+        answer = prompt(calls, "owner-answer")
+        self.assertIn(RENEW, answer)
+        self.assertLess(answer.index(RENEW), answer.index("forge-claim owner-action status"))
         self.assertLess(names.index("owner-answer"), names.index("plan-rules-revise"))
         self.assertLess(names.index("plan-rules-revise"), names.index("plan-rules-review"))
         revise = prompt(calls, "plan-rules-revise")
@@ -1931,7 +2007,7 @@ class FinalReviewedResumeTest(unittest.TestCase):
             with self.subTest(head=head):
                 result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": head}})
                 self.assertEqual(result["stage"], "done")
-                self.assertEqual(labels(calls), ["setup", "renew-verify", "verify", "renew-ship", "pr",
+                self.assertEqual(labels(calls), ["setup", "verify", "renew-ship", "pr",
                                                  "land-lock-1", "renew-checks-1", "checks-1", "renew-merge",
                                                  "land-lock-2", "merge", "land-unlock", "hold", "close-out"])
 
@@ -2104,7 +2180,7 @@ class DirectLaneTest(unittest.TestCase):
         result, calls = run(args=DIRECT)
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertFalse([l for l in names if l.startswith("plan") or l == "renew-plan"], names)
+        self.assertFalse([l for l in names if l.startswith("plan") or l == "owner-answer"], names)
         self.assertEqual([c["label"] for c in calls if c["agentType"] == "implementer"], ["direct-impl"])
         reviewers = [c for c in calls if c["agentType"] in ("reviewer", "reviewer-lite")]
         self.assertEqual([(c["label"], c["agentType"]) for c in reviewers], [("direct-review", "reviewer-lite")])

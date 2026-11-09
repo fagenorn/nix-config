@@ -2,7 +2,8 @@
 // Usage: node deliver_standard_harness.mjs <program.js>  with a scenario JSON on stdin:
 //   { "args": {...}, "replies": { "<label>": reply | [reply per call] }, "patch": { "<label>": {...} } }
 // A label with no reply gets the default for its kind (DEFAULTS below); a patch
-// is merged over that default. Prints { result, calls: [{label, agentType, model, schema, prompt}] }.
+// is merged over that default. A folded label (NESTED) given an explicit object reply with no own key for a nested step
+// gets that step's default; a key present with null stays null. Prints { result, calls: [{label, agentType, model, schema, prompt}] }.
 import { readFileSync } from 'node:fs'
 
 const program = readFileSync(process.argv[2], 'utf8')
@@ -40,11 +41,11 @@ const DEFAULTS = [
   [/^direct-impl$/, { ...DONE, acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }], sensitive: false, ineligible: false }],
   [/^direct-fix$/, DONE],
   [/-codex$/, { available: true, ...PASS }],
-  [/^owner-answer$/, { verdict: 'none', comment_id: null, questions: [], decisions: '' }],
+  [/^owner-answer$/, { verdict: 'none', comment_id: null, questions: [], decisions: '', renew: { verdict: 'renewed' } }],
   [/review|^final-/, PASS],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],
   [/^verify-fix-/, DONE],
-  [/^verify/, { head: SHA, clean: true, results: [{ id: 'build', status: 'pass', summary: 'ok' }] }],
+  [/^verify/, { head: SHA, clean: true, results: [{ id: 'build', status: 'pass', summary: 'ok' }], renew: { verdict: 'renewed' } }],
   [/^(impl|fix)-|^fix-wave$/, DONE],
   [/^pr$/, { pr: 42, head: SHA }],
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'] }],
@@ -52,6 +53,13 @@ const DEFAULTS = [
   [/^hold$/, prompt => ({ merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: SHA, checks: openChecks(prompt) }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held' })],
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok' }],
 ]
+// Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']]]
+const defaultOf = (label, prompt) => {
+  const hit = DEFAULTS.find(([re]) => re.test(label))
+  if (!hit) throw new Error(`no stub reply for agent label ${label}`)
+  return typeof hit[1] === 'function' ? hit[1](prompt) : hit[1]
+}
 
 const calls = []
 const seen = {}
@@ -62,11 +70,15 @@ async function agent(prompt, opts = {}) {
   const replies = scenario.replies || {}
   if (Object.prototype.hasOwnProperty.call(replies, label)) {
     const r = replies[label]
-    return structuredClone(Array.isArray(r) ? r[Math.min(n, r.length) - 1] : r)
+    const out = structuredClone(Array.isArray(r) ? r[Math.min(n, r.length) - 1] : r)
+    const row = NESTED.find(([re]) => re.test(label))
+    if (row && out && typeof out === 'object' && !Array.isArray(out)) {
+      const base = defaultOf(label, prompt)
+      for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
+    }
+    return out
   }
-  const hit = DEFAULTS.find(([re]) => re.test(label))
-  if (!hit) throw new Error(`no stub reply for agent label ${label}`)
-  const base = typeof hit[1] === 'function' ? hit[1](prompt) : hit[1]
+  const base = defaultOf(label, prompt)
   return structuredClone({ ...base, ...((scenario.patch || {})[label] || {}) })
 }
 const parallel = thunks => Promise.all(thunks.map(t => Promise.resolve().then(t).catch(() => null)))

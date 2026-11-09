@@ -161,6 +161,12 @@ const RENEW_SCHEMA = {
   properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' } },
   required: ['verdict'],
 }
+// A folded step (#716) returns its own result plus the claim renew it ran first as a required nested member.
+const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
+const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, renew: RENEW_SCHEMA, ...extra }, required: ['renew'] })
+// A reply is complete when every member the schema requires is present and not null (a folded schema requires only its renew).
+const complete = (r, schema) => !!r && schema.required.every(k => r[k] !== undefined && r[k] !== null)
+const ANSWER_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: { type: 'object' } }, decisions: { type: 'string' } }, required: ['verdict'] }
 const findingsOf = r => r.findings.filter(f => f.severity !== 'minor')
 const present = v => v !== undefined && v !== null && v !== ''
 // Extra branches a plan declares (#713): validated, then granted non-force pushes in the lifecycle rules.
@@ -468,17 +474,20 @@ ${RULES_FOR(setup.worktree_path)}`, { label: 'worktree', phase: 'Setup', model: 
 
 const W = setup.worktree
 let RULES = RULES_FOR(W)
-// Renews the claim before the step it guards. null = renewed; else the stop to return.
-const renew = async (at, ph) => {
-  const r = await call(`Renew the claim on issue #${ISSUE} of ${SLUG}. Run, alone and exactly: forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
-It prints one JSON line. Return its verdict (error, with detail, on exit 1 or 2), by and detail. Run nothing else and change nothing.
-${RULES}`, { label: `renew-${at}`, phase: ph, model: 'sonnet', effort: 'low', schema: RENEW_SCHEMA })
+// The nested renew instruction a folded prompt starts with.
+const RENEW_FIRST = `First renew the claim: run, alone and exactly, forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch} (it prints one JSON line) and return its verdict (error, with detail, on exit 1 or 2), by and detail as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew.`
+// Grades a renew result. null = renewed; else the stop to return.
+const renewed = (r, at) => {
   if (r && r.verdict === 'renewed') return null
   // An ended claim never comes back: no cont, a resume could only stop here again.
   if (r && r.verdict === 'not_held') return { stage: 'claim-lost', at, renew: r, details: 'the claim was ended (released, or honoured as stale by the owner); start again without cont: setup re-adopts the branch and acquire decides' }
   claimIncomplete = true
   return stop('claim-lost', { at, renew: r })
 }
+// Renews the claim before the step it guards. null = renewed; else the stop to return.
+const renew = async (at, ph) => renewed(await call(`Renew the claim on issue #${ISSUE} of ${SLUG}. Run, alone and exactly: forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
+It prints one JSON line. Return its verdict (error, with detail, on exit 1 or 2), by and detail. Run nothing else and change nothing.
+${RULES}`, { label: `renew-${at}`, phase: ph, model: 'sonnet', effort: 'low', schema: RENEW_SCHEMA }), at)
 const RANGE = `origin/${INT}...HEAD`
 const CTX = `Issue #${ISSUE} of ${SLUG}. Worktree: ${W} (branch ${setup.branch}, base ${setup.base_sha}, integration branch ${INT}). The branch's changes are git -C ${W} diff ${RANGE} (fetch origin first).`
 const K = setup.knowledge || {}
@@ -647,14 +656,21 @@ if (plan) {
   const bad = branchProblems(plan)
   if (bad.length) { plan = null; planReviewed = false; planFindingsKept = null; return stop('plan', { step: 'resume', invalid: CONT.plan, branch_problems: bad }) }
 }
-if (!plan || !planReviewed) {
+// The owner's answer is read when there is no plan or a kept plan awaits it; that read carries the plan's claim renew.
+const RESUME_KEPT = !!(plan && !planReviewed && planFindingsKept)
+const ANSWER_NEEDED = !plan || RESUME_KEPT
+if ((!plan || !planReviewed) && !ANSWER_NEEDED) {
   const lost = await renew('plan', 'Plan')
   if (lost) return lost
 }
 const readAnswer = async () => {
   const answer = await call(`${CTX}
-Read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: { type: 'object' } }, decisions: { type: 'string' } }, required: ['verdict'] } })
-  if (!answer || !['none', 'open', 'answered'].includes(answer.verdict)) return stop('owner-answer', { result: answer })
+${RENEW_FIRST}
+Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', model: 'sonnet', effort: 'low', schema: withRenew(ANSWER_SCHEMA) })
+  if (!answer) return stop('owner-answer', { result: answer })
+  const lost = renewed(answer.renew, 'plan')
+  if (lost) return lost
+  if (!complete(answer, ANSWER_SCHEMA) || !['none', 'open', 'answered'].includes(answer.verdict)) return stop('owner-answer', { result: answer })
   if (answer.verdict === 'answered') {
     // An answered prompt with no decision text would let planning go on without the owner's choices.
     if (typeof answer.decisions !== 'string' || !answer.decisions.trim()) return stop('owner-answer', { result: answer })
@@ -662,11 +678,10 @@ Read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, ex
   }
   return null
 }
-const RESUME_KEPT = !!(plan && !planReviewed && planFindingsKept)
 // Only findings the rules-only revise may touch resume as one. A kept plan with any other finding left has spent its one full
 // revise, so it is dropped and planned again with the owner's answer; the kept state stays in the cont until that answer is read.
 const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules, planFindingsKept.findings)
-if (!plan || RESUME_KEPT) {
+if (ANSWER_NEEDED) {
   const stopped = await readAnswer()
   if (stopped) return stopped
 }
@@ -863,9 +878,11 @@ const VERIFY = {
   properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' } }, required: ['id', 'status', 'summary'] } } },
   required: ['head', 'clean', 'results'],
 }
-const verifyPrompt = `${CTX}
-Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(setup.verification)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. Do not change any file.
+const verifyBody = `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(setup.verification)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. Do not change any file.
 ${RULES}`
+const verifyPrompt = `${CTX}\n${verifyBody}`
+// The first verification also renews the claim (#716); the reruns do not.
+const verifyFirst = `${CTX}\n${RENEW_FIRST}\n${verifyBody}`
 // Every declared id needs exactly one result; skipped only where the contract gives when_changed globs; and a clean tree.
 const verifyProblems = v => {
   if (!v) return [{ id: '?', summary: 'verification returned nothing' }]
@@ -880,11 +897,12 @@ const verifyProblems = v => {
 }
 let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results } : null
 if (!VERIFY_CACHED) {
-{
-  const lost = await renew('verify', 'Verify')
+verify = await call(verifyFirst, { label: 'verify', phase: 'Verify', model: 'sonnet', effort: 'low', schema: withRenew(VERIFY) })
+if (verify) {
+  const lost = renewed(verify.renew, 'verify')
   if (lost) return lost
+  if (!complete(verify, VERIFY)) verify = null
 }
-verify = await call(verifyPrompt, { label: 'verify', phase: 'Verify', model: 'sonnet', effort: 'low', schema: VERIFY })
 let vRounds = 0
 while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
