@@ -322,7 +322,7 @@ def note_blocks(text):
 # other order (D2).
 SIBLING_CANDIDATE_RE = re.compile(r"sibling(?:\s+\S+){0,2}\s+candidate")
 
-SDD_SCRIPTS = REPO_ROOT / "home/common/agent-skills/skills/sdd/scripts"
+SDD_SCRIPTS = REPO_ROOT / "home/common/agent-skills/scripts"
 
 # The superseded claim: the workspace has not been repo-root-relative since the
 # primary-checkout move (D3).
@@ -370,7 +370,7 @@ KEPT_SHAPES = (
     ".claude/specs/2026-08-23-workflow-scratch-containment-design.md",
     ".claude/plans/2026-08-23-workflow-scratch-containment.md",
     ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-1.md",
-    "home/common/agent-skills/skills/sdd/scripts/sdd-workspace",
+    "home/common/agent-skills/scripts/sdd-workspace",
     "home/common/agent-skills/tests/test_sdd_workspace.py",
     "handoff-notes.md",
 )
@@ -1775,6 +1775,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertNotIn('".agents/bin/review-package" =', nix_module)
         self.assertIn('".agents/bin/sdd-workspace"', nix_module)
         self.assertIn('".agents/bin/task-brief"', nix_module)
+        self.assertIn("source = ./scripts/sdd-workspace;", nix_module)
+        self.assertIn("source = ./scripts/task-brief;", nix_module)
         with self.subTest(skill="ship-issue detail producer"):
             self.assertIn("~/.agents/bin/review-package", self.ship_issue)
 

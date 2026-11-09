@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).parents[4]
-WORKSPACE = ROOT / "home/common/agent-skills/skills/sdd/scripts/sdd-workspace"
+WORKSPACE = ROOT / "home/common/agent-skills/scripts/sdd-workspace"
 
 GIT_LOCATION_VARS = (
     "GIT_DIR",

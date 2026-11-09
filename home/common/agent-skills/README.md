@@ -211,4 +211,4 @@ A Phase-6 `delegate` is the Phase-7 ship-owner dispatch, never a second issue ow
 
 ### task-brief on PATH
 
-`~/.agents/bin/task-brief` is the sdd skill's `scripts/task-brief`, installed unedited beside `sdd-workspace`. `sdd-gate next` runs it by name because a packaged command reaches an executable outside the package by its name on `PATH` (`docs/standards/agent-helpers.md` rule 3). The script finds `sdd-workspace` next to itself (`dirname "$0"`), which holds in the skill's `scripts/` directory and in `~/.agents/bin/` alike.
+`~/.agents/bin/task-brief` is `home/common/agent-skills/scripts/task-brief`, installed unedited beside `sdd-workspace`. `sdd-gate next` runs it by name because a packaged command reaches an executable outside the package by its name on `PATH` (`docs/standards/agent-helpers.md` rule 3). The script finds `sdd-workspace` next to itself (`dirname "$0"`), which holds in the source `scripts/` directory and in `~/.agents/bin/` alike.

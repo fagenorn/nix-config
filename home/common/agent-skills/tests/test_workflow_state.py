@@ -31,7 +31,7 @@ else:
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
 # The module the thin `SCRIPT` entry point imports (issue 612).
 MODULE = Path(__file__).parents[1] / "scripts" / "workflow_state.py"
-SDD_WORKSPACE = Path(__file__).parents[1] / "skills" / "sdd" / "scripts" / "sdd-workspace"
+SDD_WORKSPACE = Path(__file__).parents[1] / "scripts" / "sdd-workspace"
 MODEL = Path(__file__).parents[1] / "scripts" / "delivery_model" / "__init__.py"
 MODEL_FIXTURES = Path(__file__).with_name("_delivery_model_fixtures.py")
 ARTIFACT_BUDGET = Path(__file__).parents[1] / "scripts" / "artifact_budget.py"
