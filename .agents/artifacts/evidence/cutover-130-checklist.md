@@ -25,12 +25,12 @@ Owner decisions applied (issue 130, 2026-11-08T13:20:31Z): C8 (the Codex ship ha
 | C10 | `doctor` is clean on every adopted host | issue | pre | green | — |
 | C11 | Deprecation notices shipped in a bridge minor, and the fleet has zero users of the deprecated paths | issue; #66 | pre | green | — |
 | C12 | The bridge generation is identified per host and can be retained | issue; #66 | pre | green | — |
-| P1 | No static fallback ladder remains in the resolver, conformance or workflow-entry paths of any adopted project, and a missing contract fails closed with a closed error code | AC2; #69 | post | human-pending | post-activation |
-| P2 | The bridge generation is retained, and rollback to it is exercised once before retirement | AC3; refresh | post | human-pending | post-activation |
-| P3 | A Claude-driven ship completes on the strict path, against declared host capabilities with bounded admission | AC4; refresh | post | human-pending | post-activation |
-| P4 | The #71 retirement predicates: the active generation's identity matches its manifest; active and bridge fleet conformance are green; `workflow_entry` passes through both adapters; post-activation smoke is green; doctor reports no residue; traces show zero removed-fallback executions | #71 | post | human-pending | post-activation |
-| P5 | Implementation delivered, PR merged, tracker closed and cleanup postconditions reconciled before retirement | refresh | post | human-pending | post-activation |
-| P6 | Retirement is recorded with the evidence that satisfied each strict predicate | AC5 | post | human-pending | post-activation |
+| P1 | No static fallback ladder remains in the resolver, conformance or workflow-entry paths of any adopted project, and a missing contract fails closed with a closed error code | AC2; #69 | post | green | all three hosts, reading approved 2026-11-09 (P1 row below) |
+| P2 | The bridge generation is retained, and rollback to it is exercised once before retirement | AC3; refresh | post | green | rollback to the bridge and re-activation on all three hosts, 19:55Z to 20:30Z |
+| P3 | A Claude-driven ship completes on the strict path, against declared host capabilities with bounded admission | AC4; refresh | post | green | #763 shipped through deliver-standard on mbp's strict generation: PR 767, 6febd0a2 |
+| P4 | The #71 retirement predicates: the active generation's identity matches its manifest; active and bridge fleet conformance are green; `workflow_entry` passes through both adapters; post-activation smoke is green; doctor reports no residue; traces show zero removed-fallback executions | #71 | post | green | every #71 predicate green on all three hosts after re-activation |
+| P5 | Implementation delivered, PR merged, tracker closed and cleanup postconditions reconciled before retirement | refresh | post | human-pending | retirement merge in this PR; #579 and #130 close and the hosts switch from main after it |
+| P6 | Retirement is recorded with the evidence that satisfied each strict predicate | AC5 | post | green | the Retirement section below |
 
 Writes this refresh made, all outside the evidence commands and all recoverable:
 - eleven-m5 was fast-forwarded from 4444bc2340d3 to 6e2f9dde45cb and switched headless with `just switch`, from system-34 to system-35 (bridge 1.2.0). The launchd user agents did not bootstrap over ssh, because nobody is logged in at the console. eleven-m5 is the bridge, not the candidate.
@@ -579,7 +579,39 @@ eleven-m5 was switched at 2026-11-09T17:22:57Z (done 17:24:04Z) and anis-desktop
 
 **Fleet activated.** All three hosts run the candidate 06fb38b718e050742e607b9b0feefd873e90c404: eleven-m5 35 to 36 (2026-11-09T17:24:04Z), anis-desktop 79 to 80 (17:27:33Z) and mbp 325 to 326 (owner, about 18:31:32Z). On anis-desktop, nodocom's pushes were refused from activation until 17:39Z: its registry entry lacked the `branch_override` mbp's has, so the guard derived from nodocom's schema-1 `origin/main` (fixed by re-registration; follow-up #765).
 
-P2 (the rollback exercise), P3 (a Claude-driven ship), P5 and P6 are not evaluated yet.
+#### P2, rollback exercise (2026-11-09)
+
+The land locks of all five fleet repositories were free before every switch; the nodocom landing queue was paused for the exercise (issue 753).
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| eleven-m5 | rollback | system-36 to 35 | `sudo system-35-link/sw/bin/darwin-rebuild --switch-generation 35` | 2026-11-09T19:55:29Z to 19:55:56Z | 0 | C12 at 19:56:04Z: system-35 running, configurationRevision 6e2f9dde45cb, platform 1.2.0, 2/2 compatible | green |
+| anis-desktop | rollback | system-80 to 79 | `nix-env --switch-generation 79`; `switch-to-configuration switch` | 2026-11-09T19:56:14Z to 19:56:26Z | 0 | C12 at 19:56:26Z: system-79 running, configurationRevision e1d4db56718b, platform 1.2.0, 1/1 compatible | green |
+| mbp | rollback (owner) | system-326 to 325 | `sudo system-325-link/sw/bin/darwin-rebuild --switch-generation 325` | verified 2026-11-09T20:26:33Z | 0 | C12: system-325 running, configurationRevision 76a3470a347d, platform 1.2.0, 5/5 compatible | green |
+| eleven-m5 | re-activation | system-36 | gate step 4 block at 06fb38b7 | 2026-11-09T20:26:52Z to 20:27:25Z | 0 | the same store path, so nix reused generation 36; every post-activation check green; guard rows derived for both slugs | green |
+| anis-desktop | re-activation | system-80 | gate step 4 block at 06fb38b7 | 2026-11-09T20:28:09Z to 20:28:23Z | 0 | every post-activation check green; nodocom's guard row derived from origin/dev | green |
+| mbp | re-activation (owner) | system-326 | gate step 4 block at 06fb38b7 | verified 2026-11-09T20:30:50Z | 0 | every post-activation check green; guard rows derived for all 5 slugs; claude-guard-policy complete, 0 refused | green |
+
+From 2026-11-09T20:26Z, all three hosts ran the bridge at once; all three run the candidate again since 20:30Z.
+
+#### P3, Claude-driven ship on the strict path
+
+#763 (scope fallback-audit's nix-config exemptions to nix-config) was delivered through `deliver-standard`, lane direct (run wf_137ed5c7-e0f), on mbp while mbp ran the candidate (system-326, 18:31:32Z to the owner's rollback at about 20:25Z). It was the only host on the candidate at that time; eleven-m5 and anis-desktop were rolled back at 19:55Z. The lifecycle guard on the strict tools admitted `git push origin issue-763-…` at 19:59:43Z, `gh pr create` at 19:59:59Z (PR 767) and `gh pr merge 767 --merge --match-head-commit 712e1b53… --delete-branch` at 20:07:55Z. PR 767 merged as 6febd0a21fc368894cdaee96f7b459a9b72fad04 at 20:08:03Z with Agent Workflow Tests, Flake Checker, Instruction Budget and Nix Eval green; #763 closed at 20:08:04Z and its claim was released. `fallback-audit traces --since 2026-11-09T19:30:00Z` on mbp (20:32:32Z, 27 transcript files, 0 skipped lines) reports 2 matches, both at 19:54:00Z and 19:57:49Z inside that run: its implementer's `python3` heredocs that edit `tests/test_fallback_audit.py`, whose fixtures contain the `skills.config.json` marker text. Neither is an execution of a removed fallback route, so the reading is zero removed-fallback executions. Verdict: green.
+
+#### P4, the #71 retirement predicates
+
+On every host after re-activation: the active generation's identity matches the candidate (configurationRevision 06fb38b718e0, platform 2.0.0, project schema [2]); active fleet conformance passes 13/13 on all 8 roots and the bridge generation's own resolver with its own manifest reads 1.2.0 with every row compatible; both host routes answer as declared (claude-code supported, codex `declared_unsupported`); the post-activation smoke is P3; doctor passes 19/19 on every root with no residue; and the traces read zero removed-fallback executions since each host's switch, with the two P3 fixture-text matches above. Verdict: green.
+
+## Retirement (issue 130 P6)
+
+- **Candidate:** 06fb38b718e050742e607b9b0feefd873e90c404 (platform 2.0.0, project schema [2], 5 removals), activated on eleven-m5 (35 to 36), anis-desktop (79 to 80) and mbp (325 to 326) on 2026-11-09; rollback exercised and re-activated 19:55Z to 20:30Z.
+- **C3:** green by the owner's waiver on evidence (issue 130 comment 6745240816).
+- **P1:** green under the reading in the P1 row; #763 has since scoped the exemptions on main.
+- **P2, P3, P4:** green, as recorded above.
+- **P5:** this pull request merges the candidate (with origin/main merged in, force-free) into main. After the merge, #579 is closed against the merge commit and the hosts switch from main in an announced window. Until then the freeze holds and the bridge generations (eleven-m5 35, mbp 325, anis-desktop 79) are kept.
+- **Follow-ups:** #763 (closed by PR 767) and #765 (a pre-activation C-row for guard-policy derivation and registry drift across hosts).
+
+The bridge generation is garbage-collected only after the hosts switch from main and this record is confirmed on issue 130.
 
 ## Dispositions
 
@@ -756,12 +788,12 @@ AC1 to AC5 are the issue's `## Acceptance criteria`, AC6 to AC10 its `### Additi
 | AC | Criterion | Items | Verdict |
 |----|-----------|-------|---------|
 | AC1 | A committed cutover checklist cites registration for all three projects, an `approved` bundle for the cutover candidate, no in-flight legacy release or unresumable legacy attempt, a clean `doctor` on every host, and the Codex handoff — each with fresh evidence. (False at base: none of the inputs exist.) | C2, C3, C5, C6, C10 (C8 retired by the owner, 2026-11-08); C3 by the owner's waiver, 2026-11-09 | met |
-| AC2 | After activation, no static fallback ladder remains in the resolver, conformance or workflow-entry paths of any adopted project; a missing contract fails closed with a closed error code everywhere. (False at base: the ladders are the current behaviour.) | P1 | human_pending |
-| AC3 | The bridge generation is retained and rollback to it is exercised once before retirement is recorded. (False at base: no bridge exists.) | P2, C12 | human_pending |
-| AC4 | Both a Claude-driven and a Codex-driven ship complete on the strict path after cutover. (False at base: the Codex path cannot complete a ship without manual intervention.) Narrowed by the owner on 2026-11-08 to a Claude-driven ship on the strict path. | P3 | human_pending |
+| AC2 | After activation, no static fallback ladder remains in the resolver, conformance or workflow-entry paths of any adopted project; a missing contract fails closed with a closed error code everywhere. (False at base: the ladders are the current behaviour.) | P1 | met |
+| AC3 | The bridge generation is retained and rollback to it is exercised once before retirement is recorded. (False at base: no bridge exists.) | P2, C12 | met |
+| AC4 | Both a Claude-driven and a Codex-driven ship complete on the strict path after cutover. (False at base: the Codex path cannot complete a ship without manual intervention.) Narrowed by the owner on 2026-11-08 to a Claude-driven ship on the strict path. | P3 | met |
 | AC5 | Retirement is recorded with the evidence that satisfied each strict predicate. | P6 | human_pending |
 | AC6 | The checklist derives the fleet roster from current registry truth and records the explicit Arcwave inclusion/exclusion decision. | C1 | met |
 | AC7 | There are zero active legacy attempts and zero retained legacy worktrees that cannot resume on a declared path. | C6, C7 | met |
-| AC8 | Rollback to the retained bridge generation is exercised before retirement. | P2 | human_pending |
-| AC9 | Claude and Codex paths complete against declared host capabilities, including bounded capacity admission. Narrowed by the owner on 2026-11-08 to a Claude-driven ship; Codex answers its declared `unsupported`. | C9, P3 | human_pending |
+| AC8 | Rollback to the retained bridge generation is exercised before retirement. | P2 | met |
+| AC9 | Claude and Codex paths complete against declared host capabilities, including bounded capacity admission. Narrowed by the owner on 2026-11-08 to a Claude-driven ship; Codex answers its declared `unsupported`. | C9, P3 | met |
 | AC10 | Implementation delivered, PR merged, tracker closed, and cleanup postconditions are reconciled before bridge retirement. | P5 | human_pending |
