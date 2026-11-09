@@ -38,7 +38,7 @@
       "asserts": [
         {
           "name": "nothing was pushed",
-          "shell": "[ -z \"$(git -C \"$ORIGIN\" for-each-ref refs/heads/worktree-issue-3-rename-flag)\" ] || fail \"the branch reached origin despite the stop\""
+          "shell": "[ \"$(git -C \"$ORIGIN\" for-each-ref --format='%(refname) %(objectname)')\" = \"$ORIGIN_REFS\" ] || fail \"origin's refs changed since setup despite the stop: $(git -C \"$ORIGIN\" for-each-ref --format='%(refname)' | tr '\\n' ' ')\""
         },
         {
           "name": "local and origin main are unchanged",
@@ -58,7 +58,7 @@
         },
         {
           "name": "the run prints the Critical, Important and Minor sections",
-          "shell": "out_matches '^[[:space:]#*_-]*critical[[:space:]*_:]*$' && out_matches '^[[:space:]#*_-]*important[[:space:]*_:]*$' && out_matches '^[[:space:]#*_-]*minor[[:space:]*_:]*$' && out_matches 'README|test_cli|cli\\.py'"
+          "shell": "out_matches '^[[:space:]#*_-]*critical([[:space:]]*\\(must fix\\))?[[:space:]*_:]*$' && out_matches '^[[:space:]#*_-]*important([[:space:]]*\\(should fix\\))?[[:space:]*_:]*$' && out_matches '^[[:space:]#*_-]*minor[[:space:]*_:]*$' && out_matches 'README|test_cli|cli\\.py'"
         }
       ]
     }

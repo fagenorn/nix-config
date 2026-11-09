@@ -495,7 +495,11 @@ def published_sandbox(tmp):
                    env={**os.environ, **QUIET_GIT})
     base = subprocess.run(git + ["rev-parse", "main"], capture_output=True, text=True,
                           check=True).stdout.strip()
+    refs = subprocess.run(["git", "-C", str(origin), "for-each-ref",
+                           "--format=%(refname) %(objectname)"],
+                          capture_output=True, text=True, check=True).stdout.strip()
     env = {"WORK": str(tmp), "REPO": str(repo), "ORIGIN": str(origin), "BASE_MAIN": base,
+           "ORIGIN_REFS": refs,
            "SPEC_DIR": str(repo / ".claude/specs"), "PLAN_DIR": str(repo / ".claude/plans"),
            "WT": "", "WT_COUNT": "0", "PRE_WT": ""}
     return repo, git, env
@@ -911,6 +915,23 @@ class NativeReviewEvalCaseTest(unittest.TestCase):
                            check=True, env={**os.environ, **QUIET_GIT})
             self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
 
+    def test_a_push_under_another_branch_name_fails(self):
+        """The branch ref stays absent, main unchanged and the worktree clean, yet the
+        review's commits reached origin under another name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            self.assertEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+            subprocess.run(wgit + ["push", "-q", "origin", "HEAD:refs/heads/review-result"],
+                           check=True, env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+
+    def test_a_pushed_tag_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, wgit, env = self.good_run(Path(tmp).resolve())
+            subprocess.run(wgit + ["push", "-q", "origin", "HEAD:refs/tags/reviewed"],
+                           check=True, env={**os.environ, **QUIET_GIT})
+            self.assertNotEqual(self.grade("nothing was pushed", repo, env).returncode, 0)
+
     def test_an_edited_worktree_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, _, env = self.good_run(Path(tmp).resolve())
@@ -1013,6 +1034,17 @@ class NativeReviewEvalCaseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
             self.assertEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_the_native_rubric_headings_pass(self):
+        """The native reviewer prompt's own headings carry a parenthetical."""
+        name = "the run prints the Critical, Important and Minor sections"
+        for out in ("### Critical (Must Fix)\n- none\n### Important (Should Fix)\n- none\n"
+                    "### Minor\n- tinytask/cli.py:23 help text\n",
+                    "**Critical (Must Fix)**\n- none\n**Important (Should Fix):**\n- none\n"
+                    "**Minor**\n- README wording\n"):
+            with self.subTest(out=out), tempfile.TemporaryDirectory() as tmp:
+                repo, _, env = self.good_run(Path(tmp).resolve(), out=out)
+                self.assertEqual(self.grade(name, repo, env).returncode, 0)
 
     def test_an_output_without_the_route_or_sections_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
