@@ -60,15 +60,18 @@ resolved to `none` (c), and no skill text naming the retired command (d); with `
 it also reads whether the release target A is adopted and available. It exits 0 when every root is
 green, 1 when one is red, 75 when none is red and one is pending, and 2 on a tool error. Under
 `--red-pending` any root that is not green exits 75.
+`claude-session-surface [--absent-tool-prefix P]... [--absent-skill S]... [--connected-server NAME]... [--present-skill S]...` (issue 735) runs one `claude -p` stream-json session (one model request), without the caller's `ENABLE_CLAUDEAI_MCP_SERVERS`, and reads its `system`/`init` event. It is met when no listed tool starts with an absent prefix and no absent skill is a slash command. It is not yet (75) when a named server is not listed as connected or a present skill is missing, so a session whose connector or synced skills did not load never counts. It exits 2 when `claude` is missing, the session times out (its whole process group is killed) or gives no readable init event.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -812,6 +815,84 @@ def deprecations_retired_check(roots: Sequence[Path], environ: Mapping[str, str]
     return code, {"met": green, "roots": rows}
 
 
+SESSION_TIMEOUT = 300
+SESSION_ENV_DROP = ("ENABLE_CLAUDEAI_MCP_SERVERS",)
+
+
+def _string_list(init: Mapping[str, object], key: str) -> list[str]:
+    value = init.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ToolError("session_error", f"init event has no list of strings at {key}")
+    return value
+
+
+def _server_rows(init: Mapping[str, object]) -> list[tuple[str, str]]:
+    value = init.get("mcp_servers")
+    if not isinstance(value, list):
+        raise ToolError("session_error", "init event has no list at mcp_servers")
+    rows = []
+    for entry in value:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("name"), str)
+                or not isinstance(entry.get("status"), str)):
+            raise ToolError("session_error", "init event has an mcp_servers entry without a name and status")
+        rows.append((entry["name"], entry["status"]))
+    return rows
+
+
+def claude_session_surface(init: Mapping[str, object], *, absent_tool_prefixes: Sequence[str],
+                           absent_skills: Sequence[str], connected_servers: Sequence[str],
+                           present_skills: Sequence[str]) -> tuple[int, dict]:
+    """Judge one session's init event: 75 when a named server or skill did not load, else 1/0."""
+    tools = _string_list(init, "tools")
+    skills = _string_list(init, "slash_commands")
+    connected = {name for name, status in _server_rows(init) if status == "connected"}
+    missing_servers = sorted({name for name in connected_servers if name not in connected})
+    missing_skills = sorted({name for name in present_skills if name not in skills})
+    present_tools = sorted({tool for tool in tools if tool.startswith(tuple(absent_tool_prefixes))})
+    found_skills = sorted({name for name in absent_skills if name in skills})
+    if missing_servers or missing_skills:
+        code, verdict = 75, "not_observed"
+    elif present_tools or found_skills:
+        code, verdict = 1, "not_met"
+    else:
+        code, verdict = 0, "met"
+    return code, {"verdict": verdict, "present_tools": present_tools, "present_skills": found_skills,
+                  "missing_servers": missing_servers, "missing_skills": missing_skills}
+
+
+def _session_init(claude_bin: str, environ: Mapping[str, str]) -> dict:
+    """The `system`/`init` event of one `claude -p` session; ToolError when none is read.
+
+    The child runs in its own process group so a timeout kills the launcher's whole tree, and
+    without the connector switch a claude-orchestrate caller exports (it would skip the fetch).
+    """
+    env = {key: value for key, value in environ.items() if key not in SESSION_ENV_DROP}
+    argv = [claude_bin, "-p", "--output-format", "stream-json", "--verbose", "--max-turns", "1",
+            "Reply with the single word ok."]
+    with tempfile.TemporaryDirectory() as cwd:
+        try:
+            proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    errors="replace", start_new_session=True)
+        except OSError as error:
+            raise ToolError("session_error", f"claude failed to start: {error}") from None
+        try:
+            stdout, _ = proc.communicate(timeout=SESSION_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            raise ToolError("session_error", f"claude session timed out after {SESSION_TIMEOUT}s") from None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
+            return event
+    raise ToolError("session_error", "claude session printed no init event")
+
+
 def _repo(value: str) -> str:
     if not REPO.match(value):
         raise argparse.ArgumentTypeError("must be OWNER/NAME")
@@ -869,7 +950,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     retired.add_argument("--repo-root", type=Path, action="append", required=True)
     retired.add_argument("--watch-adapter")
     retired.add_argument("--red-pending", action="store_true")
+    surface = checks.add_parser(
+        "claude-session-surface",
+        help="issue 735: a fresh session lists none of the named tools or skills")
+    surface.add_argument("--absent-tool-prefix", type=_nonempty, action="append", default=[])
+    surface.add_argument("--absent-skill", type=_nonempty, action="append", default=[])
+    surface.add_argument("--connected-server", type=_nonempty, action="append", default=[])
+    surface.add_argument("--present-skill", type=_nonempty, action="append", default=[])
     args = parser.parse_args(argv)
+    if args.check == "claude-session-surface":
+        if not args.absent_tool_prefix and not args.absent_skill:
+            parser.error("claude-session-surface needs --absent-tool-prefix or --absent-skill")
+        claude_bin = shutil.which("claude", path=os.environ.get("PATH"))
+        if claude_bin is None:
+            print("verify-checks: session_error: claude not found", file=sys.stderr)
+            return 2
+        try:
+            code, report = claude_session_surface(
+                _session_init(claude_bin, os.environ),
+                absent_tool_prefixes=args.absent_tool_prefix, absent_skills=args.absent_skill,
+                connected_servers=args.connected_server, present_skills=args.present_skill)
+        except ToolError as error:
+            print(f"verify-checks: {error.kind}: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "deprecations-retired":
         try:
             code, report = deprecations_retired_check(

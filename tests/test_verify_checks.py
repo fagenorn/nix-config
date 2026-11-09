@@ -1,4 +1,5 @@
 """`agent_tools.verify_checks`: the committed verify checks of issue 638."""
+import io
 import json
 import os
 import shutil
@@ -12,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import agent_gate_bundle, forge_markers, verify_checks
-from agent_tools.verify_checks import required_checks, self_hosted_runner
+from agent_tools.verify_checks import claude_session_surface, required_checks, self_hosted_runner
 
 from .pre_push_world import PrePushWorld
 from .test_agent_gate_bundle import IDENTITY, context, flat, stratum  # the emitted-bundle builders
@@ -969,6 +970,169 @@ class CutoverBundleTest(unittest.TestCase):
         world = CutoverWorld(self)
         code, report = verify_checks.cutover_bundle(world.clone, CANDIDATE_BRANCH)
         self.assertEqual((code, report["verdict"]), (75, "absent"))
+
+
+def session_init(tools=(), skills=(), servers=(("claude.ai X", "connected"),)):
+    return {"type": "system", "subtype": "init", "tools": list(tools), "slash_commands": list(skills),
+            "mcp_servers": [{"name": n, "status": s} for n, s in servers]}
+
+
+SURFACE = {"absent_tool_prefixes": ["mcp__x_Docs"], "absent_skills": ["ns:browser"],
+           "connected_servers": ["claude.ai X"], "present_skills": ["ns:kept"]}
+
+
+def fake_claude(directory, body):
+    """An executable `claude` in `directory` running the sh `body`; its children share its process group."""
+    path = Path(directory) / "claude"
+    path.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+def init_line(**extra):
+    return json.dumps({**session_init(), **extra})
+
+
+class ClaudeSessionSurfaceTest(unittest.TestCase):
+    def test_met_when_the_absent_names_are_gone_and_the_guards_hold(self):
+        code, report = claude_session_surface(
+            session_init(tools=["Bash", "mcp__x_Other__a"], skills=["ns:kept", "ns:other"]), **SURFACE)
+        self.assertEqual((code, report["verdict"]), (0, "met"))
+
+    def test_a_tool_of_the_denied_connector_is_not_met(self):
+        code, report = claude_session_surface(
+            session_init(tools=["mcp__x_Docs__create", "Bash"], skills=["ns:kept"]), **SURFACE)
+        self.assertEqual((code, report["present_tools"]), (1, ["mcp__x_Docs__create"]))
+
+    def test_an_absent_skill_still_listed_is_not_met(self):
+        code, report = claude_session_surface(session_init(skills=["ns:kept", "ns:browser"]), **SURFACE)
+        self.assertEqual((code, report["present_skills"]), (1, ["ns:browser"]))
+
+    def test_skill_matching_is_exact(self):
+        code, _ = claude_session_surface(session_init(skills=["ns:kept", "browser", "ns:browser-x"]), **SURFACE)
+        self.assertEqual(code, 0)
+
+    def test_a_named_server_that_is_not_connected_is_not_observed(self):
+        # The reviewer's case: other servers of the account exist but the named one failed.
+        servers = (("claude.ai A", "failed"), ("claude.ai X", "failed"), ("claude.ai C", "connected"))
+        code, report = claude_session_surface(session_init(skills=["ns:kept"], servers=servers), **SURFACE)
+        self.assertEqual((code, report["verdict"], report["missing_servers"]), (75, "not_observed", ["claude.ai X"]))
+
+    def test_a_pending_named_server_is_not_observed(self):
+        code, _ = claude_session_surface(
+            session_init(skills=["ns:kept"], servers=(("claude.ai X", "pending"),)), **SURFACE)
+        self.assertEqual(code, 75)
+
+    def test_server_matching_is_exact_not_by_prefix(self):
+        code, report = claude_session_surface(
+            session_init(skills=["ns:kept"], servers=(("claude.ai X2", "connected"),)), **SURFACE)
+        self.assertEqual((code, report["missing_servers"]), (75, ["claude.ai X"]))
+
+    def test_no_server_at_all_is_not_observed_even_when_tools_are_absent(self):
+        code, _ = claude_session_surface(session_init(skills=["ns:kept"], servers=()), **SURFACE)
+        self.assertEqual(code, 75)
+
+    def test_no_synced_skill_is_not_observed_and_wins_over_not_met(self):
+        code, report = claude_session_surface(session_init(tools=["mcp__x_Docs__create"]), **SURFACE)
+        self.assertEqual((code, report["missing_skills"]), (75, ["ns:kept"]))
+
+    def test_a_malformed_init_is_a_session_error(self):
+        for init in ({"type": "system", "subtype": "init"},
+                     {**session_init(), "tools": "Bash"},
+                     {**session_init(), "mcp_servers": [{"status": "connected"}]},
+                     {**session_init(), "mcp_servers": [{"name": "claude.ai X"}]}):
+            with self.subTest(init=init):
+                with self.assertRaises(verify_checks.ToolError):
+                    claude_session_surface(init, **SURFACE)
+
+
+class ClaudeSessionSurfaceCommandTest(unittest.TestCase):
+    ARGS = ["--absent-tool-prefix", "mcp__x_Docs", "--absent-skill", "ns:browser",
+            "--connected-server", "claude.ai X", "--present-skill", "ns:kept"]
+
+    def test_main_judges_the_session_init_and_prints_the_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            line = json.dumps(session_init(skills=["ns:kept"]))
+            fake_claude(tmp, f"printf '%s\\n' '{line}'")
+            with mock.patch.dict(os.environ, {"PATH": f"{tmp}{os.pathsep}{os.environ.get('PATH', '')}"}), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                code = verify_checks.main(["claude-session-surface", *self.ARGS])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["verdict"], "met")
+
+    def test_no_absent_argument_is_a_usage_error(self):
+        with mock.patch.object(verify_checks, "_session_init", side_effect=AssertionError("ran a session")):
+            with self.assertRaises(SystemExit) as raised:
+                verify_checks.main(["claude-session-surface", "--present-skill", "ns:kept"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_session_init_skips_noise_and_returns_the_init_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Path(tmp) / "args"
+            body = (f"printf '%s\\n' \"$*\" > '{args}'\n"
+                    "echo 'not json'\necho '[1]'\n"
+                    "echo '{\"type\": \"system\", \"subtype\": \"hook\"}'\n"
+                    f"printf '%s\\n' '{init_line()}'\necho '{{\"type\": \"result\"}}'\nexit 1")
+            init = verify_checks._session_init(fake_claude(tmp, body), dict(os.environ))
+            argv = args.read_text(encoding="utf-8").split()
+        self.assertEqual(init["subtype"], "init")
+        self.assertEqual(argv[:4], ["-p", "--output-format", "stream-json", "--verbose"])
+
+    def test_session_init_drops_the_connector_switch_and_keeps_the_rest(self):
+        # A claude-orchestrate caller exports ENABLE_CLAUDEAI_MCP_SERVERS=false; the measured session must not inherit it.
+        with tempfile.TemporaryDirectory() as tmp:
+            body = ("printf '{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[],\"slash_commands\":[],"
+                    "\"mcp_servers\":[],\"switch\":\"%s\",\"kept\":\"%s\"}\\n' "
+                    "\"${ENABLE_CLAUDEAI_MCP_SERVERS-unset}\" \"${KEPT_VAR-unset}\"")
+            environ = {**os.environ, "ENABLE_CLAUDEAI_MCP_SERVERS": "false", "KEPT_VAR": "yes"}
+            init = verify_checks._session_init(fake_claude(tmp, body), environ)
+        self.assertEqual((init["switch"], init["kept"]), ("unset", "yes"))
+
+    def test_session_init_without_an_init_event_is_a_session_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(verify_checks.ToolError) as raised:
+                verify_checks._session_init(fake_claude(tmp, "echo '{\"type\": \"result\"}'"), dict(os.environ))
+        self.assertEqual(raised.exception.kind, "session_error")
+
+    def test_session_init_timeout_kills_the_whole_process_group(self):
+        # The installed claude is a launcher that waits on a separate Claude child.
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "grandchild"
+            body = f"sleep 60 &\necho $! > '{pidfile}'\nwait"
+            started = time.monotonic()
+            with mock.patch.object(verify_checks, "SESSION_TIMEOUT", 2):
+                with self.assertRaises(verify_checks.ToolError) as raised:
+                    verify_checks._session_init(fake_claude(tmp, body), dict(os.environ))
+            elapsed = time.monotonic() - started
+            grandchild = int(pidfile.read_text(encoding="utf-8"))
+        self.assertEqual(raised.exception.kind, "session_error")
+        # Without the group kill the drain blocks until the grandchild's `sleep 60` ends.
+        self.assertLess(elapsed, 30)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail(f"grandchild {grandchild} still running after the timeout")
+
+    def test_wrapper_without_claude_on_path_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.symlink(sys.executable, Path(tmp) / "python3")
+            done = run_from_root(["/bin/sh", str(ROOT / CHECKS / "claude-session-surface"), *self.ARGS],
+                                 {"PATH": tmp})
+        self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+        self.assertIn("session_error: claude not found", done.stderr)
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/claude-session-surface"), "100755")
+
+    def test_the_readme_documents_the_check(self):
+        readme = (ROOT / "python" / "README.md").read_text(encoding="utf-8")
+        for needle in ("claude-session-surface --absent-tool-prefix P", "verify_checks.claude_session_surface",
+                       "--connected-server NAME", "ENABLE_CLAUDEAI_MCP_SERVERS"):
+            self.assertIn(needle, readme)
 
 
 if __name__ == "__main__":
