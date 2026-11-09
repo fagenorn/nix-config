@@ -353,7 +353,7 @@ const LAND_SYNC_SCHEMA = {
   required: ['status'],
 }
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
-const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
+const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes_posted: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
 const MAX_SYNCS = 3
 // A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable (#716).
 const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
@@ -366,12 +366,18 @@ const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 // pre-merge acquire and the merge (one agent call, land-merge), release, close out (#677, #716). Every exit goes through the wrapper at the bottom: a landing that holds the
 // lock releases it exactly once, at the last sha it was held at (P8), and a failed landing keeps the
 // claim and its cont (D9).
+// The kinds a criterion row can carry. A note is the orchestrator's own observation: never held, listed in a close-out comment (#736).
+// This copy of the rule lives here because the program has no filesystem access and shares no module with deliver-standard.js.
+const ACCEPT_KINDS = ['code', 'evidence', 'human', 'note']
+const OPEN_KINDS = ['evidence', 'human']
+const isOpen = a => !!(a && OPEN_KINDS.includes(a.kind))
 const land = async (n, ready) => {
   const W = ready.worktree, B = ready.branch
   const RULES = RULES_FOR(W, B)
   const ACS = JSON.stringify(ready.acceptance)
-  const allCode = ready.acceptance.every(a => a.kind === 'code')
-  const closesLine = allCode && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
+  const noHold = !ready.acceptance.some(isOpen)
+  const unknownKinds = ready.acceptance.filter(a => !(a && ACCEPT_KINDS.includes(a.kind))).map(a => (a && a.id) || null)
+  const closesLine = noHold && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
   let expected = ready.head
   let pr = null
   let lockHeld = false
@@ -493,6 +499,7 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
   }
 
   const body = async () => {
+    if (unknownKinds.length) return out('stopped', { stage: 'plan', detail: 'a ready criterion has a kind that is not code, evidence, human or note', bad_kinds: unknownKinds })
     // The order (#677): the PR opens at the ready head, the land lock is taken waiting (the CLI waits
     // within its bound, so the acquire is sent once), and only then does the first resync run, so no
     // resync, check or merge happens outside the lock. A resync that changes the head pushes it and
@@ -605,19 +612,20 @@ ${RULES}`, `land-merge-${n}`, { ...clerk, schema: withRenew(LAND_MERGE_SCHEMA, {
     // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
     if (!CONTS[n]) CONTS[n] = { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }
 
-    const openCriteria = ready.acceptance.filter(a => a.kind !== 'code')
+    const openCriteria = ready.acceptance.filter(isOpen)
+    const notes = ready.acceptance.filter(a => a && a.kind === 'note')
     const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
 1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
 2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released.
 3. End the owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision. The merge proves the conflict and the label resolved and the decision settled; a verdict none is fine. decision_ended is true only when the decision end exited 0 (verdict ended or none).
-4. ${allCode
-      ? `Every criterion is of kind code. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
+${notes.length ? `4. Unless a comment starting Orchestrator notes for PR ${pr} already exists on #${n} (an earlier attempt), write to a file outside any work tree a comment whose first line is Orchestrator notes for PR ${pr} (observations the orchestrator records itself; not graded, not held): and then one line <id>: <text> per note of ${JSON.stringify(notes.map(a => ({ id: a.id, text: a.text })))}, and post it with ${UNSET}gh issue comment ${n} --repo ${SLUG} --body-file <file>. Return notes_posted true once that comment exists.\n` : ''}${notes.length ? 5 : 4}. ${noHold
+      ? `Every criterion is of kind code or note. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
       : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
-Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended and notes.
+Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended${notes.length ? ', notes_posted' : ''} and notes.
 ${RULES}`, `close-out-${n}`, { ...clerk, schema: CLOSE_SCHEMA })
-    const want = allCode ? 'CLOSED' : 'OPEN'
-    if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
-    return out(allCode ? 'landed' : 'landed-held')
+    const want = noHold ? 'CLOSED' : 'OPEN'
+    if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true || (notes.length && co.notes_posted !== true)) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
+    return out(noHold ? 'landed' : 'landed-held')
   }
 
   let result
@@ -642,7 +650,7 @@ const READOPT_SCHEMA = {
   properties: {
     ok: { type: 'boolean' }, reason: { type: 'string', enum: ['unaccepted', 'dirty', 'no-acceptance', 'worktree', 'other'] }, detail: { type: 'string' },
     worktree: { type: 'string' }, branch: { type: 'string' }, head: { type: 'string' },
-    acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human'] } }, required: ['id', 'text', 'kind'] } },
+    acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ACCEPT_KINDS } }, required: ['id', 'text', 'kind'] } },
   },
   required: ['ok'],
 }
@@ -653,7 +661,7 @@ const readoptPrompt = n => {
 2. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid,body. The PR is landed as it stands only at its accepted head: the body's Evidence section ends with a line Accepted head: <sha>. Answer ok false with reason unaccepted (and the head you read in detail) when the body has no Accepted head: line or the line's sha differs from headRefOid, and stop there.
 3. Find the worktree on ${B}: run git -C ${REPO} worktree list --porcelain and take the entry whose branch is refs/heads/${B}. When there is none, resolve the contract once (resolve-project resolve --repo-root ${REPO}) and add one at the path bindings.vcs.worktree.root (resolved against project.root) plus bindings.vcs.worktree.prefix and ${B}: git -C ${REPO} worktree add <path> ${B} when the local branch exists, else git -C ${REPO} worktree add --no-track -b ${B} <path> origin/${B} when only the remote branch exists. When that fails, answer ok false with reason other and the error in detail.
 4. In that worktree: when git -C <worktree> status --porcelain shows any change, answer ok false with reason dirty and the status in detail. When git -C <worktree> rev-parse HEAD differs from headRefOid, answer ok false with reason worktree and both shas in detail.
-5. Read the body's Acceptance table, one row per criterion (id, criterion, kind, and how it is shown). When the body has no Acceptance table, answer ok false with reason no-acceptance. Otherwise answer ok true with worktree (its absolute path), branch ${B}, head (headRefOid, the full sha) and acceptance: one {id, text (the criterion), kind (code, evidence or human, as the table says)} per row.
+5. Read the body's Acceptance table, one row per criterion (id, criterion, kind, and how it is shown). When the body has no Acceptance table, answer ok false with reason no-acceptance. Otherwise answer ok true with worktree (its absolute path), branch ${B}, head (headRefOid, the full sha) and acceptance: one {id, text (the criterion), kind (${ACCEPT_KINDS.join(', ')}, as the table says)} per row.
 ${RULES_FOR('<the worktree path>', B)}`
 }
 

@@ -38,6 +38,7 @@ HUMAN = {"id": "AC3", "text": "looks right", "kind": "human",
          "verify": {"ac": "AC3", "kind": "human", "host": "h1", "when": {"days_after": {"event": "deployed", "days": 1}},
                     "run": {"ask": "Does the page render right on the phone"}, "reason": "senses"},
          "lint": OK_LINT}
+NOTE = {"id": "AC4", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
 RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
 
 
@@ -540,10 +541,11 @@ class OwnerAnswerTest(unittest.TestCase):
     def test_plan_reviews_can_cite_every_rule(self):
         rules = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
         ids = re.findall(r"^- \*\*(R\d+)\.", rules.read_text(encoding="utf-8"), re.M)
-        self.assertIn("R8", ids)
+        self.assertIn("R9", ids)
         _, calls = run()
         review = next(c for c in calls if c["label"] == "plan-review")
         self.assertEqual(review["schema"]["properties"]["findings"]["items"]["properties"]["rule"]["enum"], ids)
+        self.assertIn(f"every rule {ids[0]}-{ids[-1]} of", prompt(calls, "plan"))
         text = PROGRAM.read_text(encoding="utf-8")
         self.assertRegex(text, r"label: 'plan-rules-review'[^}]*schema: PLAN_REVIEW")
 
@@ -865,6 +867,12 @@ class PlanRulesTest(unittest.TestCase):
         ("R5", criterion(EVIDENCE, metric=True)),
         ("R5", dict(PLAN["acceptance"][0], id="AC2", metric=True)),
     )
+    NOTE_ROWS = (
+        ("R9", criterion(NOTE, verify={"ac": "AC4", "kind": "note", "host": "h1",
+                                       "when": {"deployed_includes": SHA}, "run": {"script": "scripts/check-live"}},
+                         lint=OK_LINT)),
+        ("R9", criterion(NOTE, script="scripts/check-live")),
+    )
     RULE_FINDING = {"verdict": "findings",
                     "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
 
@@ -897,7 +905,7 @@ class PlanRulesTest(unittest.TestCase):
         return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan})
 
     def test_each_rule_violation_stops_at_plan_review_naming_the_rule(self):
-        for rule, bad in self.ROWS:
+        for rule, bad in self.ROWS + self.NOTE_ROWS:
             with self.subTest(rule=rule, ac=bad["id"]):
                 plan = with_criteria(bad)
                 result, calls = self.gate(plan)
@@ -911,6 +919,40 @@ class PlanRulesTest(unittest.TestCase):
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-revise"))
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-rules-revise"))
                 self.assertNotIn("impl-1", labels(calls))
+
+    def test_a_note_without_verify_or_script_passes_plan_rules(self):
+        """#736 AC1: a plan with a note criterion and no script passes planRules; the planner learns the kind."""
+        result, calls = run(replies={"plan": with_criteria(NOTE)}, patch={"close-out": {"notes_posted": True}})
+        kinds = schema_of(calls, "plan")["properties"]["acceptance"]["items"]["properties"]["kind"]["enum"]
+        self.assertEqual(kinds, ["code", "evidence", "human", "note"])
+        self.assertNotIn("plan-revise", labels(calls))
+        self.assertNotIn("plan-rules-review", labels(calls))
+        self.assertIn("impl-1", labels(calls))
+        self.assertNotEqual(result["stage"], "plan-review")
+        _, direct = run(args=dict(ARGS, lane="direct"))
+        for text in (prompt(calls, "plan"), prompt(direct, "direct-impl")):
+            for kind in kinds:
+                self.assertIn(f"{kind} if ", text)
+
+    def test_a_note_with_a_verify_block_or_script_is_refused_naming_r9(self):
+        """#736 AC1: planRules refuses a note carrying a verify block or a script."""
+        for _, bad in self.NOTE_ROWS:
+            with self.subTest(bad=sorted(bad)):
+                result, _ = self.gate(with_criteria(bad))
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertEqual([(r["rule"], r["ac"]) for r in result["rules"]], [("R9", "AC4")])
+
+    def test_a_metric_note_is_still_an_r5_refusal(self):
+        result, _ = self.gate(with_criteria(criterion(NOTE, metric=True)))
+        self.assertIn(("R5", "AC4"), [(r["rule"], r["ac"]) for r in result["rules"]])
+
+    def test_the_planner_never_tags_a_note_as_a_metric(self):
+        """#736 (D8): an owner-designated latency observation is a note, so the metric instruction exempts notes."""
+        _, calls = run()
+        text = prompt(calls, "plan")
+        metric = text[text.index("set metric true"):]
+        metric = metric[:metric.index(". ")]
+        self.assertIn("never on a note", metric)
 
     def test_pre_merge_only_evidence_stops_at_plan_review_naming_r1(self):
         # The issue's demo: a planner reply with a pre-merge-only evidence criterion.
@@ -2237,6 +2279,91 @@ class HoldTest(unittest.TestCase):
         result, _ = run(args=dict(ARGS, cont=cont), replies={"hold": dict(self.HOLD, **stale)},
                         patch={"setup": {"merged_pr": 42}})
         self.assertEqual(result["stage"], "hold")
+
+
+class NoteCloseOutTest(unittest.TestCase):
+    """#736 AC2: a note is never held, and the close-out comment lists the note texts."""
+
+    MERGE = "d" * 40
+
+    def ship(self, *criteria, hold=None, **patch):
+        replies = {"plan": with_criteria(*criteria)}
+        if hold is not None:
+            replies["hold"] = hold
+        return run(replies=replies, patch=dict({"merge": {"merge_commit": self.MERGE},
+                                                "close-out": {"notes_posted": True}}, **patch))
+
+    def test_the_close_out_comment_lists_the_note_texts(self):
+        result, calls = self.ship(NOTE)
+        self.assertEqual(result["stage"], "done")
+        close = prompt(calls, "close-out")
+        self.assertIn(NOTE["text"], close)
+        self.assertIn("Orchestrator notes for PR 42", close)
+        self.assertIn("gh issue comment 9 --repo owner/repo --body-file", close)
+        self.assertLess(close.index("Orchestrator notes for PR 42"), close.index("gh issue close 9 --repo owner/repo"))
+        self.assertIn("Every criterion is of kind code or note: post nothing, add no label", prompt(calls, "hold"))
+        self.assertIn("never regraded, held or checked", prompt(calls, "hold"))
+
+    def test_a_code_and_note_plan_closes_like_an_all_code_plan(self):
+        result, calls = self.ship(NOTE, setup={"integration_branch": "main"})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("Closes #9", prompt(calls, "pr"))
+        self.assertNotIn("needs-verification", prompt(calls, "close-out"))
+
+    def test_unposted_notes_stop_the_close_out(self):
+        result, _ = self.ship(NOTE, **{"close-out": {"notes_posted": False}})
+        self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
+
+    def test_a_plan_without_notes_has_no_notes_step(self):
+        _, calls = run()
+        self.assertNotIn("Orchestrator notes", prompt(calls, "close-out"))
+
+    def test_a_note_beside_evidence_is_neither_checked_nor_missing(self):
+        hold = {"merge_commit_local": True, "code_unmet": [], "blocks": [], "split": [],
+                "block": {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]},
+                "lint": {"ok": True, "errors": []}, "verify_run": {"ran": True, "exit": 0},
+                "issue_state": "OPEN", "notes": "n"}
+        result, calls = self.ship(EVIDENCE, NOTE, hold=hold,
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("(evidence or human, not split)", prompt(calls, "hold"))
+        close = prompt(calls, "close-out")
+        self.assertIn(NOTE["text"], close)
+        self.assertNotIn("gh issue close", close)
+
+    def test_a_hold_that_checks_a_note_stops(self):
+        """#736 DR-001: a note is never held, so a hold block or split child that checks one is refused."""
+        both = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}, {"ac": "AC4", "kind": "note"}]}
+        result, calls = self.ship(EVIDENCE, NOTE, hold=dict(HoldTest.HOLD, block=both),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["note_checks"]), ("hold", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        note_child = dict(HoldTest.CHILD, ac="AC4", block={"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC4", "kind": "note"}]})
+        result, calls = self.ship(HUMAN, NOTE, hold=dict(HoldTest.HOLD, blocks=[12], split=[HoldTest.CHILD, note_child]),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        extra = dict(HoldTest.CHILD, block={"v": 1, "merge": self.MERGE, "checks": [
+            {"ac": "AC3", "kind": "human"}, {"ac": "AC4", "kind": "evidence", "run": {"script": "scripts/check-live"}}]})
+        result, calls = self.ship(HUMAN, NOTE, hold=dict(HoldTest.HOLD, blocks=[12], split=[extra]),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_an_unrecognised_kind_never_closes_ungraded(self):
+        """#736 DR-002: a typo kind is neither open nor a note, so no path may close the issue on it."""
+        typo = dict(NOTE, kind="evdience")
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": with_criteria(typo), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
+        self.assertEqual((result["stage"], result["bad_kinds"]), ("close-out", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        self.assertNotIn("hold", labels(calls))
+        result, calls = run(replies={"plan": with_criteria(typo)})
+        self.assertNotEqual(result["stage"], "done")
+        self.assertNotIn("pr", labels(calls))
+        self.assertNotIn("close-out", labels(calls))
 
 
 class FixWaveTest(unittest.TestCase):

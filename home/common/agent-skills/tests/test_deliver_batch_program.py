@@ -754,6 +754,49 @@ class FoldTest(unittest.TestCase):
 
 
 class LandTest(unittest.TestCase):
+    NOTE = {"id": "AC2", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
+    CODE = {"id": "AC1", "text": "works", "kind": "code"}
+
+    def test_a_note_is_listed_and_the_issue_closes(self):
+        """#736 AC2: a note is never held; the batch close-out comment lists the note texts."""
+        result, calls, _ = run(children={"1": ready(1, [self.CODE, self.NOTE])},
+                               replies={"close-out-1": {"issue_state": "CLOSED", "released": True, "decision_ended": True,
+                                                        "notes_posted": True, "notes": "ok"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        close = prompt(calls, "close-out-1")
+        self.assertIn(self.NOTE["text"], close)
+        self.assertIn("gh issue comment 1 --repo owner/repo --body-file", close)
+        self.assertLess(close.index("Orchestrator notes for PR 41"), close.index("gh issue close 1 --repo owner/repo"))
+        self.assertNotIn("needs-verification", close)
+        _, calls, _ = run(children={"1": ready(1, [self.CODE, self.NOTE])}, patch={"setup": {"integration_branch": "main"}},
+                          replies={"close-out-1": {"issue_state": "CLOSED", "released": True, "decision_ended": True,
+                                                   "notes_posted": True, "notes": "ok"}})
+        self.assertIn("Closes #1", prompt(calls, "land-pr-1"))
+
+    def test_an_unrecognised_kind_stops_the_landing_before_any_close(self):
+        """#736 DR-002: a typo kind is neither open nor a note, so the landing stops before the PR and never closes."""
+        typo = dict(self.NOTE, kind="evdience")
+        result, calls, _ = run(children={"1": ready(1, [self.CODE, typo])})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "plan"))
+        self.assertNotIn("close-out-1", [c["label"] for c in calls])
+        self.assertNotIn("land-pr-1", [c["label"] for c in calls])
+
+    def test_unposted_notes_stop_the_landing_close_out(self):
+        result, _, _ = run(children={"1": ready(1, [self.CODE, self.NOTE])},
+                           replies={"close-out-1": {"issue_state": "CLOSED", "released": True, "decision_ended": True,
+                                                    "notes_posted": False, "notes": "x"}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))
+
+    def test_a_note_beside_evidence_holds_only_the_evidence(self):
+        evidence = {"id": "AC3", "text": "live", "kind": "evidence"}
+        result, calls, _ = run(children={"1": ready(1, [self.CODE, self.NOTE, evidence])},
+                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "decision_ended": True,
+                                                        "notes_posted": True, "notes": "held"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed-held")
+        close = prompt(calls, "close-out-1")
+        self.assertIn('how to check each: [{"id":"AC3","text":"live","kind":"evidence"}]', close)
+        self.assertIn(self.NOTE["text"], close)
+
     def test_happy_landing_runs_every_step_in_order(self):
         result, calls, _ = run()
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["pr"]), ("landed", 41))
@@ -1216,6 +1259,31 @@ OPEN_PR = {"number": 41, "head_branch": "issue-1-x"}
 
 
 class ReadoptTest(unittest.TestCase):
+    def test_the_readopt_schema_accepts_a_note_row(self):
+        """#736: a PR body Acceptance row of kind note readopts."""
+        _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}})
+        kinds = schema_of(calls, "readopt-1")["properties"]["acceptance"]["items"]["properties"]["kind"]["enum"]
+        self.assertEqual(kinds, ["code", "evidence", "human", "note"])
+
+    def test_a_readopted_note_reaches_the_close_out_and_the_issue_closes(self):
+        """#736: the clerk is told it may return a note, and a readopted note is listed, never held."""
+        note = {"id": "AC2", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
+        acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, note]
+        result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}, "readopt-1": {"acceptance": acceptance}},
+                               replies={"close-out-1": {"issue_state": "CLOSED", "released": True, "decision_ended": True,
+                                                        "notes_posted": True, "notes": "ok"}})
+        kinds = schema_of(calls, "readopt-1")["properties"]["acceptance"]["items"]["properties"]["kind"]["enum"]
+        text = prompt(calls, "readopt-1")
+        clause = text[text.index("kind ("):]
+        clause = clause[:clause.index(")")]
+        for kind in kinds:
+            self.assertIn(kind, clause)
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        close = prompt(calls, "close-out-1")
+        self.assertIn(note["text"], close)
+        self.assertIn("gh issue close 1 --repo owner/repo", close)
+        self.assertNotIn("needs-verification", close)
+
     def test_an_open_pr_of_the_branch_lands_without_lane_or_child(self):
         result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}})
         self.assertEqual(row(result, 1)["outcome"], "landed")
