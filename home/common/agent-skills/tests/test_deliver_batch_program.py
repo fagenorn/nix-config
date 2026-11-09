@@ -773,6 +773,14 @@ class LandTest(unittest.TestCase):
                                                    "notes_posted": True, "notes": "ok"}})
         self.assertIn("Closes #1", prompt(calls, "land-pr-1"))
 
+    def test_an_unrecognised_kind_stops_the_landing_before_any_close(self):
+        """#736 DR-002: a typo kind is neither open nor a note, so the landing stops before the PR and never closes."""
+        typo = dict(self.NOTE, kind="evdience")
+        result, calls, _ = run(children={"1": ready(1, [self.CODE, typo])})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "plan"))
+        self.assertNotIn("close-out-1", [c["label"] for c in calls])
+        self.assertNotIn("land-pr-1", [c["label"] for c in calls])
+
     def test_unposted_notes_stop_the_landing_close_out(self):
         result, _, _ = run(children={"1": ready(1, [self.CODE, self.NOTE])},
                            replies={"close-out-1": {"issue_state": "CLOSED", "released": True, "decision_ended": True,

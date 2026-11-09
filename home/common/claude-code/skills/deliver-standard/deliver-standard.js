@@ -399,6 +399,9 @@ const commandOutside = c => {
 // A note is the orchestrator's own observation (R9): never held, never graded. Only these kinds keep an issue open after the merge.
 const OPEN_KINDS = ['evidence', 'human']
 const isOpen = a => !!(a && OPEN_KINDS.includes(a.kind))
+// Closure is never inferred from the absence of a kind: every row must be a recognised kind before anything ships or closes (#736).
+const ACCEPT_KINDS = ['code', 'evidence', 'human', 'note']
+const badKinds = acceptance => acceptance.filter(a => !(a && ACCEPT_KINDS.includes(a.kind))).map(a => (a && a.id) || null)
 
 const RUN_OK = r => !!(r && r.ran === true && r.exit === 0)
 const LINT_V = { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array' } } }
@@ -416,6 +419,8 @@ const covers = (checks, ids) => ids.filter(id => !checks.some(c => c && c.ac ===
 const closeOut = async (PR, mergeCommit, W, prHead) => {
   const acceptance = plan ? plan.acceptance : null
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
+  const unknown = badKinds(acceptance)
+  if (unknown.length) return stop('close-out', { pr: PR, details: 'merged, but a plan criterion has a kind that is not code, evidence, human or note; close out by hand', bad_kinds: unknown })
   const noHold = !acceptance.some(isOpen)
   const openCriteria = acceptance.filter(isOpen)
   const notes = acceptance.filter(a => a && a.kind === 'note')
@@ -443,11 +448,14 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'cl
       const missing = acceptance.filter(a => a.kind === 'human' && !splitIds.includes(a.id)).map(a => a.id)
       if (missing.length) return stop('hold', { pr: PR, hold: held, missing_split: missing })
     }
-    const badSplit = held.split.filter(x => !(x && x.lint && x.lint.ok === true && RUN_OK(x.verify_run) && STATES.includes(x.issue_state) && x.block && Array.isArray(x.block.checks) && covers(x.block.checks, [x.ac]).length === 0 && !x.block.checks.some(commandOutside))).map(x => (x && x.ac) || null)
+    const noteIds = notes.map(a => a.id)
+    const badSplit = held.split.filter(x => !(x && !noteIds.includes(x.ac) && x.lint && x.lint.ok === true && RUN_OK(x.verify_run) && STATES.includes(x.issue_state) && x.block && Array.isArray(x.block.checks) && covers(x.block.checks, [x.ac]).length === 0 && !x.block.checks.some(commandOutside))).map(x => (x && x.ac) || null)
     if (badSplit.length) return stop('hold', { pr: PR, hold: held, bad_split: badSplit })
     const remaining = openCriteria.filter(a => !splitIds.includes(a.id))
     if (remaining.length && !closedBefore) {
       if (!(held.lint && held.lint.ok === true) || !RUN_OK(held.verify_run) || !held.block || !Array.isArray(held.block.checks)) return stop('hold', { pr: PR, hold: held })
+      const noteChecks = held.block.checks.filter(c => c && noteIds.includes(c.ac)).map(c => c.ac)
+      if (noteChecks.length) return stop('hold', { pr: PR, hold: held, note_checks: noteChecks })
       const uncovered = covers(held.block.checks, remaining.map(a => a.id))
       if (uncovered.length) return stop('hold', { pr: PR, hold: held, missing_checks: uncovered })
       const outside = held.block.checks.filter(commandOutside)
@@ -975,6 +983,10 @@ if (MODE === 'ready') {
 
 // ---------------- Ship ----------------
 phase('Ship')
+{
+  const unknown = badKinds(plan.acceptance)
+  if (unknown.length) return stop('plan', { details: 'a plan criterion has a kind that is not code, evidence, human or note', bad_kinds: unknown })
+}
 const noHold = !plan.acceptance.some(isOpen)
 const closesLine = noHold && INT === setup.default_branch ? `Closes #${ISSUE}` : `Refs #${ISSUE}`
 const PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head: FULL_SHA, notes: { type: 'string' } }, required: ['pr', 'head'] }

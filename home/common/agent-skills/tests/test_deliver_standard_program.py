@@ -2177,6 +2177,34 @@ class NoteCloseOutTest(unittest.TestCase):
         self.assertIn(NOTE["text"], close)
         self.assertNotIn("gh issue close", close)
 
+    def test_a_hold_that_checks_a_note_stops(self):
+        """#736 DR-001: a note is never held, so a hold block or split child that checks one is refused."""
+        both = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}, {"ac": "AC4", "kind": "note"}]}
+        result, calls = self.ship(EVIDENCE, NOTE, hold=dict(HoldTest.HOLD, block=both),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["note_checks"]), ("hold", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        note_child = dict(HoldTest.CHILD, ac="AC4", block={"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC4", "kind": "note"}]})
+        result, calls = self.ship(HUMAN, NOTE, hold=dict(HoldTest.HOLD, blocks=[12], split=[HoldTest.CHILD, note_child]),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_an_unrecognised_kind_never_closes_ungraded(self):
+        """#736 DR-002: a typo kind is neither open nor a note, so no path may close the issue on it."""
+        typo = dict(NOTE, kind="evdience")
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": with_criteria(typo), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
+        self.assertEqual((result["stage"], result["bad_kinds"]), ("close-out", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        self.assertNotIn("hold", labels(calls))
+        result, calls = run(replies={"plan": with_criteria(typo)})
+        self.assertNotEqual(result["stage"], "done")
+        self.assertNotIn("pr", labels(calls))
+        self.assertNotIn("close-out", labels(calls))
+
 
 class FixWaveTest(unittest.TestCase):
     """#635 owner comment: a narrowing re-review earns a second wave; a new kind stops; waves are counted."""

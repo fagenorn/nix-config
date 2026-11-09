@@ -376,6 +376,7 @@ const land = async (n, ready) => {
   const RULES = RULES_FOR(W, B)
   const ACS = JSON.stringify(ready.acceptance)
   const noHold = !ready.acceptance.some(isOpen)
+  const unknownKinds = ready.acceptance.filter(a => !(a && ACCEPT_KINDS.includes(a.kind))).map(a => (a && a.id) || null)
   const closesLine = noHold && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
   let expected = ready.head
   let pr = null
@@ -498,6 +499,7 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
   }
 
   const body = async () => {
+    if (unknownKinds.length) return out('stopped', { stage: 'plan', detail: 'a ready criterion has a kind that is not code, evidence, human or note', bad_kinds: unknownKinds })
     // The order (#677): the PR opens at the ready head, the land lock is taken waiting (the CLI waits
     // within its bound, so the acquire is sent once), and only then does the first resync run, so no
     // resync, check or merge happens outside the lock. A resync that changes the head pushes it and
