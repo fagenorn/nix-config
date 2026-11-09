@@ -29,6 +29,9 @@ COLLABORATION = (
 DIFF_REVIEW = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/DIFF-REVIEW.md"
 )
+PLAN_REVIEW = (
+    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/PLAN-REVIEW.md"
+)
 RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
 WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
 SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
@@ -205,7 +208,9 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
         "--artifact-path <specification-directory> --artifact-path <plan-directory>",
         "--format json", "`product.changed_files`", "`files[].path`",
         "`files[].changed_lines`", "`git diff <base>..<head> -- ':(literal)<path>'`",
+        "`git merge-base <left> <right>`", "`scope: <K> slices over <M> product files`",
     ),
+    PLAN_REVIEW: ("`Blocking`", "`Should fix`", "`Discussion`"),
 }
 
 # Machine-consumed text each ship-issue document must carry (#291 D6): helper
@@ -3646,6 +3651,53 @@ class CodexEntryRetirementTest(unittest.TestCase):
         for tree in SKILL_TREES:
             with self.subTest(tree=str(tree)):
                 self.assertEqual(sorted(tree.rglob("openai" + ".yaml")), [])
+
+
+class CodexCollaborationContractTest(unittest.TestCase):
+    """#687: codex-collaboration serves the plan path and diff range the deliver controllers send."""
+
+    SKILL_DIR = REPO_ROOT / "home/common/claude-code/skills/codex-collaboration"
+    CONTROLLER = REPO_ROOT / "home/common/claude-code/skills/deliver-standard/deliver-standard.js"
+    RETIRED = ("from-issue", "sdd", "REVIEW-CONTRACT", "artifact-budget")
+    LEGACY = ("producer", "manifest", "metrics", "rubric", "Phase", "--auto",
+              "native fallback", "Claude fallback")
+
+    def documents(self):
+        return sorted(p for p in self.SKILL_DIR.rglob("*") if p.is_file())
+
+    def test_the_skill_names_no_retired_pipeline(self):  # AC2
+        for path in self.documents():
+            text = path.read_text(encoding="utf-8")
+            for token in self.RETIRED + self.LEGACY:
+                with self.subTest(path=path.name, token=token):
+                    self.assertNotIn(token, text)
+
+    def test_the_results_carry_the_controllers_codex_schema(self):  # AC3 (key set only)
+        # Pins only what the controller consumes (agent-helpers rule 6): the
+        # CODEX result keys and the SEV enum of deliver-standard.js, read from
+        # the controller itself so the two cannot drift. No English phrase is pinned.
+        controller = self.CONTROLLER.read_text(encoding="utf-8")
+        sev = re.search(r"^const SEV = \{[^\n]*enum: \[([^\]]*)\]", controller, re.M)
+        codex = re.search(r"^const CODEX = \{\n  type: 'object',\n  properties: \{([^\n]*)\},\n", controller, re.M)
+        self.assertIsNotNone(sev)
+        self.assertIsNotNone(codex)
+        severities = re.findall(r"'([a-z]+)'", sev.group(1))
+        keys, depth = [], 0  # top-level property names only, not nested `type`/`enum`
+        for m in re.finditer(r"[{}]|(?<![\w'])([a-z_]+): ", codex.group(1)):
+            depth += {"{": 1, "}": -1}.get(m.group(0), 0)
+            if m.group(1) and depth == 0:
+                keys.append(m.group(1))
+        self.assertEqual(severities, ["critical", "important", "minor"])
+        self.assertEqual(keys, ["available", "verdict", "findings", "raw_summary"])
+        skill = normalized(COLLABORATION.read_text(encoding="utf-8"))
+        for key in keys:
+            with self.subTest(document="SKILL.md", key=key):
+                self.assertIn(f"`{key}`", skill)
+        for path in (PLAN_REVIEW, DIFF_REVIEW):
+            text = normalized(path.read_text(encoding="utf-8"))
+            for value in severities:
+                with self.subTest(document=path.name, severity=value):
+                    self.assertIn(f"`{value}`", text)
 
 
 if __name__ == "__main__":
