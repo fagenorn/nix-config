@@ -36,7 +36,7 @@ const DEFAULTS = [
   [/^acquire$/, { verdict: 'acquired', comment_id: 7 }],
   [/^setup$/, SETUP],
   [/^worktree$/, { ok: true, worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard' }],
-  [/^plan(-revise)?$/, PLAN],
+  [/^plan(-revise|-rules-revise)?$/, PLAN],
   [/^direct-impl$/, { ...DONE, acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }], sensitive: false, ineligible: false }],
   [/^direct-fix$/, DONE],
   [/-codex$/, { available: true, ...PASS }],

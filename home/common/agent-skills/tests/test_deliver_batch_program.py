@@ -146,7 +146,8 @@ class IntakeTest(unittest.TestCase):
             with self.subTest(outcome=outcome):
                 result, calls, _ = run(patch={"facts-1": facts})
                 self.assertEqual(row(result, 1)["outcome"], outcome)
-                self.assertEqual(labels(calls), ["setup", "facts-1"])
+                # A closed issue still runs the release that finishes any cleanup a failed one left (#714): no lane, no claim.
+                self.assertEqual(labels(calls), ["setup", "facts-1"] + (["release-1"] if outcome == "closed" else []))
 
     def test_skip_rows_name_their_evidence(self):
         result, _, _ = run(patch={"facts-1": {"merged_pr": 5}})
@@ -226,6 +227,55 @@ ANSWERED = dict(OPEN, verdict="answered", decisions="Which flag? Chosen: Use the
                 questions=[dict(QS[0], chosen="Use the flag.", comment_id=99)])
 
 
+FIXED = {"commit": "f" * 40, "evidence": "git grep -F 'boom' finds nothing at origin/dev; ffff removed it"}
+
+
+class AlreadyFixedTest(unittest.TestCase):
+    def test_already_fixed_symptom_skips_lane_claim_and_child(self):
+        result, calls, _ = run(patch={"facts-1": {"already_fixed": FIXED}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "already-fixed",
+                                          "commit": FIXED["commit"], "evidence": FIXED["evidence"]})
+        self.assertEqual(labels(calls), ["setup", "facts-1"])
+        self.assertEqual(result["owner_actions"], [{"issue": 1, "reason": "already-fixed", "commit": FIXED["commit"]}])
+        self.assertIsNone(result["relaunch"])
+        self.assertFalse([c["label"] for c in calls if "gh issue close" in c.get("prompt", "")])
+
+    def test_facts_agent_checks_the_symptom_at_origin_of_the_integration_branch(self):
+        _, calls, _ = run()
+        text = prompt(calls, "facts-1")
+        self.assertIn("createdAt", text)
+        self.assertIn("git -C /r grep -n -F", text)
+        self.assertIn("origin/dev", text)
+        self.assertIn("git -C /r log origin/dev -S", text)
+        self.assertIn("--since=", text)
+        self.assertIn("already_fixed", text)
+
+    def test_a_continued_or_own_claimed_issue_is_never_already_fixed(self):
+        for args, facts in ((dict(ARGS, conts={"1": {"setup": {}}}), {"already_fixed": FIXED}),
+                            (ARGS, {"already_fixed": FIXED, "claim": {"verdict": "held_by", "by": HOLDER}})):
+            with self.subTest(facts=facts, args=args):
+                result, calls, _ = run(args=args, patch={"facts-1": facts})
+                self.assertNotEqual(row(result, 1)["outcome"], "already-fixed")
+                self.assertIn("child-1", labels(calls))
+
+    def test_a_null_or_commitless_already_fixed_stays_eligible(self):
+        for fixed in (None, {"commit": "", "evidence": "x"}):
+            with self.subTest(fixed=fixed):
+                _, calls, _ = run(patch={"facts-1": {"already_fixed": fixed}})
+                self.assertIn("lane-1", labels(calls))
+
+    def test_a_failed_claim_lookup_is_never_already_fixed(self):
+        result, calls, _ = run(patch={"facts-1": {"already_fixed": FIXED, "claim": {"verdict": "error", "by": None}}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": "claim status"})
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertEqual(result["owner_actions"], [])
+        self.assertNotIn("lane-1", labels(calls))
+
+    def test_a_merged_pr_wins_over_already_fixed(self):
+        result, _, _ = run(patch={"facts-1": {"merged_pr": 5, "already_fixed": FIXED}})
+        self.assertEqual(row(result, 1)["outcome"], "duplicate")
+
+
 class ClaimTest(unittest.TestCase):
     def test_a_waiting_issue_is_not_claimed_until_admitted(self):
         _, calls, active = run(args=dict(ARGS, issues=[1, 2]), patch={"setup": {"max_parallel": 1}})
@@ -293,6 +343,117 @@ class ClaimTest(unittest.TestCase):
     def test_a_child_that_lost_its_claim_is_claim_lost(self):
         result, _, _ = run(children={"1": {"stage": "claimed", "verdict": "held_by", "by": "h2/b9"}})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["by"]), ("claim-lost", "h2/b9"))
+
+
+TASK_STOP = {"stage": "task", "task": {"n": 2}, "cont": {"setup": {}}}
+CLOSED_RELEASE = f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason closed"
+
+
+class ClosedClaimTest(unittest.TestCase):
+    def test_a_closed_issue_held_by_this_batch_is_released_at_intake(self):
+        for verdict in ("held_by", "stale"):
+            with self.subTest(verdict=verdict):
+                result, calls, _ = run(patch={"facts-1": {"state": "CLOSED", "claim": {"verdict": verdict, "by": HOLDER}}})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": True})
+                self.assertEqual(labels(calls), ["setup", "facts-1", "release-1"])
+                self.assertIn(CLOSED_RELEASE, prompt(calls, "release-1"))
+                self.assertIsNone(result["relaunch"])
+
+    def test_a_failed_intake_release_stays_open_for_a_relaunch(self):
+        held = {"state": "CLOSED", "claim": {"verdict": "held_by", "by": HOLDER}}
+        for reply, detail in (({"verdict": "error", "detail": "HTTP 502"}, "HTTP 502"),
+                              (None, "release-1 returned nothing")):
+            with self.subTest(reply=reply):
+                result, _, _ = run(patch={"facts-1": held}, replies={"release-1": reply})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "release", "detail": detail})
+                self.assertEqual(result["relaunch"]["issues"], [1])
+        result, _, _ = run(patch={"facts-1": held}, replies={"release-1": {"verdict": "not_held"}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": False})
+        self.assertIsNone(result["relaunch"])
+
+    def test_a_closed_issue_with_a_free_claim_retries_a_release_that_ended_the_claim_first(self):
+        # forge-claim ends the claim before the marker edit and label removal, which can fail afterwards:
+        # the next intake reads the claim free, and only the release itself finishes that cleanup.
+        free = {"state": "CLOSED", "claim": {"verdict": "free", "by": None}}
+        result, calls, _ = run(patch={"facts-1": free})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": True})
+        self.assertEqual(labels(calls), ["setup", "facts-1", "release-1"])
+        self.assertIn(CLOSED_RELEASE, prompt(calls, "release-1"))
+        result, _, _ = run(patch={"facts-1": free}, replies={"release-1": {"verdict": "error", "detail": "HTTP 502"}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "release", "detail": "HTTP 502"})
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        result, _, _ = run(patch={"facts-1": free}, replies={"release-1": {"verdict": "not_held"}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": False})
+        self.assertIsNone(result["relaunch"])
+
+    def test_a_closed_issue_with_a_failed_claim_lookup_stops_and_stays_in_relaunch(self):
+        # A failed lookup proves nothing about ownership: the closed row must not be final, or a claim this batch holds is never released.
+        err = {"state": "CLOSED", "claim": {"verdict": "error", "by": None}}
+        result, calls, _ = run(patch={"facts-1": err})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": "claim status"})
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertNotIn("release-1", labels(calls))
+        self.assertNotIn("lane-1", labels(calls))
+
+    def test_a_closed_issue_claimed_by_another_holder_is_not_released(self):
+        for verdict in ("held_by", "stale"):
+            with self.subTest(verdict=verdict):
+                _, calls, _ = run(patch={"facts-1": {"state": "CLOSED", "claim": {"verdict": verdict, "by": "h2/b9"}}})
+                self.assertNotIn("release-1", labels(calls))
+
+    def test_the_intake_release_waits_for_every_facts_agent_and_precedes_every_lane(self):
+        _, calls, _ = run(args=dict(ARGS, issues=[1, 2]),
+                          patch={"facts-1": {"state": "CLOSED", "claim": {"verdict": "held_by", "by": HOLDER}}})
+        ls = labels(calls)
+        self.assertLess(ls.index("facts-2"), ls.index("release-1"))
+        self.assertLess(ls.index("release-1"), ls.index("lane-2"))
+        self.assertEqual(next(c for c in calls if c["label"] == "release-1")["facts_pending"], 0)
+
+    def test_a_child_stop_on_a_closed_issue_releases_and_is_final(self):
+        for release in ("released", "not_held"):
+            with self.subTest(release=release):
+                result, calls, _ = run(children={"1": TASK_STOP},
+                                       replies={"settle-1": {"state": "CLOSED", "release": release}})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "stage": "task",
+                                                  "released": release == "released"})
+                self.assertEqual(of(calls, 1)[-2:], ["child-1", "settle-1"])
+                text = prompt(calls, "settle-1")
+                self.assertIn("gh issue view 1 --repo owner/repo --json state", text)
+                self.assertIn(CLOSED_RELEASE, text)
+                self.assertIn("not_held (exit 3)", text)
+                self.assertIsNone(result["relaunch"])
+
+    def test_a_closed_settle_whose_release_failed_keeps_the_cont(self):
+        for reply in ({"state": "CLOSED", "release": "error"}, None):
+            with self.subTest(reply=reply):
+                result, _, _ = run(children={"1": TASK_STOP}, replies={"settle-1": reply})
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "task"))
+                self.assertEqual(result["relaunch"]["conts"], {"1": {"setup": {}}})
+
+    def test_settle_runs_only_after_a_stop_with_a_cont(self):
+        for c in ({"stage": "setup", "result": {"ok": False, "reason": "no-longer-applies"}},
+                  {"stage": "plan", "needs_user": [{"question": "q?", "options": ["Do it."]}], "cont": {"setup": {}}},
+                  {"stage": "claimed", "verdict": "held_by", "by": "h2/b9"},
+                  {"stage": "planned", "cont": {"setup": {}}}):
+            with self.subTest(child=c):
+                _, calls, _ = run(children={"1": c})
+                self.assertNotIn("settle-1", labels(calls))
+        # A post-merge stop of a re-adopted merged landing: the issue reads CLOSED, but its close-out is unfinished.
+        merged = {"state": "CLOSED", "merged_pr": 41, "claim": {"verdict": "held_by", "by": HOLDER}}
+        for c in ({"stage": "close-out", "cont": {"setup": {}}},
+                  {"stage": "setup", "missing": ["host"], "cont": {"setup": {}}},
+                  {"stage": "task", "pr": 41, "cont": {"setup": {}}},
+                  {"stage": "close-out", "pr": 41, "cont": {"setup": {}}},
+                  {"stage": "hold", "pr": 41, "cont": {"setup": {}}},
+                  {"stage": "code-unmet", "pr": 41, "code_unmet": ["AC1"], "cont": {"setup": {}}}):
+            with self.subTest(child=c):
+                result, calls, _ = run(args=dict(ARGS, conts={"1": {"setup": {}}}), patch={"facts-1": merged},
+                                       children={"1": c}, replies={"settle-1": {"state": "CLOSED", "release": "released"}})
+                self.assertNotIn("settle-1", labels(calls))
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", c["stage"]))
+                self.assertEqual(result["relaunch"]["conts"], {"1": {"setup": {}}})
+        _, calls, _ = run()
+        self.assertNotIn("settle-1", labels(calls))
 
 
 class QuestionTest(unittest.TestCase):

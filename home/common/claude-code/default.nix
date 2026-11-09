@@ -353,6 +353,8 @@ let
     # ledger transitions under .superpowers/workflows/, and every lifecycle call is one
     # heredoc-fed command, so each pipeline segment matches a rule. The verification-observe adapter is allowed the same way:
     # its only write is fetching the integration branch into refs/remotes/origin/<branch>.
+    # forge-issue is allowed the same way (issue 697): its only writes are one issue and its
+    # dependency links, each linked by database id and read back.
     permissions = {
       defaultMode = "auto";
       allow = [
@@ -381,6 +383,8 @@ let
         "Bash(~/.agents/bin/ship-delivery:*)"
         "Bash(verification-observe:*)"
         "Bash(~/.agents/bin/verification-observe:*)"
+        "Bash(forge-issue:*)"
+        "Bash(~/.agents/bin/forge-issue:*)"
         "Agent"
       ];
       ask = [ ];

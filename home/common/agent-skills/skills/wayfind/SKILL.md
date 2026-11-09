@@ -47,7 +47,7 @@ A ticket's body is its `## Question`, sized to one fresh-context session. Label 
 
 Link what a session makes from the ticket, never paste it. Cite a sibling ticket by link plus one line, never by pasting its resolution.
 
-**Claim before work**: assign the ticket to yourself; open and unassigned means unclaimed. Blocking uses the tracker's native dependency relationship; on GitHub that is the same `blocked_by` call as `to-issues`, whose `issue_id` is the blocker's **numeric database id** (`--jq .id`), never its `#number`. **Frontier** = open, unblocked, unclaimed children.
+**Claim before work**: assign the ticket to yourself; open and unassigned means unclaimed. Blocking uses the tracker's native dependency relationship; on GitHub, file with `forge-issue create` and wire with `forge-issue link`, never by hand. **Frontier** = open, unblocked, unclaimed children.
 
 ## Fog of war
 

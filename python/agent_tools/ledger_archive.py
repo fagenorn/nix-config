@@ -4,7 +4,8 @@ A ledger that `workflow-state migrate` refuses (an unknown dialect, an ambiguous
 so on) stays in `.superpowers/workflows` forever and keeps every later inventory red. This
 command is the acknowledged cleanup of #72: the owner labels each refused ledger, and only a
 labelled ledger is moved, whole, to `.superpowers/archive/workflows/<ledger>` with a sidecar
-`<ledger>.archived.json`. A dry run (the default) writes nothing. With `--apply`, every
+`<ledger>.archived.json`. A labelled `migrate` ledger (a finished one the owner disposes of)
+is taken only with `--include-migrate` (issue 710), which needs `--labels`. A dry run (the default) writes nothing. With `--apply`, every
 candidate's directory is opened through a validated `O_NOFOLLOW` directory fd, its lock is
 taken without blocking and all locks are held together while the inventory is read again,
 so a ledger a live run is using, or one that changed since the inventory, is skipped and
@@ -121,13 +122,21 @@ def _check_report(document: object) -> dict:
     return document
 
 
-def plan_rows(superpowers: Path, migration: dict, labels: dict[str, dict] | None) -> list[dict]:
-    """One report row per refused ledger of the dry-run document, in its order."""
+def plan_rows(superpowers: Path, migration: dict, labels: dict[str, dict] | None, *,
+              include_migrate: bool = False) -> list[dict]:
+    """One report row per candidate ledger of the dry-run document, in its order.
+
+    A candidate is a `refused` ledger, or, with `include_migrate`, a `migrate` ledger that has
+    a label; each row records the dry run's verdict of its ledger as `source_verdict`.
+    """
     rows = []
     for source in _check_report(migration)["ledgers"]:
-        if source.get("verdict") != "refused":
-            continue
+        verdict = source.get("verdict")
         ledger = source.get("ledger")
+        if verdict != "refused" and not (
+                include_migrate and verdict == "migrate" and labels is not None
+                and isinstance(ledger, str) and ledger in labels):
+            continue
         problem = _name_violation(ledger)
         if problem:
             raise ArchiveRefused("invalid_ledger_name", problem)
@@ -140,7 +149,7 @@ def plan_rows(superpowers: Path, migration: dict, labels: dict[str, dict] | None
                "disposition": None if label is None else label["disposition"],
                "redeliver": None if label is None else list(label["redeliver"]),
                "destination": str(destination), "verdict": "would_archive",
-               "skip_reason": None}
+               "skip_reason": None, "source_verdict": verdict}
         if labels is not None and label is None:
             row["verdict"], row["skip_reason"] = "skipped", "unlabelled"
         elif (os.path.lexists(destination)
@@ -302,7 +311,7 @@ def apply_rows(root: Path, superpowers: Path, rows: list[dict], *,
             if row["verdict"] != "would_archive":
                 continue
             current = reread.get(row["ledger"])
-            expected = {**row, "verdict": "refused"}
+            expected = {**row, "verdict": row["source_verdict"]}
             if current is None or any(current.get(name) != expected.get(name)
                                       for name in IDENTITY_FIELDS):
                 _skip(row, "changed")
@@ -332,6 +341,7 @@ def apply_rows(root: Path, superpowers: Path, rows: list[dict], *,
                     "reason": current.get("reason"), "source": str(workflows / ledger),
                     "destination": str(destination), "disposition": row["disposition"],
                     "redeliver": row["redeliver"], "archived_at": now(),
+                    "source_verdict": row["source_verdict"],
                     "state_sha256": first[ledger]})
                 moved = False
                 try:
@@ -374,6 +384,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--labels")
+    parser.add_argument("--include-migrate", action="store_true")
     return parser
 
 
@@ -381,6 +392,8 @@ def _run(argv: Sequence[str] | None) -> tuple[dict, int]:
     args = _build_parser().parse_args(argv)
     if args.apply and args.labels is None:
         raise ArchiveRefused("labels_required", "--apply needs --labels FILE")
+    if args.include_migrate and args.labels is None:
+        raise ArchiveRefused("labels_required", "--include-migrate needs --labels FILE")
     labels = None if args.labels is None else load_labels(Path(args.labels))
     try:
         root = Path(args.repo_root).resolve(strict=True)
@@ -395,7 +408,7 @@ def _run(argv: Sequence[str] | None) -> tuple[dict, int]:
     if not stat.S_ISDIR(workflows_mode):
         raise ArchiveRefused("workflows_missing",
                              f"{superpowers / 'workflows'} is not a plain directory")
-    rows = plan_rows(superpowers, _dry_run(root), labels)
+    rows = plan_rows(superpowers, _dry_run(root), labels, include_migrate=args.include_migrate)
     post_check = None
     if args.apply:
         _check_archive_root(superpowers)

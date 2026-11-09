@@ -1,0 +1,19 @@
+{
+  "recorded": "Read-only gh api reads of fagenorn/nix-config/issues/<n> on 2026-11-08, trimmed to the fields forge-issue reads. 582 is natively blocked by 555 and 688 blocks 689 there. `created` (filing cannot be recorded without a side effect) and `foreign` (an issue of another repository sharing number 555) are constructed in the same shape.",
+  "repo": "fagenorn/nix-config",
+  "issues": {
+    "555": {"id": 6170576511, "node_id": "I_kwDOOfxdDc8AAAABb8uGfw", "number": 555, "state": "closed",
+            "repository_url": "https://api.github.com/repos/fagenorn/nix-config"},
+    "688": {"id": 6271403233, "node_id": "I_kwDOOfxdDc8AAAABdc4E4Q", "number": 688, "state": "open",
+            "repository_url": "https://api.github.com/repos/fagenorn/nix-config"},
+    "689": {"id": 6271403487, "node_id": "I_kwDOOfxdDc8AAAABdc4F3w", "number": 689, "state": "open",
+            "repository_url": "https://api.github.com/repos/fagenorn/nix-config"}
+  },
+  "pull_request": {"id": 6274381007, "node_id": "PR_kwDOOfxdDc8AAAABNsj12A", "number": 709, "state": "closed",
+                   "repository_url": "https://api.github.com/repos/fagenorn/nix-config",
+                   "pull_request": {"url": "https://api.github.com/repos/fagenorn/nix-config/pulls/709"}},
+  "created": {"id": 6300000001, "node_id": "I_kwDOOfxdDc8AAAABd9xAAQ", "number": 701, "state": "open",
+              "repository_url": "https://api.github.com/repos/fagenorn/nix-config"},
+  "foreign": {"id": 6100000555, "node_id": "I_kwDOForeignAAAABar0555", "number": 555, "state": "open",
+              "repository_url": "https://api.github.com/repos/other/repo"}
+}
