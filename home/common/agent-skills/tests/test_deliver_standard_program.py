@@ -401,6 +401,29 @@ class ContractTest(unittest.TestCase):
                 self.assertIn("an earlier claim stopped part way", prompt(calls, "setup"))
                 self.assertIn("worktree add --no-track -b issue-9-x /r/.wt/w-issue-9-x", prompt(calls, "worktree"))
 
+    def test_a_lost_fresh_setup_reply_keeps_a_cont_that_finishes_the_claim(self):
+        # The folded setup acquires the claim itself: a reply lost after that leaves a claim whose holder only a cont can resume.
+        for reply in (None, "throw"):
+            with self.subTest(reply=reply):
+                result, calls = run(replies={"setup": reply})
+                self.assertEqual(result["stage"], "setup")
+                self.assertIsNone(result["result"])
+                self.assertEqual(result["dead_agents"], ["setup"])
+                self.assertEqual(labels(calls), ["setup"])
+                cont = result["cont"]
+                self.assertTrue(cont["claim_incomplete"])
+                resumed, calls = run(args=dict(ARGS, cont=cont))
+                self.assertEqual(resumed["stage"], "done")
+                self.assertEqual(labels(calls)[:3], ["setup", "acquire", "worktree"])
+                self.assertIn("--holder " + HOLDER, prompt(calls, "acquire"))
+
+    def test_a_lost_resume_setup_reply_adds_no_cont(self):
+        cont = {"setup": {}, "lane": "standard", "plan": None, "plan_reviewed": False, "done": [], "fix_waves": 0,
+                "claim_incomplete": True}
+        result, _ = run(args=dict(ARGS, cont=cont), replies={"setup": None})
+        self.assertEqual(result["stage"], "setup")
+        self.assertNotIn("cont", result)
+
     def test_blocked_capability_during_an_unfinished_claim_keeps_the_claim_cont(self):
         result, _ = run(patch={"setup": {"claim": {"ok": False, "reason": "x"}}})
         result, _ = run(args=dict(ARGS, cont=result["cont"]),
@@ -1343,6 +1366,17 @@ class ShipTest(unittest.TestCase):
 
     def test_unmerged_pr_stops_before_close_out(self):
         result, calls = run(replies={"merge": {"merged": False, "notes": "head moved"}})
+        self.assertEqual(result["stage"], "merge")
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_a_merged_reply_without_notes_still_closes_out(self):
+        # The folded merge schema requires only the renew, so a merged PR's reply may carry no notes.
+        result, calls = run(replies={"merge": {"merged": True, "merge_commit": "c" * 40}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("close-out", labels(calls))
+
+    def test_a_reply_without_merged_stops_at_merge(self):
+        result, calls = run(replies={"merge": {"notes": "unsure"}})
         self.assertEqual(result["stage"], "merge")
         self.assertNotIn("close-out", labels(calls))
 
