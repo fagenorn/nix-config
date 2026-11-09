@@ -2661,11 +2661,30 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual("cannot resolve origin's push URL", module.push_url_problem(context))
 
     # Guarded command shapes (#351): the forms a delivery spells and the dressed
-    # shapes agents reach for, from the fixture the shell-example suite also reads.
+    # shapes agents reach for, from the fixture this suite alone reads.
     SHAPES = json.loads((Path(__file__).parent / "fixtures/guarded-command-shapes.json")
                         .read_text(encoding="utf-8"))
     TOKEN_PREFIX = "unset GITHUB_TOKEN && "
     ENV_TOKEN_PREFIX = "env -u GITHUB_TOKEN "
+
+    def test_readme_names_only_readers_of_the_shape_fixture(self):
+        """The README may credit a test file with reading the shape fixture only
+        if that file mentions it (a rename once left a check that no longer existed)."""
+        readme = (Path(__file__).parent.parent
+                  / "home/common/claude-code/README.md").read_text(encoding="utf-8")
+        fixture = "guarded-command-shapes.json"
+        start = readme.index(f"The shape fixture `tests/fixtures/{fixture}`")
+        sentence = readme[start:readme.index("`form_values`", start)]
+        named = re.findall(r"[\w/.-]*test_\w+\.py", sentence)
+        self.assertTrue(named, "the README sentence names no reading suite")
+        for name in named:
+            candidates = [Path(__file__).parent.parent / name,
+                          Path(__file__).parent.parent / "tests" / name]
+            path = next((c for c in candidates if c.is_file()), None)
+            if path is None:
+                path = next(Path(__file__).parent.parent.rglob(Path(name).name), None)
+            self.assertIsNotNone(path, f"{name} does not exist")
+            self.assertIn(fixture, path.read_text(encoding="utf-8"), f"{name} never reads {fixture}")
 
     def shape_command(self, template):
         for placeholder, value in self.SHAPES["values"].items():
