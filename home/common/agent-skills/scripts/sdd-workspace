@@ -18,7 +18,7 @@
 # as current progress makes controllers skip whole task sequences. The bucket
 # narrows that failure: two checkouts running one plan never share a ledger. It
 # does not make a stale read impossible — a bucket outlives the worktree that
-# named it, which is why ship-issue removes a feature worktree's bucket when it
+# named it, which is why the ship stage removes a feature worktree's bucket when it
 # removes the worktree.
 #
 # Which checkout this is gets decided BEFORE the primary is derived. A checkout

@@ -131,7 +131,7 @@ class ScanFileTest(unittest.TestCase):
         # A replayed tool_use block (same block id) must not double-count the
         # Skill load or the Agent launch.
         skill_block = {"type": "tool_use", "id": "toolu_s",
-                       "name": "Skill", "input": {"skill": "from-issue"}}
+                       "name": "Skill", "input": {"skill": "deliver-direct"}}
         agent_block = {"type": "tool_use", "id": "toolu_a", "name": "Agent",
                        "input": {"subagent_type": "implementer", "prompt": "x" * 120}}
         lines = [
@@ -140,7 +140,7 @@ class ScanFileTest(unittest.TestCase):
             assistant("msg_1", usage=USAGE_1, content=[skill_block, agent_block]),
         ]
         r = self.scan(lines)
-        self.assertEqual(r["skills"], {"from-issue": 1})
+        self.assertEqual(r["skills"], {"deliver-direct": 1})
         self.assertEqual(r["agents_by_type"], {"implementer": 1})
         self.assertEqual(r["agent_prompt_bytes"], [120])
 
@@ -443,11 +443,11 @@ class OutcomeTest(unittest.TestCase):
                          "abandoned")
 
     def test_canonical_suspension_line_classifies_interrupted(self):
-        line = "Suspended (blocked_on=usage_limit). Resume: /from-issue 101 --auto"
+        line = "Suspended (blocked_on=usage_limit). Resume: /deliver-standard 101"
         self.assertEqual(agent_costs.classify_outcome(line), "interrupted")
 
     def test_interrupted_beats_blocked_regex_overlap(self):
-        line = "Work paused. Suspended (blocked_on=human_gate). Resume: /from-issue 7 --auto"
+        line = "Work paused. Suspended (blocked_on=human_gate). Resume: /deliver-standard 7"
         self.assertEqual(agent_costs.classify_outcome(line), "interrupted")
 
     def test_group_rollup_prefers_completed(self):
@@ -1249,21 +1249,37 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
                           "authority": "runtime-agent-type"})
         self.assertEqual(reasons["role_ambiguous"], 0)
 
-    def test_the_shared_issue_owner_type_is_ambiguous_without_a_declared_role(self):
+    def test_the_shared_owner_role_is_ambiguous_without_a_declared_role(self):
         reasons = agent_costs.Counter()
-        self.assertEqual(agent_costs._declaration({"subagent_type": "issue-owner"}, reasons),
+        self.assertEqual(agent_costs._declaration({"subagent_type": "implementer"}, reasons),
                          {"dispatch_id": None, "role": None, "authority": "unknown"})
         self.assertEqual(reasons["role_ambiguous"], 1)
         self.assertEqual(reasons["dispatch_missing"], 1)
-        for role in ("issue-owner", "auto-owner", "ship-owner"):
+        for role in ("ship-owner",):
             with self.subTest(role=role):
                 reasons = agent_costs.Counter()
                 self.assertEqual(
-                    agent_costs._declaration({"subagent_type": "issue-owner", "role": role,
-                                              "dispatch_id": "from-issue-auto-owner"}, reasons),
-                    {"dispatch_id": "from-issue-auto-owner", "role": role,
+                    agent_costs._declaration({"subagent_type": "general-purpose", "role": role,
+                                              "dispatch_id": "ship-release-owner"}, reasons),
+                    {"dispatch_id": "ship-release-owner", "role": role,
                      "authority": "structured-dispatch"})
                 self.assertEqual(reasons["role_ambiguous"], 0)
+
+    def test_retired_role_spellings_are_not_canonical(self):
+        for role in ("issue-" "owner", "mech" "anic", "auto-owner", "bookkeeper"):
+            with self.subTest(role=role):
+                reasons = agent_costs.Counter()
+                self.assertEqual(agent_costs._declaration({"role": role}, reasons)["authority"], "unknown")
+
+    def test_the_renamed_owner_role_is_canonical(self):
+        reasons = agent_costs.Counter()
+        self.assertEqual(
+            agent_costs._declaration({"role": "owner", "dispatch_id": "improve-architecture-scan-owner"}, reasons),
+            {"dispatch_id": "improve-architecture-scan-owner", "role": "owner", "authority": "structured-dispatch"})
+        self.assertEqual(agent_costs._declaration({"role": "owner"}, reasons)["authority"], "runtime-agent-type")
+        self.assertEqual(reasons["role_ambiguous"], 0)
+        self.assertEqual(agent_costs._declaration({"subagent_type": "owner"}, reasons)["authority"], "unknown")
+        self.assertEqual(reasons["role_ambiguous"], 1)
 
     def test_a_declared_implementer_role_is_accepted_on_either_tier(self):
         for role in ("task-implementer", "implementer"):

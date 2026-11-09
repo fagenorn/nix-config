@@ -2002,7 +2002,7 @@ class SkillNamedReplyTest(DeliveredCustody, unittest.TestCase):
     def reply_init_run(self):
         self.project()
         return self.cli("init-run", "--repo-root", self.root, "--creation-key",
-                        "from-issue:207:1", "--now", at(0)).stdout
+                        "deliver-standard:207:1", "--now", at(0)).stdout
 
     def reply_control(self):
         self.setup_run()

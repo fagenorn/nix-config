@@ -4,9 +4,9 @@
 [--ran <command>=<exit code>]...` reads the record's acceptance table under a closed grammar,
 matches each named `unverified` `code` row's backticked measurements against the required checks
 (`gh pr checks --required --json name,bucket,link`) and the commands run at `--head`, and applies
-sdd's `code` rule: a failure makes the row `unmet`, all observed passes make it `met`, a matched
+the delivery's `code` rule: a failure makes the row `unmet`, all observed passes make it `met`, a matched
 measurement left unobserved leaves it unchanged. Spans matching no observation are the caller's
-`--row` judgment that their measurements are already cited; ship-issue names only a row with at
+`--row` judgment that their measurements are already cited; the ship stage names only a row with at
 least one uncited measurement, so a fully cited row is never named. It prints
 `{acceptance_state, changed}` and replaces the record only when a row changed. Every refusal
 exits 2 with one stderr line and the record untouched.

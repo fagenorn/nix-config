@@ -133,12 +133,12 @@ class BootReportTest(unittest.TestCase):
         session.result("o1", 111, c1, "T" * 6_100)
         c2 = session.call("o1", 120, context=33_580, write=2_540, tool=("Skill", {"skill": "sdd"}))
         session.result("o1", 121, c2, "Launching skill: sdd")
-        body = "Base directory for this skill: /h/.claude/skills/sdd\n"
+        body = "Base directory for this skill: /h/.claude/skills/deliver-direct\n"
         body += "b" * (1_980 - len(body))
         session.skill_body("o1", 122, c2, body)
         session.request("o1", [session.blob("o1", "user", [{"type": "text", "text": body}])])
         c3 = session.call("o1", 130, context=35_620, write=2_040,
-                          tool=("Read", {"file_path": "/h/.claude/skills/from-issue/AUTO.md"}))
+                          tool=("Read", {"file_path": "/h/.claude/skills/design/SKILL.md"}))
         session.result("o1", 131, c3, "A" * 500)
         session.request("o1", [session.blob("o1", "system", [
             {"type": "text", "text": "<system-reminder>\n" + "h" * 482}])])
@@ -157,7 +157,7 @@ class BootReportTest(unittest.TestCase):
              row["calls"], row["start"], row["b"]),
             (HOST, RUN, 7, "fresh", "6-7", 5, 30_000, 36_660))
         self.assertEqual(row["skills"], {"sdd": 2_000})
-        self.assertEqual(row["skill_files"], {"from-issue/AUTO.md": 500})
+        self.assertEqual(row["skill_files"], {"design/SKILL.md": 500})
         self.assertEqual((document["chars_per_token"], document["observed_chars_per_token"]),
                          (2.44, 2.44))
 
@@ -322,7 +322,7 @@ class BootReportTest(unittest.TestCase):
                                  (1_000, 2_000) if reread else (3_000, 0))
 
     def test_skill_sections_output_is_a_read_of_its_skill_file(self):
-        skill = "/h/.claude/skills/from-issue/SKILL.md"
+        skill = "/h/.claude/skills/writing-plans/SKILL.md"
         opening_call = bash(f"skill-sections --opening {skill} 'Files beside this one'")
         session = Session(self.root)
         stepped_boot(session, "o1", 0, [
@@ -334,10 +334,10 @@ class BootReportTest(unittest.TestCase):
         [row] = report(self.root)["boots"]
         self.assertEqual((row["buckets"]["skill_files"], row["buckets"]["rereads"],
                           row["buckets"]["commands"]), (3_000, 500, 0))
-        self.assertEqual(row["skill_files"], {"from-issue/SKILL.md": 3_000})
+        self.assertEqual(row["skill_files"], {"writing-plans/SKILL.md": 3_000})
 
     def test_skill_sections_names_are_never_read_paths(self):
-        skill = "/h/.claude/skills/ship-issue/REVIEW.md"
+        skill = "/h/.claude/skills/research/SKILL.md"
         session = Session(self.root)
         stepped_boot(session, "o1", 0, [
             (read(skill), 1_000),
@@ -375,7 +375,7 @@ class BootReportTest(unittest.TestCase):
     def test_foreign_flags_are_usage_errors(self):
         for extra in (["--project", "x"], ["--artifacts", "docs"], ["--strata", "codex"],
                       ["--policy", "a=threshold=150000"], ["--sweep"],
-                      ["--eval-results", "r.jsonl", "--eval", "from-issue:8"],
+                      ["--eval-results", "r.jsonl", "--eval", "deliver-direct:8"],
                       ["--context-threshold", "5"]):
             with self.subTest(extra=extra):
                 completed = costs("--format", "json", "--projects-dir", str(self.root), *extra)

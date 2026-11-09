@@ -143,19 +143,19 @@ class OwnerReportTest(unittest.TestCase):
                 (("a" * 40, "PASS", 20_000, 0), ("a" * 40, "PASS", 40_000, 0),
                  ("b" * 40, "PASS", 30_000, 0), ("b" * 40, "FAIL", 50_000, 0),
                  ("b" * 40, "PASS", 60_000, 124)), 1):   # trial 5 timed out with its asserts passing
-            workdir = f"/private/tmp/eval-from-issue-8.T{index}"
+            workdir = f"/private/tmp/eval-deliver-direct-8.T{index}"
             session = Session(self.root, project=workdir.replace("/", "-").replace(".", "-") + "-repo",
                               session=f"s{index}")
             g = session.call(None, 0, context=write, write=write, ttl="1h", bash=progress(6))
             session.result(None, 5, g, gate_reply("continue"))
             session.write()
             dollars[index] = cost(write, write, write_price=8.0)
-            rows.append({"skill": "from-issue", "id": 8, "trial": index, "verdict": verdict,
+            rows.append({"skill": "deliver-direct", "id": 8, "trial": index, "verdict": verdict,
                          "workdir": workdir, "tree_rev": rev, "policy": None,
                          "claude_exit": exit_code})
         results = self.root / "results.jsonl"
         results.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-        doc = report(self.root, "--eval-results", str(results), "--eval", "from-issue:8")
+        doc = report(self.root, "--eval-results", str(results), "--eval", "deliver-direct:8")
         arms = {arm["arm"]: arm for arm in doc["arms"]}
         a, b = arms["aaaaaaaaaaaa/default"], arms["bbbbbbbbbbbb/default"]
         self.assertEqual((a["n"], a["delivered"], b["n"], b["delivered"]), (2, 2, 2, 1))
@@ -167,19 +167,19 @@ class OwnerReportTest(unittest.TestCase):
         self.assertEqual(doc["interrupted"], [{"trial": 5, "tree_rev": "b" * 40, "claude_exit": 124}])
 
     def test_a_clean_exit_trial_with_no_matching_session_is_a_listed_gap(self):
-        session = Session(self.root, project="-private-tmp-eval-from-issue-8-T1-repo")
+        session = Session(self.root, project="-private-tmp-eval-deliver-direct-8-T1-repo")
         g = session.call(None, 0, context=20_000, write=20_000, ttl="1h", bash=progress(6))
         session.result(None, 5, g, gate_reply("continue"))
         session.write()
-        rows = [{"skill": "from-issue", "id": 8, "trial": 1, "verdict": "PASS",
-                 "workdir": "/private/tmp/eval-from-issue-8.T1", "tree_rev": "a" * 40,
+        rows = [{"skill": "deliver-direct", "id": 8, "trial": 1, "verdict": "PASS",
+                 "workdir": "/private/tmp/eval-deliver-direct-8.T1", "tree_rev": "a" * 40,
                  "policy": None, "claude_exit": 0},
-                {"skill": "from-issue", "id": 8, "trial": 2, "verdict": "PASS",
-                 "workdir": "/tmp/eval-from-issue-8.T2", "tree_rev": "a" * 40,
+                {"skill": "deliver-direct", "id": 8, "trial": 2, "verdict": "PASS",
+                 "workdir": "/tmp/eval-deliver-direct-8.T2", "tree_rev": "a" * 40,
                  "policy": None, "claude_exit": 0}]
         results = self.root / "results.jsonl"
         results.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-        doc = report(self.root, "--eval-results", str(results), "--eval", "from-issue:8")
+        doc = report(self.root, "--eval-results", str(results), "--eval", "deliver-direct:8")
         self.assertEqual([row["trial"] for row in doc["lineages"]], [1])
         self.assertEqual(doc["unmatched"], [{"trial": 2, "tree_rev": "a" * 40, "claude_exit": 0}])
         self.assertEqual(doc["interrupted"], [])
@@ -209,7 +209,7 @@ class OwnerReportTest(unittest.TestCase):
                          (True, 1, 7))
 
     def test_owners_report_refuses_foreign_flags(self):
-        for extra in (["--project", "x"], ["--artifacts", "docs"], ["--eval", "from-issue:8"],
+        for extra in (["--project", "x"], ["--artifacts", "docs"], ["--eval", "deliver-direct:8"],
                       ["--context-threshold", "5"]):
             with self.subTest(extra=extra):
                 completed = subprocess.run(
@@ -318,7 +318,7 @@ class OwnerReportTest(unittest.TestCase):
             ["--report", "owners", "--started", window, "--events-since", at(0),
              "--events-before", at(60)],
             ["--report", "owners", "--started", window, "--eval-results", "r.jsonl",
-             "--eval", "from-issue:8"],
+             "--eval", "deliver-direct:8"],
             ["--report", "owners", "--started", window, "--settle-days", "-1"],
             ["--report", "owners", "--started", "2026-10-25"],
             ["--report", "owners", "--started", "2026-10-28..2026-10-25"],
@@ -351,16 +351,16 @@ class OwnerReportTest(unittest.TestCase):
             self.assertNotIn(absent, plain)
 
     def test_eval_text_prints_no_pings_line(self):
-        session = Session(self.root, project="-private-tmp-eval-from-issue-8-T1-repo")
+        session = Session(self.root, project="-private-tmp-eval-deliver-direct-8-T1-repo")
         g = session.call(None, 0, context=20_000, write=20_000, ttl="1h", bash=progress(6))
         session.result(None, 5, g, gate_reply("continue"))
         session.write()
         results = self.root / "results.jsonl"
         results.write_text(json.dumps({
-            "skill": "from-issue", "id": 8, "trial": 1, "verdict": "PASS",
-            "workdir": "/private/tmp/eval-from-issue-8.T1", "tree_rev": "a" * 40, "policy": None,
+            "skill": "deliver-direct", "id": 8, "trial": 1, "verdict": "PASS",
+            "workdir": "/private/tmp/eval-deliver-direct-8.T1", "tree_rev": "a" * 40, "policy": None,
             "claude_exit": 0}) + "\n", encoding="utf-8")
-        out = text(self.root, "--eval-results", str(results), "--eval", "from-issue:8")
+        out = text(self.root, "--eval-results", str(results), "--eval", "deliver-direct:8")
         self.assertIn("\nProjects (", out)
         self.assertNotIn("Pings:", out)
 
@@ -555,21 +555,21 @@ class OwnerReportTest(unittest.TestCase):
 
     def test_an_eval_trial_row_takes_the_project_and_start_of_its_first_lineage(self):
         # issue 9 starts first, but the trial's first lineage is issue 7 (lineages sort by issue)
-        later = Session(self.root, project="-private-tmp-eval-from-issue-8-T1-repo", session="s1")
+        later = Session(self.root, project="-private-tmp-eval-deliver-direct-8-T1-repo", session="s1")
         g9 = later.call(None, 0, context=20_000, write=20_000, ttl="1h",
                         bash=progress(3, action_id="9:1:1", repo_root="/Users/me/zed"))
         later.result(None, 5, g9, gate_reply("continue", issue=9))
         later.write()
-        first = Session(self.root, project="-private-tmp-eval-from-issue-8-T1-repo", session="s2")
+        first = Session(self.root, project="-private-tmp-eval-deliver-direct-8-T1-repo", session="s2")
         g7 = first.call(None, 30, context=20_000, write=20_000, ttl="1h", bash=progress(6))
         first.result(None, 35, g7, gate_reply("continue"))
         first.write()
         results = self.root / "results.jsonl"
         results.write_text(json.dumps({
-            "skill": "from-issue", "id": 8, "trial": 1, "verdict": "PASS",
-            "workdir": "/private/tmp/eval-from-issue-8.T1", "tree_rev": "a" * 40, "policy": None,
+            "skill": "deliver-direct", "id": 8, "trial": 1, "verdict": "PASS",
+            "workdir": "/private/tmp/eval-deliver-direct-8.T1", "tree_rev": "a" * 40, "policy": None,
             "claude_exit": 0}) + "\n", encoding="utf-8")
-        [row] = report(self.root, "--eval-results", str(results), "--eval", "from-issue:8")["lineages"]
+        [row] = report(self.root, "--eval-results", str(results), "--eval", "deliver-direct:8")["lineages"]
         self.assertEqual((row["project"], row["started"]), ("repo", "2026-10-25T09:00:30Z"))
 
     def two_windows(self):
@@ -773,7 +773,7 @@ class OwnerReportTest(unittest.TestCase):
         self.assert_usage_errors(
             ["--report", "boot", "--proxy-log", "proxy.log"],
             ["--report", "owners", "--proxy-log", "proxy.log", "--eval-results", "r.jsonl",
-             "--eval", "from-issue:8"])
+             "--eval", "deliver-direct:8"])
         completed = run(self.root, "--report", "owners", "--proxy-log", str(self.root / "missing.log"))
         self.assertEqual((completed.returncode, completed.stdout), (1, ""))
         self.assertTrue(completed.stderr.startswith("cannot read proxy log: "), completed.stderr)
