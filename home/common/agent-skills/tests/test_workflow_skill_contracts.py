@@ -287,6 +287,11 @@ def assert_single_resolution_statement(case, text):
 # Entries of skills being retired (#688) that a tree may still hold until the
 # directories are deleted or a rebuilt home replaces them; spelled in pieces (D9).
 RETIRING_POLICY_ENTRIES = frozenset({"from-" "issue/SKILL.md", "ship-" "issue/SKILL.md"})
+RETIRING_SKILL_DIRS = ("from-" "issue", "sdd", "ship-" "issue")
+
+# Every `.superpowers/` home a live skill may name, spelled once (D10).
+SUPERPOWERS_SEGMENTS = {"workflows"}
+SUPERPOWERS_SEGMENT_RE = re.compile(r"\.superpowers/([A-Za-z0-9_.-]+)")
 
 
 def assert_policy_entries(case, root, entries, require_refusal_reporting=False):
@@ -589,6 +594,16 @@ def corpus_documents():
             yield path, path.read_text(encoding="utf-8")
 
 
+def live_corpus_documents():
+    """corpus_documents() without the skills still being retired (#688)."""
+    for path, text in corpus_documents():
+        parts = path.relative_to(REPO_ROOT).parts
+        if (parts[:4] == ("home", "common", "agent-skills", "skills")
+                and parts[4] in RETIRING_SKILL_DIRS):
+            continue
+        yield path, text
+
+
 class WorkflowSkillContractsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -757,6 +772,37 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             and REPO_ROOT_WORKSPACE_LITERAL in path.read_text(encoding="utf-8")
         ]
         self.assertEqual(offenders, [])
+
+    def test_superpowers_homes_are_a_closed_allowlist(self):
+        found: dict[str, set[str]] = {}
+        for path, text in live_corpus_documents():
+            for match in SUPERPOWERS_SEGMENT_RE.finditer(text):
+                found.setdefault(match.group(1), set()).add(
+                    str(path.relative_to(REPO_ROOT))
+                )
+        self.assertLessEqual(set(found), SUPERPOWERS_SEGMENTS, found)
+
+    def test_no_live_skill_names_the_ship_review_home(self):
+        carriers = [
+            str(path.relative_to(REPO_ROOT))
+            for path, text in live_corpus_documents()
+            if ".superpowers/" "ship-review" in text
+        ]
+        self.assertEqual(carriers, [])
+
+    def test_build_delivery_callers_name_the_sanctioned_resolution_exception(self):
+        exception = ("only sanctioned exception is `workflow-state build-delivery`, "
+                     "which performs its own sealed, read-only resolution")
+        callers = []
+        for path, raw in live_corpus_documents():
+            text = normalized(raw)
+            if "build-delivery" not in text:
+                continue
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            callers.append(relative)
+            with self.subTest(path=relative):
+                self.assertIn(exception, text)
+        self.assertEqual(sorted(callers), [])
 
     def test_gitignore_is_tracked_and_carries_the_backstop(self):
         subprocess.run(
