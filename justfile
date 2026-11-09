@@ -205,7 +205,6 @@ agent-workflow-tests *args:
     tests/test_transaction_core_sweep.py \
     tests/test_release_grammar.py \
     tests/test_release_profile.py \
-    tests/test_release_bridge.py \
     tests/test_release_command.py \
     tests/test_fallback_audit.py \
     tests/test_release_driver.py \

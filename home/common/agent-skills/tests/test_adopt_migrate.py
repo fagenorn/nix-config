@@ -18,9 +18,15 @@ from agent_tools import adopt_migrate
 from .test_adopt_project import AdoptTestCase, git, run, tree_snapshot
 from .test_resolve_project import (
     MANAGED_LINE, install_home, make_home, make_project_root, mutated_manifest,
-    run as resolve_run, source_contract)
+    RETIRED_MEMBER, run as resolve_run, schema_one, source_contract as pinned_contract)
 
 MIGRATION = "bindings-deploy.retire"
+
+
+def source_contract() -> dict:
+    """The schema-1 contract `migrate` reads: the pinned schema-2 fixture with the two
+    inert deploy members back (P11). Platform 2.0.0 refuses it everywhere except here."""
+    return schema_one(pinned_contract())
 
 
 def commit_all(root, message: str = "fixture") -> None:
@@ -67,12 +73,12 @@ class MigrateTest(AdoptTestCase):
     def test_a_deploy_in_use_refuses_and_writes_nothing(self):
         for member, mutate in (
                 ("/bindings/deploy/adapter",
-                 lambda c: c["bindings"]["deploy"].update(
+                 lambda c: c["bindings"][RETIRED_MEMBER].update(
                      adapter="railway", config={"project": "p"})),
                 ("/bindings/deploy/command",
-                 lambda c: c["bindings"]["deploy"].update(command="deploy")),
+                 lambda c: c["bindings"][RETIRED_MEMBER].update(command="deploy")),
                 ("/capabilities/deploy/support",
-                 lambda c: c["capabilities"]["deploy"].update(support="available"))):
+                 lambda c: c["capabilities"][RETIRED_MEMBER].update(support="available"))):
             with self.subTest(member=member):
                 contract = source_contract()
                 mutate(contract)

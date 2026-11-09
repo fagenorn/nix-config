@@ -38,7 +38,7 @@ from agent_tools import adopt_inspection, adopt_links, adopt_planning, adopt_pro
 from agent_tools.siblings import sibling_argv
 
 from ._inprocess_cli import run_module
-from .test_resolve_project import schema_two
+from .test_resolve_project import schema_one
 
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -169,13 +169,13 @@ def sha256_hash(data: bytes) -> str:
 # --------------------------------------------------------------------------
 
 
-# P11: the pinned schema-1 contract, not this repository's own live contract.
-SCHEMA_ONE_FIXTURE = (Path(__file__).resolve().parent / "fixtures"
-                      / "project-contract-schema-1.json")
+# P11: the pinned schema-2 contract, not this repository's own live contract.
+SCHEMA_TWO_FIXTURE = (Path(__file__).resolve().parent / "fixtures"
+                      / "project-contract-schema-2.json")
 
 
 def source_contract() -> dict:
-    return json.loads(SCHEMA_ONE_FIXTURE.read_text("utf-8"))
+    return json.loads(SCHEMA_TWO_FIXTURE.read_text("utf-8"))
 
 
 # Built fixture repositories, each kept once per process (issue 612, the #500 pattern).
@@ -232,19 +232,15 @@ def write(root: Path, relative: str, text: str) -> Path:
     return path
 
 
-def fixture_contract(*, schema: int = 2, **overrides: object) -> dict:
+def fixture_contract(**overrides: object) -> dict:
     """A valid contract in the highest supported project schema, derived from the
-    pinned schema-1 contract.
+    pinned schema-2 contract.
 
     Derived rather than authored so that the fixture cannot drift out of
     validity as the contract's shape evolves; only the members a case is about
     are overridden.
     """
-    # P3: platform 1.2.0 routes a schema-1 project to `migration_required`, so the
-    # fixtures that mean "the current schema" are schema 2 (no deploy members).
     contract = source_contract()
-    if schema == 2:
-        contract = schema_two(contract)
     contract["project"] = {"id": "fixture/target", "name": "target"}
     contract["bindings"]["paths"]["artifacts"] = {
         "specs": ".agents/artifacts/specs", "plans": ".agents/artifacts/plans"}
@@ -356,7 +352,13 @@ def adopted_repo(home: Path, *, records: bool = True, schema: int = 2) -> Path:
     (D34). `records=False` is the fixture the discovery negatives start from.
     """
     root = init_repo()
-    scaffold(root, host_independent(fixture_contract(schema=schema)), home)
+    contract = host_independent(fixture_contract())
+    scaffold(root, contract, home)
+    if schema == 1:
+        # Platform 2.0.0 refuses a schema-1 contract, so its projections are rendered
+        # from the schema-2 form and the authored contract is then put back to schema 1:
+        # the checkout a project still at schema 1 holds.
+        write(root, ".agents/project.json", json.dumps(schema_one(contract), indent=2) + "\n")
     write(root, ".agents/runtime/.gitignore", "*\n")
     git(root, "add", "-f", ".agents/runtime/.gitignore")
     git(root, "remote", "add", "origin",
@@ -1515,32 +1517,15 @@ class TypedOperationTest(AdoptTestCase):
             (root / skill).read_text("utf-8"),
             "Plans live in `.claude/plans` unless the contract says otherwise.\n")
 
-    def test_the_legacy_binding_config_gains_the_three_keys(self):
+    def test_the_legacy_binding_config_is_never_written(self):
+        # The legacy writer is removed (platform 2.0.0): `plan` leaves
+        # `.claude/skills.config.json` as it finds it.
         root = nix_config_shape_repo(self.home)
+        before = (root / ".claude" / "skills.config.json").read_bytes()
         doc = self.ready_plan(root)
-        op = self.only_write(doc, ".claude/skills.config.json")
-        config = json.loads(
-            (root / ".claude" / "skills.config.json").read_text("utf-8"))
-        config["specDir"] = ".agents/artifacts/specs"
-        config["planDir"] = ".agents/artifacts/plans"
-        config["rejectionsDir"] = ".agents/knowledge/rejections"
-        expected = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
-        self.assertEqual(op["after"], sha256_hash(expected.encode("utf-8")))
-        self.assertIn("orchestration", config)
-
-    def test_the_legacy_deploy_member_is_generated(self):
-        root = nix_config_shape_repo(self.home)
-        write(root, ".claude/skills.config.json",
-              json.dumps({"deploy": {"adapter": "none"}, "orchestration": {"maxParallel": 2}}))
-        commit(root, "carry a deploy member")
-        doc = self.ready_plan(root)
-        op = self.only_write(doc, ".claude/skills.config.json")
-        config = {"orchestration": {"maxParallel": 2},
-                  "specDir": ".agents/artifacts/specs",
-                  "planDir": ".agents/artifacts/plans",
-                  "rejectionsDir": ".agents/knowledge/rejections"}
-        expected = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
-        self.assertEqual(op["after"], sha256_hash(expected.encode("utf-8")))
+        for op in doc["changes"]:
+            self.assertNotIn(".claude/skills.config.json", op["targets"])
+        self.assertEqual((root / ".claude" / "skills.config.json").read_bytes(), before)
 
     def test_only_the_declared_legacy_binding_config_is_rewritten(self):
         root = nix_config_shape_repo(self.home)
@@ -1952,11 +1937,10 @@ class LinkRewritePlanTest(AdoptTestCase):
                 LINKED_AFTER[target].encode("utf-8")))
         order = [(op["op"], op["targets"][0] if op["targets"] else None)
                  for op in doc["changes"]]
-        legacy = order.index(("write-file", ".claude/skills.config.json"))
+        self.assertNotIn(("write-file", ".claude/skills.config.json"), order)
         first = order.index(("write-file", ".agents/artifacts/specs/x.md"))
         projections = [index for index, (kind, _) in enumerate(order)
                        if kind == "regenerate-projection"]
-        self.assertLess(legacy, first)
         self.assertTrue(projections)
         self.assertLess(first + 2, min(projections))
 

@@ -164,23 +164,25 @@ class LaneTriageRefusalTest(LaneTriageCase):
                          ["/bindings/workflow/light_lane/mode"])
 
     def test_an_overflowing_number_in_the_contract_is_resolver_refused(self):
-        """COR-002: `1e400` decodes to `inf`; `resolve-project resolve` refuses it."""
+        """COR-002: `1e400` decodes to `inf`; `resolve-project resolve` refuses it.
+
+        Project schema 2 has no unconstrained member that could carry the number into a
+        snapshot, so the resolver refuses it at validation, by name."""
         path = self.root / ".agents" / "project.json"
         contract = json.loads(path.read_text(encoding="utf-8"))
-        contract["bindings"]["deploy"]["config"] = {"threshold": 271828.5}
+        contract["probe"] = {"threshold": 271828.5}
         text = json.dumps(contract, indent=2) + "\n"
         self.assertEqual(text.count("271828.5"), 1)
         path.write_text(text.replace("271828.5", "1e400"), encoding="utf-8")
-        self.assertEqual(self.refusal(record(), "resolver_refused"),
-                         {"code": "resolver_failure", "repair_id": "resolver.internal",
-                          "violations": [{"message": "the resolver failed unexpectedly",
-                                          "pointer": ""}]})
+        detail = self.refusal(record(), "resolver_refused")
+        self.assertEqual([detail["code"], detail["repair_id"]],
+                         ["invalid_contract", "contract.top_level.member_unexpected"])
 
     def test_an_integer_past_the_digit_limit_is_resolver_refused(self):
         """COR-004: the loader leaves this `ValueError` untranslated; `resolve()` must not."""
         path = self.root / ".agents" / "project.json"
         contract = json.loads(path.read_text(encoding="utf-8"))
-        contract["bindings"]["deploy"]["config"] = {"threshold": 271828}
+        contract["probe"] = {"threshold": 271828}
         text = json.dumps(contract, indent=2) + "\n"
         self.assertEqual(text.count("271828"), 1)
         path.write_text(text.replace("271828", "9" * 5000), encoding="utf-8")

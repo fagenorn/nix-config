@@ -42,8 +42,7 @@ def candidate(**overrides) -> dict:
             "title": CANONICAL["title"], "notes": "notes body", **overrides}
 
 
-def project(case, *, profiles=None, integration="main", default="main",
-            deploy_adapter="none") -> release_driver.Project:
+def project(case, *, profiles=None, integration="main", default="main") -> release_driver.Project:
     scratch = tempfile.TemporaryDirectory()
     case.addCleanup(scratch.cleanup)
     root = Path(scratch.name).resolve() / "checkout"
@@ -52,7 +51,6 @@ def project(case, *, profiles=None, integration="main", default="main",
     return release_driver.Project(
         project_id=PROJECT_ID, root=root, common_dir=root / ".git",
         integration_branch=integration, default_branch=default,
-        deploy_adapter=deploy_adapter,
         contract={**support.base_contract(), "release": {"profiles": profiles}})
 
 

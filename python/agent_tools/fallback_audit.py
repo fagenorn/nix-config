@@ -58,6 +58,12 @@ NON_LADDER_SITES = (
      "digest-pinned retained review record of issue 234 Task 7"),
     ("home/common/agent-skills/skills/ship-release/CHANGELOG.md", "bindings-deploy",
      "release history, not an instruction"),
+    ("python/agent_tools/verify_checks.py", "bindings-deploy",
+     "the #130 checklist C11 zero-users detector (issue 582); detection, not a route"),
+    ("python/agent_tools/verify_checks.py", "legacy-skills-config",
+     "the #130 checklist C11 zero-users detector (issue 582); detection, not a route"),
+    ("python/agent_tools/verify_checks.py", "release-deploy-inspect",
+     "the #130 checklist C11 zero-users detector (issue 582); detection, not a route"),
 )
 
 CODEX_SHELL_TOOLS = ("shell", "shell_command", "exec_command", "local_shell")

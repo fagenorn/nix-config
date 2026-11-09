@@ -3,33 +3,29 @@
 A `when` condition is read from the running system (`darwin-version`/`nixos-version`, git) and
 the forge, never from a host clock: every time comparison uses `forge_markers.server_now()`
 through `Context.now()` (P7). Every `gh` call goes through `forge_markers`, so no token reaches
-it; the version tool, every `git` child and the in-process deploy adapter also run with
-`GITHUB_TOKEN` and `GH_TOKEN` removed (P16). This module only reads: the `window-open` marker a
+it; the version tool and every `git` child also run with `GITHUB_TOKEN` and `GH_TOKEN` removed
+(P16). This module only reads: the `window-open` marker a
 `days_after` condition waits for is posted by the caller.
 """
-import contextlib
 import json
 import os
 import re
 import shutil
 import subprocess
-import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools import actions_health_adapter, forge_markers, release_adapter, verify_block, verify_issues
+from agent_tools import forge_markers, verify_block, verify_issues
 from agent_tools.forge_markers import ForgeError, Marker
-from agent_tools.resolve_project import registered_deploy_adapter
 
 TOKENS = ("GITHUB_TOKEN", "GH_TOKEN")
 VERSION_TOOLS = ("darwin-version", "nixos-version")
 TOOL_TIMEOUT = 60
 REVISION = re.compile(r"[0-9a-f]{40}")
-REPORTED = re.compile(r"[0-9A-Fa-f]{7,40}")
 NOT_YET = 75
 INCLUDED = ("ahead", "identical")
 EXCLUDED = ("behind", "diverged")
@@ -40,7 +36,6 @@ class Context:
     slug: str
     root: Path
     default_branch: str
-    deploy: Mapping[str, Any]
     tracker: Mapping[str, Any]
     markers: Sequence[Marker] = ()
     _now: datetime | None = field(default=None, init=False, repr=False)
@@ -159,78 +154,11 @@ def deployed_includes(ctx: Context, sha: str) -> Reading:
     return Reading("due" if found else "not_deployed", facts)
 
 
-@contextlib.contextmanager
-def scrubbed_environ(names: Iterable[str]) -> Iterator[None]:
-    """Remove `names` from `os.environ` for the block and restore each previous value after it."""
-    previous = {name: os.environ.pop(name) for name in set(names) if name in os.environ}
-    try:
-        yield
-    finally:
-        os.environ.update(previous)
-
-
-def deploy_observation(ctx: Context, sha: str) -> dict | None:
-    """The registered deploy adapter's observation for `sha`, or None when none is registered."""
-    name = registered_deploy_adapter(ctx.deploy)
-    if name is None:
-        return None
-    operation = release_adapter.watch_operation(release_adapter.DESCRIPTORS[name])
-    request = {"kind": "effect", "operation": operation, "parameters": {
-        "target": {"kind": "github_repository", "repository": ctx.slug, "branch": ctx.default_branch},
-        "candidate": {"commit": sha}, "config": ctx.deploy["config"]}}
-    unset = ctx.tracker.get("credential_env", {}).get("unset_before_invocation", [])
-    with scrubbed_environ((*TOKENS, *unset)):
-        return release_adapter.REGISTRY[name].inspect(request)
-
-
-def _observed_revision(observation: object) -> str | None:
-    """The revision the deploy watch saw running (7 to 40 hex characters), or None when it saw none."""
-    subject = observation.get("observed_subject") if isinstance(observation, dict) else None
-    revision = subject.get("commit") if isinstance(subject, dict) else None
-    return revision.lower() if isinstance(revision, str) and REPORTED.fullmatch(revision) else None
-
-
-def _health_revision(ctx: Context) -> str | None:
-    """The revision the deploy health endpoint reports, or None when it reports none.
-
-    The adapter reads health only after it finds a run for the candidate among the branch's last
-    few runs, so a merge whose run has left that window, or never had one, yields no observed
-    revision although a descendant may be deployed. The same bounded, redirect-free health read
-    answers that case from the watch's own config."""
-    config = ctx.deploy.get("config")
-    if registered_deploy_adapter(ctx.deploy) != "github-actions-health" or not isinstance(config, dict):
-        return None
-    url, field = config.get("health_url"), config.get("health_commit_field")
-    if not isinstance(url, str) or not isinstance(field, str):
-        return None
-    reading = actions_health_adapter._health(
-        url, field, time.monotonic() + actions_health_adapter.COLLECTION_BUDGET_SECONDS)
-    commit = reading.get("commit") if reading.get("status") == "ok" else None
-    return commit.lower() if isinstance(commit, str) and REPORTED.fullmatch(commit) else None
-
-
 def released_includes(ctx: Context, sha: str) -> Reading:
-    """Whether what is released contains `sha`.
+    """Whether what is released contains `sha`: the forge's latest release.
 
-    With a bound deploy watch the adapter answers for exactly `sha` (`satisfied` only when `sha`
-    itself is the deployed revision), so a later commit deployed on top of it reads as not
-    satisfied; containment is therefore checked against the revision the watch observed."""
-    if registered_deploy_adapter(ctx.deploy) is not None:
-        observation = deploy_observation(ctx, sha)
-        if isinstance(observation, dict) and observation.get("outcome") == "satisfied":
-            return Reading("due", {})
-        observed = _observed_revision(observation)
-        if observed is None and isinstance(observation, dict) and observation.get("outcome") == "absent":
-            observed = _health_revision(ctx)
-        if observed is None:
-            return Reading("not_released", {})
-        facts = {"rev": observed}
-        found = includes(ctx, sha, observed)
-        if found is None:
-            return Reading("compare_unknown", facts)
-        return Reading("due" if found else "not_released", facts)
-    if ctx.deploy.get("command") is not None:
-        return Reading("deploy_watch_unread", {})
+    The latest release tag must contain `sha` and sit on the default branch. A release a deploy
+    watch observed is the release core's activation-unit observation (#555, #582), not read here."""
     latest = forge_markers.api_get(f"repos/{ctx.slug}/releases/latest", allow=(404,))
     tag = latest.get("tag_name") if isinstance(latest, dict) else None
     if not isinstance(tag, str) or not tag:

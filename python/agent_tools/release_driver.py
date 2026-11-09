@@ -75,7 +75,6 @@ class Project:
     common_dir: Path
     integration_branch: str
     default_branch: str
-    deploy_adapter: str
     contract: Mapping[str, Any]
 
 
@@ -194,11 +193,6 @@ class Driver:
                 f"{project.integration_branch} differs from {project.default_branch}, and the "
                 "profile declares no materialize action to merge it",
                 "release.profile.merge_unsupported")
-        if project.deploy_adapter != "none":
-            return Refusal("deploy_watch_unowned",
-                           f"the deploy adapter {project.deploy_adapter!r} is not watched by "
-                           "the driver, so it cannot release this project",
-                           "release.profile.activation_unbound")
         if any(unit["posture"] == "restorable"
                for unit in compiled["recovery_declaration"]["units"]):
             return Refusal("anchors_unsupported", "the profile declares a restorable unit, "
@@ -511,8 +505,8 @@ class _Router:
     action's node for `inspect` and `invoke`, the collector (an alias) for `observe`. It adds
     no seam: fixture adapters enter only through the driver's `registry` argument. Every
     adapter call runs with the tracker's `credential_env.unset_before_invocation` names removed
-    from this process's environment, as `release deploy inspect` removes them, and restored
-    afterwards: the watch's `gh` child inherits its environment (issue 555).
+    from this process's environment, and restored afterwards: the watch's `gh` child inherits
+    its environment (issue 555).
     """
 
     def __init__(self, compiled: Mapping[str, Any], registry: Mapping[str, Any],

@@ -208,26 +208,16 @@ LEGACY_MIGRATION_INPUTS = {
     }),
     "tests/fixtures/retained-review-evidence/issue-121.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "tests/fixtures/retained-review-evidence/task7-estimate.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
-    "python/agent_tools/adopt_inspection.py": frozenset({
-        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
-    }),
+    "python/agent_tools/adopt_inspection.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "home/common/agent-skills/tests/test_adopt_apply.py": frozenset({
         ".claude/skills.config.json", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
     }),
     "home/common/agent-skills/tests/test_adopt_project.py": frozenset({
-        ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
+        ".claude/skills.config.json", "specDir",  # policy-gate-pattern
         "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
     }),
     "home/common/agent-skills/tests/test_adopt_project_boundaries.py": frozenset({
         ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
-    }),
-    # The release bridge (#124) reads the retired deploy member of the legacy config.
-    "python/agent_tools/release_bridge.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
-    "tests/test_release_bridge.py": frozenset({
-        ".claude/skills.config.json", "maxParallel",  # policy-gate-pattern
-    }),
-    "tests/fixtures/legacy-skills-config-1722a65d.json": frozenset({
-        "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
     }),
     # Platform 1.1.0 (https://github.com/fagenorn/nix-config/issues/580) deprecates the
     # legacy store, so the manifest's deprecation entry, its documentation and the
@@ -748,7 +738,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
         for name, text in (("research", self.research),):
             with self.subTest(skill=name):
-                self.assertIn("~/.agents/bin/agent-evidence", text)
+                # A second resolution route is a ladder (issue 579): the bare name is the contract.
+                self.assertIn("`agent-evidence research <artifact.json>`", text)
+                self.assertNotIn("~/.agents/bin/agent-evidence", text)
         # The packaged detail producer and external workspace command are both
         # published by bare name; review-package has one command-table owner.
         command_table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
