@@ -39,7 +39,7 @@
         },
         {
           "name": "no occurrence of the old flag remains",
-          "shell": "[ -z \"$(git -C \"$WT\" grep -n -e '--all' -- tinytask/cli.py tests/test_cli.py README.md)\" ] || fail \"the old flag is still named\""
+          "shell": "{ [ -z \"$(git -C \"$WT\" grep -n -e '--all' -- tinytask/cli.py README.md)\" ] && git -C \"$WT\" grep -q -e '--include-done' -- tests/test_cli.py; } || fail \"the old flag is still named in the implementation or the README, or tests/test_cli.py never exercises --include-done\""
         },
         {
           "name": "no spec or plan was written",

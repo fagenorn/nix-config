@@ -16,4 +16,4 @@ and bare `list` is untouched. No deprecation alias — this tool has one user.
 1. `tinytask list --include-done` behaves exactly as `tinytask list --all` does today.
 2. `tinytask list --all` is a usage error (unrecognised argument).
 3. `tinytask list --help` shows `--include-done` and does not mention `--all`.
-4. No occurrence of the old flag name remains in the repo.
+4. No occurrence of the old flag name remains in `tinytask/` or the README. A test that asserts the old flag is rejected (criterion 2) may name it, and `tests/test_cli.py` exercises `--include-done`.
