@@ -1,11 +1,11 @@
 # Stage-4 cutover checklist — issue 130
 
 Purpose: pre-activation predicates for the issue 130 strict cutover with fresh read-only evidence, red-row dispositions and the owner's gate; preparation only, per spec D1 and the owner's 2026-11-08 overnight decision.
-Run: rel_01a1a1d8-7220-72a2-841e-df2806f78396; refreshed by the issue 130 overnight preparation, 2026-11-09. The issue 130 activation preparation re-read rows on the morning of 2026-11-09: every anis-desktop row, eleven-m5 C4, C6, C7 and C11, and mbp C6 and C7. It also took mbp C4 and C11 from #724's close. After #733 switched anis-desktop to the bridge, moved its nodocom root onto dev and ran gate step 1 there, every anis-desktop row was re-read (2026-11-09T08:39:12Z to 08:39:23Z). Gate step 1 then ran on the mbp JarBird root, and its C6 and C7 rows were re-read (2026-11-09T08:44:49Z to 08:48:25Z). After the owner waived C3 on evidence, the activation pass re-read C1, C2, C4, C6, C7, C11 and C12 on all three hosts (2026-11-09T16:26:38Z to 16:30:52Z).
+Run: rel_01a1a1d8-7220-72a2-841e-df2806f78396; refreshed by the issue 130 overnight preparation, 2026-11-09. The issue 130 activation preparation re-read rows on the morning of 2026-11-09: every anis-desktop row, eleven-m5 C4, C6, C7 and C11, and mbp C6 and C7. It also took mbp C4 and C11 from #724's close. After #733 switched anis-desktop to the bridge, moved its nodocom root onto dev and ran gate step 1 there, every anis-desktop row was re-read (2026-11-09T08:39:12Z to 08:39:23Z). Gate step 1 then ran on the mbp JarBird root, and its C6 and C7 rows were re-read (2026-11-09T08:44:49Z to 08:48:25Z). After the owner waived C3 on evidence, the activation pass re-read C1, C2, C4, C6, C7, C11 and C12 on all three hosts (2026-11-09T16:26:38Z to 16:30:52Z). Gate step 2 then re-read every pre-activation item on all three hosts (2026-11-09T16:48:15Z to 17:06:25Z) from origin/main a4739b556664, exported to `/tmp/c130-main-a4739b55` on each host (scratch on mbp); the tables below hold those readings, and C1.a is the activation pass's.
 Revisions: overnight rows read origin/main 6e2f9dde45cb76f363813801fb3b3b42b430545d. The morning rows read origin/main 76a3470a347dbbbb3332e22e7d49b877574adb0c on eleven-m5 and anis-desktop; anis-desktop ran that revision's checks exported to /tmp/c130-main-76a3470a. mbp C7 read e1d4db56718b9c4cdc330888de41fbed6d8a4c10, which is PR 723's merge and is now origin/main. The #733 re-read of anis-desktop ran from its K_H checkout, fast-forwarded to e1d4db56718b, and from the system-79 helpers built from that revision. The freeze is lifted. The activation pass read origin/main 474ae2ddd02c507b51e099ab6c9dd9e2798ce080 (PR 755's merge): each host ran that revision's `python`, checks and manifest exported to `/tmp/c130-main-474ae2dd` (on mbp, a scratch export), and C1.a ran in this branch's worktree with that revision merged in. The candidate, origin/cutover-130-candidate, is 06fb38b718e050742e607b9b0feefd873e90c404 (H2): 953f9b4b2925 merged origin/main e1d4db56 as 6543ed0b37c9, then b699d0afcbcf as 06fb38b718e0, both force-free.
 Hosts: eleven-m5, mbp, anis-desktop
-Evidence window: 2026-11-09T01:30:03Z to 2026-11-09T01:43:58Z (overnight); 2026-11-09T05:28:06Z to 2026-11-09T05:28:13Z (mbp C4 and C11, #724); 2026-11-09T08:21:54Z to 2026-11-09T08:30:42Z (this morning's pass); 2026-11-09T08:39:12Z to 2026-11-09T08:39:23Z (anis-desktop after #733); 2026-11-09T08:44:49Z to 2026-11-09T08:48:25Z (mbp JarBird gate step 1); 2026-11-09T16:26:38Z to 2026-11-09T16:30:52Z (activation pass)
-Activation readiness: activation not permitted. Of the 11 pre-activation items, 1 is red (C7, one unmapped anis-desktop nodocom worktree of a live session), 0 are human-pending and 10 are green. C3 is green by the owner's waiver. C5, C9 and C10 were not re-read on the activation pass. C8 is retired and not counted.
+Evidence window: 2026-11-09T01:30:03Z to 2026-11-09T01:43:58Z (overnight); 2026-11-09T05:28:06Z to 2026-11-09T05:28:13Z (mbp C4 and C11, #724); 2026-11-09T08:21:54Z to 2026-11-09T08:30:42Z (this morning's pass); 2026-11-09T08:39:12Z to 2026-11-09T08:39:23Z (anis-desktop after #733); 2026-11-09T08:44:49Z to 2026-11-09T08:48:25Z (mbp JarBird gate step 1); 2026-11-09T16:26:38Z to 2026-11-09T16:30:52Z (activation pass); 2026-11-09T16:48:15Z to 2026-11-09T17:06:25Z (gate step 2)
+Activation readiness: every pre-activation item is green at gate step 2 (11 of 11; C3 by the owner's waiver; C8 retired and not counted). `N_H`: eleven-m5 35, mbp 325, anis-desktop 79. Activation proceeds under the gate: step 4 on the agent hosts, then the owner's mbp switch.
 
 Owner decisions applied (issue 130, 2026-11-08T13:20:31Z): C8 (the Codex ship handoff) is no longer a cutover predicate. C3's live trials are Claude-only. AC4 and AC9 (P3) need a Claude-driven ship on the strict path only. Owner decision (issue 130, 2026-11-09, https://github.com/fagenorn/nix-config/issues/130#issuecomment-6745240816): C3 is waived on evidence; the recorded Claude-only trial evidence replaces an approved bundle for this cutover.
 
@@ -19,7 +19,7 @@ Owner decisions applied (issue 130, 2026-11-08T13:20:31Z): C8 (the Codex ship ha
 | C4 | Candidate and retained-bridge fleet preflight are green for every registered project | #71 | pre | green | — |
 | C5 | No legacy release is in flight | #90 | pre | green | — |
 | C6 | No legacy attempt is left without a resumable strict-path mapping | issue; refresh | pre | green | — |
-| C7 | No retained legacy worktree is left without a resumable mapping | refresh | pre | red | anis-desktop nodocom `issue-2632-cloak-156`, a live session's worktree: re-read at gate step 2 |
+| C7 | No retained legacy worktree is left without a resumable mapping | refresh | pre | green | — |
 | C8 | The Codex ship handoff is in place | issue; #119 | — | retired | owner decision 2026-11-08: not a cutover predicate |
 | C9 | The Claude path answers as its declared host capabilities say, including bounded admission; Codex answers its declared `unsupported` | refresh | pre | green | — |
 | C10 | `doctor` is clean on every adopted host | issue | pre | green | — |
@@ -101,10 +101,10 @@ C1.d cat .agents/state/fleet/registry.json
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| mbp | flake.nix | 0425bc65090f (this branch, origin/main 474ae2ddd02c merged) | C1.a; C1.b | 2026-11-09T16:30:09Z | 0; 0 | darwin ["eleven-m5","mbp"]; nixos ["anis-desktop"] | green |
-| eleven-m5 | host | system-35 | C1.c; C1.d | 2026-11-09T16:28:04Z | 0; 0 | hostname eleven-m5; 2 projects: fagenorn/nix-config, jarbird; registry sha256 ea8e1d478c53 | green |
-| mbp | host | system-325 | C1.c; C1.d | 2026-11-09T16:26:38Z | 0; 0 | hostname mbp; 5 projects: arcwave, fagenorn/argus, fagenorn/nix-config, jarbird, nodocom; registry sha256 819bbd848730 | green |
-| anis-desktop | host | system-79 | C1.c; C1.d | 2026-11-09T16:28:14Z | 0; 0 | hostname anis-desktop (inside `wsl -d NixOS`); 1 project: nodocom; registry sha256 18ae16af683d | green |
+| mbp | flake.nix | 0425bc65090f (origin/main 474ae2ddd02c merged) | C1.a; C1.b | 2026-11-09T16:30:09Z | 0; 0 | darwin ["eleven-m5","mbp"]; nixos ["anis-desktop"] | green |
+| mbp | host | system-325 | C1.c; C1.d | 2026-11-09T16:48:15Z | 0; 0 | hostname mbp; 5 projects: arcwave, fagenorn/argus, fagenorn/nix-config, jarbird, nodocom; registry sha256 819bbd848730 | green |
+| eleven-m5 | host | system-35 | C1.c; C1.d | 2026-11-09T16:49:32Z | 0; 0 | hostname eleven-m5; 2 projects: fagenorn/nix-config, jarbird; registry sha256 ea8e1d478c53 | green |
+| anis-desktop | host | system-79 | C1.c; C1.d | 2026-11-09T16:49:46Z | 0; 0 | hostname anis-desktop; 1 projects: nodocom; registry sha256 18ae16af683d | green |
 
 Earlier readings (2026-11-03 to 2026-11-08) and their re-read notes are in this file's history at origin/main 6e2f9dde45cb.
 
@@ -122,17 +122,17 @@ C2.c adopt-project verify --repo-root R
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| mbp | host | system-325 | C2.a | 2026-11-09T16:26:38Z | 0 | platform 1.2.0, project schemas [1, 2]; 5/5 fleet rows compatible, deprecated_uses and removed_uses [] on each | green |
-| eleven-m5 | host | system-35 | C2.a | 2026-11-09T16:28:04Z | 0 | platform 1.2.0, project schemas [1, 2]; 2/2 fleet rows compatible, deprecated_uses and removed_uses [] on each | green |
-| anis-desktop | host | system-79 | C2.a | 2026-11-09T16:28:14Z | 0 | platform 1.2.0, project schemas [1, 2]; 1/1 fleet rows compatible (nodocom), deprecated_uses and removed_uses [] | green |
-| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C2.b; C2.c | 2026-11-09T16:26:39Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
-| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C2.b; C2.c | 2026-11-09T16:26:44Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
-| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C2.b; C2.c | 2026-11-09T16:26:45Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
-| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C2.b; C2.c | 2026-11-09T16:26:46Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
-| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C2.b; C2.c | 2026-11-09T16:26:49Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
-| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C2.b; C2.c | 2026-11-09T16:28:04Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
-| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C2.b; C2.c | 2026-11-09T16:28:04Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
-| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C2.b; C2.c | 2026-11-09T16:28:14Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
+| mbp | host | system-325 | C2.a | 2026-11-09T16:48:15Z | 0 | platform 1.2.0, project schemas [1, 2]; 5/5 fleet rows compatible, deprecated_uses and removed_uses [] on each | green |
+| eleven-m5 | host | system-35 | C2.a | 2026-11-09T16:49:32Z | 0 | platform 1.2.0, project schemas [1, 2]; 2/2 fleet rows compatible, deprecated_uses and removed_uses [] on each | green |
+| anis-desktop | host | system-79 | C2.a | 2026-11-09T16:49:46Z | 0 | platform 1.2.0, project schemas [1, 2]; 1/1 fleet rows compatible, deprecated_uses and removed_uses [] on each | green |
+| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C2.b; C2.c | 2026-11-09T16:48:18Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
+| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C2.b; C2.c | 2026-11-09T16:48:21Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
+| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C2.b; C2.c | 2026-11-09T16:48:24Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
+| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C2.b; C2.c | 2026-11-09T16:48:30Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
+| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C2.b; C2.c | 2026-11-09T16:48:42Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
+| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C2.b; C2.c | 2026-11-09T16:49:33Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
+| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C2.b; C2.c | 2026-11-09T16:49:34Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
+| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C2.b; C2.c | 2026-11-09T16:49:46Z | 0; 0 | fleet passed, 13/13; verify adopted, blockers 0 | green |
 
 Registration is the C2.a fleet row. `verify` reports `registered` false unless `--register` was given, and only the eleven-m5 nix-config registration above used it.
 
@@ -180,12 +180,12 @@ C4.a passes only when `origin/main`'s manifest has major 1 and declares a deprec
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| mbp | home/common/agent-skills/platform-manifest.json against 06fb38b718e0 | 474ae2ddd02c | C4.a | 2026-11-09T16:27:04Z | 0 | main_version 1.2.0; candidate_version 2.0.0; 5 removals, 0 undeclared; verdict green | green |
-| mbp | fleet against 06fb38b718e0 | 474ae2ddd02c | C4.b | 2026-11-09T16:27:08Z | 0 | verdict green; bridge 1.2.0, candidate 2.0.0; 5/5 rows bridge_compatible and candidate_compatible, removed_uses [] | green |
-| eleven-m5 | home/common/agent-skills/platform-manifest.json against 06fb38b718e0 | 474ae2ddd02c | C4.a | 2026-11-09T16:29:27Z | 0 | main_version 1.2.0; candidate_version 2.0.0; 5 removals, 0 undeclared; verdict green (over `ssh -A`; at 16:28:06Z a non-forwarding ssh exited 2: no identity for `git ls-remote`) | green |
-| eleven-m5 | fleet against 06fb38b718e0 | 474ae2ddd02c | C4.b | 2026-11-09T16:29:33Z | 0 | verdict green; bridge 1.2.0, candidate 2.0.0; 2/2 rows (fagenorn/nix-config, jarbird) bridge_compatible and candidate_compatible, removed_uses [] | green |
-| anis-desktop | home/common/agent-skills/platform-manifest.json against 06fb38b718e0 | 474ae2ddd02c | C4.a | 2026-11-09T16:28:25Z | 0 | main_version 1.2.0; candidate_version 2.0.0; 5 removals, 0 undeclared; verdict green | green |
-| anis-desktop | fleet against 06fb38b718e0 | 474ae2ddd02c | C4.b | 2026-11-09T16:28:29Z | 0 | verdict green; bridge 1.2.0, candidate 2.0.0; 1/1 rows (nodocom) bridge_compatible and candidate_compatible, removed_uses [] | green |
+| mbp | home/common/agent-skills/platform-manifest.json against 06fb38b718e0 | a4739b556664 | C4.a | 2026-11-09T16:49:22Z | 0 | main_version 1.2.0; candidate_version 2.0.0; 5 removals, 0 undeclared; verdict green | green |
+| mbp | fleet against 06fb38b718e0 | a4739b556664 | C4.b | 2026-11-09T16:49:26Z | 0 | verdict green; bridge 1.2.0, candidate 2.0.0; 5/5 rows (arcwave, fagenorn/argus, fagenorn/nix-config, jarbird, nodocom) bridge_compatible and candidate_compatible, removed_uses [] | green |
+| eleven-m5 | home/common/agent-skills/platform-manifest.json against 06fb38b718e0 | a4739b556664 | C4.a | 2026-11-09T16:49:35Z | 0 | main_version 1.2.0; candidate_version 2.0.0; 5 removals, 0 undeclared; verdict green | green |
+| eleven-m5 | fleet against 06fb38b718e0 | a4739b556664 | C4.b | 2026-11-09T16:49:40Z | 0 | verdict green; bridge 1.2.0, candidate 2.0.0; 2/2 rows (fagenorn/nix-config, jarbird) bridge_compatible and candidate_compatible, removed_uses [] | green |
+| anis-desktop | home/common/agent-skills/platform-manifest.json against 06fb38b718e0 | a4739b556664 | C4.a | 2026-11-09T16:49:56Z | 0 | main_version 1.2.0; candidate_version 2.0.0; 5 removals, 0 undeclared; verdict green | green |
+| anis-desktop | fleet against 06fb38b718e0 | a4739b556664 | C4.b | 2026-11-09T16:50:01Z | 0 | verdict green; bridge 1.2.0, candidate 2.0.0; 1/1 rows (nodocom) bridge_compatible and candidate_compatible, removed_uses [] | green |
 
 #724 landed each fleet project's `bindings-deploy.retire` schema-2 migration, and #730 carried the eleven-m5 JarBird row through the JarBird v0.19.0 release. C4.b is green on mbp and on eleven-m5. On anis-desktop it read red at 08:27:29Z (exit 75, not_yet: bridge 1.1.0, nodocom on Nodo's 2026-11-03 main candidate_incompatible). #733 switched the host to the 1.2.0 bridge and moved the nodocom root onto dev, and it now reads green.
 
@@ -204,14 +204,14 @@ C5.b release transaction status --repo-root R
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| anis-desktop | /home/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C5.a | 2026-11-09T08:39:21Z | 2 | absent (after #733) | green |
-| mbp | /Users/anis/Projects/arcwave | 2adb089868c5 dev 0 dirty | C5.a | 2026-11-09T01:30:53Z | 2 | absent | green |
-| mbp | /Users/anis/Projects/argus | 21338cae51ea main 1 dirty | C5.a | 2026-11-09T01:30:54Z | 2 | absent | green |
-| mbp | /Users/anis/tmp/nix-config | 6e2f9dde45cb main 0 dirty | C5.a | 2026-11-09T01:30:56Z | 2 | absent | green |
-| mbp | /Users/anis/Projects/jarbird | 75f28c1d98f3 dev 1 dirty | C5.a | 2026-11-09T01:31:00Z | 2 | absent | green |
-| mbp | /Users/anis/Projects/nodocom | 6eb54814447b dev 0 dirty | C5.a | 2026-11-09T01:31:02Z | 2 | absent | green |
-| eleven-m5 | /Users/anis/Projects/nix-config | 6e2f9dde45cb main 0 dirty | C5.a | 2026-11-09T01:31:31Z | 2 | absent | green |
-| eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C5.a | 2026-11-09T01:31:32Z | 2 | absent | green |
+| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C5.a | 2026-11-09T16:48:20Z | 2 | absent | green |
+| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C5.a | 2026-11-09T16:48:23Z | 2 | absent | green |
+| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C5.a | 2026-11-09T16:48:29Z | 2 | absent | green |
+| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C5.a | 2026-11-09T16:48:38Z | 2 | absent | green |
+| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C5.a | 2026-11-09T16:48:47Z | 2 | absent | green |
+| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C5.a | 2026-11-09T16:49:33Z | 2 | absent | green |
+| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C5.a | 2026-11-09T16:49:34Z | 2 | absent | green |
+| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C5.a | 2026-11-09T16:49:47Z | 2 | absent | green |
 
 No root holds a legacy `ship-release/state.json`, so C5.b did not run.
 
@@ -229,14 +229,14 @@ C6.a workflow-state migrate --repo-root R
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C6.a | 2026-11-09T16:28:15Z | 0 | current 15, migrate 0, migrated 0, refused 0 | green |
-| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C6.a | 2026-11-09T16:26:43Z | 0 | current 11, migrate 0, migrated 0, refused 0 | green |
-| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C6.a | 2026-11-09T16:26:44Z | 0 | current 8, migrate 0, migrated 0, refused 0 | green |
-| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C6.a | 2026-11-09T16:26:45Z | 0 | current 123, migrate 0, migrated 0, refused 0 | green |
-| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C6.a | 2026-11-09T16:26:48Z | 0 | current 53, migrate 0, migrated 0, refused 0 | green |
-| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C6.a | 2026-11-09T16:26:50Z | 0 | current 154, migrate 0, migrated 0, refused 0 | green |
-| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C6.a | 2026-11-09T16:28:04Z | 0 | current 0, migrate 0, migrated 0, refused 0 | green |
-| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C6.a | 2026-11-09T16:28:05Z | 0 | current 5, migrate 0, migrated 0, refused 0 | green |
+| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C6.a | 2026-11-09T16:48:20Z | 0 | current 11, migrate 0, migrated 0, refused 0 | green |
+| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C6.a | 2026-11-09T16:48:23Z | 0 | current 8, migrate 0, migrated 0, refused 0 | green |
+| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C6.a | 2026-11-09T16:48:26Z | 0 | current 123, migrate 0, migrated 0, refused 0 | green |
+| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C6.a | 2026-11-09T16:48:36Z | 0 | current 53, migrate 0, migrated 0, refused 0 | green |
+| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C6.a | 2026-11-09T16:48:44Z | 0 | current 154, migrate 0, migrated 0, refused 0 | green |
+| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C6.a | 2026-11-09T16:49:33Z | 0 | current 0, migrate 0, migrated 0, refused 0 | green |
+| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C6.a | 2026-11-09T16:49:34Z | 0 | current 5, migrate 0, migrated 0, refused 0 | green |
+| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C6.a | 2026-11-09T16:49:47Z | 0 | current 15, migrate 0, migrated 0, refused 0 | green |
 
 Every row in the table is a `workflow-state migrate` dry run. No root refuses a ledger. On mbp, gate step 1 ran on JarBird at 2026-11-09T08:48:11Z, with the recoverable copy taken first: its 15 schema-10 ledgers (`migrate 15` at the 08:29:44Z read) are now schema 11, and its record is below. On eleven-m5, gate step 1 ran on JarBird at 2026-11-09T08:23:13Z under #732, with the recoverable copy taken first; its record is below. On anis-desktop, #733 first put the host on the bridge generation (system-79, platform 1.2.0). Gate step 1 then ran on nodocom at 2026-11-09T08:38:39Z, with the recoverable copy taken first; its record is below. Nothing held by another session was touched.
 
@@ -421,14 +421,14 @@ C7.r (issue 585, with the forge class of #710) states this item's rule in one re
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C7.r | 2026-11-09T16:30:52Z | 1 | worktrees 11: current 1, forge 9, migrate 0, refused-only 0, unmapped 1: `.worktrees/issue-2632-cloak-156` (branch issue-2632-cloak-156 at 1993673e4b50, clean, no PR); also red at 16:28:15Z | red |
-| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C7.r | 2026-11-09T16:29:46Z | 0 | worktrees 10: current 10, unmapped 0 | green |
-| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C7.r | 2026-11-09T16:29:46Z | 0 | worktrees 8: current 8, unmapped 0 | green |
-| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C7.r | 2026-11-09T16:29:46Z | 0 | worktrees 11: current 6, forge 5 (`cutover-130-candidate` declared; open PRs of issues 130, 688, 734, 735), unmapped 0; red at 16:26:51Z on the closed #750's worktree, removed between the reads | green |
-| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C7.r | 2026-11-09T16:29:46Z | 0 | worktrees 19: current 15, forge 4 (other sessions' claims), unmapped 0 | green |
-| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C7.r | 2026-11-09T16:29:46Z | 0 | worktrees 5: current 5, unmapped 0 | green |
-| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C7.r | 2026-11-09T16:28:05Z | 0 | worktrees 0 | green |
-| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C7.r | 2026-11-09T16:28:05Z | 0 | worktrees 8: current 8, unmapped 0 | green |
+| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C7.r | 2026-11-09T16:48:48Z | 0 | worktrees 10: current 10, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
+| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C7.r | 2026-11-09T16:48:48Z | 0 | worktrees 8: current 8, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
+| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C7.r | 2026-11-09T16:48:48Z | 0 | worktrees 10: current 6, forge 4, migrate 0, refused-only 0, unmapped 0 | green |
+| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C7.r | 2026-11-09T16:48:48Z | 0 | worktrees 19: current 15, forge 4, migrate 0, refused-only 0, unmapped 0 | green |
+| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C7.r | 2026-11-09T16:48:48Z | 0 | worktrees 5: current 5, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
+| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C7.r | 2026-11-09T16:49:35Z | 0 | worktrees 0: current 0, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
+| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C7.r | 2026-11-09T16:49:35Z | 0 | worktrees 8: current 8, forge 0, migrate 0, refused-only 0, unmapped 0 | green |
+| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C7.r | 2026-11-09T17:06:25Z | 0 | worktrees 10: current 1, forge 9, migrate 0, refused-only 0, unmapped 0; red at 16:49:48Z to 17:04:14Z on the closed #2007's worktree until its batch's close-out removed it | green |
 
 Activation pass (2026-11-09, from origin/main 474ae2ddd02c, exported): on mbp the first read (16:26:51Z) was red on one unmapped worktree, `/Users/anis/tmp/nix-config/.worktrees/worktree-issue-750-deliver-direct-eval-all-rejection-test`. #750 was closed, the worktree was clean and detached at b699d0afcbcf, which is in origin/main (PR 751), and nothing held it open, so it was removed with `git worktree remove` (not forced); the re-read at 16:29:46Z is green. On anis-desktop, `issue-2632-cloak-156` is a side worktree of the live session that claims elevenyellow/nodocom#2632 (holder anis-desktop/session-4e949033), committed at 2026-11-09T14:24:19Z. It is not this run's to remove, so the row stays red until that session maps it (a PR) or removes it; gate step 2 re-reads it. Morning pass (2026-11-09): mbp read from origin/main e1d4db56718b and eleven-m5 from 76a3470a347d. anis-desktop read from 76a3470a's checks, exported. On mbp, #700 settled the issue 487 and issue 499 JarBird worktrees: they are gone, and every root is green, as at #700's 05:40:33Z re-read. After mbp JarBird's gate step 1, its C7.r re-read at 08:48:25Z from e1d4db56718b is green: one more worktree than at 08:29:31Z, the issue 553 worktree, mapped by another session's claim, and none was removed. On eleven-m5, gate step 1 (#732) made the eight JarBird worktrees `current`, and none was removed. On anis-desktop, the one nodocom worktree read `migrate` at 08:27:34Z. After gate step 1 (#733), it reads `current` from K_H at e1d4db56718b, and none was removed. fagenorn/nix-config is still not registered on anis-desktop, so its K_H worktrees (`worktree-issue-468-orchestrated` and `/tmp/launch-scope-td48wcrk/trial`) are outside this reading. #733 closed with that registration decision left open.
 
@@ -436,7 +436,7 @@ The overnight note follows. Exit is the check's exit over all of that host's roo
 
 Earlier readings (2026-11-03 to 2026-11-08) and their re-read notes are in this file's history at origin/main 6e2f9dde45cb.
 
-Item verdict: **red**
+Item verdict: **green**
 
 ### C8 — Codex ship handoff installed (retired)
 
@@ -457,9 +457,9 @@ C9.b workflow-state host-route --route codex
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| mbp | host | system-324 | C9.a; C9.b | 2026-11-09T01:30:47Z | 0; 0 | claude-code supported, agent_slots 7; codex unsupported, declared_unsupported, alternative /from-issue <issue> --auto; admission passed on 5/5 roots | green |
-| eleven-m5 | host | system-35 | C9.a; C9.b | 2026-11-09T01:31:29Z | 0; 0 | claude-code supported, agent_slots 7; codex unsupported, declared_unsupported, alternative /from-issue <issue> --auto; admission passed on 2/2 roots | green |
-| anis-desktop | host | system-79 | C9.a; C9.b | 2026-11-09T08:39:21Z | 0; 0 | claude-code supported, agent_slots 7; codex unsupported, declared_unsupported, alternative /from-issue <issue> --auto; admission passed on 1/1 roots | green |
+| mbp | host | system-325 | C9.a; C9.b | 2026-11-09T16:48:16Z | 0; 0 | claude-code supported, agent_slots 7; codex unsupported, declared_unsupported, alternative /from-issue <issue> --auto; admission passed on 5/5 roots | green |
+| eleven-m5 | host | system-35 | C9.a; C9.b | 2026-11-09T16:49:33Z | 0; 0 | claude-code supported, agent_slots 7; codex unsupported, declared_unsupported, alternative /from-issue <issue> --auto; admission passed on 2/2 roots | green |
+| anis-desktop | host | system-79 | C9.a; C9.b | 2026-11-09T16:49:46Z | 0; 0 | claude-code supported, agent_slots 7; codex unsupported, declared_unsupported, alternative /from-issue <issue> --auto; admission passed on 1/1 roots | green |
 
 Codex `unsupported` is the declared answer, not a red (D10). Admission is each C10 row's `host.admission.declaration`.
 
@@ -477,14 +477,14 @@ C10.a conformance run --purpose doctor --repo-root R
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| mbp | /Users/anis/Projects/arcwave | 2adb089868c5 dev 0 dirty | C10.a | 2026-11-09T01:30:52Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
-| mbp | /Users/anis/Projects/argus | 21338cae51ea main 1 dirty | C10.a | 2026-11-09T01:30:54Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
-| mbp | /Users/anis/tmp/nix-config | 6e2f9dde45cb main 0 dirty | C10.a | 2026-11-09T01:30:55Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
-| mbp | /Users/anis/Projects/jarbird | 75f28c1d98f3 dev 1 dirty | C10.a | 2026-11-09T01:30:58Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
-| mbp | /Users/anis/Projects/nodocom | 6eb54814447b dev 0 dirty | C10.a | 2026-11-09T01:31:01Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
-| eleven-m5 | /Users/anis/Projects/nix-config | 6e2f9dde45cb main 0 dirty | C10.a | 2026-11-09T01:31:30Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
-| eleven-m5 | /Users/anis/Projects/jarbird | 81c45be0afa7 main 0 dirty | C10.a | 2026-11-09T01:31:31Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
-| anis-desktop | /home/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C10.a | 2026-11-09T08:39:21Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed (after #733; at 08:26:08Z on main 49147a1840b3 it failed 18/19 on repository.ignore.runtime_sentinel) | green |
+| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C10.a | 2026-11-09T16:48:20Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
+| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C10.a | 2026-11-09T16:48:23Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
+| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C10.a | 2026-11-09T16:48:29Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
+| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C10.a | 2026-11-09T16:48:38Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
+| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C10.a | 2026-11-09T16:48:47Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
+| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C10.a | 2026-11-09T16:49:33Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
+| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C10.a | 2026-11-09T16:49:34Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
+| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C10.a | 2026-11-09T16:49:47Z | 0 | doctor passed, 19/19; no warning checks; 0 suppressed or not_run; admission passed | green |
 
 Earlier readings (2026-11-03 to 2026-11-08) and their re-read notes are in this file's history at origin/main 6e2f9dde45cb.
 
@@ -503,17 +503,17 @@ C11.r (issue 582) states this item's per-root rule in one read-only command. Rea
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| mbp | host | system-325 | C11.a | 2026-11-09T16:26:39Z | 0 | platform 1.2.0; 5 deprecations (legacy-skills-config, legacy-skills-config-writer, bindings-deploy, release-deploy-inspect, release-bridge-planning) | green |
-| eleven-m5 | host | system-35 | C11.a | 2026-11-09T16:28:04Z | 0 | platform 1.2.0; the same 5 deprecations | green |
-| anis-desktop | host | system-79 | C11.a | 2026-11-09T16:28:14Z | 0 | platform 1.2.0; the same 5 deprecations | green |
-| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C11.r | 2026-11-09T16:27:03Z | 0 | a, b, c (adapter none), d green; one run over all 5 roots, met true | green |
-| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C11.r | 2026-11-09T16:27:03Z | 0 | a, b, c (adapter none), d green | green |
-| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C11.r | 2026-11-09T16:27:03Z | 0 | a, b, c (adapter none), d green | green |
-| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C11.r | 2026-11-09T16:27:03Z | 0 | a, b, c (adapter none), d green | green |
-| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C11.r | 2026-11-09T16:27:03Z | 0 | a, b, c (adapter none), d green | green |
-| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C11.r | 2026-11-09T16:28:05Z | 0 | a, b, c (adapter none), d green; met true over both roots | green |
-| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C11.r | 2026-11-09T16:28:05Z | 0 | a, b, c (adapter none), d green | green |
-| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C11.r | 2026-11-09T16:28:24Z | 0 | a, b, c (adapter none), d green; met true | green |
+| mbp | host | system-325 | C11.a | 2026-11-09T16:48:16Z | 0 | platform 1.2.0; 5 deprecations (legacy-skills-config, legacy-skills-config-writer, bindings-deploy, release-deploy-inspect, release-bridge-planning) | green |
+| eleven-m5 | host | system-35 | C11.a | 2026-11-09T16:49:33Z | 0 | platform 1.2.0; 5 deprecations (legacy-skills-config, legacy-skills-config-writer, bindings-deploy, release-deploy-inspect, release-bridge-planning) | green |
+| anis-desktop | host | system-79 | C11.a | 2026-11-09T16:49:46Z | 0 | platform 1.2.0; 5 deprecations (legacy-skills-config, legacy-skills-config-writer, bindings-deploy, release-deploy-inspect, release-bridge-planning) | green |
+| mbp | /Users/anis/Projects/arcwave | 60767b69f581 dev 0 dirty | C11.r | 2026-11-09T16:49:18Z | 0 | a, b, c (adapter none), d green; met true | green |
+| mbp | /Users/anis/Projects/argus | 65451b89de55 main 1 dirty | C11.r | 2026-11-09T16:49:18Z | 0 | a, b, c (adapter none), d green; met true | green |
+| mbp | /Users/anis/tmp/nix-config | e1d4db56718b main 0 dirty | C11.r | 2026-11-09T16:49:18Z | 0 | a, b, c (adapter none), d green; met true | green |
+| mbp | /Users/anis/Projects/jarbird | bb2a992290b3 dev 1 dirty | C11.r | 2026-11-09T16:49:18Z | 0 | a, b, c (adapter none), d green; met true | green |
+| mbp | /Users/anis/Projects/nodocom | 40abc7d326d0 dev 0 dirty | C11.r | 2026-11-09T16:49:18Z | 0 | a, b, c (adapter none), d green; met true | green |
+| eleven-m5 | /Users/anis/Projects/nix-config | 76a3470a347d main 0 dirty | C11.r | 2026-11-09T16:49:35Z | 0 | a, b, c (adapter none), d green; met true | green |
+| eleven-m5 | /Users/anis/Projects/jarbird | 72e0c6d99053 main 0 dirty | C11.r | 2026-11-09T16:49:35Z | 0 | a, b, c (adapter none), d green; met true | green |
+| anis-desktop | /home/anis/Projects/nodocom | 6f4f02777582 dev 0 dirty | C11.r | 2026-11-09T16:49:56Z | 0 | a, b, c (adapter none), d green; met true | green |
 
 The bridge minor shipped (#580), and the legacy skills config, the deploy adapters and the retired command have no users (#581, #582, #555). #724 and #730 cleared the deprecated use of project schema 1 on every mbp and eleven-m5 root. On anis-desktop, #733 switched the host to platform 1.2.0, which ships the bridge minor's notices, and moved the nodocom root onto Nodo's dev, which carries #582, #583 and the schema-2 migration. Every anis-desktop row now reads green.
 
@@ -534,9 +534,9 @@ C12.d readlink /run/current-system
 
 | Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
 |------|---------|----------|---------|-----|------|----------|---------|
-| eleven-m5 | host | system-35 | C12.a; C12.b; C12.c; C12.d | 2026-11-09T16:28:04Z | 0; 0; 0; 0 | N=35; store paths equal; 9p2z21bpjmyajmhbxx90p3f995r76r4q-darwin-system-25.11.ebec37a; configurationRevision 6e2f9dde45cb | green |
-| mbp | host | system-325 | C12.a; C12.b; C12.c; C12.d | 2026-11-09T16:26:38Z | 0; 0; 0; 0 | N=325; store paths equal; 1azs22xpikbb0sfz1nazll6gkj6yqjkc-darwin-system-25.11.ebec37a; configurationRevision 76a3470a347d | green |
-| anis-desktop | host | system-79 | C12.a; C12.b; C12.c; C12.d | 2026-11-09T16:28:14Z | 0; 0; 0; 0 | N=79; store paths equal; acblffazm911qvms3rxpwp4bwyghf4m5-nixos-system-nixos-25.11.20260630.b6018f8; configurationRevision e1d4db56718b; platform 1.2.0 | green |
+| mbp | host | system-325 | C12.a; C12.b; C12.c; C12.d | 2026-11-09T16:48:15Z | 0; 0; 0; 0 | N=325; store paths equal; 1azs22xpikbb0sfz1nazll6gkj6yqjkc-darwin-system-25.11.ebec37a | green |
+| eleven-m5 | host | system-35 | C12.a; C12.b; C12.c; C12.d | 2026-11-09T16:49:32Z | 0; 0; 0; 0 | N=35; store paths equal; 9p2z21bpjmyajmhbxx90p3f995r76r4q-darwin-system-25.11.ebec37a | green |
+| anis-desktop | host | system-79 | C12.a; C12.b; C12.c; C12.d | 2026-11-09T16:49:46Z | 0; 0; 0; 0 | N=79; store paths equal; acblffazm911qvms3rxpwp4bwyghf4m5-nixos-system-nixos-25.11.20260630.b6018f8 | green |
 
 The three hosts run different bridge builds. eleven-m5 is at 6e2f9dde45cb, mbp at 76a3470a347d (system-325, switched at 2026-11-09T08:17:43Z, not by this run) and anis-desktop at e1d4db56718b (#733). All three are platform 1.2.0, with the same manifest store path. Per D2 and #66, a difference between bridge builds is recorded and is not red. `N_H` is re-read at gate step 2.
 
@@ -550,20 +550,34 @@ These six items are `post` and `human-pending`: this attempt does not evaluate t
 
 | ID | Predicate |
 |----|-----------|
-| P1 | No static fallback ladder remains in the resolver, conformance or workflow-entry paths of any adopted project, and a missing contract fails closed with a closed error code (AC2; #69) |
+| P1 | No static fallback ladder remains in the resolver, conformance or workflow-entry paths of any adopted project, and a missing contract fails closed with a closed error code (AC2; #69). Reading approved 2026-11-09 under the owner's 130 delegation: "(1) The only findings outside nix-config may be `stale_exemption:*` entries that name nix-config's hard-coded exemption paths. Any other finding kind, on any root, is red. (2) nix-config is read on the candidate tree (06fb38b7), because main carries the bridge source until P5 merges the candidate." Rationale: `fallback-audit ladders` applies nix-config's exemption list to every repository, so every other root reports each absent nix-config path as a `stale_exemption` finding (#763), and the nix-config roots are main checkouts that hold the bridge source until P5 |
 | P2 | The bridge generation is retained, and rollback to it is exercised once before retirement (AC3; refresh) |
 | P3 | A Claude-driven ship completes on the strict path, against declared host capabilities with bounded admission (AC4; refresh; the Codex-driven ship was dropped by the owner's 2026-11-08 decision) |
 | P4 | The #71 retirement predicates: the active generation's identity matches its manifest; active and bridge fleet conformance are green; `workflow_entry` passes through both adapters; post-activation smoke is green; doctor reports no residue; traces show zero removed-fallback executions (#71) |
 | P5 | Implementation delivered, PR merged, tracker closed and cleanup postconditions reconciled before retirement (refresh) |
 | P6 | Retirement is recorded with the evidence that satisfied each strict predicate (AC5) |
 
+#### Post-activation readings on the agent hosts (gate step 5, partial)
+
+eleven-m5 was switched at 2026-11-09T17:22:57Z (done 17:24:04Z) and anis-desktop at 17:27:15Z (done 17:27:33Z), both from a detached `K_H/.worktrees/cutover-130` at 06fb38b718e050742e607b9b0feefd873e90c404, removed afterwards. The land locks of all five fleet repositories were free before each switch. The first anis-desktop attempt (17:25:34Z) failed before activation on an operator PATH error and changed nothing; the single retry is recorded on issue 130 as a deviation from the runbook (comment 6746762607). mbp is not switched: it is on system-325, the bridge, awaiting the owner's switch.
+
+| Host | Subject | Revision | Command | UTC | Exit | Observed | Verdict |
+|------|---------|----------|---------|-----|------|----------|---------|
+| eleven-m5 | host | system-36 (bridge N_H 35) | identity; platform-status --fleet; host-route | 2026-11-09T17:24:10Z | 0; 0; 0; 0 | system-36 running, configurationRevision 06fb38b718e0; platform 2.0.0, schemas [2], 2/2 compatible, removed_uses []; claude-code supported (7 slots), codex declared_unsupported | green |
+| eleven-m5 | P1 | system-36 | resolve-project resolve (scratch repo); fallback-audit ladders | 2026-11-09T17:24:11Z | 2; 1; 1 | fail-closed `not_onboarded`; jarbird 7 findings, all `stale_exemption` on nix-config paths; nix-config read on the candidate tree 06fb38b7 at 17:24:39Z: clean true | green |
+| eleven-m5 | P4 | system-36 | conformance fleet and doctor per root; migrate; worktree-mapping; traces; bridge fleet | 2026-11-09T17:24:11Z to 17:25:09Z | 0 | fleet 13/13 and doctor 19/19 on both roots; migrate 0, refused 0; C7 green; 0 removed-fallback executions since 17:22:57Z; bridge resolve-project with its own manifest (yl4yfaps8kndji4qdnpy73vqk2cpcqmk) 1.2.0, 2/2 compatible | green |
+| anis-desktop | host | system-80 (bridge N_H 79) | identity; platform-status --fleet; host-route | 2026-11-09T17:27:40Z | 0; 0; 0; 0 | system-80 running, configurationRevision 06fb38b718e0; platform 2.0.0, schemas [2], 1/1 compatible, removed_uses []; claude-code supported (7 slots), codex declared_unsupported | green |
+| anis-desktop | P1 | system-80 | resolve-project resolve (scratch repo); fallback-audit ladders | 2026-11-09T17:27:40Z | 2; 1 | fail-closed `not_onboarded`; nodocom 7 findings, all `stale_exemption` on nix-config paths | green |
+| anis-desktop | P4 | system-80 | conformance fleet and doctor; migrate; worktree-mapping; traces; bridge fleet | 2026-11-09T17:27:40Z | 0 | nodocom fleet 13/13, doctor 19/19; migrate 0, refused 0; C7 green; 0 removed-fallback executions since 17:27:15Z; bridge resolve-project with its own manifest 1.2.0, 1/1 compatible | green |
+
+P2 (the rollback exercise), P3 (a Claude-driven ship), P5 and P6 are not evaluated yet.
+
 ## Dispositions
 
-Every row that is red at this refresh, and its route:
+Every row that is red at this refresh, and its route: none at gate step 2.
 
 | Rows | Repair route | Disposition |
 |------|--------------|-------------|
-| C7 anis-desktop /home/anis/Projects/nodocom | The live session that claims elevenyellow/nodocom#2632 maps (opens a PR) or removes its side worktree `issue-2632-cloak-156`; not this run's to touch | re-read at gate step 2 |
 
 Rows that are human-pending and their action: none. C3 is green by the owner's waiver (issue 130 comment 6745240816), not by a bundle.
 
@@ -738,7 +752,7 @@ AC1 to AC5 are the issue's `## Acceptance criteria`, AC6 to AC10 its `### Additi
 | AC4 | Both a Claude-driven and a Codex-driven ship complete on the strict path after cutover. (False at base: the Codex path cannot complete a ship without manual intervention.) Narrowed by the owner on 2026-11-08 to a Claude-driven ship on the strict path. | P3 | human_pending |
 | AC5 | Retirement is recorded with the evidence that satisfied each strict predicate. | P6 | human_pending |
 | AC6 | The checklist derives the fleet roster from current registry truth and records the explicit Arcwave inclusion/exclusion decision. | C1 | met |
-| AC7 | There are zero active legacy attempts and zero retained legacy worktrees that cannot resume on a declared path. | C6, C7 | unmet |
+| AC7 | There are zero active legacy attempts and zero retained legacy worktrees that cannot resume on a declared path. | C6, C7 | met |
 | AC8 | Rollback to the retained bridge generation is exercised before retirement. | P2 | human_pending |
 | AC9 | Claude and Codex paths complete against declared host capabilities, including bounded capacity admission. Narrowed by the owner on 2026-11-08 to a Claude-driven ship; Codex answers its declared `unsupported`. | C9, P3 | human_pending |
 | AC10 | Implementation delivered, PR merged, tracker closed, and cleanup postconditions are reconciled before bridge retirement. | P5 | human_pending |
