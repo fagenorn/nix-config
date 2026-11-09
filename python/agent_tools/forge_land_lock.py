@@ -3,7 +3,7 @@
 D1, the lock is the ref `refs/agent-locks/land/<branch>`: created by REST (HTTP 422 means not
 created), moved and deleted by the `updateRefs` compare-and-swap with `beforeOid`; a CAS that
 reports failure is judged by re-reading the ref, and a ref left unchanged is a forge error
-carrying the CAS's own code, never a lost race.
+carrying the CAS's own code and transport class (issue 740), never a lost race.
 
 D2, the holder is derived, not stored, and the head decides: `classify` reads the pull requests
 that contain the lock sha (`_on_branch`: the forge's commit lookup, which for a commit outside
@@ -144,7 +144,8 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
             return Outcome("moved", sha, pick_pr(mine), None)
         return Outcome("acquired", sha, pick_pr(mine), kind)
     if after == lock and failure:
-        raise fm.ForgeError(failure, "compare-and-swap not applied and the lock is unchanged")
+        raise fm.ForgeError(failure.code, "compare-and-swap not applied and the lock is unchanged",
+                            transient=failure.transient)
     return Outcome("lost_to", after, _pr_of(slug, branch, after), None)
 
 
@@ -254,7 +255,9 @@ def _release(args: Any) -> tuple[int, dict[str, Any]]:
     if after is None:
         return 0, result(args, "released")
     if after == args.sha:
-        raise fm.ForgeError(failure or "gh_failed", "compare-and-swap delete left the lock at the caller's sha")
+        raise fm.ForgeError(failure.code if failure else "gh_failed",
+                            "compare-and-swap delete left the lock at the caller's sha",
+                            transient=failure is not None and failure.transient)
     pr = _pr_of(args.repo, args.branch, after)
     return 3, result(args, "not_held", lock_sha=after, pr=pr, by=holder(args.repo, pr))
 

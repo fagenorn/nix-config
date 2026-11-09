@@ -195,7 +195,7 @@ class AcquireTest(Base):
                 self.lock(B)
                 self.pulls(A, pull(11, sha=A))
                 self.pulls(B, pull(12, state="closed", merged=True, sha=B))
-                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: f):
+                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: fm.ForgeError(f, "x")):
                     code, out = run(*land("acquire", A))
                 self.assertEqual((code, out["verdict"], out["error"]), (1, "error", failure))
                 self.assertEqual(self.world.refs(), {REF: B})
@@ -318,7 +318,7 @@ class ReleaseStatusTest(Base):
             with self.subTest(failure=failure):
                 self.world.reset()
                 self.lock(A)
-                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: f):
+                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: fm.ForgeError(f, "x")):
                     code, out = run(*land("release", A))
                 self.assertEqual((code, out["verdict"], out["error"]), (1, "error", failure))
                 self.assertEqual(self.world.refs(), {REF: A})
@@ -341,6 +341,45 @@ class ReleaseStatusTest(Base):
                 code, out = run(*land("status", A))
                 self.assertEqual((code, out["verdict"], out["lock_sha"], out["pr"]), (0, verdict, lock_sha, pr))
                 self.assertEqual(self.writes(), [])
+
+
+class CasTransportTest(Base):
+    """Issue 740 D2: an unapplied compare-and-swap keeps its failure's transport class in the error."""
+
+    def prepare(self, action):
+        self.world.reset()
+        if action == "acquire":  # a lock whose pull request merged: the one-shot acquire swaps it
+            self.lock(B)
+            self.pulls(A, pull(11, sha=A))
+            self.pulls(B, pull(12, state="closed", merged=True, sha=B))
+        else:
+            self.lock(A)
+
+    def raised(self, action, failure):
+        args = forge_claim.build_parser().parse_args(land(action, A))
+        with mock.patch.object(fm, "cas_ref", lambda *_: failure), \
+                self.assertRaises(fm.ForgeError) as caught:
+            land_lock.run(args)
+        return caught.exception
+
+    def test_an_unapplied_cas_keeps_its_transport_class(self):
+        failures = ((fm.ForgeError("gh_failed", "gh: Bad Gateway (HTTP 502)", transient=True), True),
+                    (fm.ForgeError("gh_timeout", "api graphql"), True),
+                    (fm.ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"), False))
+        for action in ("acquire", "release"):
+            for failure, transient in failures:
+                with self.subTest(action=action, failure=failure.detail):
+                    self.prepare(action)
+                    before = self.world.refs()
+                    error = self.raised(action, failure)
+                    self.assertEqual((error.code, error.transient), (failure.code, transient))
+                    self.assertEqual(self.world.refs(), before)
+
+    def test_a_delete_reported_applied_that_left_the_lock_is_not_transient(self):
+        self.prepare("release")
+        error = self.raised("release", None)
+        self.assertEqual((error.code, error.transient), ("gh_failed", False))
+        self.assertEqual(self.world.refs(), {REF: A})
 
 
 class ConcurrencyTest(Base):
@@ -564,7 +603,7 @@ class WaitTest(Base):
                 self.pulls(A, pull(11, sha=A))
                 self.pulls(B, pull(12, state="closed", merged=True, sha=B))
                 clock = FakeClock()
-                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: f):
+                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: fm.ForgeError(f, "x")):
                     code, out = self.wait(clock)
                 self.assertEqual((code, out["verdict"], out["error"]), (1, "error", failure))
                 self.assertEqual(clock.slept, [120, 120])
