@@ -181,6 +181,12 @@ class DeployInspectTest(ReleaseCommandCase):
         super().setUp()
         self.world = ActionsWorld(self)
         contract = self.contract()
+        # `release deploy inspect` reads a schema-1 deploy binding (deprecated by
+        # bindings-deploy.retire), so the fixture pins schema 1 over the live schema-2 contract.
+        contract["schema_version"] = 1
+        agents = self.root / "AGENTS.md"
+        agents.write_text(agents.read_text("utf-8").replace(
+            "(project schema 2)", "(project schema 1)", 1), encoding="utf-8")
         profile = json.loads((REPO / "tests/fixtures/release/publication-free-profile.json")
                              .read_text("utf-8"))
         contract["release"] = {"profiles": {"forge-main": profile}}
@@ -188,7 +194,7 @@ class DeployInspectTest(ReleaseCommandCase):
                                           "config": dict(CONFIG, health_url=self.world.url())}
         contract["bindings"]["tracker"]["credential_env"]["unset_before_invocation"] = [
             "GITHUB_TOKEN", "GH_TOKEN"]
-        contract["capabilities"]["deploy"]["support"] = "supported"
+        contract["capabilities"]["deploy"] = {"support": "supported"}
         self.write_contract(contract)
 
     def deploy(self, commit=MERGE, env=None):

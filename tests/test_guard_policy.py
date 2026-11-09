@@ -20,7 +20,6 @@ from unittest import mock
 
 from agent_tools import adopt_inspection, contract_export, guard_policy
 from . import release_test_support as support
-from .actions_world import CONFIG
 from .guard_policy_world import REAL_GIT, GuardPolicyWorld
 
 NODO = "elevenyellow/nodocom"
@@ -271,22 +270,19 @@ class DeriveTest(WorldCase):
         self.assertEqual(self.derived("fagenorn/checks")["row"], rows["fagenorn/checks"])
 
     @staticmethod
-    def jarbird_deploy(contract):
-        contract["bindings"]["deploy"] = {
-            "adapter": "github-actions-health", "command": None, "config": dict(CONFIG)}
+    def jarbird_shape(contract):
         contract["bindings"]["tracker"]["credential_env"]["unset_before_invocation"] = [
             "GITHUB_TOKEN", "GH_TOKEN"]
-        contract["capabilities"]["deploy"]["support"] = "supported"
 
-    def test_a_jarbird_shaped_project_derives_while_its_adapter_waits_on_dev(self):
+    def test_a_jarbird_shaped_project_derives_while_its_contract_waits_on_dev(self):
         slug = "elevenyellow/jarbird"
         root = self.world.project("jarbird", slug, integration_branch="dev",
                                   publication_free=True)
         self.world.git(root, "checkout", "--quiet", "dev")
         contract = self.world.contract("jarbird", slug, integration_branch="dev",
                                        publication_free=True)
-        self.jarbird_deploy(contract)
-        self.world.commit_contract(root, contract, "deploy adapter on dev")
+        self.jarbird_shape(contract)
+        self.world.commit_contract(root, contract, "jarbird contract on dev")
         self.world.git(root, "push", "--quiet", "origin", "dev")
         report = self.derived(slug)
         self.assertEqual(report["refused"], [])
@@ -298,10 +294,10 @@ class DeriveTest(WorldCase):
         self.assertEqual([profile["id"] for profile in row["evidence"]["profiles"]],
                          ["forge-main"])
 
-    def test_a_jarbird_shaped_project_derives_once_its_adapter_reaches_main(self):
+    def test_a_jarbird_shaped_project_derives_once_its_contract_reaches_main(self):
         slug = "elevenyellow/jarbird"
         root = self.world.project("jarbird", slug, integration_branch="dev",
-                                  publication_free=True, mutate=self.jarbird_deploy)
+                                  publication_free=True, mutate=self.jarbird_shape)
         report = self.derived(slug)
         self.assertEqual(report["refused"], [])
         row = report["row"]

@@ -1907,7 +1907,8 @@ class CommittedProjectionTest(ResolverTestCase):
         # P11: this means this repository's own live contract, not the pinned schema-1 fixture.
         agents = (REPO_ROOT / "AGENTS.md").read_bytes()
         source = (REPO_ROOT / ".agents" / "instructions" / "bootstrap.md").read_bytes()
-        self.assertEqual(agents, CODEX_HEADER.encode() + b"\n\n" + source)
+        # The live contract is on project schema 2 (issue 724).
+        self.assertEqual(agents, codex_header(2).encode() + b"\n\n" + source)
         claude = (REPO_ROOT / "CLAUDE.md").read_text("utf-8")
         self.assertEqual(claude.splitlines().count(MANAGED_LINE), 1)
 
