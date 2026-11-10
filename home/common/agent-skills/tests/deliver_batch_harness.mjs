@@ -22,8 +22,7 @@ const num = label => Number((label.match(/-(\d+)(?:-|$)/) || [])[1])
 // Ordered: the first matching pattern wins. A default gets the label and the prompt.
 const DEFAULTS = [
   [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null })],
-  [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_pr: null, open_pr: null, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' } })],
-  [/^lane-/, () => ({ lane: 'standard', why: 'x' })],
+  [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_refs: [], open_pr: null, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' }, lane: 'standard', why: 'x' })],
   [/^acquire-/, () => ({ verdict: 'acquired', comment_id: 7 })],
   [/^renew-/, () => ({ verdict: 'renewed' })],
   [/^release-/, () => ({ verdict: 'released' })],
@@ -54,7 +53,7 @@ async function agent(prompt, opts = {}) {
   const isFacts = /^facts-/.test(label)
   if (isFacts) factsPending++
   // A facts agent answers later the higher its issue number, so a program that does not wait for every
-  // facts reply before its first lane agent would start a lane agent while a later issue's facts are pending.
+  // facts reply before its first acquire would start an acquire while a later issue's facts are pending.
   if (isFacts) {
     for (let i = 0; i < num(label) * 3; i++) await new Promise(r => setImmediate(r))
     factsPending--
