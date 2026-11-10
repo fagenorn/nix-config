@@ -10,8 +10,8 @@ its `verification` list equals `run`, element for element.
 The plan reads `bindings.workflow.verification`,
 `bindings.workflow.verification_conditions` and `bindings.vcs.integration_branch`
 from `resolve_project.resolve(<worktree top level>, ["verification"])`. `run`
-holds the declared ids, in declared order, that have no condition or whose
-`when_changed` globs match a changed path under
+holds the declared ids, in declared order, that have no condition (an entry
+holding only `pre_commit` is none) or whose `when_changed` globs match a changed path under
 `resolve_project.any_path_matches`; `skipped` holds the rest, in declared order,
 each with its authored `skip_reason`. The changed paths are the names
 `git diff-tree -r --no-renames` prints between
@@ -296,8 +296,8 @@ def plan(verification: Sequence[str], conditions: Mapping[str, Mapping],
     skipped: list[dict] = []
     for verification_id in verification:
         condition = conditions.get(verification_id)
-        if condition is None or resolve_project.any_path_matches(
-                list(changed), condition["when_changed"]):
+        if (condition is None or not resolve_project.is_conditional(condition)
+                or resolve_project.any_path_matches(list(changed), condition["when_changed"])):
             run.append(verification_id)
         else:
             skipped.append({"id": verification_id, "reason": condition["skip_reason"]})
@@ -308,7 +308,10 @@ def current_plan(root: Path, tree: str) -> dict:
     """The plan for `tree`; the change is read only when some declared id is conditional."""
     policy = verification_policy(root)
     conditions = policy["conditions"]
-    conditional = any(verification_id in conditions for verification_id in policy["verification"])
+    conditional = any(
+        verification_id in conditions
+        and resolve_project.is_conditional(conditions[verification_id])
+        for verification_id in policy["verification"])
     changed = (changed_paths(root, policy["integration_branch"], tree) if conditional else [])
     return plan(policy["verification"], conditions, changed)
 

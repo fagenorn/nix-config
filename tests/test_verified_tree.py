@@ -189,7 +189,7 @@ class VerifiedTreeTest(unittest.TestCase):
         self.assertEqual(self.check()["skipped"], SKIPPED)
 
     def test_a_contract_without_conditions_runs_every_id_and_needs_no_origin_ref(self):
-        for conditions in (ABSENT, None, {}):
+        for conditions in (ABSENT, None, {}, {"suite": {"pre_commit": True}}):
             with self.subTest(conditions=conditions):
                 self.git("reset", "-q", "--hard", "main")
                 self.set_conditions(conditions)
@@ -199,6 +199,15 @@ class VerifiedTreeTest(unittest.TestCase):
                 self.assertEqual((answer["run"], answer["skipped"]), (IDS, []))
                 self.verify_and_record()
                 self.assertEqual(self.recorded_ids(), IDS)
+
+    def test_a_pre_commit_flag_leaves_the_condition_in_force(self):
+        # Issue 771 D3: the flag beside when_changed changes nothing about the skip.
+        self.set_conditions({"suite": {**CONDITIONS["suite"], "pre_commit": True}})
+        self.commit_all("flag the conditional id")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        (self.repo / "tests/test_cli.py").write_text("# edited\n")
+        answer = self.check()
+        self.assertEqual((answer["run"], answer["skipped"]), (["test"], SKIPPED))
 
     def test_a_resolver_refusal_exits_2_and_writes_nothing(self):
         self.set_conditions({"suite": {"when_changed": [], "skip_reason": REASON}})
