@@ -2963,6 +2963,14 @@ class DirectLaneTest(unittest.TestCase):
         _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance}})
         self.assertNotIn("direct-fix", labels(calls))
 
+    def test_the_review_prompt_holds_only_code_criteria_to_the_blocking_evidence_rule(self):
+        for patch in ({}, {"direct-impl": {"sensitive": True}}):
+            _, calls = run(args=DIRECT, patch=patch)
+            text = prompt(calls, "direct-review")
+            self.assertIn("a code criterion that is not met, or has no evidence, is an Important finding", text)
+            self.assertIn("other kinds are not findings", text)
+            self.assertNotIn("unmet criteria only", text)
+
     def test_the_escalated_full_review_is_graded_too(self):
         replies = {"direct-review": {"verdict": "pass", "findings": [], "escalate": True},
                    "direct-review-full": {"verdict": "pass", "findings": []}}
