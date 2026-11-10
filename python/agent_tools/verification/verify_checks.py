@@ -130,7 +130,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
+from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.guard.push_fixture import make_push_fixture

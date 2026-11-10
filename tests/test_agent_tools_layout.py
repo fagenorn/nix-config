@@ -17,6 +17,7 @@ SHARED = "system"
 # is a reviewed change to this table.
 ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "claims": frozenset({"agent_tools.project_contract.agent_platform"}),
+    "delivery": frozenset({"agent_tools.project_contract.resolve_project"}),
     "guard": frozenset({
         "agent_tools.project_contract.adopt_inspection",
         "agent_tools.project_contract.adopt_verify",
@@ -28,6 +29,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "project_contract": frozenset({
         "agent_tools.release.release_adapter",
         "agent_tools.release.release_profile",
+        "agent_tools.delivery.host_admission",
     }),
     "release": frozenset({"agent_tools.project_contract.resolve_project"}),
     "verification": frozenset({
@@ -41,16 +43,12 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.guard.guard_policy",
         "agent_tools.project_contract.adopt_inspection",
         "agent_tools.project_contract.adopt_verify",
+        "agent_tools.delivery.agent_gate_bundle",
     }),
 }
 
 # Flat modules that have not moved into their area yet; each move removes a name.
-UNMOVED: frozenset[str] = frozenset({
-    "agent_gate_bundle", "agent_gate_corpus", "agnostic_lint", "artifact_budget",
-    "context_map_lint", "diff_scope", "host_admission", "issue_branch", "lane_triage",
-    "promotion", "promotion_lifecycle", "promotion_schema", "run_profile", "suite_runner",
-    "worktree_forge",
-})
+UNMOVED: frozenset[str] = frozenset()
 
 
 def area_packages(areas_dir: Path) -> frozenset[str]:

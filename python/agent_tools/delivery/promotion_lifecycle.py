@@ -18,9 +18,9 @@ import hashlib
 import os
 from pathlib import Path
 
-from agent_tools.agent_gate_bundle import (GATE_CONTRACT, GATE_VERSION,
+from agent_tools.delivery.agent_gate_bundle import (GATE_CONTRACT, GATE_VERSION,
                                            BundleIntegrityError, verify_bundle)
-from agent_tools.promotion_schema import (CLASSIFICATION_RULES, PROJECT_ONLY_RESIDUE,
+from agent_tools.delivery.promotion_schema import (CLASSIFICATION_RULES, PROJECT_ONLY_RESIDUE,
                                           Refusal, is_safe_relative_path, load_strict,
                                           symlinked_component, violation)
 

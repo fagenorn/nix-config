@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import agent_gate_bundle as gate
-from agent_tools import promotion_schema as schema
+from agent_tools.delivery import agent_gate_bundle as gate
+from agent_tools.delivery import promotion_schema as schema
 from agent_tools.canonical import telemetry_digest
 
 from .promotion_test_support import make_env, resolved_project, run

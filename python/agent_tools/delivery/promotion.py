@@ -28,8 +28,8 @@ import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
-from agent_tools.promotion_lifecycle import ARGUMENT_TARGETS, Arguments, advance
-from agent_tools.promotion_schema import (CANDIDATE_KIND, COMMAND_NAME, DIGEST_ID,
+from agent_tools.delivery.promotion_lifecycle import ARGUMENT_TARGETS, Arguments, advance
+from agent_tools.delivery.promotion_schema import (CANDIDATE_KIND, COMMAND_NAME, DIGEST_ID,
                                           DRAFT_KIND, INTERNAL_FAILURE_MESSAGE, STATES,
                                           Refusal, load_strict, mint_candidate,
                                           mint_evaluation, validate_document, violation)

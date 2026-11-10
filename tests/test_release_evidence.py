@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 
-from agent_tools import agent_gate_bundle as gate
+from agent_tools.delivery import agent_gate_bundle as gate
 from agent_tools.release import forge_adapter
 from agent_tools.canonical import telemetry_digest
 

@@ -1,7 +1,7 @@
 """Profile the token cost of Workflow runs from their agent transcripts (#715).
 
 Usage: `just agent-run-profile <run-dir>... [--json] [--top N]`, or
-`python -m agent_tools.run_profile`. It reads the Workflow run directories given as
+`python -m agent_tools.delivery.run_profile`. It reads the Workflow run directories given as
 arguments and prints phase totals, the costliest agents, label families and a per-issue
 table as text or, with `--json`, one JSON document with the keys `incomplete`, `runs`,
 `phases`, `agents`, `families`, `issues`. `--top N` (default 15) caps agents and families.

@@ -1,7 +1,7 @@
 """Run the agent workflow suite's members, each in its own process, at most --jobs at a time (issue 436).
 
 `just agent-workflow-tests` hands its curated member list to this module
-(`python -m agent_tools.suite_runner`; it has no command-table row). Each member runs from
+(`python -m agent_tools.delivery.suite_runner`; it has no command-table row). Each member runs from
 the working directory with the recipe's environment plus two git configuration entries and
 the run's bytecode cache: a `.py` member as `python -m unittest -v <path>`, a `.sh` member
 as `bash <path>`.
@@ -34,7 +34,7 @@ Jobs and order (issue 604). At most `--jobs N` members run at once. The default 
 `SUITE_RUNNER_JOBS` when that variable is set and non-empty, else `min(8, CPUs - 2)` with a
 floor of 1 (also when the CPU count is unknown); an explicit `--jobs` wins over both, and a
 bad `SUITE_RUNNER_JOBS` is a usage error (exit 2). In parallel mode members start
-longest-first (LPT): the order comes from `python/agent_tools/suite_timings.json`, a
+longest-first (LPT): the order comes from `python/agent_tools/delivery/suite_timings.json`, a
 committed map of member path to wall seconds taken from a full run's timing table, with
 members it does not name starting first in list order, ties in list order, and a missing or
 malformed file meaning list order. Serial mode keeps list order, and the report stays in

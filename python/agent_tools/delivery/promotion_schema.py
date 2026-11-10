@@ -17,7 +17,7 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 
-from agent_tools.agent_gate_bundle import GATE_CONTRACT, GATE_VERSION
+from agent_tools.delivery.agent_gate_bundle import GATE_CONTRACT, GATE_VERSION
 from agent_tools.canonical import (reject_duplicate_keys, reject_nonfinite_literal,
                                    telemetry_digest)
 

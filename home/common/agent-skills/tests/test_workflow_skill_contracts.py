@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from agent_tools import agnostic_lint
+from agent_tools.delivery import agnostic_lint
 from agent_tools.skill_lint import working_tree
 
 
@@ -440,7 +440,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             REPO_ROOT / "python/agent_tools/project_contract/resolve_project.py",
             helpers["resolve-project"],
         )
-        shutil.copyfile(REPO_ROOT / "python/agent_tools/context_map_lint.py",
+        shutil.copyfile(REPO_ROOT / "python/agent_tools/delivery/context_map_lint.py",
                         helpers["context-map-lint"])
         for helper in helpers.values():
             helper.chmod(0o755)

@@ -5,7 +5,7 @@ import subprocess
 import sys
 import unittest
 
-from agent_tools import agent_gate_bundle as gate
+from agent_tools.delivery import agent_gate_bundle as gate
 
 from .promotion_test_support import (LifecycleFixture, citation, draft, run, write_bundle,
                                      write_json)
@@ -99,7 +99,7 @@ class TransitionTest(LifecycleFixture, unittest.TestCase):
         for sub in ("capture", "advance", "evaluate", "validate"):
             with self.subTest(sub=sub):
                 proc = subprocess.run(
-                    [sys.executable, "-m", "agent_tools.promotion", sub, "--help"],
+                    [sys.executable, "-m", "agent_tools.delivery.promotion", sub, "--help"],
                     capture_output=True, text=True, env=self.env, timeout=60, check=False)
                 text = proc.stdout.lower()
                 self.assertEqual(proc.returncode, 0)

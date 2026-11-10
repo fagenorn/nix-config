@@ -30,7 +30,7 @@ import sys
 import unicodedata
 from collections.abc import Collection, Mapping
 
-from agent_tools import worktree_forge
+from agent_tools.delivery import worktree_forge
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import forge_api
 

@@ -1,4 +1,4 @@
-"""Offline tests for agent_tools.agent_gate_corpus: the issue 725 corpus and rubric.
+"""Offline tests for agent_tools.delivery.agent_gate_corpus: the issue 725 corpus and rubric.
 
 Run: just agent-workflow-tests
 """
@@ -7,8 +7,8 @@ import json
 import unittest
 from pathlib import Path
 
-from agent_tools import agent_gate_bundle as gate
-from agent_tools import agent_gate_corpus as corpus
+from agent_tools.delivery import agent_gate_bundle as gate
+from agent_tools.delivery import agent_gate_corpus as corpus
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / "tests/fixtures/agent-gate-corpus/issue-725-r1.json"

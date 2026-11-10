@@ -248,7 +248,7 @@ class DocsTreeTest(unittest.TestCase):
     def test_the_docs_tree_passes_the_context_map_lint(self):
         map_path = REPO_ROOT / "docs/CONTEXT-MAP.md"
         result = subprocess.run(
-            [sys.executable, "-m", "agent_tools.context_map_lint",
+            [sys.executable, "-m", "agent_tools.delivery.context_map_lint",
              "--repo-root", str(REPO_ROOT), "--context-map", str(map_path)],
             text=True, capture_output=True,
         )

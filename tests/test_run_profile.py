@@ -1,4 +1,4 @@
-"""Offline tests for agent_tools.run_profile on synthetic Workflow run dirs (#715).
+"""Offline tests for agent_tools.delivery.run_profile on synthetic Workflow run dirs (#715).
 
 Run: just agent-workflow-tests
 """
@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from agent_tools import run_profile
+from agent_tools.delivery import run_profile
 
 RELAY = "[Workflow harness — user request] The harness relays the user request:\n  deliver #99"
 # Two records of one message id whose per-field maxima fall in different records:
@@ -303,7 +303,7 @@ class IssueTest(Fixture):
 class CommandTest(Fixture):
     def test_json_output_with_a_journal_present(self):
         completed = subprocess.run(
-            [sys.executable, "-m", "agent_tools.run_profile", str(self.batch), str(self.child),
+            [sys.executable, "-m", "agent_tools.delivery.run_profile", str(self.batch), str(self.child),
              "--json", "--top", "2"], capture_output=True, text=True, timeout=60, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         doc = json.loads(completed.stdout)

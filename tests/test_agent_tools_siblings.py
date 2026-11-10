@@ -25,7 +25,7 @@ class SiblingArgvTest(unittest.TestCase):
 
     def test_the_argv_runs_the_named_package_module(self):
         completed = subprocess.run(
-            [*siblings.sibling_argv("diff_scope"), "--help"],
+            [*siblings.sibling_argv("delivery.diff_scope"), "--help"],
             capture_output=True, text=True, timeout=60, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertTrue(completed.stdout.startswith("usage: diff-scope "),

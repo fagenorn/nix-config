@@ -4,7 +4,7 @@
 
 | Area | Context file | Gist | governs |
 |---|---|---|---|
-| Delivery | [CONTEXT](./areas/delivery/CONTEXT.md) | Carrying an issue to merge: lanes, skills, programs, plans, test suite | `home/common/agent-skills/skills/**`, `home/common/claude-code/skills/**`, `home/common/agent-skills/default.nix`, `lib/impeccable.nix`, `python/agent_tools/lane_triage.py`, `python/agent_tools/issue_branch.py`, `python/agent_tools/artifact_budget.py`, `python/agent_tools/suite_runner.py`, `python/agent_tools/run_profile.py`, `python/agent_tools/host_admission.py` |
+| Delivery | [CONTEXT](./areas/delivery/CONTEXT.md) | Carrying an issue to merge: lanes, skills, programs, plans, test suite | `home/common/agent-skills/skills/**`, `home/common/claude-code/skills/**`, `home/common/agent-skills/default.nix`, `lib/impeccable.nix`, `python/agent_tools/delivery/**`, `python/agent_tools/agent_model_matrix.py`, `python/agent_tools/instruction_load.py`, `python/agent_tools/skill_lint.py` |
 | Verification | [CONTEXT](./areas/verification/CONTEXT.md) | Post-merge checks of held issues and recorded verification passes | `python/agent_tools/verification/**`, `home/common/verify-pending/**`, `hosts/common/darwin-verify-pending.nix` |
 | Claims | [CONTEXT](./areas/claims/CONTEXT.md) | Who delivers an issue, landing locks, owner asks and issue links | `python/agent_tools/claims/**` |
 | Release | [CONTEXT](./areas/release/CONTEXT.md) | Releasing a project through profiles, adapters and the transaction core | `python/agent_tools/release/**` |
