@@ -152,7 +152,7 @@ const SETUP_SCHEMA = {
     review: { type: 'object', properties: { code: { type: 'string' }, plan: { type: 'string' } } },
     review_state: { type: 'object', properties: { code: REVIEW_STATE, plan: REVIEW_STATE } },
     knowledge: { type: 'object', properties: { standards: STRS, hints: STRS, rejections: STRS } },
-    verification: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, argv: STRS, cwd: { type: 'string' }, when_changed: STRS, skip_reason: { type: 'string' } }, required: ['id', 'argv', 'cwd'] } },
+    verification: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, argv: STRS, cwd: { type: 'string' }, when_changed: STRS, skip_reason: { type: 'string' }, pre_commit: { type: 'boolean' } }, required: ['id', 'argv', 'cwd'] } },
   },
   required: ['ok'],
 }
@@ -260,7 +260,7 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - integration_branch and default_branch: bindings.vcs.integration_branch and bindings.vcs.default_branch; merge_strategy and delete_branch: bindings.vcs.merge.strategy and bindings.vcs.merge.delete_branch.
 - review: the command ids at bindings.workflow.review.code and .plan (omit an absent one); review_state: for code and plan, the state of the capability review.code and review.plan (available, blocked or unsupported; absent if the capability is missing).
 - knowledge: bindings.paths.standards, bindings.paths.hints and bindings.paths.rejections, each as given (empty when absent).
-- verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason).`
+- verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason), and pre_commit: true on an entry whose verification_conditions entry has pre_commit true (omit pre_commit otherwise).`
 // Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
 const DEAD = []
 // optional: a step whose failure the caller recovers (the diff-size measurement) is not reported as a dead agent.
@@ -694,7 +694,11 @@ const takePlan = (p, label) => {
   return null
 }
 
-const FMT = `Before committing, run any formatter or lint fix the project's standards (${list(K.standards)}) name on the files you changed.`
+// #771: the contract's fast pre-commit ids (verification_conditions pre_commit: true), named with argv and cwd; none keeps the generic sentence.
+const PRE_COMMIT = setup.verification.filter(e => e && e.pre_commit === true).map(e => ({ id: e.id, argv: e.argv, cwd: e.cwd }))
+const FMT = PRE_COMMIT.length
+  ? `Before committing, run the fast pre-commit checks of that verification: each of ${JSON.stringify(PRE_COMMIT)} (its argv with <worktree>/<its cwd> as working directory), and fix what it reports.`
+  : `Before committing, run any formatter or lint fix the project's standards (${list(K.standards)}) name on the files you changed.`
 const FOCUSED = `Run only the tests covering the files you changed, not the full suite or the declared verification (it runs once later). ${FMT}`
 // #787: whole test files after the task loop; one class missed a failing sibling test three times.
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
@@ -1339,7 +1343,7 @@ ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: 'sonnet',
     raced = false
     syncs++
     const sy = await call(`${CTX}
-The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. Do not push. Return conflicted, merge_commit (full sha) and resolved_files; status blocked with notes if you cannot resolve it safely.
+The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. ${FMT} Do not push. Return conflicted, merge_commit (full sha) and resolved_files; status blocked with notes if you cannot resolve it safely.
 ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
     if (!sy || sy.status !== 'done' || !present(sy.merge_commit)) return stop('sync', { pr: PR, sync: sy })
     expected = sy.merge_commit

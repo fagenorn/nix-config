@@ -167,6 +167,8 @@ WORKFLOW_OPTIONAL_MEMBERS = ("light_lane", "verification_conditions")
 ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
 LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
 VERIFICATION_CONDITION_MEMBERS = ("when_changed", "skip_reason")
+# Issue 771: a fast pre-commit check; deliver-standard names it to implementers.
+VERIFICATION_CONDITION_OPTIONAL_MEMBERS = ("pre_commit",)
 LIGHT_LANE_MODES = ("shadow", "active")
 PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
 
@@ -285,6 +287,17 @@ def any_path_matches(paths: list[str], globs: list[str]) -> bool:
     for `risk_paths` and `verified-tree` for `when_changed`.
     """
     return any(fnmatch.fnmatchcase(path, glob) for path in paths for glob in globs)
+
+
+def is_conditional(condition: object) -> bool:
+    """False only for a dict holding neither `when_changed` nor `skip_reason`.
+
+    The one conditionality test for the resolver and `verified-tree` (issue 771
+    D3): an entry holding only the `pre_commit` flag leaves its id unconditional,
+    and any other value, a malformed non-dict included, counts as conditional.
+    """
+    return not (isinstance(condition, dict)
+                and "when_changed" not in condition and "skip_reason" not in condition)
 
 
 def check_string(value: object, pointer: str, section: str,
@@ -824,7 +837,7 @@ def validate_workflow(workflow: dict, commands: dict | None,
 
 
 def validate_verification_conditions(workflow: dict, violations: list[dict]) -> None:
-    """Issue 437 D2: the optional `bindings.workflow.verification_conditions` member."""
+    """Issues 437 D2 and 771 D2: the optional `bindings.workflow.verification_conditions` member."""
     pointer = "/bindings/workflow/verification_conditions"
     conditions = workflow.get("verification_conditions")
     if conditions is None or not check_object(conditions, pointer, "workflow", violations):
@@ -839,8 +852,14 @@ def validate_verification_conditions(workflow: dict, violations: list[dict]) -> 
                 "contract.workflow.unknown_verification_id"))
         if not check_object(condition, entry, "workflow", violations):
             continue
+        flag_only = "pre_commit" in condition and not is_conditional(condition)
         check_exact_members(
-            condition, entry, VERIFICATION_CONDITION_MEMBERS, "workflow", violations)
+            condition, entry, () if flag_only else VERIFICATION_CONDITION_MEMBERS,
+            "workflow", violations,
+            optional=VERIFICATION_CONDITION_MEMBERS + VERIFICATION_CONDITION_OPTIONAL_MEMBERS)
+        if "pre_commit" in condition:
+            check_boolean(condition["pre_commit"], f"{entry}/pre_commit", "workflow",
+                          violations)
         if "when_changed" in condition and check_list(
                 condition["when_changed"], f"{entry}/when_changed", "workflow",
                 violations):
@@ -854,6 +873,7 @@ def validate_verification_conditions(workflow: dict, violations: list[dict]) -> 
             check_string(condition["skip_reason"], f"{entry}/skip_reason", "workflow",
                          violations)
     if declared and all(isinstance(verification_id, str) and verification_id in conditions
+                        and is_conditional(conditions[verification_id])
                         for verification_id in declared):
         violations.append(violation(
             pointer, "must leave at least one bindings.workflow.verification id "
