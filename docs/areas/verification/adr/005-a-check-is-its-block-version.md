@@ -13,6 +13,6 @@ A check is identified by its block version and index. The version is the block c
 
 ## Consequences
 
-- Editing a held block starts afresh: results, leases and windows of the earlier version are not read back, and a replacement block is run again from the start.
-- A window belongs to a merge and an event, not to a block, so a replacement block does inherit its `window-open` marker.
+- Editing a held block starts afresh: results and leases of the earlier version are not read back, and a replacement block is run again from the start.
+- A window belongs to a merge and an event, not to a block, so a replacement block does inherit its `window-open` marker (it carries no `block` field): an edited `days_after` check stays due on the original window, it does not restart.
 - Reordering checks is a new version even when nothing else changed.

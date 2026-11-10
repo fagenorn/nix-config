@@ -21,8 +21,8 @@ event, not to a block, so a replacement block inherits it. Every other author's 
 A result's identity is its block version and check index; the `ac` field is never part of it (P15).
 A block version is the block comment's id and a digest of the block's content (`block_key`), so
 editing or reordering the checks of a comment keeps the id but starts a new version: a marker
-written for an earlier version names another `block` (every marker carries the field) and is never
-read back as this one's.
+written for an earlier version names another `block` (every marker but `window-open`, which
+names none, carries the field) and is never read back as this one's.
 
 This module runs no process, reads no clock and touches no file.
 """
