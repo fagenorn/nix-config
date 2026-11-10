@@ -291,7 +291,9 @@ let
 
     # Durable global preferences.
     alwaysThinkingEnabled = true;
-    effortLevel = "xhigh";
+    # high, not xhigh: Anthropic's cost guide measured Opus 5.5 at xhigh solving
+    # 1.4 points more than high for about 2.5x the cost per solved task.
+    effortLevel = "high";
     teammateMode = "auto";
     remoteControlAtStartup = true;
     agentPushNotifEnabled = true;
@@ -510,7 +512,7 @@ in
   };
 
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
-  # effortLevel stays xhigh for interactive/orchestrator sessions; pipeline
+  # effortLevel stays high for interactive/orchestrator sessions; pipeline
   # subagents dispatch explicitly as implementer (opus/high), reviewer
   # (opus/high) or reviewer-lite (sonnet/medium). The Workflow programs' steps
   # run as clerk (sonnet/low; Bash, Read and Skill only, for judgment-free
