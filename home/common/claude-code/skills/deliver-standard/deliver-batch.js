@@ -360,6 +360,8 @@ const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
 const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
 // A stop the child raised after the merge (a re-adopted landing) still has close-out work its cont finishes; it is never settled (#714).
+// #790: a codex-unavailable child stop shows the Codex reviewer's reason in its row.
+const stopDetail = r => (r.stage === 'codex-unavailable' && typeof r.details === 'string' && r.details ? { detail: r.details } : {})
 const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
@@ -870,7 +872,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
 
     if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `child-${n} returned nothing` }; return }
     if (r.cont) CONTS[n] = r.cont
-    if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents }; return }
+    if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents, ...stopDetail(r) }; return }
     if (r.stage === 'done') {
       // A re-adopted merged landing: the child closed it out (claim released, worktree and branch removed). End the landing markers the merge resolved.
       const ended = await ask(agent(`The landing of issue #${n} of ${SLUG} (the git repository at ${REPO}) is merged and closed out. End its landing owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict and then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label. A verdict none is fine.
@@ -921,7 +923,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           return
         }
       }
-      rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }
+      rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
       return
     }
     // A stop with nothing to resume: give the claim back.
@@ -929,7 +931,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
 Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
-    rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }
+    rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
   } finally {
     release()
   }
