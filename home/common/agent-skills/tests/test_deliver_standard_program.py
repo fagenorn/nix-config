@@ -636,11 +636,12 @@ class OwnerAnswerTest(unittest.TestCase):
                 names = labels(calls)
                 self.assertLess(names.index("owner-answer"), names.index("plan"))
 
-    def test_the_direct_lane_setup_reads_no_answer_and_renews_nothing(self):
+    def test_the_direct_lane_setup_reads_no_answer_but_renews_after_the_claim(self):
         _, calls = run(args=dict(ARGS, lane="direct"))
         setup = prompt(calls, "setup")
         self.assertNotIn("owner-action status", setup)
-        self.assertNotIn("forge-claim renew", setup)
+        self.assertLess(setup.index(SETUP_ACQUIRE), setup.index(SETUP_RENEW))
+        self.assertLess(setup.index(SETUP_RENEW), setup.index("worktree add <worktree_path> <branch>"))
 
     def test_a_resumed_answer_read_still_renews_first(self):
         result, calls = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER), replies={"owner-answer": ANSWER})
@@ -782,6 +783,32 @@ class FoldedSetupRenewTest(unittest.TestCase):
                     self.assertNotIn("plan", labels(calls))
                 else:
                     self.assertEqual(result["stage"], "done")
+
+    def test_a_batched_direct_lane_child_renews_in_setup_and_proceeds(self):
+        result, calls = run(args=dict(BATCH_CHILD, lane="direct"),
+                            patch={"setup": {"acquire": HELD, "renew": {"verdict": "renewed"}}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:2], ["setup", "direct-impl"])
+
+    def test_a_lost_direct_lane_setup_renew_stops_claim_lost(self):
+        for renew in ({"verdict": "not_held", "by": "h2/b1"}, {"verdict": "error", "detail": "forge down"}, None):
+            with self.subTest(renew=renew):
+                result, calls = run(args=dict(BATCH_CHILD, lane="direct"),
+                                    patch={"setup": {"acquire": HELD, "renew": renew}})
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", "plan"))
+                self.assertEqual(labels(calls), ["setup"])
+                if renew and renew["verdict"] == "not_held":
+                    self.assertNotIn("cont", result)
+                else:
+                    self.assertTrue(result["cont"]["claim_incomplete"])
+
+    def test_the_direct_lane_setup_schema_lists_renew_as_the_standard_lane_does(self):
+        _, direct = run(args=dict(ARGS, lane="direct"))
+        _, standard = run()
+        schema = schema_of(direct, "setup")
+        self.assertEqual(schema["properties"]["renew"], schema_of(standard, "setup")["properties"]["renew"])
+        self.assertNotIn("renew", schema.get("required", []))
+        self.assertIn("holder, acquire, renew", prompt(direct, "setup"))
 
     def test_an_acquired_setup_reads_no_renew(self):
         result, calls = run(patch={"setup": {"renew": None}})
