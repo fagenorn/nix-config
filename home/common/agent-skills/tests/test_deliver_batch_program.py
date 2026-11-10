@@ -159,6 +159,45 @@ class ArgsTest(unittest.TestCase):
         self.assertEqual([r["issue"] for r in result["table"]], [2, 4])
 
 
+class ReviewSizingTest(unittest.TestCase):
+    """#747: review_sizing is checked, then passed to every child and the relaunch only when on."""
+
+    STOP = {"stage": "task", "task": {"n": 2}, "cont": {"setup": {}}}
+
+    def test_review_sizing_must_be_a_boolean(self):
+        for bad in ("yes", 1, None):
+            with self.subTest(bad=bad):
+                result, calls, _ = run(args=dict(ARGS, review_sizing=bad))
+                self.assertEqual(result, {"stage": "args", "error": "review_sizing must be a boolean"})
+                self.assertEqual(calls, [])
+
+    def test_off_passes_nothing(self):
+        for args in (ARGS, dict(ARGS, review_sizing=False)):
+            with self.subTest(args=args):
+                result, calls, _ = run(args=args, children={"1": self.STOP})
+                self.assertEqual(child(calls, 1)["args"],
+                                 {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready", "lane": "standard"})
+                self.assertNotIn("review_sizing", result["relaunch"])
+
+    def test_on_reaches_the_child_the_relaunch_and_the_resumed_child(self):
+        result, calls, _ = run(args=dict(ARGS, review_sizing=True), children={"1": self.STOP})
+        self.assertEqual(child(calls, 1)["args"], {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready",
+                                                   "lane": "standard", "review_sizing": True})
+        self.assertIs(result["relaunch"]["review_sizing"], True)
+        _, calls, _ = run(args=result["relaunch"], patch={"facts-1": {"claim": {"verdict": "held_by", "by": HOLDER}}})
+        self.assertEqual(child(calls, 1)["args"], {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready",
+                                                   "cont": {"setup": {}}, "review_sizing": True})
+
+    def test_on_reaches_the_standard_rerun_of_an_ineligible_direct_child(self):
+        ineligible = {"stage": "ineligible", "cont": {"setup": {}, "lane": "direct"}}
+        _, calls, _ = run(args=dict(ARGS, review_sizing=True), patch={"facts-1": {"lane": "direct", "why": "small"}},
+                          children={"1": [ineligible, self.STOP]})
+        runs = [c for c in calls if c["label"] == "child-1"]
+        self.assertEqual(len(runs), 2)
+        for c in runs:
+            self.assertIs(c["args"]["review_sizing"], True)
+
+
 class IntakeTest(unittest.TestCase):
     SKIPS = [({"state": "CLOSED"}, "closed"), ({"labels": ["needs-verification"]}, "needs-verification"),
              ({"labels": ["parked"]}, "parked"), ({"labels": ["agent:human-required"]}, "human-required"),
@@ -1681,7 +1720,7 @@ class SourceTest(unittest.TestCase):
     def test_meta_names_the_args(self):
         text = PROGRAM.read_text(encoding="utf-8")
         meta = text[:text.index("\n}\n")]
-        for arg in ("repo_root", "batch_id", "child_script", "issues", "label", "decisions"):
+        for arg in ("repo_root", "batch_id", "child_script", "issues", "label", "decisions", "review_sizing"):
             self.assertIn(arg, meta)
 
     def test_deliver_batch_skill_is_small_and_names_the_program_and_its_args(self):
