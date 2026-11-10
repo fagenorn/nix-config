@@ -343,7 +343,7 @@ const LOCK_SCHEMA = {
 const LAND_PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head: { type: 'string' }, notes: { type: 'string' } }, required: ['pr', 'head'] }
 const LAND_CHECKS_SCHEMA = {
   type: 'object',
-  properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind', 'needs_label'] }, head: { type: 'string' }, required: STRS, passed: STRS, failing: STRS, label: { type: 'string' }, details: { type: 'string' } },
+  properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind', 'needs_label'] }, head: { type: 'string' }, required: STRS, passed: STRS, failing: STRS, pending: STRS, label: { type: 'string' }, details: { type: 'string' } },
   required: ['state', 'head'],
 }
 const RECORD_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' }, head: { type: 'string' }, detail: { type: 'string' } }, required: ['ok'] }
@@ -384,7 +384,8 @@ const land = async (n, ready) => {
   let lockSha = null
   // A move of the lock whose answer may have been lost (P10): the sha it may now be held at, released after lockSha.
   let lockMaybe = null
-  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0 }
+  const PENDING_WAITS = 3
+  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0, pending: 0 }
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
   const clerk = { agentType: 'clerk', model: 'sonnet', effort: 'low' }
@@ -539,41 +540,52 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: 'sonnet', effort: 'high'
     for (;;) {
       c.checks++
       const label = `land-checks-${n}-${c.checks}`
-      const ck = await call(`Wait for the required checks of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head.
+      const ck = await call(`Wait for every check of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head, required or not.
 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${B}, push it. head is git -C ${W} rev-parse HEAD (the full sha).
 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), answer state behind at once with head.
-3. Otherwise wait in this turn for the required checks on head. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection; if neither answers, every check is required. A declared check with no run or status at head yet is pending: keep waiting for it, never treat it as absent or green. gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending) can return early, and its --required list can be partial: never treat a partial list as green.
-4. Answer passed only when every required name has passed on head, with required (the names you used) and passed (the names passing at head). Answer failed with failing (the failing names) and details when a required check failed. Answer needs_label with label and failing when a required check failed only because the PR lacks a label that only a human may apply (do not apply it yourself).
+3. Otherwise wait in this turn until every check on head has completed, required or not: the required checks are the floor, not the bar. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting for it, never treat it as absent or green.
+4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.
 ${RULES}`, label, { ...clerk, schema: LAND_CHECKS_SCHEMA })
       if (!ck) return out('stopped', { stage: 'checks', detail: `${label} returned nothing` })
       if (ck.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: ck.head })
 
-      if (ck.state === 'needs_label') {
+      const failingNames = ck.failing || []
+      const pendingNames = ck.pending || []
+      const state = ck.state === 'behind' || ck.state === 'needs_label' ? ck.state
+        : failingNames.length ? 'failed'
+        : ck.state === 'pending' || pendingNames.length ? 'pending'
+        : ck.state
+
+      if (state === 'needs_label') {
         const names = (ck.failing || []).join(', ')
-        return await ownerAction('needs-label', [`PR #${pr} of issue #${n} needs the label ${ck.label || '(unnamed)'}, which only the owner applies; the failing required checks: ${names || 'unnamed'}.`], 'needs-label', { label: ck.label, failing: ck.failing })
+        return await ownerAction('needs-label', [`PR #${pr} of issue #${n} needs the label ${ck.label || '(unnamed)'}, which only the owner applies; the failing checks: ${names || 'unnamed'}.`], 'needs-label', { label: ck.label, failing: ck.failing })
       }
-      if (ck.state === 'failed') {
+      if (state === 'failed') {
         c.ciFails++
-        if (c.ciFails >= 2) return out('ci-failed', { failing: ck.failing })
-        const fix = await call(`Issue #${n} of ${SLUG}: the required checks of PR #${pr} failed at ${expected}: ${JSON.stringify(ck.failing || [])}. Details: ${ck.details || 'none given'}.
-Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing required checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}). Never weaken, skip or delete a test or check to make it pass. ${IMPL_RETURN}
+        if (c.ciFails >= 2) return out('ci-failed', { failing: failingNames })
+        const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${ck.details || 'none given'}.
+Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}). Never weaken, skip or delete a test or check to make it pass. ${IMPL_RETURN}
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
-        if (!fix || fix.status !== 'done' || !fix.commit || fix.commit === expected) return out('ci-failed', { failing: ck.failing, detail: 'the fix round did not finish' })
+        if (!fix || fix.status !== 'done' || !fix.commit || fix.commit === expected) return out('ci-failed', { failing: failingNames, detail: 'the fix round did not finish' })
         const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-Review this fix for failing required checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(ck.failing || [])}; the implementer's notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
+Review this fix for failing checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(failingNames)}; the implementer's notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
 ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
-        if (!rv || findingsOf(rv).length) return out('ci-failed', { failing: ck.failing, review: rv })
+        if (!rv || findingsOf(rv).length) return out('ci-failed', { failing: failingNames, review: rv })
         expected = fix.commit
         const adv = await advance()
         if (adv) return adv
         continue
       }
-      if (ck.state === 'behind') {
+      if (state === 'behind') {
         const r = await behind()
         if (r) return r
         continue
       }
-      if (ck.state !== 'passed') return out('stopped', { stage: 'checks', detail: `unknown checks state ${ck.state}` })
+      if (state === 'pending') {
+        if (++c.pending >= PENDING_WAITS) return out('stopped', { stage: 'checks-pending', pending: pendingNames })
+        continue
+      }
+      if (state !== 'passed') return out('stopped', { stage: 'checks', detail: `unknown checks state ${ck.state}` })
 
       // D11: a declared check missing from the passed names is never merged.
       const have = ck.passed || []
