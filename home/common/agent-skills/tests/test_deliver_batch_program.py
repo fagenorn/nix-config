@@ -2086,5 +2086,45 @@ class AgentTypeTest(unittest.TestCase):
             self.assertEqual((call["agentType"], call["effort"]), ("clerk", "high"), call["label"])
 
 
+WHOLE_RUN = ("run in full every test file among or covering", "never a single test class",
+             "any fast suite the project declares", "each command and its result")
+
+
+class WholeTestFileLandTest(unittest.TestCase):
+    """#787: the batch's post-loop implementer steps (the first resync's conflict resolution and the CI fix) run whole test files and any fast suite, and report each command and its result."""
+
+    def assert_whole(self, text, files):
+        for needle in WHOLE_RUN + (f"covering {files}",):
+            self.assertIn(needle, text)
+        self.assertNotIn("Run only the tests", text)
+        self.assertNotIn("run only the tests", text)
+
+    def test_the_conflict_resolution_runs_whole_files_and_reports_them(self):
+        _, calls, _ = run()
+        self.assert_whole(prompt(calls, "land-sync-1-1"), "the files the merge changed against its first parent")
+
+    def test_the_ci_fix_runs_whole_files_before_it_pushes(self):
+        _, calls, _ = run(replies={
+            "land-checks-1-1": {"state": "failed", "head": SHA, "failing": ["ci"]},
+            "land-checks-1-2": {"state": "failed", "head": FIX, "failing": ["ci"]}})
+        self.assertIn("land-fix-1", labels(calls))
+        text = prompt(calls, "land-fix-1")
+        self.assert_whole(text, "the files you changed")
+        self.assertIn("push origin", text)
+        self.assertIn("before pushing, run in full every test file", text)
+
+
+class KeptObligationLandTest(unittest.TestCase):
+    """#787: the byte-budget trims left these obligations of the land prompts in place."""
+
+    def test_another_branchs_pr_is_left_untouched(self):
+        _, calls, _ = run()
+        self.assertIn("even when it references this issue; leave it untouched.", prompt(calls, "land-pr-1"))
+
+    def test_a_rerun_must_not_merge_twice(self):
+        _, calls, _ = run()
+        self.assertIn("a re-run must not merge twice.", prompt(calls, "land-merge-1"))
+
+
 if __name__ == "__main__":
     unittest.main()
