@@ -14,7 +14,7 @@ Use the session the user names, else the current one. Read primary sources, not 
 
 - **Claude Code transcripts**: `~/.claude/projects/<cwd with / and . replaced by ->/<session-id>.jsonl`, subagent transcripts beside them.
 - **Codex transcripts**: `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl`.
-- **Workflow evidence**, when the session ran this system's lifecycle: the run ledger and its attempt (`workflow-state`), the task ledger and `progress.md`, review findings, and the issue and PR threads.
+- **Workflow evidence**, when the session ran a delivery program: its run record, review findings, and the issue and PR threads.
 
 Transcripts are large: extract with `jq`/`grep` (user turns, tool calls with their sizes, tool errors, permission denials, retries), then read only the stretches around what you find. Each finding cites a session plus a turn or tool call.
 
