@@ -853,6 +853,20 @@ class CutoverPreflightTest(unittest.TestCase):
         code, report = self.preflight()
         self.assertEqual((code, report["verdict"], report["side"]), (75, "unreadable", "candidate"))
 
+    def test_a_pre_move_candidate_with_the_flat_resolver_is_judged_by_its_own_layout(self):
+        # The recorded cutover candidate predates the domain layout: `agent_tools/resolve_project.py`.
+        self.bridge(f"echo '{BRIDGE_JSON}'")
+        self.world.git(self.world.pusher, "checkout", "-q", CANDIDATE_BRANCH)
+        self.world.git(self.world.pusher, "rm", "-q",
+                       "python/agent_tools/project_contract/resolve_project.py")
+        (self.world.pusher / "python/agent_tools/resolve_project.py").write_text(
+            CANDIDATE_RESOLVER, encoding="utf-8")
+        self.world.git(self.world.pusher, "add", "-A")
+        self.world.git(self.world.pusher, "commit", "-q", "-m", "flat layout")
+        self.world.git(self.world.pusher, "push", "-q", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        code, report = self.preflight()
+        self.assertEqual((code, report["verdict"]), (0, "green"), report)
+
     def test_an_incompatible_candidate_row_is_not_yet(self):
         self.bridge(f"echo '{BRIDGE_JSON}'")
         self.world.git(self.world.pusher, "checkout", "-q", CANDIDATE_BRANCH)
@@ -1265,6 +1279,22 @@ class GuardPolicyFleetTest(unittest.TestCase):
             {"HOME": str(home), "GH_CONFIG_DIR": "/gh", "GIT_CONFIG_GLOBAL": "/dev/null"},
             Path("/c/home"), Path("/c/python"))
         self.assertEqual((kept["GH_CONFIG_DIR"], kept["GIT_CONFIG_GLOBAL"]), ("/gh", "/dev/null"))
+
+    def test_a_pre_move_candidate_with_the_flat_guard_policy_is_derived_by_its_own_layout(self):
+        # The recorded cutover candidate predates the domain layout: `agent_tools/guard_policy.py`.
+        self.world.project("fixture/one", "fagenorn/one")
+        pusher = self.world.tmp / "candidate-pusher"
+        self.world.git(pusher, "rm", "-q", "python/agent_tools/guard/guard_policy.py")
+        (pusher / "python/agent_tools/guard_policy.py").write_text(
+            "import json\nprint(json.dumps({'outcome': 'derived', 'refused': [], 'row': {}}))\n",
+            encoding="utf-8")
+        self.world.git(pusher, "add", "-A")
+        self.world.git(pusher, "commit", "--quiet", "-m", "flat layout")
+        self.world.git(pusher, "push", "--quiet", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"]), (0, "green"), report)
+        self.assertEqual([(r["repository"], r["outcome"]) for r in report["rows"]],
+                         [("fagenorn/one", "derived")])
 
     def test_the_candidates_code_derives_not_the_hosts(self):
         # A candidate whose guard-policy is broken reads unreadable even though the host's
