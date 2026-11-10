@@ -52,7 +52,6 @@ const DEFAULTS = [
   [/^direct-fix$/, DONE],
   [/-codex$/, { available: true, ...PASS }],
   [/^owner-answer$/, { verdict: 'none', comment_id: null, questions: [], decisions: '', renew: { verdict: 'renewed' } }],
-  [/^final-1$/, { ...PASS, renew: { verdict: 'renewed' } }],
   [/review|^final-/, PASS],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],
   [/^ws-check-/, { whitespace_exit: 1, changed_paths: ['src/a.js'] }],
@@ -67,7 +66,7 @@ const DEFAULTS = [
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok' }],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^(pr|merge)$/, ['renew', 'lock']], [/^checks-/, ['renew']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^final-1$/, ['renew']]]
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^(pr|merge)$/, ['renew', 'lock']], [/^checks-/, ['renew']], [/^(impl-\d+|direct-impl)$/, ['renew']]]
 const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)

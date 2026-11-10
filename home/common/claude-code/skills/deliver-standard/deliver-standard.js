@@ -26,7 +26,7 @@ export const meta = {
 // file carries no project literal and defaults no policy value.
 //
 // CLAIM: the claim is a forge-claim claim: acquired before the worktree step, renewed
-// before each stage boundary (the tasks boundary's renew rides in the first implementer call and the final-review boundary's in final-1, #745; a fresh run's setup acquire, or after an already_held acquire the setup's own renew, stands for the plan boundary's renew, #745; a renew that finds the claim ended stops with no cont; one
+// before each stage boundary (the tasks boundary's renew rides in the first implementer call, #745; a fresh run's setup acquire, or after an already_held acquire the setup's own renew, stands for the plan boundary's renew, #745; a renew that finds the claim ended stops with no cont; one
 // that gets no answer stops with a cont whose resume acquires again), released at close-out. A renew or acquire that
 // answers `error` with `transient` (forge-claim's own transport retries ran out) is re-called once, a folded step whole, before it stops (#740).
 //
@@ -325,6 +325,14 @@ const BUILT = present(setup.host) ? `${setup.host}/${HOLDER_ID}` : null
 const earlyCont = () => (CLAIM_TAKEN ? { cont: { setup: { ...setup, ...(BUILT && HOLDER_RE.test(BUILT) ? { holder: BUILT } : {}) }, lane: LANE, plan: null, plan_reviewed: false, done: [], fix_waves: 0, claim_incomplete: true } } : {})
 // Held by another holder: nothing of ours exists yet, so the stop carries no cont.
 if (FOLD_ACQ && (FOLD_ACQ.verdict === 'held_by' || FOLD_ACQ.verdict === 'lost_to')) return { stage: 'claimed', verdict: FOLD_ACQ.verdict, by: FOLD_ACQ.by }
+// The folded renew after an already_held acquire (#745) is graded before any other setup exit, so a setup failure cannot mask a lost renewal.
+// A transient one is left to the owner-answer step, which renews again. Defined before stop(): a stop here carries earlyCont's cont.
+const CLAIM_ENDED = 'the claim was ended (released, or honoured as stale by the owner); start again without cont: setup re-adopts the branch and acquire decides'
+if (SETUP_HELD && !RENEW_RECALL && !(FOLD_RENEW && FOLD_RENEW.verdict === 'renewed')) {
+  return FOLD_RENEW && FOLD_RENEW.verdict === 'not_held'
+    ? { stage: 'claim-lost', at: 'plan', renew: FOLD_RENEW, details: CLAIM_ENDED }
+    : { stage: 'claim-lost', at: 'plan', renew: FOLD_RENEW, ...deadOf(), ...earlyCont() }
+}
 if (!setup.ok) return { stage: 'setup', result: setup, ...deadOf(), ...earlyCont() }
 // A fresh run never closes out a merged PR: it is a possible duplicate delivery, for the owner to judge.
 if (!CONT && setup.merged_pr) return { stage: 'setup', result: setup, duplicate: setup.merged_pr, ...deadOf(), ...earlyCont() }
@@ -559,7 +567,7 @@ const RENEW_FIRST = `First renew the claim: run, alone and exactly, forge-claim 
 const renewed = (r, at) => {
   if (r && r.verdict === 'renewed') return null
   // An ended claim never comes back: no cont, a resume could only stop here again.
-  if (r && r.verdict === 'not_held') return { stage: 'claim-lost', at, renew: r, details: 'the claim was ended (released, or honoured as stale by the owner); start again without cont: setup re-adopts the branch and acquire decides' }
+  if (r && r.verdict === 'not_held') return { stage: 'claim-lost', at, renew: r, details: CLAIM_ENDED }
   claimIncomplete = true
   return stop('claim-lost', { at, renew: r })
 }
@@ -761,9 +769,11 @@ const takeAnswer = answer => {
   return null
 }
 const readAnswer = async () => {
-  const answer = await recall(() => call(`${CTX}
+  // After a transient setup renew this step is the one retry (#740): it is not re-called, as the acquire fallback is not.
+  const askAnswer = () => call(`${CTX}
 ${RENEW_FIRST}
-Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(ANSWER_SCHEMA) }), r => r.renew)
+Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(ANSWER_SCHEMA) })
+  const answer = RENEW_RECALL ? await askAnswer() : await recall(askAnswer, r => r.renew)
   if (!answer) return stop('owner-answer', { result: answer })
   const lost = renewed(answer.renew, 'plan')
   if (lost) return lost
@@ -774,7 +784,7 @@ Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alon
 const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules, planFindingsKept.findings)
 if (ANSWER_NEEDED) {
   // A fresh run's setup already read the answer, and renewed after an already_held acquire; a resume or a transient fold reads it again.
-  const stopped = !CONT && !ACQ_RECALL && !RENEW_RECALL ? (SETUP_HELD ? renewed(FOLD_RENEW, 'plan') : null) || takeAnswer(FOLD_ANSWER) : await readAnswer()
+  const stopped = !CONT && !ACQ_RECALL && !RENEW_RECALL ? takeAnswer(FOLD_ANSWER) : await readAnswer()
   if (stopped) return stopped
 }
 if (RESUME_KEPT && !RESUME_RULES) { plan = null; planFindingsKept = null }
@@ -909,22 +919,19 @@ for (let i = 0; i < plan.tasks.length; i += PER) groups.push(plan.tasks.slice(i,
 chunked = groups.length > 1
 if (SKIP_FINAL) log(`final review passed at ${finalReviewed.head}; skipped`)
 if (!SKIP_REVIEW && !SKIP_FINAL) {
+{
+  const lost = await renew('final-review', 'Final review')
+  if (lost) return lost
+}
 const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package;${EXTRA_RANGES()} this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
 ${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: CODEX }) : Promise.resolve(null)
-// final-1 also renews the claim first (#745); every final reviewer is built here, labelled final-N.
-const finalCall = (g, gi) => call(`${CTX}${gi === 0 ? `\n${RENEW_FIRST}\nThen:` : ''}
+const finals = await parallel(groups.map((g, gi) => () => call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
-Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is actually met, with the test or command that shows it). Report Important or Critical findings only. ${gi === 0 ? 'Apart from that renew, do not' : 'Do not'} edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: gi === 0 ? withRenew(FINDINGS) : FINDINGS })
-const finals = await parallel(groups.map((g, gi) => () => gi === 0 ? recall(() => finalCall(g, gi), r => r.renew) : finalCall(g, gi)))
+Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is actually met, with the test or command that shows it). Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })))
 const codexR = await codexP
-if (finals[0]) {
-  const lost = renewed(finals[0].renew, 'final-review')
-  if (lost) return lost
-}
-if (finals.some(r => !r) || !complete(finals[0], FINDINGS)) return stop('final-review', { details: 'a final reviewer returned nothing', finals })
-delete finals[0].renew
+if (finals.some(r => !r)) return stop('final-review', { details: 'a final reviewer returned nothing', finals })
 let finalFindings = finals.flatMap(findingsOf)
 if (REVIEW_CODE) {
   if (!codexR || !codexR.available) return stop('codex-unavailable', { step: 'code', codex: codexR })
