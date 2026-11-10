@@ -1708,5 +1708,40 @@ class DistributionalGateTest(unittest.TestCase):
         self.assertIn("--gate-version3acceptsonlycutover", text)
 
 
+FIXTURE_DIR = REPO_ROOT / "tests/fixtures/agent-gate-bundle"
+
+
+def load_fixture(name):
+    return json.loads((FIXTURE_DIR / f"{name}-v3-bundle.json").read_text(encoding="utf-8"))
+
+
+class RecomputedCutoverBundlesTest(unittest.TestCase):
+    """Issue 757: the three issue-130 runs recomputed under gate version 3."""
+
+    def test_each_fixture_judges_the_committed_measurements(self):
+        for name in COMMITTED_V2:
+            with self.subTest(name=name):
+                fixture, committed = load_fixture(name), load_committed(name)
+                self.assertEqual((fixture["gate_version"], fixture["bundle_kind"]),
+                                 (3, "cutover"))
+                for key in ("evidence", "identity", "expansion"):
+                    self.assertEqual(fixture[key], committed[key], key)
+                self.assertEqual(gate.verify_bundle(fixture, kind="cutover"), fixture["state"])
+                self.assertEqual([row["case_id"] for row in
+                                  fixture["gates"]["distribution"]["claude"]],
+                                 [case["case_id"] for case in committed["evidence"]["cases"]])
+
+    def test_the_version_three_cli_reproduces_each_fixture(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        for name in COMMITTED_V2:
+            with self.subTest(name=name):
+                fixture = load_fixture(name)
+                code, out, err = run_cli_text(["--trials", str(absolute_trials(tmp, name)),
+                                               "--gate-version", "3", "--kind", "cutover"])
+                self.assertEqual(code, 0 if fixture["state"] == "approved" else 3, err)
+                self.assertEqual(json.loads(out)["bundle_id"], fixture["bundle_id"])
+
+
 if __name__ == "__main__":
     unittest.main()
