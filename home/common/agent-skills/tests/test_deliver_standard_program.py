@@ -4281,7 +4281,6 @@ class PreCommitFocusTest(unittest.TestCase):
                "as the project's standards (/r/docs/standards) name it")
     PASSED = {"state": "passed", "head": FIX, "required": ["ci-tests"]}
     # One scenario per implementer prompt family that interpolates FOCUSED, with the labels it must reach.
-    # The merge sync (sync-N) never carries FOCUSED (plan D5), so it is left out.
     SCENARIOS = (
         ({"replies": {"review-1": TASK_FINDING}}, {"impl-1", "fix-1-1"}),
         ({"replies": {"final-1": FINDING}}, {"fix-wave"}),
@@ -4289,7 +4288,7 @@ class PreCommitFocusTest(unittest.TestCase):
         ({"replies": {"checks-1": RED, "checks-2": PASSED},
           "patch": {"fix-ci": {"start_head": SHA, "commit": FIX}}}, {"fix-ci"}),
         ({"replies": {"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING, "checks-2": PASSED},
-          "patch": CONFLICT}, {"fix-sync-1"}),
+          "patch": CONFLICT}, {"sync-1", "fix-sync-1"}),
         ({"args": DIRECT, "replies": {"direct-review": BAD}}, {"direct-impl", "direct-fix"}),
     )
     FAMILIES = frozenset().union(*(want for _, want in SCENARIOS))
@@ -4301,7 +4300,7 @@ class PreCommitFocusTest(unittest.TestCase):
             patched = dict(scenario, patch={**scenario.get("patch", {}), "setup": {"verification": verification}})
             _, calls = run(**patched)
             prompts = {c["label"]: c["prompt"] for c in calls
-                       if c["agentType"] == "implementer" and not c["label"].startswith("sync-")}
+                       if c["agentType"] == "implementer"}
             self.assertLessEqual(expected, set(prompts), scenario)
             found.update(prompts)
         self.assertLessEqual(self.FAMILIES, set(found))
