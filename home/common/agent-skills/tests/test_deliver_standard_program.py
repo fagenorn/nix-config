@@ -3933,5 +3933,40 @@ class PromptCommandFormTest(unittest.TestCase):
         self.assertEqual(seen, set(self.BODY_READERS))
 
 
+class PlannerReadsTest(unittest.TestCase):
+    """#737: only the plan step may batch-read through Explore agents; every other step keeps the no-subagent rule."""
+
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise")
+    NO_SUBAGENTS = "- Do not dispatch subagents unless this step says so."
+    HARD_RULES = "Hard rules for this step"
+    GRANT = "up to 3 read-only Explore agents"
+    BATCH = "issue independent reads together in one message"
+
+    def test_only_planner_prompts_grant_explore_and_every_ruled_prompt_keeps_the_rule(self):
+        granted, ruled = set(), set()
+        for call in all_calls():
+            text, label = call["prompt"], call["label"]
+            if self.HARD_RULES in text:
+                self.assertIn(self.NO_SUBAGENTS, text, label)
+                ruled.add(label)
+            if label in self.PLANNERS:
+                for needle in (self.GRANT, self.BATCH, "Do not build, prototype or run the change", self.NO_SUBAGENTS):
+                    self.assertIn(needle, text, label)
+                self.assertLess(text.index(self.GRANT), text.index(self.HARD_RULES), label)
+                self.assertLess(text.index(self.BATCH), text.index(self.HARD_RULES), label)
+                granted.add(label)
+            else:
+                self.assertNotIn("Explore", text, label)
+        self.assertEqual(granted, set(self.PLANNERS))
+        self.assertLessEqual({"setup", "impl-1", "pr", "merge"}, ruled)
+
+    def test_the_shared_rules_keep_the_no_subagent_line_and_name_no_grant(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        start = source.index("const BASE_RULES = `")
+        base_rules = source[start:source.index("`", start + len("const BASE_RULES = `"))]
+        self.assertIn(self.NO_SUBAGENTS, base_rules)
+        self.assertNotIn("Explore", base_rules)
+
+
 if __name__ == "__main__":
     unittest.main()
