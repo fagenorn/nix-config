@@ -13,42 +13,46 @@ PACKAGE = REPO_ROOT / "python/agent_tools"
 AREAS_DIR = REPO_ROOT / "docs/areas"
 SHARED = "system"
 
-# Importing area -> dotted modules of other areas it may import. Adding an edge
-# is a reviewed change to this table.
+# Importing area -> dotted modules of other areas it may import, each edge
+# commented with the importing modules. Adding an edge is a reviewed change to
+# this table.
 ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
-    "claims": frozenset({"agent_tools.project_contract.agent_platform"}),
-    "delivery": frozenset({"agent_tools.project_contract.resolve_project"}),
+    "claims": frozenset({
+        "agent_tools.project_contract.agent_platform",  # owner_actions
+    }),
+    "delivery": frozenset({
+        "agent_tools.project_contract.resolve_project",  # lane_triage, issue_branch
+    }),
     "guard": frozenset({
-        "agent_tools.project_contract.adopt_inspection",
-        "agent_tools.project_contract.adopt_verify",
-        "agent_tools.project_contract.agent_platform",
-        "agent_tools.project_contract.resolve_project",
-        "agent_tools.release.forge_adapter",
-        "agent_tools.release.release_profile",
+        "agent_tools.project_contract.adopt_inspection",  # guard_policy, contract_export
+        "agent_tools.project_contract.adopt_verify",  # guard_policy
+        "agent_tools.project_contract.agent_platform",  # guard_policy
+        "agent_tools.project_contract.resolve_project",  # guard_policy, contract_export
+        "agent_tools.release.forge_adapter",  # guard_policy
+        "agent_tools.release.release_profile",  # guard_policy
     }),
     "project_contract": frozenset({
-        "agent_tools.release.release_adapter",
-        "agent_tools.release.release_profile",
-        "agent_tools.delivery.host_admission",
+        "agent_tools.release.release_adapter",  # resolve_project, conformance_checks
+        "agent_tools.release.release_profile",  # resolve_project, conformance_checks
+        "agent_tools.delivery.host_admission",  # conformance_checks
     }),
-    "release": frozenset({"agent_tools.project_contract.resolve_project"}),
+    "release": frozenset({
+        "agent_tools.project_contract.resolve_project",  # release
+    }),
     "verification": frozenset({
-        "agent_tools.project_contract.resolve_project",
-        "agent_tools.project_contract.agent_platform",
-        "agent_tools.claims.forge_markers",
-        "agent_tools.claims.forge_claim",
-        "agent_tools.claims.forge_owner_action",
-        "agent_tools.claims.owner_actions",
-        "agent_tools.guard.push_fixture",
-        "agent_tools.guard.guard_policy",
-        "agent_tools.project_contract.adopt_inspection",
-        "agent_tools.project_contract.adopt_verify",
-        "agent_tools.delivery.agent_gate_bundle",
+        "agent_tools.project_contract.resolve_project",  # verified_tree, verify_pending
+        "agent_tools.project_contract.agent_platform",  # verify_checks, verify_pending
+        "agent_tools.claims.forge_markers",  # verify_facts, verify_issues, verify_owner, verify_run
+        "agent_tools.claims.forge_claim",  # verify_owner
+        "agent_tools.claims.forge_owner_action",  # verify_run
+        "agent_tools.claims.owner_actions",  # verify_pending
+        "agent_tools.guard.push_fixture",  # verify_checks
+        "agent_tools.guard.guard_policy",  # verify_exec
+        "agent_tools.project_contract.adopt_inspection",  # verify_exec
+        "agent_tools.project_contract.adopt_verify",  # verify_exec
+        "agent_tools.delivery.agent_gate_bundle",  # verify_checks
     }),
 }
-
-# Flat modules that have not moved into their area yet; each move removes a name.
-UNMOVED: frozenset[str] = frozenset()
 
 
 def area_packages(areas_dir: Path) -> frozenset[str]:
@@ -117,13 +121,11 @@ def _docstring_only(init: Path) -> bool:
                         and isinstance(body[0].value.value, str))
 
 
-def _structure(root: Path, areas, flat_allowed, unmoved) -> list[str]:
+def _structure(root: Path, areas, flat_allowed) -> list[str]:
     found = []
     flat = {path.stem for path in root.glob("*.py")}
-    for stem in sorted(flat - flat_allowed - unmoved):
+    for stem in sorted(flat - flat_allowed):
         found.append(f"flat module agent_tools.{stem} is not allowed at the top level")
-    for name in sorted(unmoved - flat):
-        found.append(f"unmoved module agent_tools.{name} is no longer flat")
     for package in sorted(d for d in root.iterdir()
                           if d.is_dir() and d.name != "__pycache__" and _has_python(d)):
         name = package.name
@@ -139,7 +141,7 @@ def _structure(root: Path, areas, flat_allowed, unmoved) -> list[str]:
     return found
 
 
-def _import_violations(root, areas, allowed, unmoved) -> list[str]:
+def _import_violations(root, areas, allowed) -> list[str]:
     found = []
     used: set[tuple[str, str]] = set()
 
@@ -154,8 +156,6 @@ def _import_violations(root, areas, allowed, unmoved) -> list[str]:
         parts = list(rel.parts[:-1]) if rel.name == "__init__" else list(rel.parts)
         importer = ".".join(["agent_tools", *parts])
         importer_area = parts[0] if len(parts) > 1 or (path.parent != root) else None
-        if importer_area is None and parts and parts[0] in unmoved:
-            continue
         for line, level, module, names in _imports(ast.parse(path.read_text("utf-8"))):
             if level:
                 found.append(f"{importer}:{line} uses a relative import")
@@ -163,8 +163,6 @@ def _import_violations(root, areas, allowed, unmoved) -> list[str]:
             for target in _targets(root, module, names):
                 target_parts = target.split(".")
                 if len(target_parts) == 1:
-                    continue
-                if area_of(target_parts) is None and target_parts[1] in unmoved:
                     continue
                 target_area = area_of(target_parts)
                 if importer_area is None:
@@ -187,10 +185,10 @@ def _import_violations(root, areas, allowed, unmoved) -> list[str]:
 
 def layout_violations(root: Path, *, areas: frozenset[str],
                       allowed: Mapping[str, frozenset[str]],
-                      flat_allowed: frozenset[str], unmoved: frozenset[str]) -> list[str]:
+                      flat_allowed: frozenset[str]) -> list[str]:
     """Sorted layout messages for an agent_tools package directory; [] when clean."""
-    return sorted(_structure(root, areas, flat_allowed, unmoved)
-                  + _import_violations(root, areas, allowed, unmoved))
+    return sorted(_structure(root, areas, flat_allowed)
+                  + _import_violations(root, areas, allowed))
 
 
 BASE = {
@@ -220,13 +218,12 @@ class SyntheticLayoutTest(unittest.TestCase):
             path.write_text(text, "utf-8")
         return root
 
-    def violations(self, files, *, allowed=None, unmoved=frozenset()):
+    def violations(self, files, *, allowed=None):
         return layout_violations(
             self.tree(files),
             areas=frozenset({"alpha", "beta", "system"}),
             allowed=DEFAULT_ALLOWED if allowed is None else allowed,
-            flat_allowed=frozenset({"__init__", "canonical"}),
-            unmoved=unmoved)
+            flat_allowed=frozenset({"__init__", "canonical"}))
 
     def test_a_clean_tree_has_no_violations(self):
         self.assertEqual(self.violations(BASE), [])
@@ -266,12 +263,6 @@ class SyntheticLayoutTest(unittest.TestCase):
         self.assertEqual(self.violations(files),
                          ["flat module agent_tools.stray is not allowed at the top level"])
 
-    def test_an_unmoved_module_is_exempt_until_it_moves(self):
-        files = {**BASE, "stray.py": "from agent_tools.alpha import b\n"}
-        self.assertEqual(self.violations(files, unmoved=frozenset({"stray"})), [])
-        self.assertEqual(self.violations(files, unmoved=frozenset({"stray", "gone"})),
-                         ["unmoved module agent_tools.gone is no longer flat"])
-
     def test_a_subpackage_that_is_not_an_area_is_refused(self):
         files = {**BASE, "gamma/__init__.py": '"""Gamma."""\n', "gamma/x.py": ""}
         self.assertEqual(self.violations(files),
@@ -309,8 +300,7 @@ class LayoutRuleTest(unittest.TestCase):
         self.assertEqual(
             layout_violations(PACKAGE, areas=area_packages(AREAS_DIR),
                               allowed=ALLOWED_IMPORTS,
-                              flat_allowed=gate_modules(PACKAGE) | {"__init__"},
-                              unmoved=UNMOVED), [])
+                              flat_allowed=gate_modules(PACKAGE) | {"__init__"}), [])
 
     def test_the_areas_are_the_docs_areas(self):
         self.assertEqual(
