@@ -4,8 +4,8 @@ export const meta = {
   whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
-    { title: 'Intake', detail: 'read every issue facts behind one barrier, decide eligibility in code' },
-    { title: 'Deliver', detail: 'lane per eligible issue, then the delivery children' },
+    { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
+    { title: 'Deliver', detail: 'the delivery children' },
     { title: 'Land', detail: 'serial land queue under the cross-host land lock' },
   ],
 }
@@ -158,9 +158,10 @@ const ask = async (pending, label) => {
 const transientError = r => !!r && r.verdict === 'error' && r.transient === true
 const recall = async (make, pick = r => r) => { const r = await make(); return r && transientError(pick(r)) ? make() : r }
 
-// --- Intake: every facts agent runs before any lane agent (one barrier) ---
+// --- Intake: every facts agent answers before any acquire (one barrier) ---
 phase('Intake')
 const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
+const LANES = ['direct', 'standard', 'needs-design']
 const FACTS_SCHEMA = {
   type: 'object',
   properties: {
@@ -171,17 +172,19 @@ const FACTS_SCHEMA = {
     open_pr: { anyOf: [{ type: 'object', properties: { number: { type: 'integer' }, head_branch: { type: 'string' } } }, { type: 'null' }] },
     blockers: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, state: { type: 'string' } }, required: ['issue', 'state'] } },
     decision: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: {} } } },
+    lane: { type: 'string', enum: LANES }, why: { type: 'string' },
   },
-  required: ['state', 'labels', 'claim', 'blockers'],
+  required: ['state', 'labels', 'claim', 'blockers', 'lane'],
 }
 const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git repository at ${REPO}) for a batch delivery with claim holder ${HOLDER}. Change nothing (a git fetch is fine), apart from what forge-claim status itself posts. ${FORGE_TIMEOUT}
-1. gh issue view ${n} --repo ${SLUG} --json state,labels,title,body,createdAt: return state, the label names as labels, and title; keep createdAt for step 7 (it is not returned).
+1. gh issue view ${n} --repo ${SLUG} --json state,labels,title,body,createdAt,comments: return state, the label names as labels, and title; keep createdAt for step 7 and the comments for step 8 (they are not returned).
 2. branch: derive it for this issue from bindings.vcs.branch_pattern (read with resolve-project resolve --repo-root ${REPO}), the slug taken from the title.
 3. claim: run alone and exactly forge-claim status --repo ${SLUG} --issue ${n} --holder ${HOLDER} and return its verdict (free, held_by or stale) and by; on exit 1 or 2 return verdict error.
 4. merged_pr: the number of a merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,body,title), else null. open_pr: {number, head_branch} of an open PR referencing the issue, else null.
 5. blockers: the issues this one is blocked by, from the body's "Blocked by" list and the tracker's issue dependencies, each as {issue, state} with the state from gh issue view.
 6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id and questions.
 7. already_fixed: name the issue's concrete symptom as one literal string taken from its body (an error string, a quoted code literal, or the quoted output of a failing command; never run the failing command). Run git -C ${REPO} fetch origin ${INT}, then git -C ${REPO} grep -n -F '<literal>' origin/${INT} and git -C ${REPO} log origin/${INT} -S'<literal>' --since=<createdAt> --format='%H %s'. Return already_fixed {commit (the full sha of the commit since the issue opened that removed the literal), evidence (the literal and what both commands printed)} only when the grep finds the literal nowhere at origin/${INT} and the log names such a commit; otherwise, or with no concrete literal, return already_fixed null.
+8. lane: invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is. Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
 ${RULES_FOR(REPO, '<branch>')}`
 const releaseClosedPrompt = n => `Issue #${n} of ${SLUG} (the git repository at ${REPO}) is closed and this batch still holds its claim. Release it.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed
@@ -189,7 +192,7 @@ Return its verdict (released on exit 0, not_held (exit 3) when the claim is alre
 ${RULES_FOR(REPO, (FACTS[n] || {}).branch || '<branch>')}`
 
 await parallel(ISSUES.map(n => async () => {
-  FACTS[n] = await ask(agent(factsPrompt(n), { label: `facts-${n}`, phase: 'Intake', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: FACTS_SCHEMA }), `facts-${n}`)
+  FACTS[n] = await ask(agent(factsPrompt(n), { label: `facts-${n}`, phase: 'Intake', agentType: 'clerk', model: 'sonnet', effort: 'medium', schema: FACTS_SCHEMA }), `facts-${n}`)
 }))
 
 // Eligibility is plain JS over the facts, first match wins; null means eligible.
@@ -255,7 +258,7 @@ await parallel(ISSUES.filter(n => rows[n] && rows[n].outcome === 'closed' && rel
 const inBatchBlockers = n => Array.from(new Set(((FACTS[n] || {}).blockers || [])
   .filter(b => b.state === 'OPEN' && ISSUES.includes(b.issue)).map(b => b.issue))).sort((a, b) => a - b)
 
-// A dependency cycle among the issues still to deliver is found here, right after intake and before any lane agent:
+// A dependency cycle among the issues still to deliver is found here, right after intake and before any acquire:
 // an issue is on a cycle when a depth-first walk over in-batch blockers returns to it.
 const onCycle = n => {
   const seen = new Set()
@@ -280,7 +283,6 @@ for (const n of ISSUES) if (!toDeliver.includes(n)) settle[n](rows[n] || { issue
 
 // --- Deliver ---
 phase('Deliver')
-const LANE_SCHEMA = { type: 'object', properties: { lane: { type: 'string', enum: ['direct', 'standard', 'needs-design'] }, why: { type: 'string' } }, required: ['lane'] }
 const ACQUIRE_SCHEMA = {
   type: 'object',
   properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'held_by', 'lost_to', 'error'] }, by: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' }, transient: { type: 'boolean' } },
@@ -689,14 +691,10 @@ const deliverOne = async n => {
   const f = FACTS[n]
   const readopt = readoptable(n)
   let laneName
-  // The lane step; false when it ended the issue (its row is set). A readoptable issue defers it until its PR is found unaccepted.
+  // The lane step; false when it ended the issue (its row is set). It reads the lane facts-n answered. A readoptable issue defers it until its PR is found unaccepted.
   const chooseLane = async () => {
-    const lane = await ask(agent(`You choose the delivery lane of issue #${n} of ${SLUG} (the git repository at ${REPO}). Change nothing in this step.
-Read the issue with its comments (gh issue view ${n} --repo ${SLUG} --comments) and invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is.
-Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
-${RULES_FOR(REPO, f.branch || '<branch>')}`, { label: `lane-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'medium', schema: LANE_SCHEMA }), `lane-${n}`)
-    if (lane === null || lane === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `lane-${n} returned nothing` }; return false }
-    if (lane.lane === 'needs-design') {
+    if (!LANES.includes(f.lane)) { rows[n] = { issue: n, outcome: 'stopped', detail: `facts-${n} returned no lane` }; return false }
+    if (f.lane === 'needs-design') {
       if (readopt) {
         // The claim is already held: give it back, as the row says nothing is left to resume.
         await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) needs a design before it can be delivered. Release the batch claim.
@@ -704,10 +702,10 @@ Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder 
 Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
       }
-      rows[n] = { issue: n, outcome: 'needs-design', lane: lane.lane }
+      rows[n] = { issue: n, outcome: 'needs-design', lane: f.lane }
       return false
     }
-    laneName = lane.lane
+    laneName = f.lane
     return true
   }
   if (CONTS[n]) laneName = CONTS[n].lane || 'standard'
@@ -729,6 +727,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
   let admitted = true
   try {
     if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
+    // The child's setup acquires again and answers already_held (its setup then renews the claim); this acquire is kept because it gates the readopt path (issue 745).
     const acquireStep = () => ask(agent(`You claim issue #${n} of ${SLUG} (the git repository at ${REPO}) for the batch holder ${HOLDER}.
 Run alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${f.branch}
 Return its verdict (acquired, already_held, held_by, lost_to, or error on any other exit), by, comment_id and transient (true only when its JSON line has transient true) from its output. ${FORGE_TIMEOUT} Run nothing else.

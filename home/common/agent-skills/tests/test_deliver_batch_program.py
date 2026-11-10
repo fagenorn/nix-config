@@ -176,12 +176,12 @@ class IntakeTest(unittest.TestCase):
                       {"blockers": [{"issue": 50, "state": "CLOSED"}]}):
             with self.subTest(facts=facts):
                 _, calls, _ = run(patch={"facts-1": facts})
-                self.assertIn("lane-1", labels(calls))
+                self.assertIn("acquire-1", labels(calls))
 
     def test_a_blocker_inside_the_batch_does_not_skip_the_issue(self):
         _, calls, _ = run(args=dict(ARGS, issues=[1, 2]),
                           patch={"facts-1": {"blockers": [{"issue": 2, "state": "OPEN"}]}})
-        self.assertIn("lane-1", labels(calls))
+        self.assertIn("acquire-1", labels(calls))
 
     def test_facts_agent_reads_claim_status_and_the_decision_marker(self):
         _, calls, _ = run()
@@ -189,23 +189,17 @@ class IntakeTest(unittest.TestCase):
         self.assertIn(f"forge-claim status --repo owner/repo --issue 1 --holder {HOLDER}", text)
         self.assertIn("forge-claim owner-action status --repo owner/repo --issue 1 --reason decision", text)
 
-    def test_every_facts_agent_runs_before_any_lane_agent(self):
+    def test_every_facts_agent_answers_before_any_acquire(self):
         _, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]))
         ls = labels(calls)
         self.assertLess(max(ls.index(f"facts-{n}") for n in (1, 2, 3)),
-                        min(ls.index(f"lane-{n}") for n in (1, 2, 3)))
-        self.assertEqual([c["facts_pending"] for c in calls if c["label"].startswith("lane-")], [0, 0, 0])
+                        min(ls.index(f"acquire-{n}") for n in (1, 2, 3)))
+        self.assertEqual([c["facts_pending"] for c in calls if c["label"].startswith("acquire-")], [0, 0, 0])
 
     def test_needs_design_is_reported_and_not_claimed(self):
-        result, calls, _ = run(replies={"lane-1": {"lane": "needs-design", "why": "no criteria"}})
+        result, calls, _ = run(patch={"facts-1": {"lane": "needs-design", "why": "no criteria"}})
         self.assertEqual(row(result, 1)["outcome"], "needs-design")
         self.assertNotIn("acquire-1", labels(calls))
-
-    def test_lane_agent_reads_deliver_direct_eligibility(self):
-        _, calls, _ = run()
-        text = prompt(calls, "lane-1")
-        self.assertIn("deliver-direct", text)
-        self.assertIn("Eligibility", text)
 
     def test_table_keeps_the_given_issue_order(self):
         result, _, _ = run(args=dict(ARGS, issues=[3, 1, 2]), patch={"facts-3": {"state": "CLOSED"}})
@@ -242,6 +236,68 @@ ANSWERED = dict(OPEN, verdict="answered", decisions="Which flag? Chosen: Use the
 FIXED = {"commit": "f" * 40, "evidence": "git grep -F 'boom' finds nothing at origin/dev; ffff removed it"}
 
 
+FACTS_NO_LANE = {"state": "OPEN", "labels": [], "title": "t", "branch": "issue-1-x",
+                 "claim": {"verdict": "free", "by": None}, "merged_pr": None, "open_pr": None, "blockers": [],
+                 "decision": {"verdict": "none", "comment_id": None, "questions": []}}
+UNACCEPTED = {"ok": False, "reason": "unaccepted"}
+NO_LANE = "facts-1 returned no lane"
+
+
+class IntakeLaneTest(unittest.TestCase):
+    """#745: facts-n answers the lane; no separate lane agent runs."""
+
+    def test_facts_answers_the_lane_and_no_lane_agent_runs(self):
+        _, calls, _ = run(patch={"facts-1": {"lane": "direct", "why": "small"}})
+        self.assertFalse([l for l in labels(calls) if l.startswith("lane-")])
+        self.assertEqual(child(calls, 1)["args"]["lane"], "direct")
+        text = prompt(calls, "facts-1")
+        self.assertIn("gh issue view 1 --repo owner/repo --json state,labels,title,body,createdAt,comments", text)
+        self.assertIn("deliver-direct", text)
+        facts = next(c for c in calls if c["label"] == "facts-1")
+        self.assertEqual((facts["agentType"], facts["model"], facts["effort"]), ("clerk", "sonnet", "medium"))
+        self.assertEqual(facts["schema"]["properties"]["lane"]["enum"], ["direct", "standard", "needs-design"])
+        self.assertIn("lane", facts["schema"]["required"])
+
+    def test_a_facts_reply_without_lane_is_a_stopped_row(self):
+        cases = ({"patch": {"facts-1": {"lane": None}}}, {"patch": {"facts-1": {"lane": "fast"}}},
+                 {"replies": {"facts-1": FACTS_NO_LANE}})
+        for case in cases:
+            with self.subTest(case=case):
+                result, calls, _ = run(**case)
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": NO_LANE})
+                self.assertNotIn("acquire-1", labels(calls))
+                self.assertNotIn("child-1", labels(calls))
+                self.assertEqual(result["relaunch"]["issues"], [1])
+
+    def test_a_missing_lane_after_an_unaccepted_readopt_stops_and_keeps_the_claim(self):
+        result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR, "lane": None}},
+                               replies={"readopt-1": UNACCEPTED})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": NO_LANE})
+        ls = labels(calls)
+        self.assertLess(ls.index("acquire-1"), ls.index("readopt-1"))
+        self.assertNotIn("child-1", ls)
+        self.assertNotIn("release-1", ls)
+        self.assertEqual(result["relaunch"]["issues"], [1])
+
+    def test_a_continuation_and_an_accepted_readopt_never_read_the_lane(self):
+        cont = {"setup": {"holder": HOLDER, "branch": "issue-1-x"}, "lane": "direct", "plan": None,
+                "done": [], "partial": 1}
+        own = {"claim": {"verdict": "held_by", "by": HOLDER}, "lane": None}
+        result, calls, _ = run(args=dict(ARGS, conts={"1": cont}), patch={"facts-1": own})
+        self.assertIn("acquire-1", labels(calls))
+        self.assertEqual(child(calls, 1)["args"]["cont"], cont)
+        self.assertNotEqual(row(result, 1).get("detail"), NO_LANE)
+        result, calls, _ = run(patch={"facts-1": dict(own, open_pr=OPEN_PR)})
+        self.assertIn("acquire-1", labels(calls))
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+
+    def test_a_closed_issue_without_lane_keeps_its_final_row(self):
+        result, _, _ = run(patch={"facts-1": {"state": "CLOSED", "lane": None}})
+        self.assertEqual(row(result, 1)["outcome"], "closed")
+
+
 class AlreadyFixedTest(unittest.TestCase):
     def test_already_fixed_symptom_skips_lane_claim_and_child(self):
         result, calls, _ = run(patch={"facts-1": {"already_fixed": FIXED}})
@@ -274,14 +330,14 @@ class AlreadyFixedTest(unittest.TestCase):
         for fixed in (None, {"commit": "", "evidence": "x"}):
             with self.subTest(fixed=fixed):
                 _, calls, _ = run(patch={"facts-1": {"already_fixed": fixed}})
-                self.assertIn("lane-1", labels(calls))
+                self.assertIn("acquire-1", labels(calls))
 
     def test_a_failed_claim_lookup_is_never_already_fixed(self):
         result, calls, _ = run(patch={"facts-1": {"already_fixed": FIXED, "claim": {"verdict": "error", "by": None}}})
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": "claim status"})
         self.assertEqual(result["relaunch"]["issues"], [1])
         self.assertEqual(result["owner_actions"], [])
-        self.assertNotIn("lane-1", labels(calls))
+        self.assertNotIn("acquire-1", labels(calls))
 
     def test_a_merged_pr_wins_over_already_fixed(self):
         result, _, _ = run(patch={"facts-1": {"merged_pr": 5, "already_fixed": FIXED}})
@@ -313,7 +369,7 @@ class ClaimTest(unittest.TestCase):
                 self.assertNotIn("child-1", labels(calls))
 
     def test_child_runs_ready_with_lane_batch_and_script(self):
-        _, calls, _ = run(replies={"lane-1": {"lane": "direct", "why": "small"}})
+        _, calls, _ = run(patch={"facts-1": {"lane": "direct", "why": "small"}})
         c = child(calls, 1)
         self.assertEqual(c["script"], "/s/deliver-standard.js")
         self.assertEqual(c["args"], {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready", "lane": "direct"})
@@ -337,7 +393,7 @@ class ClaimTest(unittest.TestCase):
         ready = {"stage": "ready", "head": SHA, "branch": "issue-1-x", "worktree": "/r/.wt/w-issue-1-x", "verify": [],
                  "tasks": [{"n": 1}], "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
                  "cont": {"setup": {"holder": HOLDER}, "lane": "standard"}}
-        result, calls, _ = run(replies={"lane-1": {"lane": "direct", "why": "small"}}, children={"1": [ineligible, ready]})
+        result, calls, _ = run(patch={"facts-1": {"lane": "direct", "why": "small"}}, children={"1": [ineligible, ready]})
         runs = [c for c in calls if c["label"] == "child-1"]
         self.assertEqual(len(runs), 2)
         self.assertEqual(runs[0]["args"]["lane"], "direct")
@@ -348,7 +404,7 @@ class ClaimTest(unittest.TestCase):
     def test_a_standard_rerun_that_stops_again_forwards_only_its_own_cont(self):
         ineligible = {"stage": "ineligible", "cont": {"setup": {}, "lane": "direct"}}
         again = {"stage": "task", "task": {"n": 1}, "cont": {"setup": {}, "lane": "standard"}}
-        result, _, _ = run(replies={"lane-1": {"lane": "direct", "why": "small"}},
+        result, _, _ = run(patch={"facts-1": {"lane": "direct", "why": "small"}},
                            children={"1": [ineligible, again]})
         self.assertEqual(result["relaunch"]["conts"], {"1": {"setup": {}, "lane": "standard"}})
 
@@ -405,7 +461,7 @@ class ClosedClaimTest(unittest.TestCase):
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": "claim status"})
         self.assertEqual(result["relaunch"]["issues"], [1])
         self.assertNotIn("release-1", labels(calls))
-        self.assertNotIn("lane-1", labels(calls))
+        self.assertNotIn("acquire-1", labels(calls))
 
     def test_a_closed_issue_claimed_by_another_holder_is_not_released(self):
         for verdict in ("held_by", "stale"):
@@ -413,12 +469,12 @@ class ClosedClaimTest(unittest.TestCase):
                 _, calls, _ = run(patch={"facts-1": {"state": "CLOSED", "claim": {"verdict": verdict, "by": "h2/b9"}}})
                 self.assertNotIn("release-1", labels(calls))
 
-    def test_the_intake_release_waits_for_every_facts_agent_and_precedes_every_lane(self):
+    def test_the_intake_release_waits_for_every_facts_agent_and_precedes_every_acquire(self):
         _, calls, _ = run(args=dict(ARGS, issues=[1, 2]),
                           patch={"facts-1": {"state": "CLOSED", "claim": {"verdict": "held_by", "by": HOLDER}}})
         ls = labels(calls)
         self.assertLess(ls.index("facts-2"), ls.index("release-1"))
-        self.assertLess(ls.index("release-1"), ls.index("lane-2"))
+        self.assertLess(ls.index("release-1"), ls.index("acquire-2"))
         self.assertEqual(next(c for c in calls if c["label"] == "release-1")["facts_pending"], 0)
 
     def test_a_child_stop_on_a_closed_issue_releases_and_is_final(self):
@@ -571,7 +627,7 @@ class BreakerTest(unittest.TestCase):
         self.assertIn("child-2", labels(calls))
 
     def test_relaunch_carries_the_decisions_verbatim(self):
-        result, _, _ = run(args=dict(ARGS, issues=[1, 2], decisions={"2": "x"}), replies={"lane-1": None})
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2], decisions={"2": "x"}), replies={"facts-1": None})
         self.assertEqual(result["relaunch"]["decisions"], {"2": "x"})
 
     def test_a_null_cont_free_stop_is_not_terminal_when_no_field_is_null(self):
@@ -592,7 +648,7 @@ class ContTest(unittest.TestCase):
                                patch={"facts-1": {"claim": {"verdict": "held_by", "by": HOLDER}}})
         self.assertEqual(child(calls, 1)["args"], {"repo_root": "/r", "issue": 1, "batch_id": "b1",
                                                    "mode": "ready", "cont": cont})
-        self.assertNotIn("lane-1", labels(calls))
+        self.assertIn("acquire-1", labels(calls))
         self.assertEqual(labels(calls).count("child-1"), 1)
         self.assertEqual(result["stage"], "done")  # Task 4 turns this ready child into a landing
 
@@ -615,7 +671,7 @@ class ContTest(unittest.TestCase):
 
 B = "b" * 40
 FIX = "c0ffee"
-HAPPY = ["facts-1", "lane-1", "acquire-1", "child-1", "land-pr-1", "land-sync-1-1", "land-checks-1-1",
+HAPPY = ["facts-1", "acquire-1", "child-1", "land-pr-1", "land-sync-1-1", "land-checks-1-1",
          "land-merge-1", "land-unlock-1", "close-out-1"]
 
 
@@ -1367,7 +1423,6 @@ class DependencyTest(unittest.TestCase):
                                patch={"facts-1": blocked_by(2), "facts-2": blocked_by(1)})
         for n in (1, 2):
             self.assertEqual((row(result, n)["outcome"], row(result, n)["detail"]), ("blocked", "cycle"))
-            self.assertNotIn(f"lane-{n}", labels(calls))
         self.assertEqual(row(result, 3)["outcome"], "landed")
 
     def test_a_cycle_is_an_owner_action_and_never_a_relaunch(self):
@@ -1424,7 +1479,6 @@ class ReadoptTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertEqual(of(calls, 1)[:4], ["facts-1", "acquire-1", "readopt-1", "land-pr-1"])
         self.assertNotIn("child-1", labels(calls))
-        self.assertNotIn("lane-1", labels(calls))
         text = prompt(calls, "readopt-1")
         for needle in ("41", "issue-1-x", "worktree list --porcelain", "headRefOid", "Acceptance"):
             self.assertIn(needle, text)
@@ -1467,11 +1521,11 @@ class ReadoptTest(unittest.TestCase):
         self.assertEqual(row(first, 1)["outcome"], "ci-failed")
         # Run 2: the PR is open at the unaccepted fix head; readopt refuses to land it as it stands.
         result, calls, _ = run(args=first["relaunch"],
-                               patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}},
+                               patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER},
+                                                  "lane": None}},
                                replies={"readopt-1": {"ok": False, "reason": "unaccepted", "detail": "head c0ffee"}})
         ls = labels(calls)
         self.assertLess(ls.index("readopt-1"), ls.index("child-1"))
-        self.assertNotIn("lane-1", ls)  # the forwarded ready cont keeps its lane
         self.assertEqual(child(calls, 1)["args"]["cont"], first["relaunch"]["conts"]["1"])
         self.assertLess(ls.index("child-1"), ls.index("land-merge-1"))
         self.assertEqual(row(result, 1)["outcome"], "landed")
@@ -1480,9 +1534,15 @@ class ReadoptTest(unittest.TestCase):
         _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}},
                           replies={"readopt-1": {"ok": False, "reason": "unaccepted"}})
         ls = labels(calls)
-        self.assertLess(ls.index("readopt-1"), ls.index("lane-1"))
-        self.assertLess(ls.index("lane-1"), ls.index("child-1"))
+        self.assertLess(ls.index("acquire-1"), ls.index("readopt-1"))
+        self.assertLess(ls.index("readopt-1"), ls.index("child-1"))
+        self.assertEqual(child(calls, 1)["args"]["lane"], "standard")
         self.assertNotIn("cont", child(calls, 1)["args"])
+        result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR, "lane": "needs-design"}},
+                               replies={"readopt-1": {"ok": False, "reason": "unaccepted"}})
+        self.assertEqual(row(result, 1)["outcome"], "needs-design")
+        self.assertIn("release-1", labels(calls))
+        self.assertNotIn("child-1", labels(calls))
 
     def test_a_relaunch_after_needs_label_lands_and_ends_the_marker(self):
         first, _, _ = run(replies={"land-checks-1-1": {"state": "needs_label", "head": SHA, "label": "raise-me",
@@ -1556,7 +1616,7 @@ class SourceTest(unittest.TestCase):
 
 CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
 EXPECTED = {stem: frozenset({kind}) for kind, stems in (
-    (CLERK, ("setup", "facts-", "release-", "lane-", "acquire-", "readopt-", "recover-end-", "ask-", "settle-",
+    (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "recover-end-", "ask-", "settle-",
              "land-unlock-", "land-ask-", "land-record-", "land-pr-", "land-checks-", "land-merge-", "close-out-")),
     (IMPL, ("land-sync-", "land-fix-")),
     (REV, ("land-sync-review-", "land-fix-review-")),
