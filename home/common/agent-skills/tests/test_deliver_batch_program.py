@@ -689,7 +689,7 @@ class BookkeepingCountTest(unittest.TestCase):
         self.assertLessEqual(len(child_book) + len(batch_book), BOOKKEEPING_BASELINE * 0.6, (child_book, batch_book))
 
 
-RENEW_READ = {"verdict", "by", "detail"}
+RENEW_READ = {"verdict", "by", "detail", "transient"}
 FOLDED_READ = {
     "land-pr-1": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "land-merge-1": ({"merged", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
@@ -767,6 +767,49 @@ class FoldTest(unittest.TestCase):
 
 
 class LandTest(unittest.TestCase):
+    NOTE = {"id": "AC2", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
+    CODE = {"id": "AC1", "text": "works", "kind": "code"}
+
+    def test_a_note_is_listed_and_the_issue_closes(self):
+        """#736 AC2: a note is never held; the batch close-out comment lists the note texts."""
+        result, calls, _ = run(children={"1": ready(1, [self.CODE, self.NOTE])},
+                               replies={"close-out-1": {"issue_state": "CLOSED", "released": True, "decision_ended": True,
+                                                        "notes_posted": True, "notes": "ok"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        close = prompt(calls, "close-out-1")
+        self.assertIn(self.NOTE["text"], close)
+        self.assertIn("gh issue comment 1 --repo owner/repo --body-file", close)
+        self.assertLess(close.index("Orchestrator notes for PR 41"), close.index("gh issue close 1 --repo owner/repo"))
+        self.assertNotIn("needs-verification", close)
+        _, calls, _ = run(children={"1": ready(1, [self.CODE, self.NOTE])}, patch={"setup": {"integration_branch": "main"}},
+                          replies={"close-out-1": {"issue_state": "CLOSED", "released": True, "decision_ended": True,
+                                                   "notes_posted": True, "notes": "ok"}})
+        self.assertIn("Closes #1", prompt(calls, "land-pr-1"))
+
+    def test_an_unrecognised_kind_stops_the_landing_before_any_close(self):
+        """#736 DR-002: a typo kind is neither open nor a note, so the landing stops before the PR and never closes."""
+        typo = dict(self.NOTE, kind="evdience")
+        result, calls, _ = run(children={"1": ready(1, [self.CODE, typo])})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "plan"))
+        self.assertNotIn("close-out-1", [c["label"] for c in calls])
+        self.assertNotIn("land-pr-1", [c["label"] for c in calls])
+
+    def test_unposted_notes_stop_the_landing_close_out(self):
+        result, _, _ = run(children={"1": ready(1, [self.CODE, self.NOTE])},
+                           replies={"close-out-1": {"issue_state": "CLOSED", "released": True, "decision_ended": True,
+                                                    "notes_posted": False, "notes": "x"}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))
+
+    def test_a_note_beside_evidence_holds_only_the_evidence(self):
+        evidence = {"id": "AC3", "text": "live", "kind": "evidence"}
+        result, calls, _ = run(children={"1": ready(1, [self.CODE, self.NOTE, evidence])},
+                               replies={"close-out-1": {"issue_state": "OPEN", "released": True, "decision_ended": True,
+                                                        "notes_posted": True, "notes": "held"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed-held")
+        close = prompt(calls, "close-out-1")
+        self.assertIn('how to check each: [{"id":"AC3","text":"live","kind":"evidence"}]', close)
+        self.assertIn(self.NOTE["text"], close)
+
     def test_happy_landing_runs_every_step_in_order(self):
         result, calls, _ = run()
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["pr"]), ("landed", 41))
@@ -783,7 +826,7 @@ class LandTest(unittest.TestCase):
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n",
                       prompt(calls, "land-pr-1"))
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "land-merge-1"))
-        self.assertNotIn("--wait", prompt(calls, "land-merge-1"))
+        self.assertNotIn(" --wait\n", prompt(calls, "land-merge-1"))
         self.assertIn(f"gh pr merge 41 --repo owner/repo --merge --match-head-commit {SHA} --delete-branch",
                       prompt(calls, "land-merge-1"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}", prompt(calls, "land-unlock-1"))
@@ -831,7 +874,7 @@ class LandTest(unittest.TestCase):
             "land-checks-1-2": {"state": "passed", "head": FIX, "passed": ["ci"]}})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertIn(f"--sha {FIX}\n", prompt(calls, "land-record-1-1"))
-        self.assertNotIn("--wait", prompt(calls, "land-record-1-1"))
+        self.assertNotIn(" --wait\n", prompt(calls, "land-record-1-1"))
         self.assertIn(f"--sha {FIX}\n", prompt(calls, "land-merge-1"))
         self.assertIn(f"--match-head-commit {FIX}", prompt(calls, "land-merge-1"))
         ls = labels(calls)
@@ -1149,6 +1192,141 @@ class SpecPrTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "landed-held")
 
 
+class AllChecksLandTest(unittest.TestCase):
+    """#756: the landing waits for every check on head, required or not."""
+
+    def test_land_checks_step_lists_every_check_and_can_answer_pending(self):
+        _, calls, _ = run()
+        checks = prompt(calls, "land-checks-1-1")
+        for argv in ("gh pr checks 41 --repo owner/repo --json name,bucket,link",
+                     "gh api repos/owner/repo/rules/branches/dev"):
+            self.assertIn(argv, checks)
+        schema = schema_of(calls, "land-checks-1-1")
+        self.assertIn("pending", schema["properties"])
+        self.assertIn("pending", schema["properties"]["state"]["enum"])
+
+    def test_a_pending_non_required_check_is_waited_for_before_the_merge(self):
+        result, calls, _ = run(replies={
+            "land-checks-1-1": {"state": "passed", "head": SHA, "required": ["ci"], "passed": ["ci"], "pending": ["e2e"]},
+            "land-checks-1-2": {"state": "passed", "head": SHA, "required": ["ci"], "passed": ["ci", "e2e"]}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        names = labels(calls)
+        self.assertLess(names.index("land-checks-1-2"), names.index("land-merge-1"))
+        self.assertNotIn("land-fix-1", names)
+
+    def test_checks_still_pending_after_three_waits_stop_unmerged(self):
+        waiting = {"state": "pending", "head": SHA, "pending": ["e2e"]}
+        result, calls, _ = run(replies={f"land-checks-1-{k}": waiting for k in (1, 2, 3)})
+        r = row(result, 1)
+        self.assertEqual((r["outcome"], r["stage"], r["pending"]), ("stopped", "checks-pending", ["e2e"]))
+        names = labels(calls)
+        self.assertNotIn("land-merge-1", names)
+        self.assertNotIn("land-checks-1-4", names)
+        self.assertIn("land-unlock-1", names)
+
+    def test_a_failing_non_required_check_in_a_passed_reply_is_never_merged(self):
+        red = {"state": "passed", "head": SHA, "required": ["ci"], "passed": ["ci"], "failing": ["e2e"]}
+        result, calls, _ = run(replies={"land-checks-1-1": red, "land-checks-1-2": dict(red, head=FIX)})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["failing"]), ("ci-failed", ["e2e"]))
+        self.assertIn("e2e", prompt(calls, "land-fix-1"))
+        self.assertNotIn("land-merge-1", labels(calls))
+
+    def test_an_explicit_failed_state_outranks_a_pending_list(self):
+        red = {"state": "failed", "head": SHA, "pending": ["slow"], "details": "e2e failed"}
+        result, calls, _ = run(replies={"land-checks-1-1": red, "land-checks-1-2": dict(red, head=FIX)})
+        r = row(result, 1)
+        self.assertEqual((r["outcome"], r["details"]), ("ci-failed", "e2e failed"))
+        self.assertIn("e2e failed", prompt(calls, "land-fix-1"))
+        self.assertNotIn("land-merge-1", labels(calls))
+
+
+TRANSIENT = {"verdict": "error", "detail": "gh_failed: dial tcp: connect: network is unreachable", "transient": True}
+
+
+class TransientTest(unittest.TestCase):
+    """#740 D6, D7: a transient acquire or renew is re-called once; a still-transient acquire row is re-queued once."""
+
+    def test_a_transient_acquire_is_called_once_more(self):
+        result, calls, _ = run(replies={"acquire-1": [TRANSIENT, {"verdict": "acquired", "comment_id": 7}]})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertEqual(labels(calls).count("acquire-1"), 2)
+
+    def test_a_row_still_transient_is_requeued_behind_the_waiting_issues(self):
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]), patch={"setup": {"max_parallel": 1}},
+                               replies={"acquire-1": [TRANSIENT, TRANSIENT, {"verdict": "acquired", "comment_id": 7}]})
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3)], ["landed"] * 3)
+        ls = labels(calls)
+        third = [i for i, label in enumerate(ls) if label == "acquire-1"][2]
+        self.assertLess(ls.index("acquire-2"), third)
+        self.assertLess(ls.index("acquire-3"), third)
+
+    def test_a_requeued_row_still_transient_stops_at_acquire(self):
+        result, calls, _ = run(replies={"acquire-1": TRANSIENT})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"], row(result, 1)["transient"]),
+                         ("stopped", "acquire", True))
+        self.assertEqual(labels(calls).count("acquire-1"), 4)
+        self.assertNotIn("child-1", labels(calls))
+        self.assertNotIn("release-1", labels(calls))
+        self.assertEqual(result["relaunch"]["issues"], [1])
+
+    def test_contention_and_a_plain_error_are_never_called_again(self):
+        for reply in ({"verdict": "held_by", "by": "h2/b9"}, {"verdict": "error", "detail": "forge down"},
+                      {"verdict": "error", "detail": "forge down", "transient": False}):
+            with self.subTest(reply=reply):
+                result, calls, _ = run(replies={"acquire-1": reply})
+                self.assertEqual(labels(calls).count("acquire-1"), 1)
+                self.assertNotIn("transient", row(result, 1))
+
+    def test_a_transient_folded_renew_recalls_its_landing_step_once(self):
+        cases = {"land-pr-1": {"pr": 41, "head": SHA},
+                 "land-merge-1": {"merged": True, "merge_commit": SHA, "notes": "merged"}}
+        for label, second in cases.items():
+            with self.subTest(label=label, recovers=True):
+                result, calls, _ = run(replies={label: [{"renew": TRANSIENT, "lock": None}, second]})
+                self.assertEqual(row(result, 1)["outcome"], "landed")
+                self.assertEqual(labels(calls).count(label), 2)
+            with self.subTest(label=label, recovers=False):
+                result, calls, _ = run(replies={label: {"renew": TRANSIENT, "lock": None}})
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "renew"))
+                self.assertEqual(labels(calls).count(label), 2)
+
+    def test_a_not_held_folded_renew_is_never_called_again(self):
+        result, calls, _ = run(patch={"land-pr-1": {"renew": {"verdict": "not_held", "by": "h2/b9"}}})
+        self.assertEqual(row(result, 1)["outcome"], "claim-lost")
+        self.assertEqual(labels(calls).count("land-pr-1"), 1)
+
+    def test_acquire_and_renew_ask_for_transient(self):
+        _, calls, _ = run()
+        self.assertEqual(schema_of(calls, "acquire-1")["properties"]["transient"], {"type": "boolean"})
+        for label in ("acquire-1", "land-pr-1", "land-merge-1"):
+            with self.subTest(label=label):
+                self.assertIn("transient", prompt(calls, label))
+
+    def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
+        timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
+        _, calls, _ = run()
+        for label in ("acquire-1", "land-pr-1", "land-merge-1", "land-unlock-1"):
+            with self.subTest(label=label):
+                self.assertIn(timeout, prompt(calls, label))
+
+    RETRIED = re.compile(r"forge-claim (?:acquire|renew|release|status|land acquire|land release|owner-action status)\b")
+
+    def test_every_prompt_that_runs_a_retried_forge_claim_command_gives_the_long_bash_timeout(self):
+        # Two 30 s timeouts plus the backoff use 120 s before the third try starts, so a command that
+        # forge-claim retries needs the long Bash timeout wherever any prompt runs it.
+        timeout = "a Bash timeout of 20 minutes (1200000 ms)"
+        closed = {"facts-1": {"state": "CLOSED", "claim": {"verdict": "held_by", "by": HOLDER}}}
+        seen = set()
+        for patch in ({}, closed):
+            _, calls, _ = run(patch=patch)
+            for call in calls:
+                if call["kind"] == "agent" and self.RETRIED.search(call["prompt"]):
+                    seen.add(call["label"])
+                    with self.subTest(label=call["label"]):
+                        self.assertIn(timeout, call["prompt"])
+        self.assertTrue({"facts-1", "release-1"} <= seen, seen)
+
+
 class LandOrderTest(unittest.TestCase):
     """#677: the land lock is taken, waiting, before the first resync, held through the merge,
     and the last held sha is released after it and on a stop."""
@@ -1192,7 +1370,7 @@ class LandOrderTest(unittest.TestCase):
         self.assertLess(ls.index("land-sync-1-1"), ls.index("land-record-1-1"))
         self.assertLess(ls.index("land-record-1-1"), ls.index("land-checks-1-1"))
         self.assertIn(f"--sha {B}\n", prompt(calls, "land-record-1-1"))
-        self.assertNotIn("--wait", prompt(calls, "land-record-1-1"))
+        self.assertNotIn(" --wait\n", prompt(calls, "land-record-1-1"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {B}",
                       prompt(calls, "land-unlock-1"))
 
@@ -1288,6 +1466,31 @@ OPEN_PR = {"number": 41, "head_branch": "issue-1-x"}
 
 
 class ReadoptTest(unittest.TestCase):
+    def test_the_readopt_schema_accepts_a_note_row(self):
+        """#736: a PR body Acceptance row of kind note readopts."""
+        _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}})
+        kinds = schema_of(calls, "readopt-1")["properties"]["acceptance"]["items"]["properties"]["kind"]["enum"]
+        self.assertEqual(kinds, ["code", "evidence", "human", "note"])
+
+    def test_a_readopted_note_reaches_the_close_out_and_the_issue_closes(self):
+        """#736: the clerk is told it may return a note, and a readopted note is listed, never held."""
+        note = {"id": "AC2", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
+        acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, note]
+        result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}, "readopt-1": {"acceptance": acceptance}},
+                               replies={"close-out-1": {"issue_state": "CLOSED", "released": True, "decision_ended": True,
+                                                        "notes_posted": True, "notes": "ok"}})
+        kinds = schema_of(calls, "readopt-1")["properties"]["acceptance"]["items"]["properties"]["kind"]["enum"]
+        text = prompt(calls, "readopt-1")
+        clause = text[text.index("kind ("):]
+        clause = clause[:clause.index(")")]
+        for kind in kinds:
+            self.assertIn(kind, clause)
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        close = prompt(calls, "close-out-1")
+        self.assertIn(note["text"], close)
+        self.assertIn("gh issue close 1 --repo owner/repo", close)
+        self.assertNotIn("needs-verification", close)
+
     def test_an_open_pr_of_the_branch_lands_without_lane_or_child(self):
         result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}})
         self.assertEqual(row(result, 1)["outcome"], "landed")

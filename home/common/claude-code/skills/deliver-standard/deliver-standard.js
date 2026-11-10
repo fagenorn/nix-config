@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Tasks', detail: 'implement and review each task' },
     { title: 'Final review', detail: 'whole-range review and fix wave' },
     { title: 'Verify', detail: 'declared verification once, after the fix wave' },
-    { title: 'Ship', detail: 'PR, land lock, sync, required checks, merge, release, close out' },
+    { title: 'Ship', detail: 'PR, land lock, sync, checks, merge, release, close out' },
   ],
 }
 
@@ -27,7 +27,8 @@ export const meta = {
 //
 // CLAIM: the claim is a forge-claim claim: acquired before the worktree step, renewed
 // before each stage boundary (a renew that finds the claim ended stops with no cont; one
-// that gets no answer stops with a cont whose resume acquires again), released at close-out.
+// that gets no answer stops with a cont whose resume acquires again), released at close-out. A renew or acquire that
+// answers `error` with `transient` (forge-claim's own transport retries ran out) is re-called once, a folded step whole, before it stops (#740).
 //
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
@@ -40,11 +41,11 @@ export const meta = {
 // is already merged, the re-adopt goes straight to close-out; that PR is the delivery's own only when it is cont.pr or carries a commit of cont.done (#752). A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
 // sync merge and its acceptance drops the marker. A result also carries dead_agents,
-// the labels of agents that returned nothing or threw, when any did. A red required check, and a sync-review
+// the labels of agents that returned nothing or threw, when any did. A red check, and a sync-review
 // finding, each get one fix wave per delivery (an implementer with a regression test, then a fresh reviewer); a second one stops with cont.
 //
 // LAND: ship opens the PR at the verified head, takes the cross-host land lock of the integration branch with --wait
-// (the CLI does the waiting), then syncs, pushes and moves the lock after every head change, waits for the required checks,
+// (the CLI does the waiting), then syncs, pushes and moves the lock after every head change, waits for every check on head (issue 756),
 // re-checks the lock once, merges and releases it; the lock is released on every stop after it was taken, and a release that
 // fails is reported as lock_unreleased on the result (#677).
 //
@@ -73,6 +74,8 @@ if (!(CONT && CONT.setup && CONT.setup.holder)) {
 // A fresh run, or a resume whose claim stopped part way, runs the (idempotent) claim step.
 const CLAIMING = !CONT || !!CONT.claim_incomplete
 
+// forge-claim retries a transport error itself (#740), up to 150 s in a hanging outage, above the Bash tool's 120 s default.
+const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms): forge-claim retries a forge outage itself before it prints its one JSON line.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
 - Work only in the worktree path you are given. Never commit in the shared checkout. Never git stash. Never sed -i (use python for edits).
@@ -95,7 +98,7 @@ const PLAN_REVIEW = {
   ...FINDINGS,
   properties: {
     ...FINDINGS.properties,
-    findings: { ...FINDINGS.properties.findings, items: { ...FINDINGS.properties.findings.items, properties: { ...FINDINGS.properties.findings.items.properties, rule: { type: 'string', enum: ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8'] } } } },
+    findings: { ...FINDINGS.properties.findings, items: { ...FINDINGS.properties.findings.items, properties: { ...FINDINGS.properties.findings.items.properties, rule: { type: 'string', enum: ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9'] } } } },
   },
 }
 const CODEX = {
@@ -155,12 +158,12 @@ const CLAIM_SCHEMA = {
 }
 const ACQUIRE_SCHEMA = {
   type: 'object',
-  properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'held_by', 'lost_to', 'error'] }, by: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' } },
+  properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'held_by', 'lost_to', 'error'] }, by: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' }, transient: { type: 'boolean' } },
   required: ['verdict'],
 }
 const RENEW_SCHEMA = {
   type: 'object',
-  properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' } },
+  properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' }, transient: { type: 'boolean' } },
   required: ['verdict'],
 }
 // A folded step (#716) returns its own result plus the claim renew it ran first as a required nested member.
@@ -170,6 +173,9 @@ const SETUP_FOLDED = { ...SETUP_SCHEMA, properties: { ...SETUP_SCHEMA.properties
 const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, renew: RENEW_SCHEMA, ...extra }, required: ['renew'] })
 // A reply is complete when every member the schema requires is present and not null (a folded schema requires only its renew).
 const complete = (r, schema) => !!r && schema.required.every(k => r[k] !== undefined && r[k] !== null)
+// A renew or acquire that ran out of forge-claim's transport retries is re-called once (#740); the second reply stands whatever it is.
+const transientError = r => !!r && r.verdict === 'error' && r.transient === true
+const recall = async (make, pick = r => r) => { const r = await make(); return r && transientError(pick(r)) ? make() : r }
 const ANSWER_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: { type: 'object' } }, decisions: { type: 'string' } }, required: ['verdict'] }
 const findingsOf = r => r.findings.filter(f => f.severity !== 'minor')
 const present = v => v !== undefined && v !== null && v !== ''
@@ -301,7 +307,7 @@ ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} bef
 3. After git -C ${REPO} fetch origin, re-adopt instead of refusing when the work already exists. ${EXISTING_READ('<branch>', '<worktree_path>')}
 4. Read the issue and the code at origin/<integration_branch>: if the issue no longer applies (already fixed or obsolete), comment the evidence on the issue and refuse with reason no-longer-applies. Otherwise return in details, in a few lines, what still applies, where (files and symbols) and what already exists.
 5. Only when steps 1 to 4 found no refusal, claim the issue. Run, alone and exactly: forge-claim acquire --repo <slug> --issue ${ISSUE} --holder <host>/${HOLDER_ID} --branch <branch>
-It prints one JSON line and adds the in-progress label itself. Return <host>/${HOLDER_ID} as holder, and its verdict (error, with detail, on exit 1 or 2), by and comment_id as acquire. When the verdict is neither acquired nor already_held, stop here: run no worktree command and return ok=true with every field above, holder and acquire.
+It prints one JSON line and adds the in-progress label itself. ${FORGE_TIMEOUT} Return <host>/${HOLDER_ID} as holder, and its verdict (error, with detail, on exit 1 or 2), by, comment_id and transient (true only when its JSON line has transient true) as acquire. When the verdict is neither acquired nor already_held, stop here: run no worktree command and return ok=true with every field above, holder and acquire.
 6. Set up the worktree, each command in its own Bash call. An earlier attempt may have done part of this: skip a step already done (the worktree already at <worktree_path> on branch <branch>; the plan directory already there). From the existing you returned: when existing.worktree is true, adopt <worktree_path> as it is and run no worktree command; else when existing.local_branch is true, git -C ${REPO} worktree add <worktree_path> <branch> (adopt the local branch); else when existing.remote_branch is true, git -C ${REPO} worktree add --no-track -b <branch> <worktree_path> origin/<branch> (only the remote branch exists: adopt it); else git -C ${REPO} worktree add --no-track -b <branch> <worktree_path> origin/<integration_branch>. Never reset, clean, restore or stash anything in it. base_sha (full sha) is git -C <worktree_path> merge-base origin/<integration_branch> HEAD for an adopted branch, else the origin/<integration_branch> sha you branched from. plan_dir is <git -C <worktree_path> rev-parse --absolute-git-dir>/deliver-standard; create it. It lives in the worktree's git dir, outside the tree, so the plan never enters a commit.
 7. Return ok=true with every field above, holder and acquire, and claim: ok, worktree (<worktree_path>), base_sha and plan_dir. Once the claim step ran, keep ok true: report a worktree failure only as claim with ok=false, the reason and what you already did.
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: CONT ? SETUP_SCHEMA : SETUP_FOLDED })
@@ -313,6 +319,7 @@ const FOLD_ACQ = !CONT && setup.acquire ? setup.acquire : null
 const FOLD_CLAIM = !CONT && setup.claim ? setup.claim : null
 const FOLD_HOLDER = !CONT ? setup.holder : undefined
 if (!CONT) { delete setup.holder; delete setup.acquire; delete setup.claim }
+const ACQ_RECALL = !CONT && transientError(FOLD_ACQ)
 const CLAIM_TAKEN = !!(FOLD_ACQ && (FOLD_ACQ.verdict === 'acquired' || FOLD_ACQ.verdict === 'already_held'))
 const BUILT = present(setup.host) ? `${setup.host}/${HOLDER_ID}` : null
 // Every stop after the folded claim was taken keeps a cont that finishes it on resume, whatever fields are missing (stop() is not defined yet).
@@ -373,7 +380,7 @@ let fixWaves = (CONT && CONT.fix_waves) || 0
 let finalReviewed = (CONT && CONT.final_reviewed) || null
 // The stages between a sync merge and its acceptance: a stop there must not carry a marker over the unreviewed merge.
 const SYNC_WINDOW = ['sync', 'sync-review', 'sync-fix']
-// Ship fix waves already spent (a red required check, a sync-review finding): one each per delivery, carried through a resume.
+// Ship fix waves already spent (a red check, a sync-review finding): one each per delivery, carried through a resume.
 let checksFixes = (CONT && CONT.checks_fixes) || 0
 let syncFixes = (CONT && CONT.sync_fixes) || 0
 // The verified head, results and verification contract of a ready stop; carried until a resume finds the head moved; its results are reused only under the same contract.
@@ -397,7 +404,7 @@ if (CONT && setup.dirty && !setup.merged_pr && partial === undefined) {
 const SLUG = setup.slug, INT = setup.integration_branch, STRATEGY = setup.merge_strategy
 // The land lock command, its return sentence and the conditional second release, one line each, byte for byte the same as deliver-batch.js (#716).
 const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
-const LOCK_RETURN = 'Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output.'
+const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
 const UNSET = setup.unset_env.length ? `unset ${setup.unset_env.join(' ')} && ` : ''
 let GRANTS = []
@@ -417,6 +424,13 @@ const commandOutside = c => {
   return command !== null && !VERIFY_IDS.includes(command)
 }
 
+// A note is the orchestrator's own observation (R9): never held, never graded. Only these kinds keep an issue open after the merge.
+const OPEN_KINDS = ['evidence', 'human']
+const isOpen = a => !!(a && OPEN_KINDS.includes(a.kind))
+// Closure is never inferred from the absence of a kind: every row must be a recognised kind before anything ships or closes (#736).
+const ACCEPT_KINDS = ['code', 'evidence', 'human', 'note']
+const badKinds = acceptance => acceptance.filter(a => !(a && ACCEPT_KINDS.includes(a.kind))).map(a => (a && a.id) || null)
+
 const RUN_OK = r => !!(r && r.ran === true && r.exit === 0)
 const LINT_V = { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array' } } }
 const RUN_V = { type: 'object', properties: { ran: { type: 'boolean' }, exit: { type: 'integer' } }, required: ['ran', 'exit'] }
@@ -433,18 +447,21 @@ const covers = (checks, ids) => ids.filter(id => !checks.some(c => c && c.ac ===
 const closeOut = async (PR, mergeCommit, W, prHead) => {
   const acceptance = plan ? plan.acceptance : null
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
-  const allCode = acceptance.every(a => a.kind === 'code')
-  const openCriteria = acceptance.filter(a => a.kind !== 'code')
+  const unknown = badKinds(acceptance)
+  if (unknown.length) return stop('close-out', { pr: PR, details: 'merged, but a plan criterion has a kind that is not code, evidence, human or note; close out by hand', bad_kinds: unknown })
+  const noHold = !acceptance.some(isOpen)
+  const openCriteria = acceptance.filter(isOpen)
+  const notes = acceptance.filter(a => a && a.kind === 'note')
   // Ship regrades the code rows for every plan; a plan with a non-code row is then held by the acceptance-planning rules' "Linting a hold" procedure.
   const merged = mergeCommit ? mergeCommit : `read from gh pr view ${PR} --repo ${SLUG} --json mergeCommit,headRefOid`
-  const heldBlock = allCode ? '' : `
+  const heldBlock = noHold ? '' : `
 4. Read the issues this one blocks: gh api repos/${SLUG}/issues/${ISSUE}/dependencies/blocking (their numbers, returned as blocks).
 5. When blocks is non-empty, move each human criterion into its own new issue that blocks no other issue (forge-issue create --repo ${SLUG}, its body naming #${ISSUE}), hold that issue by step 6 with only that criterion's check (no --blocks flag; its once-run uses --issue <child>), and return one split entry per moved criterion with its issue, block, lint, verify_run and issue_state.
-6. For the criteria left (non-code, not split): none left means close #${ISSUE} with a comment naming the evidence and the split issues. Otherwise assemble one hold comment: a line per criterion, then exactly one \`\`\`verify fence holding {"v": 1, "merge": <the merge commit>, "checks": [...]} built from each criterion's verify member with every occurrence of the base sha ${setup.base_sha} replaced by the merge commit (a criterion without a verify member gets one written per ~/.agents/standards/acceptance-planning.md; an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe). Write it to a file outside any work tree and run verify-pending lint --input <file> --repo-root ${REPO} --pr-head ${prHead || '<the headRefOid read in step 1>'} --pr-branch ${setup.branch} plus one --pr-workflow <name> per distinct workflow of gh pr checks ${PR} --repo ${SLUG} --json workflow and one --blocks <n> per blocked issue. On refusal post nothing and return its verdict as lint. Otherwise, when no hold comment with a verify fence exists yet, gh issue comment ${ISSUE} --repo ${SLUG} --body-file <file> (when one exists, post nothing: write its fence JSON to the file and lint that, so lint is still returned), add the needs-verification label (create it if missing), then run alone, once, even when an earlier attempt ran it: verify-pending run --host ${setup.host} --repo ${SLUG} --issue ${ISSUE}. Return block (the posted JSON), lint, verify_run (ran, exit) and issue_state read back from the tracker.`
+6. For the criteria left (evidence or human, not split): none left means close #${ISSUE} with a comment naming the evidence and the split issues. Otherwise assemble one hold comment: a line per criterion, then exactly one \`\`\`verify fence holding {"v": 1, "merge": <the merge commit>, "checks": [...]} built from each criterion's verify member with every occurrence of the base sha ${setup.base_sha} replaced by the merge commit (a criterion without a verify member gets one written per ~/.agents/standards/acceptance-planning.md; an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe). Write it to a file outside any work tree and run verify-pending lint --input <file> --repo-root ${REPO} --pr-head ${prHead || '<the headRefOid read in step 1>'} --pr-branch ${setup.branch} plus one --pr-workflow <name> per distinct workflow of gh pr checks ${PR} --repo ${SLUG} --json workflow and one --blocks <n> per blocked issue. On refusal post nothing and return its verdict as lint. Otherwise, when no hold comment with a verify fence exists yet, gh issue comment ${ISSUE} --repo ${SLUG} --body-file <file> (when one exists, post nothing: write its fence JSON to the file and lint that, so lint is still returned), add the needs-verification label (create it if missing), then run alone, once, even when an earlier attempt ran it: verify-pending run --host ${setup.host} --repo ${SLUG} --issue ${ISSUE}. Return block (the posted JSON), lint, verify_run (ran, exit) and issue_state read back from the tracker.`
   const held = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Hold the issue's acceptance after the merge, by ~/.agents/standards/acceptance-planning.md (its "Linting a hold" section is the procedure). Skip the posting steps an earlier attempt already finished (an existing hold comment with a verify fence, the label, a split issue already filed and held for that criterion), but never skip the evidence you return: lint and verify_run are always fresh results of this attempt, so on such a retry take block from the posted verify fence, lint that block, run the once-run, and return all three. Each command in its own Bash call:
 1. Run git -C ${REPO} fetch origin. Merge commit: ${merged}${mergeCommit ? '' : ' (and read headRefOid, the PR head)'}. Confirm git -C ${REPO} cat-file -e <merge commit>^{commit} succeeds and return the result as merge_commit_local; if it fails, stop here. Criteria: ${JSON.stringify(acceptance)}
-2. Regrade each code criterion once against the merge commit and the PR's passed required checks. Return the unmet ids as code_unmet and, if any, stop here: post nothing and add no label.
-3. ${allCode ? 'Every criterion is of kind code: post nothing, add no label; return issue_state read from the tracker.' : 'The criteria left are not of kind code. Read gh issue view ' + ISSUE + ' --repo ' + SLUG + ' --json state. When it already shows CLOSED before this attempt posts or runs anything, return already_closed true and issue_state CLOSED, post nothing, add no label and run no verify-pending command for #' + ISSUE + ' itself (step 6 is skipped); steps 4 and 5 still apply, so a split issue an earlier attempt filed is recovered and returned with its lint and a fresh once-run. Otherwise return already_closed false and continue with steps 4 to 6.'}${heldBlock}
+2. Regrade each code criterion once against the merge commit and the PR's passed required checks; a note criterion is the orchestrator's own observation and is never regraded, held or checked. Return the unmet ids as code_unmet and, if any, stop here: post nothing and add no label.
+3. ${noHold ? 'Every criterion is of kind code or note: post nothing, add no label; return issue_state read from the tracker.' : 'Some criteria are of kind evidence or human. Read gh issue view ' + ISSUE + ' --repo ' + SLUG + ' --json state. When it already shows CLOSED before this attempt posts or runs anything, return already_closed true and issue_state CLOSED, post nothing, add no label and run no verify-pending command for #' + ISSUE + ' itself (step 6 is skipped); steps 4 and 5 still apply, so a split issue an earlier attempt filed is recovered and returned with its lint and a fresh once-run. Otherwise return already_closed false and continue with steps 4 to 6.'}${heldBlock}
 ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: HOLD_SCHEMA })
   if (!held) return stop('hold', { pr: PR })
   if (held.merge_commit_local !== true) return stop('hold', { pr: PR, hold: held })
@@ -452,18 +469,21 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'cl
   if (held.code_unmet.length) return stop('code-unmet', { pr: PR, code_unmet: held.code_unmet })
   // An issue the clerk found closed before the hold posted or ran anything has no parent evidence to check. One the once-run closed is not that case: its evidence is still validated. Split children are checked either way.
   const closedBefore = held.already_closed === true && held.issue_state === 'CLOSED'
-  if (!allCode) {
+  if (!noHold) {
     if (!Array.isArray(held.blocks) || !Array.isArray(held.split)) return stop('hold', { pr: PR, hold: held })
     const splitIds = held.split.map(x => x && x.ac)
     if (held.blocks.length) {
       const missing = acceptance.filter(a => a.kind === 'human' && !splitIds.includes(a.id)).map(a => a.id)
       if (missing.length) return stop('hold', { pr: PR, hold: held, missing_split: missing })
     }
-    const badSplit = held.split.filter(x => !(x && x.lint && x.lint.ok === true && RUN_OK(x.verify_run) && STATES.includes(x.issue_state) && x.block && Array.isArray(x.block.checks) && covers(x.block.checks, [x.ac]).length === 0 && !x.block.checks.some(commandOutside))).map(x => (x && x.ac) || null)
+    const noteIds = notes.map(a => a.id)
+    const badSplit = held.split.filter(x => !(x && !noteIds.includes(x.ac) && x.lint && x.lint.ok === true && RUN_OK(x.verify_run) && STATES.includes(x.issue_state) && x.block && Array.isArray(x.block.checks) && covers(x.block.checks, [x.ac]).length === 0 && !x.block.checks.some(c => commandOutside(c) || (c && noteIds.includes(c.ac))))).map(x => (x && x.ac) || null)
     if (badSplit.length) return stop('hold', { pr: PR, hold: held, bad_split: badSplit })
     const remaining = openCriteria.filter(a => !splitIds.includes(a.id))
     if (remaining.length && !closedBefore) {
       if (!(held.lint && held.lint.ok === true) || !RUN_OK(held.verify_run) || !held.block || !Array.isArray(held.block.checks)) return stop('hold', { pr: PR, hold: held })
+      const noteChecks = held.block.checks.filter(c => c && noteIds.includes(c.ac)).map(c => c.ac)
+      if (noteChecks.length) return stop('hold', { pr: PR, hold: held, note_checks: noteChecks })
       const uncovered = covers(held.block.checks, remaining.map(a => a.id))
       if (uncovered.length) return stop('hold', { pr: PR, hold: held, missing_checks: uncovered })
       const outside = held.block.checks.filter(commandOutside)
@@ -474,12 +494,12 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'cl
   const co = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
 1. ${W ? `If ${W} still exists: git -C ${REPO} worktree remove ${W} (it also removes the plan directory). ` : ''}git -C ${REPO} fetch origin; if the checkout ${REPO} is clean and on ${INT}, git -C ${REPO} merge --ff-only origin/${INT}; then, if the local branch ${setup.branch} exists, git -C ${REPO} branch -d ${setup.branch}. If -d refuses, leave the branch and report it (never -D).
 2. End the decision prompts: run alone, exactly, forge-claim owner-action end --repo ${SLUG} --issue ${ISSUE} --reason decision (a verdict none is fine); return decision_ended true when it exits 0.
-3. Release the claim: run alone, exactly, forge-claim release --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --reason done. It prints one JSON line and removes the in-progress label when no other claim remains; released is true only for verdict released.
-4. ${allCode ? `Every criterion is of kind code. Read gh issue view ${ISSUE} --repo ${SLUG} --json state; if it is still open (${INT === setup.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run gh issue close ${ISSUE} --repo ${SLUG} --comment 'Delivered by PR ${PR} into ${INT}.'` : 'The hold step settled the issue state and labels; change neither.'}
+3. Release the claim: run alone, exactly, forge-claim release --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --reason done. It prints one JSON line and removes the in-progress label when no other claim remains; released is true only for verdict released. ${FORGE_TIMEOUT}
+${notes.length ? `4. Unless a comment starting Orchestrator notes for PR ${PR} already exists on #${ISSUE} (an earlier attempt), write to a file outside any work tree a comment whose first line is Orchestrator notes for PR ${PR} (observations the orchestrator records itself; not graded, not held): and then one line <id>: <text> per note of ${JSON.stringify(notes.map(a => ({ id: a.id, text: a.text })))}, and post it with gh issue comment ${ISSUE} --repo ${SLUG} --body-file <file>. Return notes_posted true once that comment exists.\n` : ''}${notes.length ? 5 : 4}. ${noHold ? `Every criterion is of kind code or note. Read gh issue view ${ISSUE} --repo ${SLUG} --json state; if it is still open (${INT === setup.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run gh issue close ${ISSUE} --repo ${SLUG} --comment 'Delivered by PR ${PR} into ${INT}.'` : 'The hold step settled the issue state and labels; change neither.'}
 Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, decision_ended, released and notes.
-${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state', 'notes'] } })
-  const want = allCode ? 'CLOSED' : held.issue_state
-  if (!co || co.issue_state !== want || co.decision_ended !== true || co.released !== true) return stop('close-out', { pr: PR, close_out: co, expected_issue_state: want })
+${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes_posted: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state', 'notes'] } })
+  const want = noHold ? 'CLOSED' : held.issue_state
+  if (!co || co.issue_state !== want || co.decision_ended !== true || co.released !== true || (notes.length && co.notes_posted !== true)) return stop('close-out', { pr: PR, close_out: co, expected_issue_state: want })
   return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, tasks: taskLog, acceptance, fix_waves: fixWaves }
 }
 
@@ -497,8 +517,9 @@ for (const k of ['plan', 'code']) {
 const REVIEW_CODE = RS.code === 'available' && setup.review && setup.review.code ? setup.review.code : null
 const REVIEW_PLAN = RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
 
-// A fresh run's setup already ran the claim and the worktree: validate its nested results. A claim_incomplete resume runs them itself.
-if (!CONT) {
+// A fresh run's setup already ran the claim and the worktree: validate its nested results. A claim_incomplete resume runs them itself,
+// and so does a fresh run whose folded acquire was transient (its acquire step runs once more, then the worktree).
+if (!CONT && !ACQ_RECALL) {
   if (!CLAIM_TAKEN) { claimIncomplete = true; return stop('claim', { result: FOLD_ACQ }) }
   if (!FOLD_CLAIM || !FOLD_CLAIM.ok || !present(FOLD_CLAIM.worktree) || !present(FOLD_CLAIM.base_sha) || !present(FOLD_CLAIM.plan_dir)) { claimIncomplete = true; return stop('claim', { result: FOLD_CLAIM }) }
   Object.assign(setup, { worktree: FOLD_CLAIM.worktree, base_sha: FOLD_CLAIM.base_sha, plan_dir: FOLD_CLAIM.plan_dir })
@@ -510,9 +531,10 @@ if (!CONT) {
 } else if (CLAIMING) {
   // This run's own setup report, never an earlier run's: a failed worktree step may have left the branch or the worktree behind.
   const EX = setup.existing || null
-  const acq = await call(`Claim issue #${ISSUE} of ${SLUG} for delivery. Run, alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
-It prints one JSON line and adds the in-progress label itself. Return its verdict (error, with detail, on exit 1 or 2), by and comment_id. Run nothing else and change nothing.
+  const acquireStep = () => call(`Claim issue #${ISSUE} of ${SLUG} for delivery. Run, alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
+It prints one JSON line and adds the in-progress label itself. ${FORGE_TIMEOUT} Return its verdict (error, with detail, on exit 1 or 2), by, comment_id and transient (true only when its JSON line has transient true). Run nothing else and change nothing.
 ${RULES_FOR(setup.worktree_path)}`, { label: 'acquire', phase: 'Setup', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: ACQUIRE_SCHEMA })
+  const acq = ACQ_RECALL ? await acquireStep() : await recall(acquireStep)
   // Held by another holder: nothing of ours exists yet, so the stop carries no cont.
   if (acq && (acq.verdict === 'held_by' || acq.verdict === 'lost_to')) return { stage: 'claimed', verdict: acq.verdict, by: acq.by }
   if (!acq || (acq.verdict !== 'acquired' && acq.verdict !== 'already_held')) { claimIncomplete = true; return stop('claim', { result: acq }) }
@@ -540,7 +562,7 @@ ${RULES_FOR(setup.worktree_path)}`, { label: 'worktree', phase: 'Setup', agentTy
 const W = setup.worktree
 let RULES = RULES_FOR(W)
 // The nested renew instruction a folded prompt starts with.
-const RENEW_FIRST = `First renew the claim: run, alone and exactly, forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch} (it prints one JSON line) and return its verdict (error, with detail, on exit 1 or 2), by and detail as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew.`
+const RENEW_FIRST = `First renew the claim: run, alone and exactly, forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch} (it prints one JSON line) and return its verdict (error, with detail, on exit 1 or 2), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
 // Grades a renew result. null = renewed; else the stop to return.
 const renewed = (r, at) => {
   if (r && r.verdict === 'renewed') return null
@@ -550,9 +572,9 @@ const renewed = (r, at) => {
   return stop('claim-lost', { at, renew: r })
 }
 // Renews the claim before the step it guards. null = renewed; else the stop to return.
-const renew = async (at, ph) => renewed(await call(`Renew the claim on issue #${ISSUE} of ${SLUG}. Run, alone and exactly: forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
-It prints one JSON line. Return its verdict (error, with detail, on exit 1 or 2), by and detail. Run nothing else and change nothing.
-${RULES}`, { label: `renew-${at}`, phase: ph, agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RENEW_SCHEMA }), at)
+const renew = async (at, ph) => renewed(await recall(() => call(`Renew the claim on issue #${ISSUE} of ${SLUG}. Run, alone and exactly: forge-claim renew --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
+It prints one JSON line. ${FORGE_TIMEOUT} Return its verdict (error, with detail, on exit 1 or 2), by, detail and transient (true only when its JSON line has transient true). Run nothing else and change nothing.
+${RULES}`, { label: `renew-${at}`, phase: ph, agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RENEW_SCHEMA })), at)
 const RANGE = `origin/${INT}...HEAD`
 const CTX = `Issue #${ISSUE} of ${SLUG}. Worktree: ${W} (branch ${setup.branch}, base ${setup.base_sha}, integration branch ${INT}). The branch's changes are git -C ${W} diff ${RANGE} (fetch origin first).`
 const K = setup.knowledge || {}
@@ -570,7 +592,7 @@ const PLAN_SCHEMA = {
     status: { type: 'string', enum: ['planned', 'needs_user'] },
     questions: { type: 'array', items: { type: 'object', properties: { question: { type: 'string' }, options: STRS }, required: ['question', 'options'] } },
     plan_root: { type: 'string' },
-    acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human'] }, verify: { type: 'object' }, lint: { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } } } } }, metric: { type: 'boolean' } }, required: ['id', 'text', 'kind'] } },
+    acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human', 'note'] }, verify: { type: 'object' }, lint: { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } } } } }, metric: { type: 'boolean' } }, required: ['id', 'text', 'kind'] } },
     scripts: STRS,
     tasks: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, title: { type: 'string' }, file: { type: 'string' }, risk: { type: 'string', enum: ['mechanical', 'low', 'standard', 'security'] }, branch: { type: 'string' } }, required: ['n', 'title', 'file', 'risk'] } },
     branches: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, worktree: { type: 'string' }, base: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' }, clean: { type: 'boolean' } }, required: ['name', 'worktree', 'base', 'head', 'current', 'toplevel', 'common_dir', 'clean'] } },
@@ -580,7 +602,7 @@ const PLAN_SCHEMA = {
 const wellFormed = p => !!(p && p.status === 'planned' && present(p.plan_root) && Array.isArray(p.acceptance) && p.acceptance.length && Array.isArray(p.tasks) && p.tasks.length)
 const HUMAN_REASONS = ['senses', 'hands', 'credentials', 'money', 'taste']
 const RULE_OF = { pre_merge_only: 'R1', approval_ask: 'R2', reason_required: 'R3' }
-// The program-checkable violations of the acceptance planning rules (R1 to R5); the rules file is the source, never copied here.
+// The program-checkable violations of the acceptance planning rules (R1 to R5, and R9); the rules file is the source, never copied here.
 const planRules = p => {
   const out = []
   const scripts = Array.isArray(p.scripts) ? p.scripts : []
@@ -588,6 +610,10 @@ const planRules = p => {
     const hit = (rule, why) => out.push({ severity: 'important', rule, ac: a.id, summary: `${rule} (${a.id}): ${why}` })
     const v = a.verify
     if (a.metric === true && !(a.kind === 'evidence' && v && typeof v === 'object' && v.mode === 'observe')) hit('R5', 'a metric is accepted only as an evidence check with mode observe')
+    if (a.kind === 'note') {
+      if (a.verify != null || a.script != null) hit('R9', 'a note carries no verify block and no script')
+      continue
+    }
     if (a.kind !== 'evidence' && a.kind !== 'human') continue
     if (!v || typeof v !== 'object') { hit('R4', 'no verify block'); continue }
     if (v.ac !== a.id || v.kind !== a.kind) { hit('R4', 'the verify block names another criterion or kind'); continue }
@@ -610,8 +636,9 @@ const SPEC = args.spec ? `\nThe approved design spec for this issue is ${args.sp
 // The plan reviewer's defect list, shared so the planner checks against the review it will get.
 const PLAN_RUBRIC = `an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents`
 const FACTS = present(setup.details) ? `\nSetup facts: ${setup.details}` : ''
+const KIND_GUIDE = `kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge, note if a decision makes a post-deploy reading the orchestrator's own observation or not a hold (no verify member, no script and no metric, R9 of ~/.agents/standards/acceptance-planning.md)`
 const planPrompt = extra => `${CTX}
-Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel, common_dir, clean}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}, and clean: true only when git -C <its worktree> status --porcelain prints nothing (a worktree with any staged, unstaged or untracked change is not declared); give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule R1-R8 of ~/.agents/standards/acceptance-planning.md (read it).${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
+Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (${KIND_GUIDE}) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel, common_dir, clean}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}, and clean: true only when git -C <its worktree> status --porcelain prints nothing (a worktree with any staged, unstaged or untracked change is not declared); give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold of a code, evidence or human criterion, never on a note (R9): an owner-designated observation stays a note even when it reads a cost, a time or a rate. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule ${RULE_IDS[0]}-${RULE_IDS[RULE_IDS.length - 1]} of ~/.agents/standards/acceptance-planning.md (read it).${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
 ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
 const takePlan = (p, label) => {
@@ -664,7 +691,7 @@ if (LANE === 'direct') {
     const lost = await renew('tasks', 'Tasks')
     if (lost) return lost
     impl = await call(`${CTX}
-Deliver issue #${ISSUE} in the direct lane. Invoke the deliver-direct skill with the Skill tool to read it: it is the single source for this step. Its steps 1 and 2 are done by this program (the claim is held by ${setup.holder}; the worktree is ${W} on branch ${setup.branch}). Check its Eligibility first: if the issue fails it, change nothing and return status blocked with ineligible true and why. Otherwise follow its step 3 exactly and commit. Do not run its steps 4 to 7: review, verification, ship and close-out belong to this program. Return acceptance (the issue's criteria; kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge) and sensitive (true when the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations). ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
+Deliver issue #${ISSUE} in the direct lane. Invoke the deliver-direct skill with the Skill tool to read it: it is the single source for this step. Its steps 1 and 2 are done by this program (the claim is held by ${setup.holder}; the worktree is ${W} on branch ${setup.branch}). Check its Eligibility first: if the issue fails it, change nothing and return status blocked with ineligible true and why. Otherwise follow its step 3 exactly and commit. Do not run its steps 4 to 7: review, verification, ship and close-out belong to this program. Return acceptance (the issue's criteria; ${KIND_GUIDE}) and sensitive (true when the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations). ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
 ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: DIRECT_IMPL })
     if (impl && impl.ineligible) return stop('ineligible', { impl, details: 'rerun in the standard lane without cont; setup re-adopts the worktree and the claim' })
@@ -729,9 +756,9 @@ if ((!plan || !planReviewed) && !ANSWER_NEEDED) {
   if (lost) return lost
 }
 const readAnswer = async () => {
-  const answer = await call(`${CTX}
+  const answer = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
-Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(ANSWER_SCHEMA) })
+Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(ANSWER_SCHEMA) }), r => r.renew)
   if (!answer) return stop('owner-answer', { result: answer })
   const lost = renewed(answer.renew, 'plan')
   if (lost) return lost
@@ -989,7 +1016,7 @@ ${RULES}`
 const wsAsk = ws => ` The fix changes only whitespace amounts and blank lines, in ${ws.changed_paths.map(p => p.trim()).join(', ')}. Also judge whether each of its whitespace changes is insignificant: outside every string, template, character and regex literal, heredoc and raw block, and in no construct where whitespace changes behaviour or output. Return whitespace_insignificant true only when you read every hunk and that holds, with whitespace_evidence naming each changed path and why it holds there; otherwise return false, with whitespace_evidence naming the hunk where the whitespace matters.`
 let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results } : null
 if (!VERIFY_CACHED) {
-verify = await call(verifyFirst, { label: 'verify', phase: 'Verify', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(VERIFY) })
+verify = await recall(() => call(verifyFirst, { label: 'verify', phase: 'Verify', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(VERIFY) }), r => r.renew)
 if (verify) {
   const lost = renewed(verify.renew, 'verify')
   if (lost) return lost
@@ -1019,11 +1046,15 @@ if (MODE === 'ready') {
 
 // ---------------- Ship ----------------
 phase('Ship')
-const allCode = plan.acceptance.every(a => a.kind === 'code')
-const closesLine = allCode && INT === setup.default_branch ? `Closes #${ISSUE}` : `Refs #${ISSUE}`
+{
+  const unknown = badKinds(plan.acceptance)
+  if (unknown.length) return stop('plan', { details: 'a plan criterion has a kind that is not code, evidence, human or note', bad_kinds: unknown })
+}
+const noHold = !plan.acceptance.some(isOpen)
+const closesLine = noHold && INT === setup.default_branch ? `Closes #${ISSUE}` : `Refs #${ISSUE}`
 const PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head: FULL_SHA, notes: { type: 'string' } }, required: ['pr', 'head'] }
 const MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] }
-const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind'] }, head: FULL_SHA, required: STRS, failing: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
+const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind'] }, head: FULL_SHA, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
 const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, resolved_files: STRS, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 const LOCK_SCHEMA = {
   type: 'object',
@@ -1036,6 +1067,8 @@ let expected = verify.head
 let head = expected
 let syncs = 0
 let round = 0
+const PENDING_WAITS = 3
+let pendingWaits = 0
 let mg = null
 let mergeRefusals = 0
 let raced = false
@@ -1068,7 +1101,7 @@ const unlock = async () => {
   try {
     r = await call(`Release the cross-host landing lock of the branch ${INT} held for issue #${ISSUE} of ${SLUG}.
 Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}
-released and not_held are both fine. Return its verdict and any detail. Run nothing else.
+released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail. Run nothing else.
 ${lockMaybe && !sameSha(lockMaybe, lockSha) ? RELEASE_AGAIN(lockMaybe) : ''}${RULES}`, { label: 'land-unlock', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA })
   } catch (e) {
     error = String((e && e.message) || e)
@@ -1094,12 +1127,12 @@ const landBody = async () => {
   locks++
   lockHeld = true
   lockSha = expected
-  const prR = await call(`${CTX}
+  const prR = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
 Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
 Then take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null.
-${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: withRenew(PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) })
+${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: withRenew(PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
   if (!prR) return stop('pr', { result: null })
   // A renew that ended, or a refused lock, means the prompt ran no lock command that holds anything.
   if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
@@ -1136,9 +1169,9 @@ ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', mod
       } else if (mv === 'land-contended' || mv === 'held_by' || mv === 'lost_to') lockMaybe = null
       if (!HOLDING.includes(mv)) return stop('land-contended', { pr: PR, lock: mv })
     }
-    const ck = await call(`${CTX}
-${moved ? 'Wait' : `${RENEW_FIRST}\nThen wait`} for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn for the required checks on head: take the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection; if neither answers, every check is required. gh pr checks ${PR} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending) can return early, and its --required list can be partial: never treat a partial list as green. Return passed only when every required name has passed on head, failed with failing (the failing required names) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed) when any required check failed, and the required names you used.
-${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: moved ? CHECKS : withRenew(CHECKS) })
+    const ck = await recall(() => call(`${CTX}
+${moved ? 'Wait' : `${RENEW_FIRST}\nThen wait`} for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not: branch protection's required checks are the floor, not the bar. List every check with gh pr checks ${PR} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${PR} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection, none when neither answers. Return passed only when no check on head is pending, failing or cancelled, with required and passed (the names passing at head). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.
+${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: moved ? CHECKS : withRenew(CHECKS) }), r => (moved ? null : r.renew))
     if (ck && !moved) {
       const lost = renewed(ck.renew, `checks-${round}`)
       if (lost) return lost
@@ -1147,30 +1180,37 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
     if (!sameSha(ck.head, expected)) return stop('head-moved', { pr: PR, expected, head: ck.head })
     expected = fuller(expected, ck.head)
     head = expected
-    if (ck.state === 'failed') {
-      if (checksFixes >= 1) return stop('checks', { pr: PR, checks: ck })
+    const failingNames = Array.isArray(ck.failing) ? ck.failing : []
+    const pendingNames = Array.isArray(ck.pending) ? ck.pending : []
+    const state = ck.state === 'behind' ? 'behind' : ck.state === 'failed' || failingNames.length ? 'failed' : ck.state === 'pending' || pendingNames.length ? 'pending' : ck.state
+    if (state === 'pending') {
+      if (++pendingWaits >= PENDING_WAITS) return stop('checks-pending', { pr: PR, pending: pendingNames, checks: ck })
+      continue
+    }
+    if (state === 'failed') {
+      if (checksFixes >= 1) return stop('checks', { pr: PR, failing: failingNames, checks: ck })
       checksFixes++
-      const failing = JSON.stringify(ck.failing || [])
+      const failing = JSON.stringify(failingNames)
       const w = await shipFix({
         label: 'fix-ci', reviewLabel: 'fix-ci-review',
-        fixPrompt: `${CTX}\n${PLAN_REF} The required checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without the fix, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`,
-        reviewPrompt: fix => `${CTX}\nReview this fix for failing required checks: ${span(fix)}; the failure it answers: ${failing} (${ck.details || 'no log'}); implementer notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check, or a fix with no regression test. Do not edit anything.`,
+        fixPrompt: `${CTX}\n${PLAN_REF} The checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without the fix, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`,
+        reviewPrompt: fix => `${CTX}\nReview this fix for failing checks: ${span(fix)}; the failure it answers: ${failing} (${ck.details || 'no log'}); implementer notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check, or a fix with no regression test. Do not edit anything.`,
       })
       if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix })
       if (!w.review || findingsOf(w.review).length) return stop('checks-fix-review', { pr: PR, checks: ck, review: w.review })
       expected = w.fix.commit
       continue
     }
-    if (ck.state === 'passed') {
+    if (state === 'passed') {
       // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first, once), then the merge.
       locks++
-      mg = await call(`${CTX}
+      mg = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
 Then re-check the cross-host landing lock of the branch ${INT} for PR #${PR}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
 ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${PR}: run, alone and exactly: ${UNSET}gh pr merge ${PR} --repo ${SLUG} --${STRATEGY} --match-head-commit ${head}${setup.delete_branch ? ' --delete-branch' : ''}
 Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message, and behind true only when the refusal says the head branch is not up to date with the base branch (the integration branch moved), else false. On any other lock verdict run nothing else and return merged false with the verdict in notes.
-${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) })
+${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
       if (!mg) return stop('merge', { pr: PR, merge: null })
       const pre = mg.lock ? mg.lock.verdict : null
       if (HOLDING.includes(pre)) lockSha = expected

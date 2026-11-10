@@ -55,6 +55,10 @@ def finish(proc):
 
 class Base(unittest.TestCase):
     def setUp(self):
+        self.slept = []
+        patcher = mock.patch.object(forge_claim, "sleep", self.slept.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.world = ForgeWorld(self)
 
     def lock(self, sha=None, **kwargs):
@@ -195,7 +199,7 @@ class AcquireTest(Base):
                 self.lock(B)
                 self.pulls(A, pull(11, sha=A))
                 self.pulls(B, pull(12, state="closed", merged=True, sha=B))
-                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: f):
+                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: fm.ForgeError(f, "x")):
                     code, out = run(*land("acquire", A))
                 self.assertEqual((code, out["verdict"], out["error"]), (1, "error", failure))
                 self.assertEqual(self.world.refs(), {REF: B})
@@ -318,7 +322,7 @@ class ReleaseStatusTest(Base):
             with self.subTest(failure=failure):
                 self.world.reset()
                 self.lock(A)
-                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: f):
+                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: fm.ForgeError(f, "x")):
                     code, out = run(*land("release", A))
                 self.assertEqual((code, out["verdict"], out["error"]), (1, "error", failure))
                 self.assertEqual(self.world.refs(), {REF: A})
@@ -341,6 +345,128 @@ class ReleaseStatusTest(Base):
                 code, out = run(*land("status", A))
                 self.assertEqual((code, out["verdict"], out["lock_sha"], out["pr"]), (0, verdict, lock_sha, pr))
                 self.assertEqual(self.writes(), [])
+
+
+class CasTransportTest(Base):
+    """Issue 740 D2: an unapplied compare-and-swap keeps its failure's transport class in the error."""
+
+    def prepare(self, action):
+        self.world.reset()
+        if action == "acquire":  # a lock whose pull request merged: the one-shot acquire swaps it
+            self.lock(B)
+            self.pulls(A, pull(11, sha=A))
+            self.pulls(B, pull(12, state="closed", merged=True, sha=B))
+        else:
+            self.lock(A)
+
+    def raised(self, action, failure):
+        args = forge_claim.build_parser().parse_args(land(action, A))
+        with mock.patch.object(fm, "cas_ref", lambda *_: failure), \
+                self.assertRaises(fm.ForgeError) as caught:
+            land_lock.run(args)
+        return caught.exception
+
+    def test_an_unapplied_cas_keeps_its_transport_class(self):
+        failures = ((fm.ForgeError("gh_failed", "gh: Bad Gateway (HTTP 502)", transient=True), True),
+                    (fm.ForgeError("gh_timeout", "api graphql"), True),
+                    (fm.ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"), False))
+        for action in ("acquire", "release"):
+            for failure, transient in failures:
+                with self.subTest(action=action, failure=failure.detail):
+                    self.prepare(action)
+                    before = self.world.refs()
+                    error = self.raised(action, failure)
+                    self.assertEqual((error.code, error.transient), (failure.code, transient))
+                    self.assertEqual(self.world.refs(), before)
+
+    def test_a_delete_reported_applied_that_left_the_lock_is_not_transient(self):
+        self.prepare("release")
+        error = self.raised("release", None)
+        self.assertEqual((error.code, error.transient), ("gh_failed", False))
+        self.assertEqual(self.world.refs(), {REF: A})
+
+
+class TransientRetryTest(Base):
+    """Issue 740 D3: one-shot land acquire and land release retry whole; --wait and status run once."""
+
+    def test_acquire_after_two_network_failures_is_acquired(self):
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        self.world.outage(2)
+        code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(self.slept, [20, 40])
+
+    def test_acquire_retried_after_its_create_lost_its_reply_is_acquired(self):
+        # The retry cannot tell its own lost-reply create from a lock already held, so it reports
+        # acquired: the programs recheck the base before merging on acquired, never on already_held.
+        self.lock(lose_reply=["create"])
+        self.pulls(A, pull(11, sha=A))
+        code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(self.world.refs(), {REF: A})
+        self.assertEqual(self.slept, [20])
+
+    def test_release_retried_after_its_reread_lost_its_reply_is_released(self):
+        self.lock(A, lose_reply=["get"])
+        code, out = run(*land("release", A))
+        self.assertEqual((code, out["verdict"]), (0, "released"))
+        self.assertEqual(self.world.refs(), {})
+        self.assertEqual(self.slept, [20])
+
+    def bad_gateway_once(self):
+        """`cas_ref` whose first swap answers HTTP 502 and does not apply; later swaps are real."""
+        real, failed = fm.cas_ref, []
+
+        def cas(*args):
+            if not failed:
+                failed.append(True)
+                return fm.ForgeError("gh_failed", "gh: Bad Gateway (HTTP 502)", transient=True)
+            return real(*args)
+        return mock.patch.object(fm, "cas_ref", cas)
+
+    def test_release_retried_after_an_unapplied_502_swap_is_released(self):
+        self.lock(A)
+        with self.bad_gateway_once():
+            code, out = run(*land("release", A))
+        self.assertEqual((code, out["verdict"]), (0, "released"))
+        self.assertEqual(self.world.refs(), {})
+        self.assertEqual(self.slept, [20])
+
+    def test_acquire_retried_after_an_unapplied_502_swap_takes_the_closed_lock(self):
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(12, state="closed", merged=True, sha=B))
+        with self.bad_gateway_once():
+            code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(self.world.refs(), {REF: A})
+        self.assertEqual(self.slept, [20])
+
+    def test_a_lasting_outage_is_error_transient_after_three_tries(self):
+        for argv in (land("acquire", A), land("release", A)):
+            with self.subTest(action=argv[1]):
+                self.slept.clear()
+                self.world.reset()
+                self.lock(A)
+                self.pulls(A, pull(11, sha=A))
+                self.world.outage()
+                code, out = run(*argv)
+                self.assertEqual((code, out["verdict"], out["transient"]), (1, "error", True))
+                self.assertEqual(self.slept, [20, 40])
+
+    def test_wait_and_status_run_once(self):
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.world.outage()
+        clock = FakeClock()
+        with mock.patch.object(land_lock, "monotonic", clock.monotonic), \
+                mock.patch.object(land_lock, "sleep", clock.sleep):
+            code, out = run(*land("acquire", A, "--wait"))
+        self.assertEqual((code, out["verdict"], out["transient"]), (1, "error", True))
+        code, out = run(*land("status", A))
+        self.assertEqual((code, out["verdict"], out["transient"]), (1, "error", True))
+        self.assertEqual(self.slept, [])
 
 
 class ConcurrencyTest(Base):
@@ -564,7 +690,7 @@ class WaitTest(Base):
                 self.pulls(A, pull(11, sha=A))
                 self.pulls(B, pull(12, state="closed", merged=True, sha=B))
                 clock = FakeClock()
-                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: f):
+                with mock.patch.object(fm, "cas_ref", lambda *args, f=failure: fm.ForgeError(f, "x")):
                     code, out = self.wait(clock)
                 self.assertEqual((code, out["verdict"], out["error"]), (1, "error", failure))
                 self.assertEqual(clock.slept, [120, 120])
@@ -594,6 +720,46 @@ class WaitTest(Base):
     def test_wait_is_only_an_acquire_flag(self):
         code, out = run(*land("status", A, "--wait"))
         self.assertEqual((code, out["error"]), (2, "usage"))
+
+
+class WaitFirstReadTest(Base):
+    """Issue 740 D3: --wait reads its first eligibility inside its bounded polls (D8)."""
+
+    def wait(self, clock):
+        with mock.patch.object(land_lock, "monotonic", clock.monotonic), \
+                mock.patch.object(land_lock, "sleep", clock.sleep):
+            return run(*land("acquire", A, "--wait"))
+
+    def test_a_failed_first_read_is_a_failed_poll_then_acquires(self):
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        self.world.outage(1)
+        clock = FakeClock()
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(clock.slept, [land_lock.POLL])
+        self.assertEqual(self.slept, [])  # the whole-verb retry never wraps --wait
+
+    def test_first_reads_failing_every_poll_are_fatal_on_the_third_and_write_nothing(self):
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        self.world.outage()
+        clock = FakeClock()
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["error"], out["transient"]),
+                         (1, "error", "gh_failed", True))
+        self.assertEqual(clock.slept, [land_lock.POLL, land_lock.POLL])
+        self.assertEqual(self.world.refs(), {})
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.slept, [])
+
+    def test_no_open_pr_on_the_first_read_stops_at_once(self):
+        self.lock()
+        self.pulls(A)
+        clock = FakeClock()
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "no_open_pr"))
+        self.assertEqual(clock.slept, [])
 
 
 class IdleRaceTest(Base):

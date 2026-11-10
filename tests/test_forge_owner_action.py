@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools import forge_claim
 from agent_tools import forge_markers as fm
@@ -85,6 +86,10 @@ def action(name, reason="decision", *extra):
 
 class Base(unittest.TestCase):
     def setUp(self):
+        self.slept = []
+        patcher = mock.patch.object(forge_claim, "sleep", self.slept.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.world = ForgeWorld(self)
         for argv in (OA_ENSURE, OA_ADD, OA_REMOVE, IP_ENSURE, IP_ADD, IP_REMOVE, OK_ENSURE, OK_ADD, OK_REMOVE):
             self.world.respond("gh", argv)
@@ -456,6 +461,35 @@ class CliTest(Base):
     def test_forge_error_is_exit_1(self):
         code, out = run(*action("status"))  # no comment store: the listing is unregistered and fails
         self.assertEqual((code, out["verdict"], out["action"]), (1, "error", "status"))
+
+
+class TransientRetryTest(Base):
+    """Issue 740 D3: owner-action status retries whole on a transport error; post and end run once."""
+
+    def test_status_after_two_network_failures_reads_the_prompt(self):
+        self.store(comment(30, marker_body()))
+        self.world.outage(2)
+        code, out = run(*action("status"))
+        self.assertEqual((code, out["verdict"]), (0, "open"))
+        self.assertEqual(self.slept, [20, 40])
+        self.assertEqual(self.mutations(), [])
+
+    def test_status_in_a_lasting_outage_is_error_transient(self):
+        self.store(comment(30, marker_body()))
+        self.world.outage()
+        code, out = run(*action("status"))
+        self.assertEqual((code, out["verdict"], out["transient"]), (1, "error", True))
+        self.assertEqual(self.slept, [20, 40])
+
+    def test_post_and_end_run_once(self):
+        for argv in (self.post_argv(), action("end", "conflict")):
+            with self.subTest(action=argv[1]):
+                self.slept.clear()
+                self.store(comment(30, marker_body("conflict")))
+                self.world.outage()
+                code, out = run(*argv)
+                self.assertEqual((code, out["verdict"], out["transient"]), (1, "error", True))
+                self.assertEqual(self.slept, [])
 
 
 HR_REMOVE = ["api", "-X", "DELETE", f"repos/{SLUG}/issues/{ISSUE}/labels/agent%3Ahuman-required"]

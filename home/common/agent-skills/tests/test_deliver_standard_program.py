@@ -38,6 +38,7 @@ HUMAN = {"id": "AC3", "text": "looks right", "kind": "human",
          "verify": {"ac": "AC3", "kind": "human", "host": "h1", "when": {"days_after": {"event": "deployed", "days": 1}},
                     "run": {"ask": "Does the page render right on the phone"}, "reason": "senses"},
          "lint": OK_LINT}
+NOTE = {"id": "AC4", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
 RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
 
 
@@ -124,14 +125,14 @@ def object_branch(schema):
     return schema
 
 
-RENEW_READ = {"verdict", "by", "detail"}
+RENEW_READ = {"verdict", "by", "detail", "transient"}
 # label: (top-level fields the program or a later prompt reads, {member: fields read inside it}); a member
 # named "<name>[]" is an array whose items object is checked.
 FOLDED_READ = {
     "owner-answer": ({"verdict", "decisions", "comment_id", "questions"}, {"renew": RENEW_READ}),
     "verify": ({"head", "clean", "results"}, {"renew": RENEW_READ, "results[]": {"id", "status", "summary"}}),
     "pr": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
-    "checks-1": ({"state", "head", "failing", "details"}, {"renew": RENEW_READ}),
+    "checks-1": ({"state", "head", "failing", "details", "pending"}, {"renew": RENEW_READ}),
     "merge": ({"merged", "behind", "merge_commit", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
                "worktree_path", "head", "merged_pr", "merged_refs", "merged_heads", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
@@ -142,7 +143,7 @@ FOLDED_READ = {
                "review": {"code", "plan"}, "review_state": {"code", "plan"},
                "knowledge": {"standards", "hints", "rejections"},
                "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason"},
-               "acquire": {"verdict", "by", "detail"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"}}),
+               "acquire": {"verdict", "by", "detail", "transient"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"}}),
 }
 
 
@@ -275,7 +276,7 @@ class FoldTest(unittest.TestCase):
         self.assertIn("Only when lock's verdict is already_held or moved", text)
         self.assertLess(text.index(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n"),
                         text.index("gh pr merge 42"))
-        self.assertNotIn("--wait", text)
+        self.assertNotIn(" --wait\n", text)
         result, calls = run(replies={"merge": [retaken, retaken]})
         self.assertEqual(result["stage"], "land-contended")
         self.assertEqual(labels(calls).count("land-unlock"), 1)
@@ -546,10 +547,11 @@ class OwnerAnswerTest(unittest.TestCase):
     def test_plan_reviews_can_cite_every_rule(self):
         rules = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
         ids = re.findall(r"^- \*\*(R\d+)\.", rules.read_text(encoding="utf-8"), re.M)
-        self.assertIn("R8", ids)
+        self.assertIn("R9", ids)
         _, calls = run()
         review = next(c for c in calls if c["label"] == "plan-review")
         self.assertEqual(review["schema"]["properties"]["findings"]["items"]["properties"]["rule"]["enum"], ids)
+        self.assertIn(f"every rule {ids[0]}-{ids[-1]} of", prompt(calls, "plan"))
         text = PROGRAM.read_text(encoding="utf-8")
         self.assertRegex(text, r"label: 'plan-rules-review'[^}]*schema: PLAN_REVIEW")
 
@@ -704,6 +706,123 @@ class ClaimTest(unittest.TestCase):
         _, calls = run(args={"repo_root": "/r", "issue": 9, "cont": cont})
         self.assertIn("--holder h9/b1 ", prompt(calls, "owner-answer"))
         self.assertNotIn("acquire", labels(calls))
+
+
+TRANSIENT = {"verdict": "error", "detail": "gh_failed: dial tcp: connect: network is unreachable", "transient": True}
+# The full second reply of each folded step whose first renew ran out of transport retries; the harness fills renew and lock.
+SECOND = {
+    "owner-answer": {"verdict": "none", "comment_id": None, "questions": [], "decisions": ""},
+    "verify": {"head": SHA, "clean": True, "results": [{"id": "build", "status": "pass", "summary": "ok"}]},
+    "pr": {"pr": 42, "head": SHA},
+    "checks-1": {"state": "passed", "head": SHA, "required": ["ci"]},
+    "merge": {"merged": True, "merge_commit": SHA, "notes": "merged"},
+}
+
+
+def transient_replies(via, nested, recovers=True):
+    """Replies whose renew at `via` runs out of transport retries once, then recovers (or not)."""
+    if nested:
+        first = {"renew": TRANSIENT, "lock": None} if via in ("pr", "merge") else {"renew": TRANSIENT}
+        then = SECOND[via]
+    else:
+        first, then = TRANSIENT, {"verdict": "renewed", "comment_id": 7}
+    return {via: [first, then if recovers else first]}
+
+
+class TransientTest(unittest.TestCase):
+    """#740 D6: a renew or acquire that ran out of forge-claim's transport retries re-calls its step once."""
+
+    def test_a_transient_renew_is_called_once_more_and_goes_on(self):
+        happy = labels(run()[1])
+        for at, via, nested in BOUNDARIES:
+            with self.subTest(at=at):
+                result, calls = run(replies=transient_replies(via, nested))
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(labels(calls).count(via), happy.count(via) + 1)
+
+    def test_a_transient_renew_twice_stops_with_a_cont_that_reacquires(self):
+        happy = labels(run()[1])
+        for at, via, nested in BOUNDARIES:
+            with self.subTest(at=at):
+                result, calls = run(replies=transient_replies(via, nested, recovers=False))
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", at))
+                self.assertTrue(result["cont"]["claim_incomplete"])
+                self.assertEqual(labels(calls).count(via), 2)
+                self.assertNotIn(next_guarded(happy, via), labels(calls))
+
+    def test_not_held_and_a_plain_error_are_never_called_again(self):
+        for at, via, nested in BOUNDARIES:
+            for renew in ({"verdict": "not_held", "by": "h2/b1"}, {"verdict": "not_held", "transient": True},
+                          {"verdict": "error", "detail": "forge down"},
+                          {"verdict": "error", "detail": "forge down", "transient": False}):
+                with self.subTest(at=at, renew=renew):
+                    _, calls = run(**boundary_reply(via, nested, renew))
+                    self.assertEqual(labels(calls).count(via), 1)
+
+    def test_a_transient_folded_acquire_runs_the_acquire_step_once_then_the_worktree(self):
+        result, calls = run(patch={"setup": {"acquire": TRANSIENT, "claim": None}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:3], ["setup", "acquire", "worktree"])
+        self.assertEqual(labels(calls).count("acquire"), 1)
+        self.assertIn(f"forge-claim acquire --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x",
+                      prompt(calls, "acquire"))
+
+    def test_a_transient_folded_acquire_whose_acquire_step_is_transient_stops_with_a_cont(self):
+        result, calls = run(patch={"setup": {"acquire": TRANSIENT, "claim": None}}, replies={"acquire": TRANSIENT})
+        self.assertEqual(result["stage"], "claim")
+        self.assertTrue(result["cont"]["claim_incomplete"])
+        self.assertEqual(labels(calls), ["setup", "acquire"])
+
+    def test_a_resumed_transient_acquire_is_called_once_more(self):
+        stopped, _ = run(patch={"pr": {"renew": None}})
+        for second, stage in (({"verdict": "already_held", "comment_id": 7}, "done"), (TRANSIENT, "claim")):
+            with self.subTest(stage=stage):
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"acquire": [TRANSIENT, second]})
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual(labels(calls).count("acquire"), 2)
+                self.assertEqual("worktree" in labels(calls), stage == "done")
+
+    def test_every_renew_and_acquire_asks_for_transient(self):
+        _, calls = run()
+        self.assertEqual(schema_of(calls, "renew-tasks")["properties"]["transient"], {"type": "boolean"})
+        for via in ("setup", "renew-tasks", "owner-answer", "verify", "pr", "checks-1", "merge"):
+            with self.subTest(via=via):
+                self.assertIn("transient", prompt(calls, via))
+        stopped, _ = run(patch={"pr": {"renew": None}})
+        _, calls = run(args=dict(ARGS, cont=stopped["cont"]))
+        self.assertEqual(schema_of(calls, "acquire")["properties"]["transient"], {"type": "boolean"})
+        self.assertIn("transient", prompt(calls, "acquire"))
+
+    def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
+        timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
+        _, calls = run()
+        for via in ("setup", "renew-tasks", "owner-answer", "verify", "pr", "checks-1", "merge"):
+            with self.subTest(via=via):
+                self.assertIn(timeout, prompt(calls, via))
+        _, calls = run(patch={"pr": {"head": "c" * 40}})  # a head-moved stop releases the lock
+        self.assertIn(timeout, prompt(calls, "land-unlock"))
+        stopped, _ = run(patch={"pr": {"renew": None}})
+        _, calls = run(args=dict(ARGS, cont=stopped["cont"]))
+        self.assertIn(timeout, prompt(calls, "acquire"))
+        merge = "d" * 40
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "checks-2": {"state": "passed", "head": merge}},
+                       patch={"sync-1": {"merge_commit": merge}})
+        self.assertIn(timeout, prompt(calls, "land-lock-2"))
+
+    RETRIED = re.compile(r"forge-claim (?:acquire|renew|release|status|land acquire|land release|owner-action status)\b")
+
+    def test_every_prompt_that_runs_a_retried_forge_claim_command_gives_the_long_bash_timeout(self):
+        # Two 30 s timeouts plus the backoff use 120 s before the third try starts, so a command that
+        # forge-claim retries needs the long Bash timeout wherever any prompt runs it.
+        timeout = "a Bash timeout of 20 minutes (1200000 ms)"
+        seen = set()
+        _, calls = run()
+        for call in calls:
+            if self.RETRIED.search(call["prompt"]):
+                seen.add(call["label"])
+                with self.subTest(label=call["label"]):
+                    self.assertIn(timeout, call["prompt"])
+        self.assertIn("close-out", seen)
 
 
 class SetupIdempotenceTest(unittest.TestCase):
@@ -952,6 +1071,12 @@ class PlanRulesTest(unittest.TestCase):
         ("R5", criterion(EVIDENCE, metric=True)),
         ("R5", dict(PLAN["acceptance"][0], id="AC2", metric=True)),
     )
+    NOTE_ROWS = (
+        ("R9", criterion(NOTE, verify={"ac": "AC4", "kind": "note", "host": "h1",
+                                       "when": {"deployed_includes": SHA}, "run": {"script": "scripts/check-live"}},
+                         lint=OK_LINT)),
+        ("R9", criterion(NOTE, script="scripts/check-live")),
+    )
     RULE_FINDING = {"verdict": "findings",
                     "findings": [{"severity": "important", "rule": "R2", "summary": "s"}]}
 
@@ -984,7 +1109,7 @@ class PlanRulesTest(unittest.TestCase):
         return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan})
 
     def test_each_rule_violation_stops_at_plan_review_naming_the_rule(self):
-        for rule, bad in self.ROWS:
+        for rule, bad in self.ROWS + self.NOTE_ROWS:
             with self.subTest(rule=rule, ac=bad["id"]):
                 plan = with_criteria(bad)
                 result, calls = self.gate(plan)
@@ -998,6 +1123,40 @@ class PlanRulesTest(unittest.TestCase):
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-revise"))
                 self.assertIn(f'"rule":"{rule}"', prompt(calls, "plan-rules-revise"))
                 self.assertNotIn("impl-1", labels(calls))
+
+    def test_a_note_without_verify_or_script_passes_plan_rules(self):
+        """#736 AC1: a plan with a note criterion and no script passes planRules; the planner learns the kind."""
+        result, calls = run(replies={"plan": with_criteria(NOTE)}, patch={"close-out": {"notes_posted": True}})
+        kinds = schema_of(calls, "plan")["properties"]["acceptance"]["items"]["properties"]["kind"]["enum"]
+        self.assertEqual(kinds, ["code", "evidence", "human", "note"])
+        self.assertNotIn("plan-revise", labels(calls))
+        self.assertNotIn("plan-rules-review", labels(calls))
+        self.assertIn("impl-1", labels(calls))
+        self.assertNotEqual(result["stage"], "plan-review")
+        _, direct = run(args=dict(ARGS, lane="direct"))
+        for text in (prompt(calls, "plan"), prompt(direct, "direct-impl")):
+            for kind in kinds:
+                self.assertIn(f"{kind} if ", text)
+
+    def test_a_note_with_a_verify_block_or_script_is_refused_naming_r9(self):
+        """#736 AC1: planRules refuses a note carrying a verify block or a script."""
+        for _, bad in self.NOTE_ROWS:
+            with self.subTest(bad=sorted(bad)):
+                result, _ = self.gate(with_criteria(bad))
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertEqual([(r["rule"], r["ac"]) for r in result["rules"]], [("R9", "AC4")])
+
+    def test_a_metric_note_is_still_an_r5_refusal(self):
+        result, _ = self.gate(with_criteria(criterion(NOTE, metric=True)))
+        self.assertIn(("R5", "AC4"), [(r["rule"], r["ac"]) for r in result["rules"]])
+
+    def test_the_planner_never_tags_a_note_as_a_metric(self):
+        """#736 (D8): an owner-designated latency observation is a note, so the metric instruction exempts notes."""
+        _, calls = run()
+        text = prompt(calls, "plan")
+        metric = text[text.index("set metric true"):]
+        metric = metric[:metric.index(". ")]
+        self.assertIn("never on a note", metric)
 
     def test_pre_merge_only_evidence_stops_at_plan_review_naming_r1(self):
         # The issue's demo: a planner reply with a pre-merge-only evidence criterion.
@@ -1724,7 +1883,7 @@ class LandLockTest(unittest.TestCase):
                       prompt(calls, "pr"))
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n",
                       prompt(calls, "merge"))
-        self.assertNotIn("--wait", prompt(calls, "merge"))
+        self.assertNotIn(" --wait\n", prompt(calls, "merge"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n",
                       prompt(calls, "land-unlock"))
 
@@ -1739,7 +1898,7 @@ class LandLockTest(unittest.TestCase):
             "land-lock-2", "checks-2", "merge", "land-unlock", "hold", "close-out"])
         self.assertIn("git -C /r/.wt/w-issue-9-x push origin issue-9-x", prompt(calls, "land-push-2"))
         self.assertIn(f"--sha {merge}\n", prompt(calls, "land-lock-2"))
-        self.assertNotIn("--wait", prompt(calls, "land-lock-2"))
+        self.assertNotIn(" --wait\n", prompt(calls, "land-lock-2"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {merge}",
                       prompt(calls, "land-unlock"))
 
@@ -1755,7 +1914,7 @@ class LandLockTest(unittest.TestCase):
         later_locks = [c["prompt"] for c in calls if c["label"] in ("land-lock-3", "merge")]
         self.assertEqual(len(later_locks), 3)  # the first pre-merge check, the move after the push, the last pre-merge check
         for text in later_locks:
-            self.assertNotIn("--wait", text)
+            self.assertNotIn(" --wait\n", text)
         self.assertIn("--wait", prompt(calls, "pr"))
         self.assertLess(names.index("pr"), names.index("sync-1"))
         self.assertLess(names.index("sync-1"), names.index("land-push-3"))
@@ -1839,6 +1998,8 @@ class LandLockTest(unittest.TestCase):
             "checks": {"replies": {"checks-1": {"state": "failed", "head": SHA},
                                    "checks-2": {"state": "failed", "head": fix}},
                        "patch": {"fix-ci": {"start_head": SHA, "commit": fix}}},
+            "checks-pending": {"replies": {f"checks-{k}": {"state": "pending", "head": SHA, "pending": ["e2e"]}
+                                           for k in (1, 2, 3)}},
             "head-moved": {"patch": {"checks-1": {"head": "c" * 40}}},
             "merge": {"replies": {"merge": {"merged": False, "notes": "head moved"}}},
             "sync-contention": {"replies": {"checks-1": self.BEHIND, "checks-2": self.BEHIND,
@@ -2031,6 +2192,65 @@ class ShipFixWaveTest(unittest.TestCase):
         self.assertEqual(result["stage"], "sync")
         self.assertNotIn("checks_fixes", result["cont"])
         self.assertNotIn("sync_fixes", result["cont"])
+
+
+class AllChecksTest(unittest.TestCase):
+    """#756: the checks step waits for every check on head, required or not."""
+
+    def test_checks_step_lists_every_check_and_can_answer_pending(self):
+        _, calls = run()
+        checks = prompt(calls, "checks-1")
+        for argv in ("gh pr checks 42 --repo owner/repo --json name,bucket,link",
+                     "gh api repos/owner/repo/rules/branches/dev"):
+            self.assertIn(argv, checks)
+        schema = schema_of(calls, "checks-1")
+        self.assertIn("pending", schema["properties"])
+        self.assertIn("pending", schema["properties"]["state"]["enum"])
+
+    def test_a_pending_non_required_check_is_waited_for_before_the_merge(self):  # AC1
+        waiting = {"state": "passed", "head": SHA, "required": ["lint"], "passed": ["lint"], "pending": ["e2e"]}
+        green = {"state": "passed", "head": SHA, "required": ["lint"], "passed": ["lint", "e2e"]}
+        result, calls = run(replies={"checks-1": waiting, "checks-2": green})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("checks-1"):],
+                         ["checks-1", "checks-2", "merge", "land-unlock", "hold", "close-out"])
+
+    def test_a_pending_state_is_waited_for_and_never_synced(self):
+        result, calls = run(replies={"checks-1": {"state": "pending", "head": SHA, "pending": ["e2e"]}})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertNotIn("sync-1", names)
+        self.assertLess(names.index("checks-2"), names.index("merge"))
+
+    def test_checks_still_pending_after_three_waits_stop_unmerged(self):  # AC1
+        waiting = {"state": "pending", "head": SHA, "pending": ["e2e"]}
+        result, calls = run(replies={f"checks-{k}": waiting for k in (1, 2, 3)})
+        self.assertEqual((result["stage"], result["pending"]), ("checks-pending", ["e2e"]))
+        self.assertIn("cont", result)
+        names = labels(calls)
+        self.assertNotIn("merge", names)
+        self.assertNotIn("checks-4", names)
+        self.assertEqual(names.count("land-unlock"), 1)
+
+    def test_a_failing_non_required_check_stops_the_merge_named(self):  # AC2
+        red = {"state": "passed", "head": SHA, "required": ["lint"], "passed": ["lint"], "failing": ["e2e"],
+               "details": "e2e: 2 failed"}
+        result, calls = run(replies={"checks-1": red, "checks-2": dict(red, head=FIX)},
+                            patch={"fix-ci": {"start_head": SHA, "commit": FIX}})
+        self.assertEqual((result["stage"], result["failing"]), ("checks", ["e2e"]))
+        self.assertNotIn("merge", labels(calls))
+        self.assertIn("e2e", prompt(calls, "fix-ci"))
+
+    def test_an_explicit_failed_state_outranks_a_pending_list(self):  # AC2
+        red = {"state": "failed", "head": SHA, "pending": ["slow"], "details": "e2e failed"}
+        result, calls = run(replies={"checks-1": red, "checks-2": dict(red, head=FIX)},
+                            patch={"fix-ci": {"start_head": SHA, "commit": FIX}})
+        self.assertEqual(result["stage"], "checks")
+        self.assertEqual(result["checks"]["details"], "e2e failed")
+        self.assertIn("e2e failed", prompt(calls, "fix-ci"))
+        self.assertNotIn("checks-3", labels(calls))
+        self.assertNotIn("merge", labels(calls))
 
 
 class ShaNormalisationTest(unittest.TestCase):
@@ -2324,6 +2544,91 @@ class HoldTest(unittest.TestCase):
         result, _ = run(args=dict(ARGS, cont=cont), replies={"hold": dict(self.HOLD, **stale)},
                         patch={"setup": merged(42, "c0ffee")})
         self.assertEqual(result["stage"], "hold")
+
+
+class NoteCloseOutTest(unittest.TestCase):
+    """#736 AC2: a note is never held, and the close-out comment lists the note texts."""
+
+    MERGE = "d" * 40
+
+    def ship(self, *criteria, hold=None, **patch):
+        replies = {"plan": with_criteria(*criteria)}
+        if hold is not None:
+            replies["hold"] = hold
+        return run(replies=replies, patch=dict({"merge": {"merge_commit": self.MERGE},
+                                                "close-out": {"notes_posted": True}}, **patch))
+
+    def test_the_close_out_comment_lists_the_note_texts(self):
+        result, calls = self.ship(NOTE)
+        self.assertEqual(result["stage"], "done")
+        close = prompt(calls, "close-out")
+        self.assertIn(NOTE["text"], close)
+        self.assertIn("Orchestrator notes for PR 42", close)
+        self.assertIn("gh issue comment 9 --repo owner/repo --body-file", close)
+        self.assertLess(close.index("Orchestrator notes for PR 42"), close.index("gh issue close 9 --repo owner/repo"))
+        self.assertIn("Every criterion is of kind code or note: post nothing, add no label", prompt(calls, "hold"))
+        self.assertIn("never regraded, held or checked", prompt(calls, "hold"))
+
+    def test_a_code_and_note_plan_closes_like_an_all_code_plan(self):
+        result, calls = self.ship(NOTE, setup={"integration_branch": "main"})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("Closes #9", prompt(calls, "pr"))
+        self.assertNotIn("needs-verification", prompt(calls, "close-out"))
+
+    def test_unposted_notes_stop_the_close_out(self):
+        result, _ = self.ship(NOTE, **{"close-out": {"notes_posted": False}})
+        self.assertEqual((result["stage"], result["expected_issue_state"]), ("close-out", "CLOSED"))
+
+    def test_a_plan_without_notes_has_no_notes_step(self):
+        _, calls = run()
+        self.assertNotIn("Orchestrator notes", prompt(calls, "close-out"))
+
+    def test_a_note_beside_evidence_is_neither_checked_nor_missing(self):
+        hold = {"merge_commit_local": True, "code_unmet": [], "blocks": [], "split": [],
+                "block": {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}]},
+                "lint": {"ok": True, "errors": []}, "verify_run": {"ran": True, "exit": 0},
+                "issue_state": "OPEN", "notes": "n"}
+        result, calls = self.ship(EVIDENCE, NOTE, hold=hold,
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("(evidence or human, not split)", prompt(calls, "hold"))
+        close = prompt(calls, "close-out")
+        self.assertIn(NOTE["text"], close)
+        self.assertNotIn("gh issue close", close)
+
+    def test_a_hold_that_checks_a_note_stops(self):
+        """#736 DR-001: a note is never held, so a hold block or split child that checks one is refused."""
+        both = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "evidence"}, {"ac": "AC4", "kind": "note"}]}
+        result, calls = self.ship(EVIDENCE, NOTE, hold=dict(HoldTest.HOLD, block=both),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["note_checks"]), ("hold", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        note_child = dict(HoldTest.CHILD, ac="AC4", block={"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC4", "kind": "note"}]})
+        result, calls = self.ship(HUMAN, NOTE, hold=dict(HoldTest.HOLD, blocks=[12], split=[HoldTest.CHILD, note_child]),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        extra = dict(HoldTest.CHILD, block={"v": 1, "merge": self.MERGE, "checks": [
+            {"ac": "AC3", "kind": "human"}, {"ac": "AC4", "kind": "evidence", "run": {"script": "scripts/check-live"}}]})
+        result, calls = self.ship(HUMAN, NOTE, hold=dict(HoldTest.HOLD, blocks=[12], split=[extra]),
+                                  **{"close-out": {"issue_state": "OPEN", "notes_posted": True}})
+        self.assertEqual((result["stage"], result["bad_split"]), ("hold", ["AC3"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_an_unrecognised_kind_never_closes_ungraded(self):
+        """#736 DR-002: a typo kind is neither open nor a note, so no path may close the issue on it."""
+        typo = dict(NOTE, kind="evdience")
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                          "holder": HOLDER, "base_sha": SHA},
+                "plan": with_criteria(typo), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
+        self.assertEqual((result["stage"], result["bad_kinds"]), ("close-out", ["AC4"]))
+        self.assertNotIn("close-out", labels(calls))
+        self.assertNotIn("hold", labels(calls))
+        result, calls = run(replies={"plan": with_criteria(typo)})
+        self.assertNotEqual(result["stage"], "done")
+        self.assertNotIn("pr", labels(calls))
+        self.assertNotIn("close-out", labels(calls))
 
 
 class FixWaveTest(unittest.TestCase):
@@ -2862,15 +3167,19 @@ class SourceTest(unittest.TestCase):
             start = text.index(f"const {name} = ")
             return text[start:text.index("\n", start)]
 
+        def bare(text):
+            """The text without the #740 FORGE_TIMEOUT sentence (and its template-literal quoting), which each program adds in its own task."""
+            return text.replace(" ${FORGE_TIMEOUT}", "").replace("`", "'")
+
         for name in ("LAND_ACQUIRE", "LOCK_RETURN", "RELEASE_AGAIN"):
             with self.subTest(name=name):
-                self.assertEqual(line(mine, name), line(batch, name))
+                self.assertEqual(bare(line(mine, name)), bare(line(batch, name)))
         for needle in (
             "Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}",
-            "released and not_held are both fine. Return its verdict and any detail. Run nothing else.",
+            "released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail. Run nothing else.",
         ):
             with self.subTest(line=needle):
-                self.assertIn(needle, batch)
+                self.assertIn(bare(needle), bare(batch))
                 self.assertIn(needle, mine)
 
     def test_program_avoids_replay_breaking_builtins(self):
