@@ -1,54 +1,27 @@
 #!/usr/bin/env python3
-"""Authoritative artifact budget and phase-report validation (D1/D2/D7/D8/D11/D13-D15)."""
+"""Artifact budget and producer-report validation for the skills that call it.
+
+The design, grill-with-docs, writing-plans and handoff skills are the callers. The
+surface is `check` (measure a design-spec, an implementation-plan or a handoff
+against the policy; exit 0 within budget, 3 over budget) and `validate-report
+--boundary producer` (a phase report holding exactly `state`, `artifact` and
+`notes`). Standard library only.
+"""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 from dataclasses import dataclass
-from functools import partial
-import importlib.util
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import stat
 import sys
 from typing import Callable, Mapping, Sequence
 
 
-def _delivery_model() -> object:
-    """Load source or lexical HOME package without a sys.path fallback."""
-    source_layout = Path(__file__).parent.name == "scripts"
-    source_entry = Path(__file__).parent / "delivery_model" / "__init__.py"
-    installed_entry = Path.home() / ".agents/lib/python/delivery_model/__init__.py"
-    entry = source_entry if source_layout else installed_entry
-    if not entry.is_file():
-        raise ArtifactBudgetError("delivery model is unavailable")
-    name = "_artifact_budget_delivery_model"
-    spec = importlib.util.spec_from_file_location(
-        name, entry, submodule_search_locations=[str(entry.parent)]
-    )
-    if spec is None or spec.loader is None:
-        raise ArtifactBudgetError("delivery model is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    for key in tuple(sys.modules):
-        if key == name or key.startswith(name + "."):
-            sys.modules.pop(key, None)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-        if getattr(module, "MODEL_INTERFACE_VERSION", None) != 1:
-            raise ArtifactBudgetError("unsupported delivery model interface")
-        return module
-    except Exception as exc:
-        for key in tuple(sys.modules):
-            if key == name or key.startswith(name + "."):
-                sys.modules.pop(key, None)
-        raise ArtifactBudgetError("delivery model is unavailable") from exc
-
-
-KINDS = ("design-spec", "implementation-plan", "handoff", "review-package")
+KINDS = ("design-spec", "implementation-plan", "handoff")
 # One row per violation code: the code, the limit it is measured against and the
 # measured quantity. `violations` and `overages` both derive from it (issue 472 D6).
 _BOUNDS: tuple[tuple[str, str, Callable[[Mapping[str, int]], int]], ...] = (
@@ -58,18 +31,7 @@ _BOUNDS: tuple[tuple[str, str, Callable[[Mapping[str, int]], int]], ...] = (
     ("aggregate_bytes", "aggregate_max_bytes", lambda metrics: metrics["total_bytes"]),
 )
 VIOLATIONS = tuple(code for code, _, _ in _BOUNDS)
-SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
-SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 PLAN_MEMBER_RE = re.compile(r"task-([1-9][0-9]*)\.md\Z")
-SHARD_RE = re.compile(r"shard-([0-9]{3})\.(diff|jsonl)\Z")
-DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
-BOUNDARY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-# The retired `review-feasibility gate` summary (#605); old SDD stop reports still carry it.
-SUMMARY_KEYS = frozenset({
-    "artifact_policy_sha256", "base", "completed_through", "forecast_sha256", "head", "kind",
-    "metrics", "packing_policy_sha256", "plan", "plan_package_sha256", "recommended_boundary",
-    "schema_version", "state", "violations"})
-RECOMMENDATION_KEYS = frozenset({"id", "metrics", "prerequisite_commit", "tasks"})
 
 
 class ArtifactBudgetError(Exception):
@@ -128,10 +90,6 @@ def _integer(value: object, *, minimum: int = 0) -> bool:
     return type(value) is int and value >= minimum
 
 
-def _string(value: object) -> bool:
-    return isinstance(value, str) and bool(value)
-
-
 def _pairs_no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -188,22 +146,17 @@ def _read_regular(path: Path, *, limit: int | None = None) -> bytes:
         os.close(descriptor)
 
 
-def _load_policy(path: Path) -> tuple[dict[str, ArtifactLimits], int, int, int]:
-    return _load_policy_identity(path)[0]
-
-
-def _load_policy_identity(path: Path) -> tuple[tuple[dict[str, ArtifactLimits], int, int, int], str]:
+def _load_policy(path: Path) -> tuple[dict[str, ArtifactLimits], int, int]:
     try:
         raw = _read_regular(path)
     except InputReadError as exc:
         raise ArtifactBudgetError(f"cannot read policy: {exc}") from exc
-    return _parse_policy(raw), "sha256:" + hashlib.sha256(raw).hexdigest()
+    return _parse_policy(raw)
 
 
-def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]:
+def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int]:
     value = _decode_json(raw, "policy JSON")
-    if not _exact_keys(value, {"schema_version", "unit", "artifacts", "phase_reports",
-                               "workflow_responses"}):
+    if not _exact_keys(value, {"schema_version", "unit", "artifacts", "phase_reports"}):
         raise ArtifactBudgetError("invalid policy keys")
     assert isinstance(value, dict)
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
@@ -247,17 +200,7 @@ def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]
     wire = reports["wire_max_bytes"]
     if not _integer(notes, minimum=1) or not _integer(wire, minimum=1):
         raise ArtifactBudgetError("invalid policy report limits")
-    # A workflow response is helper transport, not an owner-authored phase
-    # report: control carries one summary per requested issue plus the full
-    # delivery contract of every dispatch, so it takes its own bound.
-    responses = value["workflow_responses"]
-    if not _exact_keys(responses, {"wire_max_bytes"}):
-        raise ArtifactBudgetError("invalid response policy")
-    assert isinstance(responses, dict)
-    response_wire = responses["wire_max_bytes"]
-    if not _integer(response_wire, minimum=1):
-        raise ArtifactBudgetError("invalid policy response limits")
-    return limits, notes, wire, response_wire
+    return limits, notes, wire
 
 
 def _default_policy_path() -> Path:
@@ -381,14 +324,6 @@ def _discover_plan(root: Path, root_raw: bytes) -> list[Path]:
     return [numbered[number] for number in range(1, count + 1)]
 
 
-def _sha(value: object) -> bool:
-    return isinstance(value, str) and SHA_RE.fullmatch(value) is not None
-
-
-def _nonnegative_fields(value: object, keys: set[str]) -> bool:
-    return _exact_keys(value, keys) and all(_integer(value[key]) for key in keys)  # type: ignore[index]
-
-
 def _quoted(names: set[str]) -> str:
     return ", ".join(json.dumps(name) for name in sorted(names))
 
@@ -417,283 +352,6 @@ def _require_notes(value: object, maximum: int) -> None:
         raise ArtifactBudgetError(f"notes has {len(value)} characters; the bound is {maximum}")
 
 
-def _validate_finding(value: object, subject: str) -> None:
-    _require_members(value, {"axis", "severity", "status", "text", "ruling"}, subject)
-    assert isinstance(value, dict)
-    if not (isinstance(value["axis"], str) and value["axis"] in ("conformance", "correctness", "ship")):
-        raise ArtifactBudgetError(f"{subject}.axis must be conformance, correctness or ship")
-    if not (isinstance(value["severity"], str) and value["severity"] in (
-            "Critical", "Important", "Minor", "Blocking", "Should-fix", "Discussion")):
-        raise ArtifactBudgetError(
-            f"{subject}.severity must be Critical, Important, Minor, Blocking, Should-fix or Discussion")
-    if not (isinstance(value["status"], str)
-            and value["status"] in ("parked", "residual", "discussion", "minor")):
-        raise ArtifactBudgetError(f"{subject}.status must be parked, residual, discussion or minor")
-    if not _string(value["text"]):
-        raise ArtifactBudgetError(f"{subject}.text must be a non-empty string")
-    ruling = value["ruling"]
-    if ruling is not None and not _string(ruling):
-        raise ArtifactBudgetError(f"{subject}.ruling must be null or a non-empty string")
-    if value["status"] == "parked" and not _string(ruling):
-        raise ArtifactBudgetError(f"{subject}.ruling is required for a parked finding")
-
-
-def validate_detail_input(value: Mapping[str, object]) -> None:
-    """Validate the sole D15 non-empty detail-input shape."""
-    _require_members(value, {"interface_version", "findings"}, "detail input")
-    if type(value["interface_version"]) is not int or value["interface_version"] != 1:
-        raise ArtifactBudgetError("interface_version must be 1")
-    findings = value["findings"]
-    if not isinstance(findings, list) or not findings:
-        raise ArtifactBudgetError("findings must be a non-empty list")
-    for index, finding in enumerate(findings):
-        _validate_finding(finding, f"findings[{index}]")
-
-
-def _validate_blob_identity(value: dict) -> None:
-    """The blob id, length and SHA-256 that every generated-evidence side carries."""
-    if not _sha(value["blob_sha"]):
-        raise ArtifactBudgetError("invalid generated evidence blob")
-    if (not isinstance(value["content_sha256"], str)
-            or SHA256_RE.fullmatch(value["content_sha256"]) is None):
-        raise ArtifactBudgetError("invalid generated evidence digest")
-    if not _integer(value["bytes"]):
-        raise ArtifactBudgetError("invalid generated evidence metric")
-
-
-def _validate_ef_designer_side(value: object) -> None:
-    keys = {
-        "blob_sha", "bytes", "content_sha256", "migration_id", "product_version",
-        "entity_types", "properties", "indexes", "foreign_keys", "tables",
-    }
-    if not _exact_keys(value, keys):
-        raise ArtifactBudgetError("invalid generated evidence side")
-    assert isinstance(value, dict)
-    _validate_blob_identity(value)
-    if not _string(value["migration_id"]):
-        raise ArtifactBudgetError("invalid generated migration id")
-    if value["product_version"] is not None and not _string(value["product_version"]):
-        raise ArtifactBudgetError("invalid generated product version")
-    for key in {"entity_types", "properties", "indexes", "foreign_keys", "tables"}:
-        if not _integer(value[key]):
-            raise ArtifactBudgetError("invalid generated evidence metric")
-
-
-def _validate_ef_designer_sides(base: object, head: object) -> None:
-    """At least one side; each present side is EF-shaped."""
-    if base is None and head is None:
-        raise ArtifactBudgetError("generated evidence has no side")
-    for side in (base, head):
-        if side is not None:
-            _validate_ef_designer_side(side)
-
-
-def _validate_whole_file_deletion_sides(base: object, head: object) -> None:
-    """A null head and a base of exactly the blob identity plus `line_count`."""
-    if head is not None or base is None:
-        raise ArtifactBudgetError("invalid whole-file deletion sides")
-    if not _exact_keys(base, {"blob_sha", "bytes", "content_sha256", "line_count"}):
-        raise ArtifactBudgetError("invalid generated evidence side")
-    assert isinstance(base, dict)
-    _validate_blob_identity(base)
-    if not _integer(base["line_count"]):
-        raise ArtifactBudgetError("invalid generated evidence metric")
-
-
-GENERATED_EVIDENCE_SIDES = {
-    "ef-core-migration-designer": _validate_ef_designer_sides,
-    "whole-file-deletion": _validate_whole_file_deletion_sides,
-}
-
-
-def _validate_generated_evidence(value: object) -> None:
-    if not _exact_keys(value, {"path", "kind", "source_diff_bytes", "base", "head"}):
-        raise ArtifactBudgetError("invalid generated evidence")
-    assert isinstance(value, dict)
-    path = value["path"]
-    if (not _string(path) or "\x00" in path
-            or PurePosixPath(path).is_absolute()
-            or any(part in {"", ".", ".."} for part in PurePosixPath(path).parts)
-            or str(PurePosixPath(path)) != path):
-        raise ArtifactBudgetError("invalid generated evidence path")
-    kind = value["kind"]
-    validate_sides = GENERATED_EVIDENCE_SIDES.get(kind) if isinstance(kind, str) else None
-    if validate_sides is None:
-        raise ArtifactBudgetError("invalid generated evidence kind")
-    if not _integer(value["source_diff_bytes"], minimum=1):
-        raise ArtifactBudgetError("invalid generated source bytes")
-    validate_sides(value["base"], value["head"])
-
-
-def _validate_manifest(root: Path, root_raw: bytes) -> list[CapturedArtifact]:
-    manifest = _decode_json(root_raw)
-    if not isinstance(manifest, dict):
-        raise ArtifactBudgetError("manifest is not an object")
-    purpose = manifest.get("purpose")
-    version = manifest.get("interface_version")
-    if purpose == "diff-review" and version == 1:
-        expected_keys = {"interface_version", "kind", "purpose", "range", "commits", "stat",
-                         "shards", "total_diff_bytes", "coverage"}
-        suffix = "diff"
-        total_key = "total_diff_bytes"
-    elif purpose == "diff-review" and version == 2:
-        expected_keys = {
-            "interface_version", "kind", "purpose", "range", "commits", "stat",
-            "shards", "source_diff_bytes", "total_review_bytes", "generated_evidence",
-            "coverage",
-        }
-        suffix = "diff"
-        total_key = "total_review_bytes"
-    elif purpose == "diff-review" and version == 3:
-        expected_keys = {
-            "interface_version", "kind", "purpose", "range", "commits", "stat",
-            "shards", "source_diff_bytes", "total_review_bytes", "generated_evidence",
-            "packaging", "coverage",
-        }
-        suffix = "diff"
-        total_key = "total_review_bytes"
-    elif purpose == "delivery-detail":
-        expected_keys = {"interface_version", "kind", "purpose", "context", "shards",
-                         "total_detail_bytes", "coverage"}
-        suffix = "jsonl"
-        total_key = "total_detail_bytes"
-    else:
-        raise ArtifactBudgetError("invalid review purpose")
-    if not _exact_keys(manifest, expected_keys):
-        raise ArtifactBudgetError("invalid manifest keys")
-    if type(manifest["interface_version"]) is not int:
-        raise ArtifactBudgetError("invalid manifest version")
-    if purpose == "delivery-detail" and manifest["interface_version"] != 1:
-        raise ArtifactBudgetError("invalid manifest version")
-    if manifest["kind"] != "review-package":
-        raise ArtifactBudgetError("invalid manifest kind")
-    if purpose == "diff-review":
-        range_value = manifest["range"]
-        if not _exact_keys(range_value, {"base", "head"}) or not _sha(range_value["base"]) or not _sha(range_value["head"]):  # type: ignore[index]
-            raise ArtifactBudgetError("invalid diff range")
-        commits = manifest["commits"]
-        if not isinstance(commits, list):
-            raise ArtifactBudgetError("invalid commits")
-        for commit in commits:
-            if (not _exact_keys(commit, {"sha", "subject"}) or not _sha(commit["sha"])
-                    or not isinstance(commit["subject"], str)):  # type: ignore[index]
-                raise ArtifactBudgetError("invalid commit")
-        if not _nonnegative_fields(manifest["stat"], {"files_changed", "insertions", "deletions"}):
-            raise ArtifactBudgetError("invalid stat")
-        coverage = manifest["coverage"]
-        if version == 1:
-            if (not _exact_keys(coverage, {"complete", "file_diff_count"})
-                    or coverage["complete"] is not True
-                    or not _integer(coverage["file_diff_count"])):  # type: ignore[index]
-                raise ArtifactBudgetError("invalid diff coverage")
-        else:
-            if version == 3:
-                packaging = manifest["packaging"]
-                if (not _exact_keys(packaging, {"context_lines", "shard_strategy"})
-                        or packaging["context_lines"] not in {0, 1, 3, 5, 7}  # type: ignore[index]
-                        or type(packaging["context_lines"]) is not int  # type: ignore[index]
-                        or packaging["shard_strategy"]  # type: ignore[index]
-                        != "stable-first-fit-whole-file"):
-                    raise ArtifactBudgetError("invalid adaptive packaging")
-            coverage_keys = {
-                "complete", "file_diff_count", "byte_complete_file_count",
-                "generated_evidence_file_count",
-            }
-            if (not _exact_keys(coverage, coverage_keys)
-                    or coverage["complete"] is not True
-                    or any(not _integer(coverage[key]) for key in coverage_keys - {"complete"})):  # type: ignore[index]
-                raise ArtifactBudgetError("invalid diff coverage")
-            generated = manifest["generated_evidence"]
-            if (not isinstance(generated, list)
-                    or (version == 2 and not generated)):
-                raise ArtifactBudgetError("missing generated evidence")
-            for item in generated:
-                _validate_generated_evidence(item)
-            paths = [item["path"] for item in generated]
-            if len(set(paths)) != len(paths):
-                raise ArtifactBudgetError("duplicate generated evidence path")
-            if coverage["generated_evidence_file_count"] != len(generated):
-                raise ArtifactBudgetError("inconsistent generated evidence coverage")
-            if (coverage["byte_complete_file_count"] + len(generated)
-                    != coverage["file_diff_count"]):
-                raise ArtifactBudgetError("inconsistent byte coverage")
-            if (not _integer(manifest["source_diff_bytes"])
-                    or manifest["source_diff_bytes"]
-                    < sum(item["source_diff_bytes"] for item in generated)):
-                raise ArtifactBudgetError("invalid source diff bytes")
-        if manifest["stat"]["files_changed"] != coverage["file_diff_count"]:  # type: ignore[index]
-            raise ArtifactBudgetError("inconsistent diff coverage")
-    else:
-        context = manifest["context"]
-        if (not _exact_keys(context, {"issue", "branch", "producer"})
-                or not _integer(context["issue"], minimum=1)  # type: ignore[index]
-                or not _string(context["branch"])  # type: ignore[index]
-                or context["producer"] not in {"sdd", "ship-review"}):  # type: ignore[index]
-            raise ArtifactBudgetError("invalid detail context")
-        coverage = manifest["coverage"]
-        if (not _exact_keys(coverage, {"complete", "finding_count"})
-                or coverage["complete"] is not True or not _integer(coverage["finding_count"], minimum=1)):  # type: ignore[index]
-            raise ArtifactBudgetError("invalid detail coverage")
-    directory = root.with_suffix(".shards")
-    entries = _directory_entries(directory)
-    numbered: dict[int, Path] = {}
-    for entry in entries:
-        match = SHARD_RE.fullmatch(entry.name)
-        if match is None or match.group(2) != suffix:
-            raise ArtifactBudgetError("unknown review member")
-        number = int(match.group(1))
-        if number < 1 or number in numbered:
-            raise ArtifactBudgetError("invalid review member number")
-        numbered[number] = entry
-    count = len(numbered)
-    if set(numbered) != set(range(1, count + 1)):
-        raise ArtifactBudgetError("gapped review members")
-    shards = manifest["shards"]
-    if not isinstance(shards, list) or len(shards) != count:
-        raise ArtifactBudgetError("manifest shards do not match discovery")
-    paths = [numbered[number] for number in range(1, count + 1)]
-    members = [_capture_artifact(path) for path in paths]
-    sizes: list[int] = []
-    for number, (entry, member) in enumerate(zip(shards, members), 1):
-        if not _exact_keys(entry, {"path", "bytes"}):
-            raise ArtifactBudgetError("invalid shard entry")
-        expected_path = f"{directory.name}/shard-{number:03d}.{suffix}"
-        if entry["path"] != expected_path or not _integer(entry["bytes"]):  # type: ignore[index]
-            raise ArtifactBudgetError("invalid shard reference")
-        size = member.size
-        if entry["bytes"] != size:  # type: ignore[index]
-            raise ArtifactBudgetError("stale shard bytes")
-        sizes.append(size)
-        if suffix == "jsonl":
-            raw = member.raw
-            lines = raw.splitlines(keepends=True)
-            if not lines or any(not line.endswith(b"\n") for line in lines):
-                raise ArtifactBudgetError("invalid JSONL shard")
-            findings = []
-            for line_number, line in enumerate(lines, 1):
-                finding = _decode_json(line)
-                _validate_finding(finding, f"shard-{number:03d}.jsonl line {line_number}")
-                canonical = _canonical(finding)
-                if line != canonical:
-                    raise ArtifactBudgetError("non-canonical JSONL finding")
-                findings.append(finding)
-            if not findings:
-                raise ArtifactBudgetError("empty detail shard")
-    if not _integer(manifest[total_key]) or manifest[total_key] != sum(sizes):
-        raise ArtifactBudgetError("invalid declared total")
-    if (purpose == "diff-review" and version in {2, 3}
-            and manifest["source_diff_bytes"] < manifest["total_review_bytes"]):
-        raise ArtifactBudgetError("invalid review byte reduction")
-    if suffix == "jsonl":
-        all_findings: list[object] = []
-        for member in members:
-            all_findings.extend(_decode_json(line) for line in member.raw.splitlines())
-        validate_detail_input({"interface_version": 1, "findings": all_findings})
-        if manifest["coverage"]["finding_count"] != len(all_findings):  # type: ignore[index]
-            raise ArtifactBudgetError("inconsistent detail coverage")
-    return members
-
-
 def check_artifact(kind: str, root: str | os.PathLike[str],
                    policy_path: str | os.PathLike[str] | None = None) -> CheckResult:
     """Validate shape, measure encoded bytes, and classify one artifact root."""
@@ -715,14 +373,10 @@ def _check_artifact(kind: str, root: str | os.PathLike[str],
         except UnicodeDecodeError as exc:
             raise ArtifactBudgetError("malformed UTF-8 root") from exc
         members = []
-    elif kind == "implementation-plan":
+    else:
         if root_path.suffix != ".md" or not root_path.stem:
             raise ArtifactBudgetError("invalid plan root name")
         members = [_capture_artifact(path) for path in _discover_plan(root_path, root_raw)]
-    else:
-        if root_path.suffix != ".json" or not root_path.stem:
-            raise ArtifactBudgetError("invalid review root name")
-        members = _validate_manifest(root_path, root_raw)
     identities = {(root_artifact.device, root_artifact.inode)}
     member_sizes: list[int] = []
     for member in members:
@@ -797,375 +451,29 @@ def _artifact_fault(value: object, *, kinds: Sequence[str], over: bool,
     return None
 
 
-def _valid_artifact(value: object, *, kind: str | None = None,
-                    over: bool | None = None, root_only: bool = False) -> bool:
-    return _artifact_fault(value, kinds=KINDS if kind is None else (kind,),
-                           over=over is True, root_only=root_only) is None
-
-
-def _projected_violations(metrics: Mapping[str, int], limits: ArtifactLimits) -> list[str]:
-    return [code for code, limit_name, measure in _BOUNDS
-            if measure(metrics) > getattr(limits, limit_name)]
-
-
-def _posix_relative(value: object) -> bool:
-    if not _valid_path(value):
-        return False
-    path = PurePosixPath(value)
-    return (not path.is_absolute() and str(path) == value
-            and not any(part in {"", ".", ".."} for part in path.parts))
-
-
-def _recommendation_fault(value: object, completed_through: int, limits: ArtifactLimits) -> str | None:
-    fault = _members_fault(value, RECOMMENDATION_KEYS, "projection.recommended_boundary")
-    if fault is not None:
-        return fault
-    if not (isinstance(value["id"], str) and BOUNDARY_ID_RE.fullmatch(value["id"])):
-        return "projection.recommended_boundary.id is not a boundary id"
-    tasks = value["tasks"]
-    if not (isinstance(tasks, list) and all(_integer(task, minimum=1) for task in tasks)
-            and tasks == sorted(set(tasks)) and completed_through + 1 in tasks):
-        return "projection.recommended_boundary.tasks must be sorted, distinct and reach completed_through + 1"
-    if not _sha(value["prerequisite_commit"]):
-        return "projection.recommended_boundary.prerequisite_commit must be a 40-hex commit"
-    if not (_valid_metrics(value["metrics"]) and not _projected_violations(value["metrics"], limits)):
-        return "projection.recommended_boundary.metrics must be one measurement within the limits"
-    return None
-
-
-def summary_fault(value: object, *, limits: ArtifactLimits, policy_sha256: str) -> str | None:
-    """Why `value` is not a review-feasibility summary, or None; both report boundaries share it (issue 227 D5).
-
-    `limits` are the review-package limits; `packing_policy_sha256` is checked for shape only.
-    """
-    fault = _members_fault(value, SUMMARY_KEYS, "projection")
-    if fault is not None:
-        return fault
-    if (type(value["schema_version"]), value["schema_version"], value["kind"]) != (
-            int, 1, "review-feasibility-summary"):
-        return "projection.schema_version must be 1 and projection.kind review-feasibility-summary"
-    state = value["state"]
-    if not (isinstance(state, str) and state in {"complete", "decompose_required"}):
-        return "projection.state must be complete or decompose_required"
-    if not _posix_relative(value["plan"]):
-        return "projection.plan must be a relative POSIX path without empty, . or .. parts"
-    for name in ("base", "head"):
-        if not _sha(value[name]):
-            return f"projection.{name} must be a 40-hex commit"
-    if not _integer(value["completed_through"]):
-        return "projection.completed_through must be a non-negative integer"
-    for name in ("plan_package_sha256", "forecast_sha256", "packing_policy_sha256",
-                 "artifact_policy_sha256"):
-        if not (isinstance(value[name], str) and DIGEST_RE.fullmatch(value[name])):
-            return f"projection.{name} must be sha256:<64 hex>"
-    if value["artifact_policy_sha256"] != policy_sha256:
-        return "projection.artifact_policy_sha256 must equal the loaded policy identity"
-    if not _valid_metrics(value["metrics"]):
-        return "projection.metrics must be four non-negative integer counts of one measurement"
-    expected = _projected_violations(value["metrics"], limits)
-    if value["violations"] != expected:
-        return "projection.violations must be the limits the metrics exceed, in checker order"
-    if (state == "decompose_required") != bool(expected):
-        return f"projection.state {state} disagrees with projection.violations"
-    recommendation = value["recommended_boundary"]
-    if recommendation is not None and state == "complete":
-        return "projection.recommended_boundary must be null when the state is complete"
-    return None if recommendation is None else _recommendation_fault(
-        recommendation, value["completed_through"], limits)
-
-
 # Each producer state's allowed artifact kinds and budget side; `failed` takes a
 # root-only artifact or null (issue 472 D3).
 _PRODUCER_ARTIFACTS = {
     "complete": (KINDS, False),
-    "decompose_required": (("design-spec", "implementation-plan", "review-package"), True),
+    "decompose_required": (("design-spec", "implementation-plan"), True),
     "stopped": (("handoff",), True),
 }
 
 
-def _projection_binding_fault(projection: Mapping[str, object], state: object,
-                              artifact: Mapping[str, object]) -> str | None:
-    for name, expected in (("state", state), ("completed_through", 0), ("plan", artifact["path"])):
-        if projection[name] != expected:
-            return f"projection.{name} must be {json.dumps(expected)}"
-    return None
-
-
-def validate_producer_report(value: Mapping[str, object], notes_max_characters: int, *,
-                             review_limits: ArtifactLimits, policy_sha256: str) -> None:
-    projected = "projection" in value
-    _require_members(value, {"state", "artifact", "notes"} | ({"projection"} if projected else set()),
-                     "producer report")
+def validate_producer_report(value: Mapping[str, object], notes_max_characters: int) -> None:
+    _require_members(value, {"state", "artifact", "notes"}, "producer report")
     _require_notes(value["notes"], notes_max_characters)
     state, artifact = value["state"], value["artifact"]
-    if projected and state not in ("complete", "decompose_required"):
-        raise ArtifactBudgetError(f"projection is not allowed for state {state}")
     if state == "failed":
         fault = None if artifact is None else _artifact_fault(
             artifact, kinds=KINDS, over=False, root_only=True)
     elif isinstance(state, str) and state in _PRODUCER_ARTIFACTS:
         kinds, over = _PRODUCER_ARTIFACTS[state]
-        if projected:
-            kinds, over = ("implementation-plan",), False
         fault = _artifact_fault(artifact, kinds=kinds, over=over)
     else:
         raise ArtifactBudgetError("state must be complete, decompose_required, stopped or failed")
     if fault is not None:
         raise ArtifactBudgetError(f"{fault} for state {state}")
-    if projected:
-        fault = (summary_fault(value["projection"], limits=review_limits, policy_sha256=policy_sha256)
-                 or _projection_binding_fault(value["projection"], state, artifact))  # type: ignore[arg-type]
-        if fault is not None:
-            raise ArtifactBudgetError(fault)
-
-
-def _relative_path(value: object, *, durable: bool) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    path = PurePosixPath(value)
-    if path.is_absolute() or str(path) != value or any(part in {"", ".", ".."} for part in path.parts):
-        return False
-    prefix = (".superpowers", "issue-delivery")
-    in_delivery_home = len(path.parts) >= 2 and path.parts[:2] == prefix
-    is_durable = len(path.parts) > 2 and in_delivery_home
-    is_retained = len(path.parts) > 1 and path.parts[0] == ".superpowers" and not in_delivery_home
-    return is_durable if durable else is_retained
-
-
-def _detail_fault(value: Mapping[str, object], *, allow_unpublished: bool) -> str | None:
-    """Return the failing detail rule, or None when the detail fields hold.
-
-    Callers check `notes` with `_require_notes` first, so `notes` is a string here.
-    A reason names a state only after the closed-set check has passed, so it never
-    echoes an input value.
-    """
-    state, path, notes = value["detail_state"], value["report_path"], value["notes"]
-    if state == "none":
-        return None if path is None else "report_path must be null when detail_state is none"
-    if state == "present":
-        if not _relative_path(path, durable=True):
-            return "report_path must be a path under .superpowers/issue-delivery/ when detail_state is present"
-    elif allow_unpublished and state == "unpublished":
-        if not _relative_path(path, durable=False):
-            return ("report_path must be a path under .superpowers/ outside issue-delivery/ "
-                    "when detail_state is unpublished")
-    else:
-        return ("detail_state must be none, present or unpublished" if allow_unpublished
-                else "detail_state must be none or present")
-    return None if path in notes else f"report_path must be cited in notes when detail_state is {state}"  # type: ignore[operator]
-
-
-# The closed acceptance_state set and its ship-handoff pairing (#272 D8, D9).
-# This is the one home of both: the sdd rows below, the legacy handoff and the
-# v2 handoff all read them.
-ACCEPTANCE_STATES = frozenset({"met", "unmet", "human_pending", "not_applicable"})
-_CLEAN_ACCEPTANCE = frozenset({"met", "human_pending", "not_applicable"})
-_HANDOFF_ACCEPTANCE = {
-    "clean": _CLEAN_ACCEPTANCE,
-    "residuals": ACCEPTANCE_STATES,
-    "unknown": frozenset({"not_applicable"}),
-}
-
-
-def acceptance_pairs_with_review(review_state: object, acceptance_state: object) -> bool:
-    """True when a handoff's acceptance_state is allowed under its review_state.
-
-    Any review_state outside the table pairs with nothing (#272 D11).
-    """
-    if not isinstance(review_state, str) or not isinstance(acceptance_state, str):
-        return False
-    allowed = _HANDOFF_ACCEPTANCE.get(review_state)
-    return allowed is not None and acceptance_state in allowed
-
-
-_SDD_KEYS = {"state", "review_state", "conformance_verdict", "correctness_verdict",
-             "verification_state", "base_sha", "head_sha", "acceptance_state", "detail_state",
-             "report_path", "notes"}
-_SDD_STOP_CELLS = {"review_state": "unknown", "conformance_verdict": "not_run",
-                   "correctness_verdict": "not_run", "verification_state": "not_run",
-                   "acceptance_state": "not_applicable", "detail_state": "none", "report_path": None}
-
-
-def _sdd_stop_fault(stop: object, base: str, head: str, *, review_limits: ArtifactLimits,
-                    policy_sha256: str) -> str | None:
-    kind = stop.get("kind") if isinstance(stop, dict) else None
-    member = {"projected_overflow": "projection", "actual_overage": "artifact"}.get(
-        kind if isinstance(kind, str) else "")
-    if member is None:
-        return "stop.kind must be projected_overflow or actual_overage"
-    fault = _members_fault(stop, {"kind", member}, "stop")
-    if fault is not None:
-        return fault
-    if member == "artifact":
-        fault = _artifact_fault(stop["artifact"], kinds=("review-package",), over=True)
-        return None if fault is None else f"stop.{fault}"
-    projection = stop["projection"]
-    fault = summary_fault(projection, limits=review_limits, policy_sha256=policy_sha256)
-    if fault is not None:
-        return f"stop.{fault}"
-    if projection["state"] != "decompose_required":
-        return "stop.projection.state must be decompose_required"
-    if (projection["base"], projection["head"]) != (base, head):
-        return "stop.projection.base and head must equal base_sha and head_sha"
-    return None
-
-
-def _validate_sdd_decompose_required(value: Mapping[str, object], notes_max_characters: int, *,
-                                     review_limits: ArtifactLimits, policy_sha256: str) -> None:
-    _require_members(value, _SDD_KEYS | {"stop"}, "SDD report")
-    _require_notes(value["notes"], notes_max_characters)
-    for name, expected in _SDD_STOP_CELLS.items():
-        if value[name] != expected:
-            raise ArtifactBudgetError(f"invalid SDD state: {name} must be {json.dumps(expected)}")
-    if not (_sha(value["base_sha"]) and _sha(value["head_sha"])):
-        raise ArtifactBudgetError("invalid SDD state: base_sha and head_sha must be 40-hex commits")
-    fault = _sdd_stop_fault(value["stop"], value["base_sha"], value["head_sha"],  # type: ignore[arg-type]
-                            review_limits=review_limits, policy_sha256=policy_sha256)
-    if fault is not None:
-        raise ArtifactBudgetError(f"invalid SDD state: {fault}")
-
-
-def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int, *,
-                        review_limits: ArtifactLimits, policy_sha256: str) -> None:
-    if value.get("state") == "decompose_required":
-        _validate_sdd_decompose_required(value, notes_max_characters, review_limits=review_limits,
-                                         policy_sha256=policy_sha256)
-        return
-    _require_members(value, _SDD_KEYS, "SDD report")
-    _require_notes(value["notes"], notes_max_characters)
-    if (fault := _detail_fault(value, allow_unpublished=True)) is not None:
-        raise ArtifactBudgetError(f"invalid SDD report: {fault}")
-    acceptance = value["acceptance_state"]
-    if not isinstance(acceptance, str) or acceptance not in ACCEPTANCE_STATES:
-        raise ArtifactBudgetError("invalid SDD report")
-    state, review = value["state"], value["review_state"]
-    axes = (value["conformance_verdict"], value["correctness_verdict"])
-    verification = value["verification_state"]
-    base, head = value["base_sha"], value["head_sha"]
-    detail = value["detail_state"]
-    valid = False
-    if state == "complete" and review == "clean":
-        valid = (axes == ("clean", "clean") and verification == "passed" and _sha(base) and _sha(head)
-                 and detail in {"none", "present"} and acceptance in _CLEAN_ACCEPTANCE)
-    elif state == "residuals" and review == "residuals":
-        valid = (all(axis in {"clean", "findings"} for axis in axes) and "findings" in axes
-                 and verification in {"passed", "failed"} and _sha(base) and _sha(head) and detail == "present"
-                 and (acceptance != "unmet" or value["conformance_verdict"] == "findings"))
-    elif state == "failed" and review == "unknown":
-        if axes == ("not_run", "not_run") and verification == "not_run" and base is None and head is None:
-            valid = detail == "none" and acceptance == "not_applicable"
-        elif (_sha(base) and _sha(head) and verification in {"passed", "failed"}
-              and all(axis in {"not_run", "clean", "findings"} for axis in axes)
-              and axes != ("clean", "clean")):
-            if detail == "unpublished":
-                valid = "findings" in axes
-            elif detail == "none":
-                valid = all(axis in {"not_run", "clean"} for axis in axes)
-            else:
-                valid = detail == "present"
-            valid = valid and (value["conformance_verdict"] != "not_run" or acceptance == "not_applicable")
-    if not valid:
-        raise ArtifactBudgetError("invalid SDD state")
-
-
-def validate_ship_handoff_report(value: Mapping[str, object], notes_max_characters: int) -> None:
-    keys = {"state", "ledger_repo_root", "run_id", "attempt", "owner", "owner_worktree",
-            "action_id", "issue_number", "branch", "worktree_path", "spec_artifact",
-            "plan_artifact", "head_sha", "review_state", "acceptance_state", "auto", "report_path",
-            "notes"}
-    _require_members(value, keys, "ship handoff")
-    _require_notes(value["notes"], notes_max_characters)
-    lifecycle = [value[name] for name in
-                 ("ledger_repo_root", "run_id", "attempt", "owner", "owner_worktree", "action_id")]
-    if not (all(item is None for item in lifecycle)
-            or (_string(lifecycle[0]) and _string(lifecycle[1]) and _integer(lifecycle[2], minimum=1)
-                and _string(lifecycle[3]) and _string(lifecycle[4]) and _string(lifecycle[5]))):
-        raise ArtifactBudgetError("invalid lifecycle identity")
-    if (not _integer(value["issue_number"], minimum=1) or not _string(value["branch"])
-            or not _string(value["worktree_path"]) or type(value["auto"]) is not bool):
-        raise ArtifactBudgetError("invalid ship handoff scalars")
-    report = value["report_path"]
-    if report is not None and (not _relative_path(report, durable=True) or report not in value["notes"]):  # type: ignore[operator]
-        raise ArtifactBudgetError("invalid ship handoff report path")
-    state = value["state"]
-    both = (_valid_artifact(value["spec_artifact"], kind="design-spec", over=False)
-            and _valid_artifact(value["plan_artifact"], kind="implementation-plan", over=False))
-    review_detail_valid = value["review_state"] != "residuals" or report is not None
-    if state == "complete":
-        valid = (both and _sha(value["head_sha"])
-                 and value["review_state"] in {"clean", "residuals"} and review_detail_valid)
-    elif state == "failed":
-        before = (value["spec_artifact"] is None and value["plan_artifact"] is None
-                  and value["head_sha"] is None and value["review_state"] == "unknown")
-        after = both and _sha(value["head_sha"]) and value["review_state"] in {"unknown", "clean", "residuals"}
-        valid = before or (after and review_detail_valid)
-    else:
-        valid = False
-    valid = valid and acceptance_pairs_with_review(value["review_state"], value["acceptance_state"])
-    if not valid:
-        raise ArtifactBudgetError("invalid ship handoff state")
-
-
-def validate_ship_summary_report(value: Mapping[str, object], notes_max_characters: int) -> None:
-    keys = {"issue", "state", "pr_url", "merge_sha", "issue_closed", "discussion_items",
-            "detail_state", "report_path", "notes"}
-    _require_members(value, keys, "ship summary")
-    _require_notes(value["notes"], notes_max_characters)
-    if not _integer(value["issue"], minimum=1):
-        raise ArtifactBudgetError("invalid ship summary: issue must be a positive integer")
-    if value["discussion_items"] != []:
-        raise ArtifactBudgetError("invalid ship summary: discussion_items must be an empty list")
-    if type(value["issue_closed"]) is not bool:
-        raise ArtifactBudgetError("invalid ship summary: issue_closed must be a boolean")
-    if (fault := _detail_fault(value, allow_unpublished=True)) is not None:
-        raise ArtifactBudgetError(f"invalid ship summary: {fault}")
-    pr = value["pr_url"]
-    if pr is not None and not _string(pr):
-        raise ArtifactBudgetError("invalid ship summary: pr_url must be null or a non-empty string")
-    state = value["state"]
-    refusal = "invalid ship summary state: "
-    if state == "merged":
-        if not _string(pr):
-            raise ArtifactBudgetError(refusal + "pr_url must be a non-empty string when state is merged")
-        if not _sha(value["merge_sha"]):
-            raise ArtifactBudgetError(refusal + "merge_sha must be a 40-hex commit when state is merged")
-        if value["detail_state"] not in {"none", "present"}:
-            raise ArtifactBudgetError(refusal + "detail_state must be none or present when state is merged")
-    elif state in {"stopped", "failed"}:
-        if value["merge_sha"] is not None:
-            raise ArtifactBudgetError(refusal + f"merge_sha must be null when state is {state}")
-        if value["issue_closed"] is not False:
-            raise ArtifactBudgetError(refusal + f"issue_closed must be false when state is {state}")
-    else:
-        raise ArtifactBudgetError(refusal + "state must be merged, stopped or failed")
-
-
-def validate_ledger_result(value: Mapping[str, object], notes_max_characters: int) -> None:
-    """Check a result the lifecycle ledger projects onto a workflow response.
-
-    Every row the ledger holds meets the owner-report rule
-    (``validate_ship_summary_report``), except reconciliation's ``merged`` row
-    with ``issue_closed`` false. That row asserts only the merge the forge
-    observed, and it may carry a superseded owner's detail pointer without
-    citing it in its notes. An owner's held ``merged`` row (#273) has the same
-    two cells but meets the owner rule.
-    """
-    if not (isinstance(value, dict) and value.get("state") == "merged"
-            and value.get("issue_closed") is False):
-        validate_ship_summary_report(value, notes_max_characters)
-        return
-    keys = {"issue", "state", "pr_url", "merge_sha", "issue_closed", "discussion_items",
-            "detail_state", "report_path", "notes"}
-    _require_members(value, keys, "ledger result")
-    _require_notes(value["notes"], notes_max_characters)
-    detail, path = value["detail_state"], value["report_path"]
-    valid = (_integer(value["issue"], minimum=1) and _string(value["pr_url"])
-             and _sha(value["merge_sha"]) and value["discussion_items"] == []
-             and ((detail == "none" and path is None)
-                  or (detail == "present" and _relative_path(path, durable=True))
-                  or (detail == "unpublished" and _relative_path(path, durable=False))))
-    if not valid:
-        raise ArtifactBudgetError("invalid ledger result")
 
 
 def _canonical(value: object) -> bytes:
@@ -1174,70 +482,6 @@ def _canonical(value: object) -> bytes:
                            separators=(",", ":")) + "\n").encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ArtifactBudgetError("invalid Unicode string") from exc
-
-
-def _v2_cause(model: object, exc: BaseException) -> str:
-    """The message of an error this helper or the delivery model raised, else the class name (issue 472 D12)."""
-    if isinstance(exc, (ArtifactBudgetError, model.DeliveryModelError)):
-        return str(exc)
-    return type(exc).__name__
-
-
-def validate_workflow_response_report(value: object, notes_max_characters: int) -> None:
-    """Delegate the closed v2 transport shape to the single delivery model."""
-    model = _delivery_model()
-    try:
-        model.validate_delivery_object(
-            value, expected_kind="workflow-response", notes_max_characters=notes_max_characters
-        )
-        if isinstance(value, dict) and value.get("kind") == "terminal":
-            _validate_legacy_result_slot(value["result"], value["issue"], notes_max_characters,
-                                         rule=validate_ledger_result)
-        elif isinstance(value, dict) and "summaries" in value:
-            for summary in value["summaries"]:
-                _validate_legacy_result_slot(
-                    summary["result"], summary["issue"], notes_max_characters,
-                    rule=validate_ledger_result,
-                )
-    except Exception as exc:
-        raise ArtifactBudgetError(f"workflow-response: {_v2_cause(model, exc)}") from exc
-
-
-def validate_delivery_model_report(
-    value: object, notes_max_characters: int, boundary: str
-) -> None:
-    model = _delivery_model()
-    try:
-        model.validate_delivery_object(
-            value, expected_kind=boundary, notes_max_characters=notes_max_characters
-        )
-        if boundary == "ship-handoff" and isinstance(value, dict) and (
-                not acceptance_pairs_with_review(value["review_state"], value["acceptance_state"])
-                or (value["acceptance_state"] == "unmet" and value["report_path"] is None)):
-            # The model only admits the key; the closed pairing is ours (#272 D9),
-            # and an unmet criterion travels only with its durable detail (#272 D16).
-            raise ArtifactBudgetError("acceptance_state does not pair with review_state")
-        if boundary == "ship-summary" and isinstance(value, dict):
-            _validate_legacy_result_slot(
-                value["historical_owner_result"], value["issue"], notes_max_characters,
-                rule=validate_ship_summary_report,
-            )
-    except Exception as exc:
-        raise ArtifactBudgetError(f"{boundary}: {_v2_cause(model, exc)}") from exc
-
-
-def _validate_legacy_result_slot(
-    value: object, issue: object, notes_max_characters: int,
-    *, rule: Callable[[Mapping[str, object], int], None],
-) -> None:
-    """Apply ``rule`` to one nullable v2 result slot and match its issue."""
-    if value is None:
-        return
-    if not isinstance(issue, int) or isinstance(issue, bool):
-        raise ArtifactBudgetError("invalid legacy result issue")
-    rule(value, notes_max_characters)
-    if value["issue"] != issue:
-        raise ArtifactBudgetError("legacy result issue mismatch")
 
 
 def _input_bytes(path: str, wire_max: int, read_stdin: Callable[[int], bytes]) -> bytes:
@@ -1263,18 +507,9 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--policy")
     check.add_argument("--format", choices=("json",), required=True)
     report = subparsers.add_parser("validate-report")
-    report.add_argument("--boundary", choices=("producer", "sdd", "ship-handoff", "ship-checkpoint", "ship-summary", "workflow-response"), required=True)
+    report.add_argument("--boundary", choices=("producer",), required=True)
     report.add_argument("--input", required=True)
     report.add_argument("--policy")
-    detail = subparsers.add_parser("validate-detail-input")
-    detail.add_argument("--input", required=True)
-    detail.add_argument("--policy")
-    describe = subparsers.add_parser("describe")
-    describe.add_argument("--kind", choices=KINDS, required=True)
-    describe.add_argument("--format", choices=("json",), required=True)
-    describe.add_argument("--policy")
-    for operation in (check, report, detail):
-        operation.add_argument("--expected-policy-sha256")
     return parser
 
 
@@ -1311,68 +546,31 @@ def invoke(argv: Sequence[str], read_stdin: Callable[[int], bytes]) -> Outcome:
     try:
         args = _parser().parse_args(argv)
         try:
-            loaded, identity = _load_policy_identity(
-                _policy_path(args.policy))
-            expected = getattr(args, "expected_policy_sha256", None)
-            if expected is not None and expected != identity:
-                raise ArtifactBudgetError("policy identity disagreement")
+            limits, notes_max, wire_max = _load_policy(_policy_path(args.policy))
         except ArtifactBudgetError as exc:
-            if args.command in {"check", "describe"}:
+            if args.command == "check":
                 raise
-            label = "report" if args.command == "validate-report" else "detail input"
-            return _refuse(f"invalid {label}", exc)
-        limits, notes_max, report_wire_max, response_wire_max = loaded
-        if args.command == "describe":
-            return Outcome(0, _canonical({"schema_version": 1,
-                "kind": "artifact-budget-description", "artifact_kind": args.kind,
-                "limits": vars(limits[args.kind]), "report_wire_max_bytes": report_wire_max,
-                "policy_sha256": identity}), "")
+            return _refuse("invalid report", exc)
         if args.command == "check":
             result = _check_artifact(args.kind, args.root, limits)
             return Outcome(0 if result.status == "within_budget" else 3,
                            _canonical(result.to_dict()), "")
-        wire_max = (response_wire_max if args.command == "validate-report"
-                    and args.boundary in {"workflow-response", "ship-handoff"}
-                    else report_wire_max)
         try:
             raw = _input_bytes(args.input, wire_max, read_stdin)
         except InputReadError as exc:
-            label = "report" if args.command == "validate-report" else "detail input"
-            return _refuse(f"cannot read {label}", exc)
+            return _refuse("cannot read report", exc)
         except ArtifactBudgetError as exc:
-            label = "report" if args.command == "validate-report" else "detail input"
-            return _refuse(f"invalid {label}", exc)
+            return _refuse("invalid report", exc)
         try:
-            if args.command == "validate-report" and args.boundary in {
-                "ship-handoff", "ship-checkpoint", "ship-summary", "workflow-response"
-            }:
-                _delivery_model()
             value = _decode_json(raw)
             if not isinstance(value, dict):
                 raise ArtifactBudgetError("JSON root is not an object")
-            if args.command == "validate-detail-input":
-                validate_detail_input(value)
-            else:
-                if args.boundary == "ship-handoff" and value.get("interface_version") == 2:
-                    validate_delivery_model_report(value, notes_max, "ship-handoff")
-                elif args.boundary == "ship-checkpoint":
-                    validate_delivery_model_report(value, notes_max, "ship-checkpoint")
-                elif args.boundary == "ship-summary" and value.get("interface_version") == 2:
-                    validate_delivery_model_report(value, notes_max, "ship-summary")
-                else:
-                    review = {"review_limits": limits["review-package"], "policy_sha256": identity}
-                    validators = {"producer": partial(validate_producer_report, **review),
-                                  "sdd": partial(validate_sdd_report, **review),
-                                  "ship-handoff": validate_ship_handoff_report,
-                                  "ship-summary": validate_ship_summary_report,
-                                  "workflow-response": validate_workflow_response_report}
-                    validators[args.boundary](value, notes_max)
+            validate_producer_report(value, notes_max)
             output = _canonical(value)
             if len(output) > wire_max:
                 raise ArtifactBudgetError(f"canonical output exceeds the {wire_max}-byte wire bound")
         except ArtifactBudgetError as exc:
-            label = "report" if args.command == "validate-report" else "detail input"
-            return _refuse(f"invalid {label}", exc)
+            return _refuse("invalid report", exc)
         return Outcome(0, output, "")
     except ArtifactBudgetError as exc:
         return _refuse("invalid input", exc)

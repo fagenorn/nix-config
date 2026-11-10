@@ -37,22 +37,6 @@ named N whose status is online and whose labels include `self-hosted` and every 
 it is online but lacks one (a wrong registration), and not yet when it is unlisted or not online.
 It only reads one paginated runner listing and refuses a truncated or malformed one.
 
-`worktree-mapping [--red-pending] --repo-root R...` (issue 585) states the #130 checklist C7 rule
-over each root through `agent_tools.worktree_mapping`, read-only, using the verdicts of
-`workflow-state migrate --repo-root R`. It exits 0 when every root is green, 1 when one is red,
-75 when none is red and one is human-pending, and 2 on a tool error. Under `--red-pending` any
-root that is not green exits 75.
-
-Issue 710 adds the `forge` class (reasons `claim`, `open_pr`, `declared`), read through
-`agent_tools.worktree_forge`: only a path the ledgers leave `unmapped` is upgraded, and only
-when its branch is named by (D5) the winning claim marker of an open `in-progress` issue, whose
-author association is `OWNER` or `MEMBER` (a released or `end`-ed claim and an untrusted
-author's claim map nothing), (D6) an open pull request headed in the same repository (a fork's
-pull request maps nothing), or (D7) a branch of the declared table (`cutover-130-candidate`
-for `fagenorn/nix-config`) whose declaring issue is still open. The forge reads are GET-only,
-and a root without a GitHub `origin` reads no forge. A forge failure or a malformed payload is
-a tool error, exit 2 (`verify-checks: forge_error:`), never an unmapped reading.
-
 `deprecations-retired [--red-pending] [--watch-adapter A] --repo-root R...` (issue 582) states the
 #130 checklist C11 rule over each root, read-only: no deprecated use reported by
 `resolve-project platform-status` (a), no tracked legacy skills config (b), `bindings.deploy.adapter`
@@ -83,8 +67,6 @@ from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.agent_platform import DEPRECATION_MEMBERS, parse_semver, validate_manifest
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
-from agent_tools import worktree_forge
-from agent_tools.worktree_mapping import MappingError, classify_root
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -618,62 +600,12 @@ def cutover_bundle(repo_root: Path, branch: str = CANDIDATE_BRANCH) -> tuple[int
     return code, report
 
 
-WORKFLOW_STATE_TIMEOUT = 300
-
-
-def _migrate_report(root: Path, environ: Mapping[str, str]) -> dict:
-    """The dry-run report of `workflow-state migrate --repo-root root`; ToolError when unusable."""
-    binary = shutil.which("workflow-state", path=environ.get("PATH"))
-    if binary is None:
-        raise ToolError("tool_error", "workflow-state not found")
-    try:
-        done = subprocess.run([binary, "migrate", "--repo-root", str(root)], env=dict(environ),
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                              timeout=WORKFLOW_STATE_TIMEOUT, check=False)
-    except (OSError, subprocess.SubprocessError) as error:
-        raise ToolError("tool_error", f"workflow-state failed: {error}") from None
-    if done.returncode != 0:
-        raise ToolError("tool_error", f"workflow-state exit {done.returncode}: {done.stderr.strip()}")
-    try:
-        parsed = json.loads(done.stdout)
-    except ValueError:
-        raise ToolError("mapping_error", f"workflow-state printed non-JSON for {root}") from None
-    if not isinstance(parsed, dict):
-        raise ToolError("mapping_error", f"workflow-state report for {root} is not an object")
-    return parsed
-
-
 class ToolError(Exception):
     """The check could not judge: `kind` is the stderr label, the caller exits 2."""
 
     def __init__(self, kind: str, detail: str):
         super().__init__(detail)
         self.kind = kind
-
-
-def worktree_mapping_check(roots: Sequence[Path], environ: Mapping[str, str], *,
-                           red_pending: bool) -> tuple[int, dict]:
-    """The C7 rule over each root. Raises ToolError when a root cannot be judged."""
-    rows = []
-    for root in roots:
-        report = _migrate_report(root, environ)
-        try:
-            rows.append(classify_root(root, report, forge=worktree_forge.forge_facts))
-        except MappingError as error:
-            raise ToolError("mapping_error", str(error)) from None
-        except forge_markers.ForgeError as error:
-            raise ToolError("forge_error", str(error)) from None
-    verdicts = [row["verdict"] for row in rows]
-    green = all(v == "green" for v in verdicts)
-    if green:
-        code = 0
-    elif red_pending:
-        code = 75
-    elif "red" in verdicts:
-        code = 1
-    else:
-        code = 75
-    return code, {"met": green, "roots": rows}
 
 
 SKILLS_CONFIG = ".claude/skills.config.json"
@@ -858,11 +790,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     runner.add_argument("--repo", type=_repo, required=True)
     runner.add_argument("--runner", type=_nonempty, required=True)
     runner.add_argument("--label", type=_nonempty, action="append", required=True)
-    mapping = checks.add_parser(
-        "worktree-mapping",
-        help="issue 585/710: every retained worktree has a ledger mapping, a live claim, an open PR or a declared branch (C7)")
-    mapping.add_argument("--repo-root", type=Path, action="append", required=True)
-    mapping.add_argument("--red-pending", action="store_true")
     retired = checks.add_parser(
         "deprecations-retired",
         help="issue 582: the deprecated paths have zero users in every root (C11)")
@@ -890,15 +817,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 code, report = cutover_preflight(args.repo_root, args.branch, environ=os.environ)
         except GitError as error:
             print(f"verify-checks: git_error: {error}", file=sys.stderr)
-            return 2
-        print(json.dumps(report, sort_keys=True))
-        return code
-    if args.check == "worktree-mapping":
-        try:
-            code, report = worktree_mapping_check(args.repo_root, os.environ,
-                                                  red_pending=args.red_pending)
-        except ToolError as error:
-            print(f"verify-checks: {error.kind}: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, sort_keys=True))
         return code

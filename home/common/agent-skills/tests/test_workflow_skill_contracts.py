@@ -46,8 +46,6 @@ SKILL_ROOTS = (
 CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
 SKILL_TREES = (REPO_ROOT / "home/common/agent-skills/skills",
                REPO_ROOT / "home/common/claude-code/skills")
-NOW_FLAG = re.compile(r"(?<![\w-])--now(?![\w-])")
-NOW_KEY = re.compile(r'"now"\s*:')
 
 
 REPORT_CANDIDATE_MKTEMP = 'mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"'
@@ -134,8 +132,6 @@ KEPT_SHAPES = (
     ".claude/specs/2026-08-23-workflow-scratch-containment-design.md",
     ".claude/plans/2026-08-23-workflow-scratch-containment.md",
     ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-1.md",
-    "home/common/agent-skills/scripts/sdd-workspace",
-    "home/common/agent-skills/tests/test_sdd_workspace.py",
     "handoff-notes.md",
 )
 
@@ -377,7 +373,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             if path.suffix not in text_suffixes and path.name not in {
                 "resolve-project", "context-map-lint", "artifact-budget",
                 "agent-model-matrix", "diff-scope",
-                "sdd-workspace", "workflow-state",
             }:
                 continue
             name = relative.as_posix()
@@ -728,11 +723,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             REPO_ROOT / "home/common/agent-skills/default.nix"
         ).read_text(encoding="utf-8")
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
-        # The external workspace commands are published by bare name.
-        self.assertIn('".agents/bin/sdd-workspace"', nix_module)
-        self.assertIn('".agents/bin/task-brief"', nix_module)
-        self.assertIn("source = ./scripts/sdd-workspace;", nix_module)
-        self.assertIn("source = ./scripts/task-brief;", nix_module)
 
     def test_no_document_or_script_claims_a_repo_root_workspace(self):
         offenders = [
@@ -764,20 +754,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             if ".superpowers/" "ship-review" in text
         ]
         self.assertEqual(carriers, [])
-
-    def test_build_delivery_callers_name_the_sanctioned_resolution_exception(self):
-        exception = ("only sanctioned exception is `workflow-state build-delivery`, "
-                     "which performs its own sealed, read-only resolution")
-        callers = []
-        for path, raw in live_corpus_documents():
-            text = normalized(raw)
-            if "build-delivery" not in text:
-                continue
-            relative = path.relative_to(REPO_ROOT).as_posix()
-            callers.append(relative)
-            with self.subTest(path=relative):
-                self.assertIn(exception, text)
-        self.assertEqual(sorted(callers), [])
 
     def test_gitignore_is_tracked_and_carries_the_backstop(self):
         subprocess.run(
@@ -1944,25 +1920,6 @@ class DirectLaneRoutingTest(unittest.TestCase):
         self.assertNotIn("comment what remains", text)
 
 
-class HandBuiltTimeContractsTest(unittest.TestCase):
-    """#309 D9: no skill document hands workflow-state a time; the helper reads its clock."""
-
-    def documents(self):
-        for tree in SKILL_TREES:
-            self.assertTrue(tree.is_dir(), tree)
-            yield from sorted(path for path in tree.rglob("*.md") if path.is_file())
-
-    def test_no_skill_document_passes_now(self):
-        checked = 0
-        for path in self.documents():
-            text = path.read_text(encoding="utf-8")
-            checked += 1
-            with self.subTest(document=str(path.relative_to(REPO_ROOT))):
-                self.assertIsNone(NOW_FLAG.search(text))
-                self.assertIsNone(NOW_KEY.search(text))
-        self.assertGreater(checked, 20)
-
-
 class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
     """#474: no skill document chains a check onto a foreground `sleep`."""
 
@@ -1992,7 +1949,7 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
             ("    run one bounded foreground `sleep N`, then check\n    once.", ["prose"]),
             ("> run one bounded foreground `sleep N`, then\n> check once.", ["prose"]),
             ("`sleep 30 && gh pr checks 1`", ["shell"]),
-            ("sleep 60; workflow-state status", ["shell"]),
+            ("sleep 60; git status", ["shell"]),
             ("  > `sleep 5 || true`", ["shell"]),
         ):
             with self.subTest(hit=text):

@@ -4,13 +4,11 @@ Run: just agent-installed-skill-tests. The installed and retained recipes build
 first and pass AGENT_SKILLS_INSTALLED_HOME and AGENT_TOOLS_SYSTEM_RESULT. The
 system closure must hold one package build, with every agent-tools launcher
 execing one environment that imports that build. Every installed `.agents/bin`
-entry that names the package, other than `NOT_LAUNCHERS`, must be a generated
-launcher. Each launcher must run its store module even with a fake `agent_tools`
+entry that names the package must be a generated launcher. Each launcher must run its store module even with a fake `agent_tools`
 and a fake top-level `agent_platform` on the `PYTHONPATH`, `NIX_PYTHONPATH` (with
 a `.pth` file) and working-directory channels.
 """
 
-import json
 import os
 import re
 import subprocess
@@ -30,21 +28,9 @@ LAUNCHER = re.compile(
     rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
     rb' -I -m agent_tools\.(?P<module>[a-z][a-z0-9_]*) "\$@"\n*'
 )
-SCRIPT_LAUNCHER = re.compile(
-    rb"#![^\n]+\n"
-    rb"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
-    rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
-    rb' -I (?P<script>/nix/store/[^/\s]+-workflow-state\.py) "\$@"\n*'
-)
 MARKER = "HOSTILE agent_tools IMPORTED"
 HOSTILE_EXIT = 97
 TIMEOUT_SECONDS = 60
-# Flat installed scripts that name the package without being `-m` launchers: only
-# `workflow-state`, a script launcher under the same interpreter, checked by
-# `SCRIPT_LAUNCHER` (#337 D11, D16); its transitional lookups run
-# `agent_tools.resolve_project` and load `host_admission` from `~/.agents/lib/python`
-# (#177 D6, D13). #178 deletes this entry with them.
-NOT_LAUNCHERS = ("workflow-state",)
 # The commands #175, #179, #177, #249, #264, #279, #353, #403, #424, #623, #624 and #697 accepted as launchers: a floor, not the
 # full set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-model-matrix", "conformance",
@@ -100,10 +86,6 @@ class AgentToolsLauncherTest(unittest.TestCase):
         found = {}
         for entry in sorted((self.root / ".agents" / "bin").iterdir()):
             data = entry.read_bytes()
-            if entry.name in NOT_LAUNCHERS:
-                self.assertIsNone(LAUNCHER.fullmatch(data),
-                                  f"{entry} is a generated launcher; drop it from NOT_LAUNCHERS")
-                continue
             if PACKAGE_BYTES not in data:
                 continue
             match = LAUNCHER.fullmatch(data)
@@ -115,12 +97,6 @@ class AgentToolsLauncherTest(unittest.TestCase):
     def run_child(self, argv, env, cwd):
         return subprocess.run(argv, env=env, cwd=cwd, capture_output=True, text=True,
                               timeout=TIMEOUT_SECONDS, check=False)
-
-    def workflow_state_launcher(self):
-        data = (self.root / ".agents/bin/workflow-state").read_bytes()
-        match = SCRIPT_LAUNCHER.fullmatch(data)
-        self.assertIsNotNone(match, data[:300])
-        return match
 
     def system_closure(self) -> list[Path]:
         value = os.environ.get(SYSTEM_RESULT_ENV)
@@ -150,7 +126,7 @@ class AgentToolsLauncherTest(unittest.TestCase):
                 continue
             self.assertTrue(path.is_file(), f"{path} is not a launcher file")
             data = path.read_bytes()
-            match = LAUNCHER.fullmatch(data) or SCRIPT_LAUNCHER.fullmatch(data)
+            match = LAUNCHER.fullmatch(data)
             self.assertIsNotNone(match, f"{path} is not a recognized agent-tools launcher")
             launchers.append((path, match["python"].decode()))
         return launchers
@@ -168,7 +144,7 @@ class AgentToolsLauncherTest(unittest.TestCase):
                          f"launchers: {[str(path) for path, _python in launchers]}")
         paths = {path.resolve() for path, _python in launchers}
         for entry in sorted((self.root / ".agents/bin").iterdir()):
-            if PACKAGE_BYTES in entry.read_bytes() or entry.name == "workflow-state":
+            if PACKAGE_BYTES in entry.read_bytes():
                 with self.subTest(entry=str(entry)):
                     self.assertIn(entry.resolve(), paths,
                                   f"{entry} -> {entry.resolve()} is outside closure launchers")
@@ -190,25 +166,6 @@ class AgentToolsLauncherTest(unittest.TestCase):
                 imported = Path(done.stdout.strip()).resolve()
                 self.assertIn(build, imported.parents,
                               f"{python} imports {imported}, outside {build}")
-
-    def test_workflow_state_ignores_a_hostile_agent_tools(self):
-        completed = self.run_child(
-            [str(self.root / ".agents/bin/workflow-state"), "--help"],
-            self.hostile_env(), self.hostile)
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertTrue(completed.stdout.startswith("usage: workflow-state "))
-        self.assertNotIn(MARKER, completed.stdout + completed.stderr)
-
-    def test_installed_workflow_state_mints_a_run_against_the_store_core(self):
-        with tempfile.TemporaryDirectory() as repo:
-            completed = self.run_child(
-                [str(self.root / ".agents/bin/workflow-state"), "init-run", "--repo-root",
-                 repo, "--creation-key", "installed-check"],
-                self.hostile_env(), self.hostile)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertRegex(json.loads(completed.stdout)["run_id"], r"^rel_[0-9a-f-]{36}$")
-            self.assertNotIn(MARKER, completed.stdout + completed.stderr)
-            self.assertTrue((Path(repo) / ".superpowers/attempt-transactions").is_dir())
 
     def test_the_command_table_generates_each_deployed_command(self):
         launchers = self.launchers()

@@ -716,8 +716,7 @@ def registry_transaction() -> Iterator[list[dict]]:
     lock file is beside the registry and is never deleted — unlinking it would
     let a second process create and lock a different inode.
 
-    Follows the pattern `workflow-state.py` establishes for shared state; the
-    caller does the duplicate check inside the `with` and nowhere else.
+    The caller does the duplicate check inside the `with` and nowhere else.
     """
     lock_path = ensure_directory(registry_path().parent) / "registry.lock"
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)

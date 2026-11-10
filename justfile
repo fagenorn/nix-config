@@ -94,23 +94,8 @@ system_result := justfile_directory() / "result"
 # Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output).
 agent-workflow-tests *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.suite_runner {{args}} \
-    home/common/agent-skills/tests/test_workflow_state.py \
-    home/common/agent-skills/tests/test_attempt_migration.py \
-    home/common/agent-skills/tests/test_attempt_custody.py \
-    home/common/agent-skills/tests/test_verification_suspension.py \
-    home/common/agent-skills/tests/test_verification_control.py \
-    home/common/agent-skills/tests/test_verification_direct.py \
-    home/common/agent-skills/tests/test_control_cutover.py \
-    home/common/agent-skills/tests/test_control_decisions.py \
-    home/common/agent-skills/tests/test_delivery_sealing.py \
     home/common/agent-skills/tests/test_host_admission.py \
-    home/common/agent-skills/tests/test_delivery_model.py \
-    home/common/agent-skills/tests/test_delivery_workflow.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
-    home/common/agent-skills/tests/test_delivered_control.py \
-    home/common/agent-skills/tests/test_workflow_delivery.py \
-    home/common/agent-skills/tests/test_task_brief.py \
-    home/common/agent-skills/tests/test_sdd_workspace.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
@@ -148,9 +133,6 @@ agent-workflow-tests *args:
     tests/test_host_sudo.py \
     tests/test_runner_home.py \
     tests/test_verify_checks.py \
-    tests/test_worktree_mapping.py \
-    tests/test_worktree_reconcile.py \
-    tests/test_worktree_reconcile_audit.py \
     tests/test_keepalive_end_turn_cap.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \
@@ -158,14 +140,8 @@ agent-workflow-tests *args:
     tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
-    tests/test_phase_budget.py \
     tests/test_verified_tree.py \
-    tests/test_verification_blocker.py \
-    tests/test_verification_observe.py \
     tests/test_transaction_core.py \
-    tests/test_attempt_identity.py \
-    tests/test_attempt_custody.py \
-    tests/test_attempt_delivery.py \
     tests/test_transaction_custody.py \
     tests/test_transaction_invocation.py \
     tests/test_transaction_plan.py \

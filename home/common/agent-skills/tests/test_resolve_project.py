@@ -1,8 +1,7 @@
 """Contract tests for `resolve-project` (`agent_tools.resolve_project`).
 
 Runs the resolver's command line against temporary repository roots and parses
-its stdout, the seam established by test_resolve_bindings.py and
-test_workflow_state.py. `run` runs it in this process (`_inprocess_cli`, issue
+its stdout, the seam established by test_resolve_bindings.py. `run` runs it in this process (`_inprocess_cli`, issue
 612); `run_child` and `run_with_path` run it as a real child process, and
 `ProcessWiringTest` pins that a child's exit code, stdout and stderr are the
 in-process run's. The resolver is imported in process only by the cases

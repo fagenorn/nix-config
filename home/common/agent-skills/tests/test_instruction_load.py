@@ -320,7 +320,7 @@ GIT_LOCATION_VARS = (
 
 
 def git_env():
-    """Hermetic git, as test_sdd_workspace.py: no user or system config, so no signing."""
+    """Hermetic git, with no user or system config, so no signing."""
     env = dict(os.environ)
     for name in GIT_LOCATION_VARS:
         env.pop(name, None)

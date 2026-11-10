@@ -1,7 +1,5 @@
 # The agent_tools package (python/): one interpreter environment, a build-time
-# import of every module, one isolated launcher per command-table row, and one
-# script launcher, `workflow-state`, which runs a flat script under the same
-# isolated interpreter until #178 moves it into the package (#337 D11, D16).
+# import of every module and one isolated launcher per command-table row.
 # `commands` is the only command-to-module mapping (#175 D4, D11; parent D2,
 # D10, D13).
 { pkgs }:
@@ -51,17 +49,13 @@ let
     "forge-issue"
     "guard-policy"
     "lane-triage"
-    "ledger-archive"
-    "ledger-snapshot"
     "owner-actions"
     "promotion"
     "release"
     "resolve-project"
     "skill-lint"
-    "verification-observe"
     "verified-tree"
     "verify-pending"
-    "worktree-reconcile"
   ];
 
   # A launcher script: bash under `-p`, which ignores BASH_ENV and the functions
@@ -95,16 +89,7 @@ let
     launcherScript name ''
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
       exec ${env}/bin/python3 -I -m ${module} "$@"'';
-
-  # A store copy of a flat script under the same environment and the same
-  # `unset` line as the -m launchers (#337 D11, D16).
-  scriptLauncher =
-    name: script:
-    launcherScript name ''
-      unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${env}/bin/python3 -I ${script} "$@"'';
 in
 {
   launchers = lib.genAttrs commands launcher;
-  inherit scriptLauncher;
 }
