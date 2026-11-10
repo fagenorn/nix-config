@@ -66,7 +66,7 @@ import time
 from collections.abc import Collection
 from typing import Any, Callable, NamedTuple
 
-from agent_tools import forge_markers as fm
+from agent_tools.claims import forge_markers as fm
 
 LOCK_PREFIX = "refs/agent-locks/land/"
 CREATE_ROUNDS = 3

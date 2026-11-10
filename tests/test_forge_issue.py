@@ -10,8 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_issue
-from agent_tools import forge_markers as fm
+from agent_tools.claims import forge_issue
+from agent_tools.claims import forge_markers as fm
 from .forge_world import ForgeWorld
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/forge-issue-dependencies.json").read_text("utf-8"))
@@ -305,7 +305,7 @@ class UsageTest(Base):
 class CliTest(Base):
     def test_the_module_prints_one_json_line(self):
         self.created_world([B1], [])
-        done = subprocess.run([sys.executable, "-m", "agent_tools.forge_issue", "create", "--repo", SLUG,
+        done = subprocess.run([sys.executable, "-m", "agent_tools.claims.forge_issue", "create", "--repo", SLUG,
                                "--title", TITLE, "--body-file", str(self.body_file), "--blocked-by", "555"],
                               capture_output=True, text=True, env=dict(os.environ), timeout=120)
         lines = done.stdout.splitlines()

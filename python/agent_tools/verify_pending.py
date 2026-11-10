@@ -61,9 +61,10 @@ import sys
 from collections.abc import Collection
 from pathlib import Path
 
-from agent_tools import agent_platform, forge_markers, verify_exec, verify_run
-from agent_tools.forge_markers import ForgeError
-from agent_tools.owner_actions import SLUG_PATTERN
+from agent_tools import agent_platform, verify_exec, verify_run
+from agent_tools.claims import forge_markers
+from agent_tools.claims.forge_markers import ForgeError
+from agent_tools.claims.owner_actions import SLUG_PATTERN
 from agent_tools.resolve_project import ContractError, resolve
 from agent_tools.verify_block import HOST, SHA, count_after, count_since, lint_block, parse_block
 

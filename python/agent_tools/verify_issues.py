@@ -32,7 +32,8 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from agent_tools import forge_markers, verify_block
+from agent_tools import verify_block
+from agent_tools.claims import forge_markers
 
 TRUSTED = ("OWNER", "MEMBER")
 RESULT, RUN, WINDOW, DUE, FOLLOWUP, CLOSED, FOLLOWUP_OF = (

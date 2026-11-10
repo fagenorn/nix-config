@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import agent_gate_bundle, forge_markers, verify_checks
+from agent_tools import agent_gate_bundle, verify_checks
+from agent_tools.claims import forge_markers
 from agent_tools.verify_checks import required_checks, self_hosted_runner
 
 from .guard_policy_world import GuardPolicyWorld

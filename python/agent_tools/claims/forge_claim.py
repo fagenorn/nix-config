@@ -1,6 +1,6 @@
 """Issue claims on GitHub issue comments (issue 623): acquire, renew, release and status.
 
-Source entry `python -m agent_tools.forge_claim`, library `agent_tools.forge_markers`. One
+Source entry `python -m agent_tools.claims.forge_claim`, library `agent_tools.claims.forge_markers`. One
 session at a time delivers a forge issue, and every fact is held in issue comments called
 markers. A claim is a `claim` marker and the `in-progress`
 label is only a filter over it. Contention is settled by the marker contest (D2): the smallest
@@ -76,11 +76,11 @@ ends the claim right after judging that listing's `updated_at`, so a renewal tha
 that listing is never undone.
 
 The `land` subcommand (`land acquire|release|status`, issue 629) is the cross-host land lock
-of `agent_tools.forge_land_lock`: `main` routes it there and reports its usage errors in its
+of `agent_tools.claims.forge_land_lock`: `main` routes it there and reports its usage errors in its
 own one-line shape.
 
 The `owner-action` subcommand (`owner-action post|end|status`, issue 636, D6) is
-`agent_tools.forge_owner_action`: the decision, conflict and needs-label markers a batch posts
+`agent_tools.claims.forge_owner_action`: the decision, conflict and needs-label markers a batch posts
 for the owner. They carry no `claim` field, and claim retirement (`retire_obsolete`,
 `retire_owner_actions`) ends only owner-action markers that name a claim, so `status`, `renew`
 and `release` never end one of them or remove the label while one lives.
@@ -108,10 +108,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from agent_tools import forge_land_lock
-from agent_tools import forge_owner_action
-from agent_tools import forge_markers as fm
-from agent_tools.forge_markers import ForgeError, Marker
+from agent_tools.claims import forge_land_lock
+from agent_tools.claims import forge_owner_action
+from agent_tools.claims import forge_markers as fm
+from agent_tools.claims.forge_markers import ForgeError, Marker
 
 CLAIM_KIND = "claim"
 IN_PROGRESS = ("in-progress", "FBCA04")

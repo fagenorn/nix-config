@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_markers as fm
+from agent_tools.claims import forge_markers as fm
 from .forge_world import ForgeWorld, NETWORK_DOWN, host_clock
 
 SLUG, ISSUE = "octo/widgets", 7

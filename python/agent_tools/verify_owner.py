@@ -28,8 +28,9 @@ import re
 from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 
-from agent_tools import forge_claim, forge_markers, verify_issues
-from agent_tools.forge_markers import Marker
+from agent_tools import verify_issues
+from agent_tools.claims import forge_claim, forge_markers
+from agent_tools.claims.forge_markers import Marker
 
 KIND = forge_claim.OWNER_ACTION_KIND
 LABEL = forge_claim.OWNER_ACTION

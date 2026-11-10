@@ -9,8 +9,8 @@ from email.utils import format_datetime
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_markers as fm
-from agent_tools import forge_owner_action as foa
+from agent_tools.claims import forge_markers as fm
+from agent_tools.claims import forge_owner_action as foa
 from agent_tools import verify_owner as vo
 from agent_tools import verify_pending
 from agent_tools import verify_run as vr

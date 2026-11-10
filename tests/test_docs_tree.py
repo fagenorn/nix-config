@@ -261,7 +261,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(problems, [])
 
     def test_a_dropped_decision_row_is_reported(self):
-        rows = [("python/README.md", "forge-claim", "contract", ("python/agent_tools/forge_claim.py",))]
+        rows = [("python/README.md", "forge-claim", "contract", ("python/agent_tools/claims/forge_claim.py",))]
         audited = frozenset({
             ("python/README.md", "forge-claim", "contract"),
             ("python/README.md", "forge-claim", "decision"),
@@ -273,12 +273,12 @@ class DocsTreeTest(unittest.TestCase):
         )
 
     def test_a_decision_row_outside_an_adr_or_the_archive_is_reported(self):
-        rows = [("python/README.md", "forge-claim", "decision", ("python/agent_tools/forge_claim.py",))]
+        rows = [("python/README.md", "forge-claim", "decision", ("python/agent_tools/claims/forge_claim.py",))]
         audited = frozenset({("python/README.md", "forge-claim", "decision")})
         base = {"python/README.md": ["forge-claim"]}
         self.assertEqual(
             section_map_problems(rows, audited, base, lambda path: True),
-            ["python/README.md: forge-claim: decision destination python/agent_tools/forge_claim.py is not an allowed home"],
+            ["python/README.md: forge-claim: decision destination python/agent_tools/claims/forge_claim.py is not an allowed home"],
         )
 
     def test_a_destination_moved_after_the_map_commit_still_exists(self):

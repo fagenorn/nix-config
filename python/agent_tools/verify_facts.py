@@ -25,8 +25,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools import forge_markers, verify_block, verify_issues
-from agent_tools.forge_markers import ForgeError, Marker
+from agent_tools import verify_block, verify_issues
+from agent_tools.claims import forge_markers
+from agent_tools.claims.forge_markers import ForgeError, Marker
 
 TOKENS = ("GITHUB_TOKEN", "GH_TOKEN")
 VERSION_TOOLS = ("darwin-version", "nixos-version")

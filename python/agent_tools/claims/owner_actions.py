@@ -1,6 +1,6 @@
 """Owner actions (issue 624): which GitHub repositories this machine's checkouts belong to.
 
-Source entry `python -m agent_tools.owner_actions`. The module keeps a per-repository count of the
+Source entry `python -m agent_tools.claims.owner_actions`. The module keeps a per-repository count of the
 open issues and pull requests that wait on the owner, so a Claude Code status line can show it
 without a network call. An item needs you (counted in `count`) when it carries the `owner-action`
 label or the `agent:human-required` label; an item is answered and waiting (counted in `answered`,
@@ -48,7 +48,7 @@ the lock and the recorded attempt is old enough. The claim file is never deleted
 anyone but the next claimant. A failure to claim or spawn is one stderr line, `owner-actions: refresh
 claim for <slug> failed: ...` or `owner-actions: refresh spawn for <slug> failed: ...`, and the cached
 value is still printed with exit 0.
-P8: the detached child is `sibling_argv("owner_actions") + ["refresh", "--repo", slug]` in its own
+P8: the detached child is `sibling_argv("claims.owner_actions") + ["refresh", "--repo", slug]` in its own
 session with `cwd` `/`, its output going to `<name>.log`.
 `statusline` reads the Claude Code status-line JSON on stdin, takes `cwd` (or
 `workspace.current_dir` when `cwd` is absent or not a string), reads that checkout's `origin` slug
@@ -77,7 +77,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_tools import agent_platform, forge_claim, forge_markers
+from agent_tools import agent_platform
+from agent_tools.claims import forge_claim, forge_markers
 from agent_tools.system import siblings
 from agent_tools.system.github_remote import github_slug
 
@@ -395,7 +396,7 @@ def claim_refresh(slug: str, now: float) -> int | None:
 def spawn_refresh(slug: str, claim_fd: int) -> None:
     """Start the detached child that refreshes `slug` and holds the claim until it exits (P8)."""
     with open(log_path(slug), "wb") as log:
-        subprocess.Popen(siblings.sibling_argv("owner_actions") + ["refresh", "--repo", slug],
+        subprocess.Popen(siblings.sibling_argv("claims.owner_actions") + ["refresh", "--repo", slug],
                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
                          cwd="/", pass_fds=(claim_fd,))
 

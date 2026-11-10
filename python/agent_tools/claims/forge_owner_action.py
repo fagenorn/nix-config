@@ -69,7 +69,7 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
-from agent_tools import forge_markers as fm
+from agent_tools.claims import forge_markers as fm
 
 KIND = "owner-action"
 LABEL = ("owner-action", "D93F0B")
@@ -97,7 +97,7 @@ class _ItemsError(Exception):
 
 
 def add_actions(sub: Any) -> None:
-    from agent_tools.forge_claim import HOLDER, REPO, _issue  # forge_claim imports this module
+    from agent_tools.claims.forge_claim import HOLDER, REPO, _issue  # forge_claim imports this module
     actions = sub.add_subparsers(dest="action", required=True)
     for name in ACTIONS:
         parser = actions.add_parser(name)

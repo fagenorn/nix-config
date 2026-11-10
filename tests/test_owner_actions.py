@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import agent_platform
-from agent_tools import owner_actions as oa
+from agent_tools.claims import owner_actions as oa
 from agent_tools.system import siblings
 from .forge_world import ForgeWorld
 
@@ -610,7 +610,7 @@ class StatuslineTest(Scratch):
         self.assertLess(elapsed, 0.1)
         self.popen.assert_called_once()
         args, kwargs = self.popen.call_args
-        self.assertEqual(args[0], siblings.sibling_argv("owner_actions") + ["refresh", "--repo", SLUG])
+        self.assertEqual(args[0], siblings.sibling_argv("claims.owner_actions") + ["refresh", "--repo", SLUG])
         self.assertTrue(kwargs["start_new_session"])
         self.assertEqual(kwargs["cwd"], "/")
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
@@ -729,7 +729,7 @@ class StatuslineEndToEndTest(Scratch):
         self.env = {**self.world.env(), "HOME": str(self.home), "PYTHONPATH": str(PYTHON_DIR)}
 
     def start(self):
-        return subprocess.Popen([sys.executable, "-m", "agent_tools.owner_actions", "statusline"],
+        return subprocess.Popen([sys.executable, "-m", "agent_tools.claims.owner_actions", "statusline"],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, env=self.env)
 

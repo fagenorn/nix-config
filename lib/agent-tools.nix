@@ -47,12 +47,12 @@ let
     "context-map-lint" = "context_map_lint";
     "diff-scope" = "diff_scope";
     "fallback-audit" = "fallback_audit";
-    "forge-claim" = "forge_claim";
-    "forge-issue" = "forge_issue";
+    "forge-claim" = "claims.forge_claim";
+    "forge-issue" = "claims.forge_issue";
     "guard-policy" = "guard_policy";
     "issue-branch" = "issue_branch";
     "lane-triage" = "lane_triage";
-    "owner-actions" = "owner_actions";
+    "owner-actions" = "claims.owner_actions";
     "promotion" = "promotion";
     "release" = "release";
     "resolve-project" = "resolve_project";

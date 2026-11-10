@@ -70,8 +70,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools import forge_markers, forge_owner_action, verify_block, verify_exec, verify_facts, verify_issues, verify_owner
-from agent_tools.forge_markers import ForgeError, Marker
+from agent_tools import verify_block, verify_exec, verify_facts, verify_issues, verify_owner
+from agent_tools.claims import forge_markers, forge_owner_action
+from agent_tools.claims.forge_markers import ForgeError, Marker
 
 NEEDS = "needs-verification"
 # Delivery labels a verified close drops with NEEDS; removing an absent one is a no-op (404).

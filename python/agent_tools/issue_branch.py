@@ -30,7 +30,8 @@ import sys
 import unicodedata
 from collections.abc import Collection, Mapping
 
-from agent_tools import forge_markers, resolve_project, worktree_forge
+from agent_tools import resolve_project, worktree_forge
+from agent_tools.claims import forge_markers
 
 SLUG_WORDS = 6
 SLUG_CHARS = 40

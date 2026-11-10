@@ -1,6 +1,6 @@
 """forge-issue (issue 697): file an issue and record its blocking edges natively, read back.
 
-Source entry `python -m agent_tools.forge_issue`, library `agent_tools.forge_markers`. Blocking
+Source entry `python -m agent_tools.claims.forge_issue`, library `agent_tools.claims.forge_markers`. Blocking
 edges go through the forge's dependencies endpoints instead of prose.
 `create --repo <owner/name> --title <t> --body-file <path> [--label <l>]... [--blocked-by <n>]...
 [--blocks <n>]...` files the issue and links it; `link --repo <owner/name> --issue <n>
@@ -60,8 +60,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from agent_tools import forge_markers as fm
-from agent_tools.forge_markers import ForgeError
+from agent_tools.claims import forge_markers as fm
+from agent_tools.claims.forge_markers import ForgeError
 
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 NUMBER = re.compile(r"[1-9][0-9]*")
