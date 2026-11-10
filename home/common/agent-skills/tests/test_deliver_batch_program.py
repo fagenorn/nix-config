@@ -20,6 +20,7 @@ HARNESS = Path(__file__).with_name("deliver_batch_harness.mjs")
 SHA = "a" * 40
 ARGS = {"repo_root": "/r", "batch_id": "b1", "child_script": "/s/deliver-standard.js", "issues": [1]}
 HOLDER = "h1/b1"
+ISSUE_BRANCH_ARGV = re.compile(r"\bissue-branch --repo-root (\S+) --issue (\d+)\b")
 
 
 PROGRAM_AGENT_TYPES = {"clerk", "planner", "implementer", "reviewer", "reviewer-lite"}
@@ -1446,6 +1447,14 @@ class ReadoptTest(unittest.TestCase):
         self.assertIn("forge-claim owner-action end --repo owner/repo --issue 1 --reason needs-label",
                       prompt(calls, "close-out-1"))
         self.assertNotIn("land-ask-1", labels(calls))
+
+
+class IssueBranchFactsTest(unittest.TestCase):
+    """#748: the facts step takes the branch from issue-branch, the command deliver-standard runs."""
+
+    def test_the_facts_step_runs_issue_branch_for_its_issue(self):
+        _, calls, _ = run()
+        self.assertEqual(ISSUE_BRANCH_ARGV.findall(prompt(calls, "facts-1")), [("/r", "1")])
 
 
 class DemoTest(unittest.TestCase):

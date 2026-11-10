@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,6 +48,28 @@ def pull(number, branch):
     return {"number": number, "updated_at": "2026-11-01T00:00:00Z",
             "head": {"ref": branch, "repo": {"full_name": SLUG}},
             "base": {"repo": {"full_name": SLUG}}}
+
+
+PROGRAMS = REPO_ROOT / "home/common/claude-code/skills/deliver-standard"
+HARNESSES = REPO_ROOT / "home/common/agent-skills/tests"
+ISSUE_BRANCH_ARGV = re.compile(r"\bissue-branch --repo-root (\S+) --issue (\d+)\b")
+
+
+def program_prompt(program, harness, args, label):
+    """The last prompt labelled `label` that `program` sends under its stub-agent harness."""
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is not on PATH; the program scenarios need it")
+    scenario = {"args": args, "replies": {}, "patch": {}, "children": {}}
+    done = subprocess.run([node, str(HARNESSES / harness), str(PROGRAMS / program)],
+                          input=json.dumps(scenario), capture_output=True, text=True, timeout=60, check=False)
+    if done.returncode != 0:
+        raise AssertionError(f"harness failed: {done.stderr}")
+    found = [c["prompt"] for c in json.loads(done.stdout)["calls"]
+             if c["label"] == label and c.get("kind", "agent") == "agent"]
+    if not found:
+        raise AssertionError(f"{program} sent no {label} prompt")
+    return found[-1]
 
 
 class TitleSlugTest(unittest.TestCase):
@@ -236,6 +259,27 @@ class IssueBranchCommandTest(IssueBranchCase):
     def test_a_forge_failure_exits_one(self):
         self.set_forge(TWENTY_WORDS, [], slug="someone/else")
         self.assertEqual(self.refused(1), "forge_failed")
+
+
+class ProgramsDeriveAlikeTest(IssueBranchCase):
+    """#748 AC1: both programs run issue-branch for the issue, so a 20-word title gives one short branch."""
+
+    def test_a_twenty_word_title_derives_one_short_branch_in_both_programs(self):
+        prompts = {
+            "deliver-standard": program_prompt("deliver-standard.js", "deliver_standard_harness.mjs",
+                                               {"repo_root": "/r", "issue": 1, "session_id": "s1"}, "setup"),
+            "deliver-batch": program_prompt("deliver-batch.js", "deliver_batch_harness.mjs",
+                                            {"repo_root": "/r", "batch_id": "b1",
+                                             "child_script": "/s/deliver-standard.js", "issues": [1]}, "facts-1"),
+        }
+        outputs = {}
+        for name, text in prompts.items():
+            found = ISSUE_BRANCH_ARGV.findall(text)
+            self.assertEqual(found, [("/r", "1")], name)
+            outputs[name] = self.derived(issue=int(found[0][1]))
+        self.assertEqual(outputs["deliver-standard"], outputs["deliver-batch"])
+        self.assertEqual(outputs["deliver-standard"]["branch"], "issue-1-" + SHORT)
+        self.assertLessEqual(len(outputs["deliver-standard"]["branch"].removeprefix("issue-1-")), 40)
 
 
 if __name__ == "__main__":
