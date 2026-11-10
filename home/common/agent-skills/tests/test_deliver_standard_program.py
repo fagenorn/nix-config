@@ -4271,14 +4271,13 @@ class PlannerReadsTest(unittest.TestCase):
 
 
 class PreCommitFocusTest(unittest.TestCase):
-    """#771: FOCUSED names the contract's fast pre-commit ids, with argv and cwd, to every implementer."""
+    """#771: FOCUSED and FIX_TESTS name the contract's fast pre-commit ids, with argv and cwd, to every implementer."""
 
     # The flagged entry keeps the stub's id build, so every scenario's verify replies still answer the contract.
     UNFLAGGED = [{"id": "build", "argv": ["treefmt", "--fail-on-change"], "cwd": "tools"}]
     FLAGGED = [dict(UNFLAGGED[0], pre_commit=True)]
     NAMED = json.dumps(UNFLAGGED, separators=(",", ":"))
-    GENERIC = ("run the project's formatter or lint fix on the files you changed, "
-               "as the project's standards (/r/docs/standards) name it")
+    GENERIC = "run any formatter or lint fix the project's standards (/r/docs/standards) name on the files you changed"
     PASSED = {"state": "passed", "head": FIX, "required": ["ci-tests"]}
     # One scenario per implementer prompt family that interpolates FOCUSED, with the labels it must reach.
     SCENARIOS = (
@@ -4288,7 +4287,7 @@ class PreCommitFocusTest(unittest.TestCase):
         ({"replies": {"checks-1": RED, "checks-2": PASSED},
           "patch": {"fix-ci": {"start_head": SHA, "commit": FIX}}}, {"fix-ci"}),
         ({"replies": {"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING, "checks-2": PASSED},
-          "patch": CONFLICT}, {"sync-1", "fix-sync-1"}),
+          "patch": CONFLICT}, {"fix-sync-1"}),
         ({"args": DIRECT, "replies": {"direct-review": BAD}}, {"direct-impl", "direct-fix"}),
     )
     FAMILIES = frozenset().union(*(want for _, want in SCENARIOS))
@@ -4300,7 +4299,7 @@ class PreCommitFocusTest(unittest.TestCase):
             patched = dict(scenario, patch={**scenario.get("patch", {}), "setup": {"verification": verification}})
             _, calls = run(**patched)
             prompts = {c["label"]: c["prompt"] for c in calls
-                       if c["agentType"] == "implementer"}
+                       if c["agentType"] == "implementer" and c["label"] in expected}
             self.assertLessEqual(expected, set(prompts), scenario)
             found.update(prompts)
         self.assertLessEqual(self.FAMILIES, set(found))
@@ -4308,7 +4307,8 @@ class PreCommitFocusTest(unittest.TestCase):
 
     def test_every_focused_site_has_a_scenario(self):
         # A prompt family that gains or loses FOCUSED must be reflected in SCENARIOS.
-        self.assertEqual(PROGRAM.read_text(encoding="utf-8").count("${FOCUSED}"), len(self.FAMILIES))
+        source = PROGRAM.read_text(encoding="utf-8")
+        self.assertEqual(source.count("${FOCUSED}") + source.count("${FIX_TESTS}"), len(self.FAMILIES))
 
     def test_every_implementer_prompt_names_the_flagged_argv(self):
         for label, text in self.implementer_prompts(self.FLAGGED).items():
@@ -4335,6 +4335,76 @@ class PreCommitFocusTest(unittest.TestCase):
         self.assertIn("pre_commit: true", prompt(calls, "setup"))
         item = schema_of(calls, "setup")["properties"]["verification"]["items"]
         self.assertEqual(item["properties"]["pre_commit"], {"type": "boolean"})
+
+
+WHOLE_RUN = ("run in full every test file among or covering", "never a single test class",
+             "any fast suite the project declares", "each command and its result")
+FOCUSED_RUN = "Run only the tests covering the files you changed"
+
+
+class WholeTestFileTest(unittest.TestCase):
+    """#787: every implementer step after the task loop runs whole test files and any fast suite, and reports each command and its result."""
+
+    def assert_whole(self, text, files):
+        for needle in WHOLE_RUN + (f"covering {files}",):
+            self.assertIn(needle, text)
+        self.assertNotIn("Run only the tests", text)
+        self.assertNotIn("run only the tests", text)
+
+    def test_both_fix_waves_run_whole_files(self):
+        _, calls = run(replies={"final-1": FixWaveTest.FIRST, "fix-wave-review": FixWaveTest.narrowing()})
+        for label in ("fix-wave", "fix-wave-2"):
+            with self.subTest(label=label):
+                self.assert_whole(prompt(calls, label), "the files you changed")
+
+    def test_verify_fix_runs_whole_files(self):
+        _, calls = run(replies={"verify": VERIFY_RED})
+        self.assert_whole(prompt(calls, "verify-fix-1"), "the files you changed")
+
+    def test_checks_fix_runs_whole_files(self):
+        _, calls = run(replies={"checks-1": {"state": "failed", "head": SHA}},
+                       patch={"fix-ci": {"start_head": SHA, "commit": "f" * 40}})
+        self.assert_whole(prompt(calls, "fix-ci"), "the files you changed")
+
+    def test_conflicted_sync_and_its_fix_run_whole_files(self):
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": BAD},
+                       patch={"sync-1": {"conflicted": True, "merge_commit": "d" * 40},
+                              "fix-sync-1": {"start_head": "d" * 40, "commit": "f" * 40}})
+        self.assert_whole(prompt(calls, "sync-1"), "the files the merge changed against its first parent")
+        self.assert_whole(prompt(calls, "fix-sync-1"), "the files you changed")
+
+    def test_task_loop_and_direct_lane_keep_the_focused_run(self):
+        _, calls = run(replies={"review-1": BAD})
+        _, direct = run(args=DIRECT, replies={"direct-review": BAD})
+        for label, text in (("impl-1", prompt(calls, "impl-1")), ("fix-1-1", prompt(calls, "fix-1-1")),
+                            ("direct-fix", prompt(direct, "direct-fix"))):
+            with self.subTest(label=label):
+                self.assertIn(FOCUSED_RUN, text)
+                self.assertNotIn(WHOLE_RUN[0], text)
+
+
+class KeptObligationTest(unittest.TestCase):
+    """#787: the byte-budget trims left these obligations of the post-loop prompts in place."""
+
+    def test_the_whitespace_attestation_stays_a_question(self):
+        _, calls = WhitespaceCarryForwardTest.scenario(WS_ONLY)
+        self.assertIn("Also judge whether each of its whitespace changes is insignificant:",
+                      prompt(calls, "verify-fix-review-1"))
+
+    def test_a_rejected_finding_needs_evidence_in_notes(self):
+        _, calls = run(replies={"final-1": FixWaveTest.FIRST})
+        self.assertIn("If a finding is wrong, explain with evidence in notes.", prompt(calls, "fix-wave"))
+
+    def test_the_verify_body_asks_for_precise_failure_summaries(self):
+        _, calls = run(replies={"verify": VERIFY_RED})
+        self.assertIn("summarize the failing tests or errors precisely.", prompt(calls, "verify"))
+
+    def test_the_sync_fix_may_not_rewrite_the_merge_and_its_rebuttal_is_checked_yourself(self):
+        fix = {"start_head": "d" * 40, "commit": "d" * 40, "notes": "the finding is wrong because x"}
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": BAD},
+                       patch={"sync-1": {"conflicted": True, "merge_commit": "d" * 40}, "fix-sync-1": fix})
+        self.assertIn("never redo or rewrite the merge", prompt(calls, "fix-sync-1"))
+        self.assertIn("Check each rebuttal against the code yourself", prompt(calls, "fix-sync-review-1"))
 
 
 if __name__ == "__main__":
