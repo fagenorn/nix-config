@@ -45,7 +45,7 @@ export const meta = {
 // finding, each get one fix wave per delivery (an implementer with a regression test, then a fresh reviewer); a second one stops with cont.
 //
 // LAND: ship opens the PR at the verified head, takes the cross-host land lock of the integration branch with --wait
-// (the CLI does the waiting), then syncs, pushes and moves the lock after every head change, waits for every check on head (issue 756),
+// (the CLI does the waiting); the same PR call then waits for the first checks once the lock is held (#801). Later it syncs, pushes and moves the lock after every head change, waits for every check on head (issue 756),
 // re-checks the lock once, merges and releases it; the lock is released on every stop after it was taken, and a release that
 // fails is reported as lock_unreleased on the result (#677). After a merge the lock is released first thing in the hold call;
 // a release that call does not confirm gets one standalone release after close-out (#801). Every stop before the merge still releases it.
@@ -1173,6 +1173,7 @@ const closesLine = noHold && INT === setup.default_branch ? `Closes #${ISSUE}` :
 const PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head: FULL_SHA, notes: { type: 'string' } }, required: ['pr', 'head'] }
 const MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] }
 const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind'] }, head: FULL_SHA, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
+const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection, none when neither answers. Return passed only when no check on head is pending, failing or cancelled, with required and passed (the names passing at head). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
 const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, resolved_files: STRS, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 const LOCK_SCHEMA = {
   type: 'object',
@@ -1248,8 +1249,8 @@ const landBody = async () => {
 ${RENEW_FIRST}
 Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
 Then take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
-${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null.
-${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: withRenew(PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
+${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null. Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait ${CHECKS_WAIT('<the PR number>')} Return those fields as checks; otherwise run nothing more and return checks null.
+${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: withRenew(PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(CHECKS) }) }), r => r.renew)
   if (!prR) return stop('pr', { result: null })
   // A renew that ended, or a refused lock, means the prompt ran no lock command that holds anything.
   if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
@@ -1286,12 +1287,18 @@ ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', mod
       } else if (mv === 'land-contended' || mv === 'held_by' || mv === 'lost_to') lockMaybe = null
       if (!HOLDING.includes(mv)) return stop('land-contended', { pr: PR, lock: mv })
     }
-    const ck = await recall(() => call(`${CTX}
-${moved ? 'Wait' : `${RENEW_FIRST}\nThen wait`} for PR #${PR} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${PR} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${PR} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection, none when neither answers. Return passed only when no check on head is pending, failing or cancelled, with required and passed (the names passing at head). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.
+    // Round 1 reads the poll the pr call carried (its renew covered the claim); every later unmoved round polls on its own with a renew.
+    const folded = round === 1 && !moved
+    let ck
+    if (folded) ck = prR.checks || null
+    else {
+      ck = await recall(() => call(`${CTX}
+${moved ? 'Wait' : `${RENEW_FIRST}\nThen wait`} ${CHECKS_WAIT(PR)}
 ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: moved ? CHECKS : withRenew(CHECKS) }), r => (moved ? null : r.renew))
-    if (ck && !moved) {
-      const lost = renewed(ck.renew, `checks-${round}`)
-      if (lost) return lost
+      if (ck && !moved) {
+        const lost = renewed(ck.renew, `checks-${round}`)
+        if (lost) return lost
+      }
     }
     if (!complete(ck, CHECKS)) return stop('checks', { pr: PR, checks: null })
     if (!sameSha(ck.head, expected)) return stop('head-moved', { pr: PR, expected, head: ck.head })
