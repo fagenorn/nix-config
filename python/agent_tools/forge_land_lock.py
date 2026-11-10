@@ -37,9 +37,7 @@ the holder resyncs first.
 
 D5, a lock moves to the caller's new head (verdict `moved`: the lock sat at an earlier head of the
 same pull request) only when every open pull request containing it is the caller's; a branch
-merely stacked on the holder's head never moves it. A holder whose previous head is also contained
-in another open pull request gets `held_by` naming its own pull request, and runs `land release
---sha <lock_sha>` before acquiring again.
+merely stacked on the holder's head never moves it.
 
 D6, `acquire` needs an open pull request whose head is the caller's sha with the branch as its
 base before any ref write, and otherwise answers `error` with `no_open_pr` (exit 2). `--wait`

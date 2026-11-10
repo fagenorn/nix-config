@@ -543,6 +543,12 @@ class CliTest(Base):
         self.assertEqual((code, out["error"], out["issue"]), (2, "usage", None))
 
 
+class DocstringTest(unittest.TestCase):
+    def test_the_module_docstring_states_no_known_limitation(self):
+        # The stacked-holder residual belongs to ADR-claims-004 Consequences, never to source (D4).
+        self.assertNotIn("also contained", land_lock.__doc__)
+
+
 class FakeClock:
     """`monotonic` and `sleep` for forge_land_lock; `on_sleep(elapsed)` runs after each sleep."""
 
