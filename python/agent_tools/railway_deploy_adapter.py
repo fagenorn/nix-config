@@ -26,6 +26,44 @@ check ever re-run, and the serving deployment is the skipped push's immediate pr
 both when no watched path changed and after failed or timed-out CI, so a skip alone proves
 nothing. Anything short of both is `unknown`/`skip_unexplained`, a conservative answer the
 driver waits on and then parks, never a false success.
+
+It is registered as `railway-deploy` at contract version 1.0.0, a second watch-only adapter
+beside `github-actions-health`. Its target is a `github_repository` (`kind`, `repository`,
+`branch`, plus the compiled `handle`), so the released commit resolves through
+`release_merge` exactly as it does there (issue 555 D6). Its closed config is `project`,
+`environment` and `services` (a non-empty `string_list`), all required. Its executables are
+`gh` and `railway`.
+
+`inspect` reads `railway status --json` first, whose linked project `name` must equal
+`config.project` and which must list an environment named `config.environment` (else
+`unknown`, `project_mismatch`), then `railway deployment list --service <s> --environment
+<env> --json` once per service in config order, under one 30-second budget. Each service is
+classified newest first by `createdAt`, then `id`, in this order:
+
+- no deployment at the released commit on the target branch is `absent`
+  (`deployment_absent`);
+- a serving (`SUCCESS` or `SLEEPING`) deployment newer than the matched one is `diverged`
+  (`superseded`), before the matched status is read;
+- `QUEUED`, `WAITING`, `INITIALIZING`, `BUILDING`, `DEPLOYING` or `NEEDS_APPROVAL` is
+  `in_progress` (`deployment_in_progress`);
+- `SUCCESS` or `SLEEPING` is `satisfied` (`deployed`);
+- `SKIPPED` is `satisfied` (`skipped`) only when the commit's GitHub check runs are all green
+  and the serving deployment is the immediately older row at the released commit's first
+  parent, otherwise `unknown` (`skip_unexplained`) or, after a failed check, `diverged`
+  (`skipped_after_ci_failure`);
+- `FAILED` or `CRASHED` is `diverged` (`silent_rollback` with an older serving deployment,
+  else `deployment_failed`);
+- `REMOVED` or `REMOVING` is `diverged` (`removed`);
+- any other status is `unknown` (`status_unrecognized`).
+
+The services aggregate with the precedence `diverged`, `unknown`, `in_progress`, `absent`,
+`satisfied`, and the reason is the first service's, in config order, at the winning outcome.
+`running_subject_identity` is `satisfied` (`running`) when every service is deployed or a
+benign skip, `unknown` (`identity_unobservable`) when any service is unobservable, and
+otherwise `unsatisfied` (`subject_mismatch`). The release driver waits on `in_progress` and
+`absent` within the unit's `observation_deadline_ms` and parks `attention_required` past it,
+so an absent deployment is never a success. `tests/railway_world.py` is its fake `gh` and
+`railway`.
 """
 
 import json

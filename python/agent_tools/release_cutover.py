@@ -7,6 +7,22 @@ start; `in_flight` and `unreadable` stop it (`legacy_release_in_flight`), becaus
 cannot tell a half-finished release from a damaged file. `retire` removes only a `completed`
 file. Removing an in-flight or unreadable file is a human action, never the driver's: the
 person decides that the old release is abandoned.
+
+`classify` reads the file without following a symlink. It is `absent` when the file is
+missing; `unreadable` when it is a symlink or not a regular file, larger than 65536 bytes, not
+valid UTF-8 JSON (duplicate keys and non-finite constants included), not an object, or its keys
+are not exactly `headSha`, `pr`, `prUrl`, `mergeSha`, `tag`, `releaseUrl`, `deployState`, or a
+field has another type than the previous schema's (`headSha` and `deployState` strings, `pr`
+null or an integer, the other four null or strings); `completed` when `releaseUrl` is set, or
+`tag` is set with `pr` null, and `deployState` is `done` or `none`; and `in_flight` otherwise.
+
+The release driver's `preview` and `run` refuse `legacy_release_in_flight` (repair
+`release.legacy.finish`) for `in_flight` and `unreadable`, before any shape gate; the detail
+names the class and path. `status` reports the `{class, path}` dict as its `legacy` member and
+never refuses; `abandon` is not gated. In mode `new` only, `run` calls `retire` after the
+confirmation checks and the store is made, immediately before `create`, which unlinks a
+`completed` file (any other class raises `ValueError`), and its document gains `legacy:
+"deleted"`; otherwise `legacy` is null. A resumed `run` never retires.
 """
 
 import json

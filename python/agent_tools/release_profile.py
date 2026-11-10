@@ -43,6 +43,63 @@ issue 554 D15 for that mode).
 publication actions or activation units of a profile, and an empty list for a phase
 authored as `"none"`. `release_targets` lists the targets every profile binds, each with
 the operations its nodes run against it.
+
+The authored `release` member is required and has two forms (#124 D1): `"unsupported"`, or
+`{"profiles": {<profile-id>: <profile>}}` with exactly that member and a non-empty map. A
+profile's `publication` is `"none"` or `{"actions": [...]}` with at least one action. A
+publication-free profile (#368 D1, D2) declares its target, requirements and bindings like any
+other and passes the same same-repository rule; its recovery key rule is the one above (#368
+D11).
+
+Two tiers judge a profile. The grammar runs inside `resolve-project resolve`: every violation
+is `invalid_contract` with a `contract.release.*` repair, and a profile that names an adapter
+outside the closed registry (`release_adapter.REGISTRY`) or an operation the adapter does not
+support is a grammar violation, never a lookup fallback (D7). Admissibility (D3) runs over a
+grammar-valid profile only and reports every finding of its four rules (`observation_deadline`,
+`rolled_back_reachable`, `restore_anchor`, `core_plans`) as `{rule, pointer, reason, detail}`.
+The same function feeds `capabilities.release`, which is `unsupported` for `"unsupported"`,
+`blocked` with `release_profile_inadmissible` for the first inadmissible profile, `blocked`
+with `release_adapter_unavailable` when a bound adapter's declared executable is not on `PATH`,
+and `available` otherwise (D23). It is also `unsupported` when no profile declares a
+publication, before any admissibility or executable check; otherwise that logic runs over all
+profiles, publication-free ones included (#368 D4).
+
+`compile_profile` returns a deep-frozen `ResolvedReleaseProfile` or raises
+`ProfileInadmissible`, and its `digest` covers the authored profile and the bound adapters'
+identities only (D5, D23). `bind_candidate(compiled, candidate)` takes only a
+`ResolvedReleaseProfile` and returns the exact inputs of `TransactionStore.create` (`proof`,
+`recovery`, `concurrency_keys`, `subject`), so the core recompiles what the profile lowered
+(D5, D20). It refuses a compiled profile with no publication node with `ValueError` naming the
+profile, before it reads the candidate, so a publication-free profile never reaches
+`TransactionStore.create` (#368 D3); `release_adapter.core_binding` over such a profile has no
+compiled node and refuses every request for it (#368 D8).
+
+A profile with a node that consumes the `merge` candidate member (`binds_merge`, issue 554 D2)
+needs the candidate to carry `merge: {pr, base_tip}`, a positive integer and 40 lowercase hex
+digits. `bind_candidate` binds that member, beside `version` and `commit`, into the subject's
+`candidate` and into the `candidate` of every unit of the consuming node's adapter alias, and
+into every `publication_triggered` activation unit too. A schema-2 contract has neither
+`bindings.deploy` nor `capabilities.deploy`, so a profile's activation unit is the only deploy
+watch. Any other profile refuses a candidate that carries `merge` (issue 554 D15). The grammar
+refuses, as `contract.release.invalid` at its `adapter`, a node of that same registered adapter
+on another alias, so no `tag` or `release` runs without the `merge` it must target.
+
+The resolved snapshot has a fifth member, `release`, derived rather than authored (#368 D5):
+`{"targets": [...]}`, where `release.targets` is built by `release_targets` from the authored
+`release` member alone, so a profile that fails admissibility is listed all the same. It is
+`{"targets": []}` for `"unsupported"`. Otherwise it holds one entry per `bindings.targets`
+handle of every profile, ordered by profile id and then handle: `profile`, `adapter` (the
+registered adapter the target's alias binds), `target` (the normalized target, with `handle`
+and `kind`) and `operations` (the sorted, duplicate-free operations the profile's publication
+actions and activation units run against that handle). Every target of a publication-free
+profile is listed with an empty `operations` (#368 D6). The other four members of the snapshot
+are unchanged by it.
+
+A liveness check on an activated unit is an authored obligation with `semantic: liveness`,
+`form: snapshot`, `predicate: agent_running` and the `launchd-agent` alias as `collector`,
+usually depending on `derived:running_subject_identity:<unit>`. Its `parameters.parameters`
+restates the unit's `action`, `operation`, normalized `target` and `config` (#124 D24);
+the host-local profile fixture in `tests/fixtures/release/` is the worked example.
 """
 
 import copy

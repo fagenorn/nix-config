@@ -18,3 +18,12 @@ Where each section of the three READMEs that issue 694 dissolved went: contract 
 | `python/README.md` | forge-issue | decision | `docs/areas/claims/adr/007-blocking-edges-by-database-id.md` |
 | `python/README.md` | owner-actions | contract | `python/agent_tools/owner_actions.py` |
 | `python/README.md` | owner-actions | decision | `docs/areas/claims/adr/008-owner-counts-are-cached-for-the-status-line.md` |
+| `python/README.md` | Transaction core | contract | `python/agent_tools/transaction_core.py` |
+| `python/README.md` | Transaction core | superseded | `docs/areas/release/adr/001-attempts-first-transaction-consumer.md` |
+| `python/README.md` | Transaction core | decision | `docs/areas/release/adr/002-release-driver-is-the-core-caller.md` |
+| `python/README.md` | Release profiles | contract | `python/agent_tools/release_profile.py`, `python/agent_tools/release.py` |
+| `python/README.md` | Release profiles | decision | `docs/areas/release/adr/003-profiles-judged-in-two-tiers.md`, `docs/areas/release/adr/004-publication-free-profiles.md` |
+| `python/README.md` | Release adapters | contract | `python/agent_tools/release_adapter.py`, `python/agent_tools/forge_adapter.py`, `python/agent_tools/actions_health_adapter.py`, `python/agent_tools/railway_deploy_adapter.py`, `python/agent_tools/codesigned_artifact_adapter.py`, `python/agent_tools/launchd_agent_adapter.py` |
+| `python/README.md` | Release adapters | decision | `docs/areas/release/adr/005-adapters-never-claim-success.md`, `docs/areas/release/adr/006-forge-merge-needs-the-protection-floor.md`, `docs/areas/release/adr/007-deploy-watches-are-activation-units.md` |
+| `python/README.md` | Release driver | contract | `python/agent_tools/release_driver.py`, `python/agent_tools/release_verification.py`, `python/agent_tools/release_cutover.py`, `python/agent_tools/release.py` |
+| `python/README.md` | Release driver | decision | `docs/areas/release/adr/008-preview-creates-nothing.md` |

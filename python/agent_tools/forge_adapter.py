@@ -36,6 +36,66 @@ commit) and the base tip bound by `merge`. Any non-zero exit of its one `gh pr m
 
 With a merge binding, `tag` and `release` judge and tag the release PR's merge commit rather
 than `candidate.commit` (issue 554 D8).
+
+Operations. `pr_merge` is `materialize`, `pointer_cas`, with `candidate_members` `["merge"]`
+(issue 554 D4); `tag` and `release` are `index` mode, irreversible and create-if-absent.
+`inspect` reads a tag from its own ref and object, never from a Release's `target_commitish`.
+
+`invoke` steps. Request shape: an unsupported operation is `unsupported_operation` and bad
+parameters are `invalid_input`, with no child process. Working checkout: `git rev-parse
+--show-toplevel` (D23). Same repository: `origin` and its one push URL must each be a
+`github.com` URL in the `git@github.com:`, `https://github.com/` or `ssh://git@github.com/`
+spelling, and they and `gh api repos/<slug> --jq .full_name` must all name
+`target.repository`. Containment of the commit in the target branch (`tag`). The local
+annotated tag is reused at the same commit, created when absent and refused otherwise (D25).
+Then the rendered command and the guard. A failed read before the mutation is `rejected` with
+`transient_transport` or `provider_unavailable`, because nothing was mutated.
+
+There are three mutation spellings: `git push origin refs/tags/<tag>`, `gh release create
+<tag> --repo <slug> --verify-tag --title "<title>" --notes-file <file>` and `gh pr merge <pr>
+--repo <slug> --merge --match-head-commit <commit>`. `--verify-tag` refuses to create a tag,
+and the notes file is a mode-0600 temporary removed afterwards. Before the one mutation the
+command text is passed to `claude-bash-lifecycle-guard`, by name on `PATH`, as a `{tool_name,
+tool_input.command, cwd}` Bash payload; a non-zero exit, timeout or missing guard is
+`authorization_denied` (D9). For `tag` and `release`, `already exists` (git) or `HTTP 422` (gh)
+is `precondition_failed`. A mutation binary that cannot be spawned is `rejected` with
+`provider_unavailable`, because no child ran and nothing was applied (D23); a timeout or any
+other non-zero exit is `unknown` with `transient_transport`, which the core resolves by
+inspection (D9, D11).
+
+`pr_merge` binds the candidate's `merge` member, `{pr, base_tip}`, beside `version` and
+`commit`; its expected head is `candidate.commit`, so `candidate` is exactly `{version, commit,
+merge}` for it, while `tag` and `release` take `{version, commit}` or the same with `merge`.
+After the same-repository step it makes four precondition reads, and a miss in any of them is
+`rejected` with `precondition_failed` before the guard and the merge (issue 554 D6, D13):
+
+1. the protection floor on `target.branch`, which needs a 200 answer with `strict` true,
+   non-empty required contexts and enforced admins, else `protection_floor_unmet: <member>`
+   naming the first of `unprotected`, `inaccessible`, `strict`, `required_contexts` and
+   `enforce_admins`;
+2. the repository's `delete_branch_on_merge`, which must print `false`, else
+   `head_auto_delete_on`;
+3. the pull request, which must be `OPEN` on `target.branch` at `candidate.commit`, else
+   `pr_not_open: <STATE>`, `pr_base_mismatch: <base>` or `pr_head_mismatch: <oid>`;
+4. the base tip, which must equal `merge.base_tip`, else `base_moved: <tip>`.
+
+A read that fails is `rejected` with `transient_transport` on a timeout and
+`provider_unavailable` otherwise. The merge spelling never renders `--admin`, `--auto`,
+`--delete-branch`, `--squash`, `--rebase` or a subject (issue 554 D5, D17). Exit 0 is
+`accepted` with the pull request URL as its reference; a timeout or any non-zero exit is
+`unknown` with `transient_transport`, whatever stderr says (issue 554 D6). Its `inspect` adds
+`strict` to `facts.protection` and is `satisfied` only when the merge commit's parents are
+exactly `[merge.base_tip, candidate.commit]` (issue 554 D7).
+
+With `candidate.merge`, `tag` and `release` judge an existing tag against the release PR's
+merge commit, whose parents must be exactly `[base_tip, commit]`, else `tag_target_mismatch`;
+`tag` invoke refuses `release PR not merged as bound`, then checks that merge commit's
+containment, fetches `refs/heads/<branch>` and tags it (issue 554 D8, D17).
+
+`tests/fixtures/forge-adapter-spellings.json` is the one list of provider spellings:
+`tests/forge_world.py` builds its fake `gh`, `git` and `claude-bash-lifecycle-guard` from it,
+and `tests/test_forge_adapter.py` pins the adapter to it, so the world and the adapter cannot
+disagree about a spelling (D12, D22).
 """
 
 import json
