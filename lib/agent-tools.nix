@@ -49,6 +49,7 @@ let
     "forge-claim"
     "forge-issue"
     "guard-policy"
+    "issue-branch"
     "lane-triage"
     "owner-actions"
     "promotion"

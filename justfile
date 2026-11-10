@@ -133,6 +133,7 @@ agent-workflow-tests *args:
     tests/test_host_sudo.py \
     tests/test_runner_home.py \
     tests/test_verify_checks.py \
+    tests/test_issue_branch.py \
     tests/test_keepalive_end_turn_cap.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \

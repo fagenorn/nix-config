@@ -19,8 +19,12 @@ stale edit can drop a field but can never bring an ended marker back.
 Ref primitives (issue 629): `read_ref`, `create_ref`, `repo_node_id` and `cas_ref`, a
 compare-and-swap through the GraphQL `updateRefs` mutation with `force: true` (the oid pair is
 the guard; an `after` of `ZERO_OID` deletes). Any CAS error, timeout or lie is "not done": the
-caller re-reads the ref to learn what happened and keeps the returned code to report when the
-ref is unchanged (D1). REST ref deletion is never used.
+caller re-reads the ref to learn what happened and keeps the returned `ForgeError` (its code and
+transport class) to report when the ref is unchanged (D1). REST ref deletion is never used.
+
+Transport class (issue 740): `_gh` marks a timeout, an HTTP 5xx and a connection failure
+transient on the `ForgeError`; a caller may retry a whole idempotent operation on it; a
+`cas_ref` failure carries the class of the call that failed.
 
 The module reads no host clock: "now" is the server's `Date` header (D5).
 """
@@ -41,6 +45,10 @@ VALUE = r"[A-Za-z0-9._:/@+-]+"
 MARKER = re.compile(rf"<!-- agent:(?P<kind>{KIND}) v1(?P<fields>(?: {KEY}={VALUE})*) -->")
 FIELD = re.compile(rf" (?P<key>{KEY})=(?P<value>{VALUE})")
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
+TRANSPORT = re.compile(
+    r"\bHTTP 5\d\d\b|error connecting to|dial tcp|network is unreachable|connection refused"
+    r"|connection reset|no such host|i/o timeout|TLS handshake timeout|unexpected EOF",
+    re.IGNORECASE)
 END_KIND = "end"
 TIMEOUT = 30
 DETAIL_LIMIT = 240
@@ -56,13 +64,22 @@ CLOSING_ISSUES = ("query($owner: String!, $name: String!, $number: Int!) { "
                   "closingIssuesReferences(first: 5) { nodes { number } } } } }")
 
 
-class ForgeError(Exception):
-    """A forge call failed: `code` is gh_missing, gh_failed, gh_timeout or payload_invalid."""
+def is_transport(stderr: str) -> bool:
+    """Whether a `gh` failure's stderr shows an HTTP 5xx or a connection failure."""
+    return TRANSPORT.search(stderr) is not None
 
-    def __init__(self, code: str, detail: str = "") -> None:
+
+class ForgeError(Exception):
+    """A forge call failed: `code` is gh_missing, gh_failed, gh_timeout or payload_invalid.
+
+    `transient` is true for a transport error (issue 740 D2): a `gh_timeout`, or a `gh_failed`
+    whose stderr shows HTTP 5xx or a connection failure."""
+
+    def __init__(self, code: str, detail: str = "", transient: bool | None = None) -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
         self.detail = detail[:DETAIL_LIMIT]
+        self.transient = code == "gh_timeout" if transient is None else bool(transient)
 
 
 @dataclass(frozen=True)
@@ -185,7 +202,7 @@ def _gh(argv: list[str], allow: Iterable[int] = ()) -> tuple[int, str]:
     status = int(found[1]) if found else 0
     if status and status in set(allow):
         return status, done.stdout
-    raise ForgeError("gh_failed", done.stderr.strip())
+    raise ForgeError("gh_failed", done.stderr.strip(), transient=is_transport(done.stderr))
 
 
 def logged_in() -> bool:
@@ -429,25 +446,26 @@ def repo_node_id(slug: str) -> str:
     return node_id
 
 
-def cas_ref(slug: str, repository_id: str, ref: str, before: str, after: str) -> str | None:
+def cas_ref(slug: str, repository_id: str, ref: str, before: str, after: str) -> ForgeError | None:
     """Move `ref` from `before` to `after` (`ZERO_OID` deletes) through `updateRefs`.
 
-    None means gh reported the swap applied. Any other outcome returns its failure code
-    (`gh_timeout` or `gh_failed`) without raising: a failed swap, a timeout and a swap that
-    applied while reporting failure look alike, so the caller re-reads the ref (D1) and keeps
-    the code to report if the ref is unchanged. `gh_missing` and `payload_invalid` raise.
+    None means gh reported the swap applied. Any other outcome returns its failure as a
+    `ForgeError` (code and transport class kept, `gh_timeout` or `gh_failed`) without raising:
+    a failed swap, a timeout and a swap that applied while reporting failure look alike, so the
+    caller re-reads the ref (D1) and keeps the error to report if the ref is unchanged.
+    `gh_missing` and `payload_invalid` raise.
     """
     try:
         payload = _json(["api", "graphql", "-f", f"query={UPDATE_REFS}", "-f", f"repositoryId={repository_id}",
                          "-f", f"name={ref}", "-f", f"before={before}", "-f", f"after={after}"])
     except ForgeError as error:
         if error.code in ("gh_timeout", "gh_failed"):
-            return error.code
+            return error
         raise
     data = payload.get("data") if isinstance(payload, dict) else None
     if (not isinstance(payload, dict) or "errors" in payload
             or not isinstance(data, dict) or data.get("updateRefs") is None):
-        return "gh_failed"
+        return ForgeError("gh_failed", "updateRefs reported no update")
     return None
 
 

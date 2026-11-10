@@ -4,8 +4,8 @@ export const meta = {
   whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
-    { title: 'Intake', detail: 'read every issue facts behind one barrier, decide eligibility in code' },
-    { title: 'Deliver', detail: 'lane per eligible issue, then the delivery children' },
+    { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
+    { title: 'Deliver', detail: 'the delivery children' },
     { title: 'Land', detail: 'serial land queue under the cross-host land lock' },
   ],
 }
@@ -29,7 +29,9 @@ export const meta = {
 // The lead runs a non-null relaunch as a NEW run, never with resumeFromRunId (D1): the new run
 // re-reads the tracker (an owner reply, a closed blocker, a released lock) and every side effect
 // re-adopts. Only a run cut off before it returned is resumed with its own original args.
-// Every tracker effect goes through forge-claim (claims and the land lock, D2). Every policy
+// Every tracker effect goes through forge-claim (claims and the land lock, D2). A renew or acquire that
+// answers error with transient is re-called once, a folded landing step whole, and a row still transient at
+// acquire is re-queued once behind the issues waiting for a slot, then stops at acquire with transient: true (#740). Every policy
 // value comes from the project contract that setup resolves; this file carries no project
 // literal and defaults no policy value (D3).
 
@@ -77,7 +79,10 @@ Hard rules for this step (they override anything else you remember):
 - Do everything in the FOREGROUND inside this one turn: run long commands with a long Bash timeout; never use run_in_background, never end your turn while anything you started is pending, never sleep or use sleep workarounds. Your final message is your return value.
 - Do not dispatch subagents unless this step says so.
 - Never run a host activation, deploy or release command.
-- Global skills, agents and standards are shared by other projects: never write a project-specific literal (check names, branch names, recipe names, repository paths) into them.`
+- Global skills, agents and standards are shared by other projects: never write a project-specific literal (check names, branch names, recipe names, repository paths) into them.
+- Run git as git -C <worktree> and name every file by its absolute path; never prefix a command with cd <worktree> &&, except for a tool that must run inside the worktree and has no directory flag (a test runner or a build).`
+// forge-claim retries a transport error itself (#740), up to 150 s in a hanging outage, above the Bash tool's 120 s default.
+const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms): forge-claim retries a forge outage itself before it prints its one JSON line.'
 
 // --- Setup: one agent resolves the contract; nothing is defaulted ---
 phase('Setup')
@@ -119,7 +124,7 @@ if (!HOLDER_RE.test(HOLDER)) return { stage: 'setup', result: setup, invalid: 'h
 const SLUG = SETUP.slug, INT = SETUP.integration_branch, MAX = SETUP.max_parallel
 // The land lock command, its return sentence and the conditional second release, one line each so deliver-standard.js carries them byte for byte (#716).
 const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
-const LOCK_RETURN = 'Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output.'
+const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
 
 let ISSUES
@@ -150,47 +155,92 @@ const ask = async (pending, label) => {
   if (r === null || r === undefined) trip(label)
   return r
 }
+// A renew or acquire that ran out of forge-claim's transport retries is re-called once (#740).
+const transientError = r => !!r && r.verdict === 'error' && r.transient === true
+const recall = async (make, pick = r => r) => { const r = await make(); return r && transientError(pick(r)) ? make() : r }
 
-// --- Intake: every facts agent runs before any lane agent (one barrier) ---
+// --- Intake: every facts agent answers before any acquire (one barrier) ---
 phase('Intake')
 const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
+const LANES = ['direct', 'standard', 'needs-design']
 const FACTS_SCHEMA = {
   type: 'object',
   properties: {
-    state: { type: 'string' }, labels: STRS, title: { type: 'string' }, branch: { type: 'string' },
+    state: { type: 'string' }, labels: STRS, title: { type: 'string' }, branch: { type: 'string' }, branch_error: { type: 'string' },
     claim: { type: 'object', properties: { verdict: { type: 'string', enum: ['free', 'held_by', 'stale', 'error'] }, by: { type: ['string', 'null'] } }, required: ['verdict'] },
-    merged_pr: { type: ['integer', 'null'] },
+    merged_refs: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, closes: { type: 'boolean' } }, required: ['number', 'closes'] } },
+    landed: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, commits: STRS }, required: ['number', 'commits'] } },
     already_fixed: { anyOf: [{ type: 'object', properties: { commit: { type: 'string' }, evidence: { type: 'string' } }, required: ['commit', 'evidence'] }, { type: 'null' }] },
     open_pr: { anyOf: [{ type: 'object', properties: { number: { type: 'integer' }, head_branch: { type: 'string' } } }, { type: 'null' }] },
     blockers: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, state: { type: 'string' } }, required: ['issue', 'state'] } },
     decision: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: {} } } },
+    lane: { type: 'string', enum: LANES }, why: { type: 'string' },
   },
-  required: ['state', 'labels', 'claim', 'blockers'],
+  required: ['state', 'labels', 'claim', 'blockers', 'lane'],
 }
-const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git repository at ${REPO}) for a batch delivery with claim holder ${HOLDER}. Change nothing (a git fetch is fine), apart from what forge-claim status itself posts.
-1. gh issue view ${n} --repo ${SLUG} --json state,labels,title,body,createdAt: return state, the label names as labels, and title; keep createdAt for step 7 (it is not returned).
-2. branch: derive it for this issue from bindings.vcs.branch_pattern (read with resolve-project resolve --repo-root ${REPO}), the slug taken from the title.
+// Copied from deliver-standard.js: the two programs share no code.
+const normSha = x => x.trim().toLowerCase()
+const sameSha = (a, b) => {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const x = normSha(a), y = normSha(b)
+  if (x === y) return x !== ''
+  const ok = /^[0-9a-f]{7,40}$/
+  if (!ok.test(x) || !ok.test(y)) return false
+  return x.length >= y.length ? x.startsWith(y) : y.startsWith(x)
+}
+const closingOf = f => {
+  const r = (Array.isArray(f.merged_refs) ? f.merged_refs : []).find(m => isObj(m) && m.closes === true && Number.isInteger(m.number))
+  return r ? r.number : null
+}
+const ownOf = n => {
+  const c = CONTS[n]
+  if (!isObj(c)) return null
+  const pr = Number.isInteger(c.pr) ? c.pr : null
+  const commits = (Array.isArray(c.done) ? c.done : []).filter(d => isObj(d) && nonEmpty(d.commit)).map(d => d.commit)
+  return pr === null && !commits.length ? null : { pr, commits }
+}
+const landedOf = (n, f) => {
+  const own = ownOf(n)
+  if (!own) return null
+  const l = (Array.isArray(f.landed) ? f.landed : []).find(m => isObj(m) && Number.isInteger(m.number)
+    && (m.number === own.pr || (Array.isArray(m.commits) && m.commits.some(c => own.commits.some(o => sameSha(c, o))))))
+  return l ? l.number : null
+}
+// #752: a merged PR that merely mentions the issue (a spec PR saying Refs) is no duplicate and no landing; only one that closes the issue is a duplicate.
+// A forwarded cont names its own landing by its PR number or one of its done commits, and the landed read looks for exactly that on the cont's branch.
+const landedRead = n => {
+  if (!ownOf(n)) return ''
+  const s = (CONTS[n] || {}).setup
+  const b = isObj(s) && nonEmpty(s.branch) ? s.branch : '<branch>'
+  return ` landed: one {number, commits (every commit oid, from gh pr view <number> --repo ${SLUG} --json commits)} per merged PR whose head is ${b} (gh pr list --repo ${SLUG} --state merged --head ${b} --json number), [] when none.`
+}
+const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git repository at ${REPO}) for a batch delivery with claim holder ${HOLDER}. Change nothing (a git fetch is fine), apart from what forge-claim status itself posts. ${FORGE_TIMEOUT}
+1. gh issue view ${n} --repo ${SLUG} --json state,labels,title,body,createdAt,comments: return state, the label names as labels, and title; keep createdAt for step 7 and the comments for step 8 (they are not returned).
+2. branch: run alone and exactly issue-branch --repo-root ${REPO} --issue ${n} and return the branch member of the one JSON line it prints; on a non-zero exit omit branch and return branch_error: the exit code and the code and message of the JSON error it printed.
 3. claim: run alone and exactly forge-claim status --repo ${SLUG} --issue ${n} --holder ${HOLDER} and return its verdict (free, held_by or stale) and by; on exit 1 or 2 return verdict error.
-4. merged_pr: the number of a merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,body,title), else null. open_pr: {number, head_branch} of an open PR referencing the issue, else null.
+4. merged_refs: one {number, closes} per merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,closingIssuesReferences), closes true only when its closingIssuesReferences lists issue ${n}, [] when none.${landedRead(n)} open_pr: {number, head_branch} of an open PR referencing the issue, else null.
 5. blockers: the issues this one is blocked by, from the body's "Blocked by" list and the tracker's issue dependencies, each as {issue, state} with the state from gh issue view.
 6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id and questions.
 7. already_fixed: name the issue's concrete symptom as one literal string taken from its body (an error string, a quoted code literal, or the quoted output of a failing command; never run the failing command). Run git -C ${REPO} fetch origin ${INT}, then git -C ${REPO} grep -n -F '<literal>' origin/${INT} and git -C ${REPO} log origin/${INT} -S'<literal>' --since=<createdAt> --format='%H %s'. Return already_fixed {commit (the full sha of the commit since the issue opened that removed the literal), evidence (the literal and what both commands printed)} only when the grep finds the literal nowhere at origin/${INT} and the log names such a commit; otherwise, or with no concrete literal, return already_fixed null.
+8. lane: invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is. Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
 ${RULES_FOR(REPO, '<branch>')}`
 const releaseClosedPrompt = n => `Issue #${n} of ${SLUG} (the git repository at ${REPO}) is closed and this batch still holds its claim. Release it.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed
-Return its verdict (released on exit 0, not_held (exit 3) when the claim is already gone, or error on any other exit) and any detail. Run nothing else.
+Return its verdict (released on exit 0, not_held (exit 3) when the claim is already gone, or error on any other exit) and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, (FACTS[n] || {}).branch || '<branch>')}`
 
 await parallel(ISSUES.map(n => async () => {
-  FACTS[n] = await ask(agent(factsPrompt(n), { label: `facts-${n}`, phase: 'Intake', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: FACTS_SCHEMA }), `facts-${n}`)
+  FACTS[n] = await ask(agent(factsPrompt(n), { label: `facts-${n}`, phase: 'Intake', agentType: 'clerk', model: 'sonnet', effort: 'medium', schema: FACTS_SCHEMA }), `facts-${n}`)
 }))
 
 // Eligibility is plain JS over the facts, first match wins; null means eligible.
 // A forwarded cont names a landing this batch started; its PR now reads as merged and the claim is still ours (or already released):
 // the merge happened after the cont was forwarded, so the issue is re-adopted for its close-out, never skipped as a duplicate or closed.
+// A landing is the cont's own merged PR (by its pr or a done commit), whether it closes the issue or only says Refs: a merged PR that
+// closes the issue but is not the cont's own is a duplicate, never a re-adoption.
 const mergedReadopt = (n, f) => {
   const claim = f.claim || {}
-  return !!(CONTS[n] && f.merged_pr && (claim.verdict === 'free' || claim.by === HOLDER))
+  return !!(CONTS[n] && landedOf(n, f) !== null && (claim.verdict === 'free' || claim.by === HOLDER))
 }
 const eligibility = (n, f) => {
   const readopt = mergedReadopt(n, f)
@@ -203,7 +253,8 @@ const eligibility = (n, f) => {
   for (const [label, outcome] of [['needs-verification', 'needs-verification'], ['parked', 'parked'], ['agent:human-required', 'human-required']]) {
     if (labels.includes(label) && !(readopt && label === 'needs-verification')) return { issue: n, outcome }
   }
-  if (f.merged_pr && !readopt) return { issue: n, outcome: 'duplicate', pr: f.merged_pr }
+  const dup = closingOf(f)
+  if (dup && !readopt) return { issue: n, outcome: 'duplicate', pr: dup }
   // A failed claim lookup proves nothing about ownership: it falls through to the claim-error stop below, never to a final row.
   const fixed = f.already_fixed
   if (isObj(fixed) && nonEmpty(fixed.commit) && !CONTS[n] && (f.claim || {}).by !== HOLDER && (f.claim || {}).verdict !== 'error') {
@@ -248,7 +299,7 @@ await parallel(ISSUES.filter(n => rows[n] && rows[n].outcome === 'closed' && rel
 const inBatchBlockers = n => Array.from(new Set(((FACTS[n] || {}).blockers || [])
   .filter(b => b.state === 'OPEN' && ISSUES.includes(b.issue)).map(b => b.issue))).sort((a, b) => a - b)
 
-// A dependency cycle among the issues still to deliver is found here, right after intake and before any lane agent:
+// A dependency cycle among the issues still to deliver is found here, right after intake and before any acquire:
 // an issue is on a cycle when a depth-first walk over in-batch blockers returns to it.
 const onCycle = n => {
   const seen = new Set()
@@ -273,10 +324,9 @@ for (const n of ISSUES) if (!toDeliver.includes(n)) settle[n](rows[n] || { issue
 
 // --- Deliver ---
 phase('Deliver')
-const LANE_SCHEMA = { type: 'object', properties: { lane: { type: 'string', enum: ['direct', 'standard', 'needs-design'] }, why: { type: 'string' } }, required: ['lane'] }
 const ACQUIRE_SCHEMA = {
   type: 'object',
-  properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'held_by', 'lost_to', 'error'] }, by: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' } },
+  properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'held_by', 'lost_to', 'error'] }, by: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' }, transient: { type: 'boolean' } },
   required: ['verdict'],
 }
 const ASK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['posted', 'already_posted', 'error'] }, comment_id: { type: 'integer' } }, required: ['verdict'] }
@@ -334,7 +384,7 @@ const IMPL = {
 }
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
 const findingsOf = r => (r.findings || []).filter(f => f.severity !== 'minor')
-const RENEW_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
+const RENEW_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' }, transient: { type: 'boolean' } }, required: ['verdict'] }
 const LOCK_SCHEMA = {
   type: 'object',
   properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'moved', 'held_by', 'lost_to', 'land-contended', 'error'] }, lock_sha: { type: 'string' }, pr: { type: 'integer' }, by: { type: 'string' }, detail: { type: 'string' } },
@@ -343,7 +393,7 @@ const LOCK_SCHEMA = {
 const LAND_PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head: { type: 'string' }, notes: { type: 'string' } }, required: ['pr', 'head'] }
 const LAND_CHECKS_SCHEMA = {
   type: 'object',
-  properties: { state: { type: 'string', enum: ['passed', 'failed', 'behind', 'needs_label'] }, head: { type: 'string' }, required: STRS, passed: STRS, failing: STRS, label: { type: 'string' }, details: { type: 'string' } },
+  properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind', 'needs_label'] }, head: { type: 'string' }, required: STRS, passed: STRS, failing: STRS, pending: STRS, label: { type: 'string' }, details: { type: 'string' } },
   required: ['state', 'head'],
 }
 const RECORD_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' }, head: { type: 'string' }, detail: { type: 'string' } }, required: ['ok'] }
@@ -353,7 +403,7 @@ const LAND_SYNC_SCHEMA = {
   required: ['status'],
 }
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
-const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
+const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes_posted: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
 const MAX_SYNCS = 3
 // A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable (#716).
 const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
@@ -366,24 +416,31 @@ const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 // pre-merge acquire and the merge (one agent call, land-merge), release, close out (#677, #716). Every exit goes through the wrapper at the bottom: a landing that holds the
 // lock releases it exactly once, at the last sha it was held at (P8), and a failed landing keeps the
 // claim and its cont (D9).
+// The kinds a criterion row can carry. A note is the orchestrator's own observation: never held, listed in a close-out comment (#736).
+// This copy of the rule lives here because the program has no filesystem access and shares no module with deliver-standard.js.
+const ACCEPT_KINDS = ['code', 'evidence', 'human', 'note']
+const OPEN_KINDS = ['evidence', 'human']
+const isOpen = a => !!(a && OPEN_KINDS.includes(a.kind))
 const land = async (n, ready) => {
   const W = ready.worktree, B = ready.branch
   const RULES = RULES_FOR(W, B)
   const ACS = JSON.stringify(ready.acceptance)
-  const allCode = ready.acceptance.every(a => a.kind === 'code')
-  const closesLine = allCode && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
+  const noHold = !ready.acceptance.some(isOpen)
+  const unknownKinds = ready.acceptance.filter(a => !(a && ACCEPT_KINDS.includes(a.kind))).map(a => (a && a.id) || null)
+  const closesLine = noHold && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
   let expected = ready.head
   let pr = null
   let lockHeld = false
   let lockSha = null
   // A move of the lock whose answer may have been lost (P10): the sha it may now be held at, released after lockSha.
   let lockMaybe = null
-  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0 }
+  const PENDING_WAITS = 3
+  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0, pending: 0 }
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
   const clerk = { agentType: 'clerk', model: 'sonnet', effort: 'low' }
 
-  const RENEW_FIRST = `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by and detail as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew.`
+  const RENEW_FIRST = `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
   // The nested renew of a folded reply: a row ends the landing, null continues.
   const renewed = (r, label) => {
     if (!r) return out('stopped', { stage: 'renew', detail: `${label} returned no renew` })
@@ -397,7 +454,7 @@ const land = async (n, ready) => {
     lockHeld = false
     await call(`Release the cross-host landing lock of the branch ${INT} held for issue #${n} of ${SLUG}.
 Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}
-released and not_held are both fine. Return its verdict and any detail. Run nothing else.
+released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail. Run nothing else.
 ${lockMaybe && lockMaybe !== lockSha ? RELEASE_AGAIN(lockMaybe) : ''}${RULES}`, `land-unlock-${n}`, { ...clerk, schema: RELEASE_SCHEMA })
   }
 
@@ -493,6 +550,7 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
   }
 
   const body = async () => {
+    if (unknownKinds.length) return out('stopped', { stage: 'plan', detail: 'a ready criterion has a kind that is not code, evidence, human or note', bad_kinds: unknownKinds })
     // The order (#677): the PR opens at the ready head, the land lock is taken waiting (the CLI waits
     // within its bound, so the acquire is sent once), and only then does the first resync run, so no
     // resync, check or merge happens outside the lock. A resync that changes the head pushes it and
@@ -501,7 +559,7 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
     // The pr call may take the lock (--wait) after opening the PR: mark the ready head as possibly held before it, so a lost reply still reaches the release (P5).
     lockHeld = true
     lockSha = expected
-    const prR = await call(`${RENEW_FIRST}
+    const prR = await recall(() => call(`${RENEW_FIRST}
 Then open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${B} (worktree ${W}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
 1. Push the branch: git -C ${W} push origin ${B}.
 2. If an open PR with head ${B} exists (a re-run), reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
@@ -509,7 +567,7 @@ Body, plain prose, no single or double quotes, dollar signs, backticks or backsl
 Return pr (number) and head (the full sha of the pushed head).
 Take the cross-host landing lock of the branch ${INT} for that PR at the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null.
-${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: 'sonnet', effort: 'high', schema: withRenew(LAND_PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) })
+${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: 'sonnet', effort: 'high', schema: withRenew(LAND_PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
     if (!prR) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
     // A renew that ended ran nothing after it; a refused lock holds nothing (P5). Otherwise the lock stays marked held at expected (O2).
     if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
@@ -532,41 +590,52 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: 'sonnet', effort: 'high'
     for (;;) {
       c.checks++
       const label = `land-checks-${n}-${c.checks}`
-      const ck = await call(`Wait for the required checks of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head.
+      const ck = await call(`Wait for every check of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head, required or not.
 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${B}, push it. head is git -C ${W} rev-parse HEAD (the full sha).
 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), answer state behind at once with head.
-3. Otherwise wait in this turn for the required checks on head. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection; if neither answers, every check is required. A declared check with no run or status at head yet is pending: keep waiting for it, never treat it as absent or green. gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending) can return early, and its --required list can be partial: never treat a partial list as green.
-4. Answer passed only when every required name has passed on head, with required (the names you used) and passed (the names passing at head). Answer failed with failing (the failing names) and details when a required check failed. Answer needs_label with label and failing when a required check failed only because the PR lacks a label that only a human may apply (do not apply it yourself).
+3. Otherwise wait in this turn until every check on head has completed, required or not: the required checks are the floor, not the bar. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting for it, never treat it as absent or green.
+4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.
 ${RULES}`, label, { ...clerk, schema: LAND_CHECKS_SCHEMA })
       if (!ck) return out('stopped', { stage: 'checks', detail: `${label} returned nothing` })
       if (ck.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: ck.head })
 
-      if (ck.state === 'needs_label') {
+      const failingNames = ck.failing || []
+      const pendingNames = ck.pending || []
+      const state = ck.state === 'behind' || ck.state === 'needs_label' ? ck.state
+        : ck.state === 'failed' || failingNames.length ? 'failed'
+        : ck.state === 'pending' || pendingNames.length ? 'pending'
+        : ck.state
+
+      if (state === 'needs_label') {
         const names = (ck.failing || []).join(', ')
-        return await ownerAction('needs-label', [`PR #${pr} of issue #${n} needs the label ${ck.label || '(unnamed)'}, which only the owner applies; the failing required checks: ${names || 'unnamed'}.`], 'needs-label', { label: ck.label, failing: ck.failing })
+        return await ownerAction('needs-label', [`PR #${pr} of issue #${n} needs the label ${ck.label || '(unnamed)'}, which only the owner applies; the failing checks: ${names || 'unnamed'}.`], 'needs-label', { label: ck.label, failing: ck.failing })
       }
-      if (ck.state === 'failed') {
+      if (state === 'failed') {
         c.ciFails++
-        if (c.ciFails >= 2) return out('ci-failed', { failing: ck.failing })
-        const fix = await call(`Issue #${n} of ${SLUG}: the required checks of PR #${pr} failed at ${expected}: ${JSON.stringify(ck.failing || [])}. Details: ${ck.details || 'none given'}.
-Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing required checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}). Never weaken, skip or delete a test or check to make it pass. ${IMPL_RETURN}
+        if (c.ciFails >= 2) return out('ci-failed', { failing: failingNames, details: ck.details })
+        const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${ck.details || 'none given'}.
+Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}). Never weaken, skip or delete a test or check to make it pass. ${IMPL_RETURN}
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
-        if (!fix || fix.status !== 'done' || !fix.commit || fix.commit === expected) return out('ci-failed', { failing: ck.failing, detail: 'the fix round did not finish' })
+        if (!fix || fix.status !== 'done' || !fix.commit || fix.commit === expected) return out('ci-failed', { failing: failingNames, detail: 'the fix round did not finish' })
         const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-Review this fix for failing required checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(ck.failing || [])}; the implementer's notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
+Review this fix for failing checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(failingNames)}; the implementer's notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
 ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
-        if (!rv || findingsOf(rv).length) return out('ci-failed', { failing: ck.failing, review: rv })
+        if (!rv || findingsOf(rv).length) return out('ci-failed', { failing: failingNames, review: rv })
         expected = fix.commit
         const adv = await advance()
         if (adv) return adv
         continue
       }
-      if (ck.state === 'behind') {
+      if (state === 'behind') {
         const r = await behind()
         if (r) return r
         continue
       }
-      if (ck.state !== 'passed') return out('stopped', { stage: 'checks', detail: `unknown checks state ${ck.state}` })
+      if (state === 'pending') {
+        if (++c.pending >= PENDING_WAITS) return out('stopped', { stage: 'checks-pending', pending: pendingNames })
+        continue
+      }
+      if (state !== 'passed') return out('stopped', { stage: 'checks', detail: `unknown checks state ${ck.state}` })
 
       // D11: a declared check missing from the passed names is never merged.
       const have = ck.passed || []
@@ -574,7 +643,7 @@ ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
       if (missingNames.length) return out('stopped', { stage: 'checks', missing: missingNames })
 
       // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first), then the merge (O3).
-      const mg = await call(`${RENEW_FIRST}
+      const mg = await recall(() => call(`${RENEW_FIRST}
 Then re-check the cross-host landing lock of the branch ${INT} for PR #${pr}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
 ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
@@ -582,7 +651,7 @@ Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n
 2. Otherwise run, alone and exactly: ${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${expected}${SETUP.delete_branch ? ' --delete-branch' : ''}
 3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
 Return merged, merge_commit and notes. On any other lock verdict run nothing else and return merged false with the verdict in notes.
-${RULES}`, `land-merge-${n}`, { ...clerk, schema: withRenew(LAND_MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) })
+${RULES}`, `land-merge-${n}`, { ...clerk, schema: withRenew(LAND_MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
       if (!mg) return out('stopped', { stage: 'merge', detail: `land-merge-${n} returned nothing` })
       const v2 = mg.lock ? mg.lock.verdict : null
       if (HOLDING(v2)) {
@@ -603,21 +672,22 @@ ${RULES}`, `land-merge-${n}`, { ...clerk, schema: withRenew(LAND_MERGE_SCHEMA, {
     }
     await unlock()
     // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
-    if (!CONTS[n]) CONTS[n] = { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }
+    CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
 
-    const openCriteria = ready.acceptance.filter(a => a.kind !== 'code')
+    const openCriteria = ready.acceptance.filter(isOpen)
+    const notes = ready.acceptance.filter(a => a && a.kind === 'note')
     const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
 1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
-2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released.
+2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released. ${FORGE_TIMEOUT}
 3. End the owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision. The merge proves the conflict and the label resolved and the decision settled; a verdict none is fine. decision_ended is true only when the decision end exited 0 (verdict ended or none).
-4. ${allCode
-      ? `Every criterion is of kind code. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
+${notes.length ? `4. Unless a comment starting Orchestrator notes for PR ${pr} already exists on #${n} (an earlier attempt), write to a file outside any work tree a comment whose first line is Orchestrator notes for PR ${pr} (observations the orchestrator records itself; not graded, not held): and then one line <id>: <text> per note of ${JSON.stringify(notes.map(a => ({ id: a.id, text: a.text })))}, and post it with ${UNSET}gh issue comment ${n} --repo ${SLUG} --body-file <file>. Return notes_posted true once that comment exists.\n` : ''}${notes.length ? 5 : 4}. ${noHold
+      ? `Every criterion is of kind code or note. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
       : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
-Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended and notes.
+Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended${notes.length ? ', notes_posted' : ''} and notes.
 ${RULES}`, `close-out-${n}`, { ...clerk, schema: CLOSE_SCHEMA })
-    const want = allCode ? 'CLOSED' : 'OPEN'
-    if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
-    return out(allCode ? 'landed' : 'landed-held')
+    const want = noHold ? 'CLOSED' : 'OPEN'
+    if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true || (notes.length && co.notes_posted !== true)) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
+    return out(noHold ? 'landed' : 'landed-held')
   }
 
   let result
@@ -642,7 +712,7 @@ const READOPT_SCHEMA = {
   properties: {
     ok: { type: 'boolean' }, reason: { type: 'string', enum: ['unaccepted', 'dirty', 'no-acceptance', 'worktree', 'other'] }, detail: { type: 'string' },
     worktree: { type: 'string' }, branch: { type: 'string' }, head: { type: 'string' },
-    acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human'] } }, required: ['id', 'text', 'kind'] } },
+    acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ACCEPT_KINDS } }, required: ['id', 'text', 'kind'] } },
   },
   required: ['ok'],
 }
@@ -653,7 +723,7 @@ const readoptPrompt = n => {
 2. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid,body. The PR is landed as it stands only at its accepted head: the body's Evidence section ends with a line Accepted head: <sha>. Answer ok false with reason unaccepted (and the head you read in detail) when the body has no Accepted head: line or the line's sha differs from headRefOid, and stop there.
 3. Find the worktree on ${B}: run git -C ${REPO} worktree list --porcelain and take the entry whose branch is refs/heads/${B}. When there is none, resolve the contract once (resolve-project resolve --repo-root ${REPO}) and add one at the path bindings.vcs.worktree.root (resolved against project.root) plus bindings.vcs.worktree.prefix and ${B}: git -C ${REPO} worktree add <path> ${B} when the local branch exists, else git -C ${REPO} worktree add --no-track -b ${B} <path> origin/${B} when only the remote branch exists. When that fails, answer ok false with reason other and the error in detail.
 4. In that worktree: when git -C <worktree> status --porcelain shows any change, answer ok false with reason dirty and the status in detail. When git -C <worktree> rev-parse HEAD differs from headRefOid, answer ok false with reason worktree and both shas in detail.
-5. Read the body's Acceptance table, one row per criterion (id, criterion, kind, and how it is shown). When the body has no Acceptance table, answer ok false with reason no-acceptance. Otherwise answer ok true with worktree (its absolute path), branch ${B}, head (headRefOid, the full sha) and acceptance: one {id, text (the criterion), kind (code, evidence or human, as the table says)} per row.
+5. Read the body's Acceptance table, one row per criterion (id, criterion, kind, and how it is shown). When the body has no Acceptance table, answer ok false with reason no-acceptance. Otherwise answer ok true with worktree (its absolute path), branch ${B}, head (headRefOid, the full sha) and acceptance: one {id, text (the criterion), kind (${ACCEPT_KINDS.join(', ')}, as the table says)} per row.
 ${RULES_FOR('<the worktree path>', B)}`
 }
 
@@ -662,25 +732,21 @@ const deliverOne = async n => {
   const f = FACTS[n]
   const readopt = readoptable(n)
   let laneName
-  // The lane step; false when it ended the issue (its row is set). A readoptable issue defers it until its PR is found unaccepted.
+  // The lane step; false when it ended the issue (its row is set). It reads the lane facts-n answered. A readoptable issue defers it until its PR is found unaccepted.
   const chooseLane = async () => {
-    const lane = await ask(agent(`You choose the delivery lane of issue #${n} of ${SLUG} (the git repository at ${REPO}). Change nothing in this step.
-Read the issue with its comments (gh issue view ${n} --repo ${SLUG} --comments) and invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is.
-Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
-${RULES_FOR(REPO, f.branch || '<branch>')}`, { label: `lane-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'medium', schema: LANE_SCHEMA }), `lane-${n}`)
-    if (lane === null || lane === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `lane-${n} returned nothing` }; return false }
-    if (lane.lane === 'needs-design') {
+    if (!LANES.includes(f.lane)) { rows[n] = { issue: n, outcome: 'stopped', detail: `facts-${n} returned no lane` }; return false }
+    if (f.lane === 'needs-design') {
       if (readopt) {
         // The claim is already held: give it back, as the row says nothing is left to resume.
         await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) needs a design before it can be delivered. Release the batch claim.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
-Return its verdict and any detail. Run nothing else.
+Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
       }
-      rows[n] = { issue: n, outcome: 'needs-design', lane: lane.lane }
+      rows[n] = { issue: n, outcome: 'needs-design', lane: f.lane }
       return false
     }
-    laneName = lane.lane
+    laneName = f.lane
     return true
   }
   if (CONTS[n]) laneName = CONTS[n].lane || 'standard'
@@ -698,17 +764,30 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
 
   // An issue is claimed only once it holds a child slot: a waiting issue holds no claim.
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
+  // Every claim, release and lane step below names the branch: without a derived one nothing is claimed (never `--branch undefined`).
+  if (!nonEmpty(f.branch)) { rows[n] = { issue: n, outcome: 'stopped', stage: 'branch', detail: nonEmpty(f.branch_error) ? f.branch_error : 'issue-branch derived no branch' }; return }
   await admit()
   let admitted = true
   try {
     if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
-    const acq = await ask(agent(`You claim issue #${n} of ${SLUG} (the git repository at ${REPO}) for the batch holder ${HOLDER}.
+    // The child's setup acquires again and answers already_held (its setup then renews the claim); this acquire is kept because it gates the readopt path (issue 745).
+    const acquireStep = () => ask(agent(`You claim issue #${n} of ${SLUG} (the git repository at ${REPO}) for the batch holder ${HOLDER}.
 Run alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${f.branch}
-Return its verdict (acquired, already_held, held_by, lost_to, or error on any other exit), by and comment_id from its output. Run nothing else.
+Return its verdict (acquired, already_held, held_by, lost_to, or error on any other exit), by, comment_id and transient (true only when its JSON line has transient true) from its output. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: ACQUIRE_SCHEMA }), `acquire-${n}`)
+    let acq = await recall(acquireStep)
+    if (transientError(acq)) {
+      // #740 D7: re-queued once, behind every issue waiting for a slot now: give the slot back and ask for one again.
+      leave()
+      admitted = false
+      await admit()
+      admitted = true
+      if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
+      acq = await recall(acquireStep)
+    }
     if (acq === null || acq === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'acquire', detail: `acquire-${n} returned nothing` }; return }
     if (acq.verdict === 'held_by' || acq.verdict === 'lost_to') { rows[n] = { issue: n, outcome: 'claim-lost', by: acq.by }; return }
-    if (acq.verdict !== 'acquired' && acq.verdict !== 'already_held') { rows[n] = { issue: n, outcome: 'stopped', stage: 'acquire', detail: acq.detail || acq.verdict }; return }
+    if (acq.verdict !== 'acquired' && acq.verdict !== 'already_held') { rows[n] = { issue: n, outcome: 'stopped', stage: 'acquire', detail: acq.detail || acq.verdict, ...(transientError(acq) ? { transient: true } : {}) }; return }
 
     if (readopt) {
       // The plan was settled before the PR existed: an owner answer does not apply on this path.
@@ -798,7 +877,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `ask-${n}`, phase: 'Deliver', agentType:
         // A re-adopted merged landing is never settled, whatever stage it stopped at: its close-out is still owed (#714).
         const st = await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) stopped with a continuation. Settle its claim.
 1. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state and return state (OPEN or CLOSED).
-2. Only when state is CLOSED, run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed and return its verdict as release: released (exit 0), not_held (exit 3) when the claim is already gone, or error on any other exit; otherwise return release null. Run nothing else.
+2. Only when state is CLOSED, run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed and return its verdict as release: released (exit 0), not_held (exit 3) when the claim is already gone, or error on any other exit; otherwise return release null. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: SETTLE_SCHEMA }), `settle-${n}`)
         if (st && st.state === 'CLOSED' && (st.release === 'released' || st.release === 'not_held')) {
           delete CONTS[n]
@@ -812,7 +891,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
     // A stop with nothing to resume: give the claim back.
     await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) stopped without anything to resume. Release the batch claim.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
-Return its verdict and any detail. Run nothing else.
+Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
     rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }
   } finally {
