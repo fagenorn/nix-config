@@ -27,6 +27,16 @@ AUDITED: frozenset[tuple[str, str, str]] = frozenset({
     ("python/README.md", "`verified-tree`", "decision"),
     ("python/README.md", "verify-pending", "contract"),
     ("python/README.md", "verify-pending", "decision"),
+    ("python/README.md", "forge-claim", "contract"),
+    ("python/README.md", "forge-claim", "decision"),
+    ("python/README.md", "forge-claim land", "contract"),
+    ("python/README.md", "forge-claim land", "decision"),
+    ("python/README.md", "forge-claim owner-action", "contract"),
+    ("python/README.md", "forge-claim owner-action", "decision"),
+    ("python/README.md", "forge-issue", "contract"),
+    ("python/README.md", "forge-issue", "decision"),
+    ("python/README.md", "owner-actions", "contract"),
+    ("python/README.md", "owner-actions", "decision"),
 })
 
 # The base sections no text leaves.

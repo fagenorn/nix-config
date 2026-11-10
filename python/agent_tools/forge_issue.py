@@ -1,29 +1,57 @@
 """forge-issue (issue 697): file an issue and record its blocking edges natively, read back.
 
-D1, identity on the wire: every link posts a database id read from `repos/<slug>/issues/<n>`
-(`.id`), never an issue number, which the dependencies endpoint would not accept as one.
+Source entry `python -m agent_tools.forge_issue`, library `agent_tools.forge_markers`. Blocking
+edges go through the forge's dependencies endpoints instead of prose.
+`create --repo <owner/name> --title <t> --body-file <path> [--label <l>]... [--blocked-by <n>]...
+[--blocks <n>]...` files the issue and links it; `link --repo <owner/name> --issue <n>
+[--blocked-by <n>]... [--blocks <n>]...` adds the edges an existing issue lacks (and needs at
+least one edge). `--blocked-by <n>` records that the issue is blocked by #n, `--blocks <n>` that
+#n is blocked by the issue.
+
+D1, identity on the wire: every link posts `issue_id=<database id>` of the blocker, read from
+`repos/<owner/name>/issues/<n>` (`.id`), never an issue number, which the dependencies endpoint
+would not accept as one. `create` posts one `blocked_by` link per `--blocked-by` on the new issue
+and one per `--blocks` on the blocked issue (the new issue's id as the blocker), in argv order,
+`--blocked-by` first; `link` posts only the edges whose blocker id is absent from its first read,
+and reads the target's own id only when a `--blocks` edge is missing.
 
 D3, outcomes: exit 1 with `issue` null and an `error` other than `create_unconfirmed` filed
-nothing; exit 1 with `issue` set means that issue exists and `link` repairs it; a `ForgeError` of
-the filing call itself is `create_unconfirmed` (`issue` null), because the request may have
-landed, and nothing is linked.
+nothing; exit 1 with `issue` set means that issue exists, so rerun `link` with it and never
+refile; a `ForgeError` of the filing call itself is `create_unconfirmed` (`issue` null, `detail`
+`<original code>: <original detail>`), because the request may have landed: look the title up on
+the forge before filing again. Nothing is linked after an unconfirmed filing.
 
 D6, validate first: `create` (and `link`) resolve every requested number to an issue of `--repo`
-before any POST, so a 404, a pull request or a payload answering another number files nothing.
+before any POST, so a 404, a pull request (`not_an_issue`) or a payload answering another number
+(`payload_invalid`) files nothing.
 
-D7, read back: after posting, both lists of the issue (`blocked_by` and `blocking`) are read
-back; `create` succeeds only when each id set equals the requested one, `link` when it contains it.
+D7, read back: after posting, both lists of the issue (`dependencies/blocked_by` and
+`dependencies/blocking`) are read back; `create` succeeds (`created`, exit 0) only when each id
+set equals the requested one, `link` (`linked`) when it contains it; otherwise the verdict is
+`links_differ`, exit 1, with the issue number reported.
 
-D8, output: every call, a usage error included, prints exactly one JSON object on one stdout
-line. Exit 0 success, 1 a forge error or a read-back that differs, 2 usage.
+D8, output: every call, a usage error included, prints exactly one line,
+`json.dumps(result, sort_keys=True)`, with exactly the keys `command`, `repo`, `issue`,
+`verdict`, `blocked_by`, `blocks`, `missing_blocked_by`, `missing_blocks`, `unexpected_blocked_by`,
+`unexpected_blocks`, `error` and `detail`. `blocked_by` and `blocks` are the read-back entries as
+sorted `<owner>/<name>#<n>` references (the owner and name come from each entry's
+`repository_url` after `/repos/`; null when no read-back happened); `missing_*` are the requested
+numbers of `--repo` whose database id is absent from the read-back, sorted; `unexpected_*` are the
+references of read-back entries whose id was not requested, sorted (always empty for `link`).
+Exit 0 is `created` or `linked`, exit 1 a forge error (`verdict: "error"`, `error` the
+`ForgeError` code, `detail`) or `links_differ`, exit 2 usage (`error: "usage"`; a repeated number,
+`--issue` among its own edges, an empty title, an unreadable body file or a malformed flag, always
+before any `gh` call), and `-h`/`--help` prints argparse help and exits 0. Every `gh` child runs
+without `GITHUB_TOKEN` and `GH_TOKEN`, so the keyring credential answers.
 
 D11, home repository: a lookup is accepted only when its `repository_url` names `--repo`, because
 GitHub redirects a transferred issue's number to its new home, where the same number may be another
 issue whose database id would otherwise be posted and read back identically.
 
-D10, identity is the database id: an existing edge and the read-back match requested issues by
-`id`, never by `number`, so an issue of another repository sharing a requested number is
-neither an existing edge nor a confirmed link.
+D10, identity is the database id: an existing edge (`link`) and the read-back (`create` and
+`link`) match requested issues by `id`, never by `number`, so an issue of another repository
+sharing a requested number is neither an existing edge nor a confirmed link; it is reported as
+`unexpected_*` and the requested number as `missing_*`.
 """
 import argparse
 import json

@@ -1,33 +1,66 @@
 """The cross-host land lock (issue 629): `forge-claim land acquire|release|status`.
 
-D1, the lock is the ref `refs/agent-locks/land/<branch>`: created by REST (HTTP 422 means not
-created), moved and deleted by the `updateRefs` compare-and-swap with `beforeOid`; a CAS that
-reports failure is judged by re-reading the ref, and a ref left unchanged is a forge error
-carrying the CAS's own code and transport class (issue 740), never a lost race.
+The lock serialises landings on one branch across hosts. Each action takes `--repo <owner/name>`,
+`--branch <name>` and `--sha <40 hex>`; `--wait` exists on `acquire` only.
+
+D1, the lock is the ref `refs/agent-locks/land/<branch>`, whose value is a pull-request head sha:
+created by REST `POST git/refs` (HTTP 422 means not created), moved and deleted by the
+`updateRefs` compare-and-swap with `beforeOid` and `force: true`. A failed compare-and-swap
+answers HTTP 200 with a generic error, so any CAS error counts as not done and the ref is
+re-read to classify the outcome: the caller's sha is success, another oid or no ref is a lost
+race, and the observed oid unchanged is a forge error carrying the CAS's own code and transport
+class (issue 740), never a lost race. REST ref deletion is unconditional and never used.
 
 D2, the holder is derived, not stored, and the head decides: `classify` reads the pull requests
-that contain the lock sha (`_on_branch`: the forge's commit lookup, which for a commit outside
-the default branch lists open pull requests only, plus the closed pull requests headed at the
-lock), and only an open pull request whose head is the lock holds it.
+that contain the lock sha (`_on_branch`: the forge's commit lookup `GET commits/<sha>/pulls`, which
+for a commit outside the default branch lists open pull requests only, so a squash-merged,
+rebase-merged or closed-unmerged holder gets `[]`; plus the closed pull requests headed at the
+lock, found by head sha in the closed listing `GET pulls?state=closed&base=<branch>&sort=updated`,
+at most 5 pages of 100), and only an open pull request whose head is the lock holds it: the lock
+is held while it is the head of an open pull request other than the caller's, and a pull request
+that merely contains the lock's sha (a branch stacked on the holder) never holds or moves it.
 
-D3, staleness: no wall clock and no event is read; a lock is stale only when `classify` answers
-`closed`, and a one-shot acquire never takes over a `held` lock.
+D3, staleness follows the owner's option-B decision on issue 629
+(https://github.com/fagenorn/nix-config/issues/629#issuecomment-6693579241): no wall clock and no
+event is read; a one-shot `status` or `acquire` treats a lock as stale only when `classify` answers
+`closed` (the lock of a merged or closed pull request), takes only that over, and never takes over
+a `held` lock.
 
 D4, the only idle takeover is `wait_acquire`'s, of an oid this process has itself watched
-unchanged for `IDLE_AFTER` seconds of `monotonic()`; every completed ref observation, a lost
-CAS's re-read and an observed absence included, restarts the watch when the oid differs.
+unchanged for `IDLE_AFTER` seconds (45 minutes) of `monotonic()`, counted from its first
+observation of that oid; nothing is persisted, so every `--wait` invocation starts a fresh watch.
+Every completed ref observation, a lost CAS's re-read and an observed absence included, restarts
+the watch when the oid differs. A holder runs a one-shot `acquire` with its sha right before the
+merge and merges only when its verdict is `already_held` or `moved`, never on exit status alone:
+`acquired` also exits 0 and means the lock was lost and taken again, so the base may have moved and
+the holder resyncs first.
 
-D5, a lock moves to the caller's new head only when every open pull request containing it is the
-caller's; a branch merely stacked on the holder's head never moves it.
+D5, a lock moves to the caller's new head (verdict `moved`: the lock sat at an earlier head of the
+same pull request) only when every open pull request containing it is the caller's; a branch
+merely stacked on the holder's head never moves it. A holder whose previous head is also contained
+in another open pull request gets `held_by` naming its own pull request, and runs `land release
+--sha <lock_sha>` before acquiring again.
 
-D6, `acquire` needs an open pull request whose head is the caller's sha before any ref write.
+D6, `acquire` needs an open pull request whose head is the caller's sha with the branch as its
+base before any ref write, and otherwise answers `error` with `no_open_pr` (exit 2). `--wait`
+re-checks this before every attempt, the first included: a caller whose pull request no longer has
+`--sha` as its head stops with `no_open_pr` and never moves the lock.
 
-D7, every call prints one JSON object; exit 0 success, 3 contention, 1 forge error, 2 usage.
+D7, every call prints one JSON object on one stdout line with `command`, `action`, `repo`,
+`branch`, `sha`, `verdict`, `lock_sha`, `pr`, `by`, `took_over` (`null`, `"closed"` or `"idle"`)
+and `waited_s`. The `acquire` verdicts are `acquired`, `already_held` (the lock is already at
+`--sha`), `moved`, `held_by` and `lost_to`. Exit 0 is `acquired`, `already_held`, `moved`,
+`released` and every `status` verdict (`free`, `held_by`, `stale`); exit 3 is contention
+(`held_by`, `lost_to`, `land-contended`, and `not_held` on `release`); exit 1 a forge error; exit 2
+a usage error or `no_open_pr`.
 
-D8, `--wait` attempts at offsets 0, `POLL`, ... `BOUND` and then answers `land-contended`
-(exit 3); a `gh_failed`/`gh_timeout` poll counts as failed and `FAILED_POLLS` in a row are fatal;
-every poll, the first included, reads the caller's eligible pull requests (D6) inside the poll, so
-a failed read is a failed poll (issue 740).
+D8, `--wait` attempts at offsets 0, `POLL` (120 s), ... `BOUND` (3600 s) and then answers
+`land-contended` (exit 3); a `gh_failed`/`gh_timeout` poll counts as failed, an unapplied CAS on an
+unchanged lock included, and `FAILED_POLLS` in a row exit 1 with that error; only a poll that
+completes with a verdict resets the count. Every poll, the first included, reads the caller's
+eligible pull requests (D6) inside the poll, so a failed read is a failed poll and a transport
+failure there waits for the next poll instead of exiting at once (issue 740). The whole-verb
+transport retry of `forge_claim` never wraps `--wait`, whose failed-poll count is its own bound.
 
 D9, `release` is a compare-and-swap delete sent without a prior read, then re-read.
 """

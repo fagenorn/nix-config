@@ -1,30 +1,66 @@
 """Owner actions (issue 624): which GitHub repositories this machine's checkouts belong to.
 
+Source entry `python -m agent_tools.owner_actions`. The module keeps a per-repository count of the
+open issues and pull requests that wait on the owner, so a Claude Code status line can show it
+without a network call. An item needs you (counted in `count`) when it carries the `owner-action`
+label or the `agent:human-required` label; an item is answered and waiting (counted in `answered`,
+issue 670) when it carries `owner-answered` and neither of those, so no item is in both. The
+`in-progress` label and every other label never count, an item carrying none of the three is
+ignored, and a closed item never counts. The one search asks for
+`label:owner-action,agent:human-required,owner-answered`.
+
 P1: a checkout's `origin` is read by decoding `.git/config` in-process with git's own syntax
 (quoting, comments, continuations, case rules), because a regular expression over the text
 accepts what git would reject and rejects what git would accept.
 P2: identity never starts a process, so the statusline can ask it on every render at no cost.
-P3: one cache file per repository, `<state>/owner-actions/<owner>/<name>.json`, written as bytes
-through `agent_platform.write_atomically`; its mtime is the staleness, and deleting it loses nothing.
+P3: one cache file per repository, `<state>/owner-actions/<owner>/<name>.json`, written atomically
+as bytes through `agent_platform.write_atomically` as `{"schema_version": 2, "repo", "count",
+"oldest", "answered"}`; its mtime is the age of the data, an entry that does not parse to exactly
+that shape (a `schema_version` 1 entry included) reads as absent so the next statusline call
+schedules a refresh, and deleting it loses nothing because the next refresh rebuilds it.
 P4: an item's time is the latest `LabeledEvent` of each counted label it carries, minimum over those
-labels; a repository's `oldest` is the minimum over its items, kept as the server's own string.
-P4b: a refresh publishes only a complete answer: the search is followed page by page, and a truncated
-per-item connection, a search unfinished after `MAX_PAGES`, or one that returned fewer nodes than its
-`issueCount` (GitHub caps a search at 1,000 results) fails the refresh and writes nothing. Page flags,
+labels; a repository's `oldest` is the minimum over its needs-you items, kept as the server's own
+timestamp string; an answered item has no age.
+P4b: a refresh publishes only a complete answer: the search is followed page by page through its
+cursor, and a truncated label or label-event connection on an item, a search unfinished after
+`MAX_PAGES` (ten), or one that returned fewer nodes than its `issueCount` (GitHub caps a search at
+1,000 results) fails that repository with `payload_incomplete` and writes nothing. Page flags,
 counts and timestamps must be well formed (an offset-bearing ISO 8601 instant, `Z` included) or the
 refresh fails `payload_invalid`; a cache entry with a malformed `oldest` reads as missing.
 P5: items are counted by their current labels, whatever the server returned: an item carrying
 `owner-action` or `agent:human-required` is needs-you (`count`, with its age), an item carrying
 `owner-answered` and neither of those is answered-and-waiting (`answered`, no age), never both, and an
 item carrying none of the three is ignored.
-P6: the first page also reads the `owner-action` label (not `owner-answered`), and a missing one is created.
+P6: the first page also reads the `owner-action` label (not `owner-answered`), and a missing one is
+created with color `D93F0B`.
+`refresh [--repo <owner/name>]` runs one GraphQL search per repository through `gh` and
+rewrites that repository's cache entry; without `--repo` it takes every slug in the project registry
+and attempts each of them even after one fails. It prints one JSON line `{"refreshed": [<slug>...],
+"failed": [{"repo": <slug>, "error": <code>}...]}` on stdout and one `owner-actions: <slug>: <error>`
+line per failure on stderr (an unreadable registry is reported as `owner-actions: registry: ...` with
+`"repo": null`); it exits 0 when nothing failed and 1 otherwise.
 P7: a statusline starts a refresh only by holding an exclusive `flock` on `<name>.refresh`, which also
-records the last attempt's time; the child inherits the locked descriptor, and attempts are spaced
-`RETRY_AFTER` apart whatever their outcome.
-P8: the detached child is `sibling_argv("owner_actions") + ["refresh", "--repo", slug]` in its own session,
-its output going to `<name>.log`.
-P10: a statusline prints nothing for the expected blank cases and lets every other failure escape to `main`,
-which reports the traceback on stderr and exits 1.
+records the last attempt's time; the child inherits the locked descriptor and so holds the claim until
+it exits, and attempts are spaced `RETRY_AFTER` (120 s) apart whatever their outcome. An entry is
+stale when it is absent or its file is more than `STALE_AFTER` (15 minutes) old; a stale call prints
+the cached value at once and starts at most one detached refresh, spawning only when no refresh holds
+the lock and the recorded attempt is old enough. The claim file is never deleted or truncated by
+anyone but the next claimant. A failure to claim or spawn is one stderr line, `owner-actions: refresh
+claim for <slug> failed: ...` or `owner-actions: refresh spawn for <slug> failed: ...`, and the cached
+value is still printed with exit 0.
+P8: the detached child is `sibling_argv("owner_actions") + ["refresh", "--repo", slug]` in its own
+session with `cwd` `/`, its output going to `<name>.log`.
+`statusline` reads the Claude Code status-line JSON on stdin, takes `cwd` (or
+`workspace.current_dir` when `cwd` is absent or not a string), reads that checkout's `origin` slug
+from its git config files without running `git`, and prints the cached value for it only when the
+slug belongs to a registered project's checkout. It prints `owner <count> (oldest <days>d)` (days
+rounded down, never negative) or `owner <count>` when no label time is known, followed by `, answered
+<answered>` when `answered` is above 0; `answered <answered>` alone when `count` is 0 and `answered`
+is above 0; and nothing when both are 0 or no entry exists; it never runs `gh`.
+P10: a statusline prints nothing for the expected blank cases (input that is not a JSON object, a
+missing or non-string directory, a directory outside a GitHub checkout, a repository outside the
+fleet; nothing on stderr, exit 0) and lets every other failure escape to `main`, which reports the
+traceback on stderr, prints nothing on stdout and exits 1; a corrupt registry is one of those.
 """
 
 import argparse

@@ -1,41 +1,79 @@
 """Issue claims on GitHub issue comments (issue 623): acquire, renew, release and status.
 
-A claim is a `claim` marker (`agent_tools.forge_markers`) and the `in-progress` label is only
-a filter over it. Contention is settled by the marker contest (D2): the smallest live claim
-comment id of the issue wins, and `acquire` never steals a claim, stale or not.
+Source entry `python -m agent_tools.forge_claim`, library `agent_tools.forge_markers`. One
+session at a time delivers a forge issue, and every fact is held in issue comments called
+markers. A claim is a `claim` marker and the `in-progress`
+label is only a filter over it. Contention is settled by the marker contest (D2): the smallest
+live claim comment id of the issue wins, and `acquire` never steals a claim, stale or not.
+
+Subcommands: each of `acquire`, `renew`, `release` and `status` takes `--repo <owner/name>
+--issue <n> --holder <host>/<batch_id>` (a session without a batch uses `<host>/session-<id>`).
+`acquire` and `renew` also take an optional `--branch <name>`, recorded as the claim's `branch`
+field (the staleness activity source); `release` takes `--reason` (default `done`); `status`
+takes no more. `acquire` posts the claim and adds the `in-progress` label. `status` reports the
+verdict and never takes a claim.
 
 D3, a renewal changes the body: `renew` rewrites the claim's first line with `renewed=<n+1>`
 so the edit always moves the server's `updated_at`, then re-lists and reports `not_held` when
-the claim was ended meanwhile.
+the claim was ended meanwhile. A holder renews before each irreversible step and stops on
+`not_held`.
 
 D7, labels: a label is ensured (HTTP 422 means it exists) before it is added; removing a label
 that is not there is success.
 
 D8, output: every call, a usage error included, prints exactly one JSON object on one stdout
-line. Exit 0 success, 3 contention or `not_held`, 1 forge error (carrying `transient`), 2 usage.
+line with the keys `command`, `repo`, `issue`, `holder`, `verdict`, `comment_id` and `by`.
+Exit 0 carries `acquired`, `already_held`, `renewed`, `released` and every `status` verdict
+(`free`, `held_by`, `stale`); exit 3 is contention (`acquire` answers `held_by` or `lost_to`,
+`renew` and `release` answer `not_held`); exit 1 is a forge error (`verdict: "error"`, `error`
+the `ForgeError` code, `detail`, and `transient`, true when the error is a transport error: a
+`gh` timeout, an HTTP 5xx or a connection failure); exit 2 is usage (`verdict: "error"`,
+`error: "usage"`, `detail` the parser's message), and `-h`/`--help` alone prints argparse help
+and exits 0. Verdict-specific keys: `acquire` and `status` add `released_by_owner` (the claim
+ids ended by a ticked owner-action box), `release` adds `label_removed`, and `status` adds
+`activity_at` (UTC, null when free), `owner_action_comment_id` and `owner_action_posted`.
 
-D9, ending is append-only: `release` posts an `end` marker first and then edits the claim to
-`released=<reason>`, so a delayed `renew` PATCH can drop that field but never the `end`, and a
-released claim cannot come back.
+D9, ending is append-only: `release` posts an `end` marker first, then edits the claim to
+`released=<reason>`, retires the issue's obsolete `owner-action` markers and removes
+`in-progress` only when no other live claim remains, restoring it when a claim was acquired
+between its listing and the removal. A delayed `renew` PATCH can drop the `released` field but
+never the `end`, so a released claim cannot come back. A `release` retried after any step past
+the `end` failed finishes the remaining steps and answers `released`, but only for the issue's
+newest claim: a holder whose old claim was followed by another gets `not_held` and leaves that
+claim untouched. A repeat `release` of the newest claim after a complete one likewise answers
+`released` (exit 0) and changes nothing.
 
 D10, owner-action retirement: `renew` and `release` end every live `owner-action` marker that
-names their claim, a `status` that finds the issue free or held ends every live stale-claim
-`owner-action` whose claim is not the holder, and the `owner-action` label goes when none of any
-reason remains live on the issue. An `owner-action` of another reason is never ended here.
+names their claim, a `status` whose verdict is `free`, `held_by` or `stale` ends every live
+stale-claim `owner-action` naming a claim other than the holder's, and the `owner-action` label
+goes when none of any reason remains live on the issue. Retirement ends only markers that carry a
+`claim` field: a claim-less marker, or a prompt of another reason such as a verify-pending
+prompt, is never ended here and counts as live, so it keeps the label.
 
-D4, branch activity: a claim recorded with `--branch` counts the branch's last push and the
-`updated_at` of its pull requests as activity beside its own renewals; a claim with no branch
-counts only its own `updated_at`.
+D4, branch activity: a claim recorded with `--branch` counts the branch's last push (the
+repository activity API for `refs/heads/<branch>`) and the `updated_at` of the pull requests
+whose head is that branch as activity beside its own renewals; a claim with no branch counts only
+its own `updated_at`.
 
-D5, server now: "now" is the server's `Date` header (`forge_markers.server_now`); a claim is
-stale when `now - activity >= 24 hours`. The module reads no host clock.
+D5, server now: "now" is the server's `Date` header of `gh api --include rate_limit`
+(`forge_markers.server_now`), never the host clock, so a skewed host clock changes no verdict. A
+claim is stale when `now - activity >= 24 hours`, where activity is the latest of the claim's own
+`updated_at` (moved by each renewal, D3) and the branch activity of D4.
 
-D6, owner-action: `status` reports a stale claim by posting one `owner-action` marker whose
-checkbox the owner ticks. The next `status` or `acquire` honours a ticked box only while the
-claim it names is live and still stale at that moment: the claim is ended (reason
-`owner-action`), edited to `released=owner-action`, and the marker ended (reason `released`).
-A box ticked on a claim that is no longer stale is ended (reason `renewed`) and releases
-nothing. A stale claim is never stolen: `acquire` against it without a ticked box is `held_by`.
+D6, owner-action: a stale claim is never stolen. `status` reports one by posting one
+`owner-action` marker (`reason=stale-claim`, `claim=<id>`, extra line `- [ ] Release this
+claim`) when no live one exists for that claim, and on every stale call ensures and adds the
+`owner-action` label, so a label call that failed after the post is repaired by the next call.
+The next `status` or `acquire` honours a ticked box (`- [x] Release this claim`, either case)
+only while the claim it names is live and still stale at that moment: the claim is ended (reason
+`owner-action`), edited to `released=owner-action`, and the marker ended (reason `released`). An
+honour that ends a claim removes `in-progress` the same restoring way. A box ticked on a claim
+that is no longer stale is ended (reason `renewed`) and releases nothing. `acquire` against a
+stale claim without a ticked box is `held_by`.
+
+An honour reads the server time and the branch activity first, then takes a fresh listing and
+ends the claim right after judging that listing's `updated_at`, so a renewal that landed before
+that listing is never undone.
 
 The `land` subcommand (`land acquire|release|status`, issue 629) is the cross-host land lock
 of `agent_tools.forge_land_lock`: `main` routes it there and reports its usage errors in its
@@ -47,22 +85,20 @@ for the owner. They carry no `claim` field, and claim retirement (`retire_obsole
 `retire_owner_actions`) ends only owner-action markers that name a claim, so `status`, `renew`
 and `release` never end one of them or remove the label while one lives.
 
-D10, residual window, accepted: an honour reads the server time and the branch activity first,
-then takes a fresh listing and ends the claim right after judging that listing's `updated_at`, so
-a renewal that landed before that listing is never undone. One that lands between that listing
-and the end can still lose the claim; the holder's `renew` then reports `not_held` (D3), so
-holders run `renew` before each irreversible step and stop on `not_held`.
-
 D11, transport retry (issue 740): `acquire`, `renew`, `release`, `status`, a one-shot `land
 acquire`, `land release` and `owner-action status` retry the whole verb when it fails with a
 transient `ForgeError` (a `gh` timeout, an HTTP 5xx or a connection failure): three tries, 20 s
 then 40 s between them. The verb is retried whole, never one gh call inside it, because each is
-idempotent for its holder under a lost reply (#623). `land acquire --wait` keeps its own D8 bound
-and is never wrapped; `owner-action post`, `owner-action end` and `land status` run once. Every
-exit-1 line carries `transient`: true when the error was a transport error (the tries ran out).
-A retried `land acquire` that raised after it sent a create or a swap reports `acquired`, not
-`already_held`, for a lock then found at its sha: the programs recheck the base on `acquired`.
-A retried `renew` also sheds the `owner-action` label its lost-reply retirement left behind.
+idempotent for its holder under a lost reply (#623), so a retry finishes the same outcome
+(`already_held` for an acquire whose claim landed). Each gh call also has its own 30 s timeout, so
+a hanging forge holds a retried verb for about 150 s (3 x 30 s + 60 s), more when earlier calls of
+a try answer slowly: a caller gives the command a Bash timeout well above that (the delivery
+programs give 20 minutes). `land acquire --wait` keeps its own D8 bound and is never wrapped;
+`owner-action post`, `owner-action end` and `land status` run once. Every exit-1 line carries
+`transient`: true when the error was a transport error (the tries ran out). A retried `land
+acquire` that raised after it sent a create or a swap reports `acquired`, not `already_held`, for
+a lock then found at its sha: the programs recheck the base on `acquired`. A retried `renew`
+also sheds the `owner-action` label its lost-reply retirement left behind.
 """
 import argparse
 import json

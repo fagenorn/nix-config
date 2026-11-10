@@ -1,9 +1,12 @@
 """Race-safe machine state on GitHub issue comments (issue 623).
 
 A marker is an issue comment whose first line is `<!-- agent:<kind> v1 key=value ... -->`
-(D1: a repeated key or any other first line is not a marker); line 2 is one human sentence and
-later lines are free. This module renders, parses, lists, posts, edits and deletes markers
-through `gh api`, with `GITHUB_TOKEN` and `GH_TOKEN` removed from every child.
+(D1: a repeated key or any other first line is not a marker); the kind matches
+`[a-z][a-z0-9-]*`, a key `[a-z][a-z0-9_]*` and a value `[A-Za-z0-9._:/@+-]+`. Line 2 is one human
+sentence and later lines are free text. This module renders, parses, lists, posts, edits and
+deletes markers through `gh api`, with `GITHUB_TOKEN` and `GH_TOKEN` removed from every child so
+the keyring credential answers. Labels (`in-progress`, `owner-action`) are filters only; the
+markers decide.
 
 D2, winner and write: among the live markers of one kind whose fields contain a match set, the
 smallest comment id wins. `write` posts, re-lists, takes the contest over the re-read plus its
@@ -11,10 +14,11 @@ own id and deletes its own comment when it is not the winner. Safety assumes a l
 reflects every comment created before the listing started. A caller that names trusted
 associations makes markers by any other author invisible to its contest.
 
-D9, ending is append-only: a marker is ended by posting an `end` marker naming its id, and
-nothing edits or deletes an `end` marker. A marker is live when it is not itself an `end`
-marker, carries no `released` field and no `end` marker in the same listing names it, so a
-stale edit can drop a field but can never bring an ended marker back.
+D9, ending is append-only: a marker is ended by posting an `end` marker (`of=<id>`,
+`reason=<reason>`) naming its id, and nothing edits or deletes an `end` marker. A marker is live
+when it is not itself an `end` marker, carries no `released` field and no `end` marker in the
+same listing names it, so a delayed edit that rewrites an older body can drop a field but can
+never bring an ended marker back.
 
 Ref primitives (issue 629): `read_ref`, `create_ref`, `repo_node_id` and `cas_ref`, a
 compare-and-swap through the GraphQL `updateRefs` mutation with `force: true` (the oid pair is
