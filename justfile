@@ -180,6 +180,7 @@ agent-workflow-tests *args:
     tests/test_promotion_deployment.py \
     tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
+    tests/test_docs_tree.py \
     tests/test_cache_proxy.py \
     tests/test_cache_keepalive.py \
     tests/test_claude_account_routing.py \
