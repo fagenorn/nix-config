@@ -1328,6 +1328,17 @@ class PlanTestCaseFormTest(unittest.TestCase):
             self.assertIn(needle, text)
         self.assertEqual(PROGRAM.read_text(encoding="utf-8").count(text), 1)
 
+    def test_every_planner_prompt_prohibits_full_test_code_outside_the_carve_out(self):
+        # Literals are pinned here, not read back from the constant under test.
+        restrictions = ("not as code", "full test code stays only under its carve-out")
+        seen = set()
+        for call in all_calls():
+            if call["label"] in self.PLANNERS:
+                for needle in restrictions:
+                    self.assertIn(needle, call["prompt"], call["label"])
+                seen.add(call["label"])
+        self.assertEqual(seen, set(self.PLANNERS))
+
     def test_only_planner_prompts_carry_the_rule(self):
         text = self.rule()
         seen = set()
