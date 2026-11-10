@@ -415,11 +415,11 @@
     "omlx-tap": {
       "flake": false,
       "locked": {
-        "lastModified": 1794317826,
-        "narHash": "sha256-XWLROYSroCTRViTQjPFem1kq0d+Y3sQX9YgKJ6Fi+Yc=",
+        "lastModified": 1793464989,
+        "narHash": "sha256-nnSZJ8iMhTWDF6GNPiSd9pWeBpqhp11SWLlYoiVS/70=",
         "owner": "jundot",
         "repo": "omlx",
-        "rev": "1de88e785948246b46d3dfe70a353d68609b557d",
+        "rev": "17fce1d939f65a3cb92616862710c3007ea32b95",
         "type": "github"
       },
       "original": {
