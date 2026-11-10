@@ -52,6 +52,7 @@ const DEFAULTS = [
   [/^direct-fix$/, DONE],
   [/-codex$/, { available: true, ...PASS }],
   [/^owner-answer$/, { verdict: 'none', comment_id: null, questions: [], decisions: '', renew: { verdict: 'renewed' } }],
+  [/^direct-review/, { ...PASS, acceptance: [{ id: 'AC1', met: true, evidence: 'test_a.py:10 test_works' }] }],
   [/review|^final-/, PASS],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],
   [/^ws-check-/, { whitespace_exit: 1, changed_paths: ['src/a.js'] }],
