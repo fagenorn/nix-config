@@ -50,6 +50,13 @@ export const meta = {
 // fails is reported as lock_unreleased on the result (#677). After a merge the lock is released first thing in the hold call;
 // a release that call does not confirm gets one standalone release after close-out (#801). Every stop before the merge still releases it.
 //
+// FOLDS (#801): consecutive clerk steps with no program decision between them share one call. Folded: the lock release into the hold call,
+// the first poll into the pr call, a moved round's renew into its push call, and its lock move into its checks call. Kept separate, each with a program
+// decision between the two: checks then merge (the state picks fix, sync, re-poll or merge), merge then release (a refused or retaken merge loops
+// instead), hold then close-out (the hold's gates read its reply first); the push then the lock move (the pushed full sha is the value the lock
+// command names, so the program must read the push reply first); and the renew before the final review and the verify, which are not consecutive
+// (reviewers run between them; the verify call already carries its own renew).
+//
 // Lifecycle forms follow the contract (merge strategy, delete_branch, credential
 // unsets). A host guard that accepts fewer forms refuses at that command; the
 // step then returns its stop with the guard's message instead of working around it.
@@ -1173,6 +1180,7 @@ const closesLine = noHold && INT === setup.default_branch ? `Closes #${ISSUE}` :
 const PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head: FULL_SHA, notes: { type: 'string' } }, required: ['pr', 'head'] }
 const MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] }
 const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind'] }, head: FULL_SHA, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
+const PUSH_SCHEMA = { type: 'object', properties: { head: FULL_SHA, notes: { type: 'string' } }, required: ['head'] }
 const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection, none when neither answers. Return passed only when no check on head is pending, failing or cancelled, with required and passed (the names passing at head). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
 const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, resolved_files: STRS, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 const LOCK_SCHEMA = {
@@ -1198,18 +1206,8 @@ let lockHeld = false
 let lockSha = null
 // The sha a move acquire may have left held when its answer was lost (#716); cleared by a definitive answer.
 let lockMaybe = null
-let locks = 0
 let retakes = 0
 const HOLDING = ['acquired', 'already_held', 'moved']
-// The verdict string, or null when the agent returned nothing.
-const lock = async wait => {
-  locks++
-  const r = await call(`Take the cross-host landing lock of the branch ${INT} for PR #${PR} of issue #${ISSUE} of ${SLUG} at the head ${expected}.
-Run alone and exactly: ${LAND_ACQUIRE(expected, wait)}
-${LOCK_RETURN} Run nothing else.
-${RULES}`, { label: `land-lock-${locks}`, phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: LOCK_SCHEMA })
-  return r ? r.verdict : null
-}
 // Releases the last held sha once; {} when nothing was held or it was released, else lock_unreleased (and a fresh dead_agents) for the result to carry. Never throws.
 const unlock = async () => {
   if (!lockHeld) return {}
@@ -1242,7 +1240,6 @@ const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal =
 }
 const landBody = async () => {
   // The pr call may take the lock (--wait) after opening the PR: mark the verified head as possibly held before it, so a lost reply still reaches the release.
-  locks++
   lockHeld = true
   lockSha = expected
   const prR = await recall(() => call(`${CTX}
@@ -1268,35 +1265,38 @@ ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: 'sonnet', ef
   if (!HOLDING.includes(v)) return stop(refused ? 'land-contended' : 'land-lock', { pr: PR, lock: v })
   for (;;) {
     round++
-    // A sync merge, sync fix or CI fix moved the head: renew, push it and move the lock to it before the checks wait on it.
+    // A sync merge, sync fix or CI fix moved the head: the push call renews and pushes it, then the checks call moves the lock to it before it waits (#801).
     const moved = !sameSha(lockSha, expected)
     if (moved) {
-      const lost = await renew(`checks-${round}`, 'Ship')
-      if (lost) return lost
-      const pu = await call(`${CTX}
-Push the branch ${setup.branch} of PR #${PR} at the head ${expected}: run alone git -C ${W} push origin ${setup.branch}, then return head (git -C ${W} rev-parse HEAD, the full sha).
-${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: { type: 'object', properties: { head: FULL_SHA, notes: { type: 'string' } }, required: ['head'] } })
+      const pu = await recall(() => call(`${CTX}
+${RENEW_FIRST}
+Then push the branch ${setup.branch} of PR #${PR} at the head ${expected}: run alone git -C ${W} push origin ${setup.branch}, then return head (git -C ${W} rev-parse HEAD, the full sha).
+${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: withRenew(PUSH_SCHEMA) }), r => r.renew)
       if (!pu) return stop('push', { pr: PR })
+      const lost = renewed(pu.renew, `checks-${round}`)
+      if (lost) return lost
       if (!sameSha(pu.head, expected)) return stop('head-moved', { pr: PR, expected, head: pu.head })
       expected = fuller(expected, pu.head)
       lockMaybe = expected
-      const mv = await lock(false)
-      if (HOLDING.includes(mv)) {
-        lockSha = expected
-        lockMaybe = null
-      } else if (mv === 'land-contended' || mv === 'held_by' || mv === 'lost_to') lockMaybe = null
-      if (!HOLDING.includes(mv)) return stop('land-contended', { pr: PR, lock: mv })
     }
-    // Round 1 reads the poll the pr call carried (its renew covered the claim); every later unmoved round polls on its own with a renew.
+    // Round 1 reads the poll the pr call carried (its renew covered the claim); a moved round moves the lock then polls, one call; every later unmoved round polls on its own with a renew.
     const folded = round === 1 && !moved
     let ck
     if (folded) ck = prR.checks || null
     else {
       ck = await recall(() => call(`${CTX}
-${moved ? 'Wait' : `${RENEW_FIRST}\nThen wait`} ${CHECKS_WAIT(PR)}
-${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: moved ? CHECKS : withRenew(CHECKS) }), r => (moved ? null : r.renew))
-      if (ck && !moved) {
-        const lost = renewed(ck.renew, `checks-${round}`)
+${moved ? `Move the cross-host landing lock of the branch ${INT} for PR #${PR} to the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
+${LOCK_RETURN} Return it as lock. Only when lock's verdict is acquired, already_held or moved, wait ${CHECKS_WAIT(PR)} Otherwise run nothing else and return only lock.` : `${RENEW_FIRST}\nThen wait ${CHECKS_WAIT(PR)}`}
+${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: moved ? { ...CHECKS, properties: { ...CHECKS.properties, lock: NULLABLE(LOCK_SCHEMA) }, required: ['lock'] } : withRenew(CHECKS) }), r => (moved ? null : r.renew))
+      if (moved) {
+        const mv = ck && ck.lock ? ck.lock.verdict : null
+        if (HOLDING.includes(mv)) {
+          lockSha = expected
+          lockMaybe = null
+        } else if (mv === 'land-contended' || mv === 'held_by' || mv === 'lost_to') lockMaybe = null
+        if (!HOLDING.includes(mv)) return stop('land-contended', { pr: PR, lock: mv })
+      } else {
+        const lost = ck ? renewed(ck.renew, `checks-${round}`) : null
         if (lost) return lost
       }
     }
@@ -1327,7 +1327,6 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
     }
     if (state === 'passed') {
       // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first, once), then the merge.
-      locks++
       mg = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
 Then re-check the cross-host landing lock of the branch ${INT} for PR #${PR}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
