@@ -4270,5 +4270,51 @@ class PlannerReadsTest(unittest.TestCase):
         self.assertNotIn("Explore", base_rules)
 
 
+WHOLE_RUN = ("run in full every test file among or covering", "never a single test class",
+             "any fast suite the project declares", "each command and its result")
+FOCUSED_RUN = "Run only the tests covering the files you changed"
+
+
+class WholeTestFileTest(unittest.TestCase):
+    """#787: every implementer step after the task loop runs whole test files and any fast suite, and reports each command and its result."""
+
+    def assert_whole(self, text, files):
+        for needle in WHOLE_RUN + (f"covering {files}",):
+            self.assertIn(needle, text)
+        self.assertNotIn("Run only the tests", text)
+        self.assertNotIn("run only the tests", text)
+
+    def test_both_fix_waves_run_whole_files(self):
+        _, calls = run(replies={"final-1": FixWaveTest.FIRST, "fix-wave-review": FixWaveTest.narrowing()})
+        for label in ("fix-wave", "fix-wave-2"):
+            with self.subTest(label=label):
+                self.assert_whole(prompt(calls, label), "the files you changed")
+
+    def test_verify_fix_runs_whole_files(self):
+        _, calls = run(replies={"verify": VERIFY_RED})
+        self.assert_whole(prompt(calls, "verify-fix-1"), "the files you changed")
+
+    def test_checks_fix_runs_whole_files(self):
+        _, calls = run(replies={"checks-1": {"state": "failed", "head": SHA}},
+                       patch={"fix-ci": {"start_head": SHA, "commit": "f" * 40}})
+        self.assert_whole(prompt(calls, "fix-ci"), "the files you changed")
+
+    def test_conflicted_sync_and_its_fix_run_whole_files(self):
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": BAD},
+                       patch={"sync-1": {"conflicted": True, "merge_commit": "d" * 40},
+                              "fix-sync-1": {"start_head": "d" * 40, "commit": "f" * 40}})
+        self.assert_whole(prompt(calls, "sync-1"), "the files the merge changed against its first parent")
+        self.assert_whole(prompt(calls, "fix-sync-1"), "the files you changed")
+
+    def test_task_loop_and_direct_lane_keep_the_focused_run(self):
+        _, calls = run(replies={"review-1": BAD})
+        _, direct = run(args=DIRECT, replies={"direct-review": BAD})
+        for label, text in (("impl-1", prompt(calls, "impl-1")), ("fix-1-1", prompt(calls, "fix-1-1")),
+                            ("direct-fix", prompt(direct, "direct-fix"))):
+            with self.subTest(label=label):
+                self.assertIn(FOCUSED_RUN, text)
+                self.assertNotIn(WHOLE_RUN[0], text)
+
+
 if __name__ == "__main__":
     unittest.main()
