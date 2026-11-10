@@ -756,7 +756,7 @@ class SetupIdempotenceTest(unittest.TestCase):
         result, calls = run(replies={"setup": {"ok": False, "reason": "duplicate", "duplicate_pr": 41}})
         self.assertEqual(result["stage"], "setup")
         self.assertEqual(labels(calls), ["setup"])
-        result, calls = run(patch={"setup": {"merged_pr": 41}})
+        result, calls = run(patch={"setup": {"merged_refs": [{"number": 41, "closes": True}]}})
         self.assertEqual((result["stage"], result["duplicate"]), ("setup", 41))
         self.assertEqual(labels(calls), ["setup"])
 
@@ -809,6 +809,26 @@ class SpecPrTest(unittest.TestCase):
                         patch={"setup": {"merged_refs": [{"number": 7, "closes": False}]}})
         self.assertEqual(result["stage"], "done")
         self.assertNotIn("duplicate", result)
+
+    def test_a_refs_only_pr_is_no_duplicate_whatever_merged_pr_says(self):
+        result, _ = run(args=dict(ARGS, spec="/r/spec.md"),
+                        patch={"setup": {"merged_pr": 7, "merged_refs": [{"number": 7, "closes": False}]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("duplicate", result)
+
+    def test_a_close_out_cont_keeps_its_pr_through_successive_stops(self):
+        cont = {"setup": {"holder": HOLDER, "branch": "issue-9-x", "worktree": "/r/.wt/w-issue-9-x",
+                          "worktree_path": "/r/.wt/w-issue-9-x"},
+                "lane": "standard", "plan": {"acceptance": PLAN["acceptance"]}, "pr": 42}
+        facts = {"merged_heads": [{"number": 42, "commits": []}]}
+        failed = {"close-out": {"issue_state": "OPEN", "released": False}}
+        first, calls = run(args=dict(ARGS, cont=cont), patch={"setup": facts, **failed})
+        self.assertEqual((first["stage"], first["cont"]["pr"]), ("close-out", 42))
+        second, calls = run(args=dict(ARGS, cont=first["cont"]), patch={"setup": facts, **failed})
+        self.assertEqual((second["stage"], second["cont"]["pr"]), ("close-out", 42))
+        self.assertIn("--state merged --head issue-9-x", prompt(calls, "setup"))
+        third, _ = run(args=dict(ARGS, cont=second["cont"]), patch={"setup": facts})
+        self.assertEqual((third["stage"], third["pr"]), ("done", 42))
 
     def test_resume_never_closes_out_a_same_named_spec_pr(self):
         # Squash strategy: the adopted spec branch put base_sha before the spec, so no ancestry rule can tell.

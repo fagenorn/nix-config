@@ -225,10 +225,11 @@ await parallel(ISSUES.map(n => async () => {
 // Eligibility is plain JS over the facts, first match wins; null means eligible.
 // A forwarded cont names a landing this batch started; its PR now reads as merged and the claim is still ours (or already released):
 // the merge happened after the cont was forwarded, so the issue is re-adopted for its close-out, never skipped as a duplicate or closed.
-// A landing is a merged PR that closes the issue or the cont's own merged PR (by its pr or a done commit), which may say Refs.
+// A landing is the cont's own merged PR (by its pr or a done commit), whether it closes the issue or only says Refs: a merged PR that
+// closes the issue but is not the cont's own is a duplicate, never a re-adoption.
 const mergedReadopt = (n, f) => {
   const claim = f.claim || {}
-  return !!(CONTS[n] && (closingOf(f) || landedOf(n, f)) && (claim.verdict === 'free' || claim.by === HOLDER))
+  return !!(CONTS[n] && landedOf(n, f) !== null && (claim.verdict === 'free' || claim.by === HOLDER))
 }
 const eligibility = (n, f) => {
   const readopt = mergedReadopt(n, f)
@@ -642,7 +643,7 @@ ${RULES}`, `land-merge-${n}`, { ...clerk, schema: withRenew(LAND_MERGE_SCHEMA, {
     }
     await unlock()
     // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
-    if (!CONTS[n]) CONTS[n] = { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance }, pr }
+    CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
 
     const openCriteria = ready.acceptance.filter(a => a.kind !== 'code')
     const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
