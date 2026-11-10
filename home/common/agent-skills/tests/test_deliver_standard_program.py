@@ -970,6 +970,19 @@ class SpecPrTest(unittest.TestCase):
         self.assertEqual((result["stage"], result["pr"]), ("done", 42))
         self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
 
+    def test_a_recorded_pr_outranks_a_commit_match_on_another_pr(self):
+        """DR-001: a reused branch can list the same commit on two merged PRs; the recorded number decides."""
+        heads = [{"number": 43, "commits": [self.MINE]}, {"number": 42, "commits": [self.MINE]}]
+        cont = self.cont(pr=42)
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42, "merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        # Only when no PR is recorded does a commit decide.
+        result, _ = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 43))
+
     def test_a_cont_with_no_commit_and_no_pr_never_closes_out(self):
         failed, _ = run(patch={"setup": {"claim": {"ok": False, "reason": "worktree add failed"}}})
         self.assertTrue(failed["cont"]["claim_incomplete"])
@@ -2621,7 +2634,7 @@ class NoteCloseOutTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": with_criteria(typo), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
-        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee")})
         self.assertEqual((result["stage"], result["bad_kinds"]), ("close-out", ["AC4"]))
         self.assertNotIn("close-out", labels(calls))
         self.assertNotIn("hold", labels(calls))

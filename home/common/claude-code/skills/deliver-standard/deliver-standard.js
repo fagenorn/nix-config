@@ -292,9 +292,13 @@ const closingPr = refs => {
 }
 const OWN_PR = CONT && Number.isInteger(CONT.pr) ? CONT.pr : null
 const OWN_COMMITS = CONT && Array.isArray(CONT.done) ? CONT.done.filter(d => isEntry(d) && typeof d.commit === 'string' && d.commit !== '').map(d => d.commit) : []
-const ownMerged = heads => (Array.isArray(heads) ? heads : []).find(h => isEntry(h) && Number.isInteger(h.number)
-  && (h.number === OWN_PR || (Array.isArray(h.commits) && h.commits.some(c => OWN_COMMITS.some(o => sameSha(c, o)))))) || undefined
-const OWN_ID = [OWN_PR !== null ? `#${OWN_PR}` : null, OWN_COMMITS.length ? `a commit among ${OWN_COMMITS.join(', ')}` : null].filter(Boolean).join(' or ')
+// A recorded cont.pr decides alone: a reused branch can list one commit on several merged PRs, so commits name the PR only when none is recorded.
+const ownMerged = heads => {
+  const list = (Array.isArray(heads) ? heads : []).filter(h => isEntry(h) && Number.isInteger(h.number))
+  if (OWN_PR !== null) return list.find(h => h.number === OWN_PR)
+  return list.find(h => Array.isArray(h.commits) && h.commits.some(c => OWN_COMMITS.some(o => sameSha(c, o))))
+}
+const OWN_ID = OWN_PR !== null ? `#${OWN_PR}` : `a PR whose commits include one of ${OWN_COMMITS.join(', ')}`
 const setup = await call(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
 1. ${CONTRACT_READ}
 2. ${REDERIVE ? `${DERIVE_LOCATION} ` : ''}${OWN_PR !== null || OWN_COMMITS.length ? `List the merged PRs whose head is ${RES_BRANCH} (gh pr list --repo <slug> --state merged --head ${RES_BRANCH} --json number) and, for each, its commits (gh pr view <number> --repo <slug> --json commits); return them as merged_heads, one {number, commits} each with every commit oid. This delivery's own merged PR is the one that is ${OWN_ID}: return ok=true with merged_pr set to that PR's number only for it (the worktree may already be gone). Any other merged PR on that head is not this delivery's: leave merged_pr unset for it.` : 'This delivery has no commit and no PR yet, so look for no merged PR and leave merged_pr and merged_heads unset.'}
