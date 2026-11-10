@@ -26,7 +26,7 @@ export const meta = {
 // file carries no project literal and defaults no policy value.
 //
 // CLAIM: the claim is a forge-claim claim: acquired before the worktree step, renewed
-// before each stage boundary (the tasks boundary's renew rides in the first implementer call, #745; a fresh run's setup acquire, or after an already_held acquire the setup's own renew, stands for the plan boundary's renew, #745; a renew that finds the claim ended stops with no cont; one
+// before each stage boundary (the tasks boundary's renew rides in the first implementer call and the final-review boundary's in final-1, #745; a fresh run's setup acquire, or after an already_held acquire the setup's own renew, stands for the plan boundary's renew, #745; a renew that finds the claim ended stops with no cont; one
 // that gets no answer stops with a cont whose resume acquires again), released at close-out. A renew or acquire that
 // answers `error` with `transient` (forge-claim's own transport retries ran out) is re-called once, a folded step whole, before it stops (#740).
 //
@@ -909,19 +909,22 @@ for (let i = 0; i < plan.tasks.length; i += PER) groups.push(plan.tasks.slice(i,
 chunked = groups.length > 1
 if (SKIP_FINAL) log(`final review passed at ${finalReviewed.head}; skipped`)
 if (!SKIP_REVIEW && !SKIP_FINAL) {
-{
-  const lost = await renew('final-review', 'Final review')
-  if (lost) return lost
-}
 const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package;${EXTRA_RANGES()} this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
 ${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: CODEX }) : Promise.resolve(null)
-const finals = await parallel(groups.map((g, gi) => () => call(`${CTX}
+// final-1 also renews the claim first (#745); every final reviewer is built here, labelled final-N.
+const finalCall = (g, gi) => call(`${CTX}${gi === 0 ? `\n${RENEW_FIRST}\nThen:` : ''}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
-Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is actually met, with the test or command that shows it). Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })))
+Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is actually met, with the test or command that shows it). Report Important or Critical findings only. ${gi === 0 ? 'Apart from that renew, do not' : 'Do not'} edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: gi === 0 ? withRenew(FINDINGS) : FINDINGS })
+const finals = await parallel(groups.map((g, gi) => () => gi === 0 ? recall(() => finalCall(g, gi), r => r.renew) : finalCall(g, gi)))
 const codexR = await codexP
-if (finals.some(r => !r)) return stop('final-review', { details: 'a final reviewer returned nothing', finals })
+if (finals[0]) {
+  const lost = renewed(finals[0].renew, 'final-review')
+  if (lost) return lost
+}
+if (finals.some(r => !r) || !complete(finals[0], FINDINGS)) return stop('final-review', { details: 'a final reviewer returned nothing', finals })
+delete finals[0].renew
 let finalFindings = finals.flatMap(findingsOf)
 if (REVIEW_CODE) {
   if (!codexR || !codexR.available) return stop('codex-unavailable', { step: 'code', codex: codexR })

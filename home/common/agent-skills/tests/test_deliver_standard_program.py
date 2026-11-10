@@ -129,6 +129,7 @@ FOLDED_READ = {
     "checks-1": ({"state", "head", "failing", "details", "pending"}, {"renew": RENEW_READ}),
     "merge": ({"merged", "behind", "merge_commit", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "impl-1": ({"status", "start_head", "commit", "notes"}, {"renew": RENEW_READ}),
+    "final-1": ({"verdict", "findings"}, {"renew": RENEW_READ}),
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
                "worktree_path", "head", "merged_pr", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
                "existing", "unset_env", "merge_strategy", "delete_branch", "review", "review_state", "knowledge",
@@ -314,7 +315,7 @@ class FoldTest(unittest.TestCase):
 
 
 CHILD_HAPPY = ["setup", "plan", "plan-codex", "plan-review", "impl-1", "review-1",
-               "renew-final-review", "final-codex", "final-1", "verify", "pr", "checks-1", "merge",
+               "final-codex", "final-1", "verify", "pr", "checks-1", "merge",
                "land-unlock", "hold", "close-out"]
 
 
@@ -355,6 +356,42 @@ class FoldedTaskRenewTest(unittest.TestCase):
                                                                 "ineligible": True}})
         self.assertEqual((result["stage"], result["at"]), ("claim-lost", "tasks"))
         self.assertNotIn("direct-review", labels(calls))
+
+
+class FoldedFinalRenewTest(unittest.TestCase):
+    """#745: final-1 renews the claim first; its renew is graded before any final finding is used."""
+
+    def test_final_1_renews_first_and_no_other_final_does(self):
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(4))})
+        self.assertNotIn("renew-final-review", labels(calls))
+        first = prompt(calls, "final-1")
+        self.assertLess(first.index(RENEW), first.index("/g/plan.md"))
+        self.assertEqual(schema_of(calls, "final-1")["required"], ["renew"])
+        self.assertEqual(next(c for c in calls if c["label"] == "final-1")["agentType"], "reviewer")
+        self.assertNotIn(RENEW, prompt(calls, "final-2"))
+        self.assertNotIn("renew", schema_of(calls, "final-2")["properties"])
+        self.assertNotIn('"renew"', prompt(calls, "final-integration"))
+
+    def test_a_lost_renew_inside_final_1_stops_before_any_finding_is_used(self):
+        finding = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "boom"}]}
+        for renew in ({"verdict": "not_held", "by": "h2/b1"}, {"verdict": "error", "detail": "forge down"}, None):
+            with self.subTest(renew=renew):
+                result, calls = run(replies={"plan": dict(PLAN, tasks=tasks(4)),
+                                             "final-1": dict(finding, renew=renew), "final-2": finding})
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", "final-review"))
+                names = labels(calls)
+                for later in ("final-integration", "fix-wave", "verify"):
+                    self.assertNotIn(later, names)
+                if renew and renew["verdict"] == "not_held":
+                    self.assertNotIn("cont", result)
+                else:
+                    self.assertTrue(result["cont"]["claim_incomplete"])
+                    self.assertNotIn("final_reviewed", result["cont"])
+
+    def test_a_renewed_final_1_without_findings_stops_as_a_silent_reviewer(self):
+        result, calls = run(replies={"final-1": {"renew": {"verdict": "renewed"}}})
+        self.assertEqual(result["stage"], "final-review")
+        self.assertNotIn("verify", labels(calls))
 
 
 # The bookkeeping agents of one fresh standard issue's happy path at e0c0656d (issue 745 baseline): setup,
@@ -718,10 +755,10 @@ class FoldedSetupRenewTest(unittest.TestCase):
 RENEW = f"forge-claim renew --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x"
 # (at, the call that renews, nested): a nested renew rides in that call's reply as renew.
 BOUNDARIES = [("tasks", "impl-1", True),
-              ("final-review", "renew-final-review", False), ("verify", "verify", True),
+              ("final-review", "final-1", True), ("verify", "verify", True),
               ("ship", "pr", True), ("checks-1", "checks-1", True), ("merge", "merge", True)]
 # The text each folded prompt runs after its renew.
-STEP_MARK = {"impl-1": "task-1.md", "verify": "Run the project's declared verification",
+STEP_MARK = {"impl-1": "task-1.md", "final-1": "plan.md", "verify": "Run the project's declared verification",
              "pr": "open the pull request", "checks-1": "to be mergeable", "merge": "forge-claim land acquire"}
 
 
@@ -863,6 +900,7 @@ TRANSIENT = {"verdict": "error", "detail": "gh_failed: dial tcp: connect: networ
 # The full second reply of each folded step whose first renew ran out of transport retries; the harness fills renew and lock.
 SECOND = {
     "impl-1": {"status": "done", "start_head": "b0", "commit": "c0ffee", "tests": ["t"], "notes": "ok"},
+    "final-1": {"verdict": "pass", "findings": []},
     "verify": {"head": SHA, "clean": True, "results": [{"id": "build", "status": "pass", "summary": "ok"}]},
     "pr": {"pr": 42, "head": SHA},
     "checks-1": {"state": "passed", "head": SHA, "required": ["ci"]},
@@ -941,7 +979,7 @@ class TransientTest(unittest.TestCase):
     def test_every_renew_and_acquire_asks_for_transient(self):
         _, calls = run()
         self.assertEqual(member(schema_of(calls, "verify"), "renew")["properties"]["transient"], {"type": "boolean"})
-        for via in ("setup", "impl-1", "verify", "pr", "checks-1", "merge"):
+        for via in ("setup", "impl-1", "final-1", "verify", "pr", "checks-1", "merge"):
             with self.subTest(via=via):
                 self.assertIn("transient", prompt(calls, via))
         _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
@@ -954,7 +992,7 @@ class TransientTest(unittest.TestCase):
     def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
         timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
         _, calls = run()
-        for via in ("setup", "impl-1", "verify", "pr", "checks-1", "merge"):
+        for via in ("setup", "impl-1", "final-1", "verify", "pr", "checks-1", "merge"):
             with self.subTest(via=via):
                 self.assertIn(timeout, prompt(calls, via))
         _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
@@ -3332,7 +3370,7 @@ class DeclaredBranchTest(unittest.TestCase):
         cut = labels(calls).index("plan-review") + 1
         post = calls[cut:]
         granted = {c["label"] for c in post if c["agentType"] not in REVIEWERS}
-        self.assertLessEqual({"impl-1", "impl-2", "fix-2-1", "renew-final-review", "final-codex",
+        self.assertLessEqual({"impl-1", "impl-2", "fix-2-1", "final-codex",
                               "verify", "pr", "checks-1", "merge", "land-unlock", "hold",
                               "close-out"}, granted)
         for c in post:
@@ -3581,8 +3619,9 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertIn("verify", labels(calls))
 
     def test_claim_lost_resume_rereads_the_declared_heads(self):
-        stopped, _ = run(replies={"plan": bplan(), "renew-final-review": {"verdict": "error", "detail": "forge down"}},
-                         patch={"impl-2": {"commit": "d" * 40}})
+        stopped, _ = run(replies={"plan": bplan()},
+                         patch={"final-1": {"renew": {"verdict": "error", "detail": "forge down"}},
+                                "impl-2": {"commit": "d" * 40}})
         self.assertEqual((stopped["stage"], stopped["at"]), ("claim-lost", "final-review"))
         cont = stopped["cont"]
         self.assertTrue(cont["claim_incomplete"])
