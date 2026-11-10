@@ -984,7 +984,8 @@ if (REVIEW_SIZING && chunked) {
   let sizeReply = null
   let sizeWhy = 'no usable reply'
   try {
-    sizeReply = await call(`${CTX}
+    // agent, not call: a failed optional measurement is recovered here and must not be reported as a dead agent (deliver-batch's breaker reads those).
+    sizeReply = await agent(`${CTX}
 Measure the delivery's diff size. Run git -C ${W} fetch origin, then git -C ${W} diff --shortstat ${RANGE}${declared(plan).map(b => `, then git -C ${b.worktree} diff --shortstat ${b.base}...${b.name}`).join('')}. Each prints at most one line (N files changed, X insertions(+), Y deletions(-)); an empty output or a missing count is 0. Return measured true and changed_lines: the sum of the insertions and deletions over those lines. If any of these commands exits non-zero or prints an error, return measured false and no changed_lines; never return a partial sum. Run nothing else and change nothing.
 ${RULES}`, { label: 'diff-size', phase: 'Final review', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: SIZE_SCHEMA })
   } catch (e) {

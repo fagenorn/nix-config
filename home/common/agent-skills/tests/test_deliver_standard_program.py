@@ -1946,6 +1946,15 @@ class ReviewSizingFinalTest(unittest.TestCase):
                 for label in ("final-1", "final-2", "final-integration"):
                     self.assertIn(label, labels(calls))
 
+    def test_a_recovered_size_failure_is_not_a_dead_agent_on_a_later_stop(self):
+        # deliver-batch's breaker reads dead_agents; an optional measurement that fell back must not trip it.
+        for reply in ("throw", None):
+            with self.subTest(reply=reply):
+                result, _ = run(args=SIZED, replies=dict(FOUR, **{"diff-size": reply, "final-1": FINDING,
+                                                                  "fix-wave": {"status": "blocked", "notes": "no"}}))
+                self.assertEqual(result["stage"], "fix-wave")
+                self.assertNotIn("dead_agents", result)
+
     def test_the_size_step_is_a_low_clerk_reading_shortstat_of_every_range(self):
         _, calls = run(args=SIZED, replies=FOUR)
         size = next(c for c in calls if c["label"] == "diff-size")
