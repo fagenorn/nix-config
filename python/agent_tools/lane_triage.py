@@ -2,7 +2,7 @@
 
 `lane-triage evaluate --repo-root <root> --input -` reads the triage record on stdin and
 `bindings.workflow.light_lane` (an optional `resolve-project` member) through
-`agent_tools.resolve_project.resolve`, the one public function that composes exactly what
+`agent_tools.project_contract.resolve_project.resolve`, the one public function that composes exactly what
 `resolve-project resolve` prints. It prints the verdict `{hits, lane, mode}` and writes
 no file.
 
@@ -17,7 +17,7 @@ import argparse
 import json
 import sys
 
-from agent_tools import resolve_project
+from agent_tools.project_contract import resolve_project
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
 SIGNALS = ("contract_change", "concurrency_or_persistence",

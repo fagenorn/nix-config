@@ -1,8 +1,8 @@
-"""Contract tests for `adopt-project` (`agent_tools.adopt_project`).
+"""Contract tests for `adopt-project` (`agent_tools.project_contract.adopt_project`).
 
 Runs `adopt-project`'s command line under a temporary `HOME` holding a fixture
 manifest. The command consumes the resolver only as a child process of its own
-interpreter, `agent_tools.resolve_project` run through
+interpreter, `agent_tools.project_contract.resolve_project` run through
 `agent_tools.system.siblings.sibling_argv` (D26, #177 D5). `run` runs the command in
 this process and answers that resolver child in process too (issue 612);
 `run_child` runs both as real processes, and `ProcessWiringTest` pins that the
@@ -34,7 +34,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import adopt_inspection, adopt_links, adopt_planning, adopt_project
+from agent_tools.project_contract import (adopt_inspection, adopt_links, adopt_planning,
+                                          adopt_project)
 from agent_tools.system.siblings import sibling_argv
 
 from ._inprocess_cli import run_module
@@ -105,10 +106,10 @@ _SUBPROCESS_RUN = subprocess.run
 def _resolver_in_process(argv, *args, **kwargs):
     """`subprocess.run`, except that the resolver child `run_resolver` starts runs
     in this process, with the caller's environment and the same captured bytes."""
-    prefix = sibling_argv("resolve_project")
+    prefix = sibling_argv("project_contract.resolve_project")
     if list(argv[:len(prefix)]) != prefix:
         return _SUBPROCESS_RUN(argv, *args, **kwargs)
-    done = run_module("agent_tools.resolve_project", argv[len(prefix):],
+    done = run_module("agent_tools.project_contract.resolve_project", argv[len(prefix):],
                       env=dict(os.environ), text=False)
     return subprocess.CompletedProcess(list(argv), done.returncode, done.stdout, done.stderr)
 
@@ -116,7 +117,7 @@ def _resolver_in_process(argv, *args, **kwargs):
 def run(*args: str, home: Path) -> tuple[int, str, str]:
     """`adopt-project`'s command line in this process, its resolver child too (issue 612)."""
     with mock.patch.object(adopt_project.subprocess, "run", _resolver_in_process):
-        proc = run_module("agent_tools.adopt_project", args,
+        proc = run_module("agent_tools.project_contract.adopt_project", args,
                           env={**os.environ, "HOME": str(home)})
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -124,7 +125,7 @@ def run(*args: str, home: Path) -> tuple[int, str, str]:
 def run_child(*args: str, home: Path) -> tuple[int, str, str]:
     """`adopt-project` as a real child process, with its real resolver child."""
     proc = subprocess.run(
-        [sys.executable, "-m", "agent_tools.adopt_project", *args],
+        [sys.executable, "-m", "agent_tools.project_contract.adopt_project", *args],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "HOME": str(home)},
     )
@@ -281,7 +282,7 @@ def scaffold(root: Path, contract: dict, home: Path) -> None:
     for standards in contract["bindings"]["paths"]["standards"]:
         (root / standards).mkdir(parents=True, exist_ok=True)
     write(root, ".agents/project.json", json.dumps(contract, indent=2) + "\n")
-    proc = run_module("agent_tools.resolve_project",
+    proc = run_module("agent_tools.project_contract.resolve_project",
                       ("write-projections", "--repo-root", str(root)),
                       env={**os.environ, "HOME": str(home)})
     if proc.returncode != 0:
@@ -3094,7 +3095,7 @@ class RefusalTest(AdoptTestCase):
 
 
 class ProcessWiringTest(AdoptTestCase):
-    """The real `python -m agent_tools.adopt_project` child, with its real resolver
+    """The real `python -m agent_tools.project_contract.adopt_project` child, with its real resolver
     child (D26), answers exactly what the in-process `run` answers: argv parsing,
     the exit code and both streams (issue 612)."""
 
@@ -3117,7 +3118,7 @@ class ProcessWiringTest(AdoptTestCase):
 class AdoptFailureWrapperTest(unittest.TestCase):
     """The generic wrapper, reachable only in process (D23).
 
-    Importing `agent_tools.adopt_project` and making the inspection entry point
+    Importing `agent_tools.project_contract.adopt_project` and making the inspection entry point
     raise is the one monkeypatch this suite is allowed.
     """
 

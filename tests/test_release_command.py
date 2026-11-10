@@ -278,7 +278,7 @@ class TransactionCommandTest(ReleaseCommandCase):
             return subprocess.run([sys.executable, "-m", *argv, "--repo-root", str(bare)],
                                   capture_output=True, env=env, timeout=120)
         ours = raw("agent_tools.release", "transaction", "status")
-        theirs = raw("agent_tools.resolve_project", "resolve", "--require", "release")
+        theirs = raw("agent_tools.project_contract.resolve_project", "resolve", "--require", "release")
         self.assertEqual((ours.returncode, ours.stdout), (2, theirs.stdout))
         self.assertEqual(theirs.returncode, 2)
 

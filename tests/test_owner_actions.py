@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import agent_platform
+from agent_tools.project_contract import agent_platform
 from agent_tools.claims import owner_actions as oa
 from agent_tools.system import siblings
 from .forge_world import ForgeWorld

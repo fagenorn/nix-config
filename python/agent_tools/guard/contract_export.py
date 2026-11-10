@@ -25,8 +25,8 @@ import os
 from pathlib import Path
 import posixpath
 
-from agent_tools import resolve_project
-from agent_tools.adopt_inspection import AdoptError, refuse, run_git
+from agent_tools.project_contract import resolve_project
+from agent_tools.project_contract.adopt_inspection import AdoptError, refuse, run_git
 
 REGULAR_MODES = ("100644", "100755")
 

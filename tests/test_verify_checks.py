@@ -788,7 +788,8 @@ class CutoverPreflightTest(unittest.TestCase):
         self.world = CutoverWorld(self)
         self.sha = self.world.publish_candidate(files={
             "python/agent_tools/__init__.py": "",
-            "python/agent_tools/resolve_project.py": CANDIDATE_RESOLVER})
+            "python/agent_tools/project_contract/__init__.py": "",
+            "python/agent_tools/project_contract/resolve_project.py": CANDIDATE_RESOLVER})
         self.bin = self.world.tmp / "bin"
         self.bin.mkdir()
         self.scratch = self.world.tmp / "scratch"
@@ -844,7 +845,7 @@ class CutoverPreflightTest(unittest.TestCase):
     def test_the_candidate_side_failing_names_the_candidate(self):
         self.bridge(f"echo '{BRIDGE_JSON}'")
         self.world.git(self.world.pusher, "checkout", "-q", CANDIDATE_BRANCH)
-        (self.world.pusher / "python/agent_tools/resolve_project.py").write_text(
+        (self.world.pusher / "python/agent_tools/project_contract/resolve_project.py").write_text(
             "import sys\nsys.exit(4)\n", encoding="utf-8")
         self.world.git(self.world.pusher, "commit", "-q", "-am", "break")
         self.world.git(self.world.pusher, "push", "-q", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
@@ -854,7 +855,7 @@ class CutoverPreflightTest(unittest.TestCase):
     def test_an_incompatible_candidate_row_is_not_yet(self):
         self.bridge(f"echo '{BRIDGE_JSON}'")
         self.world.git(self.world.pusher, "checkout", "-q", CANDIDATE_BRANCH)
-        (self.world.pusher / "python/agent_tools/resolve_project.py").write_text(
+        (self.world.pusher / "python/agent_tools/project_contract/resolve_project.py").write_text(
             CANDIDATE_RESOLVER.replace('"compatible": True', '"compatible": False'),
             encoding="utf-8")
         self.world.git(self.world.pusher, "commit", "-q", "-am", "incompatible")
@@ -1269,7 +1270,7 @@ class GuardPolicyFleetTest(unittest.TestCase):
         # own PYTHONPATH (the world's) holds a working one.
         self.world.project("fixture/one", "fagenorn/one")
         pusher = self.world.tmp / "candidate-pusher"
-        (pusher / "python/agent_tools/guard_policy.py").write_text(
+        (pusher / "python/agent_tools/guard/guard_policy.py").write_text(
             "import sys\nsys.exit(4)\n", encoding="utf-8")
         self.world.git(pusher, "commit", "--quiet", "-am", "break")
         self.world.git(pusher, "push", "--quiet", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")

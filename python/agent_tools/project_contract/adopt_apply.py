@@ -39,15 +39,15 @@ import subprocess
 import tarfile
 import tempfile
 
-from agent_tools import agent_platform
-from agent_tools.adopt_links import (
+from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract.adopt_links import (
     Tree,
     broken_count,
     index_records,
     markdown_texts,
     tree_records,
 )
-from agent_tools.adopt_inspection import (
+from agent_tools.project_contract.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     AdoptError,
     COMMIT_GATES,
@@ -68,7 +68,7 @@ from agent_tools.adopt_inspection import (
     sha256_hash,
     tracked_inventory,
 )
-from agent_tools.adopt_planning import store_document, stored_plan_path
+from agent_tools.project_contract.adopt_planning import store_document, stored_plan_path
 
 # The entry point's resolver call, as this layer receives it: `(root, *args)`
 # to the resolver's exit code and its parsed JSON, or an `AdoptError`.

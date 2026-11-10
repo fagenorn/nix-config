@@ -28,7 +28,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import agent_platform
+from agent_tools.project_contract import agent_platform
 from agent_tools.system import semver
 
 from .test_resolve_project import (
@@ -273,7 +273,7 @@ class ManifestGateTest(ResolverTestCase):
         """#177 D4: with no `HOME` there is no installed manifest to load."""
         env = {key: value for key, value in os.environ.items() if key != "HOME"}
         proc = subprocess.run(
-            [sys.executable, "-m", "agent_tools.resolve_project", "resolve",
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "resolve",
              "--repo-root", str(self.make_root())],
             capture_output=True, text=True, timeout=60, env=env)
         self.assertEqual(proc.returncode, 2, proc.stdout)
@@ -942,7 +942,7 @@ class StrictCandidateTest(ResolverTestCase):
     def test_the_bridge_modules_are_gone(self):
         import importlib.util
         self.assertIsNone(importlib.util.find_spec("agent_tools.release_bridge"))
-        from agent_tools import resolve_project
+        from agent_tools.project_contract import resolve_project
         self.assertEqual(
             [name for name in dir(resolve_project) if "deploy" in name.lower()
              and "deployment" not in name.lower()], [])

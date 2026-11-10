@@ -51,7 +51,7 @@ import sys
 import tempfile
 from typing import Any
 
-from agent_tools import agent_platform, resolve_project
+from agent_tools.project_contract import agent_platform, resolve_project
 from agent_tools.canonical import parse_rfc3339_utc
 
 ENTRY_PATHSPECS = (
@@ -64,7 +64,7 @@ ENTRY_PATHSPECS = (
     ".agents/instructions",
     ".codex",
 )
-SELF_PATH = "python/agent_tools/fallback_audit.py"
+SELF_PATH = "python/agent_tools/project_contract/fallback_audit.py"
 EXCLUDED_DIRECTORIES = ("tests", "evals")
 
 # The 2026-08-20 fallback inventory's removable cluster, plus the bridge paths.
@@ -85,7 +85,7 @@ INVENTORY_MARKERS = (
 # reports them as stale.
 NON_LADDER_PROJECT_ID = "fagenorn/nix-config"
 NON_LADDER_SITES = (
-    ("python/agent_tools/adopt_inspection.py", "legacy-skills-config",
+    ("python/agent_tools/project_contract/adopt_inspection.py", "legacy-skills-config",
      "adoption classifies a legacy store it finds in a project being adopted; "
      "detection, not a route"),
     ("home/common/agent-skills/skills/ship-release/CHANGELOG.md", "bindings-deploy",
@@ -96,9 +96,9 @@ NON_LADDER_SITES = (
      "the #130 checklist C11 zero-users detector (issue 582); detection, not a route"),
     ("python/agent_tools/verify_checks.py", "release-deploy-inspect",
      "the #130 checklist C11 zero-users detector (issue 582); detection, not a route"),
-    ("python/agent_tools/resolve_project.py", "bindings-deploy",
+    ("python/agent_tools/project_contract/resolve_project.py", "bindings-deploy",
      "the schema-2 docstring names the removed schema member; a description, not a route"),
-    ("python/agent_tools/adopt_migrate.py", "bindings-deploy",
+    ("python/agent_tools/project_contract/adopt_migrate.py", "bindings-deploy",
      "the migration docstring names the member it retires; a description, not a route"),
     ("python/agent_tools/release_profile.py", "bindings-deploy",
      "the docstring says a schema-2 contract lacks the removed member; a description, not a route"),

@@ -119,7 +119,7 @@ stages and commits nothing. `adopt_migrate` owns the executors and the
 transaction.
 
 The resolver is consumed **only** as a child process, never imported (D26):
-`run_resolver` runs `agent_tools.resolve_project` under this process's own
+`run_resolver` runs `agent_tools.project_contract.resolve_project` under this process's own
 interpreter through `agent_tools.system.siblings.sibling_argv` (#177 D5), so
 contract validation has one home and an installed run is answered by the
 resolver of its own store environment. The shared platform library
@@ -139,7 +139,9 @@ from pathlib import Path
 import subprocess
 import sys
 
-from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_migrate, adopt_planning, adopt_references, adopt_verify, agent_platform
+from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_links,
+                                          adopt_migrate, adopt_planning, adopt_references,
+                                          adopt_verify, agent_platform)
 from agent_tools.system.siblings import sibling_argv
 
 
@@ -175,7 +177,7 @@ def run_resolver(root: Path, *args: str) -> tuple[int, object]:
     adoption failure rather than a guess.
     """
     try:
-        proc = subprocess.run([*sibling_argv("resolve_project"), *args, "--repo-root", str(root)],
+        proc = subprocess.run([*sibling_argv("project_contract.resolve_project"), *args, "--repo-root", str(root)],
                               capture_output=True, timeout=300)
     except (OSError, subprocess.SubprocessError):
         raise adopt_inspection.refuse(

@@ -7,9 +7,9 @@ test checks a report against, so the schema has exactly one executable
 definition and no consumer re-derives it.
 
 The engine is three modules of the `agent_tools` package: the vocabulary and
-the registry in `agent_tools.conformance_registry`, the evaluators in
-`agent_tools.conformance_checks`, and this entry module, which imports both
-and the resolver `agent_tools.resolve_project` by name (#177 D1, D2).
+the registry in `agent_tools.project_contract.conformance_registry`, the evaluators in
+`agent_tools.project_contract.conformance_checks`, and this entry module, which imports both
+and the resolver `agent_tools.project_contract.resolve_project` by name (#177 D1, D2).
 
 A schema refusal prints the resolver's refusal shape — one JSON object
 carrying an `error` member — on stdout and exits 2. An argparse usage error
@@ -28,11 +28,11 @@ from pathlib import Path
 import platform
 import sys
 
-from agent_tools import conformance_checks as CHECKS_MODULE
-from agent_tools import conformance_registry as registry
-from agent_tools import resolve_project
-from agent_tools.conformance_checks import bounded_run
-from agent_tools.conformance_registry import (
+from agent_tools.project_contract import conformance_checks as CHECKS_MODULE
+from agent_tools.project_contract import conformance_registry as registry
+from agent_tools.project_contract import resolve_project
+from agent_tools.project_contract.conformance_checks import bounded_run
+from agent_tools.project_contract.conformance_registry import (
     CHECK_MEMBERS, Check, Context, DOMAINS, FORBIDDEN_MEMBER_NAMES,
     HEX_DIGITS, MAX_FACT_KEYS, MAX_FACT_LIST, MAX_FACT_STRING,
     OPERATION_MEMBERS, OUTCOME_MEMBERS, OUTCOME_STATUSES, Outcome,
@@ -47,7 +47,7 @@ ENGINE_FAILURE_MESSAGE = "the conformance engine failed unexpectedly"
 
 
 def load_resolver():
-    """Contract: the resolver module, `agent_tools.resolve_project` (D2)."""
+    """Contract: the resolver module, `agent_tools.project_contract.resolve_project` (D2)."""
     return resolve_project
 
 

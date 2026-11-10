@@ -64,8 +64,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import tempfile
 
-from agent_tools import agent_platform
-from agent_tools.adopt_inspection import (
+from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract.adopt_inspection import (
     AdoptError,
     EVIDENCE_RECORD_DIR,
     GIT_TIMEOUT_SECONDS,

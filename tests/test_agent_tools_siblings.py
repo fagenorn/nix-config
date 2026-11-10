@@ -13,15 +13,15 @@ class SiblingArgvTest(unittest.TestCase):
     def argv_under(self, isolated):
         with mock.patch.object(siblings.sys, "flags",
                                types.SimpleNamespace(isolated=isolated)):
-            return siblings.sibling_argv("resolve_project")
+            return siblings.sibling_argv("project_contract.resolve_project")
 
     def test_a_non_isolated_caller_runs_its_sibling_without_isolation(self):
         self.assertEqual(self.argv_under(0),
-                         [sys.executable, "-m", "agent_tools.resolve_project"])
+                         [sys.executable, "-m", "agent_tools.project_contract.resolve_project"])
 
     def test_an_isolated_caller_runs_its_sibling_isolated(self):
         self.assertEqual(self.argv_under(1),
-                         [sys.executable, "-I", "-m", "agent_tools.resolve_project"])
+                         [sys.executable, "-I", "-m", "agent_tools.project_contract.resolve_project"])
 
     def test_the_argv_runs_the_named_package_module(self):
         completed = subprocess.run(

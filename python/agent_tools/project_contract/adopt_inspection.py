@@ -15,10 +15,10 @@ writes are `fetch_pinned`'s: the fetched objects and one
 `fetch_pinned`, so it writes nothing when the checkout already holds the commit
 `origin` lists. `export_commit` writes only into the directory its caller
 names. It does not import
-`agent_tools.resolve_project` and never will (D26) — the resolver is reached
+`agent_tools.project_contract.resolve_project` and never will (D26) — the resolver is reached
 only as a subprocess, by the entry point.
 
-A module of the `agent_tools` package, imported by `agent_tools.adopt_project` and
+A module of the `agent_tools` package, imported by `agent_tools.project_contract.adopt_project` and
 its sibling adoption modules.
 """
 
@@ -451,7 +451,7 @@ def plan_state_is_terminal(state: str) -> bool:
 # The resolver's answer, read
 #
 # Pure readers over an already-parsed resolver payload: no subprocess, no
-# import of `agent_tools.resolve_project` (D26), nothing written. They live here rather
+# import of `agent_tools.project_contract.resolve_project` (D26), nothing written. They live here rather
 # than beside either caller because `plan` and `verify` read the same refusal
 # and this module is the one layer both are built on.
 # --------------------------------------------------------------------------

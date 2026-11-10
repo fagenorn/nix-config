@@ -115,7 +115,7 @@ import subprocess
 import sys
 import tempfile
 
-from agent_tools import resolve_project
+from agent_tools.project_contract import resolve_project
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
 SCHEMA = "verified-tree/v1"

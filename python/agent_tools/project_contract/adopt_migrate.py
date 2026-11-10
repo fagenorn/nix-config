@@ -52,7 +52,7 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from agent_tools import adopt_inspection, agent_platform
+from agent_tools.project_contract import adopt_inspection, agent_platform
 from agent_tools.system import semver
 
 PLATFORM_FLOOR = "1.2.0"

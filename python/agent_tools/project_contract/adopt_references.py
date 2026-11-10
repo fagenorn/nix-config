@@ -312,9 +312,9 @@ from pathlib import Path
 import re
 from typing import Callable, Iterable, Mapping
 
-from agent_tools.adopt_inspection import (
+from agent_tools.project_contract.adopt_inspection import (
     blob_at, is_secret_path, refuse, run_git, split_nul, tree_records)
-from agent_tools.adopt_links import (
+from agent_tools.project_contract.adopt_links import (
     REGULAR_MODES, Tree, directory_successor, is_markdown_path)
 
 ANSWERS = ("extend", "rewrite", "retain")

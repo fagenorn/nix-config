@@ -191,7 +191,7 @@ POLICY_GATE_PATTERN_FILES = frozenset({
 # files, and an entry that no longer matches fails it, so the allowance cannot
 # outlive its use or widen silently.
 LEGACY_MIGRATION_INPUTS = {
-    "python/agent_tools/adopt_inspection.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "python/agent_tools/project_contract/adopt_inspection.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "home/common/agent-skills/tests/test_adopt_apply.py": frozenset({
         ".claude/skills.config.json", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
     }),
@@ -211,7 +211,7 @@ LEGACY_MIGRATION_INPUTS = {
     # The strict-cutover fallback audit (https://github.com/fagenorn/nix-config/issues/579)
     # searches the entry surface for the removed resolver and legacy store, so its marker
     # inventory, its docstring and its tests must name them as patterns.
-    "python/agent_tools/fallback_audit.py": frozenset({"resolve-bindings"}),  # policy-gate-pattern
+    "python/agent_tools/project_contract/fallback_audit.py": frozenset({"resolve-bindings"}),  # policy-gate-pattern
     "tests/test_fallback_audit.py": frozenset({
         ".claude/skills.config.json", "resolve-bindings",  # policy-gate-pattern
     }),
@@ -437,7 +437,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         }
         helpers["context-map-lint"].parent.mkdir(parents=True)
         shutil.copy2(
-            REPO_ROOT / "python/agent_tools/resolve_project.py",
+            REPO_ROOT / "python/agent_tools/project_contract/resolve_project.py",
             helpers["resolve-project"],
         )
         shutil.copyfile(REPO_ROOT / "python/agent_tools/context_map_lint.py",

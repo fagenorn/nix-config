@@ -19,9 +19,9 @@ from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
-from agent_tools import adopt_links, adopt_references, agent_platform
+from agent_tools.project_contract import adopt_links, adopt_references, agent_platform
 from agent_tools.system import semver
-from agent_tools.adopt_inspection import (
+from agent_tools.project_contract.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     APPROVAL_CLASSES,
     ARCHIVE_ADOPTED_DIR,
@@ -61,8 +61,8 @@ from agent_tools.adopt_inspection import (
     refuse,
     sha256_hash,
 )
-from agent_tools.adopt_links import LinkRewrites
-from agent_tools.adopt_references import References
+from agent_tools.project_contract.adopt_links import LinkRewrites
+from agent_tools.project_contract.adopt_references import References
 
 # --------------------------------------------------------------------------
 # Project identity (D35)

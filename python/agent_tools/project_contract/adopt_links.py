@@ -51,7 +51,7 @@ import re
 from typing import Iterable
 import urllib.parse
 
-from agent_tools.adopt_inspection import (
+from agent_tools.project_contract.adopt_inspection import (
     git_or_fail, is_secret_path, refuse, run_git, split_nul, tree_records)
 
 MARKDOWN_SUFFIXES = (".md", ".markdown")

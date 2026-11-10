@@ -1,4 +1,4 @@
-"""Unit tables for `agent_tools.adopt_references` (#350 D2-D6, D11)."""
+"""Unit tables for `agent_tools.project_contract.adopt_references` (#350 D2-D6, D11)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import adopt_references
-from agent_tools.adopt_links import Tree
+from agent_tools.project_contract import adopt_references
+from agent_tools.project_contract.adopt_links import Tree
 
 PATHS = [".claude/specs/x.md", ".claude/specs/sub/s.md", ".claude/plans/y.md",
          ".claude/settings.json", ".out-of-scope/z.md", "docs/guide.txt",

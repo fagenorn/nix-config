@@ -15,29 +15,31 @@ SHARED = "system"
 
 # Importing area -> dotted modules of other areas it may import. Adding an edge
 # is a reviewed change to this table.
-ALLOWED_IMPORTS: dict[str, frozenset[str]] = {}
+ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
+    "claims": frozenset({"agent_tools.project_contract.agent_platform"}),
+    "guard": frozenset({
+        "agent_tools.project_contract.adopt_inspection",
+        "agent_tools.project_contract.adopt_verify",
+        "agent_tools.project_contract.agent_platform",
+        "agent_tools.project_contract.resolve_project",
+    }),
+}
 
 # Flat modules that have not moved into their area yet; each move removes a name.
 UNMOVED: frozenset[str] = frozenset({
-    "actions_health_adapter", "adopt_apply", "adopt_inspection", "adopt_links",
-    "adopt_migrate", "adopt_planning", "adopt_project", "adopt_references",
-    "adopt_verify", "agent_gate_bundle", "agent_gate_corpus", "agent_platform",
-    "agnostic_lint", "artifact_budget", "cache_keepalive", "cache_proxy",
-    "codesigned_artifact_adapter", "conformance", "conformance_checks",
-    "conformance_registry", "context_map_lint", "contract_export", "diff_scope",
-    "fallback_audit", "forge_adapter", "guard_policy",
-    "host_admission", "issue_branch", "keepalive_pings", "lane_triage",
-    "launchd_agent_adapter", "model_pricing", "promotion",
-    "promotion_lifecycle", "promotion_schema", "push_fixture", "railway_deploy_adapter",
+    "actions_health_adapter", "agent_gate_bundle", "agent_gate_corpus", "agnostic_lint",
+    "artifact_budget", "cache_keepalive", "cache_proxy", "codesigned_artifact_adapter",
+    "context_map_lint", "diff_scope", "forge_adapter", "host_admission", "issue_branch",
+    "keepalive_pings", "lane_triage", "launchd_agent_adapter", "model_pricing",
+    "promotion", "promotion_lifecycle", "promotion_schema", "railway_deploy_adapter",
     "release", "release_adapter", "release_cutover", "release_driver", "release_merge",
-    "release_profile", "release_verification", "resolve_project", "run_profile",
-    "subagent_prefix", "suite_runner", "transaction_core",
-    "transaction_custody", "transaction_disposition", "transaction_history",
-    "transaction_invocation", "transaction_plan", "transaction_proof",
-    "transaction_receipt", "transaction_recovery", "transaction_recovery_plan",
-    "transaction_storage", "verified_tree", "verify_block", "verify_checks",
-    "verify_exec", "verify_facts", "verify_issues", "verify_owner", "verify_pending",
-    "verify_run", "worktree_forge",
+    "release_profile", "release_verification", "run_profile", "subagent_prefix",
+    "suite_runner", "transaction_core", "transaction_custody",
+    "transaction_disposition", "transaction_history", "transaction_invocation",
+    "transaction_plan", "transaction_proof", "transaction_receipt",
+    "transaction_recovery", "transaction_recovery_plan", "transaction_storage",
+    "verified_tree", "verify_block", "verify_checks", "verify_exec", "verify_facts",
+    "verify_issues", "verify_owner", "verify_pending", "verify_run", "worktree_forge",
 })
 
 

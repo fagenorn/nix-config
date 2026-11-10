@@ -292,7 +292,7 @@ run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE"
 check "settings: the --settings copy is byte-identical to EVAL_SETTINGS" cmp -s "$SETTINGS_FIXTURE" "$STATE/settings.json"
 check "settings: the guard entry is unchanged" jq -e '.hooks.PreToolUse[0].hooks[0].command == "/nix/store/0000-claude-bash-lifecycle-guard/bin/claude-bash-lifecycle-guard"' "$STATE/settings.json"
 check "shim: resolve-project resolves to the tree shim" grep -q '^resolve_project=.*/run-eval-tree\.[^/]*/bin/resolve-project$' "$STATE/record"
-check "shim: the resolve-project shim runs its table module" grep -qxF 'resolve_project_module=agent_tools.resolve_project' "$STATE/record"
+check "shim: the resolve-project shim runs its table module" grep -qxF 'resolve_project_module=agent_tools.project_contract.resolve_project' "$STATE/record"
 check "row: no policy key" jq -e 'select(has("policy") | not)' "$COPY/results/results.jsonl"
 
 # --- a settings file without any hook is accepted unchanged ------------------------
@@ -330,7 +330,7 @@ check "SIGTERM: no row was written" test "$(row_count)" -eq 0
 # --- setup kinds, smoke-tested in deployed mode (D15, D16) -------------------------
 cat >"$FAKE_BIN/resolve-project" <<SHIM
 #!/usr/bin/env bash
-PYTHONPATH="$TREE/python" exec python3 -P -m agent_tools.resolve_project "\$@"
+PYTHONPATH="$TREE/python" exec python3 -P -m agent_tools.project_contract.resolve_project "\$@"
 SHIM
 chmod +x "$FAKE_BIN/resolve-project"
 row_is_deployed_pass() {

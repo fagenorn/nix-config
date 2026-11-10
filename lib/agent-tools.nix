@@ -39,23 +39,23 @@ let
   # its last segment is the command with each "-" replaced by "_".
   # context-map-lint is a stable path other projects' CIs call without vendoring it (parent D15).
   commands = {
-    "adopt-project" = "adopt_project";
+    "adopt-project" = "project_contract.adopt_project";
     "agent-model-matrix" = "agent_model_matrix";
     "artifact-budget" = "artifact_budget";
     "cache-proxy" = "cache_proxy";
-    "conformance" = "conformance";
+    "conformance" = "project_contract.conformance";
     "context-map-lint" = "context_map_lint";
     "diff-scope" = "diff_scope";
-    "fallback-audit" = "fallback_audit";
+    "fallback-audit" = "project_contract.fallback_audit";
     "forge-claim" = "claims.forge_claim";
     "forge-issue" = "claims.forge_issue";
-    "guard-policy" = "guard_policy";
+    "guard-policy" = "guard.guard_policy";
     "issue-branch" = "issue_branch";
     "lane-triage" = "lane_triage";
     "owner-actions" = "claims.owner_actions";
     "promotion" = "promotion";
     "release" = "release";
-    "resolve-project" = "resolve_project";
+    "resolve-project" = "project_contract.resolve_project";
     "skill-lint" = "skill_lint";
     "verified-tree" = "verified_tree";
     "verify-pending" = "verify_pending";

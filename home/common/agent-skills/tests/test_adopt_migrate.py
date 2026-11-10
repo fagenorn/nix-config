@@ -1,4 +1,4 @@
-"""Contract tests for `adopt-project migrate` (`agent_tools.adopt_migrate`).
+"""Contract tests for `adopt-project migrate` (`agent_tools.project_contract.adopt_migrate`).
 
 `migrate` rewrites the authored contract, regenerates the projections and has
 the resolver child judge the result, all in the same store environment. The
@@ -13,7 +13,7 @@ import json
 import os
 import unittest
 
-from agent_tools import adopt_migrate
+from agent_tools.project_contract import adopt_migrate
 
 from .test_adopt_project import AdoptTestCase, git, run, tree_snapshot
 from .test_resolve_project import (

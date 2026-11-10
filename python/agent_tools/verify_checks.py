@@ -52,7 +52,7 @@ judge every registered project compatible, with no removed use. It is 75 otherwi
 green. It computes the manifest report from the same fetch, unpacks `python/` and the manifest at
 the candidate sha into a temporary directory that is always removed, and runs two
 `platform-status --fleet` reports, each with a 120-second timeout: the installed `resolve-project`
-found on `PATH` (with `PYTHONPATH` removed) and the candidate's `python3 -m agent_tools.resolve_project
+found on `PATH` (with `PYTHONPATH` removed) and the candidate's `python3 -m agent_tools.project_contract.resolve_project
 ... --manifest <tmp>/...` with `PYTHONPATH=<tmp>/python` and `cwd=<tmp>`. A side that exits non-zero,
 times out or prints something other than a JSON object is 75 with verdict `unreadable` and `side`
 naming it. `preflight_verdict` is 0 (`green`) only when C4.a is green, the bridge is major 1 and at
@@ -79,7 +79,7 @@ It only reads one paginated runner listing and refuses a truncated or malformed 
 `guard-policy-fleet [--repo-root R] [--branch B] [--registry FILE]` (`verify_checks.guard_policy_fleet`,
 issue 765, C13.a) is met (0, `green`)
 when, with the candidate's own `python/` and platform manifest unpacked from origin's candidate branch into a
-temporary `HOME`, `python -m agent_tools.guard_policy derive --repository S` exits 0 with a derived row for
+temporary `HOME`, `python -m agent_tools.guard.guard_policy derive --repository S` exits 0 with a derived row for
 every slug S named by a registry entry's `origin` (the host's own registry unless `--registry` names another
 file). Any other exit, outcome or unreadable answer makes that row, and the check, 1 (`red`); a candidate
 branch that does not exist is 75 (`absent`) and an unreadable registry or unpackable candidate is 75
@@ -131,9 +131,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
-from agent_tools.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
+from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc
-from agent_tools.push_fixture import make_push_fixture
+from agent_tools.guard.push_fixture import make_push_fixture
 from agent_tools.system import forge_api, github_remote
 from agent_tools.system.semver import parse_semver
 
@@ -586,7 +586,7 @@ def cutover_preflight(repo_root: Path, branch: str = CANDIDATE_BRANCH, *,
         if bridge is None:
             return _preflight_failure("unreadable", sha, "bridge", manifest)
         candidate_report = _run_side(
-            [sys.executable, "-m", "agent_tools.resolve_project", "platform-status", "--fleet",
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "platform-status", "--fleet",
              "--manifest", str(tmp_path / MANIFEST_PATH)],
             {**environ, "PYTHONPATH": str(tmp_path / "python")}, tmp_path)
         if candidate_report is None:
@@ -899,7 +899,7 @@ def _derive_row(slug: str, child_env: Mapping[str, str], cwd: Path) -> dict:
     row: dict = {"repository": slug, "exit": None, "outcome": "unreadable", "reason_codes": []}
     try:
         done = subprocess.run(
-            [sys.executable, "-m", "agent_tools.guard_policy", "derive", "--repository", slug],
+            [sys.executable, "-m", "agent_tools.guard.guard_policy", "derive", "--repository", slug],
             env=dict(child_env), cwd=cwd, capture_output=True, text=True,
             timeout=GUARD_DERIVE_TIMEOUT, check=False)
         report = json.loads(done.stdout)

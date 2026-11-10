@@ -27,7 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
-from . import adopt_inspection, adopt_verify, canonical, guard_policy
+from agent_tools import canonical
+from agent_tools.guard import guard_policy
+from agent_tools.project_contract import adopt_inspection, adopt_verify
 
 TIMEOUT = 600
 OUTPUT_LIMIT = 2000

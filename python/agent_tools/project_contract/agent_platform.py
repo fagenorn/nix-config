@@ -4,7 +4,7 @@ the user-scope state root, the fleet registry, and the atomic writer.
 This module is imported, never run: it has no `main`, no argparse, and no
 adoption or resolver logic. It exists so that every binary reads one manifest
 through one loader and writes through one atomic writer (D37) — `adopt-project`
-must not import `agent_tools.resolve_project` (D26), and a second copy of either helper
+must not import `agent_tools.project_contract.resolve_project` (D26), and a second copy of either helper
 is the duplication the plan forbids.
 
 A `deprecations` entry of `platform-manifest.json` is closed on exactly `id`,
@@ -713,7 +713,7 @@ def registry_transaction() -> Iterator[list[dict]]:
 # Atomic writing
 #
 # D37: this module is the single owner of both helpers below. `adopt-project`
-# may not import `agent_tools.resolve_project` (D26) and both binaries must write
+# may not import `agent_tools.project_contract.resolve_project` (D26) and both binaries must write
 # atomically, so a second copy anywhere is a defect.
 # --------------------------------------------------------------------------
 

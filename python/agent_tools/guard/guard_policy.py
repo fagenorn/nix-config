@@ -170,7 +170,7 @@ because it can only re-derive from the registry and `origin`, and the other
 codes name a registry, contract or remote that has to change first.
 
 Tests. `tests/test_guard_policy.py` drives the commands as `python -m
-agent_tools.guard_policy compile` and `derive` over
+agent_tools.guard.guard_policy compile` and `derive` over
 `tests/guard_policy_world.py`, and calls two functions directly for the checks no
 command input reaches: `target_profiles` on a hand-built snapshot for the one
 step the release grammar hides (issue 126 D10, D15), and `unsupported_name` on a
@@ -189,8 +189,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_tools import (adopt_inspection, adopt_verify, agent_platform, canonical,
-                         contract_export, forge_adapter, release_profile, resolve_project)
+from agent_tools import canonical, forge_adapter, release_profile
+from agent_tools.guard import contract_export
+from agent_tools.project_contract import (adopt_inspection, adopt_verify, agent_platform,
+                                          resolve_project)
 from agent_tools.system import github_remote
 
 REPORT_SCHEMA_VERSION = 1

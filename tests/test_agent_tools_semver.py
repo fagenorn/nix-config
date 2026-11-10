@@ -2,7 +2,7 @@
 
 import unittest
 
-from agent_tools import agent_platform
+from agent_tools.project_contract import agent_platform
 from agent_tools.system import semver
 
 

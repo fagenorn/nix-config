@@ -77,7 +77,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_tools import agent_platform
+from agent_tools.project_contract import agent_platform
 from agent_tools.claims import forge_claim
 from agent_tools.system import forge_api, siblings
 from agent_tools.system.github_remote import github_slug

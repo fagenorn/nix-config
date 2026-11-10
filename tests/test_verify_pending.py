@@ -23,7 +23,7 @@ from agent_tools import verify_facts as vf
 from agent_tools import verify_issues as vi
 from agent_tools import verify_pending
 from agent_tools import verify_run as vr
-from agent_tools.resolve_project import resolve
+from agent_tools.project_contract.resolve_project import resolve
 from agent_tools.verify_block import lint_block
 
 from .forge_world import ForgeWorld, host_clock

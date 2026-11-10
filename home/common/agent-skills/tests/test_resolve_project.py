@@ -1,4 +1,4 @@
-"""Contract tests for `resolve-project` (`agent_tools.resolve_project`).
+"""Contract tests for `resolve-project` (`agent_tools.project_contract.resolve_project`).
 
 Runs the resolver's command line against temporary repository roots and parses
 its stdout, the seam established by test_resolve_bindings.py. `run` runs it in this process (`_inprocess_cli`, issue
@@ -34,7 +34,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import resolve_project
+from agent_tools.project_contract import resolve_project
 
 from ._inprocess_cli import run_module
 
@@ -156,7 +156,7 @@ SUBCOMMANDS = ("resolve", "check-projections", "write-projections",
 
 def run(*args: str, home: Path, cwd: Path | None = None) -> tuple[int, str, str]:
     """The resolver's command line run in this process (issue 612)."""
-    proc = run_module("agent_tools.resolve_project", args,
+    proc = run_module("agent_tools.project_contract.resolve_project", args,
                       env={**os.environ, "HOME": str(home)}, cwd=cwd)
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -164,7 +164,7 @@ def run(*args: str, home: Path, cwd: Path | None = None) -> tuple[int, str, str]
 def run_child(*args: str, home: Path) -> tuple[int, str, str]:
     """The resolver as a real child process, for the process wiring itself."""
     proc = subprocess.run(
-        [sys.executable, "-m", "agent_tools.resolve_project", *args],
+        [sys.executable, "-m", "agent_tools.project_contract.resolve_project", *args],
         capture_output=True, text=True, timeout=60,
         env={**os.environ, "HOME": str(home)},
     )
@@ -919,7 +919,7 @@ class UsageErrorTest(ResolverTestCase):
 
 
 class ProcessWiringTest(ResolverTestCase):
-    """The real `python -m agent_tools.resolve_project` child answers exactly what
+    """The real `python -m agent_tools.project_contract.resolve_project` child answers exactly what
     the in-process `run` answers: argv parsing, the exit code and both streams
     (issue 612)."""
 
@@ -941,7 +941,7 @@ class ProcessWiringTest(ResolverTestCase):
 
 
 def load_module():
-    """The resolver module, `agent_tools.resolve_project`.
+    """The resolver module, `agent_tools.project_contract.resolve_project`.
 
     Reserved for the seams no subprocess run can reach: the generic failure
     wrapper, and the emit-side guard that the parse-side guard keeps unreachable
@@ -1059,7 +1059,7 @@ def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, st
     """
     env = dict(os.environ, PATH=path_value, HOME=str(home))
     proc = subprocess.run(
-        [sys.executable, "-m", "agent_tools.resolve_project", *args],
+        [sys.executable, "-m", "agent_tools.project_contract.resolve_project", *args],
         capture_output=True, text=True, timeout=60, env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr
@@ -1956,7 +1956,7 @@ class LightLaneTest(ResolverTestCase):
     """#279: the optional `bindings.workflow.light_lane` member (parent D13)."""
 
     VALID = {"mode": "shadow", "budget_minutes": 45,
-             "risk_paths": ["python/agent_tools/resolve_project.py",
+             "risk_paths": ["python/agent_tools/project_contract/resolve_project.py",
                             "home/common/agent-skills/scripts/workflow*"]}
 
     def contract_with(self, light_lane):

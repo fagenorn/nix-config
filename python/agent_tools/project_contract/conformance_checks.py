@@ -6,8 +6,8 @@ entry module. The resolver ladder is the one stateful evaluator:
 `check_contract_resolvable` runs the resolver once and caches every stage it
 settles, and the five dependent evaluators are pure reads of that cache (D17).
 
-`agent_tools.conformance` imports this module as `CHECKS_MODULE`; its vocabulary
-comes from `agent_tools.conformance_registry` (D2, D40).
+`agent_tools.project_contract.conformance` imports this module as `CHECKS_MODULE`; its vocabulary
+comes from `agent_tools.project_contract.conformance_registry` (D2, D40).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 import subprocess
 
 from agent_tools import host_admission, release_adapter, release_profile
-from agent_tools.conformance_registry import (
+from agent_tools.project_contract.conformance_registry import (
     CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER,
     NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,
     PROMOTED_DUPLICATE_DRIFTED, PROMOTED_DUPLICATE_FINDINGS,
