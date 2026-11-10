@@ -7,7 +7,10 @@ import contextlib
 import inspect
 import io
 import json
+import math
+import random
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -96,6 +99,27 @@ def full_cases(tmp, totals=None):
     """One case per core class, all with the same trial totals."""
     totals = totals or {s: ([1000, 1000, 1000], [800, 800, 800]) for s in gate.STRATA}
     return [make_case(tmp, klass, klass, totals) for klass in gate.CORE_CASE_CLASSES]
+
+
+def seeded_totals(seed, n, effect_pct, mean=200_000, cv=0.20):
+    """Seeded fixture (P7): `n` base input totals with population CV `cv` around
+    `mean`, and `n` candidate totals built from the same standardized noise,
+    permuted by the seed and scaled by `1 + effect_pct / 100`, so the realized
+    mean ratio is the true effect while the index-aligned pairs scatter. Only
+    `Random.random()` is drawn: it alone is reproducible across Python versions."""
+    rng = random.Random(seed)
+    draws = []
+    for _ in range(n):
+        radius = math.sqrt(-2.0 * math.log(1.0 - rng.random()))
+        draws.append(radius * math.cos(2.0 * math.pi * rng.random()))
+    centre, spread = statistics.fmean(draws), statistics.pstdev(draws)
+    unit = [(value - centre) / spread for value in draws]
+    base = [round(mean * (1 + cv * value)) for value in unit]
+    keys = [rng.random() for _ in range(n)]
+    order = sorted(range(n), key=keys.__getitem__)
+    candidate = [round(mean * (1 + effect_pct / 100) * (1 + cv * unit[index]))
+                 for index in order]
+    return base, candidate
 
 
 class ManifestDocumentTest(unittest.TestCase):
@@ -489,6 +513,95 @@ class GatePrimitiveTest(unittest.TestCase):
             "base": 1, "candidate": 1})))                            # no site removed
         self.assertFalse(gate.maintenance_saves(dict(
             fires, new_hand_authored_projections=1)))
+
+
+class DistributionalIntervalTest(unittest.TestCase):
+    """Issue 757: the bootstrap mean-ratio interval against the cutover materiality."""
+
+    FIXTURES = ((7570, 40, 0), (7571, 10, 40), (7572, 10, 10), (7573, 10, 0))
+
+    def verdict(self, seed, n, effect_pct):
+        base, candidate = seeded_totals(seed, n, effect_pct)
+        return gate.materiality_verdict(gate.mean_ratio_interval(base, candidate),
+                                        gate.MATERIALITY_PCT["cutover"])
+
+    def test_the_pinned_constants(self):
+        self.assertEqual(gate.MATERIALITY_PCT, {"cutover": 10.0})
+        self.assertEqual((gate.BOOTSTRAP_RESAMPLES, gate.BOOTSTRAP_SEED,
+                          gate.BOOTSTRAP_CONFIDENCE), (2000, 757, 0.90))
+
+    def test_the_fixtures_carry_twenty_percent_cv_and_the_true_effect(self):
+        for seed, n, effect in self.FIXTURES:
+            with self.subTest(seed=seed):
+                base, candidate = seeded_totals(seed, n, effect)
+                self.assertEqual((len(base), len(candidate)), (n, n))
+                self.assertTrue(all(value > 0 for value in base + candidate))
+                self.assertAlmostEqual(statistics.pstdev(base) / statistics.fmean(base),
+                                       0.20, places=3)
+                self.assertAlmostEqual(statistics.fmean(candidate) / statistics.fmean(base),
+                                       1 + effect / 100, places=4)
+                self.assertNotEqual(candidate, [round(v * (1 + effect / 100)) for v in base])
+                self.assertEqual(seeded_totals(seed, n, effect), (base, candidate))
+
+    def test_a_flat_candidate_at_forty_trials_approves(self):
+        self.assertEqual(self.verdict(7570, 40, 0), "approved")
+
+    def test_a_forty_percent_regression_at_ten_trials_rejects(self):
+        self.assertEqual(self.verdict(7571, 10, 40), "rejected")
+
+    def test_a_ten_percent_regression_at_ten_trials_is_unmeasured(self):
+        self.assertEqual(self.verdict(7572, 10, 10), "unmeasured")
+
+    def test_a_flat_candidate_at_ten_trials_is_unmeasured(self):
+        self.assertEqual(self.verdict(7573, 10, 0), "unmeasured")
+
+    def test_the_interval_is_deterministic_and_ordered(self):
+        base, candidate = seeded_totals(7572, 10, 10)
+        first = gate.mean_ratio_interval(base, candidate)
+        self.assertEqual(first, gate.mean_ratio_interval(list(base), list(candidate)))
+        self.assertLessEqual(first[0], first[1])
+        self.assertEqual(gate.mean_ratio_interval([1000] * 3, [2000] * 3), (2.0, 2.0))
+
+    def test_the_bounds_are_the_resampled_extremes_of_each_side(self):
+        # Pinned by hand from the sampling distribution, not from the implementation:
+        # with two values per side, a resampled side mean takes its low and high value
+        # with probability 1/4 each, about 500 of the 2000 resamples (sd about 19),
+        # so the sorted ratios at the tail indices 100 and 1899 are those extremes.
+        # Only the candidate side varies: ratios {1.0, 2.0, 3.0}.
+        self.assertEqual(gate.mean_ratio_interval([1000, 1000], [1000, 3000]), (1.0, 3.0))
+        # Only the base side varies: ratios {3.0, 2.0, 1.5}; candidate over base.
+        self.assertEqual(gate.mean_ratio_interval([1000, 2000], [3000, 3000]), (1.5, 3.0))
+        # A 90% interval is narrower than a 99.9% one over the same resamples.
+        base, candidate = seeded_totals(7572, 10, 10)
+        narrow = gate.mean_ratio_interval(base, candidate)
+        wide = gate.mean_ratio_interval(base, candidate, confidence=0.999)
+        self.assertLess(wide[0], narrow[0])
+        self.assertLess(narrow[1], wide[1])
+
+    def test_the_interval_follows_its_seed_not_the_global_random_state(self):
+        base, candidate = seeded_totals(7572, 10, 10)
+        random.seed(1)
+        first = gate.mean_ratio_interval(base, candidate)
+        random.seed(2)
+        self.assertEqual(gate.mean_ratio_interval(base, candidate), first)
+        self.assertEqual(gate.mean_ratio_interval(base, candidate, seed=gate.BOOTSTRAP_SEED),
+                         first)
+        self.assertNotEqual(gate.mean_ratio_interval(base, candidate, seed=758), first)
+
+    def test_an_undefined_ratio_has_no_interval(self):
+        for base, candidate in (([], []), ([0, 100, 100], [100] * 3),
+                                ([100, -1, 100], [100] * 3), ([100, True, 100], [100] * 3),
+                                ([100] * 3, [100, -5, 100]), ([100] * 3, [])):
+            with self.subTest(base=base, candidate=candidate):
+                self.assertIsNone(gate.mean_ratio_interval(base, candidate))
+        self.assertEqual(gate.materiality_verdict(None, 10.0), "unmeasured")
+
+    def test_the_verdict_boundaries(self):
+        for interval, expected in (((1.1, 1.3), "unmeasured"), ((1.1000001, 1.3), "rejected"),
+                                   ((0.9, 1.1), "unmeasured"), ((0.9, 1.0999999), "approved"),
+                                   ((1.0, 1.0), "approved")):
+            with self.subTest(interval=interval):
+                self.assertEqual(gate.materiality_verdict(interval, 10.0), expected)
 
 
 class DecideTest(unittest.TestCase):

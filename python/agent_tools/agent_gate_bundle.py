@@ -27,6 +27,7 @@ import argparse
 import copy
 import json
 import math
+import random
 import statistics
 import sys
 from collections import namedtuple
@@ -822,6 +823,57 @@ def maintenance_saves(maintenance):
     return (sites["base"] - sites["candidate"] >= 1
             and _dropped_at_least(sites["base"], sites["candidate"],
                                   MAINTENANCE_DROP_PCT))
+
+
+# --- The distributional context test (issue 757) ----------------------------
+
+MATERIALITY_PCT = {"cutover": 10.0}
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 757
+BOOTSTRAP_CONFIDENCE = 0.90
+
+
+def mean_ratio_interval(base, candidate, resamples=BOOTSTRAP_RESAMPLES,
+                        seed=BOOTSTRAP_SEED, confidence=BOOTSTRAP_CONFIDENCE):
+    """Contract: the percentile bootstrap interval of mean(candidate) /
+    mean(base), each side resampled independently with replacement, or None
+    when the ratio is undefined (an empty side, a base value that is not a
+    positive number, a candidate value that is not a non-negative number).
+    Every index is drawn through `Random.random()`, the one draw Python keeps
+    reproducible across versions, so a bundle re-decides the same anywhere."""
+    if not base or not candidate:
+        return None
+    if not all(is_number(value) and value > 0 for value in base):
+        return None
+    if not all(is_number(value) and value >= 0 for value in candidate):
+        return None
+    rng = random.Random(seed)
+
+    def resampled_mean(values):
+        count = len(values)
+        return math.fsum(values[int(rng.random() * count)] for _ in range(count)) / count
+
+    ratios = []
+    for _ in range(resamples):
+        base_mean = resampled_mean(base)
+        ratios.append(resampled_mean(candidate) / base_mean)
+    ratios.sort()
+    tail = round(resamples * (1 - confidence) / 2)
+    return ratios[tail], ratios[resamples - 1 - tail]
+
+
+def materiality_verdict(interval, materiality_pct):
+    """Contract: "rejected" when the whole interval lies above 1 + materiality,
+    "approved" when it lies wholly below, else "unmeasured" (None included)."""
+    if interval is None:
+        return "unmeasured"
+    threshold = 1 + materiality_pct / 100
+    lower, upper = interval
+    if lower > threshold:
+        return "rejected"
+    if upper < threshold:
+        return "approved"
+    return "unmeasured"
 
 
 def _pairs(context):
