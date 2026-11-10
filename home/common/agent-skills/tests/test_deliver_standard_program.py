@@ -1307,6 +1307,53 @@ class PlanRulesTest(unittest.TestCase):
                 self.assertNotIn(line.split("** ", 1)[1][:40], source)
 
 
+class PlanTestCaseFormTest(unittest.TestCase):
+    """#746 trial: only the plan step's task files state each failing test as a case, not as code."""
+
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise")
+    MARK = "state each failing test as a case"
+
+    @staticmethod
+    def rule():
+        found = re.search(r"const TEST_CASES = `([^`]*)`", PROGRAM.read_text(encoding="utf-8"))
+        if found is None:
+            raise AssertionError("TEST_CASES is not a shared constant")
+        return found.group(1)
+
+    def test_the_rule_names_every_part_of_a_case_and_keeps_the_carve_out(self):
+        text = self.rule()
+        for needle in (self.MARK, "its name", "the arrange", "the act", "the exact assertion",
+                       "the expected failure", "carve-out", "an exact wire format",
+                       "Write failing tests out in full.", "The implementer writes the test code from the case."):
+            self.assertIn(needle, text)
+        self.assertEqual(PROGRAM.read_text(encoding="utf-8").count(text), 1)
+
+    def test_only_planner_prompts_carry_the_rule(self):
+        text = self.rule()
+        seen = set()
+        for call in all_calls():
+            label = call["label"]
+            if label in self.PLANNERS:
+                self.assertIn(text, call["prompt"], label)
+                seen.add(label)
+            else:
+                self.assertNotIn(self.MARK, call["prompt"], label)
+        self.assertEqual(seen, set(self.PLANNERS))
+
+    def test_writing_plans_and_deliver_batch_keep_full_test_code(self):
+        skill = (REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Write failing tests out in full.", skill)
+        self.assertNotIn(self.MARK, skill)
+        batch = (PROGRAM.parent / "deliver-batch.js").read_text(encoding="utf-8")
+        self.assertNotIn(self.MARK, batch)
+
+    def test_the_implementer_prompt_still_demands_red_first_and_a_mutation_check(self):
+        _, calls = run()
+        impl = prompt(calls, "impl-1")
+        self.assertIn("write the failing test first and see it fail", impl)
+        self.assertIn("temporarily remove the code it pins and confirm it fails", impl)
+
+
 class TaskTest(unittest.TestCase):
     def test_blocked_task_stops_with_cont_marking_it_partial(self):
         result, _ = run(replies={"impl-1": {"status": "blocked", "notes": "no"}})
