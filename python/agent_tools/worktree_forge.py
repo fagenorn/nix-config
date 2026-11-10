@@ -3,8 +3,8 @@
 `open_pull_heads(slug)` reads the open pull requests whose head branch lives in the pull
 request's own base repository, GET only and never a write. Every field a reading consumes is
 validated, and any deviation raises `forge_markers.ForgeError("payload_invalid", ...)`: a
-malformed payload is never a silent skip. The retired C7 worktree-mapping rule and the
-worktree reconcile that shared this reader are gone with the workflow ledger (issue 689).
+malformed payload is never a silent skip. The ledger-backed branch-mapping rule and the
+reconcile command that once shared this reader went with the workflow ledger (issue 689).
 """
 from __future__ import annotations
 

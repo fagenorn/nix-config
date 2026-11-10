@@ -46,7 +46,7 @@ _UNDERSCORED = (("workflow", "state"), ("workflow", "delivery"), ("workflow", "d
                 ("agent", "model", "drift"),
                 *(("agent", "model", "drift", s) for s in ("routing", "scheduling", "schema")),
                 ("ledger", "archive"), ("ledger", "snapshot"), ("worktree", "reconcile"),
-                ("worktree", "mapping"), ("worktree", "forge"),
+                ("worktree", "mapping"),
                 ("owner", "transcripts"), ("", "delivery", "model", "fixtures"),
                 *((*p, "test", "support") for p in (("agent", "model", "drift"),
                                                     ("retained", "evidence"),
