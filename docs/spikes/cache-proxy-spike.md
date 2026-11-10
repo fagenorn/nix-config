@@ -153,7 +153,7 @@ Conditions: measured 2026-10-25 on mbp by Task 5 (D14, D18) on the built, never 
 
 Median TTFT: proxied 3133.5 ms, direct 2622.0 ms. Difference (proxied minus direct) 511.5 ms against the +100 ms threshold: over it, so fact 3 fails.
 
-Raw usage of every run (pair, arm), as the stream reported it, is in [`cache-proxy-spike-fact3-usage.md`](cache-proxy-spike-fact3-usage.md): each API request's `start` (message_start) and `delta` (message_delta) usage objects, then the session `usage` total. It is kept beside this report, moved there unchanged, so that each file fits one review-package member (D26).
+Raw usage of every run (pair, arm), as the stream reported it, is in [`cache-proxy-spike-fact3-usage.md`](cache-proxy-spike-fact3-usage.md): each API request's `start` (message_start) and `delta` (message_delta) usage objects, then the session `usage` total. It is kept beside this report, moved there unchanged, so that each file fits one artifact member (D26).
 
 ## Request log
 

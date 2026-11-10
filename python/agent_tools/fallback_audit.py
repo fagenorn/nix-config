@@ -53,10 +53,6 @@ NON_LADDER_SITES = (
     ("python/agent_tools/adopt_inspection.py", "legacy-skills-config",
      "adoption classifies a legacy store it finds in a project being adopted; "
      "detection, not a route"),
-    ("python/agent_tools/review_issue100.py", "resolve-bindings",
-     "digest-pinned retained review record of issue 100"),
-    ("python/agent_tools/review_task7.py", "legacy-skills-config",
-     "digest-pinned retained review record of issue 234 Task 7"),
     ("home/common/agent-skills/skills/ship-release/CHANGELOG.md", "bindings-deploy",
      "release history, not an instruction"),
     ("python/agent_tools/verify_checks.py", "bindings-deploy",

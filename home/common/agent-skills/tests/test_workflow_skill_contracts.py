@@ -109,7 +109,6 @@ SCRATCH_IGNORE_PATTERNS = (
     "**/.claude/worktrees/",
     "*.tmp.??????",
     "producer-report-*.json",
-    "review-package-report-*.json",
 )
 
 # Every ephemeral shape a workflow run has produced or been told to produce.
@@ -123,7 +122,6 @@ IGNORED_SHAPES = (
     "nested/.claude/worktrees/w/file",
     ".claude/plans/task-1-brief.md.tmp.aB3xY9",
     "producer-report-Ab12Cd.json",
-    "review-package-report-xyz789.json",
     ".claude/specs/producer-report-XXXXXX.json",
 )
 
@@ -198,16 +196,6 @@ POLICY_GATE_PATTERN_FILES = frozenset({
 # files, and an entry that no longer matches fails it, so the allowance cannot
 # outlive its use or widen silently.
 LEGACY_MIGRATION_INPUTS = {
-    "python/agent_tools/review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
-    "tests/test_review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
-    "python/agent_tools/review_issue100.py": frozenset({"resolve-bindings"}),  # policy-gate-pattern
-    # The committed retained evidence (https://github.com/fagenorn/nix-config/issues/235) records the same
-    # historical paths as facts of the retained ranges.
-    "tests/fixtures/retained-review-evidence/issue-100-derived.json": frozenset({
-        ".claude/skills.config.json", "resolve-bindings",  # policy-gate-pattern
-    }),
-    "tests/fixtures/retained-review-evidence/issue-121.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
-    "tests/fixtures/retained-review-evidence/task7-estimate.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "python/agent_tools/adopt_inspection.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "home/common/agent-skills/tests/test_adopt_apply.py": frozenset({
         ".claude/skills.config.json", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
@@ -389,7 +377,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             if path.suffix not in text_suffixes and path.name not in {
                 "resolve-project", "context-map-lint", "artifact-budget",
                 "agent-model-matrix", "diff-scope",
-                "review-package", "sdd-workspace", "workflow-state",
+                "sdd-workspace", "workflow-state",
             }:
                 continue
             name = relative.as_posix()
@@ -711,7 +699,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(expected[("design-spec", "design-root-plus-one")], "decompose_required")
         self.assertEqual(expected[("implementation-plan", "plan-ninth-member")], "decompose_required")
         self.assertEqual(expected[("handoff", "handoff-root-plus-one")], "stopped")
-        self.assertEqual(expected[("review-package", "review-member-plus-one")], "decompose_required")
 
     def test_codex_collaboration_has_exactly_one_companion_tail(self):
         blocks = re.findall(r"```text\n(.*?)```", self.collaboration, re.S)
@@ -741,11 +728,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             REPO_ROOT / "home/common/agent-skills/default.nix"
         ).read_text(encoding="utf-8")
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
-        # The packaged detail producer and external workspace command are both
-        # published by bare name; review-package has one command-table owner.
-        command_table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
-        self.assertIn('"review-package"', command_table)
-        self.assertNotIn('".agents/bin/review-package" =', nix_module)
+        # The external workspace commands are published by bare name.
         self.assertIn('".agents/bin/sdd-workspace"', nix_module)
         self.assertIn('".agents/bin/task-brief"', nix_module)
         self.assertIn("source = ./scripts/sdd-workspace;", nix_module)

@@ -111,22 +111,6 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_workflow_delivery.py \
     home/common/agent-skills/tests/test_task_brief.py \
     home/common/agent-skills/tests/test_sdd_workspace.py \
-    home/common/agent-skills/tests/test_review_package.py \
-    tests/test_review_pack.py \
-    tests/test_review_feasibility.py \
-    tests/test_review_projection_cases.py \
-    tests/test_review_history.py \
-    tests/test_review_record_view.py \
-    tests/test_review_task7.py \
-    tests/test_review_expansion.py \
-    tests/test_review_issue121.py \
-    tests/test_review_compact121.py \
-    tests/test_review_issue100.py \
-    tests/test_review_compact100.py \
-    tests/test_review_witness.py \
-    tests/test_review_derivation.py \
-    tests/test_review_replay.py \
-    tests/test_review_evidence.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
@@ -175,7 +159,6 @@ agent-workflow-tests *args:
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
     tests/test_phase_budget.py \
-    tests/test_review_range.py \
     tests/test_verified_tree.py \
     tests/test_verification_blocker.py \
     tests/test_verification_observe.py \
@@ -227,7 +210,6 @@ agent-workflow-tests *args:
     tests/test_suite_runner.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
-    tests/test_retained_root_copy.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the representative trace.
@@ -277,29 +259,6 @@ agent-installed-skill-tests: build
       tests/test_promotion_installed.py \
       tests/test_impeccable_installed.py \
       tests/test_claude_code_installed.py
-
-# Full-shape retained tier (#249): the real retained objects and archive of `root`, run on a private copy (#573) so a commit to `root` mid-run cannot void it. Not part of agent-workflow-tests.
-agent-retained-tests root: build
-  @set -- $(nix-store --query --requisites ./result \
-    | grep -- '-home-manager-files$' || true); \
-    if [ "$#" -ne 1 ]; then \
-      echo "expected exactly one built home-manager-files output; found $#" >&2; \
-      exit 1; \
-    fi; \
-    log=$(mktemp "${TMPDIR:-/tmp}/agent-retained-XXXXXX") || exit 1; \
-    copy=$(mktemp -d "${TMPDIR:-/tmp}/agent-retained-root-XXXXXX") || exit 1; \
-    trap 'rm -rf -- "$log" "$copy"' EXIT; \
-    PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.retained_root_copy "{{root}}" "$copy/root" || exit 1; \
-    status=0; \
-    AGENT_RETAINED_ROOT="$copy/root" AGENT_SKILLS_INSTALLED_HOME="$1" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" PYTHONPATH="{{agent_tools_path}}" \
-      python3 -m unittest -v tests/test_review_retained_full.py tests/test_agent_tools_launchers.py \
-      >"$log" 2>&1 || status=$?; \
-    cat "$log"; \
-    if [ "$status" -ne 0 ]; then exit "$status"; fi; \
-    if grep -Eq '\.\.\. skipped|^OK \(.*skipped=' "$log"; then \
-      echo "agent-retained-tests: a skipped test is not acceptance" >&2; \
-      exit 1; \
-    fi
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.

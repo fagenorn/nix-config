@@ -890,7 +890,7 @@ class MemberEnvironmentTest(unittest.TestCase):
         self.assertEqual(self.read(environment, "maintenance.auto"), "false")
 
     def test_a_tests_own_config_count_keeps_the_suite_entries(self):
-        # As tests/test_review_task7.py does with HOSTILE_GIT_ENV.
+        # As the retired review tests did with a hostile git environment.
         environment = {**self.compose(None), "GIT_CONFIG_COUNT": "1",
                        "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "Counted"}
         self.assertEqual(self.read(environment, "user.name"), "Counted")
