@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
   description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
@@ -16,7 +16,7 @@ export const meta = {
 // (positive integers, distinct) or label (every open issue carrying it; exactly one of the two),
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
 // continuation}, only for listed issues, D9), unattended (boolean, default false: true only for a run
-// no session watches, D12).
+// no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747).
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
@@ -66,6 +66,7 @@ if (args.decisions !== undefined) {
   if (!isObj(args.decisions) || !Object.values(args.decisions).every(v => typeof v === 'string' && v)) return bad('every decisions value must be a non-empty string')
 }
 if (args.unattended !== undefined && typeof args.unattended !== 'boolean') return bad('unattended must be a boolean')
+if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean') return bad('review_sizing must be a boolean')
 if (args.conts !== undefined) {
   if (!isObj(args.conts)) return bad('conts must be an object')
   if (!HAS_ISSUES) return bad('conts requires issues')
@@ -76,6 +77,7 @@ if (args.conts !== undefined) {
 }
 const DECISIONS = args.decisions
 const UNATTENDED = args.unattended === true
+const REVIEW_SIZING = args.review_sizing === true
 const CONTS = args.conts || {}
 
 const BASE_RULES = `
@@ -362,13 +364,14 @@ const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
 const readyOf = n => READY[n]
-// The child's whole input (D1): the batch args, the mode (plan or ready), the issue's cont, its lane and the owner's answer, nothing else.
+// The child's whole input (D1): the batch args, the mode (plan or ready), the issue's cont, its lane, the owner's answer and the review_sizing setting (#747), nothing else.
 const childArgs = (n, lane, mode) => {
   const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode }
   if (CONTS[n]) a.cont = CONTS[n]
   else a.lane = lane
   const answer = answerOf(n)
   if (answer !== null) a.decisions = answer
+  if (REVIEW_SIZING) a.review_sizing = true
   return a
 }
 
@@ -954,6 +957,7 @@ const relaunchArgs = () => {
   for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
   if (Object.keys(conts).length) a.conts = conts
   if (UNATTENDED) a.unattended = true
+  if (REVIEW_SIZING) a.review_sizing = true
   return a
 }
 for (const r of table) log(`#${r.issue}: ${r.outcome}${r.detail ? ` (${r.detail})` : ''}`)

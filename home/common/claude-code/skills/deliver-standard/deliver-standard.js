@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-standard',
   description: 'Deliver one standard-lane tracker issue: plan, implement and review each task, final review, verify once, ship',
-  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, cont?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round',
+  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, review_sizing?, cont?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines',
   phases: [
     { title: 'Setup', detail: 'resolve contract, pre-flight, claim, worktree' },
     { title: 'Plan', detail: 'plan outside the tree, then review' },
@@ -21,7 +21,7 @@ export const meta = {
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
 // implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
 // its lane and no direct plan mode exists), cont (the `cont` object of an earlier stop, passed
-// back unchanged to resume; see RESUME below).
+// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
 //
@@ -63,6 +63,8 @@ if (args.lane !== undefined && !['standard', 'direct'].includes(args.lane)) retu
 if (CONT && args.lane && args.lane !== (CONT.lane || 'standard')) return { stage: 'args', error: 'a cont keeps its lane; start again without cont: setup re-adopts the branch and the claim' }
 const LANE = args.lane || (CONT && CONT.lane) || 'standard'
 if (LANE === 'direct' && MODE === 'plan') return { stage: 'args', error: 'the direct lane has no plan mode' }
+if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean') return { stage: 'args', error: 'review_sizing must be a boolean' }
+const REVIEW_SIZING = args.review_sizing === true
 // The claim holder: a resume keeps cont.setup.holder; else it is built from the host and an id.
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const HOLDER_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -107,6 +109,8 @@ const CODEX = {
   properties: { available: { type: 'boolean' }, verdict: { type: 'string', enum: ['pass', 'findings'] }, findings: FINDINGS.properties.findings, raw_summary: { type: 'string' } },
   required: ['available', 'verdict', 'findings'],
 }
+// The delivery's changed-line count from the diff-size clerk; measured false means it could not be read.
+const SIZE_SCHEMA = { type: 'object', properties: { measured: { type: 'boolean' }, changed_lines: { type: 'integer', minimum: 0 } }, required: ['measured'] }
 const IMPL = {
   type: 'object',
   properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: { type: 'string' }, commit: { type: 'string' }, tests: { type: 'array', items: { type: 'string' } }, mutation_checked: { type: 'boolean' }, notes: { type: 'string' } },
@@ -259,15 +263,16 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason).`
 // Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
 const DEAD = []
-const call = async (prompt, opts) => {
+// optional: a step whose failure the caller recovers (the diff-size measurement) is not reported as a dead agent.
+const call = async (prompt, opts, optional) => {
   let reply
   try {
     reply = await agent(prompt, opts)
   } catch (error) {
-    DEAD.push(opts && opts.label)
+    if (!optional) DEAD.push(opts && opts.label)
     throw error
   }
-  if (reply == null) DEAD.push(opts && opts.label)
+  if (reply == null && !optional) DEAD.push(opts && opts.label)
   return reply
 }
 const deadOf = () => (DEAD.length ? { dead_agents: DEAD.slice() } : {})
@@ -664,6 +669,9 @@ const CODE_MAP = `${setup.plan_dir}/context.md`
 const MAP_FIRST = `Read the code map ${CODE_MAP} first: open the code only to check one of its claims or where it is silent; when it is missing, read the code; check against HEAD every claim of it that a finding or a change relies on.`
 // The plan reviewer's defect list, shared so the planner checks against the review it will get.
 const PLAN_RUBRIC = `an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents`
+// #747: the narrowed Claude plan review when the Codex plan review runs; the acceptance-planning clause stays the shared one in the prompt, and the Codex sentence is a separate suffix after it.
+const PLAN_RUBRIC_SIZED = `an acceptance criterion with no task, a design choice that breaks the project's documented conventions, standards or docs (name the document it breaks), a project-specific literal written into global skills or agents, or an internal inconsistency (a task, interface, file or decision that the plan root or another task contradicts, or that no task defines)`
+const PLAN_CODEX_OWNS = `The Codex plan review running beside you owns code correctness (whether a task's code, tests and interfaces will work): do not sweep for it.`
 // The plan step's own read rules (#737): the one step that may dispatch subagents, and only read-only Explore agents.
 const PLAN_READS = `Read in batches: issue independent reads together in one message (the files a symbol touches, its tests and its callers), never one small range per turn. This step says so for subagents: you may dispatch up to 3 read-only Explore agents (subagent_type Explore, model sonnet), all in one message and in the foreground, to map the code the issue touches (entry points, callers, tests, wire fixtures). Keep their summaries, not the file dumps, and check against the tree yourself every path and symbol you write into a task. Dispatch no other subagent.`
 const FACTS = present(setup.details) ? `\nSetup facts: ${setup.details}` : ''
@@ -876,8 +884,9 @@ Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${ACS0}.${S
 Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}, giving it the code map ${CODE_MAP} as its code map input; this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn. Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.
 ${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: CODEX }) : Promise.resolve(null)
   const ruleFindings = planRules(plan)
+  const narrow = REVIEW_SIZING && !!REVIEW_PLAN
   const planReviewClaude = await call(`${CTX}
-Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments).${SPEC} ${KNOW} ${MAP_FIRST} Report only Important or Critical defects: ${PLAN_RUBRIC}, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule). No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
+Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments).${SPEC} ${KNOW} ${MAP_FIRST} Report only Important or Critical defects: ${narrow ? PLAN_RUBRIC_SIZED : PLAN_RUBRIC}, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule).${narrow ? ` ${PLAN_CODEX_OWNS}` : ''} No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
   const planCodexR = await planCodexP
   if (!planReviewClaude) return stop('plan-review', { details: 'the plan reviewer returned nothing' })
   let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
@@ -960,15 +969,42 @@ Re-review only these previously reported findings for task ${t.n} against the fi
 
 // ---------------- Final review ----------------
 phase('Final review')
-const groups = []
+// #747: with review_sizing on, a delivery of more tasks than one chunk holds is split for review only above this many changed lines.
+const SIZED_CHUNK_LINES = 1500
+let groups = []
+let sizedWhole = false
 const PER = 3
 for (let i = 0; i < plan.tasks.length; i += PER) groups.push(plan.tasks.slice(i, i + PER))
 chunked = groups.length > 1
+// A resume that skips the final review reports the shape it had (#747).
+if ((SKIP_REVIEW || SKIP_FINAL) && finalReviewed && finalReviewed.whole === true) chunked = false
 if (SKIP_FINAL) log(`final review passed at ${finalReviewed.head}; skipped`)
 if (!SKIP_REVIEW && !SKIP_FINAL) {
 {
   const lost = await renew('final-review', 'Final review')
   if (lost) return lost
+}
+if (REVIEW_SIZING && chunked) {
+  let sizeReply = null
+  let sizeWhy = 'no usable reply'
+  try {
+    // optional call: a failed measurement is recovered here and must not be reported as a dead agent (deliver-batch's breaker reads those).
+    sizeReply = await call(`${CTX}
+Measure the delivery's diff size. Run git -C ${W} fetch origin, then git -C ${W} diff --shortstat ${RANGE}${declared(plan).map(b => `, then git -C ${b.worktree} diff --shortstat ${b.base}...${b.name}`).join('')}. Each prints at most one line (N files changed, X insertions(+), Y deletions(-)); an empty output or a missing count is 0. Return measured true and changed_lines: the sum of the insertions and deletions over those lines. If any of these commands exits non-zero or prints an error, return measured false and no changed_lines; never return a partial sum. Run nothing else and change nothing.
+${RULES}`, { label: 'diff-size', phase: 'Final review', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: SIZE_SCHEMA }, true)
+  } catch (e) {
+    // The measurement is optional: an agent exception must never abort the delivery.
+    sizeReply = null
+    sizeWhy = `the size step threw: ${e && e.message}`
+  }
+  const lines = sizeReply && typeof sizeReply === 'object' && sizeReply.measured === true && Number.isInteger(sizeReply.changed_lines) && sizeReply.changed_lines >= 0 ? sizeReply.changed_lines : null
+  if (lines === null) log(`final review size not read (${sizeWhy}); keeping the task chunks`)
+  else if (lines <= SIZED_CHUNK_LINES) {
+    groups = [plan.tasks.slice()]
+    chunked = false
+    sizedWhole = true
+    log(`final review: ${lines} changed lines, at most ${SIZED_CHUNK_LINES}; one whole-delivery review`)
+  } else log(`final review: ${lines} changed lines, above ${SIZED_CHUNK_LINES}; keeping the task chunks`)
 }
 const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
@@ -1018,7 +1054,7 @@ if (finalFindings.length) {
     waveFindings = next
   }
 }
-if (present(tip)) finalReviewed = { head: tip, ...branchSnap() }
+if (present(tip)) finalReviewed = { head: tip, ...branchSnap(), ...(sizedWhole ? { whole: true } : {}) }
 }
 }
 
