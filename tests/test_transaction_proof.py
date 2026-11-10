@@ -7,8 +7,8 @@ import copy
 import json
 import unittest
 
-from agent_tools import transaction_storage
-from agent_tools.transaction_core import (
+from agent_tools.release import transaction_storage
+from agent_tools.release.transaction_core import (
     PROOF_REFUSAL_REASONS, EffectResultInvalid, ProofRefused, StaleCustody, StateInvalid,
     TransactionError, TransactionStore, TransitionRefused, action_id)
 

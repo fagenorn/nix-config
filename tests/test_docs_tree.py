@@ -248,7 +248,7 @@ class DocsTreeTest(unittest.TestCase):
     def test_the_docs_tree_passes_the_context_map_lint(self):
         map_path = REPO_ROOT / "docs/CONTEXT-MAP.md"
         result = subprocess.run(
-            [sys.executable, "-m", "agent_tools.context_map_lint",
+            [sys.executable, "-m", "agent_tools.delivery.context_map_lint",
              "--repo-root", str(REPO_ROOT), "--context-map", str(map_path)],
             text=True, capture_output=True,
         )
@@ -261,7 +261,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(problems, [])
 
     def test_a_dropped_decision_row_is_reported(self):
-        rows = [("python/README.md", "forge-claim", "contract", ("python/agent_tools/forge_claim.py",))]
+        rows = [("python/README.md", "forge-claim", "contract", ("python/agent_tools/claims/forge_claim.py",))]
         audited = frozenset({
             ("python/README.md", "forge-claim", "contract"),
             ("python/README.md", "forge-claim", "decision"),
@@ -273,12 +273,12 @@ class DocsTreeTest(unittest.TestCase):
         )
 
     def test_a_decision_row_outside_an_adr_or_the_archive_is_reported(self):
-        rows = [("python/README.md", "forge-claim", "decision", ("python/agent_tools/forge_claim.py",))]
+        rows = [("python/README.md", "forge-claim", "decision", ("python/agent_tools/claims/forge_claim.py",))]
         audited = frozenset({("python/README.md", "forge-claim", "decision")})
         base = {"python/README.md": ["forge-claim"]}
         self.assertEqual(
             section_map_problems(rows, audited, base, lambda path: True),
-            ["python/README.md: forge-claim: decision destination python/agent_tools/forge_claim.py is not an allowed home"],
+            ["python/README.md: forge-claim: decision destination python/agent_tools/claims/forge_claim.py is not an allowed home"],
         )
 
     def test_a_destination_moved_after_the_map_commit_still_exists(self):
@@ -358,7 +358,7 @@ class DocsTreeTest(unittest.TestCase):
     def test_the_codesigned_artifact_docstring_states_no_limitation(self):
         import ast
 
-        source = (REPO_ROOT / "python/agent_tools/codesigned_artifact_adapter.py").read_text()
+        source = (REPO_ROOT / "python/agent_tools/release/codesigned_artifact_adapter.py").read_text()
         docstring = " ".join((ast.get_docstring(ast.parse(source)) or "").split())
         self.assertNotIn("cannot prove", docstring)
 

@@ -93,7 +93,7 @@ system_result := justfile_directory() / "result"
 
 # Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output).
 agent-workflow-tests *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.suite_runner {{args}} \
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
@@ -122,6 +122,8 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
+    tests/test_agent_tools_layout.py \
+    tests/test_agent_tools_semver.py \
     tests/test_lane_triage.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
@@ -205,7 +207,7 @@ agent-instruction-budget *args:
 
 # Run this host's due read-only verification checks and close passing issues (issue 630)
 verify host *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verify_pending run --host {{host}} {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
 # Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build
@@ -288,11 +290,11 @@ install IP:
 
 # Profile Workflow run dirs: fresh and cache-read tokens, wall time and tool calls per phase, agent, label family and delivered issue
 agent-run-profile *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.run_profile {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.run_profile {{args}}
 
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_gate_bundle {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.agent_gate_bundle {{args}}
 
 # Certify issue 554's forge pr_merge against the live sandbox repository (real GitHub calls)
 release-merge-certification *args:
@@ -301,7 +303,7 @@ release-merge-certification *args:
 # Capture, evaluate, validate and advance promotion candidates (#127)
 [positional-arguments]
 promotion *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.promotion "$@"
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.promotion "$@"
 
 # Garbage collect old OS generations and remove stale packages from the nix store
 gc generations="5":

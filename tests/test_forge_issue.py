@@ -10,8 +10,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_issue
-from agent_tools import forge_markers as fm
+from agent_tools.claims import forge_issue
+from agent_tools.claims import forge_markers as fm
+from agent_tools.system import forge_api
 from .forge_world import ForgeWorld
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/forge-issue-dependencies.json").read_text("utf-8"))
@@ -194,7 +195,7 @@ class CreateTest(Base):
         self.assertEqual(self.links(), [])
 
     def test_a_lost_filing_response_is_reported_unconfirmed(self):
-        with mock.patch.object(fm, "create_issue", side_effect=fm.ForgeError("gh_timeout", "api -X POST")):
+        with mock.patch.object(forge_api, "create_issue", side_effect=fm.ForgeError("gh_timeout", "api -X POST")):
             code, out = self.file("--blocked-by", "555")
         self.assertEqual((code, out["error"], out["issue"]), (1, "create_unconfirmed", None))
         self.assertTrue(out["detail"].startswith("gh_timeout: "), out["detail"])
@@ -217,12 +218,12 @@ class LinkTest(Base):
 
     def posting(self, blocked_by, blocking):
         """Patch add_blocked_by so that, once it posts, the forge lists `blocked_by` and `blocking`."""
-        real = fm.add_blocked_by
+        real = forge_api.add_blocked_by
 
         def post(*args, **kwargs):
             real(*args, **kwargs)
             self.lists(NEW, blocked_by, blocking)
-        return mock.patch.object(fm, "add_blocked_by", post)
+        return mock.patch.object(forge_api, "add_blocked_by", post)
 
     def test_link_posts_only_the_missing_edges_then_reads_back(self):
         self.lists(NEW, [B1], [])
@@ -305,7 +306,7 @@ class UsageTest(Base):
 class CliTest(Base):
     def test_the_module_prints_one_json_line(self):
         self.created_world([B1], [])
-        done = subprocess.run([sys.executable, "-m", "agent_tools.forge_issue", "create", "--repo", SLUG,
+        done = subprocess.run([sys.executable, "-m", "agent_tools.claims.forge_issue", "create", "--repo", SLUG,
                                "--title", TITLE, "--body-file", str(self.body_file), "--blocked-by", "555"],
                               capture_output=True, text=True, env=dict(os.environ), timeout=120)
         lines = done.stdout.splitlines()

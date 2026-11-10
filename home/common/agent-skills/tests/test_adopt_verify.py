@@ -26,11 +26,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import adopt_inspection
-from agent_tools import adopt_project
-from agent_tools import adopt_verify
-from agent_tools import agent_platform
-from agent_tools.adopt_inspection import AdoptError
+from agent_tools.project_contract import adopt_inspection
+from agent_tools.project_contract import adopt_project
+from agent_tools.project_contract import adopt_verify
+from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract.adopt_inspection import AdoptError
 
 from .test_adopt_project import (
     DEPTH_REWRITE_ANSWERS,
@@ -153,7 +153,7 @@ class VerifyTestCase(unittest.TestCase):
         return json.loads(self.registry_path().read_text("utf-8"))
 
     def fleet(self) -> list[dict]:
-        proc = run_module("agent_tools.resolve_project", ("platform-status", "--fleet"),
+        proc = run_module("agent_tools.project_contract.resolve_project", ("platform-status", "--fleet"),
                           env={**os.environ, "HOME": str(self.home)})
         self.assertEqual(proc.returncode, 0, proc.stdout)
         return json.loads(proc.stdout)["fleet"]
@@ -479,7 +479,7 @@ class RegistrationTest(VerifyTestCase):
         environment = {**os.environ, "HOME": str(self.home)}
         processes = [
             subprocess.Popen(
-                [sys.executable, "-m", "agent_tools.adopt_project",
+                [sys.executable, "-m", "agent_tools.project_contract.adopt_project",
                  "verify", "--repo-root", str(root), "--register"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env=environment)

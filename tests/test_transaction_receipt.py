@@ -10,9 +10,9 @@ import stat
 import tempfile
 import unittest
 
-from agent_tools import transaction_core, transaction_receipt, transaction_storage
+from agent_tools.release import transaction_core, transaction_receipt, transaction_storage
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_core import RECEIPT_SCHEMA, ReceiptInvalid, StateInvalid
+from agent_tools.release.transaction_core import RECEIPT_SCHEMA, ReceiptInvalid, StateInvalid
 
 from .test_transaction_custody import (
     AUTHORITY, KEYS, PATH, SUBJECT, TTL, CustodyCase, plain, serialize)

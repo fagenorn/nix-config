@@ -40,7 +40,7 @@ in
 
     # The host declaration: authored host policy -- per route, whether it is
     # supported and how many agent slots one root session may hold -- read by
-    # the conformance check through `agent_tools.host_admission`.
+    # the conformance check through `agent_tools.delivery.host_admission`.
     ".agents/share/host-declaration.json".source = ./host-declaration.json;
 
     # Claude accepts Home Manager's recursive file links, so its view of the

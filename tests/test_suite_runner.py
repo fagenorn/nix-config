@@ -1,7 +1,7 @@
-"""End-to-end tests for `agent_tools.suite_runner`, the scheduler behind
+"""End-to-end tests for `agent_tools.delivery.suite_runner`, the scheduler behind
 `just agent-workflow-tests` (issue 436).
 
-Most cases run `python -m agent_tools.suite_runner` in a temporary working
+Most cases run `python -m agent_tools.delivery.suite_runner` in a temporary working
 directory over fixture members written there. The report-ordering case and the
 members' environment cases (issues 496 and 499) call the module's functions
 directly, and one control runs a fixture member with `bash` outside the runner.
@@ -27,8 +27,8 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
-from agent_tools import suite_runner
-from agent_tools.suite_runner import MemberResult
+from agent_tools.delivery import suite_runner
+from agent_tools.delivery.suite_runner import MemberResult
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_TREE_SCRIPT = "home/common/agent-skills/evals/tests/test-run-eval-tree.sh"
@@ -132,7 +132,7 @@ STARTUP_INTERRUPT = textwrap.dedent('''\
     import sys
     import threading
 
-    from agent_tools import suite_runner
+    from agent_tools.delivery import suite_runner
 
     start = threading.Thread.start
     started = []
@@ -156,7 +156,7 @@ SERIAL_LAUNCH_INTERRUPT = textwrap.dedent('''\
     import subprocess
     import sys
 
-    from agent_tools import suite_runner
+    from agent_tools.delivery import suite_runner
 
     popen = subprocess.Popen
     launched = []
@@ -181,7 +181,7 @@ SERIAL_REAP_INTERRUPT = textwrap.dedent('''\
     import signal
     import sys
 
-    from agent_tools import suite_runner
+    from agent_tools.delivery import suite_runner
 
     wait4 = os.wait4
     reaped = []
@@ -208,7 +208,7 @@ SERIAL_INTERRUPTED_REAP_INTERRUPT = textwrap.dedent('''\
     import signal
     import sys
 
-    from agent_tools import suite_runner
+    from agent_tools.delivery import suite_runner
 
     waitid = os.waitid
     wait4 = os.wait4
@@ -385,7 +385,7 @@ class RunnerCase(unittest.TestCase):
     def run_suite(self, *args: str, cap: int = 1, total: int = 1,
                   env: dict | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, "-m", "agent_tools.suite_runner", *args],
+            [sys.executable, "-m", "agent_tools.delivery.suite_runner", *args],
             cwd=self.work, env=self.environment(cap, total, env or {}),
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
             check=False)
@@ -557,7 +557,7 @@ class CapTest(RunnerCase):
     def test_one_job_passes_a_members_output_through_while_it_runs(self):
         member = self.member("test_live.py", LIVE_MEMBER)
         runner = subprocess.Popen(
-            [sys.executable, "-m", "agent_tools.suite_runner", "--jobs", "1", member],
+            [sys.executable, "-m", "agent_tools.delivery.suite_runner", "--jobs", "1", member],
             cwd=self.work, env=self.environment(1, 1, {}), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.addCleanup(runner.stdout.close)
@@ -779,7 +779,7 @@ class InterruptTest(RunnerCase):
     def interrupt_while_running(self, jobs: int) -> None:
         """SIGINT the runner alone once `jobs` held members are live."""
         members = [self.member(f"test_hold{n}.py", HOLD_MEMBER) for n in range(4)]
-        runner = self.launch("-m", "agent_tools.suite_runner", "--jobs", str(jobs), *members)
+        runner = self.launch("-m", "agent_tools.delivery.suite_runner", "--jobs", str(jobs), *members)
         deadline = time.monotonic() + 60
         while len(list((self.barrier / "live").iterdir())) < jobs:
             self.assertLess(time.monotonic(), deadline, "the held members never started")
@@ -1036,7 +1036,7 @@ class RecipeWiringTest(unittest.TestCase):
             body.append(line)
         self.assertEqual(
             body[0],
-            '  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.suite_runner {{args}} \\')
+            '  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \\')
         self.assertTrue(all(line.endswith(" \\") for line in body[:-1]), body)
         self.assertFalse(body[-1].endswith("\\"), body[-1])
         members = [line.strip().removesuffix(" \\") for line in body[1:]]

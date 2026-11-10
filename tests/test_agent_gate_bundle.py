@@ -1,4 +1,4 @@
-"""Offline tests for agent_tools.agent_gate_bundle.
+"""Offline tests for agent_tools.delivery.agent_gate_bundle.
 
 Run: just agent-workflow-tests
 """
@@ -17,7 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import agent_gate_bundle as gate
+from agent_tools.delivery import agent_gate_bundle as gate
 from agent_tools.canonical import telemetry_digest
 
 IDENTITY = {
@@ -1102,7 +1102,7 @@ class ModuleEntryPointTest(unittest.TestCase):
 
     def test_the_module_run_reaches_main_under_the_command_name(self):
         completed = subprocess.run(
-            [sys.executable, "-m", "agent_tools.agent_gate_bundle", "--help"],
+            [sys.executable, "-m", "agent_tools.delivery.agent_gate_bundle", "--help"],
             capture_output=True, text=True, timeout=60, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertTrue(completed.stdout.startswith("usage: agent-gate-bundle "),

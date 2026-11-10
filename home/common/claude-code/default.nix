@@ -31,7 +31,7 @@ let
   # Advances on `just update` (nix flake update) + the next rebuild.
   claudeUnwrapped = inputs.claude-code.packages.${pkgs.system}.default;
 
-  # The cache proxy (agent_tools.cache_proxy, #422). This port is its one home:
+  # The cache proxy (agent_tools.hosts.cache_proxy, #422). This port is its one home:
   # the service below listens on it and the launcher's CACHE_PROXY_URL is
   # rewritten to it, so `claude` routes through the proxy while it is healthy
   # unless launched with CLAUDE_CACHE_PROXY=0 (on by default since #450).

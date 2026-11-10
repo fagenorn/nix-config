@@ -1,6 +1,6 @@
 """The guard-policy compiler at its command seam (issue 126 D10, D15).
 
-Every case runs `python -m agent_tools.guard_policy compile` over `GuardPolicyWorld` and
+Every case runs `python -m agent_tools.guard.guard_policy compile` over `GuardPolicyWorld` and
 asserts on the exit status, the report and the written file. Three suites call an imported
 function instead, each for a check no command input reaches: `TargetProfilesTest`, because
 the release grammar refuses a foreign forge target before the compiler sees it,
@@ -18,7 +18,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import adopt_inspection, contract_export, guard_policy
+from agent_tools.guard import contract_export, guard_policy
+from agent_tools.project_contract import adopt_inspection
 from . import release_test_support as support
 from .guard_policy_world import REAL_GIT, GuardPolicyWorld
 
@@ -189,7 +190,7 @@ class EmptyRebuildTest(WorldCase):
         for flag in ("--help", "-h"):
             with self.subTest(flag=flag):
                 done = subprocess.run(
-                    [sys.executable, "-m", "agent_tools.guard_policy",
+                    [sys.executable, "-m", "agent_tools.guard.guard_policy",
                      "compile", "--base", str(self.world.base),
                      "--output", str(self.world.output), flag],
                     capture_output=True, text=True, timeout=120, env=self.world.env,
@@ -201,7 +202,7 @@ class EmptyRebuildTest(WorldCase):
 
     def test_help_creates_no_policy_file(self):
         done = subprocess.run(
-            [sys.executable, "-m", "agent_tools.guard_policy", "compile",
+            [sys.executable, "-m", "agent_tools.guard.guard_policy", "compile",
              "--base", str(self.world.base), "--output", str(self.world.output), "--help"],
             capture_output=True, text=True, timeout=120, env=self.world.env, cwd=self.world.tmp)
         self.assertEqual(done.returncode, 0, done.stderr)

@@ -3,9 +3,10 @@ import plistlib
 import unittest
 from pathlib import Path
 
-from agent_tools import (actions_health_adapter, codesigned_artifact_adapter, forge_adapter,
-                         launchd_agent_adapter, release_adapter, release_profile)
-from agent_tools.transaction_storage import InvocationRefused
+from agent_tools.release import (actions_health_adapter, codesigned_artifact_adapter,
+                                 forge_adapter, launchd_agent_adapter, release_adapter,
+                                 release_profile)
+from agent_tools.release.transaction_storage import InvocationRefused
 from . import release_test_support as support
 from .forge_world import ForgeWorld
 from .host_world import IDENTITY, HostWorld
@@ -88,7 +89,7 @@ class RegistryTest(unittest.TestCase):
 
     def test_no_agent_tools_module_names_argus(self):
         """AC2: the vocabulary is neutral."""
-        modules = sorted((REPO / "python/agent_tools").glob("*.py"))
+        modules = sorted((REPO / "python/agent_tools").rglob("*.py"))
         self.assertGreater(len(modules), 50)
         for path in modules:
             with self.subTest(module=path.name):

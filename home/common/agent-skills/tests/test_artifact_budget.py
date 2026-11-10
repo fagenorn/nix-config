@@ -13,11 +13,11 @@ import tempfile
 import unittest
 from unittest import mock
 
-from agent_tools import artifact_budget
+from agent_tools.delivery import artifact_budget
 
 
 ROOT = Path(__file__).parents[4]
-COMMAND = (sys.executable, "-m", "agent_tools.artifact_budget")
+COMMAND = (sys.executable, "-m", "agent_tools.delivery.artifact_budget")
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 FIXTURES = Path(__file__).parent / "fixtures/artifact-budgets"
 

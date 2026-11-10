@@ -8,7 +8,7 @@ import stat
 import unittest
 from unittest import mock
 
-from agent_tools import launchd_agent_adapter as adapter, release_adapter
+from agent_tools.release import launchd_agent_adapter as adapter, release_adapter
 from .host_world import HostWorld
 
 LABEL = "dev.example.notifier"

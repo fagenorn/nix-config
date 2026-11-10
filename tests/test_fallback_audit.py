@@ -33,7 +33,7 @@ def audit(*args, path_prefix=None):
     env = dict(os.environ, PYTHONPATH=str(PYTHON))
     if path_prefix is not None:
         env["PATH"] = f"{path_prefix}{os.pathsep}{env['PATH']}"
-    result = subprocess.run([sys.executable, "-m", "agent_tools.fallback_audit", *args],
+    result = subprocess.run([sys.executable, "-m", "agent_tools.project_contract.fallback_audit", *args],
                             capture_output=True, text=True, env=env, timeout=120)
     return result.returncode, (json.loads(result.stdout) if result.stdout.strip() else None), result.stderr
 
@@ -44,13 +44,13 @@ NIX_CONFIG_CONTRACT = {".agents/project.json": json.dumps(
 
 class LaddersTest(unittest.TestCase):
     EXEMPT_ONLY = {
-        "python/agent_tools/adopt_inspection.py": 'X = "skills.config.json"\n',
+        "python/agent_tools/project_contract/adopt_inspection.py": 'X = "skills.config.json"\n',
         "home/common/agent-skills/skills/ship-release/CHANGELOG.md": "bindings.deploy\n",
-        "python/agent_tools/verify_checks.py":
+        "python/agent_tools/verification/verify_checks.py":
             'X = ("bindings.deploy", "skills.config.json", "release deploy inspect")\n',
-        "python/agent_tools/resolve_project.py": "bindings.deploy\n",
-        "python/agent_tools/adopt_migrate.py": "bindings.deploy\n",
-        "python/agent_tools/release_profile.py": "bindings.deploy\n",
+        "python/agent_tools/project_contract/resolve_project.py": "bindings.deploy\n",
+        "python/agent_tools/project_contract/adopt_migrate.py": "bindings.deploy\n",
+        "python/agent_tools/release/release_profile.py": "bindings.deploy\n",
     }
 
     def setUp(self):
@@ -102,7 +102,7 @@ class LaddersTest(unittest.TestCase):
         root = self.make_repo({".agents/artifacts/specs/a.md": "skills.config.json\n",
                                "home/common/agent-skills/skills/x/tests/t.py": "release_bridge\n",
                                "home/common/agent-skills/skills/x/evals/e.md": "resolve-bindings\n",
-                               "python/agent_tools/fallback_audit.py": "resolve-bindings\n"})
+                               "python/agent_tools/project_contract/fallback_audit.py": "resolve-bindings\n"})
         (root / "CLAUDE.md").write_text("resolve-bindings\n")  # untracked
         code, report, _ = self.ladders(root)
         # A fixture tree holds none of the NON_LADDER_SITES, so only stale rows may appear.
@@ -110,11 +110,11 @@ class LaddersTest(unittest.TestCase):
 
     def test_a_listed_site_is_exempt_and_reported(self):
         root = self.make_repo({**NIX_CONFIG_CONTRACT,
-                               "python/agent_tools/adopt_inspection.py":
+                               "python/agent_tools/project_contract/adopt_inspection.py":
                                'X = (".claude/skills.config.json",)\n'})
         code, report, _ = self.ladders(root)
         self.assertEqual([(e["path"], e["marker_id"]) for e in report["exempt"]],
-                         [("python/agent_tools/adopt_inspection.py", "legacy-skills-config")])
+                         [("python/agent_tools/project_contract/adopt_inspection.py", "legacy-skills-config")])
         self.assertNotIn("legacy-skills-config", [f["marker_id"] for f in report["findings"]])
 
     def test_the_same_marker_elsewhere_is_not_exempt(self):
@@ -125,7 +125,7 @@ class LaddersTest(unittest.TestCase):
     def test_an_exemption_with_no_hit_is_stale(self):
         root = self.make_repo({**NIX_CONFIG_CONTRACT, "README.md": "x\n"})
         findings = self.ladders(root)[1]["findings"]
-        self.assertIn({"path": "python/agent_tools/adopt_inspection.py", "line": None,
+        self.assertIn({"path": "python/agent_tools/project_contract/adopt_inspection.py", "line": None,
                        "marker_id": "stale_exemption:legacy-skills-config"}, findings)
 
     def test_another_project_has_no_exemptions_and_no_stale_ones(self):
@@ -141,11 +141,11 @@ class LaddersTest(unittest.TestCase):
         contract = json.dumps({"schema_version": 2,
                                "project": {"id": "fagenorn/argus", "name": "argus"}})
         root = self.make_repo({".agents/project.json": contract,
-                               "python/agent_tools/adopt_inspection.py":
+                               "python/agent_tools/project_contract/adopt_inspection.py":
                                'X = ".claude/skills.config.json"\n'})
         report = self.ladders(root)[1]
         self.assertEqual([(f["path"], f["marker_id"]) for f in report["findings"]],
-                         [("python/agent_tools/adopt_inspection.py", "legacy-skills-config")])
+                         [("python/agent_tools/project_contract/adopt_inspection.py", "legacy-skills-config")])
         self.assertEqual(report["exempt"], [])
 
     def test_a_repository_with_no_readable_contract_has_no_exemptions(self):
@@ -161,7 +161,7 @@ class LaddersTest(unittest.TestCase):
                 contract = ('{"schema_version": 2, "project": {"id": "fagenorn/nix-config", '
                             '"name": "nix-config"}, "deploy": {"config": {"x": %s}}}' % token)
                 root = self.make_repo({".agents/project.json": contract,
-                                       "python/agent_tools/adopt_inspection.py":
+                                       "python/agent_tools/project_contract/adopt_inspection.py":
                                        'X = ".claude/skills.config.json"\n'})
                 report = self.ladders(root)[1]
                 self.assertEqual(report["exempt"], [])
@@ -363,10 +363,10 @@ class CandidateTreeTest(unittest.TestCase):
         # The probe runs the resolve-project on PATH: point it at this tree's own resolver.
         stub = Path(shim) / "resolve-project"
         stub.write_text(f'#!/bin/sh\nPYTHONPATH="{self.ROOT / "python"}" exec "{sys.executable}" '
-                        '-m agent_tools.resolve_project "$@"\n')
+                        '-m agent_tools.project_contract.resolve_project "$@"\n')
         stub.chmod(0o755)
         proc = subprocess.run(
-            [sys.executable, "-m", "agent_tools.fallback_audit", "ladders",
+            [sys.executable, "-m", "agent_tools.project_contract.fallback_audit", "ladders",
              "--repo-root", str(self.ROOT),
              "--manifest", str(self.ROOT / "home/common/agent-skills/platform-manifest.json")],
             capture_output=True, text=True, timeout=120,
@@ -383,7 +383,7 @@ class CandidateTreeTest(unittest.TestCase):
         _, report = self.audit()
         sys.path.insert(0, str(self.ROOT / "python"))
         try:
-            from agent_tools.fallback_audit import NON_LADDER_SITES
+            from agent_tools.project_contract.fallback_audit import NON_LADDER_SITES
         finally:
             sys.path.pop(0)
         self.assertEqual(sorted({(e["path"], e["marker_id"]) for e in report["exempt"]}),
@@ -394,8 +394,9 @@ class CandidateTreeTest(unittest.TestCase):
         # audit exempts it by a row with a reason, never by rewording the literal away.
         _, report = self.audit()
         exempt = {e["path"] for e in report["exempt"] if e["marker_id"] == "bindings-deploy"}
-        for module in ("resolve_project", "adopt_migrate", "release_profile"):
-            path = f"python/agent_tools/{module}.py"
+        for path in ("python/agent_tools/project_contract/resolve_project.py",
+                     "python/agent_tools/project_contract/adopt_migrate.py",
+                     "python/agent_tools/release/release_profile.py"):
             self.assertIn("bindings.deploy", (self.ROOT / path).read_text("utf-8"), path)
             self.assertIn(path, exempt)
 
@@ -405,7 +406,7 @@ class CandidateTreeTest(unittest.TestCase):
         sys.path.insert(0, str(self.ROOT / "python"))
         try:
             self.assertIsNone(importlib.util.find_spec("agent_tools.release_bridge"))
-            from agent_tools import release
+            from agent_tools.release import release
             with self.assertRaises(SystemExit):
                 release.main(["deploy", "inspect", "--commit", "a" * 40])
         finally:

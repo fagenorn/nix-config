@@ -6,7 +6,7 @@ Run: just agent-workflow-tests
 import copy
 import unittest
 
-from agent_tools.transaction_core import (
+from agent_tools.release.transaction_core import (
     RECOVERY_REFUSAL_REASONS, EffectResultInvalid, InvocationRefused, RecoveryRefused,
     StaleCustody, TransactionError, TransactionStore, TransitionRefused, action_id)
 

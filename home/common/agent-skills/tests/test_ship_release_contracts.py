@@ -161,7 +161,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
         self.assertIn("bindings.tracker.repo_slug", phase3)
 
     def test_release_examples_parse_and_cover_every_subcommand(self):
-        from agent_tools import release
+        from agent_tools.release import release
         lines = [line for line in self.skill.splitlines()
                  if line.startswith("release transaction ")]
         actions = set()

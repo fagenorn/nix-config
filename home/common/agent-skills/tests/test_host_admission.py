@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from agent_tools import host_admission
+from agent_tools.delivery import host_admission
 
 REPO = Path(__file__).resolve().parents[4]
 COMMITTED_DECLARATION = REPO / "home/common/agent-skills/host-declaration.json"

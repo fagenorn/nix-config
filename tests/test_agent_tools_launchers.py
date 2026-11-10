@@ -27,7 +27,7 @@ LAUNCHER = re.compile(
     rb"#![^\n]+\n"
     rb"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
     rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
-    rb' -I -m agent_tools\.(?P<module>[a-z][a-z0-9_]*) "\$@"\n*'
+    rb' -I -m agent_tools\.(?P<module>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?) "\$@"\n*'
 )
 MARKER = "HOSTILE agent_tools IMPORTED"
 HOSTILE_EXIT = 97
@@ -40,6 +40,42 @@ LAUNCHER_FLOOR = ("adopt-project", "agent-model-matrix", "artifact-budget", "con
 # Legacy commands may treat --help as misuse, including parser-backed commands
 # with help disabled; pin each existing exit/stdout/stderr contract.
 MISUSE_USAGE = {"context-map-lint": "Usage: context-map-lint --repo-root "}
+
+
+def command_for(module: str) -> str:
+    """The command a module is named for: its basename, with each "_" a "-"."""
+    return module.rsplit(".", 1)[-1].replace("_", "-")
+
+
+def launcher_bytes(module: bytes) -> bytes:
+    return (
+        b"#!/nix/store/" + b"a" * 32 + b"-bash/bin/bash -p\n"
+        b"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+        b"exec /nix/store/" + b"b" * 32 + b"-python3-env/bin/python3 -I -m agent_tools."
+        + module + b' "$@"\n'
+    )
+
+
+class LauncherPatternTest(unittest.TestCase):
+    def test_a_launcher_naming_an_area_module_matches(self):
+        data = launcher_bytes(b"claims.forge_claim")
+
+        match = LAUNCHER.fullmatch(data)
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match["module"], b"claims.forge_claim")
+
+    def test_a_flat_module_launcher_still_matches(self):
+        data = launcher_bytes(b"resolve_project")
+
+        match = LAUNCHER.fullmatch(data)
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match["module"], b"resolve_project")
+
+    def test_a_command_is_named_for_its_module_basename(self):
+        self.assertEqual(command_for("claims.forge_claim"), "forge-claim")
+        self.assertEqual(command_for("resolve_project"), "resolve-project")
 
 
 class AgentToolsLauncherTest(unittest.TestCase):
@@ -202,7 +238,7 @@ class AgentToolsLauncherTest(unittest.TestCase):
     def test_each_launcher_is_named_for_its_module(self):
         for name, (_python, module) in self.launchers().items():
             with self.subTest(launcher=name):
-                self.assertEqual(name, module.replace("_", "-"))
+                self.assertEqual(name, command_for(module))
 
     def dependency_env(self):
         home = self.hostile / 'dependencies'

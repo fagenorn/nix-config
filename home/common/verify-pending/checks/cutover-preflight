@@ -3,4 +3,4 @@
 # both judge every registered project compatible, with no removed use, and C4.a is green.
 # verify-pending runs it from the repository root at the commit the block names;
 # ~/.agents/bin is not on its PATH.
-PATH="$HOME/.agents/bin:$PATH" PYTHONPATH=python exec python3 -m agent_tools.verify_checks cutover-preflight "$@"
+PATH="$HOME/.agents/bin:$PATH" PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks cutover-preflight "$@"

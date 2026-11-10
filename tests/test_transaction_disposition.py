@@ -10,10 +10,9 @@ import os
 import unittest
 import unittest.mock
 
-from agent_tools import (
-    transaction_core, transaction_disposition, transaction_history, transaction_receipt,
-    transaction_storage)
-from agent_tools.transaction_core import (
+from agent_tools.release import (transaction_core, transaction_disposition, transaction_history,
+                                 transaction_receipt, transaction_storage)
+from agent_tools.release.transaction_core import (
     ACTOR_KINDS, CONSEQUENCES, DISPOSITION_REFUSAL_REASONS, GROUNDS, HAZARD_SCHEMA,
     KNOWN_STATE_GROUNDS, OBSERVABILITY_GROUNDS, OBSERVATION_SCHEMA, QUALIFIERS, RESIDUE_BOUNDS,
     CreationConflict, DispositionRefused, ReceiptInvalid, StateInvalid, TransitionRefused)

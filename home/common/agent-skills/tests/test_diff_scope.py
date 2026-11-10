@@ -1,7 +1,7 @@
 """Contracts for the diff-scope product-accounting helper.
 
 Two layers, per the design's Test seams section. The classifier layer imports
-`agent_tools.diff_scope` and drives the pure classifier over synthetic
+`agent_tools.delivery.diff_scope` and drives the pure classifier over synthetic
 rows shaped the way the git layer actually emits them -- a binary row carrying
 absent counts rather than zeros, a rename row already reduced to its
 destination path. The CLI layer (added with the git layer) runs the module with
@@ -24,7 +24,7 @@ import unittest
 import unittest.mock
 
 
-from agent_tools import diff_scope
+from agent_tools.delivery import diff_scope
 
 
 class DiffScopeClassifierTest(unittest.TestCase):
@@ -462,7 +462,7 @@ def write(root, relative_path: bytes, content: bytes) -> None:
 def run_helper(root, *arguments):
     """Invoke the script the way a caller does, capturing raw bytes."""
     return subprocess.run(
-        [sys.executable, "-m", "agent_tools.diff_scope", *arguments],
+        [sys.executable, "-m", "agent_tools.delivery.diff_scope", *arguments],
         cwd=root,
         env=git_env(),
         capture_output=True,
@@ -709,7 +709,7 @@ class DiffScopeCommandTest(unittest.TestCase):
     def test_a_root_outside_a_work_tree_exits_one(self):
         with tempfile.TemporaryDirectory() as outside:
             completed = subprocess.run(
-                [sys.executable, "-m", "agent_tools.diff_scope", self.range, "--root", outside],
+                [sys.executable, "-m", "agent_tools.delivery.diff_scope", self.range, "--root", outside],
                 env=git_env(),
                 capture_output=True,
                 check=False,

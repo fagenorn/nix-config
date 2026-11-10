@@ -1,8 +1,8 @@
-"""`agent_tools.cache_keepalive`: keepalive pings for idle subagent conversations (#423).
+"""`agent_tools.hosts.cache_keepalive`: keepalive pings for idle subagent conversations (#423).
 
 The classification, ping-building and SSE-reader cases call the module's functions directly.
 Later classes drive `Keepalive` on a fake clock against #422's `FakeUpstream`, put a
-`ProxyServer` in front of it, and run `python -m agent_tools.cache_proxy --keepalive`.
+`ProxyServer` in front of it, and run `python -m agent_tools.hosts.cache_proxy --keepalive`.
 """
 
 import functools
@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest import mock
 
-from agent_tools import cache_keepalive, cache_proxy, subagent_prefix
+from agent_tools.hosts import cache_keepalive, cache_proxy, subagent_prefix
 from agent_tools.canonical import telemetry_digest
 from tests.test_cache_proxy import (TIMEOUT, FakeUpstream, RecordingStream, closed_port, fixture,
                                     holders, json_reply)
@@ -1056,7 +1056,7 @@ class KeepaliveCommandTest(unittest.TestCase):
     def start(self, *args):
         fake = FakeUpstream(json_reply)
         self.addCleanup(fake.close)
-        process = subprocess.Popen([sys.executable, "-m", "agent_tools.cache_proxy", "--port", "0",
+        process = subprocess.Popen([sys.executable, "-m", "agent_tools.hosts.cache_proxy", "--port", "0",
                                     "--upstream", fake.url, *args],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.addCleanup(process.stderr.close)
@@ -1080,7 +1080,7 @@ class KeepaliveCommandTest(unittest.TestCase):
         return listening, self.record(process)
 
     def test_help_lists_the_keepalive_flag(self):
-        completed = subprocess.run([sys.executable, "-m", "agent_tools.cache_proxy", "--help"],
+        completed = subprocess.run([sys.executable, "-m", "agent_tools.hosts.cache_proxy", "--help"],
                                    capture_output=True, text=True, timeout=TIMEOUT, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--keepalive", completed.stdout)
