@@ -362,6 +362,58 @@ class DocsTreeTest(unittest.TestCase):
         docstring = " ".join((ast.get_docstring(ast.parse(source)) or "").split())
         self.assertNotIn("cannot prove", docstring)
 
+    def doc(self, path):
+        return " ".join((REPO_ROOT / path).read_text().split())
+
+    def test_the_build_provenance_limitation_is_in_a_release_adr_and_the_map(self):
+        adrs = [
+            path for path in (REPO_ROOT / "docs/areas/release/adr").glob("*.md")
+            if "cannot prove the bundle was built from that commit"
+            in " ".join(path.read_text().split())
+        ]
+        self.assertEqual(len(adrs), 1)
+        relative = adrs[0].relative_to(REPO_ROOT).as_posix()
+        self.assertIn("## Consequences", adrs[0].read_text())
+        self.assertIn("issue 547 D9", adrs[0].read_text())
+        row = next(
+            line for line in (REPO_ROOT / "docs/archive/readme-section-map.md").read_text().splitlines()
+            if line.startswith("| `python/README.md` | Release adapters | decision |")
+        )
+        self.assertIn(relative, row)
+
+    def test_the_guard_context_separates_the_base_and_the_compiled_policy(self):
+        text = self.doc("docs/areas/guard/CONTEXT.md")
+        self.assertNotIn("The base policy plus one derived row", text)
+        self.assertIn("none of the base policy's members", text)
+
+    def test_the_verification_context_names_every_kind_of_check(self):
+        text = self.doc("docs/areas/verification/CONTEXT.md")
+        self.assertNotIn("One named, read-only test", text)
+        for word in ("built-in probe", "question or action for the owner", "unattended"):
+            self.assertIn(word, text)
+
+    def test_the_guard_adr_keeps_the_loader_and_the_compiler_apart(self):
+        text = self.doc("docs/areas/guard/adr/006-two-policy-files-one-trust-rule-each.md")
+        self.assertNotIn("costs that project its row, not the whole file", text)
+        self.assertIn("empties the whole compiled policy", text)
+
+    def test_the_verification_adr_names_the_command_that_never_reaches_the_owner(self):
+        text = self.doc("docs/areas/verification/adr/003-only-verification-commands-run-unattended.md")
+        self.assertNotIn("Everything else reaches the owner through an owner prompt", text)
+        self.assertIn("raises no owner prompt", text)
+
+    def test_the_registration_adr_follows_the_contract_branch(self):
+        text = self.doc("docs/areas/project-contract/adr/005-registration-reads-the-remote.md")
+        self.assertNotIn("changes nothing unless", text)
+        self.assertIn("integration branch the default contract names", text)
+        self.assertIn("conflicting `--integration-branch` operand refuses", text)
+
+    def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
+        text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")
+        self.assertNotIn("An adapter makes at most one mutation", text)
+        self.assertIn("The forge adapter makes at most one mutation", text)
+        self.assertIn("launchd adapter", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ Registering a project in the fleet registry vouches that its adoption is integra
 
 ## Decision
 
-`--register` lists `origin`, pins one commit of the remote's default branch, exports it and resolves the contract there; every check then reads that one pinned commit and nothing from the checkout. The default branch's contract stays the authority when it resolves, so `--integration-branch` changes nothing unless the default contract does not resolve, and then it names the branch to read.
+`--register` lists `origin`, pins one commit of the remote's default branch, exports it and resolves the contract there; every check then reads that one pinned commit and nothing from the checkout. The default branch's contract stays the authority when it resolves: registration follows the integration branch the default contract names, pinned and checked the same way, and a conflicting `--integration-branch` operand refuses. The operand takes effect only when the default contract does not resolve, and then it names the branch to read.
 
 ## Consequences
 

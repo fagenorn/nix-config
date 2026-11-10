@@ -10,10 +10,10 @@ Guard is the fail-closed pre-tool hook that judges the lifecycle verbs an agent 
 ## Language
 
 **Base policy**:
-The hand-authored part of the guard's policy that every host gets: the allowed verbs and repositories before any derived row is added.
+The store file of every member the guard trusts absolutely: the authorized owners, the literal integration bases and the store paths of the programs it runs. Every host gets it, and the compiled policy never carries a member of it.
 
 **Compiled policy**:
-The base policy plus one derived row per registered project, written by the policy compiler from the fleet registry. A missing or refused row leaves that project without one.
+The derived-only user file the policy compiler writes from the fleet registry: one derived row per registered project and a record of the derivation, and none of the base policy's members. A project the compiler cannot derive has no row, but a stored row the guard's loader refuses empties the whole file.
 _Avoid_: policy file
 
 **Derived row**:

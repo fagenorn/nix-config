@@ -9,7 +9,7 @@ An adapter's mutating call can time out, lose its response or exit non-zero afte
 
 ## Decision
 
-`invoke` returns only `accepted`, `rejected` or `unknown`, and `succeeded` does not exist in the result vocabulary. Only the core's later inspection, which reads the world through the adapter's `inspect`, says that an effect landed. An adapter makes at most one mutation, never retries it and never reads the target after it; a timeout or an unexplained failure is `unknown`, which the core resolves by inspection. `release_adapter.core_binding` validates every result and adds no retry or ordering policy, so retry, ordering and outcome stay in the core.
+`invoke` returns only `accepted`, `rejected` or `unknown`, and `succeeded` does not exist in the result vocabulary. Only the core's later inspection, which reads the world through the adapter's `inspect`, says that an effect landed. A timeout or an unexplained failure after a mutation is `unknown`, which the core resolves by inspection, and no adapter retries a mutation. The forge adapter makes at most one mutation and never reads the target after it. The launchd adapter deliberately boots the agent out, replaces the plist and bootstraps it, and rereads the job after a failed bootout to tell `rejected` from `unknown`. `release_adapter.core_binding` validates every result and adds no retry or ordering policy, so retry, ordering and outcome stay in the core.
 
 ## Consequences
 
