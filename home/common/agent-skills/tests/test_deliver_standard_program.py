@@ -3567,5 +3567,60 @@ class PromptCommandFormTest(unittest.TestCase):
         self.assertEqual(seen, set(self.BODY_READERS))
 
 
+MAP_PATH = "/r/.git/worktrees/w/deliver-standard/context.md"
+MAP_TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
+MAP_READERS = re.compile(r"plan|plan-review|plan-codex|plan-revise|plan-rules-revise|impl-\d+|fix-\d+-\d+")
+
+
+def map_carriers(calls):
+    return [c["label"] for c in calls if "context.md" in c["prompt"]]
+
+
+class CodeMapTest(unittest.TestCase):
+    """#743: the planner writes a code map beside the plan; plan reviewers, revisers and task implementers are pointed at it, nobody else."""
+
+    def assert_no_map(self, calls, expected):
+        # prompt() raises when a label is missing, so each expected call is shown to have run.
+        for label in expected:
+            with self.subTest(label=label):
+                self.assertNotIn("context.md", prompt(calls, label))
+        self.assertEqual([l for l in map_carriers(calls) if not MAP_READERS.fullmatch(l)], [])
+
+    def test_the_planner_writes_the_map_in_the_plan_directory(self):
+        _, calls = run()
+        self.assertIn(MAP_PATH, prompt(calls, "plan"))
+
+    def test_plan_reviewers_reviser_and_implementers_name_the_map(self):
+        _, calls = run(replies={"plan-review": MAP_TASK_FINDING, "review-1": MAP_TASK_FINDING})
+        for label in ("plan-review", "plan-codex", "plan-revise", "impl-1", "fix-1-1"):
+            with self.subTest(label=label):
+                self.assertIn(MAP_PATH, prompt(calls, label))
+
+    def test_the_rules_only_reviser_names_the_map(self):
+        # The scenario of PlanRulesTest.keep_stop: both reviews return an R2 rule finding, so plan-rules-revise runs.
+        plan = with_criteria(HUMAN)
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": PlanRulesTest.REVISED,
+                                "plan-review": PlanRulesTest.RULE_FINDING,
+                                "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        self.assertIn(MAP_PATH, prompt(calls, "plan-rules-revise"))
+
+    def test_task_reviewers_get_no_map(self):
+        _, calls = run(replies={"review-1": MAP_TASK_FINDING})
+        self.assert_no_map(calls, ("review-1", "rereview-1-1", "final-1", "final-codex"))
+
+    def test_chunked_final_review_and_integration_get_no_map(self):
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(4))})
+        self.assert_no_map(calls, ("review-1", "review-4", "final-1", "final-2", "final-integration", "final-codex"))
+
+    def test_the_final_fix_wave_and_its_review_get_no_map(self):
+        _, calls = run(replies={"final-1": BAD})
+        self.assert_no_map(calls, ("fix-wave", "fix-wave-review"))
+
+    def test_the_direct_lane_and_its_repair_get_no_map(self):
+        _, calls = run(args=DIRECT, replies={"direct-review": BAD})
+        self.assert_no_map(calls, ("direct-impl", "direct-review", "direct-fix", "direct-rereview"))
+        self.assertEqual(map_carriers(calls), [])
+
+
 if __name__ == "__main__":
     unittest.main()
