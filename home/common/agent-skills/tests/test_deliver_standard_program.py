@@ -41,6 +41,10 @@ HUMAN = {"id": "AC3", "text": "looks right", "kind": "human",
          "lint": OK_LINT}
 NOTE = {"id": "AC4", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
 RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
+SIZED = dict(ARGS, review_sizing=True)
+FULL_RUBRIC = "a task whose test cannot fail, wrong or missing interfaces"
+CODEX_OWNS = "The Codex plan review running beside you owns code correctness"
+RULE_ID = "put the broken rule's id in the finding's rule)."
 
 
 def refused(*errors):
@@ -1293,6 +1297,71 @@ class PlanTest(unittest.TestCase):
         finding = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
         _, calls = run(replies={"plan-review": finding})
         self.assertEqual(labels(calls).count("plan-revise"), 1)
+
+
+class ReviewSizingArgTest(unittest.TestCase):
+    """#747: review_sizing is an opt-in boolean, checked before any agent."""
+
+    def test_review_sizing_must_be_a_boolean(self):
+        for bad in ("yes", 1, None):
+            with self.subTest(bad=bad):
+                result, calls = run(args=dict(ARGS, review_sizing=bad))
+                self.assertEqual(result, {"stage": "args", "error": "review_sizing must be a boolean"})
+                self.assertEqual(calls, [])
+
+    def test_false_runs_like_absent(self):
+        absent, absent_calls = run()
+        off, off_calls = run(args=dict(ARGS, review_sizing=False))
+        self.assertEqual(off["stage"], "done")
+        self.assertEqual([(c["label"], c["prompt"]) for c in off_calls],
+                         [(c["label"], c["prompt"]) for c in absent_calls])
+
+
+class ReviewSizingPlanTest(unittest.TestCase):
+    """#747: with sizing on and the Codex plan review configured, the Claude plan review narrows to rules, conventions and consistency."""
+
+    def test_off_keeps_the_full_rubric(self):
+        _, calls = run()
+        text = prompt(calls, "plan-review")
+        self.assertIn(FULL_RUBRIC, text)
+        self.assertNotIn(CODEX_OWNS, text)
+
+    def test_on_with_the_codex_plan_review_narrows_the_claude_rubric(self):
+        result, calls = run(args=SIZED)
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("plan-codex", labels(calls))
+        text = prompt(calls, "plan-review")
+        self.assertIn(CODEX_OWNS, text)
+        self.assertNotIn(FULL_RUBRIC, text)
+        self.assertNotIn("wrong or missing interfaces", text)
+        for needle in ("an acceptance criterion with no task", "acceptance-planning.md", "documented conventions",
+                       "internal inconsistency", "project-specific literal written into global skills or agents",
+                       "/r/docs/standards", "context.md", "--json title,body,comments"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        # The rule-id instruction stays whole and comes before the Codex sentence, never inside its "do not sweep" clause.
+        self.assertLess(text.index(RULE_ID), text.index(CODEX_OWNS))
+        self.assertNotIn("do not sweep for it, or", text)
+        off = prompt(run()[1], "plan-review")
+        self.assertEqual(text.count("acceptance-planning.md"), off.count("acceptance-planning.md"))
+        self.assertEqual(text.count(RULE_ID), 1)
+        review = next(c for c in calls if c["label"] == "plan-review")
+        self.assertEqual((review["agentType"], review["schema"]["properties"]["findings"]["items"]["properties"]["rule"]["enum"][0]),
+                         ("reviewer", "R1"))
+
+    def test_on_keeps_the_full_rubric_for_the_planner(self):
+        _, calls = run(args=SIZED, replies={"plan-review": {"verdict": "findings",
+                                                             "findings": [{"severity": "important", "summary": "gap"}]}})
+        for label in ("plan", "plan-revise"):
+            with self.subTest(label=label):
+                self.assertIn(FULL_RUBRIC, prompt(calls, label))
+
+    def test_on_without_a_plan_review_capability_keeps_the_full_rubric(self):
+        _, calls = run(args=SIZED, patch={"setup": {"review_state": {"code": "available", "plan": "unsupported"}}})
+        self.assertNotIn("plan-codex", labels(calls))
+        text = prompt(calls, "plan-review")
+        self.assertIn(FULL_RUBRIC, text)
+        self.assertNotIn(CODEX_OWNS, text)
 
 
 class PlanRulesTest(unittest.TestCase):
@@ -3507,7 +3576,7 @@ class SourceTest(unittest.TestCase):
     def test_meta_names_the_new_args(self):
         text = PROGRAM.read_text(encoding="utf-8")
         meta = text[:text.index("\n}\n")]
-        for arg in ("session_id", "batch_id", "mode?", "lane?"):
+        for arg in ("session_id", "batch_id", "mode?", "lane?", "review_sizing?"):
             self.assertIn(arg, meta)
 
 
