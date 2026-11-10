@@ -383,7 +383,7 @@ class DeprecationsRetiredTest(unittest.TestCase):
             json.dumps({"project": {"deprecated_uses": deprecated}}))
         (self.answers / "resolve.json").write_text(json.dumps({
             "project": {"id": project_id, "root": str(self.root)},
-            "bindings": {"deploy": {"adapter": adapter}},
+            "bindings": {} if adapter is None else {"deploy": {"adapter": adapter}},
             "capabilities": {"release": {"state": state, "reason_code": None, "repair_id": None}},
             "release": {"targets": [{"adapter": a} for a in targets]}}))
         (self.answers / "resolve.exit").write_text(str(resolve_exit))
@@ -417,6 +417,20 @@ class DeprecationsRetiredTest(unittest.TestCase):
                 code, report = self.check()
                 self.assertEqual((code, report["roots"][0]["verdict"]), (1, "red"))
                 self.assertEqual(self.check(red_pending=True)[0], 75)
+
+    def test_a_schema_2_snapshot_without_a_deploy_binding_reads_c_green(self):
+        self.answer(deprecated=[], adapter=None)
+        code, report = self.check()
+        self.assertEqual((code, report["roots"][0]["readings"]["c"]["status"]), (0, "green"))
+        self.answer(deprecated=[], adapter=None, resolve_exit=2)
+        self.assertEqual(self.check()[0], 1)
+
+    def test_a_real_deploy_adapter_keeps_c_red_and_none_keeps_it_green(self):
+        self.answer(deprecated=[], adapter="railway")
+        code, report = self.check()
+        self.assertEqual((code, report["roots"][0]["readings"]["c"]["status"]), (1, "red"))
+        self.answer(deprecated=[], adapter="none")
+        self.assertEqual(self.check()[1]["roots"][0]["readings"]["c"]["status"], "green")
 
     def test_a_hit_under_the_artifact_directory_is_not_a_user(self):
         self.commit(".agents/artifacts/evidence/old.md", "release deploy inspect\n")
