@@ -4340,5 +4340,37 @@ class KeptObligationTest(unittest.TestCase):
         self.assertIn("Check each rebuttal against the code yourself", prompt(calls, "fix-sync-review-1"))
 
 
+class CodexUnavailableReasonTest(unittest.TestCase):
+    """#790: a codex-unavailable stop carries the Codex reviewer's reported reason."""
+
+    REASON = ("runtime failure: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
+              "to purchase more credits or try again at Nov 12th, 2026 5:34 AM.")
+    SITES = ((ARGS, "plan-codex", "plan"), (ARGS, "final-codex", "code"), (DIRECT, "direct-codex", "code"))
+
+    def test_each_codex_unavailable_stop_carries_the_reviewers_reason(self):
+        for args, label, step in self.SITES:
+            with self.subTest(label=label):
+                reply = {"available": False, "verdict": "pass", "findings": [], "raw_summary": self.REASON}
+                result, _ = run(args=args, replies={label: reply})
+                self.assertEqual((result["stage"], result["step"]), ("codex-unavailable", step))
+                self.assertEqual(result["details"], self.REASON)
+                self.assertEqual(result["codex"], reply)
+
+    def test_a_reply_without_a_reason_still_names_one(self):
+        for raw in ({}, {"raw_summary": "  "}):
+            with self.subTest(raw=raw):
+                reply = {"available": False, "verdict": "pass", "findings": [], **raw}
+                result, _ = run(replies={"final-codex": reply})
+                self.assertEqual(result["details"], "the Codex review step gave no reason")
+
+    def test_no_reply_is_named_and_stays_a_dead_agent(self):
+        for args, label, step in self.SITES:
+            with self.subTest(label=label):
+                result, _ = run(args=args, replies={label: None})
+                self.assertEqual((result["stage"], result["step"]), ("codex-unavailable", step))
+                self.assertEqual(result["details"], "the Codex review step returned nothing")
+                self.assertEqual(result["dead_agents"], [label])
+
+
 if __name__ == "__main__":
     unittest.main()
