@@ -32,7 +32,6 @@ The checker runs a command only when it can verify it stays inside the worktree:
 - Carry the directory in the invocation: absolute paths under the worktree, or a directory flag such as `git -C <path>`. A `cd` prelude is itself a refused chain.
 - Read a non-zero exit instead of suppressing stderr.
 - One chain is sanctioned: the `unset GITHUB_TOKEN && ` prefix that the resolved tracker credential policy (`bindings.tracker.credential_env.unset_before_invocation`) yields, spelled exactly so.
-- One pipeline is sanctioned: a lifecycle helper call (one heredoc-fed `workflow-state` command, optionally piped into or out of `artifact-budget validate-report --input -`) and no other shape. Never copy that shape to another command. If the checker refuses one, report the refusal rather than reshape the call.
 - On a refusal, change the shell form, never the isolation.
 
 ## Detect existing isolation

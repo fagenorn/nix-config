@@ -15,7 +15,7 @@
         },
         {
           "name": "every task section (inline or per-task brief) has a falsifiable verification line",
-          "contract": "accepts both today's single-file plan and the target thin-index + per-task-brief layout",
+          "contract": "accepts both today's single-file plan and the target thin-index + per-task member layout",
           "shell": "for f in \"$PLAN_DIR\"/*.md; do [ -f \"$f\" ] || { fail \"no plan root under $PLAN_DIR\"; exit 1; }; plan_tasks_verifiable \"$f\" || exit 1; done"
         },
         {

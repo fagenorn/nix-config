@@ -94,47 +94,13 @@ system_result := justfile_directory() / "result"
 # Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output).
 agent-workflow-tests *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.suite_runner {{args}} \
-    home/common/agent-skills/tests/test_workflow_state.py \
-    home/common/agent-skills/tests/test_attempt_migration.py \
-    home/common/agent-skills/tests/test_attempt_custody.py \
-    home/common/agent-skills/tests/test_verification_suspension.py \
-    home/common/agent-skills/tests/test_verification_control.py \
-    home/common/agent-skills/tests/test_verification_direct.py \
-    home/common/agent-skills/tests/test_control_cutover.py \
-    home/common/agent-skills/tests/test_control_decisions.py \
-    home/common/agent-skills/tests/test_delivery_sealing.py \
     home/common/agent-skills/tests/test_host_admission.py \
-    home/common/agent-skills/tests/test_delivery_model.py \
-    home/common/agent-skills/tests/test_delivery_workflow.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
-    home/common/agent-skills/tests/test_ship_delivery.py \
-    home/common/agent-skills/tests/test_delivered_control.py \
-    home/common/agent-skills/tests/test_workflow_delivery.py \
-    home/common/agent-skills/tests/test_task_brief.py \
-    home/common/agent-skills/tests/test_sdd_workspace.py \
-    home/common/agent-skills/tests/test_review_package.py \
-    tests/test_review_pack.py \
-    tests/test_review_feasibility.py \
-    tests/test_review_limits_replay.py \
-    tests/test_review_projection_cases.py \
-    tests/test_review_history.py \
-    tests/test_review_record_view.py \
-    tests/test_review_task7.py \
-    tests/test_review_expansion.py \
-    tests/test_review_issue121.py \
-    tests/test_review_compact121.py \
-    tests/test_review_issue100.py \
-    tests/test_review_compact100.py \
-    tests/test_review_witness.py \
-    tests/test_review_derivation.py \
-    tests/test_review_replay.py \
-    tests/test_review_evidence.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
     home/common/agent-skills/tests/test_eval_cases.py \
-    home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \
     home/common/agent-skills/tests/test_skill_lint.py \
@@ -167,9 +133,6 @@ agent-workflow-tests *args:
     tests/test_host_sudo.py \
     tests/test_runner_home.py \
     tests/test_verify_checks.py \
-    tests/test_worktree_mapping.py \
-    tests/test_worktree_reconcile.py \
-    tests/test_worktree_reconcile_audit.py \
     tests/test_issue_branch.py \
     tests/test_keepalive_end_turn_cap.py \
     tests/test_forge_markers.py \
@@ -178,22 +141,8 @@ agent-workflow-tests *args:
     tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
-    tests/test_skill_sections.py \
-    tests/test_phase_budget.py \
-    tests/test_context_meter.py \
-    tests/test_sdd_brief.py \
-    tests/test_sdd_gate.py \
-    tests/test_launch_commit.py \
-    tests/test_launch_scope.py \
-    tests/test_review_range.py \
     tests/test_verified_tree.py \
-    tests/test_verification_blocker.py \
-    tests/test_verification_observe.py \
-    tests/test_acceptance_record.py \
     tests/test_transaction_core.py \
-    tests/test_attempt_identity.py \
-    tests/test_attempt_custody.py \
-    tests/test_attempt_delivery.py \
     tests/test_transaction_custody.py \
     tests/test_transaction_invocation.py \
     tests/test_transaction_plan.py \
@@ -222,15 +171,7 @@ agent-workflow-tests *args:
     tests/test_release_adapter_core.py \
     tests/test_codesigned_artifact_adapter.py \
     tests/test_launchd_agent_adapter.py \
-    tests/test_agent_costs.py \
     tests/test_run_profile.py \
-    tests/test_agent_owner_report.py \
-    tests/test_agent_owner_replay.py \
-    tests/test_agent_boot_report.py \
-    tests/test_agent_model_drift_schema.py \
-    tests/test_agent_model_drift_routing.py \
-    tests/test_agent_model_drift_scheduling.py \
-    tests/test_agent_model_drift_producer_integration.py \
     tests/test_agent_gate_bundle.py \
     tests/test_agent_gate_corpus.py \
     tests/test_retired_surfaces.py \
@@ -246,7 +187,6 @@ agent-workflow-tests *args:
     tests/test_suite_runner.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
-    tests/test_retained_root_copy.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the representative trace.
@@ -297,29 +237,6 @@ agent-installed-skill-tests: build
       tests/test_impeccable_installed.py \
       tests/test_claude_code_installed.py
 
-# Full-shape retained tier (#249): the real retained objects and archive of `root`, run on a private copy (#573) so a commit to `root` mid-run cannot void it. Not part of agent-workflow-tests.
-agent-retained-tests root: build
-  @set -- $(nix-store --query --requisites ./result \
-    | grep -- '-home-manager-files$' || true); \
-    if [ "$#" -ne 1 ]; then \
-      echo "expected exactly one built home-manager-files output; found $#" >&2; \
-      exit 1; \
-    fi; \
-    log=$(mktemp "${TMPDIR:-/tmp}/agent-retained-XXXXXX") || exit 1; \
-    copy=$(mktemp -d "${TMPDIR:-/tmp}/agent-retained-root-XXXXXX") || exit 1; \
-    trap 'rm -rf -- "$log" "$copy"' EXIT; \
-    PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.retained_root_copy "{{root}}" "$copy/root" || exit 1; \
-    status=0; \
-    AGENT_RETAINED_ROOT="$copy/root" AGENT_SKILLS_INSTALLED_HOME="$1" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" PYTHONPATH="{{agent_tools_path}}" \
-      python3 -m unittest -v tests/test_review_retained_full.py tests/test_agent_tools_launchers.py \
-      >"$log" 2>&1 || status=$?; \
-    cat "$log"; \
-    if [ "$status" -ne 0 ]; then exit "$status"; fi; \
-    if grep -Eq '\.\.\. skipped|^OK \(.*skipped=' "$log"; then \
-      echo "agent-retained-tests: a skipped test is not acceptance" >&2; \
-      exit 1; \
-    fi
-
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
 show-claude-settings: build
@@ -368,16 +285,9 @@ install IP:
     sh install-nix.sh\"'"
 
 
-# Report agent token spend per issue from the local Claude Code and Codex sessions
-agent-costs *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_costs {{args}}
-
 # Profile Workflow run dirs: fresh and cache-read tokens, wall time and tool calls per phase, agent, label family and delivered issue
 agent-run-profile *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.run_profile {{args}}
-
-agent-model-drift *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.agent_model_drift {{args}}
 
 # Apply issue #70's token-and-quality gate to a trials manifest of emitted cost records
 agent-gate-bundle *args:

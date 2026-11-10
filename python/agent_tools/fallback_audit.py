@@ -16,7 +16,8 @@ import sys
 import tempfile
 from typing import Any
 
-from agent_tools import agent_costs, agent_platform, resolve_project
+from agent_tools import agent_platform, resolve_project
+from agent_tools.canonical import parse_rfc3339_utc
 
 ENTRY_PATHSPECS = (
     "home/common/agent-skills/skills",
@@ -52,10 +53,6 @@ NON_LADDER_SITES = (
     ("python/agent_tools/adopt_inspection.py", "legacy-skills-config",
      "adoption classifies a legacy store it finds in a project being adopted; "
      "detection, not a route"),
-    ("python/agent_tools/review_issue100.py", "resolve-bindings",
-     "digest-pinned retained review record of issue 100"),
-    ("python/agent_tools/review_task7.py", "legacy-skills-config",
-     "digest-pinned retained review record of issue 234 Task 7"),
     ("home/common/agent-skills/skills/ship-release/CHANGELOG.md", "bindings-deploy",
      "release history, not an instruction"),
     ("python/agent_tools/verify_checks.py", "bindings-deploy",
@@ -242,7 +239,7 @@ def _transcripts(root: Path) -> list[Path]:
 
 def traces(args: argparse.Namespace) -> int:
     try:
-        since = agent_costs.parse_rfc3339_utc(args.since)
+        since = parse_rfc3339_utc(args.since)
     except ValueError:
         print("fallback-audit: --since must be RFC 3339 with an offset", file=sys.stderr)
         return 2
@@ -276,7 +273,7 @@ def traces(args: argparse.Namespace) -> int:
                         if not calls:
                             continue
                         try:
-                            moment = agent_costs.parse_rfc3339_utc(record.get("timestamp"))
+                            moment = parse_rfc3339_utc(record.get("timestamp"))
                         except ValueError:
                             skipped += 1
                             continue

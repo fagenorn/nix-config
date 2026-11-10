@@ -61,36 +61,6 @@
         "overages": {"root_bytes": {"limit": 8192, "over_by": 1}, "aggregate_bytes": {"limit": 8192, "over_by": 1}},
         "producer_state": "stopped"
       }
-    },
-    {
-      "kind": "review-package",
-      "case": "review-member-plus-one",
-      "shape": "diff-review-package",
-      "root_bytes": 1024,
-      "member_bytes": [65537],
-      "expected": {
-        "exit_code": 3,
-        "status": "over_budget",
-        "metrics": {"root_bytes": 1024, "total_bytes": 66561, "file_count": 2, "largest_member_bytes": 65537},
-        "violations": ["member_bytes"],
-        "overages": {"member_bytes": {"limit": 65536, "over_by": 1}},
-        "producer_state": "decompose_required"
-      }
-    },
-    {
-      "kind": "review-package",
-      "case": "review-aggregate-and-count",
-      "shape": "diff-review-package",
-      "root_bytes": 1024,
-      "member_bytes": [60000, 60000, 60000, 60000, 60000, 60000, 60000, 60000, 60000],
-      "expected": {
-        "exit_code": 3,
-        "status": "over_budget",
-        "metrics": {"root_bytes": 1024, "total_bytes": 541024, "file_count": 10, "largest_member_bytes": 60000},
-        "violations": ["member_count", "aggregate_bytes"],
-        "overages": {"member_count": {"limit": 8, "over_by": 1}, "aggregate_bytes": {"limit": 524288, "over_by": 16736}},
-        "producer_state": "decompose_required"
-      }
     }
   ]
 }

@@ -46,8 +46,6 @@ SKILL_ROOTS = (
 CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
 SKILL_TREES = (REPO_ROOT / "home/common/agent-skills/skills",
                REPO_ROOT / "home/common/claude-code/skills")
-NOW_FLAG = re.compile(r"(?<![\w-])--now(?![\w-])")
-NOW_KEY = re.compile(r'"now"\s*:')
 
 
 REPORT_CANDIDATE_MKTEMP = 'mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"'
@@ -63,7 +61,7 @@ SHARED_SKILL_MACHINE_TEXT = {
     HANDOFF: (REPORT_CANDIDATE_MKTEMP, REPORT_CANDIDATE_VALIDATION,
               ".superpowers/workflows/<run-id>/handoffs/"),
     RESEARCH: (
-        "`research-observations`", "agent-evidence research <artifact.json>",
+        "`research-observations`",
         "`observed_at`", "`outcome`", "`follow_up`", "`execution_id`", "`transient`",
         "`{file_path, key_facts[]}`",
     ),
@@ -94,8 +92,6 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
 # other order (D2).
 SIBLING_CANDIDATE_RE = re.compile(r"sibling(?:\s+\S+){0,2}\s+candidate")
 
-SDD_SCRIPTS = REPO_ROOT / "home/common/agent-skills/scripts"
-
 # The superseded claim: the workspace has not been repo-root-relative since the
 # primary-checkout move (D3).
 REPO_ROOT_WORKSPACE_LITERAL = "<repo-root>/.superpowers/sdd"
@@ -109,7 +105,6 @@ SCRATCH_IGNORE_PATTERNS = (
     "**/.claude/worktrees/",
     "*.tmp.??????",
     "producer-report-*.json",
-    "review-package-report-*.json",
 )
 
 # Every ephemeral shape a workflow run has produced or been told to produce.
@@ -123,7 +118,6 @@ IGNORED_SHAPES = (
     "nested/.claude/worktrees/w/file",
     ".claude/plans/task-1-brief.md.tmp.aB3xY9",
     "producer-report-Ab12Cd.json",
-    "review-package-report-xyz789.json",
     ".claude/specs/producer-report-XXXXXX.json",
 )
 
@@ -136,8 +130,6 @@ KEPT_SHAPES = (
     ".claude/specs/2026-08-23-workflow-scratch-containment-design.md",
     ".claude/plans/2026-08-23-workflow-scratch-containment.md",
     ".claude/plans/2026-08-23-workflow-scratch-containment.tasks/task-1.md",
-    "home/common/agent-skills/scripts/sdd-workspace",
-    "home/common/agent-skills/tests/test_sdd_workspace.py",
     "handoff-notes.md",
 )
 
@@ -198,16 +190,6 @@ POLICY_GATE_PATTERN_FILES = frozenset({
 # files, and an entry that no longer matches fails it, so the allowance cannot
 # outlive its use or widen silently.
 LEGACY_MIGRATION_INPUTS = {
-    "python/agent_tools/review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
-    "tests/test_review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
-    "python/agent_tools/review_issue100.py": frozenset({"resolve-bindings"}),  # policy-gate-pattern
-    # The committed retained evidence (https://github.com/fagenorn/nix-config/issues/235) records the same
-    # historical paths as facts of the retained ranges.
-    "tests/fixtures/retained-review-evidence/issue-100-derived.json": frozenset({
-        ".claude/skills.config.json", "resolve-bindings",  # policy-gate-pattern
-    }),
-    "tests/fixtures/retained-review-evidence/issue-121.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
-    "tests/fixtures/retained-review-evidence/task7-estimate.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "python/agent_tools/adopt_inspection.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "home/common/agent-skills/tests/test_adopt_apply.py": frozenset({
         ".claude/skills.config.json", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
@@ -387,9 +369,8 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             if not path.is_file():
                 continue
             if path.suffix not in text_suffixes and path.name not in {
-                "resolve-project", "context-map-lint", "artifact-budget",
-                "agent-evidence", "agent-model-matrix", "diff-scope",
-                "review-package", "sdd-workspace", "workflow-state",
+                "resolve-project", "context-map-lint",
+                "agent-model-matrix", "diff-scope",
             }:
                 continue
             name = relative.as_posix()
@@ -711,7 +692,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(expected[("design-spec", "design-root-plus-one")], "decompose_required")
         self.assertEqual(expected[("implementation-plan", "plan-ninth-member")], "decompose_required")
         self.assertEqual(expected[("handoff", "handoff-root-plus-one")], "stopped")
-        self.assertEqual(expected[("review-package", "review-member-plus-one")], "decompose_required")
 
     def test_codex_collaboration_has_exactly_one_companion_tail(self):
         blocks = re.findall(r"```text\n(.*?)```", self.collaboration, re.S)
@@ -728,40 +708,30 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 with self.subTest(path=path.name, item=item):
                     self.assertIn(item, text)
 
+    def test_research_and_writing_plans_name_no_retired_helper(self):
+        # Names spelled in pieces so this file never matches the retired-name grep.
+        for path, name in ((RESEARCH, "agent-" "evidence"), (WRITING_PLANS, "acceptance-" "record")):
+            with self.subTest(path=path.parent.name):
+                self.assertNotIn(name, path.read_text(encoding="utf-8"))
+
     def test_helper_binaries_resolve_from_bare_names(self):
-        # Skills invoke agent-evidence by bare name. The Nix module must put
-        # ~/.agents/bin on PATH, and each contract must anchor the full path as
-        # fallback for shells that skip profile init.
+        # Skills invoke helpers by bare name. The Nix module must put
+        # ~/.agents/bin on PATH.
         nix_module = (
             REPO_ROOT / "home/common/agent-skills/default.nix"
         ).read_text(encoding="utf-8")
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
-        for name, text in (("research", self.research),):
-            with self.subTest(skill=name):
-                # A second resolution route is a ladder (issue 579): the bare name is the contract.
-                self.assertIn("`agent-evidence research <artifact.json>`", text)
-                self.assertNotIn("~/.agents/bin/agent-evidence", text)
-        # The packaged detail producer and external workspace command are both
-        # published by bare name; review-package has one command-table owner.
+        # artifact-budget has one command-table owner and no hand-written entry (issue 689).
         command_table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
-        self.assertIn('"review-package"', command_table)
-        self.assertNotIn('".agents/bin/review-package" =', nix_module)
-        self.assertIn('".agents/bin/sdd-workspace"', nix_module)
-        self.assertIn('".agents/bin/task-brief"', nix_module)
-        self.assertIn("source = ./scripts/sdd-workspace;", nix_module)
-        self.assertIn("source = ./scripts/task-brief;", nix_module)
+        self.assertIn('"artifact-budget"', command_table)
+        self.assertNotIn('".agents/bin/artifact-budget"', nix_module)
+        self.assertNotIn('".agents/lib/', nix_module)
 
     def test_no_document_or_script_claims_a_repo_root_workspace(self):
         offenders = [
             str(path.relative_to(REPO_ROOT))
             for path, text in corpus_documents()
             if REPO_ROOT_WORKSPACE_LITERAL in text
-        ]
-        offenders += [
-            str(path.relative_to(REPO_ROOT))
-            for path in sorted(SDD_SCRIPTS.iterdir())
-            if path.is_file()
-            and REPO_ROOT_WORKSPACE_LITERAL in path.read_text(encoding="utf-8")
         ]
         self.assertEqual(offenders, [])
 
@@ -781,20 +751,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             if ".superpowers/" "ship-review" in text
         ]
         self.assertEqual(carriers, [])
-
-    def test_build_delivery_callers_name_the_sanctioned_resolution_exception(self):
-        exception = ("only sanctioned exception is `workflow-state build-delivery`, "
-                     "which performs its own sealed, read-only resolution")
-        callers = []
-        for path, raw in live_corpus_documents():
-            text = normalized(raw)
-            if "build-delivery" not in text:
-                continue
-            relative = path.relative_to(REPO_ROOT).as_posix()
-            callers.append(relative)
-            with self.subTest(path=relative):
-                self.assertIn(exception, text)
-        self.assertEqual(sorted(callers), [])
 
     def test_gitignore_is_tracked_and_carries_the_backstop(self):
         subprocess.run(
@@ -1961,25 +1917,6 @@ class DirectLaneRoutingTest(unittest.TestCase):
         self.assertNotIn("comment what remains", text)
 
 
-class HandBuiltTimeContractsTest(unittest.TestCase):
-    """#309 D9: no skill document hands workflow-state a time; the helper reads its clock."""
-
-    def documents(self):
-        for tree in SKILL_TREES:
-            self.assertTrue(tree.is_dir(), tree)
-            yield from sorted(path for path in tree.rglob("*.md") if path.is_file())
-
-    def test_no_skill_document_passes_now(self):
-        checked = 0
-        for path in self.documents():
-            text = path.read_text(encoding="utf-8")
-            checked += 1
-            with self.subTest(document=str(path.relative_to(REPO_ROOT))):
-                self.assertIsNone(NOW_FLAG.search(text))
-                self.assertIsNone(NOW_KEY.search(text))
-        self.assertGreater(checked, 20)
-
-
 class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
     """#474: no skill document chains a check onto a foreground `sleep`."""
 
@@ -2009,7 +1946,7 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
             ("    run one bounded foreground `sleep N`, then check\n    once.", ["prose"]),
             ("> run one bounded foreground `sleep N`, then\n> check once.", ["prose"]),
             ("`sleep 30 && gh pr checks 1`", ["shell"]),
-            ("sleep 60; workflow-state status", ["shell"]),
+            ("sleep 60; git status", ["shell"]),
             ("  > `sleep 5 || true`", ["shell"]),
         ):
             with self.subTest(hit=text):

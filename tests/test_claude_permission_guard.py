@@ -32,10 +32,7 @@ EXPECTED_ALLOW = [
     "Bash(git worktree remove:*)", "Bash(git worktree prune:*)",
     "Bash(git push:*)", "Bash(gh pr create:*)",
     "Bash(git branch -d:*)", "Bash(gh pr merge:*)",
-    "Bash(workflow-state:*)", "Bash(~/.agents/bin/workflow-state:*)",
     "Bash(artifact-budget:*)", "Bash(~/.agents/bin/artifact-budget:*)",
-    "Bash(ship-delivery:*)", "Bash(~/.agents/bin/ship-delivery:*)",
-    "Bash(verification-observe:*)", "Bash(~/.agents/bin/verification-observe:*)",
     "Bash(forge-issue:*)", "Bash(~/.agents/bin/forge-issue:*)", "Agent",
 ]
 
@@ -227,21 +224,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             for hook in matches[0].get("hooks", [])
             if hook.get("type") == "command"
         ]
-        # Issue 424: the context meter is the entry's second command hook.
         guards = [hook for hook in command_hooks if str(hook.get("command", "")).endswith(
             "/bin/claude-bash-lifecycle-guard")]
-        meters = [hook for hook in command_hooks if str(hook.get("command", "")).endswith(
-            "-agent-tools-context-meter")]
-        if len(command_hooks) != 2 or len(guards) != 1 or len(meters) != 1:
-            raise AssertionError(
-                f"expected exactly the guard and the context meter, found {command_hooks!r}")
-        meter = meters[0]
-        if meter.get("timeout") != 10 or meter.get("args", []) != []:
-            raise AssertionError(f"context meter must take no args and time out at 10: {meter!r}")
-        cls.meter = Path(meter["command"])
-        if " " in meter["command"] or not cls.meter.is_absolute() or not os.access(
-                cls.meter, os.X_OK):
-            raise AssertionError(f"meter is not an executable absolute path: {meter!r}")
+        if len(command_hooks) != 1 or len(guards) != 1:
+            raise AssertionError(f"expected exactly the guard, found {command_hooks!r}")
         command_hook = guards[0]
         if command_hook.get("timeout") != 30:
             raise AssertionError(f"expected hook timeout 30, found {command_hook.get('timeout')!r}")
@@ -403,19 +389,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
     def test_single_command_lifecycle_calls_pass_the_guard(self):
         for command in (
-            "workflow-state control --repo-root /r --run-id run --request-file - <<'JSON' "
-            "| artifact-budget validate-report --boundary workflow-response --input -\n"
-            '{"interface_version": 2}\nJSON',
-            "artifact-budget validate-report --boundary ship-summary --input - <<'JSON' "
-            "| ~/.agents/bin/workflow-state finish --repo-root /r --run-id run "
-            "--now 2026-09-24T00:00:00Z --summary-file -\n{}\nJSON",
-            "ship-delivery checkpoint --context /r/.agents/runtime/context.json --input - <<'JSON' "
-            "| workflow-state checkpoint-delivery --repo-root /r --run-id run --checkpoint-file - "
-            "| artifact-budget validate-report --boundary workflow-response --input -\n"
-            '{"observed_at":"2026-10-22T00:00:00Z","requested_stage":null}\nJSON',
-            "verification-observe observe --repo-root /r --input - <<'JSON'\n"
-            '{"kind":"verification","blocker_id":"sha256:' + "0" * 64 + '",'
-            '"sources":[{"name":"flake-lock","paths":["flake.lock"]}]}\nJSON',
+            "artifact-budget validate-report --boundary producer --input - <<'JSON'\n{}\nJSON",
             "forge-issue create --repo octo/widgets --title Wire --body-file /tmp/body.md "
             "--blocked-by 555 --blocks 689",
         ):
@@ -455,7 +429,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "cat > notes.md <<'EOF'\nrun gh pr merge 5 later\ngit push origin main\nEOF\n",
             'echo "docs say gh pr create --repo x"',
             "true # gh pr merge 9 --repo fagenorn/nix-config --merge --delete-branch",
-            "workflow-state finish --notes 'blocked, cannot gh pr merge yet'",
+            "artifact-budget check --kind handoff --root 'blocked, cannot gh pr merge yet' --format json",
             "rg -n 'git branch -d' docs/",
         ):
             with self.subTest(command=command):
@@ -752,7 +726,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             command,
         )
         self.assertIn("run_in_background", result.stderr, command)
-        self.assertIn("launch-scope exec", result.stderr, command)
+        self.assertNotIn("launch-" "scope", result.stderr, command)
 
     def test_detaching_words_are_refused_globally(self):
         # Every form below makes the shell run a detaching word (or hands it to

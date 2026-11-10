@@ -2,10 +2,8 @@
 
 This module is the one home of the declaration vocabulary: the declaration's
 schema, the route-name grammar, the fixed role sets, the supported-route slot
-floor and the closed reason codes (D18). It is imported by `workflow-state` and
-by the conformance evaluator, never run, so it carries no entry point. Claim
-policy is not here; it stays in `workflow-state.py`, so conformance never holds
-a claim API (D13).
+floor and the closed reason codes (D18). It is imported by the conformance
+evaluator, never run, so it carries no entry point.
 
 The declaration is authored host policy installed at exactly
 `$HOME/.agents/share/host-declaration.json` (D2). It declares, per route,

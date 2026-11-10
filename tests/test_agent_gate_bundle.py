@@ -1359,7 +1359,7 @@ class NoRegressionCriterionTest(unittest.TestCase):
         self.assertEqual((code, json.loads(out)["state"]), (3, "unmeasured"))
 
     def producer_cases(self, strata=("claude",)):
-        """Every trial of every core case carries the run_id agent_costs emits for
+        """Every trial of every core case carries the run_id the producer emits for
         an eval sandbox, `<stratum>:repo:none`, in a record of its own."""
         cases = []
         for case_index, klass in enumerate(gate.CORE_CASE_CLASSES):

@@ -71,8 +71,8 @@
      "label": "merge", "reason": "forbidden character `&`"},
     {"id": "merge.then-echo", "form": "merge.plain", "before": "", "after": "; echo exit=$?",
      "label": "merge", "reason": "`;` outside quotes"},
-    {"id": "mention.unquoted", "form": "push.later", "before": "workflow-state finish --notes refused ", "after": "",
-     "label": "push", "reason": "`workflow-state finish --notes refused` before the verb"},
+    {"id": "mention.unquoted", "form": "push.later", "before": "artifact-budget check --kind handoff --root refused ", "after": "",
+     "label": "push", "reason": "`artifact-budget check --kind handoff --root refused` before the verb"},
     {"id": "branch.after-cd", "form": "branch.local", "before": "cd /tmp/worktree && ", "after": "",
      "label": "branch deletion", "reason": "forbidden character `&`"}
   ],

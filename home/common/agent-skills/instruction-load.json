@@ -44,7 +44,7 @@
         "claude": 16997
       },
       "conditional_ceiling_bytes": {
-        "claude": 11480
+        "claude": 11167
       },
       "note": "One delegated release through ship-release and its changelog rubric."
     },
@@ -108,7 +108,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 2780
+        "claude": 2575
       },
       "conditional_ceiling_bytes": {
         "claude": 0
@@ -141,7 +141,7 @@
         "claude": 14696
       },
       "conditional_ceiling_bytes": {
-        "claude": 25187
+        "claude": 24669
       },
       "note": "One decision session. Grilling is the default mode; research and prototype sessions are conditional. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
@@ -188,7 +188,7 @@
         "claude": 16997
       },
       "conditional_ceiling_bytes": {
-        "claude": 11480
+        "claude": 11167
       },
       "note": "A direct interactive release, with the current session as owner."
     },
@@ -274,6 +274,6 @@
     }
   ],
   "excluded_sites": {},
-  "corpus_ceiling_bytes": 146416,
+  "corpus_ceiling_bytes": 145816,
   "description_ceiling_bytes": 2321
 }

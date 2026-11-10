@@ -11,5 +11,4 @@ __pycache__/
 *.tmp.??????
 .resolve-project.*.tmp
 producer-report-*.json
-review-package-report-*.json
 

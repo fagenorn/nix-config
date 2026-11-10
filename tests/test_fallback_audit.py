@@ -45,8 +45,6 @@ NIX_CONFIG_CONTRACT = {".agents/project.json": json.dumps(
 class LaddersTest(unittest.TestCase):
     EXEMPT_ONLY = {
         "python/agent_tools/adopt_inspection.py": 'X = "skills.config.json"\n',
-        "python/agent_tools/review_issue100.py": 'X = "resolve-bindings"\n',
-        "python/agent_tools/review_task7.py": 'X = "skills.config.json"\n',
         "home/common/agent-skills/skills/ship-release/CHANGELOG.md": "bindings.deploy\n",
         "python/agent_tools/verify_checks.py":
             'X = ("bindings.deploy", "skills.config.json", "release deploy inspect")\n',
@@ -222,7 +220,7 @@ class LaddersTest(unittest.TestCase):
         code, report, _ = self.ladders(
             root, stub_body="""echo '{"error":{"code":"not_onboarded"}}'; exit 2""")
         self.assertEqual((code, report["findings"], report["clean"]), (0, [], True))
-        self.assertEqual(len(report["exempt"]), 7)
+        self.assertEqual(len(report["exempt"]), 5)
 
 
 def claude_line(timestamp, command, usage=True):
@@ -390,7 +388,7 @@ class CandidateTreeTest(unittest.TestCase):
 
     def test_the_known_ladders_are_deleted_not_reworded(self):
         skill = (self.ROOT / "home/common/agent-skills/skills/research/SKILL.md").read_text("utf-8")
-        self.assertNotIn("~/.agents/bin/agent-evidence", skill)
+        self.assertNotIn("~/.agents/bin/agent-" "evidence", skill)
         sys.path.insert(0, str(self.ROOT / "python"))
         try:
             self.assertIsNone(importlib.util.find_spec("agent_tools.release_bridge"))

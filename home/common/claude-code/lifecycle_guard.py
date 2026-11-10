@@ -188,8 +188,7 @@ LIFECYCLE_GRAMMAR = (
 )
 DETACHING_ROUTES = (
     "a detached process outlives the task stop; run it with the Bash tool's "
-    "background mode (run_in_background: true), or wrap a lifecycle launch in "
-    "launch-scope exec"
+    "background mode (run_in_background: true)"
 )
 # Characters that end a word and re-open the command position: subshells,
 # groups, `case` arms and command substitution all start a command after one.

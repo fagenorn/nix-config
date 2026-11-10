@@ -32,52 +32,15 @@ in
     # deltas) stays in each repo under docs/standards/.
     ".agents/standards".source = ./standards;
 
-    ".agents/bin/workflow-state".source =
-      agentTools.scriptLauncher "workflow-state" ./scripts/workflow-state.py;
-
-    ".agents/bin/artifact-budget" = {
-      source = ./scripts/artifact-budget;
-      executable = true;
-    };
-
-    ".agents/bin/sdd-workspace" = {
-      source = ./scripts/sdd-workspace;
-      executable = true;
-    };
-
-    ".agents/bin/task-brief" = {
-      source = ./scripts/task-brief;
-      executable = true;
-    };
-
-    # The artifact-budget module. The `artifact-budget` wrapper runs it, and
-    # `workflow-state` loads the store file this link resolves to into its own
-    # process (issue 498 D2, D7).
-    ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
-    # The `workflow-state` command, which its entry point imports (issue 612).
-    ".agents/lib/python/workflow_state.py".source = ./scripts/workflow_state.py;
-    ".agents/lib/python/workflow_delivery.py".source = ./scripts/workflow_delivery.py;
-    ".agents/lib/python/workflow_delivery_wire.py".source = ./scripts/workflow_delivery_wire.py;
-    ".agents/lib/python/workflow_delivery_build.py".source = ./scripts/workflow_delivery_build.py;
-    ".agents/lib/python/delivery_model" = {
-      source = ./scripts/delivery_model;
-      recursive = false;
-    };
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
-    ".agents/share/ship-delivery.md".source = ../../../python/ship-delivery.md;
 
     # The platform manifest: authored data with nothing templated, so this
     # store copy is byte-identical to the repository's (D1).
     ".agents/share/platform-manifest.json".source = ./platform-manifest.json;
 
-    # The host admission library and the host declaration it reads. The
-    # declaration is authored host policy -- per route, whether it is supported
-    # and how many agent slots one root session may hold -- read by
-    # `workflow-state` and the conformance check through that library (D2, D18).
-    # The library lives in the agent_tools package; this copy serves only
-    # `workflow-state`'s transitional installed-layout load, and #178 deletes it
-    # (#177 D6).
-    ".agents/lib/python/host_admission.py".source = ../../../python/agent_tools/host_admission.py;
+    # The host declaration: authored host policy -- per route, whether it is
+    # supported and how many agent slots one root session may hold -- read by
+    # the conformance check through `agent_tools.host_admission`.
     ".agents/share/host-declaration.json".source = ./host-declaration.json;
 
     # Claude accepts Home Manager's recursive file links, so its view of the
@@ -125,18 +88,8 @@ in
     unset skillRoot skillName target foreign entry
   '';
 
-  # Installed agent modules are links into the store, where every file has
-  # modification time 1, so bytecode cached beside a link could outlive a
-  # same-size edit. Once the links are updated, every activation removes the
-  # library's bytecode cache; a failure is reported and the switch goes on
-  # (issue 567; README § Installed module library).
-  home.activation.clearAgentModuleBytecode = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
-    run ${pkgs.runtimeShell} ${./scripts/clear-library-bytecode} "$HOME/.agents/lib/python" \
-      || errorEcho "Clearing $HOME/.agents/lib/python/__pycache__ failed (see the error above). While it remains, an installed agent module may run stale bytecode: remove it and any .pycache-clear.* directory beside it by hand."
-  '';
-
-  # The workflow skills invoke these helpers by bare name (`workflow-state`,
-  # `agent-evidence`), so ~/.agents/bin must be on PATH or every spawned agent
+  # The workflow skills invoke these helpers by bare name (`forge-issue`,
+  # `resolve-project`), so ~/.agents/bin must be on PATH or every spawned agent
   # shell gets exit 127 — the failure codex-companion hit before it was wrapped
   # onto PATH (see home/common/claude-code/default.nix).
   home.sessionPath = [ "$HOME/.agents/bin" ];

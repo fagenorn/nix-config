@@ -401,7 +401,7 @@ NOTE: cache reads measure logical context re-processing (tokens the model
 - Runs: on 2026-10-26T20:45:55.750Z .. 2026-10-26T20:46:15.309Z, total_cost_usd 0.1700839; off 2026-10-26T20:46:43.251Z .. 2026-10-26T20:47:24.071Z, total_cost_usd 0.16671929999999996. Both `subtype` success, exit 0, two `general-purpose` subagents, sibling 2 first record after sibling 1's last, every upstream status 200, no 429.
 - Proxy lines: on 7 `/v1/messages` lines, 2 `"reorder":"applied"`, 2 `applied_at_cap`, 4 `not_subagent`; off 7 `/v1/messages` lines, no `reorder` field at all. Keepalive pings: on 0, off 0 (neither run idled past the ping threshold).
 - Reading: sibling 1's windowed start-up is `None` in both runs because the window opens at sibling 2's first record; sibling 2's start-up row matches the `1st read` column above within its `k` rounding.
-- Run: `env PYTHONPATH="$PWD/python" python3 $E/ac3.py run <on|off> $E <port>`, then `… measure <on|off> $E <proxy log>`; table: `just agent-costs --report cache --projects-dir $E/<arm>-projects --events-since <window since> --events-before <window before>`.
+- Run: `env PYTHONPATH="$PWD/python" python3 $E/ac3.py run <on|off> $E <port>`, then `… measure <on|off> $E <proxy log>`; table: the cost report of the time (since retired), over `$E/<arm>-projects`, bounded by the window since and before.
 
 ## AC4 evidence — A/B eval
 
@@ -409,12 +409,12 @@ Appended by Task 5; the sections above are unchanged (D10).
 
 One run of the retired issue-pipeline eval 1 per arm, on first, each against its own built-launcher instance; the two runs differ only in `--reorder`. One trial per arm, not rerun toward a pass (#422 D27).
 
-| Arm | VERDICT | Asserts | agent-costs list-price USD | results.jsonl cost_usd | ts | wall_s | Proxy lines | Pings |
+| Arm | VERDICT | Asserts | cost report list-price USD | results.jsonl cost_usd | ts | wall_s | Proxy lines | Pings |
 |-----|---------|---------|----------------------------|------------------------|----|--------|-------------|-------|
 | on (`--keepalive --reorder`) | VERDICT: PASS (9/9 asserts) | 9/9 | 1.042106 | 1.042106 | 2026-10-26T20:58:51Z | 281 | 32 `/v1/messages`, 1 `reorder:applied`, 34 `reorder` fields | 0 |
 | off (`--keepalive`) | VERDICT: PASS (9/9 asserts) | 9/9 | 0.984163 | 0.984163 | 2026-10-26T21:04:10Z | 293 | 28 `/v1/messages`, 0 `reorder:applied`, 0 `reorder` fields | 0 |
 
-Thresholds (AC4): the on `VERDICT:` is `PASS`: met. The on list-price cost is at most the off one: missed (on 1.042106 vs off 0.984163 USD, difference +0.057944). Both costs are `cost_basis` `list-price`, from `just agent-costs --format json --days 0` over an isolated copy of that run's own transcripts (one session, root plus subagent transcripts, completeness checked against the source projects dir). The cost comparison is one trial per arm of a model-driven pipeline, so the difference is the observed value of a single pair, not an estimate of the reorder's effect. Keepalive pings: no `ping` event appears in either log, so there is no `ping` usage to report beside the cost (D18, not gating).
+Thresholds (AC4): the on `VERDICT:` is `PASS`: met. The on list-price cost is at most the off one: missed (on 1.042106 vs off 0.984163 USD, difference +0.057944). Both costs are `cost_basis` `list-price`, from the cost report of the time (since retired), run in JSON with no day limit over an isolated copy of that run's own transcripts (one session, root plus subagent transcripts, completeness checked against the source projects dir). The cost comparison is one trial per arm of a model-driven pipeline, so the difference is the observed value of a single pair, not an estimate of the reorder's effect. Keepalive pings: no `ping` event appears in either log, so there is no `ping` usage to report beside the cost (D18, not gating).
 
 `PASS`/`FAIL`/`VERDICT` lines:
 

@@ -22,8 +22,8 @@ The researcher:
 
 ## Live availability and blocking evidence
 
-A live availability or blocking conclusion keeps the one-file contract and return shape: the evidence and its validation result go in the same findings file.
+A live availability or blocking conclusion keeps the one-file contract and return shape: the evidence goes in the same findings file.
 
 Record the evidence as a schema-1 object of `kind` `research-observations`. Each observation has a unique `id`, an independent `execution_id`, an `observed_at` with an explicit UTC offset, a `source` and an `outcome`. A `transient` conclusion cites exactly one observation in `observation_ids` and names an independent `follow_up`; a `standing` conclusion needs at least two observations with distinct `execution_id` and `observed_at` values.
 
-Write the object to a temporary file and run `agent-evidence research <artifact.json>`. Return a standing conclusion only after exit 0. On failure, keep the observations and diagnostics in the findings file, return no standing conclusion, and delete the temporary input.
+Return a standing conclusion only when the object meets these rules; otherwise keep the observations in the findings file and return no standing conclusion.

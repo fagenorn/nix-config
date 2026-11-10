@@ -29,8 +29,7 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME/.agents/share"
 cp "$TREE/home/common/agent-skills/platform-manifest.json" \
   "$TREE/home/common/agent-skills/host-declaration.json" "$HOME/.agents/share/"
-unset CLAUDE_CONFIG_DIR CLAUDE_CODE_FORCE_SESSION_PERSISTENCE CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS EVAL_TREE EVAL_SETTINGS EVAL_MAX_USD EVAL_TRIALS \
-  EVAL_POLICY AGENT_PHASE_BUDGET
+unset CLAUDE_CONFIG_DIR CLAUDE_CODE_FORCE_SESSION_PERSISTENCE CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS EVAL_TREE EVAL_SETTINGS EVAL_MAX_USD EVAL_TRIALS
 
 FAKE_BIN="$SCRATCH/fakebin"
 mkdir -p "$FAKE_BIN"
@@ -41,10 +40,8 @@ cat >"$FAKE_BIN/claude" <<'FAKE'
 # $FAKE_STATE/release. FAKE_EMPTY=1 makes a -p run print nothing on stdout, as a
 # timed-out run does. Any non -p invocation (an auth probe) is recorded as `other=`.
 # A -p run also leaves, in $FAKE_STATE: the --settings file it was given (settings.json),
-# where `workflow-state` resolved (which-workflow-state), that file's content
-# (workflow-state-shim), AGENT_PHASE_BUDGET (agent-phase-budget),
-# CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS (print-bg-wait-ceiling) and the `gh` it
-# resolves (gh=).
+# CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS (print-bg-wait-ceiling), where
+# `resolve-project` resolved (resolve_project=) and the `gh` it resolves (gh=).
 if [ "${1:-}" != -p ]; then
   printf 'other=%s\n' "$*" >>"$FAKE_STATE/record"
   exit 0
@@ -65,9 +62,6 @@ for argument in "$@"; do
   previous=$argument
 done
 [ -n "$settings_file" ] && cp "$settings_file" "$FAKE_STATE/settings.json"
-command -v workflow-state >"$FAKE_STATE/which-workflow-state"
-cat "$(command -v workflow-state)" >"$FAKE_STATE/workflow-state-shim" 2>/dev/null
-printenv AGENT_PHASE_BUDGET >"$FAKE_STATE/agent-phase-budget"
 printenv CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS >"$FAKE_STATE/print-bg-wait-ceiling"
 if [ -d .claude ]; then
   ( find .claude -type l | sed 's|^\./||' | sort | while IFS= read -r link; do
@@ -272,48 +266,39 @@ check "bad settings: the message names the settings file" grep -q 'run-eval: set
 check "bad settings: claude -p never ran" test -z "$(recorded run)"
 check "bad settings: no sandbox and no temp root remain" tmp_is_empty
 
-# --- tree mode shims workflow-state and points the meter at the tree --------------
+# --- a settings file that parses but is not exactly one JSON object ----------------
+# jq empty accepts an empty file, a bare array and several values; none is a settings file.
+for shape in empty whitespace array two-objects; do
+  scenario "bad-settings-$shape"
+  case "$shape" in
+    empty) : >"$S/settings.json" ;;
+    whitespace) printf ' \n\t\n' >"$S/settings.json" ;;
+    array) printf '[]\n' >"$S/settings.json" ;;
+    two-objects) printf '{}\n{}\n' >"$S/settings.json" ;;
+  esac
+  run_env EVAL_SETTINGS="$S/settings.json"
+  status=$?
+  check "bad settings ($shape): the runner exits 2" test "$status" -eq 2
+  check "bad settings ($shape): the message names the settings file" grep -q 'run-eval: settings file is not one JSON object' "$S/log"
+  check "bad settings ($shape): claude -p never ran" test -z "$(recorded run)"
+  check "bad settings ($shape): no sandbox and no temp root remain" tmp_is_empty
+done
+
+# --- tree mode passes the settings through and shims only table commands --------
 scenario tree-shims
 run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE"
-check "shim: workflow-state resolves to the tree shim" grep -q '/run-eval-tree\.[^/]*/bin/workflow-state$' "$STATE/which-workflow-state"
-check "shim: it runs the tree's script" grep -q "home/common/agent-skills/scripts/workflow-state.py" "$STATE/workflow-state-shim"
-check "settings: the meter hook names the tree shim" jq -e '[.hooks.PreToolUse[0].hooks[1].command | endswith("/bin/context-meter")] | all' "$STATE/settings.json"
+check "settings: the --settings copy is byte-identical to EVAL_SETTINGS" cmp -s "$SETTINGS_FIXTURE" "$STATE/settings.json"
 check "settings: the guard entry is unchanged" jq -e '.hooks.PreToolUse[0].hooks[0].command == "/nix/store/0000-claude-bash-lifecycle-guard/bin/claude-bash-lifecycle-guard"' "$STATE/settings.json"
-check "row: policy is null without EVAL_POLICY" jq -e 'select(has("policy") and .policy == null)' "$COPY/results/results.jsonl"
+check "shim: resolve-project resolves to the tree shim" grep -q '^resolve_project=.*/run-eval-tree\.[^/]*/bin/resolve-project$' "$STATE/record"
+check "row: no policy key" jq -e 'select(has("policy") | not)' "$COPY/results/results.jsonl"
 
-# --- a settings file with no meter hook is refused --------------------------------
-scenario no-meter
-jq '.hooks.PreToolUse = []' "$SETTINGS_FIXTURE" >"$S/settings.json"
+# --- a settings file without any hook is accepted unchanged ------------------------
+scenario no-hooks
+jq 'del(.hooks)' "$SETTINGS_FIXTURE" >"$S/settings.json"
 run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$S/settings.json"
 status=$?
-check "no meter: the runner exits 2" test "$status" -eq 2
-check "no meter: the message names the file" grep -q 'run-eval: settings file has no context-meter hook' "$S/log"
-check "no meter: claude -p never ran" test -z "$(recorded run)"
-check "no meter: no sandbox and no temp root remain" tmp_is_empty
-
-# --- EVAL_POLICY ------------------------------------------------------------------
-scenario policy
-run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE" EVAL_POLICY="threshold=140000"
-check "policy: exported to the run" grep -qx 'threshold=140000' "$STATE/agent-phase-budget"
-check "policy: recorded on the row" jq -e 'select(.policy == "threshold=140000")' "$COPY/results/results.jsonl"
-scenario inherited-budget
-run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE" AGENT_PHASE_BUDGET="threshold=90000"
-check "inherited budget: the run happened" test -e "$STATE/agent-phase-budget"
-check "inherited budget: without EVAL_POLICY the run does not carry it" test ! -s "$STATE/agent-phase-budget"
-check "inherited budget: the row records no policy" jq -e 'select(has("policy") and .policy == null)' "$COPY/results/results.jsonl"
-scenario bad-policy
-run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE" EVAL_POLICY="boot=slim"
-status=$?
-check "bad policy: exits 2 before any sandbox" test "$status" -eq 2
-check "bad policy: names the value" grep -q "run-eval: invalid EVAL_POLICY 'boot=slim'" "$S/log"
-check "bad policy: claude -p never ran" test -z "$(recorded run)"
-check "bad policy: no sandbox and no temp root remain" tmp_is_empty
-scenario policy-without-tree
-run_env EVAL_TREE= EVAL_POLICY="threshold=140000"
-status=$?
-check "policy without tree: exits 2" test "$status" -eq 2
-check "policy without tree: says so" grep -q 'run-eval: EVAL_POLICY requires EVAL_TREE' "$S/log"
-check "policy without tree: claude -p never ran" test -z "$(recorded run)"
+check "no hooks: the runner ran claude -p" test -n "$(recorded run)"
+check "no hooks: the copy is the file given" cmp -s "$S/settings.json" "$STATE/settings.json"
 
 # --- exit path 4: SIGTERM to the runner during the claude run ----------------------
 scenario sigterm

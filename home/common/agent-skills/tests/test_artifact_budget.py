@@ -1,114 +1,31 @@
 from __future__ import annotations
 
-import argparse
 import errno
 import json
 import hashlib
-import importlib.util
 import io
 import os
-import re
 from copy import deepcopy
 from pathlib import Path
 import subprocess
-import shutil
 import sys
 import tempfile
-import types
 import unittest
 from unittest import mock
 
-from ._delivery_model_fixtures import contract_and_delivery, custody, ship_handoff, workflow_responses
-from .test_attempt_custody import DeliveredCustody
-from .test_delivered_control import DELIVERED, at
-from .test_workflow_state import load_source_module
+from agent_tools import artifact_budget
 
 
 ROOT = Path(__file__).parents[4]
-SCRIPT = ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
+COMMAND = (sys.executable, "-m", "agent_tools.artifact_budget")
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 FIXTURES = Path(__file__).parent / "fixtures/artifact-budgets"
-sys.path.insert(0, str(SCRIPT.parent))
-import artifact_budget
-
-WORKFLOW_STATE = ROOT / "home/common/agent-skills/scripts/workflow_state.py"
-SKILL_TREES = (ROOT / "home/common/agent-skills/skills", ROOT / "home/common/claude-code/skills")
-# Issue 473 D5: the skill-named subcommands whose stdout is no workflow response.
-NOT_WORKFLOW_RESPONSES = frozenset({"build-delivery", "resume-pack"})
-SKILL_CALL = re.compile(r"workflow-state ([a-z][a-z-]*)")
-VALIDATOR_PIPE = re.compile(r"\|\s*artifact-budget validate-report(?P<arguments>[^|]*)")
-
-
-def skill_texts():
-    """Every skill document of the shared and Claude-only trees, evals excluded."""
-    for tree in SKILL_TREES:
-        for path in sorted(tree.rglob("*.md")):
-            if "evals" not in path.relative_to(tree).parts:
-                yield path, path.read_text(encoding="utf-8")
-
-
-def workflow_state_subcommands():
-    """The subcommand names of workflow-state's own parser, loaded from source."""
-    parser = load_source_module(WORKFLOW_STATE, "artifact_budget_test_workflow_state").build_parser()
-    return frozenset(next(action for action in parser._actions
-                          if isinstance(action, argparse._SubParsersAction)).choices)
-
-
-def skill_named_workflow_responses():
-    """Every workflow-state subcommand a skill names whose reply is a workflow response."""
-    commands = workflow_state_subcommands()
-    named = {name for _, text in skill_texts() for name in SKILL_CALL.findall(text)}
-    return frozenset(named & commands) - NOT_WORKFLOW_RESPONSES
-
-# The closed acceptance_state set (#272 D8), spelled out so the test can fail.
-ACCEPTANCE = ("met", "unmet", "human_pending", "not_applicable")
 
 
 class ArtifactBudgetCliTest(unittest.TestCase):
-    def test_describe_pins_exact_policy_bytes_for_every_operation(self):
-        with tempfile.TemporaryDirectory() as raw:
-            directory = Path(raw)
-            policy = directory / "policy.json"
-            original = POLICY.read_bytes()
-            policy.write_bytes(original)
-            command = [sys.executable, str(SCRIPT)]
-            described = subprocess.run(command + ["describe", "--kind", "review-package",
-                "--format", "json", "--policy", str(policy)], capture_output=True)
-            self.assertEqual(described.returncode, 0, described.stderr)
-            value = json.loads(described.stdout)
-            identity = "sha256:" + hashlib.sha256(original).hexdigest()
-            self.assertEqual(value, {"schema_version": 1, "kind": "artifact-budget-description",
-                "artifact_kind": "review-package", "limits": json.loads(original)["artifacts"]["review-package"],
-                "report_wire_max_bytes": json.loads(original)["phase_reports"]["wire_max_bytes"],
-                "policy_sha256": identity})
-            self.assertEqual(described.stdout, json.dumps(value, ensure_ascii=False,
-                sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
-            loaded = artifact_budget.load_limits(policy)["review-package"]
-            self.assertEqual(value["limits"], vars(loaded))
-            root = directory / "note.md"
-            root.write_text("bounded\n")
-            operations = [
-                (["check", "--kind", "design-spec", "--root", str(root), "--format", "json"], None),
-                (["validate-report", "--boundary", "producer", "--input", "-"],
-                 b'{"state":"failed","artifact":null,"notes":"fixture"}'),
-                (["validate-detail-input", "--input", "-"],
-                 b'{"interface_version":1,"findings":[{"axis":"conformance","severity":"Minor","status":"parked","text":"f","ruling":"r"}]}'),
-            ]
-            for argv, payload in operations:
-                with self.subTest(operation=argv[0]):
-                    policy.write_bytes(original)
-                    pinned = command + argv + ["--policy", str(policy), "--expected-policy-sha256", identity]
-                    good = subprocess.run(pinned, input=payload, capture_output=True)
-                    self.assertEqual(good.returncode, 0, good.stderr)
-                    policy.write_bytes(original + b"\n")
-                    refused = subprocess.run(pinned, input=payload, capture_output=True)
-                    label = {"check": "invalid input", "validate-report": "invalid report",
-                             "validate-detail-input": "invalid detail input"}[argv[0]]
-                    self.assertIn("policy", self.assert_refusal(refused, label))
-
     def run_check(self, kind: str, root: Path, policy: Path = POLICY):
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "check", "--kind", kind,
+            [*COMMAND, "check", "--kind", kind,
              "--root", str(root), "--policy", str(policy), "--format", "json"],
             text=True, capture_output=True, check=False,
         )
@@ -117,7 +34,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if use_stdin:
             return subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", boundary,
+                [*COMMAND, "validate-report", "--boundary", boundary,
                  "--input", "-", "--policy", str(POLICY)],
                 input=encoded, capture_output=True, check=False,
             )
@@ -125,7 +42,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             candidate = Path(raw) / "candidate.json"
             candidate.write_bytes(encoded)
             return subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", boundary,
+                [*COMMAND, "validate-report", "--boundary", boundary,
                  "--input", str(candidate), "--policy", str(POLICY)],
                 capture_output=True, check=False,
             )
@@ -144,428 +61,6 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         self.assertTrue(reason, stderr)
         self.assertEqual(reason, reason.strip(), stderr)
         return reason
-
-    def test_ship_handoff_v2_acceptance_state_is_required_closed_and_paired(self):
-        """#272 D8, D9, D11: the v2 handoff gets the same pairing as the legacy one."""
-        model = artifact_budget._delivery_model()
-        contract, delivery = contract_and_delivery(model)
-        handoff = ship_handoff(model, contract, delivery)
-        detail = ".superpowers/issue-delivery/151/run-1/sdd-a.json"
-        residual = {**handoff, "review_state": "residuals", "report_path": detail,
-                    "notes": f"details: {detail}"}
-        accepted = [
-            *({**handoff, "acceptance_state": v} for v in ("met", "human_pending", "not_applicable")),
-            *({**residual, "acceptance_state": v}
-              for v in ("met", "unmet", "human_pending", "not_applicable")),
-            {**handoff, "review_state": "unknown", "acceptance_state": "not_applicable"},
-        ]
-        for index, payload in enumerate(accepted):
-            with self.subTest(accepted=index):
-                result = self.run_validate("ship-handoff", payload, use_stdin=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-        rejected = [
-            {key: value for key, value in handoff.items() if key != "acceptance_state"},
-            {**handoff, "acceptance_state": "unmet"},
-            {**handoff, "acceptance_state": "partially_met"},
-            {**handoff, "review_state": "unknown", "acceptance_state": "met"},
-            {**handoff, "review_state": "partial", "acceptance_state": "met"},
-            {**residual, "acceptance_state": "unmet", "report_path": None,
-             "notes": "no durable detail"},
-        ]
-        for index, payload in enumerate(rejected):
-            with self.subTest(rejected=index):
-                result = self.run_validate("ship-handoff", payload, use_stdin=True)
-                self.assert_refusal(result, "invalid report")
-
-    def test_workflow_response_boundary_red_accepts_valid_v3_bootstrap_shape(self):
-        """Task 2 must add this closed raw boundary, not repair this fixture."""
-        bootstrap = {
-            "interface_version": 3,
-            "kind": "workflow_bootstrap",
-            "run_id": "task-151-synthetic",
-            "requirements": [],
-            "verification": [],
-        }
-        result = self.run_validate("workflow-response", bootstrap, use_stdin=True)
-        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8"))
-        self.assertEqual(result.stdout, json.dumps(
-            bootstrap, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8") + b"\n")
-
-    def test_workflow_response_takes_its_own_wire_bound(self):
-        """Control responses grow with the issue set, past the phase-report bound."""
-        policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        report_bound = policy["phase_reports"]["wire_max_bytes"]
-        response_bound = policy["workflow_responses"]["wire_max_bytes"]
-        self.assertGreater(response_bound, report_bound)
-
-        def bootstrap(count):
-            return {"interface_version": 3, "kind": "workflow_bootstrap", "run_id": "bound",
-                    "requirements": [{"issue": issue, "owner": f"{issue}:1",
-                        "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
-                                    "action_id": f"{issue}:1:1"},
-                        "recorded_worktree": f"/worktrees/issue-{issue}",
-                        "contract_digest": None}
-                        for issue in range(1, count + 1)],
-                    "verification": []}
-
-        def canonical(value):
-            return json.dumps(value, sort_keys=True,
-                              separators=(",", ":")).encode("utf-8") + b"\n"
-
-        count = 1
-        while len(canonical(bootstrap(count))) <= report_bound:
-            count += 1
-        within = bootstrap(count)
-        accepted = self.run_validate("workflow-response", within, use_stdin=True)
-        self.assertEqual((accepted.returncode, accepted.stdout), (0, canonical(within)),
-                         accepted.stderr.decode("utf-8"))
-        while len(canonical(bootstrap(count))) <= response_bound:
-            count += 1
-        refused = self.run_validate("workflow-response", bootstrap(count), use_stdin=True)
-        reason = self.assert_refusal(refused, "invalid report")
-        self.assertIn(str(response_bound), reason)
-
-    def test_null_digest_summary_carries_legacy_custody_and_bootstrap_reports_digest(self):
-        model = artifact_budget._delivery_model()
-        response = deepcopy(workflow_responses(model)["control"])
-        response["summaries"][0].update(contract_digest=None, pending_stage_ids=[],
-            requirements=[{"kind": "delivery_contract", "subject_id": "151",
-                           "reason_code": "delivery_contract_required",
-                           "detail_pointer": None}])
-        response["actions"] = [item for item in response["actions"] if item.get("issue") != 151]
-        self.assertIsNotNone(response["summaries"][0]["custody"])
-        accepted = self.run_validate("workflow-response", response, use_stdin=True)
-        self.assertEqual(accepted.returncode, 0, accepted.stderr)
-        response["summaries"][0]["requirements"] = []
-        bare = self.run_validate("workflow-response", response, use_stdin=True)
-        self.assertEqual(bare.returncode, 0, bare.stderr)
-        requirement = {"issue": 151, "owner": "151:1", "custody": custody(),
-                       "recorded_worktree": "/worktree"}
-        for digest, code in ((None, 0), ("sha256:" + "a" * 64, 0), ("absent", 2)):
-            value = dict(requirement) if digest == "absent" else {**requirement, "contract_digest": digest}
-            bootstrap = {"interface_version": 3, "kind": "workflow_bootstrap",
-                         "run_id": "r", "requirements": [value], "verification": []}
-            with self.subTest(digest=digest):
-                self.assertEqual(self.run_validate("workflow-response", bootstrap,
-                                                   use_stdin=True).returncode, code)
-
-    def test_ship_handoff_reads_under_the_response_wire_bound(self):
-        """A ship handoff carries the contract and intents, past the phase-report bound."""
-        policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        report_bound = policy["phase_reports"]["wire_max_bytes"]
-        response_bound = policy["workflow_responses"]["wire_max_bytes"]
-        candidate = {**self.lifecycle(), "state": "complete",
-                     "spec_artifact": self.full("design-spec"),
-                     "plan_artifact": self.full("implementation-plan"),
-                     "head_sha": "b" * 40, "review_state": "clean",
-                     "report_path": None, "notes": "ok"}
-        within = {**candidate, "worktree_path": "/tmp/" + "w" * report_bound}
-        accepted = self.run_validate("ship-handoff", within, use_stdin=True)
-        self.assertEqual(accepted.returncode, 0, accepted.stderr.decode("utf-8"))
-        self.assertGreater(len(accepted.stdout), report_bound)
-        beyond = {**candidate, "worktree_path": "/tmp/" + "w" * response_bound}
-        refused = self.run_validate("ship-handoff", beyond, use_stdin=True)
-        reason = self.assert_refusal(refused, "invalid report")
-        self.assertIn(str(response_bound), reason)
-
-    def test_delivery_v2_boundaries_accept_closed_shapes_and_reject_hybrids(self):
-        model = artifact_budget._delivery_model()
-        contract, _ = contract_and_delivery(model)
-        digest = model.canonical_digest(contract)
-        active = custody()
-        checkpoint = {
-            "interface_version": 2, "issue": 151, "custody": active,
-            "contract_digest": digest, "delivery_observations": [],
-            "authority_observations": [], "reevaluation_evidence": [],
-            "requested_scope": None, "detail_state": "none",
-            "report_path": None, "notes": "",
-        }
-        historical = {"issue": 151, "state": "failed", "pr_url": None,
-            "merge_sha": None, "issue_closed": False, "discussion_items": [],
-            "detail_state": "none", "report_path": None, "notes": "failed"}
-        summary = {
-            "interface_version": 2, "issue": 151, "state": "terminal_failed",
-            "custody": active, "historical_owner_result": historical,
-            "delivery_contract_digest": digest, "delivery_observations": [],
-            "authority_observations": [], "reevaluation_evidence": [],
-            "detail_state": "none", "report_path": None, "notes": "failed",
-        }
-        for boundary, value in (("ship-checkpoint", checkpoint),
-                                ("ship-summary", summary)):
-            accepted = self.run_validate(boundary, value, use_stdin=True)
-            self.assertEqual(accepted.returncode, 0, accepted.stderr)
-            self.assertEqual(accepted.stdout, json.dumps(
-                value, sort_keys=True, separators=(",", ":")
-            ).encode() + b"\n")
-        responses = workflow_responses(model)
-        for name, response in responses.items():
-            with self.subTest(response=name):
-                accepted = self.run_validate("workflow-response", response, use_stdin=True)
-                self.assertEqual(accepted.returncode, 0, accepted.stderr)
-        malformed = []
-        extra = deepcopy(checkpoint); extra["attempt"] = 1
-        malformed.append(("ship-checkpoint", extra))
-        missing_scope = deepcopy(responses["owner"]); missing_scope.pop("requested_scope")
-        malformed.append(("workflow-response", missing_scope))
-        hybrid = deepcopy(summary); hybrid["delivery_contract_digest"] = "not-a-digest"
-        malformed.append(("ship-summary", hybrid))
-        nested = deepcopy(responses["checkpointed"])
-        nested["requirements"] = [{"kind": "tracker"}]
-        malformed.append(("workflow-response", nested))
-        for boundary, value in malformed:
-            refused = self.run_validate(boundary, value, use_stdin=True)
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertEqual(refused.stdout, b"")
-
-    def test_v2_boundaries_compose_legacy_result_validation(self):
-        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
-                                 if key == "_artifact_budget_delivery_model"
-                                 or key.startswith("_artifact_budget_delivery_model.")])
-        model = artifact_budget._delivery_model()
-        contract, _ = contract_and_delivery(model)
-        digest = model.canonical_digest(contract)
-        active = custody()
-        historical = {"issue": 151, "state": "failed", "pr_url": None,
-            "merge_sha": None, "issue_closed": False, "discussion_items": [],
-            "detail_state": "none", "report_path": None, "notes": "failed"}
-        summary = {"interface_version": 2, "issue": 151,
-            "state": "terminal_failed", "custody": active,
-            "historical_owner_result": historical,
-            "delivery_contract_digest": digest, "delivery_observations": [],
-            "authority_observations": [], "reevaluation_evidence": [],
-            "detail_state": "none", "report_path": None, "notes": "failed"}
-        responses = workflow_responses(model)
-        responses["terminal"]["result"] = deepcopy(historical)
-        responses["control"]["summaries"][0]["result"] = deepcopy(historical)
-        specimens = [
-            ("ship-summary", summary, ("historical_owner_result",)),
-            ("workflow-response", responses["terminal"], ("result",)),
-            ("workflow-response", responses["control"], ("summaries", 0, "result")),
-        ]
-        for boundary, specimen, path in specimens:
-            accepted = self.run_validate(boundary, specimen, use_stdin=True)
-            self.assertEqual(accepted.returncode, 0, accepted.stderr)
-            malformed = deepcopy(specimen)
-            target = malformed
-            for part in path[:-1]:
-                target = target[part]
-            target[path[-1]] = {"bogus": 1}
-            refused = self.run_validate(boundary, malformed, use_stdin=True)
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertEqual(refused.stdout, b"")
-            mismatched = deepcopy(specimen)
-            target = mismatched
-            for part in path[:-1]:
-                target = target[part]
-            target[path[-1]]["issue"] = 152
-            refused = self.run_validate(boundary, mismatched, use_stdin=True)
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertEqual(refused.stdout, b"")
-        for raw in (b'{"interface_version":3,"kind":"workflow_bootstrap",'
-                    b'"run_id":"x","requirements":[],"requirements":[],"verification":[]}',
-                    b'{"interface_version":3,"kind":"workflow_bootstrap",'
-                    b'"run_id":"x","requirements":[],"verification":[]}\xff'):
-            refused = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary",
-                 "workflow-response", "--input", "-", "--policy", str(POLICY)],
-                input=raw, capture_output=True, check=False)
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertEqual(refused.stdout, b"")
-
-    def test_only_response_result_slots_accept_the_reconciliation_record(self):
-        """#191 D2-D4, amended by #273 D6: response slots alone accept the uncited reconciliation record."""
-        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
-                                 if key == "_artifact_budget_delivery_model"
-                                 or key.startswith("_artifact_budget_delivery_model.")])
-        model = artifact_budget._delivery_model()
-        contract, _ = contract_and_delivery(model)
-        digest = model.canonical_digest(contract)
-        durable = ".superpowers/issue-delivery/151/run-1/ship-review.json"
-        retained = ".superpowers/ship-review/151/retained-detail.json"
-        superseded = "reconciled from forge observation; superseded owner failed verdict"
-        bare = {"issue": 151, "state": "merged",
-                "pr_url": "https://github.com/fagenorn/nix-config/pull/187",
-                "merge_sha": "bad94161012db5d285176762e4f4a9247d2f4d48",
-                "issue_closed": False, "discussion_items": [],
-                "detail_state": "none", "report_path": None,
-                "notes": "reconciled from forge observation"}
-        records = {
-            "bare": bare,
-            "present": {**bare, "detail_state": "present", "report_path": durable,
-                        "notes": superseded},
-            "unpublished": {**bare, "detail_state": "unpublished",
-                            "report_path": retained, "notes": superseded},
-        }
-
-        def terminal(result):
-            value = deepcopy(workflow_responses(model)["terminal"])
-            value["result"] = deepcopy(result)
-            return value
-
-        def control(result):
-            value = deepcopy(workflow_responses(model)["control"])
-            value["summaries"][0]["result"] = deepcopy(result)
-            return value
-
-        def summary(result):
-            return {"interface_version": 2, "issue": 151, "state": "delivery_complete",
-                    "custody": custody(), "historical_owner_result": deepcopy(result),
-                    "delivery_contract_digest": digest, "delivery_observations": [],
-                    "authority_observations": [], "reevaluation_evidence": [],
-                    "detail_state": "none", "report_path": None, "notes": "merged"}
-
-        owner_twin = {**bare, "issue_closed": True}
-        for boundary, value in (("ship-summary", summary(owner_twin)),
-                                ("ship-summary", owner_twin)):
-            accepted = self.run_validate(boundary, value, use_stdin=True)
-            self.assertEqual((accepted.returncode, accepted.stderr), (0, b""))
-        for name, record in records.items():
-            for slot, wrap in (("terminal", terminal), ("control", control)):
-                with self.subTest(record=name, slot=slot):
-                    accepted = self.run_validate("workflow-response", wrap(record),
-                                                 use_stdin=True)
-                    self.assertEqual((accepted.returncode, accepted.stderr), (0, b""))
-            for version, value in ((2, summary(record)), (1, record)):
-                with self.subTest(record=name, ship_summary=version):
-                    checked = self.run_validate("ship-summary", value, use_stdin=True)
-                    if name == "bare":
-                        # #273 D6 amends #191 D3: a held merge's owner row is
-                        # `merged` with `issue_closed` false.
-                        self.assertEqual((checked.returncode, checked.stderr), (0, b""))
-                    else:
-                        self.assertEqual((checked.returncode, checked.stdout), (2, b""))
-        mutations = {
-            "null PR URL": {"pr_url": None},
-            "short merge SHA": {"merge_sha": "bad9416"},
-            "discussion items": {"discussion_items": ["lost"]},
-            "none with a path": {"report_path": durable},
-            "present without a path": {"detail_state": "present"},
-            "present with a retained path": {"detail_state": "present",
-                                             "report_path": retained},
-            "unpublished with a durable path": {"detail_state": "unpublished",
-                                                "report_path": durable},
-            "notes over the policy limit": {"notes": "n" * 501},
-            "an extra member": {"result_source": "superseded"},
-        }
-        for name, change in mutations.items():
-            for slot, wrap in (("terminal", terminal), ("control", control)):
-                with self.subTest(mutation=name, slot=slot):
-                    refused = self.run_validate("workflow-response",
-                                                wrap({**bare, **change}), use_stdin=True)
-                    self.assertEqual((refused.returncode, refused.stdout), (2, b""))
-
-    def test_a_held_merge_row_is_an_owner_report(self):
-        """#273 D6: `merged` admits `issue_closed` false; nothing else widens."""
-        held = {"issue": 273, "state": "merged",
-                "pr_url": "https://github.com/fagenorn/nix-config/pull/300",
-                "merge_sha": "c" * 40, "issue_closed": False, "discussion_items": [],
-                "detail_state": "none", "report_path": None,
-                "notes": "held for verification: https://github.com/fagenorn/nix-config/issues/273#issuecomment-1"}
-        accepted = self.run_validate("ship-summary", held, use_stdin=True)
-        self.assertEqual((accepted.returncode, accepted.stderr), (0, b""))
-        for label, change in (("null PR URL", {"pr_url": None}),
-                              ("null merge SHA", {"merge_sha": None}),
-                              ("short merge SHA", {"merge_sha": "c" * 7}),
-                              ("unpublished detail", {"detail_state": "unpublished",
-                                                      "report_path": ".superpowers/x.json"}),
-                              ("non-boolean", {"issue_closed": 0})):
-            with self.subTest(mutation=label):
-                refused = self.run_validate("ship-summary", {**held, **change},
-                                            use_stdin=True)
-                self.assertEqual((refused.returncode, refused.stdout), (2, b""))
-
-    def test_workflow_response_uses_source_and_lexical_installed_package(self):
-        payload = {"interface_version": 3, "kind": "workflow_bootstrap",
-                   "run_id": "synthetic-loader", "requirements": [], "verification": []}
-        source = self.run_validate("workflow-response", payload, use_stdin=True)
-        self.assertEqual(source.returncode, 0, source.stderr)
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); store = root / "store"; home = root / "home"
-            store.mkdir(); shutil.copy2(SCRIPT, store / "artifact_budget.py")
-            shutil.copytree(SCRIPT.parent / "delivery_model", store / "delivery_model")
-            lexical = home / ".agents/lib/python"; lexical.mkdir(parents=True)
-            (lexical / "artifact_budget.py").symlink_to(store / "artifact_budget.py")
-            (lexical / "delivery_model").symlink_to(store / "delivery_model", target_is_directory=True)
-            installed = subprocess.run(
-                [sys.executable, str(lexical / "artifact_budget.py"), "validate-report",
-                 "--boundary", "workflow-response", "--input", "-", "--policy", str(POLICY)],
-                input=json.dumps(payload).encode(), capture_output=True, check=False,
-                env={**os.environ, "HOME": str(home)},
-            )
-            self.assertEqual(installed.returncode, 0, installed.stderr)
-            self.assertEqual(installed.stdout, source.stdout)
-
-    def test_workflow_response_lexical_loader_refuses_closed_failures(self):
-        payload = (b'{"interface_version":3,"kind":"workflow_bootstrap","requirements":[],'
-                   b'"run_id":"x","verification":[]}')
-        for variant in ("missing_entry", "missing_private", "directory_entry", "wrong_interface"):
-            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as raw:
-                root = Path(raw); store = root / "store"; home = root / "home"; store.mkdir()
-                shutil.copy2(SCRIPT, store / "artifact_budget.py")
-                shutil.copytree(SCRIPT.parent / "delivery_model", store / "delivery_model")
-                package = store / "delivery_model"
-                if variant == "missing_entry": (package / "__init__.py").unlink()
-                elif variant == "missing_private": (package / "_wire.py").unlink()
-                elif variant == "directory_entry":
-                    (package / "__init__.py").unlink(); (package / "__init__.py").mkdir()
-                else: (package / "__init__.py").write_text("MODEL_INTERFACE_VERSION = 2\n")
-                lexical = home / ".agents/lib/python"; lexical.mkdir(parents=True)
-                (lexical / "artifact_budget.py").symlink_to(store / "artifact_budget.py")
-                (lexical / "delivery_model").symlink_to(package, target_is_directory=True)
-                result = subprocess.run([sys.executable, str(lexical / "artifact_budget.py"), "validate-report", "--boundary", "workflow-response", "--input", "-", "--policy", str(POLICY)], input=payload, capture_output=True, check=False, env={**os.environ, "HOME": str(home)})
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(result.stdout, b"")
-
-    def test_workflow_response_partial_package_import_cleans_namespace(self):
-        with tempfile.TemporaryDirectory() as raw:
-            # A `scripts` parent selects the source layout, so the loader reaches the
-            # broken package below instead of whatever HOME has installed.
-            root = Path(raw) / "scripts"; script = root / "artifact_budget.py"
-            package = root / "delivery_model"
-            root.mkdir(); shutil.copy2(SCRIPT, script); package.mkdir()
-            (package / "__init__.py").write_text("from . import _broken\nMODEL_INTERFACE_VERSION = 1\n")
-            (package / "_broken.py").write_text("raise RuntimeError('boom')\n")
-            name = "artifact_budget_partial_loader_test"
-            spec = importlib.util.spec_from_file_location(name, script)
-            module = importlib.util.module_from_spec(spec); sys.modules[name] = module
-            assert spec and spec.loader; spec.loader.exec_module(module)
-            with self.assertRaises(module.ArtifactBudgetError): module._delivery_model()
-            self.assertFalse(any(key == "_artifact_budget_delivery_model" or key.startswith("_artifact_budget_delivery_model.") for key in sys.modules))
-            sys.modules.pop(name, None)
-
-    def test_source_layout_missing_model_never_falls_back_to_home(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); scripts = root / "scripts"; scripts.mkdir()
-            script = scripts / "artifact_budget.py"; shutil.copy2(SCRIPT, script)
-            home = root / "home"; installed = home / ".agents/lib/python/delivery_model"
-            installed.parent.mkdir(parents=True); shutil.copytree(SCRIPT.parent / "delivery_model", installed)
-            name = "artifact_budget_source_no_fallback"
-            spec = importlib.util.spec_from_file_location(name, script)
-            module = importlib.util.module_from_spec(spec); sys.modules[name] = module
-            assert spec and spec.loader; spec.loader.exec_module(module)
-            prior_home = os.environ.get("HOME"); os.environ["HOME"] = str(home)
-            try:
-                with self.assertRaises(module.ArtifactBudgetError): module._delivery_model()
-            finally:
-                if prior_home is None: os.environ.pop("HOME", None)
-                else: os.environ["HOME"] = prior_home
-                sys.modules.pop(name, None)
-
-    def test_successful_loader_does_not_cache_missing_private_member(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); scripts = root / "scripts"; scripts.mkdir()
-            script = scripts / "artifact_budget.py"; shutil.copy2(SCRIPT, script)
-            package = scripts / "delivery_model"; shutil.copytree(SCRIPT.parent / "delivery_model", package)
-            name = "artifact_budget_stale_private"
-            spec = importlib.util.spec_from_file_location(name, script)
-            module = importlib.util.module_from_spec(spec); sys.modules[name] = module
-            assert spec and spec.loader; spec.loader.exec_module(module)
-            self.assertEqual(module._delivery_model().MODEL_INTERFACE_VERSION, 1)
-            (package / "_wire.py").unlink()
-            with self.assertRaises(module.ArtifactBudgetError): module._delivery_model()
-            self.assertFalse(any(key == "_artifact_budget_delivery_model" or key.startswith("_artifact_budget_delivery_model.") for key in sys.modules))
-            sys.modules.pop(name, None)
 
     def test_single_file_exact_boundary_and_unicode_plus_one(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -681,14 +176,14 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             root = directory / "handoff.md"
             root.write_text("small", encoding="utf-8")
             default = subprocess.run(
-                [sys.executable, str(SCRIPT), "check", "--kind", "handoff",
+                [*COMMAND, "check", "--kind", "handoff",
                  "--root", str(root), "--format", "json"],
                 text=True, capture_output=True, check=False,
                 env={**os.environ, "HOME": str(directory)},
             )
             self.assertEqual(default.returncode, 0, default.stderr)
             report = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+                [*COMMAND, "validate-report", "--boundary", "producer",
                  "--input", "-"],
                 input=b'{"state":"failed","artifact":null,"notes":"installed"}',
                 capture_output=True, check=False,
@@ -701,38 +196,21 @@ class ArtifactBudgetCliTest(unittest.TestCase):
     def materialize_descriptor(self, item: dict[str, object], directory: Path) -> Path:
         kind = item["kind"]
         root = directory / {"design-spec": "spec.md", "implementation-plan": "plan.md",
-                            "handoff": "handoff.md", "review-package": "review.json"}[kind]
+                            "handoff": "handoff.md"}[kind]
         target = item["root_bytes"]
         member_sizes = item["member_bytes"]
         if kind in {"design-spec", "handoff"}:
             root.write_bytes(b"x" * target)
             return root
-        if kind == "implementation-plan":
-            members = directory / "plan.tasks"
-            members.mkdir()
-            rows = []
-            for number, size in enumerate(member_sizes, 1):
-                prefix = f"# Task {number}\n".encode()
-                (members / f"task-{number}.md").write_bytes(prefix + b"x" * (size - len(prefix)))
-                rows.append(f"Task {number} — T{number} — f — full — "
-                            f"[task-{number}.md](plan.tasks/task-{number}.md)")
-            prefix = ("## Task index\n\n" + "\n\n".join(rows) + "\n").encode()
-            root.write_bytes(prefix + b" " * (target - len(prefix)))
-            return root
-        members = directory / "review.shards"
+        members = directory / "plan.tasks"
         members.mkdir()
-        shards = []
+        rows = []
         for number, size in enumerate(member_sizes, 1):
-            path = members / f"shard-{number:03d}.diff"
-            path.write_bytes(b"d" * size)
-            shards.append({"path": f"review.shards/{path.name}", "bytes": size})
-        manifest = {"interface_version": 1, "kind": "review-package", "purpose": "diff-review",
-                    "range": {"base": "a" * 40, "head": "b" * 40},
-                    "commits": [],
-                    "stat": {"files_changed": len(shards), "insertions": 0, "deletions": 0},
-                    "shards": shards, "total_diff_bytes": sum(member_sizes),
-                    "coverage": {"complete": True, "file_diff_count": len(shards)}}
-        prefix = json.dumps(manifest, separators=(",", ":")).encode()
+            prefix = f"# Task {number}\n".encode()
+            (members / f"task-{number}.md").write_bytes(prefix + b"x" * (size - len(prefix)))
+            rows.append(f"Task {number} — T{number} — f — full — "
+                        f"[task-{number}.md](plan.tasks/task-{number}.md)")
+        prefix = ("## Task index\n\n" + "\n\n".join(rows) + "\n").encode()
         root.write_bytes(prefix + b" " * (target - len(prefix)))
         return root
 
@@ -777,7 +255,6 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             ({"state": "complete", "artifact": self.full("handoff"), "notes": "ok"}, True),
             ({"state": "decompose_required", "artifact": self.full("design-spec", True), "notes": "ok"}, True),
             ({"state": "decompose_required", "artifact": self.full("implementation-plan", True), "notes": "ok"}, True),
-            ({"state": "decompose_required", "artifact": self.full("review-package", True), "notes": "ok"}, True),
             ({"state": "stopped", "artifact": self.full("handoff", True), "notes": "ok"}, True),
             ({"state": "failed", "artifact": None, "notes": "no root"}, True),
             ({"state": "failed", "artifact": {"kind": "handoff", "path": "h.md"}, "notes": "root"}, True),
@@ -794,100 +271,6 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 self.assertEqual(result.stdout, expected)
             else:
                 self.assert_refusal(result, "invalid report")
-
-    def summary(self, state="complete", **changes):
-        identity = "sha256:" + hashlib.sha256(POLICY.read_bytes()).hexdigest()
-        over = state == "decompose_required"
-        value = {"schema_version": 1, "kind": "review-feasibility-summary", "state": state,
-                 "plan": "artifacts/implementation-plan.json", "base": "a" * 40, "head": "b" * 40,
-                 "completed_through": 0, "plan_package_sha256": "sha256:" + "1" * 64,
-                 "forecast_sha256": "sha256:" + "2" * 64, "packing_policy_sha256": "sha256:" + "3" * 64,
-                 "artifact_policy_sha256": identity,
-                 "metrics": {"root_bytes": 17000 if over else 1000, "total_bytes": 19000 if over else 3000,
-                             "file_count": 2, "largest_member_bytes": 2000},
-                 "violations": ["root_bytes"] if over else [],
-                 "recommended_boundary": {"id": "c1", "tasks": [1, 2], "prerequisite_commit": "c" * 40,
-                     "metrics": {"root_bytes": 900, "total_bytes": 2900, "file_count": 2,
-                                 "largest_member_bytes": 2000}} if over else None}
-        value.update(changes)
-        return value
-
-    def plan_report(self, state, projection, over=False):
-        value = {"state": state, "artifact": self.full("implementation-plan", over), "notes": "n"}
-        if projection is not None:
-            value["projection"] = projection
-        return value
-
-    def sdd_stop(self, stop, **changes):
-        value = {"state": "decompose_required", "review_state": "unknown", "conformance_verdict": "not_run",
-                 "correctness_verdict": "not_run", "verification_state": "not_run", "base_sha": "a" * 40,
-                 "head_sha": "b" * 40, "acceptance_state": "not_applicable", "detail_state": "none",
-                 "report_path": None, "notes": "projected overflow at bbbbbbb through 0", "stop": stop}
-        value.update(changes)
-        return value
-
-    def test_projection_rows_at_the_producer_boundary(self):
-        over = self.summary("decompose_required")
-        rows = [
-            (self.plan_report("complete", self.summary()), True),
-            (self.plan_report("decompose_required", over), True),
-            (self.plan_report("decompose_required", {**over, "recommended_boundary": None}), True),  # D18
-            (self.plan_report("decompose_required", None, over=True), True),
-            (self.plan_report("complete", None), True),  # Stage 2c: planners stop forecasting
-            (self.plan_report("complete", over), False),
-            (self.plan_report("decompose_required", self.summary()), False),
-            (self.plan_report("decompose_required", over, over=True), False),
-            (self.plan_report("complete", self.summary(completed_through=1)), False),
-            (self.plan_report("complete", self.summary(plan="other.md")), False),
-            (self.plan_report("complete", self.summary(artifact_policy_sha256="sha256:" + "0" * 64)), False),
-            (self.plan_report("complete", self.summary(violations=["root_bytes"])), False),
-            (self.plan_report("decompose_required", {**over, "violations": []}), False),
-            (self.plan_report("complete", {**self.summary(), "extra": 1}), False),
-            (self.plan_report("complete", self.summary(schema_version=True)), False),
-            ({"state": "failed", "artifact": None, "notes": "n", "projection": self.summary()}, False),
-            ({"state": "complete", "artifact": self.full("design-spec"), "notes": "n",
-              "projection": self.summary(plan="artifacts/design-spec.json")}, False),
-        ]
-        bad_recommendations = [{"tasks": [2]}, {"tasks": [1, 1]}, {"prerequisite_commit": "c" * 39},
-                               {"metrics": over["metrics"]}, {"id": "../x"}]
-        for change in bad_recommendations:
-            rows.append((self.plan_report("decompose_required", {**over, "recommended_boundary":
-                         {**over["recommended_boundary"], **change}}), False))
-        for number, (payload, valid) in enumerate(rows):
-            with self.subTest(number=number):
-                result = self.run_validate("producer", payload, number % 2 == 0)
-                self.assertEqual(result.returncode, 0 if valid else 2, result.stderr)
-                if not valid:
-                    self.assert_refusal(result, "invalid report")
-
-    def test_decompose_required_rows_at_the_sdd_boundary(self):
-        over = self.summary("decompose_required", head="b" * 40)
-        artifact = self.full("review-package", True)
-        rows = [
-            (self.sdd_stop({"kind": "projected_overflow", "projection": over}), True),
-            (self.sdd_stop({"kind": "projected_overflow", "projection": {**over, "recommended_boundary": None}}),
-             True),                                                                     # D18
-            (self.sdd_stop({"kind": "actual_overage", "artifact": artifact}), True),
-            (self.sdd_stop({"kind": "projected_overflow", "projection": self.summary()}), False),
-            (self.sdd_stop({"kind": "projected_overflow", "projection": {**over, "head": "d" * 40}}), False),
-            (self.sdd_stop({"kind": "actual_overage", "artifact": self.full("review-package")}), False),
-            (self.sdd_stop({"kind": "actual_overage", "artifact": self.full("design-spec", True)}), False),
-            (self.sdd_stop({"kind": "other", "projection": over}), False),
-            (self.sdd_stop({"kind": []}), False),
-            (self.sdd_stop({"kind": {"projected_overflow": 1}, "projection": over}), False),
-            (self.sdd_stop({"kind": "projected_overflow", "projection": over}, review_state="clean"), False),
-            (self.sdd_stop({"kind": "projected_overflow", "projection": over}, report_path="x"), False),
-            (self.sdd_stop({"kind": "projected_overflow", "projection": over}, verification_state="passed"), False),
-        ]
-        failed = {"state": "failed", "review_state": "unknown", "conformance_verdict": "not_run",
-                  "correctness_verdict": "not_run", "verification_state": "not_run", "base_sha": None,
-                  "head_sha": None, "acceptance_state": "not_applicable", "detail_state": "none",
-                  "report_path": None, "notes": "n"}
-        rows += [(failed, True), ({**failed, "stop": {"kind": "actual_overage", "artifact": artifact}}, False)]
-        for number, (payload, valid) in enumerate(rows):
-            with self.subTest(number=number):
-                result = self.run_validate("sdd", payload, number % 2 == 0)
-                self.assertEqual(result.returncode, 0 if valid else 2, result.stderr)
 
     def test_a_producer_refusal_names_its_member_or_bound(self):
         """Issue 472 AC1, D2, D3: the notes bound and the key set are named; the notes text never is."""
@@ -941,412 +324,17 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 for token in tokens:
                     self.assertIn(token, reason)
 
-    def test_every_legacy_boundary_names_its_members_and_notes_bound(self):
-        """Issue 472 D3, D12: each legacy validator checks its key set, then notes, before its matrix."""
-        bound = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["notes_max_characters"]
-        long_notes = "n" * (bound + 1)
-        payloads = {
-            "sdd": self.make_sdd("complete", "clean", "clean", "clean", "passed",
-                                 "a" * 40, "b" * 40, "none", None),
-            "ship-handoff": {**self.lifecycle(), "state": "complete",
-                             "spec_artifact": self.full("design-spec"),
-                             "plan_artifact": self.full("implementation-plan"),
-                             "head_sha": "b" * 40, "review_state": "clean",
-                             "report_path": None, "notes": "ok"},
-            "ship-summary": {"issue": 49, "state": "stopped", "pr_url": None, "merge_sha": None,
-                             "issue_closed": False, "discussion_items": [],
-                             "detail_state": "none", "report_path": None, "notes": "ok"},
-        }
-        for boundary, payload in payloads.items():
-            with self.subTest(boundary=boundary):
-                self.assertEqual(self.run_validate(boundary, payload, True).returncode, 0)
-                reason = self.assert_refusal(
-                    self.run_validate(boundary, {**payload, "notes": long_notes}, True),
-                    "invalid report")
-                self.assertIn("notes", reason)
-                self.assertIn(str(bound), reason)
-                without = {key: value for key, value in payload.items() if key != "report_path"}
-                reason = self.assert_refusal(self.run_validate(boundary, without, False),
-                                             "invalid report")
-                self.assertIn('"report_path"', reason)
-        # Only a whole workflow response reaches this row at the CLI (issue 472 D12).
-        ledger = {"issue": 49, "state": "merged", "pr_url": "https://example.test/pr/1",
-                  "merge_sha": "c" * 40, "issue_closed": False, "discussion_items": [],
-                  "detail_state": "none", "report_path": None, "notes": long_notes}
-        with self.assertRaises(artifact_budget.ArtifactBudgetError) as caught:
-            artifact_budget.validate_ledger_result(ledger, bound)
-        self.assertIn("notes", str(caught.exception))
-        self.assertIn(str(bound), str(caught.exception))
-
-    def test_ship_summary_refusals_name_the_member_and_rule(self):
-        """Issue 559 AC2, D6, D7: every ship-summary rule names its member and rule, on v1 and v2."""
-        self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
-                                 if key == "_artifact_budget_delivery_model"
-                                 or key.startswith("_artifact_budget_delivery_model.")])
-        bound = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["notes_max_characters"]
-        model = artifact_budget._delivery_model()
-        contract, _ = contract_and_delivery(model)
-        digest = model.canonical_digest(contract)
-        durable = ".superpowers/issue-delivery/151/run-1/ship-review.json"
-        retained = ".superpowers/ship-review/151/retained-detail.json"
-        stopped = {"issue": 151, "state": "stopped", "pr_url": None, "merge_sha": None,
-                   "issue_closed": False, "discussion_items": [], "detail_state": "none",
-                   "report_path": None, "notes": "stopped"}
-        merged = {**stopped, "state": "merged", "pr_url": "https://github.com/fagenorn/nix-config/pull/187",
-                  "merge_sha": "c" * 40, "issue_closed": True, "notes": "merged"}
-
-        def wrapped(result):
-            return {"interface_version": 2, "issue": 151, "state": "terminal_failed",
-                    "custody": custody(), "historical_owner_result": result,
-                    "delivery_contract_digest": digest, "delivery_observations": [],
-                    "authority_observations": [], "reevaluation_evidence": [],
-                    "detail_state": "none", "report_path": None, "notes": "failed"}
-
-        summary, state = "invalid ship summary: ", "invalid ship summary state: "
-        rows = (
-            (stopped, {"issue": 0}, summary + "issue", "positive integer"),
-            (stopped, {"discussion_items": ["lost"]}, summary + "discussion_items", "empty list"),
-            (stopped, {"issue_closed": 0}, summary + "issue_closed", "boolean"),
-            (stopped, {"detail_state": "partial"}, summary + "detail_state", "none, present or unpublished"),
-            (stopped, {"report_path": durable}, summary + "report_path", "null when detail_state is none"),
-            (stopped, {"detail_state": "present", "report_path": retained, "notes": retained},
-             summary + "report_path", "issue-delivery/ when detail_state is present"),
-            (stopped, {"detail_state": "unpublished", "report_path": durable, "notes": durable},
-             summary + "report_path", "outside issue-delivery/ when detail_state is unpublished"),
-            (stopped, {"detail_state": "present", "report_path": durable},
-             summary + "report_path", "cited in notes when detail_state is present"),
-            (stopped, {"pr_url": ""}, summary + "pr_url", "null or a non-empty string"),
-            (merged, {"pr_url": None}, state + "pr_url", "non-empty string when state is merged"),
-            (merged, {"merge_sha": "c" * 7}, state + "merge_sha", "40-hex commit when state is merged"),
-            (merged, {"detail_state": "unpublished", "report_path": retained, "notes": retained},
-             state + "detail_state", "none or present when state is merged"),
-            (stopped, {"merge_sha": "c" * 40}, state + "merge_sha", "null when state is stopped"),
-            ({**stopped, "state": "failed"}, {"issue_closed": True}, state + "issue_closed",
-             "false when state is failed"),
-            (stopped, {"state": "closed"}, state + "state", "merged, stopped or failed"),
-            (stopped, {"notes": "n" * (bound + 1)}, "notes", str(bound)),
-        )
-        for accepted in (stopped, merged, wrapped(stopped), wrapped(merged)):
-            self.assertEqual(self.run_validate("ship-summary", accepted, True).returncode, 0)
-        for base, change, member, rule in rows:
-            for version, value in ((1, {**base, **change}), (2, wrapped({**base, **change}))):
-                with self.subTest(member=member, rule=rule, version=version):
-                    reason = self.assert_refusal(self.run_validate("ship-summary", value, version == 1),
-                                                 "invalid report")
-                    if version == 2:
-                        self.assertTrue(reason.startswith("ship-summary: "), reason)
-                    self.assertIn(member, reason)
-                    self.assertIn(rule, reason)
-                    self.assertNotIn("closed", reason.replace("issue_closed", ""))
-
-    def test_an_sdd_detail_refusal_names_report_path(self):
-        """Issue 559 D6: the shared detail check names its rule for the SDD report too."""
-        value = self.make_sdd("complete", "clean", "clean", "clean", "passed", "a" * 40, "b" * 40,
-                              "present", ".superpowers/issue-delivery/49/run-1/sdd-a.json")
-        self.assertEqual(self.run_validate("sdd", value, True).returncode, 0)
-        reason = self.assert_refusal(self.run_validate("sdd", {**value, "notes": "no durable detail"}, True),
-                                     "invalid report")
-        self.assertEqual(reason, "invalid SDD report: report_path must be cited in notes when detail_state is present")
-
-    def test_a_detail_refusal_names_the_failing_finding_member(self):
-        """Issue 472 AC2, D3: a detail refusal names the finding by index and its member."""
-        finding = {"axis": "ship", "severity": "Minor", "status": "minor",
-                   "text": "kept", "ruling": None}
-        parked = {**finding, "status": "parked"}
-        cases = (
-            ({"interface_version": 1, "findings": [parked]}, ("findings[0]", "ruling")),
-            ({"interface_version": 1, "findings": [finding, parked]}, ("findings[1]", "ruling")),
-            ({"interface_version": 1, "findings": [{**finding, "axis": "style"}]},
-             ("findings[0].axis",)),
-            ({"interface_version": 1,
-              "findings": [{key: value for key, value in finding.items() if key != "text"}]},
-             ("findings[0]", '"text"')),
-            ({"interface_version": 1, "items": []}, ('"findings"', '"items"')),
-        )
-        for payload, tokens in cases:
-            with self.subTest(tokens=tokens):
-                result = subprocess.run(
-                    [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
-                     "--policy", str(POLICY)],
-                    input=json.dumps(payload).encode("utf-8"), capture_output=True, check=False)
-                reason = self.assert_refusal(result, "invalid detail input")
-                for token in tokens:
-                    self.assertIn(token, reason)
-                self.assertNotIn("style", reason)
-
-    def test_v2_refusals_name_the_boundary_and_its_cause(self):
-        """Issue 472 D4: a v2 refusal names its boundary, then the cause it wraps."""
-        model = artifact_budget._delivery_model()
-        contract, delivery = contract_and_delivery(model)
-        handoff = ship_handoff(model, contract, delivery)
-        unpaired = self.run_validate("ship-handoff", {**handoff, "acceptance_state": "unmet"}, True)
-        reason = self.assert_refusal(unpaired, "invalid report")
-        self.assertTrue(reason.startswith("ship-handoff: "), reason)
-        self.assertIn("acceptance_state", reason)
-        missing_scope = deepcopy(workflow_responses(model)["owner"])
-        missing_scope.pop("requested_scope")
-        refused = self.run_validate("workflow-response", missing_scope, True)
-        reason = self.assert_refusal(refused, "invalid report")
-        self.assertTrue(reason.startswith("workflow-response: "), reason)
-
-    def test_a_foreign_v2_cause_is_named_by_its_class(self):
-        """Issue 472 D12: a v2 reason carries only the helper's or the model's own message."""
-        class ModelError(ValueError):
-            pass
-
-        def model_raising(error):
-            def validate_delivery_object(value, **_):
-                raise error
-            return types.SimpleNamespace(DeliveryModelError=ModelError,
-                                         validate_delivery_object=validate_delivery_object)
-
-        cases = (
-            (ModelError("invalid checkpoint"), "ship-checkpoint: invalid checkpoint"),
-            (ValueError("invalid literal for int() with base 10: 'secret'"),
-             "ship-checkpoint: ValueError"),
-            (KeyError("secret"), "ship-checkpoint: KeyError"),
-        )
-        for error, expected in cases:
-            with self.subTest(error=type(error).__name__), mock.patch.object(
-                    artifact_budget, "_delivery_model", return_value=model_raising(error)):
-                with self.assertRaises(artifact_budget.ArtifactBudgetError) as caught:
-                    artifact_budget.validate_delivery_model_report({}, 500, "ship-checkpoint")
-                self.assertEqual(str(caught.exception), expected)
-        with mock.patch.object(artifact_budget, "_delivery_model",
-                               return_value=model_raising(KeyError("secret"))):
-            with self.assertRaises(artifact_budget.ArtifactBudgetError) as caught:
-                artifact_budget.validate_workflow_response_report({}, 500)
-        self.assertEqual(str(caught.exception), "workflow-response: KeyError")
-
-    def make_sdd(self, state, review, conformance, correctness, verification,
-                 base, head, detail_state, report_path, acceptance="not_applicable"):
-        notes = f"details: {report_path}" if report_path else "no durable detail"
-        return {"state": state, "review_state": review,
-                "conformance_verdict": conformance, "correctness_verdict": correctness,
-                "verification_state": verification, "base_sha": base, "head_sha": head,
-                "acceptance_state": acceptance,
-                "detail_state": detail_state, "report_path": report_path, "notes": notes}
-
-    def test_every_sdd_report_matrix_row(self):
-        detail = ".superpowers/issue-delivery/49/run-1/sdd-a.json"
-        retained = ".superpowers/sdd/plan/retained-detail.json"
-        valid = [
-            self.make_sdd("complete", "clean", "clean", "clean", "passed", "a"*40, "b"*40, "none", None),
-            self.make_sdd("residuals", "residuals", "clean", "findings", "passed", "a"*40, "b"*40, "present", detail),
-            self.make_sdd("failed", "unknown", "not_run", "not_run", "not_run", None, None, "none", None),
-            self.make_sdd("failed", "unknown", "not_run", "clean", "failed", "a"*40, "b"*40, "none", None),
-            self.make_sdd("failed", "unknown", "clean", "findings", "failed", "a"*40, "b"*40, "present", detail),
-            self.make_sdd("failed", "unknown", "findings", "clean", "passed", "a"*40, "b"*40, "unpublished", retained),
-        ]
-        invalid = [
-            {**valid[0], "correctness_verdict": "findings"},
-            {**valid[1], "detail_state": "none", "report_path": None, "notes": "none"},
-            {**valid[2], "base_sha": "a"*40},
-            {**valid[3], "conformance_verdict": "clean", "correctness_verdict": "clean"},
-            {**valid[4], "report_path": None},
-            {**valid[5], "state": "complete", "review_state": "clean"},
-        ]
-        for i, payload in enumerate(valid):
-            self.assertEqual(self.run_validate("sdd", payload, i % 2 == 0).returncode, 0)
-        for i, payload in enumerate(invalid):
-            result = self.run_validate("sdd", payload, i % 2 == 1)
-            self.assert_refusal(result, "invalid report")
-
-    def assert_rejected(self, boundary, payload, use_stdin):
-        self.assert_refusal(self.run_validate(boundary, payload, use_stdin), "invalid report")
-
-    def test_sdd_acceptance_state_is_required_closed_and_paired(self):
-        """#272 D8: clean never carries unmet; residual unmet needs a conformance finding."""
-        detail = ".superpowers/issue-delivery/272/run-1/sdd-a.json"
-        clean = self.make_sdd("complete", "clean", "clean", "clean", "passed",
-                              "a" * 40, "b" * 40, "none", None)
-        conformance = self.make_sdd("residuals", "residuals", "findings", "clean",
-                                    "passed", "a" * 40, "b" * 40, "present", detail)
-        correctness = self.make_sdd("residuals", "residuals", "clean", "findings",
-                                    "passed", "a" * 40, "b" * 40, "present", detail)
-        before = self.make_sdd("failed", "unknown", "not_run", "not_run", "not_run",
-                               None, None, "none", None)
-        ungraded = self.make_sdd("failed", "unknown", "not_run", "clean", "failed",
-                                 "a" * 40, "b" * 40, "none", None)
-        graded = self.make_sdd("failed", "unknown", "findings", "clean", "failed",
-                               "a" * 40, "b" * 40, "present", detail)
-        accepted = [
-            *({**clean, "acceptance_state": v} for v in ("met", "human_pending", "not_applicable")),
-            *({**conformance, "acceptance_state": v} for v in ACCEPTANCE),
-            *({**correctness, "acceptance_state": v} for v in ("met", "human_pending", "not_applicable")),
-            {**before, "acceptance_state": "not_applicable"},
-            {**ungraded, "acceptance_state": "not_applicable"},
-            *({**graded, "acceptance_state": v} for v in ACCEPTANCE),
-        ]
-        for index, payload in enumerate(accepted):
-            with self.subTest(accepted=index):
-                result = self.run_validate("sdd", payload, index % 2 == 0)
-                self.assertEqual(result.returncode, 0, (payload, result.stderr))
-                self.assertEqual(json.loads(result.stdout), payload)
-        rejected = [
-            {**clean, "acceptance_state": "unmet"},
-            {**correctness, "acceptance_state": "unmet"},
-            {key: value for key, value in clean.items() if key != "acceptance_state"},
-            {**clean, "acceptance_state": "unverified"},
-            {**clean, "acceptance_state": True},
-            {**clean, "acceptance_state": None},
-            {**clean, "acceptance_state": ["met"]},
-            {**before, "acceptance_state": "met"},
-            {**ungraded, "acceptance_state": "unmet"},
-        ]
-        for index, payload in enumerate(rejected):
-            with self.subTest(rejected=index):
-                self.assert_rejected("sdd", payload, index % 2 == 1)
-
-    def test_ship_handoff_acceptance_state_is_required_closed_and_paired(self):
-        """#272 D8, D9: the legacy handoff pairs acceptance_state with review_state."""
-        detail = ".superpowers/issue-delivery/49/run-1/sdd-a.json"
-        complete = {**self.lifecycle(), "state": "complete",
-                    "spec_artifact": self.full("design-spec"),
-                    "plan_artifact": self.full("implementation-plan"),
-                    "head_sha": "b" * 40, "review_state": "clean",
-                    "report_path": None, "notes": "ok"}
-        residual = {**complete, "review_state": "residuals", "report_path": detail,
-                    "notes": f"details: {detail}"}
-        before = {**self.lifecycle(), "state": "failed", "spec_artifact": None,
-                  "plan_artifact": None, "head_sha": None, "review_state": "unknown",
-                  "report_path": None, "notes": "failed"}
-        after_unknown = {**complete, "state": "failed", "review_state": "unknown"}
-        accepted = [
-            *({**complete, "acceptance_state": v} for v in ("met", "human_pending", "not_applicable")),
-            *({**residual, "acceptance_state": v} for v in ACCEPTANCE),
-            {**before, "acceptance_state": "not_applicable"},
-            {**after_unknown, "acceptance_state": "not_applicable"},
-            {**complete, "state": "failed", "acceptance_state": "met"},
-        ]
-        for index, payload in enumerate(accepted):
-            with self.subTest(accepted=index):
-                result = self.run_validate("ship-handoff", payload, index % 2 == 0)
-                self.assertEqual(result.returncode, 0, (payload, result.stderr))
-        rejected = [
-            {**complete, "acceptance_state": "unmet"},
-            {key: value for key, value in complete.items() if key != "acceptance_state"},
-            {key: value for key, value in before.items() if key != "acceptance_state"},
-            {**residual, "acceptance_state": "unverified"},
-            {**complete, "acceptance_state": 1},
-            {**before, "acceptance_state": "met"},
-            {**after_unknown, "acceptance_state": "unmet"},
-        ]
-        for index, payload in enumerate(rejected):
-            with self.subTest(rejected=index):
-                self.assert_rejected("ship-handoff", payload, index % 2 == 1)
-
-    def test_acceptance_pairing_is_one_closed_table(self):
-        """#272 D9, D11: one pairing home; unknown review states pair with nothing."""
-        self.assertEqual(artifact_budget.ACCEPTANCE_STATES, frozenset(ACCEPTANCE))
-        table = {"clean": {"met", "human_pending", "not_applicable"},
-                 "residuals": set(ACCEPTANCE), "unknown": {"not_applicable"}}
-        for review in ("clean", "residuals", "unknown", "partial", "", None, ["clean"]):
-            for acceptance in (*ACCEPTANCE, "unverified", None, ["met"]):
-                with self.subTest(review=review, acceptance=acceptance):
-                    expected = (isinstance(review, str) and review in table
-                                and isinstance(acceptance, str)
-                                and acceptance in table[review])
-                    self.assertIs(artifact_budget.acceptance_pairs_with_review(
-                        review, acceptance), expected)
-
-    def lifecycle(self):
-        return {"ledger_repo_root": None, "run_id": None, "attempt": None,
-                "owner": None, "owner_worktree": None, "action_id": None,
-                "issue_number": 49, "branch": "issue-49",
-                "worktree_path": "/tmp/issue-49", "auto": True,
-                "acceptance_state": "not_applicable"}
-
-    def test_ship_handoff_and_summary_matrices(self):
-        detail = ".superpowers/issue-delivery/49/run-1/sdd-a.json"
-        retained = ".superpowers/sdd/plan/retained-detail.json"
-        complete = {**self.lifecycle(), "state": "complete", "spec_artifact": self.full("design-spec"),
-                    "plan_artifact": self.full("implementation-plan"), "head_sha": "b"*40,
-                    "review_state": "clean", "report_path": None, "notes": "ok"}
-        before = {**self.lifecycle(), "state": "failed", "spec_artifact": None,
-                  "plan_artifact": None, "head_sha": None, "review_state": "unknown",
-                  "report_path": None, "notes": "failed"}
-        after = {**self.lifecycle(), "state": "failed", "spec_artifact": self.full("design-spec"),
-                 "plan_artifact": self.full("implementation-plan"), "head_sha": "b"*40,
-                 "review_state": "residuals", "report_path": detail, "notes": f"details: {detail}"}
-        for value in (complete, before, after):
-            self.assertEqual(self.run_validate("ship-handoff", value, True).returncode, 0)
-        for value in ({**complete, "plan_artifact": None}, {**before, "spec_artifact": self.full("design-spec")},
-                      {**after, "head_sha": None}):
-            self.assertEqual(self.run_validate("ship-handoff", value, False).returncode, 2)
-
-        summaries = [
-            {"issue": 49, "state": "merged", "pr_url": "https://example.test/pr/1",
-             "merge_sha": "c"*40, "issue_closed": True, "discussion_items": [],
-             "detail_state": "none", "report_path": None, "notes": "none"},
-            {"issue": 49, "state": "stopped", "pr_url": None, "merge_sha": None,
-             "issue_closed": False, "discussion_items": [], "detail_state": "present",
-             "report_path": detail, "notes": f"details: {detail}"},
-            {"issue": 49, "state": "failed", "pr_url": None, "merge_sha": None,
-             "issue_closed": False, "discussion_items": [], "detail_state": "unpublished",
-             "report_path": retained, "notes": f"retained: {retained}"},
-        ]
-        for value in summaries:
-            self.assertEqual(self.run_validate("ship-summary", value, True).returncode, 0)
-        bad = [{**summaries[0], "merge_sha": None}, {**summaries[1], "discussion_items": ["lost"]},
-               {**summaries[2], "report_path": None}]
-        for value in bad:
-            self.assertEqual(self.run_validate("ship-summary", value, False).returncode, 2)
-
-    def test_ship_handoff_residuals_requires_durable_report_path(self):
-        candidate = {**self.lifecycle(), "state": "complete",
-                     "spec_artifact": self.full("design-spec"),
-                     "plan_artifact": self.full("implementation-plan"),
-                     "head_sha": "b" * 40, "review_state": "residuals",
-                     "report_path": None, "notes": "detail was dropped"}
-        result = self.run_validate("ship-handoff", candidate, use_stdin=True)
-        self.assert_refusal(result, "invalid report")
-
-    def test_ship_handoff_lifecycle_group_is_all_or_nothing_with_the_launch(self):
-        present = {"ledger_repo_root": "/repo", "run_id": "issue-49-run",
-                   "attempt": 1, "owner": "49:1", "owner_worktree": "/repo/wt-49",
-                   "action_id": "49:1:1"}
-        base = {**self.lifecycle(), **present, "state": "complete",
-                "spec_artifact": self.full("design-spec"),
-                "plan_artifact": self.full("implementation-plan"),
-                "head_sha": "b" * 40, "review_state": "clean",
-                "report_path": None, "notes": "ok"}
-        self.assertEqual(self.run_validate("ship-handoff", base, True).returncode, 0)
-        rejected = (
-            # The launch alone, with the rest of the group absent.
-            {**base, **{name: None for name in present if name != "action_id"}},
-            # The rest of the group, with the launch absent — the shape the
-            # guard could not answer for.
-            {**base, "action_id": None},
-            # A non-string launch identity.
-            {**base, "action_id": 1},
-            # The key removed outright: the boundary is closed, not optional.
-            {key: value for key, value in base.items() if key != "action_id"},
-        )
-        for index, value in enumerate(rejected):
-            with self.subTest(row=index):
-                result = self.run_validate("ship-handoff", value, index % 2 == 1)
-                self.assertEqual((result.returncode, result.stdout), (2, b""))
-
-    def test_unpublished_rejects_the_delivery_home_itself(self):
-        candidate = self.make_sdd(
-            "failed", "unknown", "findings", "clean", "failed",
-            "a" * 40, "b" * 40, "unpublished", ".superpowers/issue-delivery",
-        )
-        result = self.run_validate("sdd", candidate, use_stdin=False)
-        self.assert_refusal(result, "invalid report")
-
     def test_validate_report_rejects_wire_parse_and_io_failures(self):
         malformed = (b'{"state":"failed","state":"failed","artifact":null,"notes":"x"}',
                      b"\xff", b"[]", b"{}{}", b'{"value":NaN}')
         for raw in malformed:
             result = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+                [*COMMAND, "validate-report", "--boundary", "producer",
                  "--input", "-", "--policy", str(POLICY)], input=raw,
                 capture_output=True, check=False)
             self.assert_refusal(result, "invalid report")
         missing = subprocess.run(
-            [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+            [*COMMAND, "validate-report", "--boundary", "producer",
              "--input", "/definitely/missing/report.json", "--policy", str(POLICY)],
             capture_output=True, check=False)
         self.assert_refusal(missing, "cannot read report")
@@ -1356,20 +344,19 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             link = Path(raw) / "link.json"
             link.symlink_to(target)
             symlinked = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+                [*COMMAND, "validate-report", "--boundary", "producer",
                  "--input", str(link), "--policy", str(POLICY)], capture_output=True, check=False)
             self.assert_refusal(symlinked, "cannot read report")
         policy = json.loads(POLICY.read_text(encoding="utf-8"))
-        oversized = {"issue": 49, "state": "stopped",
-                     "pr_url": "https://example.test/" + "x" * policy["phase_reports"]["wire_max_bytes"],
-                     "merge_sha": None, "issue_closed": False, "discussion_items": [],
-                     "detail_state": "none", "report_path": None, "notes": "wire bound"}
-        over = self.run_validate("ship-summary", oversized, use_stdin=True)
+        oversized = {"state": "failed", "notes": "wire bound",
+                     "artifact": {"kind": "handoff",
+                                  "path": "x" * policy["phase_reports"]["wire_max_bytes"]}}
+        over = self.run_validate("producer", oversized, use_stdin=True)
         self.assert_refusal(over, "invalid report")
 
     def test_validate_report_rejects_escaped_lone_surrogate_without_traceback(self):
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+            [*COMMAND, "validate-report", "--boundary", "producer",
              "--input", "-", "--policy", str(POLICY)],
             input=b'{"state":"failed","artifact":null,"notes":"\\ud800"}',
             capture_output=True, check=False,
@@ -1378,13 +365,13 @@ class ArtifactBudgetCliTest(unittest.TestCase):
 
     def test_refusal_reasons_name_the_wire_parse_read_and_policy_failure(self):
         """Issue 472 D1-D3, D13: a refusal names its failure, never a path or an input value."""
-        report = [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer"]
+        report = [*COMMAND, "validate-report", "--boundary", "producer"]
         good = b'{"state":"failed","artifact":null,"notes":"x"}'
         bound = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["wire_max_bytes"]
         stdin_cases = (
             (b'{"state":"failed","state":"failed","artifact":null,"notes":"x"}',
-             ('duplicate key "state"',)),
-            (b'{"st\\nate":1,"st\\nate":2}', ('duplicate key "st\\nate"',)),
+             ("duplicate JSON key 'state'",)),
+            (b'{"st\\nate":1,"st\\nate":2}', ("duplicate JSON key 'st\\nate'",)),
             (b"\xff", ("invalid JSON", "UTF-8")),
             (b"{}{}", ("invalid JSON", "column")),
             (b'{"value":NaN}', ("invalid JSON", "constant")),
@@ -1399,26 +386,20 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 for token in tokens:
                     self.assertIn(token, reason)
         # Exactly the wire bound in, one byte over it once canonical output adds its newline.
-        summary = {"issue": 49, "state": "stopped", "pr_url": "", "merge_sha": None,
-                   "issue_closed": False, "discussion_items": [], "detail_state": "none",
-                   "report_path": None, "notes": "canonical bound"}
+        padded = {"state": "failed", "notes": "canonical bound",
+                  "artifact": {"kind": "handoff", "path": ""}}
 
         def compact(value):
             return json.dumps(value, ensure_ascii=False, sort_keys=True,
                               separators=(",", ":")).encode("utf-8")
 
-        prefix = "https://example.test/"
-        summary["pr_url"] = prefix + "x" * (bound - len(compact(summary)) - len(prefix))
-        self.assertEqual(len(compact(summary)), bound)
+        padded["artifact"]["path"] = "x" * (bound - len(compact(padded)))
+        self.assertEqual(len(compact(padded)), bound)
         canonical = subprocess.run(
-            [sys.executable, str(SCRIPT), "validate-report", "--boundary", "ship-summary",
+            [*COMMAND, "validate-report", "--boundary", "producer",
              "--input", "-", "--policy", str(POLICY)],
-            input=compact(summary), capture_output=True, check=False)
+            input=compact(padded), capture_output=True, check=False)
         self.assertIn(str(bound), self.assert_refusal(canonical, "invalid report"))
-        detail = subprocess.run(
-            [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
-             "--policy", str(POLICY)], input=b"{", capture_output=True, check=False)
-        self.assertIn("invalid JSON", self.assert_refusal(detail, "invalid detail input"))
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             missing = directory / "missing-report.json"
@@ -1447,297 +428,6 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                     reason = self.assert_refusal(result, "invalid report")
                     self.assertIn("policy", reason)
                     self.assertNotIn(raw, reason)
-
-    def test_validate_detail_input_is_one_strict_cli_boundary(self):
-        finding = {"axis": "ship", "severity": "Minor", "status": "minor",
-                   "text": "kept", "ruling": None}
-        valid = {"interface_version": 1, "findings": [finding]}
-        canonical = (json.dumps(valid, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        with tempfile.TemporaryDirectory() as raw:
-            path = Path(raw) / "retained.json"
-            path.write_bytes(canonical)
-            accepted = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-detail-input", "--input", str(path),
-                 "--policy", str(POLICY)], capture_output=True, check=False)
-            self.assertEqual((accepted.returncode, accepted.stdout, accepted.stderr), (0, canonical, b""))
-        invalid = (b"", b"{", b'{"interface_version":2,"findings":[]}',
-                   b'{"interface_version":1,"items":[]}', b'{"interface_version":1,"findings":[]}',
-                   json.dumps({"interface_version": 1, "findings": [{**finding, "status": "unknown"}]}).encode(),
-                   json.dumps({"interface_version": 1, "findings": [{**finding, "text": 1}]}).encode(),
-                   json.dumps({"interface_version": 1, "findings": [{**finding, "status": "parked", "ruling": None}]}).encode())
-        for payload in invalid:
-            result = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
-                 "--policy", str(POLICY)], input=payload, capture_output=True, check=False)
-            self.assert_refusal(result, "invalid detail input")
-
-    def test_validate_detail_input_rejects_escaped_lone_surrogate_without_traceback(self):
-        payload = (
-            b'{"interface_version":1,"findings":[{"axis":"ship","severity":"Minor",'
-            b'"status":"minor","text":"\\ud800","ruling":null}]}'
-        )
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
-             "--policy", str(POLICY)], input=payload, capture_output=True, check=False,
-        )
-        self.assert_refusal(result, "invalid detail input")
-
-    def review_manifest(self, directory: Path, suffix="diff", size=4):
-        root = directory / "review.json"
-        members = directory / "review.shards"
-        members.mkdir()
-        member = members / f"shard-001.{suffix}"
-        member.write_bytes(b"d" * size)
-        manifest = {"interface_version": 1, "kind": "review-package", "purpose": "diff-review",
-                    "range": {"base": "a"*40, "head": "b"*40}, "commits": [],
-                    "stat": {"files_changed": 1, "insertions": 1, "deletions": 0},
-                    "shards": [{"path": f"review.shards/{member.name}", "bytes": size}],
-                    "total_diff_bytes": size,
-                    "coverage": {"complete": True, "file_diff_count": 1}}
-        root.write_text(json.dumps(manifest), encoding="utf-8")
-        return root, member, manifest
-
-    def test_review_manifest_member_boundary_and_reference_bytes(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root, member, manifest = self.review_manifest(Path(raw), size=65_536)
-            self.assertEqual(self.run_check("review-package", root).returncode, 0)
-            member.write_bytes(b"d" * 65_537)
-            manifest["shards"][0]["bytes"] = 65_537
-            manifest["total_diff_bytes"] = 65_537
-            root.write_text(json.dumps(manifest), encoding="utf-8")
-            over = self.run_check("review-package", root)
-            self.assertEqual(over.returncode, 3)
-            self.assertIn("member_bytes", json.loads(over.stdout)["violations"])
-
-    def test_generated_evidence_manifest_is_strict_and_within_budget(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root, _, manifest = self.review_manifest(Path(raw), size=256)
-            manifest["interface_version"] = 2
-            manifest["source_diff_bytes"] = 70_000
-            manifest["total_review_bytes"] = manifest.pop("total_diff_bytes")
-            side = {
-                "blob_sha": "c" * 40,
-                "bytes": 68_000,
-                "content_sha256": "d" * 64,
-                "migration_id": "20260826010101_AddWidgets",
-                "product_version": "10.0.10",
-                "entity_types": 12,
-                "properties": 70,
-                "indexes": 5,
-                "foreign_keys": 3,
-                "tables": 12,
-            }
-            manifest["generated_evidence"] = [{
-                "path": "src/App/Migrations/20260826010101_AddWidgets.Designer.cs",
-                "kind": "ef-core-migration-designer",
-                "source_diff_bytes": 70_000,
-                "base": None,
-                "head": side,
-            }]
-            manifest["coverage"] = {
-                "complete": True,
-                "file_diff_count": 1,
-                "byte_complete_file_count": 0,
-                "generated_evidence_file_count": 1,
-            }
-            root.write_text(json.dumps(manifest), encoding="utf-8")
-            self.assertEqual(self.run_check("review-package", root).returncode, 0)
-
-            mutations = {
-                "unknown evidence kind": lambda m: m["generated_evidence"][0].__setitem__(
-                    "kind", "generated"),
-                "traversal path": lambda m: m["generated_evidence"][0].__setitem__(
-                    "path", "../escape.Designer.cs"),
-                "boolean metric": lambda m: m["generated_evidence"][0]["head"].__setitem__(
-                    "entity_types", True),
-                "bad digest": lambda m: m["generated_evidence"][0]["head"].__setitem__(
-                    "content_sha256", "not-a-digest"),
-                "coverage mismatch": lambda m: m["coverage"].__setitem__(
-                    "generated_evidence_file_count", 0),
-            }
-            for name, mutate in mutations.items():
-                with self.subTest(name=name):
-                    invalid = deepcopy(manifest)
-                    mutate(invalid)
-                    root.write_text(json.dumps(invalid), encoding="utf-8")
-                    result = self.run_check("review-package", root)
-                    self.assertEqual((result.returncode, result.stdout), (2, ""))
-
-    def test_whole_file_deletion_evidence_is_strict_in_a_v3_manifest(self):
-        # Issue 439: an oversized whole-file deletion travels as bounded evidence.
-        with tempfile.TemporaryDirectory() as raw:
-            root, _, manifest = self.review_manifest(Path(raw), size=256)
-            manifest["interface_version"] = 3
-            manifest["source_diff_bytes"] = 82_259
-            manifest["total_review_bytes"] = manifest.pop("total_diff_bytes")
-            manifest["stat"] = {"files_changed": 1, "insertions": 0, "deletions": 1_000}
-            manifest["packaging"] = {
-                "context_lines": 7,
-                "shard_strategy": "stable-first-fit-whole-file",
-            }
-            manifest["generated_evidence"] = [{
-                "path": "landing/src/app/app/page.tsx",
-                "kind": "whole-file-deletion",
-                "source_diff_bytes": 82_259,
-                "base": {
-                    "blob_sha": "c" * 40,
-                    "bytes": 80_975,
-                    "content_sha256": "d" * 64,
-                    "line_count": 1_000,
-                },
-                "head": None,
-            }]
-            manifest["coverage"] = {
-                "complete": True,
-                "file_diff_count": 1,
-                "byte_complete_file_count": 0,
-                "generated_evidence_file_count": 1,
-            }
-            root.write_text(json.dumps(manifest), encoding="utf-8")
-            accepted = self.run_check("review-package", root)
-            self.assertEqual(accepted.returncode, 0, accepted.stderr)
-            self.assertEqual(json.loads(accepted.stdout)["status"], "within_budget")
-
-            ef_side = {
-                "blob_sha": "c" * 40, "bytes": 80_975, "content_sha256": "d" * 64,
-                "migration_id": "20260826010101_AddWidgets", "product_version": "10.0.10",
-                "entity_types": 12, "properties": 70, "indexes": 5, "foreign_keys": 3,
-                "tables": 12,
-            }
-
-            def entry(m):
-                return m["generated_evidence"][0]
-
-            mutations = {
-                "non-null head": (
-                    lambda m: entry(m).__setitem__("head", dict(entry(m)["base"])),
-                    "invalid whole-file deletion sides"),
-                "null base": (
-                    lambda m: entry(m).__setitem__("base", None),
-                    "invalid whole-file deletion sides"),
-                "EF-shaped base": (
-                    lambda m: entry(m).__setitem__("base", ef_side),
-                    "invalid generated evidence side"),
-                "missing line count": (
-                    lambda m: entry(m)["base"].pop("line_count"),
-                    "invalid generated evidence side"),
-                "boolean line count": (
-                    lambda m: entry(m)["base"].__setitem__("line_count", True),
-                    "invalid generated evidence metric"),
-                "negative line count": (
-                    lambda m: entry(m)["base"].__setitem__("line_count", -1),
-                    "invalid generated evidence metric"),
-                "boolean bytes": (
-                    lambda m: entry(m)["base"].__setitem__("bytes", True),
-                    "invalid generated evidence metric"),
-                "bad digest": (
-                    lambda m: entry(m)["base"].__setitem__("content_sha256", "D" * 64),
-                    "invalid generated evidence digest"),
-                "bad blob sha": (
-                    lambda m: entry(m)["base"].__setitem__("blob_sha", "c" * 39),
-                    "invalid generated evidence blob"),
-                "non-string kind": (
-                    lambda m: entry(m).__setitem__("kind", ["whole-file-deletion"]),
-                    "invalid generated evidence kind"),
-            }
-            for name, (mutate, message) in mutations.items():
-                with self.subTest(name=name):
-                    invalid = deepcopy(manifest)
-                    mutate(invalid)
-                    root.write_text(json.dumps(invalid), encoding="utf-8")
-                    result = self.run_check("review-package", root)
-                    self.assertEqual((result.returncode, result.stdout), (2, ""))
-                    self.assertIn(message, result.stderr)
-
-    def test_adaptive_context_manifest_is_strict_and_within_budget(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root, _, manifest = self.review_manifest(Path(raw), size=256)
-            manifest["interface_version"] = 3
-            manifest["source_diff_bytes"] = 256
-            manifest["total_review_bytes"] = manifest.pop("total_diff_bytes")
-            manifest["generated_evidence"] = []
-            manifest["packaging"] = {
-                "context_lines": 7,
-                "shard_strategy": "stable-first-fit-whole-file",
-            }
-            manifest["coverage"] = {
-                "complete": True,
-                "file_diff_count": 1,
-                "byte_complete_file_count": 1,
-                "generated_evidence_file_count": 0,
-            }
-            root.write_text(json.dumps(manifest), encoding="utf-8")
-            self.assertEqual(self.run_check("review-package", root).returncode, 0)
-
-            mutations = {
-                "unknown context": lambda m: m["packaging"].__setitem__(
-                    "context_lines", 6),
-                "boolean context": lambda m: m["packaging"].__setitem__(
-                    "context_lines", True),
-                "unknown strategy": lambda m: m["packaging"].__setitem__(
-                    "shard_strategy", "first-fit"),
-                "coverage mismatch": lambda m: m["coverage"].__setitem__(
-                    "byte_complete_file_count", 0),
-            }
-            for name, mutate in mutations.items():
-                with self.subTest(name=name):
-                    invalid = deepcopy(manifest)
-                    mutate(invalid)
-                    root.write_text(json.dumps(invalid), encoding="utf-8")
-                    result = self.run_check("review-package", root)
-                    self.assertEqual((result.returncode, result.stdout), (2, ""))
-
-    def test_delivery_detail_manifest_uses_the_same_review_limits(self):
-        with tempfile.TemporaryDirectory() as raw:
-            directory = Path(raw)
-            root = directory / "delivery.json"
-            members = directory / "delivery.shards"
-            members.mkdir()
-            record = (json.dumps({"axis": "correctness", "severity": "Minor", "status": "parked",
-                                  "text": "detail", "ruling": "accepted"},
-                                 sort_keys=True, separators=(",", ":")) + "\n").encode()
-            (members / "shard-001.jsonl").write_bytes(record)
-            manifest = {"interface_version": 1, "kind": "review-package", "purpose": "delivery-detail",
-                        "context": {"issue": 49, "branch": "issue-49", "producer": "sdd"},
-                        "shards": [{"path": "delivery.shards/shard-001.jsonl", "bytes": len(record)}],
-                        "total_detail_bytes": len(record),
-                        "coverage": {"complete": True, "finding_count": 1}}
-            root.write_text(json.dumps(manifest), encoding="utf-8")
-            self.assertEqual(self.run_check("review-package", root).returncode, 0)
-            invalid_record = (json.dumps({"axis": "correctness", "severity": "Minor",
-                                          "status": "parked", "text": "detail", "ruling": None},
-                                         sort_keys=True, separators=(",", ":")) + "\n").encode()
-            (members / "shard-001.jsonl").write_bytes(invalid_record)
-            manifest["shards"][0]["bytes"] = len(invalid_record)
-            manifest["total_detail_bytes"] = len(invalid_record)
-            root.write_text(json.dumps(manifest), encoding="utf-8")
-            invalid_parked = self.run_check("review-package", root)
-            self.assertEqual((invalid_parked.returncode, invalid_parked.stdout), (2, ""))
-            (members / "shard-001.jsonl").write_bytes(record)
-            manifest["shards"][0]["bytes"] = len(record)
-            manifest["total_detail_bytes"] = len(record)
-            manifest["context"]["issue"] = True
-            root.write_text(json.dumps(manifest), encoding="utf-8")
-            self.assertEqual(self.run_check("review-package", root).returncode, 2)
-
-    def test_review_manifest_rejects_boolean_in_every_integer_family(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root, _, valid = self.review_manifest(Path(raw))
-            mutations = {
-                "interface_version": lambda m: m.__setitem__("interface_version", True),
-                "files": lambda m: m["stat"].__setitem__("files_changed", True),
-                "insertions": lambda m: m["stat"].__setitem__("insertions", True),
-                "deletions": lambda m: m["stat"].__setitem__("deletions", True),
-                "bytes": lambda m: m["shards"][0].__setitem__("bytes", True),
-                "total": lambda m: m.__setitem__("total_diff_bytes", True),
-                "coverage": lambda m: m["coverage"].__setitem__("file_diff_count", True),
-            }
-            for mutate in mutations.values():
-                manifest = deepcopy(valid)
-                mutate(manifest)
-                root.write_text(json.dumps(manifest), encoding="utf-8")
-                result = self.run_check("review-package", root)
-                self.assertEqual((result.returncode, result.stdout), (2, ""))
 
     def test_unknown_gapped_symlinked_and_duplicate_package_entries_fail(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1851,7 +541,13 @@ class ArtifactBudgetCliTest(unittest.TestCase):
     def test_checker_rejects_member_in_place_mutation_during_capture(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
-            root, member, _ = self.review_manifest(directory)
+            root = directory / "plan.md"
+            members = directory / "plan.tasks"
+            members.mkdir()
+            member = members / "task-1.md"
+            member.write_text("# Task 1\n", encoding="utf-8")
+            root.write_text("## Task index\n\nTask 1 — T — f — full — "
+                            "[task-1.md](plan.tasks/task-1.md)\n", encoding="utf-8")
             original_fstat = os.fstat
             calls = 0
 
@@ -1866,7 +562,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                                    side_effect=mutate_before_stability_check):
                 with self.assertRaisesRegex(artifact_budget.ArtifactBudgetError,
                                            "artifact changed during read"):
-                    artifact_budget.check_artifact("review-package", root, POLICY)
+                    artifact_budget.check_artifact("implementation-plan", root, POLICY)
 
     def test_duplicate_unknown_and_scalar_policy_errors_are_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -1882,9 +578,6 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 lambda p: p.__setitem__("schema_version", True),
                 lambda p: p["phase_reports"].__setitem__("notes_max_characters", 0),
                 lambda p: p["phase_reports"].__setitem__("wire_max_bytes", 1.5),
-                lambda p: p.pop("workflow_responses"),
-                lambda p: p["workflow_responses"].__setitem__("unexpected", 1),
-                lambda p: p["workflow_responses"].__setitem__("wire_max_bytes", 0),
                 lambda p: p["artifacts"]["handoff"].__setitem__("root_max_bytes", 0),
                 lambda p: p["artifacts"]["handoff"].__setitem__("aggregate_max_bytes", 0),
                 lambda p: p["artifacts"]["handoff"].__setitem__("member_max_bytes", 1),
@@ -1915,24 +608,13 @@ class InvokeParityTest(unittest.TestCase):
         within, over = directory / "within.md", directory / "over.md"
         within.write_bytes(b"h" * 8_192)
         over.write_bytes(b"h" * 8_193)
-        merged = {"issue": 14, "state": "merged",
-                  "pr_url": "https://github.com/fagenorn/nix-config/pull/15",
-                  "merge_sha": "abc123abc123abc123abc123abc123abc123abcd",
-                  "issue_closed": True, "discussion_items": [], "detail_state": "none",
-                  "report_path": None, "notes": ""}
         return (
             ("accepted producer report", self.PRODUCER,
              b'{"state":"failed","artifact":null,"notes":"x"}', 0, None),
-            ("accepted ship-summary report",
-             ("validate-report", "--boundary", "ship-summary", "--input", "-"),
-             json.dumps(merged).encode("utf-8"), 0, None),
             ("schema-refused report", self.PRODUCER,
              b'{"state":"failed","artifact":null,"decisions":[]}', 2, "invalid report"),
             ("report over the wire bound", self.PRODUCER, b" " * (wire + 1), 2,
              "invalid report"),
-            ("unreadable detail input",
-             ("validate-detail-input", "--input", str(directory / "missing.json")), b"", 2,
-             "cannot read detail input"),
             ("argparse refusal",
              ("validate-report", "--boundary", "no-such-boundary", "--input", "-"), b"", 2,
              "invalid input"),
@@ -1950,7 +632,7 @@ class InvokeParityTest(unittest.TestCase):
                 with self.subTest(name):
                     argv = [*argv, "--policy", str(POLICY)]
                     outcome = artifact_budget.invoke(argv, io.BytesIO(stdin).read)
-                    process = subprocess.run([sys.executable, str(SCRIPT), *argv], input=stdin,
+                    process = subprocess.run([*COMMAND, *argv], input=stdin,
                                              capture_output=True, check=False)
                     self.assertEqual(
                         (outcome.exit_code, outcome.stdout, outcome.stderr),
@@ -1965,9 +647,9 @@ class InvokeParityTest(unittest.TestCase):
                                         outcome.stderr)
 
     def test_invoke_touches_no_process_stream(self):
-        """`workflow-state` prints its own reply after a validation, so `invoke`
-        writes to neither process stream and reads stdin only through its reader,
-        which a command without `--input -` never calls."""
+        """A caller prints its own reply after a validation, so `invoke` writes to
+        neither process stream and reads stdin only through its reader, which a
+        command without `--input -` never calls."""
         def no_stdin(size):
             raise AssertionError(f"stdin read ({size} bytes) by a command without --input -")
 
@@ -1986,103 +668,120 @@ class InvokeParityTest(unittest.TestCase):
             self.assertEqual(stream.buffer.getvalue(), b"")
 
 
-class SkillNamedReplyTest(DeliveredCustody, unittest.TestCase):
-    """Issue 473 AC3: each workflow-state reply a skill names passes the workflow-response
-    boundary. A driver is a `reply_<subcommand>` method that returns one real reply."""
+class SkillSurfaceTest(unittest.TestCase):
+    """Issue 689 D3: only the surface design, grill-with-docs, writing-plans and handoff call."""
 
-    def drivers(self):
-        return {name[len("reply_"):].replace("_", "-"): getattr(self, name)
-                for name in dir(self) if name.startswith("reply_")}
+    def run_cli(self, *argv, stdin="{}"):
+        return subprocess.run([*COMMAND, *argv], input=stdin,
+                              capture_output=True, text=True, timeout=60)
 
-    def launched(self):
-        """Spawn 207 under its contract at minute 0: its custody and action id."""
-        custody = self.spawn(DELIVERED)[DELIVERED]
-        return custody, custody["action_id"]
+    def assert_parser_refusal(self, done, token):
+        self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+        self.assertTrue(done.stderr.startswith("artifact-budget: invalid input: "), done.stderr)
+        self.assertIn(token, done.stderr)
 
-    def reply_init_run(self):
-        self.project()
-        return self.cli("init-run", "--repo-root", self.root, "--creation-key",
-                        "deliver-standard:207:1", "--now", at(0)).stdout
+    def test_the_committed_policy_holds_exactly_the_skill_kinds(self):
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(policy), ["artifacts", "phase_reports", "schema_version", "unit"])
+        self.assertEqual(sorted(policy["artifacts"]), ["design-spec", "handoff", "implementation-plan"])
 
-    def reply_control(self):
-        self.setup_run()
-        return self.cli("control", *self.run_args, "--request-file", "-", stdin=self.request(
-            0, recorded={DELIVERED: None}, contracts=True)).stdout
+    # Formerly valid payloads: every argv below, with its stdin, exited 0 before the trim.
+    FAILED_SDD = {"state": "failed", "review_state": "unknown", "conformance_verdict": "not_run",
+                  "correctness_verdict": "not_run", "verification_state": "not_run",
+                  "base_sha": None, "head_sha": None, "acceptance_state": "not_applicable",
+                  "detail_state": "none", "report_path": None, "notes": ""}
+    FAILED_HANDOFF = {"state": "failed", "ledger_repo_root": None, "run_id": None, "attempt": None,
+                      "owner": None, "owner_worktree": None, "action_id": None, "issue_number": 14,
+                      "branch": "issue-14", "worktree_path": "/tmp/w", "spec_artifact": None,
+                      "plan_artifact": None, "head_sha": None, "review_state": "unknown",
+                      "acceptance_state": "not_applicable", "auto": False, "report_path": None,
+                      "notes": ""}
+    CHECKPOINT = {"interface_version": 2, "issue": 151,
+                  "custody": {"action_id": "151:1:1", "attempt": 1, "kind": "implementation", "launch": 1},
+                  "contract_digest": "sha256:7d4be1f805893d0ae096126ebf440dd8a196d2fe06e8cb48553b9c45c025cad4",
+                  "delivery_observations": [], "authority_observations": [], "reevaluation_evidence": [],
+                  "requested_scope": None, "detail_state": "none", "report_path": None, "notes": ""}
+    MERGED_SUMMARY = {"issue": 14, "state": "merged",
+                      "pr_url": "https://github.com/fagenorn/nix-config/pull/15",
+                      "merge_sha": "abc123abc123abc123abc123abc123abc123abcd", "issue_closed": True,
+                      "discussion_items": [], "detail_state": "none", "report_path": None, "notes": ""}
+    BOOTSTRAP = {"interface_version": 3, "kind": "workflow_bootstrap", "run_id": "task-151-synthetic",
+                 "requirements": [], "verification": []}
+    DETAIL = {"interface_version": 1, "findings": [{"axis": "conformance", "severity": "Minor",
+                                                     "status": "parked", "text": "f", "ruling": "r"}]}
 
-    def reply_direct_owner(self):
-        self.project()
-        return self.cli("direct-owner", "--repo-root", self.root, "--request-file", "-",
-                        stdin=json.dumps(self.direct_request()).encode()).stdout
+    def test_retired_commands_kinds_and_boundaries_are_parser_refusals(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            (directory / "review.shards").mkdir()
+            (directory / "review.shards/shard-001.diff").write_bytes(b"dddd")
+            manifest = directory / "review.json"
+            manifest.write_text(json.dumps({
+                "interface_version": 1, "kind": "review-" "package", "purpose": "diff-review",
+                "range": {"base": "a" * 40, "head": "b" * 40}, "commits": [],
+                "stat": {"files_changed": 1, "insertions": 1, "deletions": 0},
+                "shards": [{"path": "review.shards/shard-001.diff", "bytes": 4}],
+                "total_diff_bytes": 4, "coverage": {"complete": True, "file_diff_count": 1}}),
+                encoding="utf-8")
+            cases = [(("describe", "--kind", "handoff", "--format", "json"), None),
+                     (("validate-detail-input", "--input", "-"), self.DETAIL),
+                     (("check", "--kind", "review-" "package", "--root", str(manifest), "--format", "json"), None)]
+            cases += [(("validate-report", "--boundary", boundary, "--input", "-"), payload)
+                      for boundary, payload in (("sdd", self.FAILED_SDD), ("ship-handoff", self.FAILED_HANDOFF),
+                                                ("ship-checkpoint", self.CHECKPOINT),
+                                                ("ship-summary", self.MERGED_SUMMARY),
+                                                ("workflow-response", self.BOOTSTRAP))]
+            for argv, payload in cases:
+                with self.subTest(argv=argv[:3]):
+                    done = self.run_cli(*argv, "--policy", str(POLICY),
+                                        stdin="{}" if payload is None else json.dumps(payload))
+                    self.assert_parser_refusal(done, "invalid choice")
 
-    def reply_check_launch(self):
-        _, action = self.launched()
-        return self.cli("check-launch", *self.run_args, "--action-id", action).stdout
+    def test_the_policy_pin_is_a_parser_refusal(self):
+        # Both pinned calls, with this identity, exited 0 before the trim.
+        identity = "sha256:" + hashlib.sha256(POLICY.read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "handoff.md"
+            root.write_text("# Handoff\n", encoding="utf-8")
+            calls = [(("check", "--kind", "handoff", "--root", str(root), "--format", "json"), "{}"),
+                     (("validate-report", "--boundary", "producer", "--input", "-"),
+                      '{"state": "failed", "artifact": null, "notes": ""}')]
+            for argv, stdin in calls:
+                with self.subTest(command=argv[0]):
+                    done = self.run_cli(*argv, "--policy", str(POLICY),
+                                        "--expected-policy-sha256", identity, stdin=stdin)
+                    self.assert_parser_refusal(done, "unrecognized arguments: --expected-policy-sha256")
 
-    def reply_current_launch(self):
-        _, action = self.launched()
-        return self.cli("current-launch", *self.run_args, "--action-id", action).stdout
+    def test_a_projection_member_is_refused(self):
+        # This report, with the committed policy's identity, was valid before the trim.
+        identity = "sha256:" + hashlib.sha256(POLICY.read_bytes()).hexdigest()
+        report = {"state": "complete", "notes": "n",
+                  "artifact": {"kind": "implementation-plan", "path": "artifacts/implementation-plan.json",
+                               "metrics": {"root_bytes": 1, "total_bytes": 1, "file_count": 1,
+                                           "largest_member_bytes": 0},
+                               "budget_status": "within_budget"},
+                  "projection": {"schema_version": 1, "kind": "review-feasibility-summary",
+                                 "state": "complete", "plan": "artifacts/implementation-plan.json",
+                                 "base": "a" * 40, "head": "b" * 40, "completed_through": 0,
+                                 "plan_package_sha256": "sha256:" + "1" * 64,
+                                 "forecast_sha256": "sha256:" + "2" * 64,
+                                 "packing_policy_sha256": "sha256:" + "3" * 64,
+                                 "artifact_policy_sha256": identity,
+                                 "metrics": {"root_bytes": 1000, "total_bytes": 3000, "file_count": 2,
+                                             "largest_member_bytes": 2000},
+                                 "violations": [], "recommended_boundary": None}}
+        done = self.run_cli("validate-report", "--boundary", "producer", "--input", "-",
+                            "--policy", str(POLICY), stdin=json.dumps(report))
+        self.assertEqual(
+            (done.returncode, done.stdout, done.stderr),
+            (2, "", 'artifact-budget: invalid report: producer report members: unexpected "projection"\n'))
 
-    def reply_register_worker(self):
-        _, action = self.launched()
-        return self.cli("register-worker", *self.run_args, "--now", at(1),
-                        "--action-id", action).stdout
-
-    def reply_release_worker(self):
-        _, action = self.launched()
-        self.cli("register-worker", *self.run_args, "--now", at(1), "--action-id", action)
-        return self.cli("release-worker", *self.run_args, "--now", at(2),
-                        "--worker-id", f"{action}:w1", "--event", "returned").stdout
-
-    def reply_mark_progress(self):
-        _, action = self.launched()
-        self.linked_worktree(Path(self.worktrees[DELIVERED]).name, "issue-207-shape")
-        return self.cli("mark-progress", *self.run_args, "--now", at(1),
-                        "--action-id", action).stdout
-
-    def reply_progress(self):
-        _, action = self.launched()
-        return self.cli("progress", *self.run_args, "--action-id", action, "--phase", "1",
-                        "--next-needs-context", "true", "--artifacts-sufficient", "false",
-                        "--remainder-self-contained", "false", "--now", at(1)).stdout
-
-    def reply_suspend(self):
-        _, action = self.launched()
-        return self.cli("suspend", *self.run_args, "--action-id", action,
-                        "--blocked-on", "transport", "--now", at(1)).stdout
-
-    def reply_finish(self):
-        custody, _ = self.launched()
-        return self.cli("finish", *self.run_args, "--now", at(1), "--summary-file", "-",
-                        stdin=self.summary(custody, "stopped")).stdout
-
-    def reply_checkpoint_delivery(self):
-        custody, _ = self.launched()
-        self.merge_checkpoint(custody, 1)
-        return self.checkpoint_reply
-
-    def test_the_drivers_cover_every_skill_named_reply(self):
-        # The retired issue pipeline was the only skill text naming these subcommands, so the
-        # named set is empty today; a skill that names one later must bring a driver with it.
-        self.assertLessEqual(skill_named_workflow_responses(), set(self.drivers()))
-
-    def test_every_skill_named_reply_passes_the_workflow_response_boundary(self):
-        for name, reply in sorted(self.drivers().items()):
-            with self.subTest(subcommand=name):
-                raw = reply()
-                checked = self.boundary("workflow-response", raw)
-                self.assertEqual((checked.returncode, checked.stderr), (0, b""))
-                self.assertEqual(checked.stdout, raw)
-
-    def test_every_explicit_validator_pipe_names_the_workflow_response_boundary(self):
-        replies = skill_named_workflow_responses()
-        for path, text in skill_texts():
-            for line in text.splitlines():
-                for call in SKILL_CALL.finditer(line):
-                    pipe = VALIDATOR_PIPE.search(line, call.end())
-                    if call[1] not in replies or pipe is None:
-                        continue
-                    with self.subTest(document=path.name, subcommand=call[1]):
-                        self.assertIn("--boundary workflow-response", pipe["arguments"])
+    def test_a_failed_producer_report_still_validates(self):
+        done = self.run_cli("validate-report", "--boundary", "producer", "--input", "-",
+                            "--policy", str(POLICY),
+                            stdin='{"state": "failed", "artifact": null, "notes": ""}')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout), {"state": "failed", "artifact": None, "notes": ""})
 
 
 if __name__ == "__main__":

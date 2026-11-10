@@ -638,8 +638,8 @@ RESIDUE_FACT_KEYS = {LIVE_OWNER: "live_owner",
                      UNACKNOWLEDGED_RESIDUE: "unacknowledged",
                      TERMINAL_RESIDUE: "terminal"}
 
-ROOT_SCRATCH_PATTERNS = ("producer-report-*.json", "review-package-report-*.json",
-                         "*.tmp.??????", ".resolve-project.*.tmp")
+ROOT_SCRATCH_PATTERNS = ("producer-report-*.json", "*.tmp.??????",
+                         ".resolve-project.*.tmp")
 
 
 def listed(directory: Path) -> list:

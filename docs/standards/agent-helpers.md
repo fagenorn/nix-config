@@ -1,9 +1,8 @@
 # Agent helpers
 
-Deltas for agent-workflow Python in this repository. They bind new code now;
-a legacy flat script meets them when its cluster moves into the package.
+Deltas for agent-workflow Python in this repository. They bind all agent-workflow Python.
 
-1. **Helpers live in the package.** Agent-workflow Python is a module of `agent_tools` under `python/`, and a command is that module plus one row in the command table in `lib/agent-tools.nix`, never a new top-level script. Each legacy script moves in with its cluster's PR. ([design](../../.agents/artifacts/specs/2026-09-24-agent-tools-package-design.md))
+1. **Helpers live in the package.** Agent-workflow Python is a module of `agent_tools` under `python/`, and a command is that module plus one row in the command table in `lib/agent-tools.nix`, never a new top-level script. ([design](../../.agents/artifacts/specs/2026-09-24-agent-tools-package-design.md))
 
 2. **A command module is a thin shell.** It parses argv with a parser whose `prog` is the command name, reads input, calls importable functions, writes output and maps errors to exit codes; policy lives in functions that other modules and tests import. ([design](../../.agents/artifacts/specs/2026-09-24-agent-tools-package-design.md))
 
@@ -13,7 +12,7 @@ a legacy flat script meets them when its cluster moves into the package.
 
 5. **Tests drive commands from source.** A test runs a command as `python -m agent_tools.<module>` under the recipe's `PYTHONPATH` and imports modules normally. Only the installed-layout test, `tests/test_agent_tools_launchers.py`, touches the built launchers. ([design](../../.agents/artifacts/specs/2026-09-24-agent-tools-package-design.md))
 
-6. **Skill-text tests pin only what a tool or subagent consumes.** A test under `home/common/agent-skills/tests/` may assert the dispatch marker lines and the `Agent(...)` call lines mirrored in `model-matrix.json`, the carrier clauses `test_dispatch_contracts` places in dispatch regions, shell examples vetted by `test_shell_example_contracts`, frontmatter, the JSON key sets of lifecycle contracts, and `workflow-state`/`resolve-project` argv. No new test pins an English phrase. Existing phrase pins are deleted in the slice that slims their skill, and a heading anchor that only tests read may be renamed with its test in the same commit. ([design](../../.agents/artifacts/specs/2026-10-07-issue-291-skill-best-practices-design.md))
+6. **Skill-text tests pin only what a tool or subagent consumes.** A test under `home/common/agent-skills/tests/` may assert the dispatch marker lines and the `Agent(...)` call lines mirrored in `model-matrix.json`, the carrier clauses `test_dispatch_contracts` places in dispatch regions, shell examples vetted by `test_shell_example_contracts`, frontmatter, the JSON key sets of lifecycle contracts, and `resolve-project` argv. No new test pins an English phrase. Existing phrase pins are deleted in the slice that slims their skill, and a heading anchor that only tests read may be renamed with its test in the same commit. ([design](../../.agents/artifacts/specs/2026-10-07-issue-291-skill-best-practices-design.md))
 
 7. **Plan no edit to an Instruction Budget gate file.** Any change to a path in `instruction_load.GATE_FILES` (the budget workflow, `skill_lint.py`, `instruction_load.py`, `.github/branch-protection.json`) fails the required `Instruction Budget` check until a human applies `instruction-budget-raise`, which no agent may do. A new skill-text check belongs in a test under `home/common/agent-skills/tests/`, not a new `skill_lint.py` rule. ([design](../../.agents/artifacts/specs/2026-11-03-issue-559-helper-self-describing-design.md))
 
