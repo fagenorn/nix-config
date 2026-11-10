@@ -53,6 +53,10 @@ async def nothing(*args, **kwargs):
     pass
 
 
+class VLMBatchedEngine:
+    """Stand-in for upstream's type check; the probe engine is never one."""
+
+
 class AdapterRouteTest(unittest.TestCase):
     def setUp(self):
         self.settings = ModelSettings(**MODEL_SETTINGS)
@@ -67,6 +71,7 @@ class AdapterRouteTest(unittest.TestCase):
         )
         self.namespace = {
             "__name__": "omlx_adapter_route_probe", "inspect": inspect,
+            "asyncio": asyncio, "VLMBatchedEngine": VLMBatchedEngine,
             "logger": logging.getLogger(__name__),
             "InvalidRequestError": InvalidRequestError,
             "HTTPException": RuntimeError,
@@ -103,7 +108,8 @@ class AdapterRouteTest(unittest.TestCase):
         tree = ast.parse(SERVER_SOURCE.read_text())
         names = {"_merge_anthropic_chat_template_kwargs", "_resolve_thinking_budget", "create_anthropic_message",
                  "_cache_store_kwargs", "_prepare_anthropic_prompt",
-                 "_count_anthropic_prompt", "_apply_preserve_thinking_default"}
+                 "_count_anthropic_prompt", "_apply_preserve_thinking_default",
+                 "_prepare_prompt_off_loop"}
         constants = {"_CACHE_STORE_HEADER"}
         nodes = [n for n in tree.body if isinstance(n, ast.Assign)
                  and any(isinstance(t, ast.Name) and t.id in constants for t in n.targets)]
