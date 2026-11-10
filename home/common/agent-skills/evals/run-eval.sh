@@ -192,7 +192,10 @@ TREE_AGENTS=()
 prepare_tree_env() {
   local source_settings=${EVAL_SETTINGS:-$HOME/.claude/settings.json}
   [ -f "$source_settings" ] || die "settings file not found: $source_settings (set EVAL_SETTINGS)"
-  jq empty "$source_settings" || die "settings file is not JSON: $source_settings"
+  jq empty "$source_settings" 2>/dev/null || die "settings file is not JSON: $source_settings"
+  # jq empty accepts an empty file, a bare array and several values; settings are one object.
+  jq -es 'length == 1 and (.[0] | type == "object")' "$source_settings" >/dev/null 2>&1 ||
+    die "settings file is not one JSON object: $source_settings"
 
   # Every step below is checked: the runner has no `set -e`, and a half-prepared tree
   # would still let the model run.

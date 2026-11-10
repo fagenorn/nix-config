@@ -266,6 +266,24 @@ check "bad settings: the message names the settings file" grep -q 'run-eval: set
 check "bad settings: claude -p never ran" test -z "$(recorded run)"
 check "bad settings: no sandbox and no temp root remain" tmp_is_empty
 
+# --- a settings file that parses but is not exactly one JSON object ----------------
+# jq empty accepts an empty file, a bare array and several values; none is a settings file.
+for shape in empty whitespace array two-objects; do
+  scenario "bad-settings-$shape"
+  case "$shape" in
+    empty) : >"$S/settings.json" ;;
+    whitespace) printf ' \n\t\n' >"$S/settings.json" ;;
+    array) printf '[]\n' >"$S/settings.json" ;;
+    two-objects) printf '{}\n{}\n' >"$S/settings.json" ;;
+  esac
+  run_env EVAL_SETTINGS="$S/settings.json"
+  status=$?
+  check "bad settings ($shape): the runner exits 2" test "$status" -eq 2
+  check "bad settings ($shape): the message names the settings file" grep -q 'run-eval: settings file is not one JSON object' "$S/log"
+  check "bad settings ($shape): claude -p never ran" test -z "$(recorded run)"
+  check "bad settings ($shape): no sandbox and no temp root remain" tmp_is_empty
+done
+
 # --- tree mode passes the settings through and shims only table commands --------
 scenario tree-shims
 run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE"
