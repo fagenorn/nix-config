@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import agent_gate_bundle, verify_checks
-from agent_tools.claims import forge_markers
+from agent_tools.system import forge_api
 from agent_tools.verify_checks import required_checks, self_hosted_runner
 
 from .guard_policy_world import GuardPolicyWorld
@@ -53,8 +53,8 @@ def forge(gets, pages):
         if path not in pages:
             raise AssertionError(f"unexpected paginated read {path}")
         return pages[path]
-    return (mock.patch.object(forge_markers, "api_get", side_effect=api_get),
-            mock.patch.object(forge_markers, "api_pages", side_effect=api_pages))
+    return (mock.patch.object(forge_api, "api_get", side_effect=api_get),
+            mock.patch.object(forge_api, "api_pages", side_effect=api_pages))
 
 
 def search_page(numbers, total=None, incomplete=False):
@@ -160,7 +160,7 @@ class RequiredChecksTest(unittest.TestCase):
     def test_a_malformed_app_id_is_refused(self):
         gets, pages = world([run("lint")])
         gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": "15368"}]}
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             self.check(gets, pages)
 
     def test_no_required_checks_is_not_met(self):
@@ -191,20 +191,20 @@ class RequiredChecksTest(unittest.TestCase):
     def test_a_status_page_that_is_not_a_list_is_refused(self):
         gets, pages = world([run("lint")])
         pages[STATUSES] = [{"message": "nope"}]
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             self.check(gets, pages)
 
     def test_an_incomplete_search_is_refused(self):
         gets, pages = world([run("lint")])
         pages[SEARCH] = [search_page([2610], incomplete=True)]
-        with self.assertRaises(forge_markers.ForgeError) as raised:
+        with self.assertRaises(forge_api.ForgeError) as raised:
             self.check(gets, pages)
         self.assertEqual(raised.exception.code, "payload_invalid")
 
     def test_a_truncated_search_is_refused(self):
         gets, pages = world([run("lint")])
         pages[SEARCH] = [search_page([2610], total=1500)]
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             self.check(gets, pages)
 
     def test_check_runs_on_a_second_page_count_and_a_short_listing_is_refused(self):
@@ -213,13 +213,13 @@ class RequiredChecksTest(unittest.TestCase):
                        {"total_count": 101, "check_runs": [run("lint")]}]
         self.assertEqual(self.check(gets, pages)[0], 0)
         pages[RUNS] = [{"total_count": 101, "check_runs": [run(f"other-{i}") for i in range(100)]}]
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             self.check(gets, pages)
 
     def test_forge_error_propagates(self):
-        with mock.patch.object(forge_markers, "api_pages",
-                               side_effect=forge_markers.ForgeError("gh_failed", "boom")):
-            with self.assertRaises(forge_markers.ForgeError):
+        with mock.patch.object(forge_api, "api_pages",
+                               side_effect=forge_api.ForgeError("gh_failed", "boom")):
+            with self.assertRaises(forge_api.ForgeError):
                 required_checks("elevenyellow/nodocom", "dev", SINCE)
 
 
@@ -1045,7 +1045,7 @@ class SelfHostedRunnerTest(unittest.TestCase):
         self.assertEqual((code, report["found"], report["status"]), (75, False, None))
 
     def test_a_truncated_listing_is_refused(self):
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             judge_runner([runner_entry()], total=2)
 
     def test_malformed_entries_are_refused(self):
@@ -1055,7 +1055,7 @@ class SelfHostedRunnerTest(unittest.TestCase):
         del no_status["status"]
         for entries in (["eleven-m5-jarbird"], [{"status": "online"}], [bad_labels], [no_status]):
             with self.subTest(entries=entries):
-                with self.assertRaises(forge_markers.ForgeError):
+                with self.assertRaises(forge_api.ForgeError):
                     judge_runner(entries)
 
 

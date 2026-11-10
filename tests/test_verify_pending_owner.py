@@ -14,6 +14,7 @@ from agent_tools.claims import forge_owner_action as foa
 from agent_tools import verify_owner as vo
 from agent_tools import verify_pending
 from agent_tools import verify_run as vr
+from agent_tools.system import forge_api
 
 from .test_verify_pending import (ISSUE, MERGE, SLUG, T0, PassBase, Refs, block, bkey, check, gnode, hold, line, marker,
                                   ok_check, result, stored_comment)
@@ -776,7 +777,7 @@ class ForeignOwnerActionTest(OwnerBase):
     def closing_pass(self, reason):
         self.hold(ask_check(), extra=[stored_comment(self.BATCH_ID, self.batch_marker(reason))])
         delayed, = vr.list_held(SLUG)
-        fm.remove_label(SLUG, ISSUE, "needs-verification")  # the issue leaves the listing: no held block
+        forge_api.remove_label(SLUG, ISSUE, "needs-verification")  # the issue leaves the listing: no held block
         vr.pass_issue(self.project, "mbp", delayed, Refs())  # must not raise
         self.assert_untouched()
         self.assertIn("owner-action", self.world.issue()["labels"])  # the batch marker still stands

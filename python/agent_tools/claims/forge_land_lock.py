@@ -67,6 +67,7 @@ from collections.abc import Collection
 from typing import Any, Callable, NamedTuple
 
 from agent_tools.claims import forge_markers as fm
+from agent_tools.system import forge_api
 
 LOCK_PREFIX = "refs/agent-locks/land/"
 CREATE_ROUNDS = 3
@@ -184,7 +185,7 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
         if lock is not None:
             break
     if lock is None:
-        raise fm.ForgeError("gh_failed", "ref create refused while the ref is absent")
+        raise forge_api.ForgeError("gh_failed", "ref create refused while the ref is absent")
     if lock == sha:
         verdict = "acquired" if attempts is not None and attempts.unsure else "already_held"
         return Outcome(verdict, sha, pick_pr(mine), None)
@@ -203,7 +204,7 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
             return Outcome("moved", sha, pick_pr(mine), None)
         return Outcome("acquired", sha, pick_pr(mine), kind)
     if after == lock and failure:
-        raise fm.ForgeError(failure.code, "compare-and-swap not applied and the lock is unchanged",
+        raise forge_api.ForgeError(failure.code, "compare-and-swap not applied and the lock is unchanged",
                             transient=failure.transient)
     return Outcome("lost_to", after, _pr_of(slug, branch, after), None)
 
@@ -256,7 +257,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
             if not mine:
                 return _no_open_pr(args)
             outcome = acquire_once(args.repo, args.branch, args.sha, mine, idle, node, seen)
-        except fm.ForgeError as error:
+        except forge_api.ForgeError as error:
             failures += 1
             if error.code not in ("gh_failed", "gh_timeout") or failures >= FAILED_POLLS:
                 raise
@@ -313,7 +314,7 @@ def _release(args: Any) -> tuple[int, dict[str, Any]]:
     if after is None:
         return 0, result(args, "released")
     if after == args.sha:
-        raise fm.ForgeError(failure.code if failure else "gh_failed",
+        raise forge_api.ForgeError(failure.code if failure else "gh_failed",
                             "compare-and-swap delete left the lock at the caller's sha",
                             transient=failure is not None and failure.transient)
     pr = _pr_of(args.repo, args.branch, after)

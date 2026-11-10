@@ -31,7 +31,7 @@ import unicodedata
 from collections.abc import Collection, Mapping
 
 from agent_tools import resolve_project, worktree_forge
-from agent_tools.claims import forge_markers
+from agent_tools.system import forge_api
 
 SLUG_WORDS = 6
 SLUG_CHARS = 40
@@ -140,9 +140,9 @@ def derive(repo_root: str, issue: int) -> dict:
         raise BranchRefusal("tracker_unsupported", tracker["kind"], 2)
     slug = tracker["repo_slug"]
     try:
-        payload = forge_markers.api_get(f"repos/{slug}/issues/{issue}")
+        payload = forge_api.api_get(f"repos/{slug}/issues/{issue}")
         if not isinstance(payload, dict) or not isinstance(payload.get("title"), str):
-            raise forge_markers.ForgeError("payload_invalid", "issue title is not a string")
+            raise forge_api.ForgeError("payload_invalid", "issue title is not a string")
         title = payload["title"]
         vcs = snapshot["bindings"]["vcs"]
         derived = render(vcs["branch_pattern"], issue, title_slug(title))
@@ -153,7 +153,7 @@ def derive(repo_root: str, issue: int) -> dict:
         _git(root, "fetch", "--quiet", "origin")
         refs = ref_dates(root)
         pr_heads = {b: v["number"] for b, v in worktree_forge.open_pull_heads(slug).items()}
-    except forge_markers.ForgeError as error:
+    except forge_api.ForgeError as error:
         raise BranchRefusal("forge_failed", {"code": error.code, "detail": error.detail,
                                              "transient": error.transient}, 1) from None
     branch = select(derived, refs, pr_heads, matcher(vcs["branch_pattern"], issue), excluded)

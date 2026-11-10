@@ -62,10 +62,10 @@ from collections.abc import Collection
 from pathlib import Path
 
 from agent_tools import agent_platform, verify_exec, verify_run
-from agent_tools.claims import forge_markers
-from agent_tools.claims.forge_markers import ForgeError
 from agent_tools.claims.owner_actions import SLUG_PATTERN
 from agent_tools.resolve_project import ContractError, resolve
+from agent_tools.system import forge_api
+from agent_tools.system.forge_api import ForgeError
 from agent_tools.verify_block import HOST, SHA, count_after, count_since, lint_block, parse_block
 
 GIT_TIMEOUT = 60
@@ -270,7 +270,7 @@ def run_run(args: argparse.Namespace) -> int:
     if not HOST.fullmatch(args.host):
         print(f"verify-pending: --host {args.host} is not a hostname", file=sys.stderr)
         return 2
-    if not forge_markers.logged_in():
+    if not forge_api.logged_in():
         print("verify-pending: no-forge-credential", file=sys.stderr)
         return 0
     try:

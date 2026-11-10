@@ -56,7 +56,7 @@ whose head is that branch as activity beside its own renewals; a claim with no b
 its own `updated_at`.
 
 D5, server now: "now" is the server's `Date` header of `gh api --include rate_limit`
-(`forge_markers.server_now`), never the host clock, so a skewed host clock changes no verdict. A
+(`forge_api.server_now`), never the host clock, so a skewed host clock changes no verdict. A
 claim is stale when `now - activity >= 24 hours`, where activity is the latest of the claim's own
 `updated_at` (moved by each renewal, D3) and the branch activity of D4.
 
@@ -111,7 +111,9 @@ from typing import Any
 from agent_tools.claims import forge_land_lock
 from agent_tools.claims import forge_owner_action
 from agent_tools.claims import forge_markers as fm
-from agent_tools.claims.forge_markers import ForgeError, Marker
+from agent_tools.claims.forge_markers import Marker
+from agent_tools.system import forge_api
+from agent_tools.system.forge_api import ForgeError
 
 CLAIM_KIND = "claim"
 IN_PROGRESS = ("in-progress", "FBCA04")
@@ -195,8 +197,8 @@ def _holder_of(marker: Marker | None) -> str | None:
 
 
 def _mark_in_progress(args: argparse.Namespace) -> None:
-    fm.ensure_label(args.repo, *IN_PROGRESS)
-    fm.add_label(args.repo, args.issue, IN_PROGRESS[0])
+    forge_api.ensure_label(args.repo, *IN_PROGRESS)
+    forge_api.add_label(args.repo, args.issue, IN_PROGRESS[0])
 
 
 def retire_owner_actions(slug: str, issue: int, markers: list[Marker], claim_id: int | None,
@@ -213,7 +215,7 @@ def retire_owner_actions(slug: str, issue: int, markers: list[Marker], claim_id:
     for comment_id in named:
         fm.end(slug, issue, comment_id, reason)
     if named and not any(m.comment_id not in named for m in live):
-        fm.remove_label(slug, issue, OWNER_ACTION[0])
+        forge_api.remove_label(slug, issue, OWNER_ACTION[0])
     return named
 
 
@@ -273,7 +275,7 @@ def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Mar
         claim = _claim_named(snapshot, owner_action)
         if claim is None or claim.comment_id in released or not fm.is_live(claim, snapshot):
             return claim, "released", []
-        now = fm.server_now() if now is None else now
+        now = forge_api.server_now() if now is None else now
         if early is None:
             moments = branch_activity(slug, claim)
         elif claim.fields.get("branch") != early[0].fields.get("branch"):
@@ -314,7 +316,7 @@ def honour_ticks(slug: str, issue: int, markers: list[Marker]) -> tuple[list[Mar
         # Like release: a claim acquired between `again` and the removal gets its label back.
         _, again = _settle_in_progress(slug, issue, again)
     if not _live_owner_actions(again):
-        fm.remove_label(slug, issue, OWNER_ACTION[0])
+        forge_api.remove_label(slug, issue, OWNER_ACTION[0])
     return again, sorted(released)
 
 
@@ -335,7 +337,7 @@ def retire_obsolete(slug: str, issue: int, markers: list[Marker], keep: int | No
                          and fm.is_live(c, markers) for c in markers)
         fm.end(slug, issue, marker.comment_id, "renewed" if claim_live else "released")
     if obsolete and len(obsolete) == len(live):
-        fm.remove_label(slug, issue, OWNER_ACTION[0])
+        forge_api.remove_label(slug, issue, OWNER_ACTION[0])
     return sorted(m.comment_id for m in obsolete)
 
 
@@ -404,7 +406,7 @@ def _retired_owner_action_label(slug: str, issue: int, markers: list[Marker], cl
     had an `owner-action` marker and none of the issue is live any more (D10)."""
     named = any(m.kind == OWNER_ACTION_KIND and m.fields.get("claim") == str(claim_id) for m in markers)
     if named and not _live_owner_actions(markers):
-        fm.remove_label(slug, issue, OWNER_ACTION[0])
+        forge_api.remove_label(slug, issue, OWNER_ACTION[0])
 
 
 def _settle_in_progress(slug: str, issue: int,
@@ -419,11 +421,11 @@ def _settle_in_progress(slug: str, issue: int,
     markers = fm.list_markers(slug, issue) if markers is None else markers
     if fm.contest(markers, CLAIM_KIND, match):
         return False, markers
-    fm.remove_label(slug, issue, IN_PROGRESS[0])
+    forge_api.remove_label(slug, issue, IN_PROGRESS[0])
     markers = fm.list_markers(slug, issue)
     if fm.contest(markers, CLAIM_KIND, match):
-        fm.ensure_label(slug, *IN_PROGRESS)
-        fm.add_label(slug, issue, IN_PROGRESS[0])
+        forge_api.ensure_label(slug, *IN_PROGRESS)
+        forge_api.add_label(slug, issue, IN_PROGRESS[0])
         return False, markers
     return True, markers
 
@@ -462,7 +464,7 @@ def status(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     activity = activity_at(args.repo, winner)
     report["activity_at"] = activity.strftime("%Y-%m-%dT%H:%M:%SZ")
     base = (winner.comment_id, _holder_of(winner))
-    if not is_stale(activity, fm.server_now()):
+    if not is_stale(activity, forge_api.server_now()):
         retire_obsolete(args.repo, args.issue, markers, None)
         return 0, _result(args, "held_by", *base, **report)
     retire_obsolete(args.repo, args.issue, markers, winner.comment_id)
@@ -478,8 +480,8 @@ def status(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         report["owner_action_posted"] = written.won
         report["owner_action_comment_id"] = (written.own_id if written.won else
                                              written.winner.comment_id if written.winner else None)
-    fm.ensure_label(args.repo, *OWNER_ACTION)
-    fm.add_label(args.repo, args.issue, OWNER_ACTION[0])
+    forge_api.ensure_label(args.repo, *OWNER_ACTION)
+    forge_api.add_label(args.repo, args.issue, OWNER_ACTION[0])
     return 0, _result(args, "stale", *base, **report)
 
 

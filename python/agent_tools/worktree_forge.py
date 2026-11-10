@@ -2,17 +2,17 @@
 
 `open_pull_heads(slug)` reads the open pull requests whose head branch lives in the pull
 request's own base repository, GET only and never a write. Every field a reading consumes is
-validated, and any deviation raises `forge_markers.ForgeError("payload_invalid", ...)`: a
+validated, and any deviation raises `forge_api.ForgeError("payload_invalid", ...)`: a
 malformed payload is never a silent skip. The ledger-backed branch-mapping rule and the
 reconcile command that once shared this reader went with the workflow ledger (issue 689).
 """
 from __future__ import annotations
 
-from agent_tools.claims import forge_markers
+from agent_tools.system import forge_api
 
 
-def _invalid(detail: str) -> forge_markers.ForgeError:
-    return forge_markers.ForgeError("payload_invalid", detail)
+def _invalid(detail: str) -> forge_api.ForgeError:
+    return forge_api.ForgeError("payload_invalid", detail)
 
 
 def _is_int(value: object) -> bool:
@@ -41,7 +41,7 @@ def open_pull_heads(slug: str) -> dict[str, dict]:
     pull requests share a branch the lowest number is kept.
     """
     heads: dict[str, dict] = {}
-    for page in forge_markers.api_pages(f"repos/{slug}/pulls?state=open&per_page=100"):
+    for page in forge_api.api_pages(f"repos/{slug}/pulls?state=open&per_page=100"):
         if not isinstance(page, list):
             raise _invalid("pull request page is not an array")
         for pr in page:

@@ -1,8 +1,8 @@
 """The facts a verify-pending run reads: `when` conditions and the built-in probes (issue 630).
 
 A `when` condition is read from the running system (`darwin-version`/`nixos-version`, git) and
-the forge, never from a host clock: every time comparison uses `forge_markers.server_now()`
-through `Context.now()` (P7). Every `gh` call goes through `forge_markers`, so no token reaches
+the forge, never from a host clock: every time comparison uses `forge_api.server_now()`
+through `Context.now()` (P7). Every `gh` call goes through `forge_api`, so no token reaches
 it; the version tool and every `git` child also run with `GITHUB_TOKEN` and `GH_TOKEN` removed
 (P16). This module only reads: the `window-open` marker a
 `days_after` condition waits for is posted by the caller.
@@ -26,8 +26,9 @@ from typing import Any
 from urllib.parse import quote
 
 from agent_tools import verify_block, verify_issues
-from agent_tools.claims import forge_markers
-from agent_tools.claims.forge_markers import ForgeError, Marker
+from agent_tools.claims.forge_markers import Marker
+from agent_tools.system import forge_api
+from agent_tools.system.forge_api import ForgeError
 
 TOKENS = ("GITHUB_TOKEN", "GH_TOKEN")
 VERSION_TOOLS = ("darwin-version", "nixos-version")
@@ -51,7 +52,7 @@ class Context:
     def now(self) -> datetime:
         """The forge's time, read once."""
         if self._now is None:
-            self._now = forge_markers.server_now()
+            self._now = forge_api.server_now()
         return self._now
 
     def revision(self) -> str | None:
@@ -115,7 +116,7 @@ def deployed_revision() -> str | None:
 
 def _compare(slug: str, base: str, head: str) -> str | None:
     """The status of the forge's compare of `base...head`, or None when the forge cannot say."""
-    payload = forge_markers.api_get(f"repos/{slug}/compare/{quote(base)}...{quote(head)}", allow=(404,))
+    payload = forge_api.api_get(f"repos/{slug}/compare/{quote(base)}...{quote(head)}", allow=(404,))
     status = payload.get("status") if isinstance(payload, dict) else None
     return status if isinstance(status, str) else None
 
@@ -140,7 +141,7 @@ def includes(ctx: Context, sha: str, rev: str) -> bool | None:
 
 def on_forge(ctx: Context, rev: str) -> bool | None:
     """True when the forge holds commit `rev`, False when it answers 404 or 422."""
-    payload = forge_markers.api_get(f"repos/{ctx.slug}/commits/{rev}", allow=(404, 422))
+    payload = forge_api.api_get(f"repos/{ctx.slug}/commits/{rev}", allow=(404, 422))
     if payload is None:
         return False
     if isinstance(payload, dict) and payload.get("sha") == rev:
@@ -166,7 +167,7 @@ def released_includes(ctx: Context, sha: str) -> Reading:
 
     The latest release tag must contain `sha` and sit on the default branch. A release a deploy
     watch observed is the release core's activation-unit observation (#555, #582), not read here."""
-    latest = forge_markers.api_get(f"repos/{ctx.slug}/releases/latest", allow=(404,))
+    latest = forge_api.api_get(f"repos/{ctx.slug}/releases/latest", allow=(404,))
     tag = latest.get("tag_name") if isinstance(latest, dict) else None
     if not isinstance(tag, str) or not tag:
         return Reading("not_released", {})
@@ -181,7 +182,7 @@ def released_includes(ctx: Context, sha: str) -> Reading:
 
 
 def _workflow_runs(ctx: Context, query: str) -> list[dict]:
-    payload = forge_markers.api_get(f"repos/{ctx.slug}/actions/runs?{query}")
+    payload = forge_api.api_get(f"repos/{ctx.slug}/actions/runs?{query}")
     runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
     if not isinstance(runs, list):
         raise ForgeError("payload_invalid", "no workflow_runs list")
@@ -249,14 +250,14 @@ def _stamps(ctx: Context, run: Mapping) -> list[str]:
     out of a capped search. A listing shorter than its `total_count` was truncated by the forge
     and is refused rather than counted low."""
     if run["source"] == "releases":
-        pages = forge_markers.api_pages(f"repos/{ctx.slug}/releases?per_page=100")
+        pages = forge_api.api_pages(f"repos/{ctx.slug}/releases?per_page=100")
         if not all(isinstance(page, list) for page in pages):
             raise ForgeError("payload_invalid", "releases is not a list")
         return [item["published_at"] for page in pages for item in page
                 if isinstance(item, dict) and not item.get("draft")
                 and isinstance(item.get("published_at"), str)]
     workflow = quote(run["workflow"], safe="")
-    pages = forge_markers.api_pages(f"repos/{ctx.slug}/actions/workflows/{workflow}/runs?" + _run_query(run))
+    pages = forge_api.api_pages(f"repos/{ctx.slug}/actions/workflows/{workflow}/runs?" + _run_query(run))
     runs, total = [], 0
     for page in pages:
         listed = page.get("workflow_runs") if isinstance(page, dict) else None

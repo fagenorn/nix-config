@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_tools.claims import forge_markers as fm
+from agent_tools.system import forge_api
 
 KIND = "owner-action"
 LABEL = ("owner-action", "D93F0B")
@@ -244,18 +245,18 @@ def apply_labels(slug: str, issue: int, markers: list[fm.Marker], labels: Collec
     has_decision = any(m.kind == KIND and m.fields.get("reason") == "decision" and fm.is_live(m, markers)
                        for m in markers)
     if done and ANSWERED_LABEL[0] not in labels:
-        fm.ensure_label(slug, *ANSWERED_LABEL)
-        fm.add_label(slug, issue, ANSWERED_LABEL[0])
+        forge_api.ensure_label(slug, *ANSWERED_LABEL)
+        forge_api.add_label(slug, issue, ANSWERED_LABEL[0])
     if action and LABEL[0] not in labels:
-        fm.ensure_label(slug, *LABEL)
-        fm.add_label(slug, issue, LABEL[0])
+        forge_api.ensure_label(slug, *LABEL)
+        forge_api.add_label(slug, issue, LABEL[0])
     if not action and LABEL[0] in labels and (has_decision or drop_bare):
-        fm.remove_label(slug, issue, LABEL[0])
+        forge_api.remove_label(slug, issue, LABEL[0])
     for name in sorted(clears):
         if name in labels:
-            fm.remove_label(slug, issue, name)
+            forge_api.remove_label(slug, issue, name)
     if not done and ANSWERED_LABEL[0] in labels:
-        fm.remove_label(slug, issue, ANSWERED_LABEL[0])
+        forge_api.remove_label(slug, issue, ANSWERED_LABEL[0])
     return "open" if action else "answered" if done else "none"
 
 
@@ -264,7 +265,7 @@ def reconcile(slug: str, issue: int | None = None) -> list[dict]:
     given): one report line each. A forge error on one issue skips it; a listing failure raises."""
     names: dict[int, set[str]] = {}
     for label in (LABEL[0], ANSWERED_LABEL[0]):
-        for item in fm.open_issues(slug, label):
+        for item in forge_api.open_issues(slug, label):
             number = item.get("number")
             if isinstance(number, int) and not isinstance(number, bool):
                 found = item.get("labels")
@@ -281,7 +282,7 @@ def reconcile(slug: str, issue: int | None = None) -> list[dict]:
             state = apply_labels(slug, number, fm.list_markers(slug, number, TRUSTED), names[number],
                                  drop_bare=False)
             lines.append({**line, "state": state, "reason": reasons[state]})
-        except fm.ForgeError:
+        except forge_api.ForgeError:
             lines.append({**line, "state": "skipped", "reason": "forge_error"})
     return lines
 
@@ -299,8 +300,8 @@ def _usage(args: Any, detail: str) -> tuple[int, dict[str, Any]]:
 
 
 def _label_owner_action(args: Any) -> None:
-    fm.ensure_label(args.repo, *LABEL)
-    fm.add_label(args.repo, args.issue, LABEL[0])
+    forge_api.ensure_label(args.repo, *LABEL)
+    forge_api.add_label(args.repo, args.issue, LABEL[0])
 
 
 def _post(args: Any) -> tuple[int, dict[str, Any]]:
@@ -381,10 +382,10 @@ def _end(args: Any) -> tuple[int, dict[str, Any]]:
     if not named and not decision:
         return 0, result(args, "none", ended=[])
     if decision:
-        fm.remove_label(args.repo, args.issue, ANSWERED_LABEL[0])
+        forge_api.remove_label(args.repo, args.issue, ANSWERED_LABEL[0])
     if not any(m.kind == KIND and m.comment_id not in named and fm.is_live(m, markers)
                for m in markers):
-        fm.remove_label(args.repo, args.issue, LABEL[0])
+        forge_api.remove_label(args.repo, args.issue, LABEL[0])
     if not named:
         return 0, result(args, "none", ended=[])
     return 0, result(args, "ended", named[0], ended=named)

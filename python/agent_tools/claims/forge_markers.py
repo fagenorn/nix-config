@@ -4,9 +4,8 @@ A marker is an issue comment whose first line is `<!-- agent:<kind> v1 key=value
 (D1: a repeated key or any other first line is not a marker); the kind matches
 `[a-z][a-z0-9-]*`, a key `[a-z][a-z0-9_]*` and a value `[A-Za-z0-9._:/@+-]+`. Line 2 is one human
 sentence and later lines are free text. This module renders, parses, lists, posts, edits and
-deletes markers through `gh api`, with `GITHUB_TOKEN` and `GH_TOKEN` removed from every child so
-the keyring credential answers. Labels (`in-progress`, `owner-action`) are filters only; the
-markers decide.
+deletes markers through the `forge_api` transport. Labels (`in-progress`, `owner-action`) are
+filters only; the markers decide.
 
 D2, winner and write: among the live markers of one kind whose fields contain a match set, the
 smallest comment id wins. `write` posts, re-lists, takes the contest over the re-read plus its
@@ -26,36 +25,25 @@ the guard; an `after` of `ZERO_OID` deletes). Any CAS error, timeout or lie is "
 caller re-reads the ref to learn what happened and keeps the returned `ForgeError` (its code and
 transport class) to report when the ref is unchanged (D1). REST ref deletion is never used.
 
-Transport class (issue 740): `_gh` marks a timeout, an HTTP 5xx and a connection failure
-transient on the `ForgeError`; a caller may retry a whole idempotent operation on it; a
-`cas_ref` failure carries the class of the call that failed.
-
-The module reads no host clock: "now" is the server's `Date` header (D5).
+Transport: the `gh api` calls, `ForgeError` and its transport class (issue 740), and the
+server-time read (D5) are in `agent_tools.system.forge_api`; this module only calls them.
 """
-import json
-import os
 import re
-import subprocess
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote
+
+from agent_tools.system import forge_api
+from agent_tools.system.forge_api import ForgeError
 
 KIND = r"[a-z][a-z0-9-]*"
 KEY = r"[a-z][a-z0-9_]*"
 VALUE = r"[A-Za-z0-9._:/@+-]+"
 MARKER = re.compile(rf"<!-- agent:(?P<kind>{KIND}) v1(?P<fields>(?: {KEY}={VALUE})*) -->")
 FIELD = re.compile(rf" (?P<key>{KEY})=(?P<value>{VALUE})")
-HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
-TRANSPORT = re.compile(
-    r"\bHTTP 5\d\d\b|error connecting to|dial tcp|network is unreachable|connection refused"
-    r"|connection reset|no such host|i/o timeout|TLS handshake timeout|unexpected EOF",
-    re.IGNORECASE)
 END_KIND = "end"
-TIMEOUT = 30
-DETAIL_LIMIT = 240
 ZERO_OID = "0" * 40
 OID = re.compile(r"[0-9a-f]{40}")
 NODE_ID = re.compile(r"[A-Za-z0-9_=-]+")
@@ -66,24 +54,6 @@ UPDATE_REFS = ("mutation($repositoryId: ID!, $name: GitRefname!, $before: GitObj
 CLOSING_ISSUES = ("query($owner: String!, $name: String!, $number: Int!) { "
                   "repository(owner: $owner, name: $name) { pullRequest(number: $number) { "
                   "closingIssuesReferences(first: 5) { nodes { number } } } } }")
-
-
-def is_transport(stderr: str) -> bool:
-    """Whether a `gh` failure's stderr shows an HTTP 5xx or a connection failure."""
-    return TRANSPORT.search(stderr) is not None
-
-
-class ForgeError(Exception):
-    """A forge call failed: `code` is gh_missing, gh_failed, gh_timeout or payload_invalid.
-
-    `transient` is true for a transport error (issue 740 D2): a `gh_timeout`, or a `gh_failed`
-    whose stderr shows HTTP 5xx or a connection failure."""
-
-    def __init__(self, code: str, detail: str = "", transient: bool | None = None) -> None:
-        super().__init__(f"{code}: {detail}" if detail else code)
-        self.code = code
-        self.detail = detail[:DETAIL_LIMIT]
-        self.transient = code == "gh_timeout" if transient is None else bool(transient)
 
 
 @dataclass(frozen=True)
@@ -189,66 +159,13 @@ def contest(markers: Iterable[Marker], kind: str, match: Mapping[str, str]) -> l
                   key=lambda m: m.comment_id)
 
 
-def _gh(argv: list[str], allow: Iterable[int] = ()) -> tuple[int, str]:
-    """Run `gh` without any token variable. Returns (0, stdout), or (status, stdout) when the
-    call failed with an HTTP status in `allow`; every other failure is a ForgeError."""
-    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
-    try:
-        done = subprocess.run(["gh", *argv], capture_output=True, text=True, timeout=TIMEOUT,
-                              stdin=subprocess.DEVNULL, env=env)
-    except subprocess.TimeoutExpired:
-        raise ForgeError("gh_timeout", " ".join(argv)) from None
-    except OSError as error:
-        raise ForgeError("gh_missing", str(error)) from None
-    if done.returncode == 0:
-        return 0, done.stdout
-    found = HTTP_STATUS.search(done.stderr)
-    status = int(found[1]) if found else 0
-    if status and status in set(allow):
-        return status, done.stdout
-    raise ForgeError("gh_failed", done.stderr.strip(), transient=is_transport(done.stderr))
-
-
-def logged_in() -> bool:
-    """Whether `gh` holds a credential: `gh auth status` succeeds. Any forge failure, a missing `gh` included, is False."""
-    try:
-        _gh(["auth", "status"])
-    except ForgeError:
-        return False
-    return True
-
-
-def _json(argv: list[str], allow: Iterable[int] = ()) -> Any:
-    """The parsed stdout of a `gh` call, or None when it failed with a status in `allow`."""
-    status, out = _gh(argv, allow)
-    if status:
-        return None
-    try:
-        return json.loads(out)
-    except ValueError:
-        raise ForgeError("payload_invalid", "stdout is not JSON") from None
-
-
-def api_get(path: str, allow: Iterable[int] = ()) -> Any:
-    """The parsed JSON of one `gh api` read, or None when it failed with a status in `allow`."""
-    return _json(["api", path], allow)
-
-
-def api_pages(path: str) -> list[Any]:
-    """The parsed JSON page of every page of one paginated `gh api` read, in order."""
-    pages = _json(["api", "--paginate", "--slurp", path])
-    if not isinstance(pages, list):
-        raise ForgeError("payload_invalid", "paginated listing is not an array of pages")
-    return pages
-
-
 def _comments(slug: str, issue: int) -> str:
     return f"repos/{slug}/issues/{issue}/comments"
 
 
 def list_comments(slug: str, issue: int) -> list[dict]:
     """Every REST comment object of the issue, ascending comment id."""
-    pages = _json(["api", "--paginate", "--slurp", _comments(slug, issue) + "?per_page=100"])
+    pages = forge_api.gh_json(["api", "--paginate", "--slurp", _comments(slug, issue) + "?per_page=100"])
     if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
         raise ForgeError("payload_invalid", "comment listing is not an array of pages")
     found = [c for page in pages for c in page if isinstance(c, dict)]
@@ -267,7 +184,7 @@ def list_markers(slug: str, issue: int,
 
 
 def _posted(slug: str, issue: int, body: str) -> dict:
-    comment = _json(["api", "-X", "POST", _comments(slug, issue), "-f", f"body={body}"])
+    comment = forge_api.gh_json(["api", "-X", "POST", _comments(slug, issue), "-f", f"body={body}"])
     comment_id = comment.get("id") if isinstance(comment, dict) else None
     if isinstance(comment_id, bool) or not isinstance(comment_id, int):
         raise ForgeError("payload_invalid", "posted comment has no id")
@@ -315,50 +232,18 @@ def write(slug: str, issue: int, kind: str, fields: Mapping[str, str], sentence:
 
 
 def edit(slug: str, comment_id: int, body: str) -> None:
-    _gh(["api", "-X", "PATCH", f"repos/{slug}/issues/comments/{comment_id}", "-f", f"body={body}"])
+    forge_api.run_gh(["api", "-X", "PATCH", f"repos/{slug}/issues/comments/{comment_id}", "-f", f"body={body}"])
 
 
 def delete(slug: str, comment_id: int) -> None:
     """Delete a comment; HTTP 404 means it is already gone."""
-    _gh(["api", "-X", "DELETE", f"repos/{slug}/issues/comments/{comment_id}"], allow=(404,))
-
-
-def server_now() -> datetime:
-    """The forge's current time: the `Date` header of a free `rate_limit` call (D5)."""
-    _, out = _gh(["api", "--include", "rate_limit"])
-    headers = re.split(r"\r?\n\r?\n", out, maxsplit=1)[0].splitlines()
-    for line in headers[1:]:
-        name, _, value = line.partition(":")
-        if name.strip().lower() == "date":
-            try:
-                parsed = parsedate_to_datetime(value.strip())
-            except (TypeError, ValueError):
-                break
-            return (parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None
-                    else parsed.astimezone(timezone.utc))
-    raise ForgeError("payload_invalid", "no readable Date header")
-
-
-def ensure_label(slug: str, name: str, color: str) -> None:
-    """Create the label; HTTP 422 means it already exists (D7)."""
-    _gh(["api", "-X", "POST", f"repos/{slug}/labels", "-f", f"name={name}", "-f", f"color={color}"],
-        allow=(422,))
-
-
-def add_label(slug: str, issue: int, name: str) -> None:
-    _gh(["api", "-X", "POST", f"repos/{slug}/issues/{issue}/labels", "-f", f"labels[]={name}"])
-
-
-def remove_label(slug: str, issue: int, name: str) -> None:
-    """Remove the label; HTTP 404 means it is not there (D7)."""
-    _gh(["api", "-X", "DELETE", f"repos/{slug}/issues/{issue}/labels/{quote(name, safe='')}"],
-        allow=(404,))
+    forge_api.run_gh(["api", "-X", "DELETE", f"repos/{slug}/issues/comments/{comment_id}"], allow=(404,))
 
 
 def latest_push(slug: str, branch: str) -> datetime | None:
     """The time of the branch's last push, None when it has none or no longer exists (D4)."""
-    activity = _json(["api", f"repos/{slug}/activity?ref=refs/heads/{quote(branch, safe='/')}"
-                      "&activity_type=push&per_page=1"], allow=(404,))
+    activity = forge_api.gh_json(["api", f"repos/{slug}/activity?ref=refs/heads/{quote(branch, safe='/')}"
+                                  "&activity_type=push&per_page=1"], allow=(404,))
     if activity is None or activity == []:
         return None
     if not isinstance(activity, list) or not isinstance(activity[0], dict):
@@ -369,62 +254,17 @@ def latest_push(slug: str, branch: str) -> datetime | None:
 def latest_pr_event(slug: str, branch: str) -> datetime | None:
     """The newest `updated_at` among pull requests whose head is the branch (D4)."""
     owner = slug.split("/", 1)[0]
-    pulls = _json(["api", f"repos/{slug}/pulls?state=all&head={owner}:{quote(branch, safe='/')}"
-                   "&per_page=100"])
+    pulls = forge_api.gh_json(["api", f"repos/{slug}/pulls?state=all&head={owner}:{quote(branch, safe='/')}"
+                               "&per_page=100"])
     if not isinstance(pulls, list) or not all(isinstance(p, dict) for p in pulls):
         raise ForgeError("payload_invalid", "pull requests are not an array of objects")
     return max((_instant(p.get("updated_at")) for p in pulls), default=None)
 
 
-def graphql(query: str, variables: Mapping[str, str]) -> Any:
-    """The parsed JSON of one `gh api graphql` call with string variables."""
-    return _json(["api", "graphql", "-f", f"query={query}",
-                  *(arg for key, value in variables.items() for arg in ("-f", f"{key}={value}"))])
-
-
-def create_issue(slug: str, title: str, body: str, labels: Sequence[str] = ()) -> int:
-    """Create an issue; its number."""
-    created = _json(["api", "-X", "POST", f"repos/{slug}/issues", "-f", f"title={title}",
-                     "-f", f"body={body}", *(arg for name in labels for arg in ("-f", f"labels[]={name}"))])
-    number = created.get("number") if isinstance(created, dict) else None
-    if isinstance(number, bool) or not isinstance(number, int):
-        raise ForgeError("payload_invalid", "created issue has no number")
-    return number
-
-
-def add_blocked_by(slug: str, issue: int, blocker_id: int) -> None:
-    """Record that `issue` is blocked by the issue whose database id is `blocker_id`."""
-    _gh(["api", "--method", "POST", f"repos/{slug}/issues/{issue}/dependencies/blocked_by",
-         "-F", f"issue_id={blocker_id}"])
-
-
-def list_issues(slug: str, label: str, since: datetime) -> list[dict]:
-    """Every issue (any state) carrying `label` and updated since `since`, across all pages."""
-    pages = api_pages(f"repos/{slug}/issues?labels={quote(label)}&state=all"
-                      f"&since={since:%Y-%m-%dT%H:%M:%SZ}&per_page=100")
-    if not all(isinstance(page, list) and all(isinstance(i, dict) for i in page) for page in pages):
-        raise ForgeError("payload_invalid", "issues are not an array of objects")
-    return [issue for page in pages for issue in page]
-
-
-def open_issues(slug: str, label: str) -> list[dict]:
-    """Every open issue (a pull request is not one) carrying `label`, across all pages."""
-    pages = api_pages(f"repos/{slug}/issues?labels={quote(label)}&state=open&per_page=100")
-    if not all(isinstance(page, list) and all(isinstance(i, dict) for i in page) for page in pages):
-        raise ForgeError("payload_invalid", "issues are not an array of objects")
-    return [issue for page in pages for issue in page if "pull_request" not in issue]
-
-
-def close_issue(slug: str, issue: int, reason: str) -> None:
-    """Close the issue with a state reason (`completed` or `not_planned`); closing a closed issue is a no-op."""
-    _gh(["api", "-X", "PATCH", f"repos/{slug}/issues/{issue}", "-f", "state=closed",
-         "-f", f"state_reason={reason}"])
-
-
 def read_ref(slug: str, ref: str) -> str | None:
     """The sha a full ref name (`refs/...`) points at, None when HTTP 404 says it is absent."""
-    payload = _json(["api", f"repos/{slug}/git/ref/{quote(ref.removeprefix('refs/'), safe='/')}"],
-                    allow=(404,))
+    payload = forge_api.gh_json(["api", f"repos/{slug}/git/ref/{quote(ref.removeprefix('refs/'), safe='/')}"],
+                                allow=(404,))
     if payload is None:
         return None
     obj = payload.get("object") if isinstance(payload, dict) else None
@@ -437,13 +277,13 @@ def read_ref(slug: str, ref: str) -> str | None:
 
 def create_ref(slug: str, ref: str, sha: str) -> bool:
     """Create the ref at `sha`: True when created, False on HTTP 422 (re-read to learn why)."""
-    status, _ = _gh(["api", "-X", "POST", f"repos/{slug}/git/refs", "-f", f"ref={ref}",
-                     "-f", f"sha={sha}"], allow=(422,))
+    status, _ = forge_api.run_gh(["api", "-X", "POST", f"repos/{slug}/git/refs", "-f", f"ref={ref}",
+                                  "-f", f"sha={sha}"], allow=(422,))
     return status == 0
 
 
 def repo_node_id(slug: str) -> str:
-    _, out = _gh(["api", f"repos/{slug}", "--jq", ".node_id"])
+    _, out = forge_api.run_gh(["api", f"repos/{slug}", "--jq", ".node_id"])
     node_id = out.strip()
     if not NODE_ID.fullmatch(node_id):
         raise ForgeError("payload_invalid", "repository node id")
@@ -460,8 +300,8 @@ def cas_ref(slug: str, repository_id: str, ref: str, before: str, after: str) ->
     `gh_missing` and `payload_invalid` raise.
     """
     try:
-        payload = _json(["api", "graphql", "-f", f"query={UPDATE_REFS}", "-f", f"repositoryId={repository_id}",
-                         "-f", f"name={ref}", "-f", f"before={before}", "-f", f"after={after}"])
+        payload = forge_api.gh_json(["api", "graphql", "-f", f"query={UPDATE_REFS}", "-f", f"repositoryId={repository_id}",
+                                     "-f", f"name={ref}", "-f", f"before={before}", "-f", f"after={after}"])
     except ForgeError as error:
         if error.code in ("gh_timeout", "gh_failed"):
             return error
@@ -494,7 +334,7 @@ def commit_pulls(slug: str, sha: str) -> list[Pull]:
     (verified live: a closed-unmerged head answers `[]`), so this never finds a squash-merged,
     rebase-merged or closed holder; `closed_pulls_headed` does.
     """
-    payload = _json(["api", f"repos/{slug}/commits/{sha}/pulls?per_page=100"])
+    payload = forge_api.gh_json(["api", f"repos/{slug}/commits/{sha}/pulls?per_page=100"])
     if not isinstance(payload, list):
         raise ForgeError("payload_invalid", "commit pulls are not an array")
     return [_pull(item) for item in payload]
@@ -511,8 +351,8 @@ def closed_pulls_headed(slug: str, branch: str, sha: str) -> list[Pull]:
     """
     found: list[Pull] = []
     for page in range(1, CLOSED_PAGES + 1):
-        payload = _json(["api", f"repos/{slug}/pulls?state=closed&base={quote(branch, safe='/')}"
-                         f"&sort=updated&direction=desc&per_page=100&page={page}"])
+        payload = forge_api.gh_json(["api", f"repos/{slug}/pulls?state=closed&base={quote(branch, safe='/')}"
+                                     f"&sort=updated&direction=desc&per_page=100&page={page}"])
         if not isinstance(payload, list):
             raise ForgeError("payload_invalid", "closed pulls are not an array")
         found += [pull for pull in map(_pull, payload) if pull.head_sha == sha]
@@ -524,8 +364,8 @@ def closed_pulls_headed(slug: str, branch: str, sha: str) -> list[Pull]:
 def closing_issues(slug: str, pr: int) -> list[int]:
     """The issue numbers the pull request closes, in the forge's order."""
     owner, name = slug.split("/", 1)
-    payload = _json(["api", "graphql", "-f", f"query={CLOSING_ISSUES}", "-f", f"owner={owner}",
-                     "-f", f"name={name}", "-F", f"number={pr}"])
+    payload = forge_api.gh_json(["api", "graphql", "-f", f"query={CLOSING_ISSUES}", "-f", f"owner={owner}",
+                                 "-f", f"name={name}", "-F", f"number={pr}"])
     try:
         nodes = payload["data"]["repository"]["pullRequest"]["closingIssuesReferences"]["nodes"]
         numbers = [node["number"] for node in nodes]

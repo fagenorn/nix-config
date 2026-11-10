@@ -314,7 +314,7 @@ class RefreshTest(Scratch):
     def test_a_search_past_the_page_cap_is_incomplete(self):
         self.world.respond_json("gh", oa.search_argv(SLUG), answer([node(["owner-action"])], next_cursor="c1"))
         self.world.respond_json("gh", oa.search_argv(SLUG, "c1"), answer([node(["owner-action"])], next_cursor="c2"))
-        with mock.patch.object(oa, "MAX_PAGES", 2), self.assertRaises(oa.forge_markers.ForgeError) as raised:
+        with mock.patch.object(oa, "MAX_PAGES", 2), self.assertRaises(oa.forge_api.ForgeError) as raised:
             oa.refresh(SLUG)
         self.assertEqual(raised.exception.code, "payload_incomplete")
         self.assertIsNone(oa.read_entry(SLUG))
@@ -338,7 +338,7 @@ class RefreshTest(Scratch):
             else:
                 payload["data"]["search"]["issueCount"] = count
             self.world.respond_json("gh", oa.search_argv(SLUG), payload)
-            with self.assertRaises(oa.forge_markers.ForgeError) as raised:
+            with self.assertRaises(oa.forge_api.ForgeError) as raised:
                 oa.refresh(SLUG)
             self.assertEqual(raised.exception.code, "payload_invalid", count)
         self.assertIsNone(oa.read_entry(SLUG))
@@ -381,7 +381,7 @@ class RefreshTest(Scratch):
     def test_a_repeated_cursor_is_invalid(self):
         self.world.respond_json("gh", oa.search_argv(SLUG), answer([], next_cursor="c1"))
         self.world.respond_json("gh", oa.search_argv(SLUG, "c1"), answer([], next_cursor="c1"))
-        with self.assertRaises(oa.forge_markers.ForgeError) as raised:
+        with self.assertRaises(oa.forge_api.ForgeError) as raised:
             oa.refresh(SLUG)
         self.assertEqual(raised.exception.code, "payload_invalid")
 
@@ -485,7 +485,7 @@ class RefreshTest(Scratch):
                         {"data": {"search": {"nodes": [], "pageInfo": None}}}):
             self.world.reset()
             self.world.respond_json("gh", oa.search_argv(SLUG), payload)
-            with self.assertRaises(oa.forge_markers.ForgeError) as raised:
+            with self.assertRaises(oa.forge_api.ForgeError) as raised:
                 oa.refresh(SLUG)
             self.assertEqual(raised.exception.code, "payload_invalid")
         self.assertIsNone(oa.read_entry(SLUG))

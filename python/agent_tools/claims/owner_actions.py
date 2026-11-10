@@ -78,8 +78,8 @@ from pathlib import Path
 from typing import Any
 
 from agent_tools import agent_platform
-from agent_tools.claims import forge_claim, forge_markers
-from agent_tools.system import siblings
+from agent_tools.claims import forge_claim
+from agent_tools.system import forge_api, siblings
 from agent_tools.system.github_remote import github_slug
 
 # A repository name may begin with a dot (`org/.github`) but is never `.` or `..`; an owner never does.
@@ -449,8 +449,8 @@ def statusline(stdin_text: str) -> str:
     return text + "\n" if text else ""
 
 
-def _invalid(detail: str) -> forge_markers.ForgeError:
-    return forge_markers.ForgeError("payload_invalid", detail)
+def _invalid(detail: str) -> forge_api.ForgeError:
+    return forge_api.ForgeError("payload_invalid", detail)
 
 
 def _total(connection: dict, what: str, field: str = "totalCount") -> int:
@@ -483,7 +483,7 @@ def _item(node: dict) -> tuple[str | None, str | None]:
     """The search node's class (P5: "needs", "answered" or None) and its time (P4), or raise when truncated."""
     labels, label_nodes = _connection(node, "labels")
     if _total(labels, "labels") > len(label_nodes):
-        raise forge_markers.ForgeError("payload_incomplete", "an item's labels are truncated")
+        raise forge_api.ForgeError("payload_incomplete", "an item's labels are truncated")
     timeline, events = _connection(node, "timelineItems")
     total = _total(timeline, "timelineItems")
     names = {n.get("name") for n in label_nodes if isinstance(n, dict)}
@@ -504,7 +504,7 @@ def _item(node: dict) -> tuple[str | None, str | None]:
         if latest is not None:
             times.append(latest)
         elif total > len(events):
-            raise forge_markers.ForgeError(
+            raise forge_api.ForgeError(
                 "payload_incomplete", "an item's label events are truncated")
     kind = "needs" if names & set(COUNTED) else "answered" if ANSWERED in names else None
     return kind, min(times, key=_instant) if times else None
@@ -518,7 +518,7 @@ def refresh(slug: str) -> dict:
     cursor: str | None = None
     seen: set[str] = set()
     for page in range(1, MAX_PAGES + 1):
-        data = forge_markers._json(search_argv(slug, cursor))
+        data = forge_api.gh_json(search_argv(slug, cursor))
         page_nodes, info, issue_count = _page(data)
         nodes.extend(page_nodes)
         if page == 1:
@@ -531,10 +531,10 @@ def refresh(slug: str) -> dict:
             raise _invalid("search page has a missing or repeated endCursor")
         seen.add(cursor)
         if page == MAX_PAGES:
-            raise forge_markers.ForgeError(
+            raise forge_api.ForgeError(
                 "payload_incomplete", f"search still has pages after {MAX_PAGES}")
     if len(nodes) < issue_count:
-        raise forge_markers.ForgeError(
+        raise forge_api.ForgeError(
             "payload_incomplete", f"search returned {len(nodes)} of {issue_count} matches")
     count = answered = 0
     oldest: str | None = None
@@ -550,7 +550,7 @@ def refresh(slug: str) -> dict:
         if time is not None and (oldest is None or _instant(time) < _instant(oldest)):
             oldest = time
     if label_missing:
-        forge_markers.ensure_label(slug, *forge_claim.OWNER_ACTION)
+        forge_api.ensure_label(slug, *forge_claim.OWNER_ACTION)
     write_entry(slug, count, oldest, answered)
     return {"schema_version": SCHEMA_VERSION, "repo": slug, "count": count, "oldest": oldest,
             "answered": answered}
@@ -591,7 +591,7 @@ def main(argv: list[str] | None = None) -> int:
     for slug in slugs:
         try:
             refresh(slug)
-        except forge_markers.ForgeError as error:
+        except forge_api.ForgeError as error:
             failed.append({"repo": slug, "error": error.code})
             print(f"owner-actions: {slug}: {error}", file=sys.stderr)
         except OSError as error:

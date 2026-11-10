@@ -130,20 +130,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from agent_tools.claims import forge_markers
 from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
-from agent_tools.system import github_remote
+from agent_tools.system import forge_api, github_remote
 from agent_tools.system.semver import parse_semver
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def _invalid(detail: str) -> forge_markers.ForgeError:
-    return forge_markers.ForgeError("payload_invalid", detail)
+def _invalid(detail: str) -> forge_api.ForgeError:
+    return forge_api.ForgeError("payload_invalid", detail)
 
 
 def _is_int(value: object) -> bool:
@@ -176,7 +175,7 @@ def _counted_pages(pages: Sequence[object], key: str, what: str) -> list[object]
 def _merged_pull_numbers(repo: str, base: str, since: datetime) -> list[int]:
     since_z = since.astimezone(timezone.utc).strftime(_STAMP)
     query = quote(f"repo:{repo} is:pr is:merged base:{base} merged:>{since_z}", safe="")
-    pages = forge_markers.api_pages(
+    pages = forge_api.api_pages(
         f"search/issues?q={query}&sort=created&order=asc&per_page=100")
     for page in pages:
         if isinstance(page, dict) and page.get("incomplete_results") is not False:
@@ -196,7 +195,7 @@ def _required_checks(repo: str, base: str) -> list[Requirement]:
     """The protection's required checks: `checks` entries keep their app binding (an absent,
     null or -1 `app_id` is any app), and a `contexts` name already in `checks` adds nothing,
     since that legacy list carries no app and must not loosen a bound check."""
-    payload = forge_markers.api_get(
+    payload = forge_api.api_get(
         f"repos/{repo}/branches/{base}/protection/required_status_checks")
     if not isinstance(payload, dict):
         raise _invalid("required_status_checks is not an object")
@@ -244,7 +243,7 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
     report: dict = {"pr": None, "merged_at": None, "required": [], "missing": []}
     first = None
     for number in _merged_pull_numbers(repo, base, since):
-        pull = forge_markers.api_get(f"repos/{repo}/pulls/{number}")
+        pull = forge_api.api_get(f"repos/{repo}/pulls/{number}")
         if not isinstance(pull, dict):
             raise _invalid(f"pull request {number} is not an object")
         if pull.get("merged_at") is None:
@@ -264,9 +263,9 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
     report["required"] = sorted({context for context, _ in required})
     if not required:
         return 1, report
-    runs = _counted_pages(forge_markers.api_pages(
+    runs = _counted_pages(forge_api.api_pages(
         f"repos/{repo}/commits/{sha}/check-runs?per_page=100"), "check_runs", "check-run listing")
-    status_pages = forge_markers.api_pages(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
+    status_pages = forge_api.api_pages(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
     if not all(isinstance(page, list) for page in status_pages):
         raise _invalid("status page is not a list")
     statuses = [entry for page in status_pages for entry in page]
@@ -278,7 +277,7 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
 def self_hosted_runner(repo: str, runner: str, labels: Sequence[str]) -> tuple[int, dict]:
     """Met when `runner` is listed on `repo`, online, and carries `self-hosted` and every label."""
     required = {"self-hosted", *labels}
-    entries = _counted_pages(forge_markers.api_pages(
+    entries = _counted_pages(forge_api.api_pages(
         f"repos/{repo}/actions/runners?per_page=100"), "runners", "runner listing")
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
@@ -1086,7 +1085,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = self_hosted_runner(args.repo, args.runner, args.label)
         else:
             code, report = required_checks(args.repo, args.base, args.since)
-    except forge_markers.ForgeError as error:
+    except forge_api.ForgeError as error:
         print(f"verify-checks: forge_error: {error.code}", file=sys.stderr)
         return 2
     print(json.dumps(report, sort_keys=True))

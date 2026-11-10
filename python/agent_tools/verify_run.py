@@ -4,7 +4,7 @@
 check whether it is this host's and due, runs it through `verify_exec` (never here), records one
 result marker per state change (P4), labels failures (P16), files one follow-up issue per observed
 miss under a claim (P10) and closes the issue once through a contested `verify-closed` marker
-(P9). Every forge call goes through `forge_markers` and every marker write names `TRUSTED`
+(P9). Every forge call goes through `forge_api` or `forge_markers` and every marker write names `TRUSTED`
 associations, so a marker by any other author neither wins a contest nor ends one (P3). "Now" is
 only `Context.now()`, the forge's clock (P6, P7).
 
@@ -72,7 +72,9 @@ from urllib.parse import quote
 
 from agent_tools import verify_block, verify_exec, verify_facts, verify_issues, verify_owner
 from agent_tools.claims import forge_markers, forge_owner_action
-from agent_tools.claims.forge_markers import ForgeError, Marker
+from agent_tools.claims.forge_markers import Marker
+from agent_tools.system import forge_api
+from agent_tools.system.forge_api import ForgeError
 
 NEEDS = "needs-verification"
 # Delivery labels a verified close drops with NEEDS; removing an absent one is a no-op (404).
@@ -113,7 +115,7 @@ class Project:
 def list_held(slug: str) -> list[dict]:
     """The open `needs-verification` issue nodes of the repository, with their last comments."""
     owner, name = slug.split("/", 1)
-    payload = forge_markers.graphql(QUERY, {"owner": owner, "name": name})
+    payload = forge_api.graphql(QUERY, {"owner": owner, "name": name})
     try:
         nodes = payload["data"]["repository"]["issues"]["nodes"]
     except (KeyError, TypeError):
@@ -135,7 +137,7 @@ def _with_every_comment(slug: str, node: dict) -> dict:
         return node
     if not _is_int(node.get("number")):
         raise _invalid("an issue has no integer number")
-    every = _rest_comments(forge_markers.api_pages(f"repos/{slug}/issues/{node['number']}/comments?per_page=100"))
+    every = _rest_comments(forge_api.api_pages(f"repos/{slug}/issues/{node['number']}/comments?per_page=100"))
     return {**node, "comments": {**listing, "nodes": [
         {"fullDatabaseId": str(c.id), "authorAssociation": c.association, "body": c.body,
          "createdAt": c.created_at, "updatedAt": c.created_at} for c in every]}}
@@ -176,7 +178,7 @@ def held_issues(slug: str) -> list[tuple[int, list[verify_issues.Comment]]]:
     variables = {"owner": owner, "name": name}
     held: list[tuple[int, list[verify_issues.Comment]]] = []
     while True:
-        payload = forge_markers.graphql(APPROVE_QUERY, variables)
+        payload = forge_api.graphql(APPROVE_QUERY, variables)
         try:
             issues = payload["data"]["repository"]["issues"]
             info, nodes = issues["pageInfo"], issues["nodes"]
@@ -193,7 +195,7 @@ def held_issues(slug: str) -> list[tuple[int, list[verify_issues.Comment]]]:
                     or not isinstance(listing.get("nodes"), list):
                 raise _invalid(f"issue {node['number']} has no comment listing")
             if listing["totalCount"] > len(listing["nodes"]):
-                comments = _rest_comments(forge_markers.api_pages(
+                comments = _rest_comments(forge_api.api_pages(
                     f"repos/{slug}/issues/{node['number']}/comments?per_page=100"))
             else:
                 comments = verify_issues.comments_from_graphql(listing["nodes"])
@@ -250,16 +252,16 @@ def runner_trusted(slug: str) -> bool:
     and never expire a check. The association is the forge's, so it is derived the way the forge
     derives it: the owner of a user-owned repository, or an active member of the owning
     organization. A payload without the fields it needs is a `ForgeError`."""
-    user = forge_markers.api_get("user")
+    user = forge_api.api_get("user")
     login = user.get("login") if isinstance(user, dict) else None
-    repository = forge_markers.api_get(f"repos/{slug}")
+    repository = forge_api.api_get(f"repos/{slug}")
     owner = repository.get("owner") if isinstance(repository, dict) else None
     owner_login = owner.get("login") if isinstance(owner, dict) else None
     if not (isinstance(login, str) and login and isinstance(owner_login, str) and owner_login):
         raise ForgeError("payload_invalid", "no authenticated login or repository owner")
     if owner.get("type") != "Organization":
         return login.lower() == owner_login.lower()
-    membership = forge_markers.api_get(f"user/memberships/orgs/{quote(owner_login, safe='')}", allow=(403, 404))
+    membership = forge_api.api_get(f"user/memberships/orgs/{quote(owner_login, safe='')}", allow=(403, 404))
     return isinstance(membership, dict) and membership.get("state") == "active"
 
 
@@ -496,8 +498,8 @@ class _Pass:
             self.decide_fail(index, ac, posted)
             return self.line(index, ac, state, "fail_ask")
         if state == "fail":
-            forge_markers.ensure_label(self.slug, *FAILED)
-            forge_markers.add_label(self.slug, self.number, FAILED[0])
+            forge_api.ensure_label(self.slug, *FAILED)
+            forge_api.add_label(self.slug, self.number, FAILED[0])
         posted = self.record(index, ac, state, code, facts, command, output)
         self.line(index, ac, state, "changed")
         if state == "miss":
@@ -556,11 +558,11 @@ class _Pass:
         tag_fields = {"issue": str(n), "block": self.block_key, "check": str(index)}
         found = self.filed(claim, tag_fields)
         if not found:
-            forge_markers.ensure_label(self.slug, *FOLLOW_UP)
+            forge_api.ensure_label(self.slug, *FOLLOW_UP)
             body = forge_markers.render(
                 verify_issues.FOLLOWUP_OF, tag_fields,
                 f"Follow-up of #{n}: {ac} observed below target on {self.host}.", fenced)
-            created = forge_markers.create_issue(
+            created = forge_api.create_issue(
                 self.slug, f"Follow-up: {ac} of #{n} observed below target", body, (FOLLOW_UP[0],))
             # The claim names a host, not a run, so another run on this host may have listed none
             # too and filed its own: the lowest number stands (CR-2).
@@ -571,14 +573,14 @@ class _Pass:
         # Closing a closed issue is a no-op, and the result is edited only after, so the follow-up
         # is never recorded while a duplicate is open.
         for extra in sorted(set(found) - {number}):
-            forge_markers.close_issue(self.slug, extra, "not_planned")
+            forge_api.close_issue(self.slug, extra, "not_planned")
         forge_markers.edit(self.slug, result.comment_id, forge_markers.with_fields(result, followup=str(number)))
         self.followups[index] = str(number)
 
     def filed(self, claim: Marker, tag_fields: Mapping[str, str]) -> list[int]:
         """The numbers of the trusted follow-up issues tagged with `tag_fields`, closed ones included."""
         found = []
-        for issue in forge_markers.list_issues(self.slug, FOLLOW_UP[0], claim.updated_at):
+        for issue in forge_api.list_issues(self.slug, FOLLOW_UP[0], claim.updated_at):
             if issue.get("author_association") not in TRUSTED or isinstance(issue.get("number"), bool) \
                     or not isinstance(issue.get("number"), int):
                 continue
@@ -862,8 +864,8 @@ class _Pass:
                 self.line(index, ac, "pending", "owner_waiting")
                 return True
             if state == "fail" and check.get("on_fail", "label") == "label":
-                forge_markers.ensure_label(self.slug, *FAILED)
-                forge_markers.add_label(self.slug, self.number, FAILED[0])
+                forge_api.ensure_label(self.slug, *FAILED)
+                forge_api.add_label(self.slug, self.number, FAILED[0])
             posted = self.record(index, ac, state, None, {}, "", "", **(
                 {"waived": prompt.fields["host"]} if waived else {}), owner=str(prompt.comment_id))
             forge_markers.end(self.slug, self.number, prompt.comment_id, "answered")
@@ -970,8 +972,8 @@ class _Pass:
             # Every label but NEEDS goes before the close: a closed issue is no longer listed, so a
             # label left on it by a failed removal could never be retried.
             for name in (*DELIVERY, FAILED[0]):
-                forge_markers.remove_label(self.slug, self.number, name)
-            forge_markers.close_issue(self.slug, self.number, "completed")
-            forge_markers.remove_label(self.slug, self.number, NEEDS)
+                forge_api.remove_label(self.slug, self.number, name)
+            forge_api.close_issue(self.slug, self.number, "completed")
+            forge_api.remove_label(self.slug, self.number, NEEDS)
         else:
-            forge_markers.close_issue(self.slug, self.number, "not_planned")
+            forge_api.close_issue(self.slug, self.number, "not_planned")

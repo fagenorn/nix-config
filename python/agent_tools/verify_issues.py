@@ -34,6 +34,7 @@ from dataclasses import dataclass
 
 from agent_tools import verify_block
 from agent_tools.claims import forge_markers
+from agent_tools.system import forge_api
 
 TRUSTED = ("OWNER", "MEMBER")
 RESULT, RUN, WINDOW, DUE, FOLLOWUP, CLOSED, FOLLOWUP_OF = (
@@ -72,7 +73,7 @@ def comment_id(value: object) -> int:
     `databaseId` is a 32-bit Int that the forge cannot fill for this repository's comment ids
     (about 6.7e9), so it is never read; anything but decimal digits is `payload_invalid`."""
     if not isinstance(value, str) or not re.fullmatch(r"[0-9]+", value):
-        raise forge_markers.ForgeError("payload_invalid", f"comment fullDatabaseId {value!r}")
+        raise forge_api.ForgeError("payload_invalid", f"comment fullDatabaseId {value!r}")
     return int(value)
 
 
@@ -81,11 +82,11 @@ def comments_from_graphql(nodes: list) -> list[Comment]:
     comments = []
     for node in nodes:
         if not isinstance(node, dict):
-            raise forge_markers.ForgeError("payload_invalid", f"comment node {node!r} is not an object")
+            raise forge_api.ForgeError("payload_invalid", f"comment node {node!r} is not an object")
         cid = comment_id(node.get("fullDatabaseId"))
         for key in ("authorAssociation", "body", "createdAt"):
             if not isinstance(node.get(key), str):
-                raise forge_markers.ForgeError("payload_invalid", f"comment {cid} has no string {key}")
+                raise forge_api.ForgeError("payload_invalid", f"comment {cid} has no string {key}")
         comments.append(Comment(cid, node["authorAssociation"], node["body"], node["createdAt"]))
     return sorted(comments, key=lambda c: c.id)
 

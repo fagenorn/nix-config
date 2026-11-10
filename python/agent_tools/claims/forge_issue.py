@@ -1,6 +1,6 @@
 """forge-issue (issue 697): file an issue and record its blocking edges natively, read back.
 
-Source entry `python -m agent_tools.claims.forge_issue`, library `agent_tools.claims.forge_markers`. Blocking
+Source entry `python -m agent_tools.claims.forge_issue`, library `agent_tools.system.forge_api`. Blocking
 edges go through the forge's dependencies endpoints instead of prose.
 `create --repo <owner/name> --title <t> --body-file <path> [--label <l>]... [--blocked-by <n>]...
 [--blocks <n>]...` files the issue and links it; `link --repo <owner/name> --issue <n>
@@ -60,8 +60,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from agent_tools.claims import forge_markers as fm
-from agent_tools.claims.forge_markers import ForgeError
+from agent_tools.system import forge_api
+from agent_tools.system.forge_api import ForgeError
 
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 NUMBER = re.compile(r"[1-9][0-9]*")
@@ -142,7 +142,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
 
 def database_id(slug: str, number: int) -> int:
     """The database id of issue `number` of `slug`; a pull request, another number's or another repository's payload is an error."""
-    payload = fm.api_get(f"repos/{slug}/issues/{number}")
+    payload = forge_api.api_get(f"repos/{slug}/issues/{number}")
     answered = payload.get("number") if isinstance(payload, dict) else None
     if not isinstance(payload, dict) or isinstance(answered, bool) or answered != number:
         raise ForgeError("payload_invalid", f"#{number} answered as {answered!r}")
@@ -173,7 +173,7 @@ def entries(slug: str, issue: int, side: str) -> dict[int, str]:
     """The `blocked_by` or `blocking` list of an issue: database id -> qualified reference."""
     path = f"repos/{slug}/issues/{issue}/dependencies/{side}?per_page=100"
     found: dict[int, str] = {}
-    for page in fm.api_pages(path):
+    for page in forge_api.api_pages(path):
         if not isinstance(page, list):
             raise ForgeError("payload_invalid", f"{path} has a page that is not an array")
         for item in page:
@@ -215,16 +215,16 @@ def _read_back(args, issue: int, ids: dict[int, int], exact: bool) -> tuple[dict
 def _create(args, state: dict) -> tuple[dict, int]:
     ids = {n: database_id(args.repo, n) for n in args.blocked_by + args.blocks}
     try:
-        issue = fm.create_issue(args.repo, args.title, args.body, args.labels)
+        issue = forge_api.create_issue(args.repo, args.title, args.body, args.labels)
     except ForgeError as error:
         raise ForgeError("create_unconfirmed", f"{error.code}: {error.detail}") from None
     state["issue"] = issue
     for n in args.blocked_by:
-        fm.add_blocked_by(args.repo, issue, ids[n])
+        forge_api.add_blocked_by(args.repo, issue, ids[n])
     if args.blocks:
         own = database_id(args.repo, issue)
         for n in args.blocks:
-            fm.add_blocked_by(args.repo, n, own)
+            forge_api.add_blocked_by(args.repo, n, own)
     return _read_back(args, issue, ids, exact=True)
 
 
@@ -237,9 +237,9 @@ def _link(args, state: dict) -> tuple[dict, int]:
     need_by = [n for n in args.blocked_by if ids[n] not in have_by]
     need_blocks = [n for n in args.blocks if ids[n] not in have_blocking]
     for n in need_by:
-        fm.add_blocked_by(args.repo, issue, ids[n])
+        forge_api.add_blocked_by(args.repo, issue, ids[n])
     for n in need_blocks:
-        fm.add_blocked_by(args.repo, n, own)
+        forge_api.add_blocked_by(args.repo, n, own)
     return _read_back(args, issue, ids, exact=False)
 
 
