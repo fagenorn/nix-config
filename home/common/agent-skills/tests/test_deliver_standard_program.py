@@ -120,7 +120,7 @@ def object_branch(schema):
     return schema
 
 
-RENEW_READ = {"verdict", "by", "detail"}
+RENEW_READ = {"verdict", "by", "detail", "transient"}
 # label: (top-level fields the program or a later prompt reads, {member: fields read inside it}); a member
 # named "<name>[]" is an array whose items object is checked.
 FOLDED_READ = {
@@ -137,7 +137,7 @@ FOLDED_READ = {
                "review": {"code", "plan"}, "review_state": {"code", "plan"},
                "knowledge": {"standards", "hints", "rejections"},
                "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason"},
-               "acquire": {"verdict", "by", "detail"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"}}),
+               "acquire": {"verdict", "by", "detail", "transient"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"}}),
 }
 
 
@@ -270,7 +270,7 @@ class FoldTest(unittest.TestCase):
         self.assertIn("Only when lock's verdict is already_held or moved", text)
         self.assertLess(text.index(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n"),
                         text.index("gh pr merge 42"))
-        self.assertNotIn("--wait", text)
+        self.assertNotIn(" --wait\n", text)
         result, calls = run(replies={"merge": [retaken, retaken]})
         self.assertEqual(result["stage"], "land-contended")
         self.assertEqual(labels(calls).count("land-unlock"), 1)
@@ -700,6 +700,123 @@ class ClaimTest(unittest.TestCase):
         _, calls = run(args={"repo_root": "/r", "issue": 9, "cont": cont})
         self.assertIn("--holder h9/b1 ", prompt(calls, "owner-answer"))
         self.assertNotIn("acquire", labels(calls))
+
+
+TRANSIENT = {"verdict": "error", "detail": "gh_failed: dial tcp: connect: network is unreachable", "transient": True}
+# The full second reply of each folded step whose first renew ran out of transport retries; the harness fills renew and lock.
+SECOND = {
+    "owner-answer": {"verdict": "none", "comment_id": None, "questions": [], "decisions": ""},
+    "verify": {"head": SHA, "clean": True, "results": [{"id": "build", "status": "pass", "summary": "ok"}]},
+    "pr": {"pr": 42, "head": SHA},
+    "checks-1": {"state": "passed", "head": SHA, "required": ["ci"]},
+    "merge": {"merged": True, "merge_commit": SHA, "notes": "merged"},
+}
+
+
+def transient_replies(via, nested, recovers=True):
+    """Replies whose renew at `via` runs out of transport retries once, then recovers (or not)."""
+    if nested:
+        first = {"renew": TRANSIENT, "lock": None} if via in ("pr", "merge") else {"renew": TRANSIENT}
+        then = SECOND[via]
+    else:
+        first, then = TRANSIENT, {"verdict": "renewed", "comment_id": 7}
+    return {via: [first, then if recovers else first]}
+
+
+class TransientTest(unittest.TestCase):
+    """#740 D6: a renew or acquire that ran out of forge-claim's transport retries re-calls its step once."""
+
+    def test_a_transient_renew_is_called_once_more_and_goes_on(self):
+        happy = labels(run()[1])
+        for at, via, nested in BOUNDARIES:
+            with self.subTest(at=at):
+                result, calls = run(replies=transient_replies(via, nested))
+                self.assertEqual(result["stage"], "done")
+                self.assertEqual(labels(calls).count(via), happy.count(via) + 1)
+
+    def test_a_transient_renew_twice_stops_with_a_cont_that_reacquires(self):
+        happy = labels(run()[1])
+        for at, via, nested in BOUNDARIES:
+            with self.subTest(at=at):
+                result, calls = run(replies=transient_replies(via, nested, recovers=False))
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", at))
+                self.assertTrue(result["cont"]["claim_incomplete"])
+                self.assertEqual(labels(calls).count(via), 2)
+                self.assertNotIn(next_guarded(happy, via), labels(calls))
+
+    def test_not_held_and_a_plain_error_are_never_called_again(self):
+        for at, via, nested in BOUNDARIES:
+            for renew in ({"verdict": "not_held", "by": "h2/b1"}, {"verdict": "not_held", "transient": True},
+                          {"verdict": "error", "detail": "forge down"},
+                          {"verdict": "error", "detail": "forge down", "transient": False}):
+                with self.subTest(at=at, renew=renew):
+                    _, calls = run(**boundary_reply(via, nested, renew))
+                    self.assertEqual(labels(calls).count(via), 1)
+
+    def test_a_transient_folded_acquire_runs_the_acquire_step_once_then_the_worktree(self):
+        result, calls = run(patch={"setup": {"acquire": TRANSIENT, "claim": None}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:3], ["setup", "acquire", "worktree"])
+        self.assertEqual(labels(calls).count("acquire"), 1)
+        self.assertIn(f"forge-claim acquire --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x",
+                      prompt(calls, "acquire"))
+
+    def test_a_transient_folded_acquire_whose_acquire_step_is_transient_stops_with_a_cont(self):
+        result, calls = run(patch={"setup": {"acquire": TRANSIENT, "claim": None}}, replies={"acquire": TRANSIENT})
+        self.assertEqual(result["stage"], "claim")
+        self.assertTrue(result["cont"]["claim_incomplete"])
+        self.assertEqual(labels(calls), ["setup", "acquire"])
+
+    def test_a_resumed_transient_acquire_is_called_once_more(self):
+        stopped, _ = run(patch={"pr": {"renew": None}})
+        for second, stage in (({"verdict": "already_held", "comment_id": 7}, "done"), (TRANSIENT, "claim")):
+            with self.subTest(stage=stage):
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"acquire": [TRANSIENT, second]})
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual(labels(calls).count("acquire"), 2)
+                self.assertEqual("worktree" in labels(calls), stage == "done")
+
+    def test_every_renew_and_acquire_asks_for_transient(self):
+        _, calls = run()
+        self.assertEqual(schema_of(calls, "renew-tasks")["properties"]["transient"], {"type": "boolean"})
+        for via in ("setup", "renew-tasks", "owner-answer", "verify", "pr", "checks-1", "merge"):
+            with self.subTest(via=via):
+                self.assertIn("transient", prompt(calls, via))
+        stopped, _ = run(patch={"pr": {"renew": None}})
+        _, calls = run(args=dict(ARGS, cont=stopped["cont"]))
+        self.assertEqual(schema_of(calls, "acquire")["properties"]["transient"], {"type": "boolean"})
+        self.assertIn("transient", prompt(calls, "acquire"))
+
+    def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
+        timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
+        _, calls = run()
+        for via in ("setup", "renew-tasks", "owner-answer", "verify", "pr", "checks-1", "merge"):
+            with self.subTest(via=via):
+                self.assertIn(timeout, prompt(calls, via))
+        _, calls = run(patch={"pr": {"head": "c" * 40}})  # a head-moved stop releases the lock
+        self.assertIn(timeout, prompt(calls, "land-unlock"))
+        stopped, _ = run(patch={"pr": {"renew": None}})
+        _, calls = run(args=dict(ARGS, cont=stopped["cont"]))
+        self.assertIn(timeout, prompt(calls, "acquire"))
+        merge = "d" * 40
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "checks-2": {"state": "passed", "head": merge}},
+                       patch={"sync-1": {"merge_commit": merge}})
+        self.assertIn(timeout, prompt(calls, "land-lock-2"))
+
+    RETRIED = re.compile(r"forge-claim (?:acquire|renew|release|status|land acquire|land release|owner-action status)\b")
+
+    def test_every_prompt_that_runs_a_retried_forge_claim_command_gives_the_long_bash_timeout(self):
+        # Two 30 s timeouts plus the backoff use 120 s before the third try starts, so a command that
+        # forge-claim retries needs the long Bash timeout wherever any prompt runs it.
+        timeout = "a Bash timeout of 20 minutes (1200000 ms)"
+        seen = set()
+        _, calls = run()
+        for call in calls:
+            if self.RETRIED.search(call["prompt"]):
+                seen.add(call["label"])
+                with self.subTest(label=call["label"]):
+                    self.assertIn(timeout, call["prompt"])
+        self.assertIn("close-out", seen)
 
 
 class SetupIdempotenceTest(unittest.TestCase):
@@ -1679,7 +1796,7 @@ class LandLockTest(unittest.TestCase):
                       prompt(calls, "pr"))
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n",
                       prompt(calls, "merge"))
-        self.assertNotIn("--wait", prompt(calls, "merge"))
+        self.assertNotIn(" --wait\n", prompt(calls, "merge"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n",
                       prompt(calls, "land-unlock"))
 
@@ -1694,7 +1811,7 @@ class LandLockTest(unittest.TestCase):
             "land-lock-2", "checks-2", "merge", "land-unlock", "hold", "close-out"])
         self.assertIn("git -C /r/.wt/w-issue-9-x push origin issue-9-x", prompt(calls, "land-push-2"))
         self.assertIn(f"--sha {merge}\n", prompt(calls, "land-lock-2"))
-        self.assertNotIn("--wait", prompt(calls, "land-lock-2"))
+        self.assertNotIn(" --wait\n", prompt(calls, "land-lock-2"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {merge}",
                       prompt(calls, "land-unlock"))
 
@@ -1710,7 +1827,7 @@ class LandLockTest(unittest.TestCase):
         later_locks = [c["prompt"] for c in calls if c["label"] in ("land-lock-3", "merge")]
         self.assertEqual(len(later_locks), 3)  # the first pre-merge check, the move after the push, the last pre-merge check
         for text in later_locks:
-            self.assertNotIn("--wait", text)
+            self.assertNotIn(" --wait\n", text)
         self.assertIn("--wait", prompt(calls, "pr"))
         self.assertLess(names.index("pr"), names.index("sync-1"))
         self.assertLess(names.index("sync-1"), names.index("land-push-3"))
@@ -2902,15 +3019,19 @@ class SourceTest(unittest.TestCase):
             start = text.index(f"const {name} = ")
             return text[start:text.index("\n", start)]
 
+        def bare(text):
+            """The text without the #740 FORGE_TIMEOUT sentence (and its template-literal quoting), which each program adds in its own task."""
+            return text.replace(" ${FORGE_TIMEOUT}", "").replace("`", "'")
+
         for name in ("LAND_ACQUIRE", "LOCK_RETURN", "RELEASE_AGAIN"):
             with self.subTest(name=name):
-                self.assertEqual(line(mine, name), line(batch, name))
+                self.assertEqual(bare(line(mine, name)), bare(line(batch, name)))
         for needle in (
             "Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}",
-            "released and not_held are both fine. Return its verdict and any detail. Run nothing else.",
+            "released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail. Run nothing else.",
         ):
             with self.subTest(line=needle):
-                self.assertIn(needle, batch)
+                self.assertIn(bare(needle), bare(batch))
                 self.assertIn(needle, mine)
 
     def test_program_avoids_replay_breaking_builtins(self):

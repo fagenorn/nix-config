@@ -52,6 +52,13 @@ when it exists), the repository node id and the `updateRefs` compare-and-swap, w
 only from the observed oid. `cas_lies=n` makes the next n applied swaps answer failure, the
 spike's observed lie. Schedule entries are the bare op names `get`, `create` and `cas`, with
 the comment store's semantics. `refs()` reads the store, `set_ref(ref, sha)` moves a ref.
+
+Transport faults (issue 740): `outage(calls=None, stderr=NETWORK_DOWN)` makes the next `calls`
+`gh` invocations (every one when `None`, none when `0`) exit 1 with `stderr` after being logged,
+changing no store; `reset()` forgets it. `comment_store(..., lose_reply=[...])` (operations
+`post`, `edit`, `delete`, `list`) and `ref_store(..., lose_reply=[...])` (`get`, `create`,
+`cas`) make the next call of each named operation make its change, save the store and then exit 1
+with `NETWORK_DOWN` and nothing on stdout, the reply lost on the way back; each entry is consumed once.
 """
 import contextlib
 import json
@@ -77,6 +84,22 @@ FLOOR_PROTECTION = {
         "checks": [{"context": "Nix Eval", "app_id": None},
                    {"context": "Instruction Budget", "app_id": None}]},
     "enforce_admins": {"enabled": True}}
+
+NETWORK_DOWN = 'Post "https://api.github.com/graphql": dial tcp 20.250.119.72:443: connect: network is unreachable'
+
+OUTAGE_HANDLER = f"LOST_REPLY = {NETWORK_DOWN!r}\n" + """\
+if tool == "gh" and (state / "outage.json").exists():
+    import fcntl
+    with open(state / "outage.lock", "a") as outage_lock:
+        fcntl.flock(outage_lock, fcntl.LOCK_EX)
+        outage = json.loads((state / "outage.json").read_text("utf-8"))
+        if outage["remaining"] != 0:
+            if outage["remaining"] > 0:
+                outage["remaining"] -= 1
+            (state / "outage.json").write_text(json.dumps(outage), encoding="utf-8")
+            sys.stderr.write(outage["stderr"] + "\\n")
+            sys.exit(1)
+"""
 
 REF_HANDLER = """\
 if tool == "gh" and (state / "refs.json").exists():
@@ -129,7 +152,18 @@ if tool == "gh" and (state / "refs.json").exists():
                     save_refs(store)
                     sys.stdout.write(store["node_id"] + "\\n")
                     sys.exit(0)
+                lose = kind in store.get("lose_reply", [])
+                if lose:
+                    store["lose_reply"].remove(kind)
+
+                def lost_reply():
+                    save_refs(store)
+                    sys.stderr.write(LOST_REPLY + "\\n")
+                    sys.exit(1)
+
                 if kind == "get":
+                    if lose:
+                        lost_reply()
                     save_refs(store)
                     if arg not in refs:
                         sys.stderr.write("gh: Not Found (HTTP 404)\\n")
@@ -140,11 +174,15 @@ if tool == "gh" and (state / "refs.json").exists():
                 if kind == "create":
                     name, sha = arg
                     if name in refs:
+                        if lose:
+                            lost_reply()
                         save_refs(store)
                         sys.stdout.write(json.dumps({"message": "Reference already exists", "status": "422"}))
                         sys.stderr.write("gh: Reference already exists (HTTP 422)\\n")
                         sys.exit(1)
                     refs[name] = sha
+                    if lose:
+                        lost_reply()
                     save_refs(store)
                     sys.stdout.write(json.dumps({"ref": name, "object": {"sha": sha, "type": "commit"}}))
                     sys.exit(0)
@@ -158,6 +196,8 @@ if tool == "gh" and (state / "refs.json").exists():
                 lied = applied and store["cas_lies"] > 0
                 if lied:
                     store["cas_lies"] -= 1
+                if lose:
+                    lost_reply()
                 save_refs(store)
                 if applied and not lied:
                     sys.stdout.write(json.dumps({"data": {"updateRefs": {"clientMutationId": None}}}))
@@ -343,6 +383,11 @@ if tool == "gh" and (state / "store.json").exists():
                     comments.remove(found[0])
                     out = None
                 save(store)
+                if name in store.get("lose_reply", []):
+                    store["lose_reply"].remove(name)
+                    save(store)
+                    sys.stderr.write(LOST_REPLY + "\\n")
+                    sys.exit(1)
                 if kind == "list":
                     out = [out]
                 if out is not None:
@@ -397,7 +442,7 @@ class ForgeWorld:
         self.checkout.mkdir()
         for tool in TOOLS + tuple(tools):
             path = self.bin / tool
-            path.write_text(SCRIPT.format(python=sys.executable).replace("# store handler\n", REF_HANDLER + STORE_HANDLER),
+            path.write_text(SCRIPT.format(python=sys.executable).replace("# store handler\n", OUTAGE_HANDLER + REF_HANDLER + STORE_HANDLER),
                             encoding="utf-8")
             path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         patch = mock.patch.dict(os.environ, {"PATH": str(self.bin), "GITHUB_TOKEN": "harness-token",
@@ -414,8 +459,13 @@ class ForgeWorld:
         """Forget every registered response and every logged call."""
         (self.state / "responses.json").write_text("{}", encoding="utf-8")
         (self.state / "calls.jsonl").write_text("", encoding="utf-8")
-        for name in ("store.json", "store.lock", "refs.json", "refs.lock"):
+        for name in ("store.json", "store.lock", "refs.json", "refs.lock", "outage.json", "outage.lock"):
             (self.state / name).unlink(missing_ok=True)
+
+    def outage(self, calls: int | None = None, stderr: str = NETWORK_DOWN) -> None:
+        """Fail the next `calls` `gh` invocations (all when None, none when 0) with `stderr`."""
+        (self.state / "outage.json").write_text(json.dumps(
+            {"remaining": -1 if calls is None else calls, "stderr": stderr}), encoding="utf-8")
 
     def respond(self, tool: str, argv: list[str], *, exit: int = 0, stdout: str = "",
                 stderr: str = "", sleep: float = 0) -> None:
@@ -436,12 +486,13 @@ class ForgeWorld:
 
     def comment_store(self, slug: str, issue: int, comments=(), *, next_id: int = 100,
                       clock: str = "2026-11-06T10:00:00Z", schedule=(), labels=None,
-                      next_issue: int = 500, fail_once=(), created=()) -> None:
+                      next_issue: int = 500, fail_once=(), created=(), lose_reply=()) -> None:
         """Serve one issue's comments from shared state (see STORE_HANDLER); `labels` (a list)
         also gives the issue its state, labels and issue creation and listing, and `created`
         seeds the issues it already holds (dicts shaped like the ones the fake creates)."""
         store = {"slug": slug, "issue": issue, "comments": list(comments), "next_id": next_id,
-                 "clock": clock, "schedule": list(schedule), "cursor": 0, "fail_once": list(fail_once)}
+                 "clock": clock, "schedule": list(schedule), "cursor": 0, "fail_once": list(fail_once),
+                 "lose_reply": list(lose_reply)}
         if labels is not None:
             store["issue_state"] = {"state": "open", "state_reason": None, "labels": list(labels),
                                     "created": [dict(c) for c in created], "next_issue": next_issue}
@@ -460,11 +511,12 @@ class ForgeWorld:
         return {key: store[key] for key in ("state", "state_reason", "labels", "created")}
 
     def ref_store(self, slug: str, refs: dict[str, str] | None = None, *, node_id: str = "R_kgDOtest",
-                  schedule=(), cas_lies: int = 0) -> None:
+                  schedule=(), cas_lies: int = 0, lose_reply=()) -> None:
         """Serve one repository's git refs from shared state (see REF_HANDLER)."""
         (self.state / "refs.json").write_text(json.dumps({
             "slug": slug, "refs": dict(refs or {}), "node_id": node_id,
-            "schedule": list(schedule), "cursor": 0, "cas_lies": cas_lies}), encoding="utf-8")
+            "schedule": list(schedule), "cursor": 0, "cas_lies": cas_lies,
+            "lose_reply": list(lose_reply)}), encoding="utf-8")
 
     def refs(self) -> dict[str, str]:
         """The ref store's refs now: full name to sha."""

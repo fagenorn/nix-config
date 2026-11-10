@@ -96,6 +96,10 @@ def interleave(test, after_listing, action):
 
 class Base(unittest.TestCase):
     def setUp(self):
+        self.slept = []
+        patcher = mock.patch.object(forge_claim, "sleep", self.slept.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.fresh_world()
 
     def fresh_world(self):
@@ -103,8 +107,9 @@ class Base(unittest.TestCase):
         for argv in (ENSURE, ADD, REMOVE, OA_ENSURE, OA_ADD, OA_REMOVE):
             self.world.respond("gh", argv)
 
-    def store(self, *comments, next_id=40, schedule=()):
-        self.world.comment_store(SLUG, ISSUE, list(comments), next_id=next_id, schedule=schedule)
+    def store(self, *comments, next_id=40, schedule=(), lose_reply=()):
+        self.world.comment_store(SLUG, ISSUE, list(comments), next_id=next_id, schedule=schedule,
+                                 lose_reply=lose_reply)
 
     def mutations(self):
         return [argv for argv in self.world.argvs("gh") if "-X" in argv]
@@ -169,9 +174,9 @@ class CliTest(Base):
         self.assertEqual((code, out["verdict"], out["by"]), (3, "held_by", OTHER))
 
     def test_forge_error_exit_1(self):
-        self.world.respond("gh", LIST, exit=1, stderr="gh: Server Error (HTTP 500)")
+        self.world.respond("gh", LIST, exit=1, stderr="gh: Forbidden (HTTP 403)")
         code, out = run_cli(*common("acquire"))
-        self.assertEqual((code, out["error"]), (1, "gh_failed"))
+        self.assertEqual((code, out["error"], out["transient"]), (1, "gh_failed", False))
 
     def test_usage_error_exit_2(self):
         code, out = run_cli(*common("acquire", holder="no-slash"))
@@ -440,12 +445,13 @@ class StatusTest(Base):
         self.world.respond("gh", OA_ADD, exit=1, stderr="gh: Server Error (HTTP 500)")
         code, out = run(*common("status"))
         self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
+        self.assertEqual(self.slept, [20, 40])
         self.world.respond("gh", OA_ADD)
         code, out = run(*common("status"))
         self.assertEqual((code, out["verdict"], out["owner_action_comment_id"], out["owner_action_posted"]),
                          (0, "stale", 30, False))
         self.assertEqual(self.comment_posts(), [post(oa_body(5, OTHER))])
-        self.assertEqual(self.mutations().count(OA_ADD), 2)
+        self.assertEqual(self.mutations().count(OA_ADD), 4)
 
     def test_a_fresh_claim_retires_an_obsolete_owner_action(self):
         self.store(comment(5, claim_body(OTHER, renewed="1")), comment(30, oa_body(5, OTHER)))
@@ -572,6 +578,98 @@ class StatusTest(Base):
         self.assertEqual((code, out["verdict"], out["by"], out["released_by_owner"]), (3, "held_by", OTHER, []))
         self.assertEqual([m.fields["holder"] for m in self.live()], [OTHER])
         self.assertNotIn(post(fm.end_body(5, "owner-action")), self.mutations())
+
+
+class TransientRetryTest(Base):
+    """Issue 740: a transport error retries the whole verb (D3, D4); tries running out is transient (D5)."""
+
+    def test_two_network_failures_then_success_acquires(self):
+        self.store(next_id=11)
+        self.world.outage(2)
+        code, out = run(*common("acquire"))
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 11))
+        self.assertNotIn("transient", out)
+        self.assertEqual(self.slept, [20, 40])
+        self.assertEqual([m.fields["holder"] for m in self.live()], [ME])
+
+    def test_two_network_failures_then_success_renews(self):
+        self.store(comment(5, claim_body(ME)))
+        self.world.outage(2)
+        code, out = run(*common("renew"))
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "renewed", 5))
+        self.assertEqual(self.slept, [20, 40])
+        self.assertEqual(self.live()[0].fields["renewed"], "1")  # the failed tries changed nothing
+
+    def test_a_lasting_outage_is_error_transient_after_three_tries(self):
+        for verb in ("acquire", "renew", "release", "status"):
+            with self.subTest(verb=verb):
+                self.fresh_world()
+                self.slept.clear()
+                self.store(comment(5, claim_body(ME)))
+                self.world.outage()
+                code, out = run(*common(verb))
+                self.assertEqual((code, out["verdict"], out["error"], out["transient"]),
+                                 (1, "error", "gh_failed", True))
+                self.assertEqual(self.slept, [20, 40])
+                self.assertEqual(self.world.argvs("gh"), [LIST] * 3)  # each try stops at its first listing
+
+    def test_a_non_transport_error_is_not_retried(self):
+        self.world.respond("gh", LIST, exit=1, stderr="gh: Forbidden (HTTP 403)")
+        code, out = run(*common("acquire"))
+        self.assertEqual((code, out["error"], out["transient"]), (1, "gh_failed", False))
+        self.assertEqual(self.slept, [])
+        self.assertEqual(self.world.argvs("gh"), [LIST])
+
+    def test_contention_is_never_retried(self):
+        self.store(comment(5, claim_body(OTHER)))
+        self.assertEqual(run(*common("acquire"))[1]["verdict"], "held_by")
+        self.assertEqual(run(*common("renew"))[1]["verdict"], "not_held")
+        self.assertEqual(self.slept, [])
+
+    def test_acquire_retried_after_its_claim_post_lost_its_reply_is_already_held(self):
+        self.store(next_id=11, lose_reply=["post"])
+        code, out = run(*common("acquire"))
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 11))
+        self.assertEqual(self.slept, [20])
+        self.assertEqual([c["id"] for c in self.world.stored()], [11])  # one claim, no second post
+        self.assertEqual(self.mutations()[-2:], [ENSURE, ADD])
+
+    def test_renew_retried_after_its_edit_lost_its_reply_renews_again(self):
+        self.store(comment(5, claim_body(ME)), lose_reply=["edit"])
+        code, out = run(*common("renew"))
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "renewed", 5))
+        self.assertEqual(self.slept, [20])
+        self.assertEqual([c["id"] for c in self.world.stored()], [5])
+        self.assertEqual(self.live()[0].fields["renewed"], "2")
+
+    def test_renew_retried_after_its_owner_action_end_lost_its_reply_removes_the_label(self):
+        # The end marker landed, its reply was lost; the retry finds no live marker and must still
+        # shed the owner-action label before it reports renewed.
+        self.store(comment(5, claim_body(ME)), comment(30, oa_body(5, ME)), next_id=40, lose_reply=["post"])
+        code, out = run(*common("renew"))
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "renewed", 5))
+        self.assertEqual(self.slept, [20])
+        self.assertEqual(self.live("owner-action"), [])
+        self.assertEqual(self.mutations().count(post(fm.end_body(30, "renewed"))), 1)
+        self.assertEqual(self.mutations()[-1], OA_REMOVE)
+
+    def test_release_retried_after_its_end_post_lost_its_reply_ends_once(self):
+        self.store(comment(5, claim_body(ME)), lose_reply=["post"])
+        code, out = run(*common("release"))
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["label_removed"]),
+                         (0, "released", 5, True))
+        self.assertEqual(self.slept, [20])
+        self.assertEqual(self.mutations().count(post(fm.end_body(5, "done"))), 1)
+        self.assertEqual(self.live(), [])
+
+    def test_status_retried_after_its_owner_action_post_lost_its_reply_posts_once(self):
+        self.world.respond("gh", NOW, stdout="HTTP/2.0 200 OK\nDate: Fri, 06 Nov 2026 10:00:00 GMT\n\n{}")
+        self.store(comment(5, claim_body(OTHER), OLD), next_id=30, lose_reply=["post"])
+        code, out = run(*common("status"))
+        self.assertEqual((code, out["verdict"], out["owner_action_comment_id"], out["owner_action_posted"]),
+                         (0, "stale", 30, False))
+        self.assertEqual(self.slept, [20])
+        self.assertEqual([m.comment_id for m in self.live("owner-action")], [30])
 
 
 class NoHostClockTest(unittest.TestCase):
