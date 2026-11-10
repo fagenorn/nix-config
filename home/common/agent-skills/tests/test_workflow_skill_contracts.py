@@ -2090,6 +2090,18 @@ class CodexCollaborationContractTest(unittest.TestCase):
     def test_the_skill_documents_do_not_grow(self):  # #789 AC3: the instruction budget stays flat
         self.assertLessEqual(self.markdown_bytes(None), self.markdown_bytes(self.GROWTH_BASE))
 
+    def test_the_retry_eval_covers_both_outcomes(self):  # #789 AC1, AC2: identifiers and result tokens only (agent-helpers rule 6)
+        cases = json.loads((self.SKILL_DIR / "evals/evals.json").read_text(encoding="utf-8"))["evals"]
+        self.assertEqual([case["id"] for case in cases], [1, 2, 3, 4, 5])
+        case = cases[4]
+        self.assertEqual((case["name"], case["mode"], case["files"]),
+                         ("diff-review-failed-slice-retried-once", "plan-only", []))
+        expected = case["expected_output"]
+        for token in ("available: true", "available: false", "`failed slices: 2`"):
+            with self.subTest(token=token):
+                self.assertIn(token, expected)
+        self.assertLess(expected.index("available: true"), expected.index("available: false"))
+
     def test_the_skill_names_no_retired_pipeline(self):  # AC2
         for path in self.documents():
             text = path.read_text(encoding="utf-8")
