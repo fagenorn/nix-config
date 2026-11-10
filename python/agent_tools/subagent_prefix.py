@@ -8,6 +8,45 @@ holds fewer than four cache breakpoints, marks the block just before the prompt 
 subagent's later turns are reordered only once its first request was, so a forked subagent keeps
 its parent's prefix. Every other request, and every body of another shape, comes back as the
 bytes and headers it arrived with.
+
+Which requests. A `POST` to `/v1/messages` (any query) with a non-empty `x-claude-code-agent-id`
+is parsed as strict JSON (a duplicate key or `NaN` is `unparsed`); every other request is
+`not_subagent` and is never parsed, and so is a body whose `system[0]` is not a text block
+starting `x-anthropic-billing-header:` with `cc_is_subagent=true` among its `;`-separated fields.
+A request with no assistant message is a first request, and its agent id is registered when it is
+reordered (in memory, at most 4,096 ids, oldest out first, forgotten on restart); a later request
+is reordered only when its id is registered, so a forked subagent, which carries its parent's
+first message, passes as `unregistered`.
+
+Shape. The reorder needs `messages[0]` to be a user message of text blocks: attachments (text
+starting `<system-reminder>`), budget lines (whole text `<total_tokens>N tokens left</total_tokens>`,
+`N` digits or `Infinite`) and exactly one other block, the prompt, which is not first. Only its
+last block may carry a `cache_control`, and the body's marks (on `tools`, `system`, each message
+block after its inner content, then a top-level one) number at most four, are objects with a
+`ttl` of `5m` (the default) or `1h`, and never grow longer in prefix order; anything else is
+`shape`.
+
+Output. The output keeps every block before the prompt and every attachment after it in order,
+then the prompt, then the budget lines that followed it, and a mark on the original last block
+moves to the new last block. With fewer than four marks, the block just before the prompt gains
+`{"type":"ephemeral"}` with the `ttl` of the nearest mark after it, else of the nearest before
+it, else none (`applied`); with four, nothing is added (`applied_at_cap`). No existing mark is
+retimed or removed, and the billing header is never changed. A reordered body is re-encoded as
+compact UTF-8 JSON in its key order, with every `Content-Length` value replaced; every other
+outcome forwards the client's bytes and headers.
+
+Where it runs. The transform runs after the upstream headers are assembled and before the
+keepalive's observation, so a keepalive candidate and its pings carry the reordered body.
+
+Log lines. With `--reorder`, the `listening` line gains `"reorder":true` and each `request` line
+that reached the transform gains `reorder`: `applied`, `applied_at_cap`, `not_subagent`,
+`unregistered`, `unparsed`, `shape` or `error`. A request rejected while its body was read
+(`411`, `400`) and the health path carry none. An exception from the transform, or an outcome
+outside that set, forwards the original bytes and headers and is logged at once as a
+`reorder_error` line with `method`, `path` and `error`. Without the flag no transform object
+exists, and every byte sent upstream and every log line is as `agent_tools.cache_proxy`
+describes.
+
 """
 
 from __future__ import annotations

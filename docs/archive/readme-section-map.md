@@ -53,3 +53,8 @@ Where each section of the three READMEs that issue 694 dissolved went: contract 
 | `home/common/claude-code/README.md` | Guard/core decision | decision | `docs/areas/guard/adr/008-merge-arms-keep-the-required-check-floor.md` |
 | `python/README.md` | guard-policy | contract | `python/agent_tools/guard_policy.py` |
 | `python/README.md` | guard-policy | decision | `docs/areas/guard/adr/006-two-policy-files-one-trust-rule-each.md`, `docs/areas/guard/adr/007-derived-rows-rechecked-at-use.md` |
+| `python/README.md` | `cache-proxy` | contract | `python/agent_tools/cache_proxy.py`, `python/agent_tools/cache_keepalive.py`, `python/agent_tools/subagent_prefix.py`, `python/agent_tools/model_pricing.py`, `python/agent_tools/keepalive_pings.py` |
+| `python/README.md` | `cache-proxy` | decision | `docs/areas/hosts/adr/001-cache-proxy-is-a-transparent-loopback.md`, `docs/areas/hosts/adr/002-keepalive-replays-idle-subagents.md`, `docs/areas/hosts/adr/003-subagent-prefix-reorder.md` |
+| `home/common/claude-code/README.md` | Cache proxy | decision | `docs/areas/hosts/adr/004-claude-routes-through-the-proxy-by-default.md` |
+| `home/common/claude-code/README.md` | Accounts | decision | `docs/areas/hosts/adr/005-account-profiles-link-shared-config.md` |
+| `home/common/claude-code/README.md` | Plugins | decision | `docs/areas/hosts/adr/006-codex-plugin-is-a-pinned-input-plus-patch.md` |

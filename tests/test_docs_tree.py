@@ -72,6 +72,11 @@ AUDITED: frozenset[tuple[str, str, str]] = frozenset({
     ("home/common/claude-code/README.md", "Guard/core decision", "decision"),
     ("python/README.md", "guard-policy", "contract"),
     ("python/README.md", "guard-policy", "decision"),
+    ("python/README.md", "`cache-proxy`", "contract"),
+    ("python/README.md", "`cache-proxy`", "decision"),
+    ("home/common/claude-code/README.md", "Cache proxy", "decision"),
+    ("home/common/claude-code/README.md", "Accounts", "decision"),
+    ("home/common/claude-code/README.md", "Plugins", "decision"),
 })
 
 # The base sections no text leaves.
