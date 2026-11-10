@@ -15,7 +15,7 @@ not list, refuses `adopt.migration.unknown`. The contract's `schema_version`
 must equal the entry's `from_schema` (`adopt.migration.not_applicable`
 otherwise, which is also what a second run over a migrated tree gets).
 `bindings-deploy.retire` returns a deep copy of the contract with
-`schema_version` 2, no `deploy` member of `bindings`, no `capabilities.deploy` and
+`schema_version` 2, no `bindings.deploy`, no `capabilities.deploy` and
 the platform interval `[max(min_inclusive, 1.2.0), 3.0.0)`, every other member
 keeping its authored order, and refuses `adopt.migration.deploy_in_use` at the
 first of `/bindings/deploy/adapter`, `/bindings/deploy/command` and

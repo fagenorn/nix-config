@@ -49,7 +49,7 @@ this way against the candidate's own manifest.
 Platform 2.0.0 supports project schema 2 only (`project_schema_versions` is
 `[2]`, `resolved_schema_version` is 2) and declares the migration
 `bindings-deploy.retire` from schema 1 to 2 (issue 579). Schema 2 is schema 1
-without the deploy watch: the `deploy` member of `bindings` and `capabilities.deploy` are not
+without the deploy watch: `bindings.deploy` and `capabilities.deploy` are not
 members of it, so an authored one is refused like any member outside the
 schema, and the resolved snapshot has neither. A schema-1 contract is refused
 `unsupported_schema` with reason `project_schema_unsupported`. The projection

@@ -48,6 +48,9 @@ class LaddersTest(unittest.TestCase):
         "home/common/agent-skills/skills/ship-release/CHANGELOG.md": "bindings.deploy\n",
         "python/agent_tools/verify_checks.py":
             'X = ("bindings.deploy", "skills.config.json", "release deploy inspect")\n',
+        "python/agent_tools/resolve_project.py": "bindings.deploy\n",
+        "python/agent_tools/adopt_migrate.py": "bindings.deploy\n",
+        "python/agent_tools/release_profile.py": "bindings.deploy\n",
     }
 
     def setUp(self):
@@ -220,7 +223,7 @@ class LaddersTest(unittest.TestCase):
         code, report, _ = self.ladders(
             root, stub_body="""echo '{"error":{"code":"not_onboarded"}}'; exit 2""")
         self.assertEqual((code, report["findings"], report["clean"]), (0, [], True))
-        self.assertEqual(len(report["exempt"]), 5)
+        self.assertEqual(len(report["exempt"]), 8)
 
 
 def claude_line(timestamp, command, usage=True):
@@ -385,6 +388,16 @@ class CandidateTreeTest(unittest.TestCase):
             sys.path.pop(0)
         self.assertEqual(sorted({(e["path"], e["marker_id"]) for e in report["exempt"]}),
                          sorted((path, marker) for path, marker, _ in NON_LADDER_SITES))
+
+    def test_the_removed_deploy_member_is_named_by_its_literal_and_exempted(self):
+        # A docstring that describes the removal says `bindings.deploy` itself; the
+        # audit exempts it by a row with a reason, never by rewording the literal away.
+        _, report = self.audit()
+        exempt = {e["path"] for e in report["exempt"] if e["marker_id"] == "bindings-deploy"}
+        for module in ("resolve_project", "adopt_migrate", "release_profile"):
+            path = f"python/agent_tools/{module}.py"
+            self.assertIn("bindings.deploy", (self.ROOT / path).read_text("utf-8"), path)
+            self.assertIn(path, exempt)
 
     def test_the_known_ladders_are_deleted_not_reworded(self):
         skill = (self.ROOT / "home/common/agent-skills/skills/research/SKILL.md").read_text("utf-8")

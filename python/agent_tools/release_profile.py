@@ -79,7 +79,7 @@ needs the candidate to carry `merge: {pr, base_tip}`, a positive integer and 40 
 digits. `bind_candidate` binds that member, beside `version` and `commit`, into the subject's
 `candidate` and into the `candidate` of every unit of the consuming node's adapter alias, and
 into every `publication_triggered` activation unit too. A schema-2 contract has neither
-the `deploy` member of `bindings` nor `capabilities.deploy`, so a profile's activation unit is the only deploy
+`bindings.deploy` nor `capabilities.deploy`, so a profile's activation unit is the only deploy
 watch. Any other profile refuses a candidate that carries `merge` (issue 554 D15). The grammar
 refuses, as `contract.release.invalid` at its `adapter`, a node of that same registered adapter
 on another alias, so no `tag` or `release` runs without the `merge` it must target.
