@@ -6,7 +6,7 @@
 work tree, an unreadable input path, a `--pr-head` that is not a sha, or `--pr-workflow`
 with neither `--pr-head` nor `--pr-branch`. The grammar, the findings and the context options
 (`--repo-root`, `--code-unmet`, `--pr-workflow` with `--pr-head` or `--pr-branch`, `--blocks`) are
-in `agent_tools.verify_block`; this module builds the real reference lookups and prints the verdict.
+in `agent_tools.verification.verify_block`; this module builds the real reference lookups and prints the verdict.
 
 `verify-pending count-since --input <path|-> --since T --n N [--key K]` reads a
 JSON array whose elements are times or objects with a time at `K` (default
@@ -29,7 +29,7 @@ project or issue level line. The states are `due`, `pending`, `pass`, `fail`, `h
 `tracker_not_github`, `forge_error`, `runner_untrusted`, `owner_asked`, `owner_waiting`,
 `owner_ambiguous`, `owner_answered`, `owner_waived`, plus the `when` reasons that name what is
 awaited). The `ask`, `act`, `live` and `paid` checks and the `on_fail: ask` and `on_expire: ask`
-decisions reach the owner through the prompts of `agent_tools.verify_owner`.
+decisions reach the owner through the prompts of `agent_tools.verification.verify_owner`.
 A project that cannot be read is a `skipped` line with reason `project_unresolved`, one whose
 tracker is not GitHub is `tracker_not_github` (both omitted when `--repo` is given), and a forge
 failure while listing is `forge_error`. A write pass whose `gh` account the forge would not label
@@ -61,13 +61,13 @@ import sys
 from collections.abc import Collection
 from pathlib import Path
 
-from agent_tools import verify_exec, verify_run
+from agent_tools.verification import verify_exec, verify_run
 from agent_tools.project_contract import agent_platform
 from agent_tools.claims.owner_actions import SLUG_PATTERN
 from agent_tools.project_contract.resolve_project import ContractError, resolve
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
-from agent_tools.verify_block import HOST, SHA, count_after, count_since, lint_block, parse_block
+from agent_tools.verification.verify_block import HOST, SHA, count_after, count_since, lint_block, parse_block
 
 GIT_TIMEOUT = 60
 

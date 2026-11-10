@@ -46,7 +46,7 @@ class LaddersTest(unittest.TestCase):
     EXEMPT_ONLY = {
         "python/agent_tools/project_contract/adopt_inspection.py": 'X = "skills.config.json"\n',
         "home/common/agent-skills/skills/ship-release/CHANGELOG.md": "bindings.deploy\n",
-        "python/agent_tools/verify_checks.py":
+        "python/agent_tools/verification/verify_checks.py":
             'X = ("bindings.deploy", "skills.config.json", "release deploy inspect")\n',
         "python/agent_tools/project_contract/resolve_project.py": "bindings.deploy\n",
         "python/agent_tools/project_contract/adopt_migrate.py": "bindings.deploy\n",

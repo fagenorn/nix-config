@@ -32,7 +32,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from agent_tools import verify_block
+from agent_tools.verification import verify_block
 from agent_tools.claims import forge_markers
 from agent_tools.system import forge_api
 

@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import verify_block
-from agent_tools.verify_block import count_since
+from agent_tools.verification import verify_block
+from agent_tools.verification.verify_block import count_since
 
 SHA = "a" * 40
 SHA2 = "b" * 40
@@ -38,7 +38,7 @@ def base_block():
 
 
 def run_cli(args, stdin, env=None):
-    return subprocess.run([sys.executable, "-m", "agent_tools.verify_pending", *args],
+    return subprocess.run([sys.executable, "-m", "agent_tools.verification.verify_pending", *args],
                           input=stdin, text=True, capture_output=True, timeout=60,
                           env=env if env is not None else cli_env())
 

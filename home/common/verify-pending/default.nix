@@ -28,7 +28,7 @@
 # lines (preceded by `switch host=H target=T current=yes|timeout` for a switch) with UTC times to
 # `~/.agents/state/verify-pending/runner.log`, rotated to `runner.log.1` above 1 MiB, then runs
 # `owner-actions refresh`, and the pass always exits 0; what runs unattended is decided by
-# `verify-pending run` itself (see `agent_tools.verify_exec`).
+# `verify-pending run` itself (see `agent_tools.verification.verify_exec`).
 #
 # Every Mac is logged-in only (issue 668): the darwin job is a launchd user agent in `gui/<uid>`,
 # and gh reads its token from the login keychain, so neither exists while nobody is logged in at

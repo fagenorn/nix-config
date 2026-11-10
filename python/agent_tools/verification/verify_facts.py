@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools import verify_block, verify_issues
+from agent_tools.verification import verify_block, verify_issues
 from agent_tools.claims.forge_markers import Marker
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError

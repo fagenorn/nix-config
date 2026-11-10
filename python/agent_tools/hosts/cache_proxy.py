@@ -21,8 +21,8 @@ a `HEAD` reply ends after its headers, so it logs 0. An exception no request ste
 client reset on an idle connection) is one `handler_error` line with `error`, never a traceback.
 
 With `--keepalive` it also replays idle subagent conversations' last requests with
-`max_tokens=1` (`agent_tools.cache_keepalive`, #423); with `--reorder` it reorders each
-subagent's first user message (`agent_tools.subagent_prefix`, #429) before the keepalive sees the
+`max_tokens=1` (`agent_tools.hosts.cache_keepalive`, #423); with `--reorder` it reorders each
+subagent's first user message (`agent_tools.hosts.subagent_prefix`, #429) before the keepalive sees the
 request. Its forwarding changes only as those modules describe. The launchd agent or systemd
 user unit that runs it and the `claude` launcher that routes through it are in
 `home/common/claude-code/README.md`.
@@ -265,7 +265,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         that returns an outcome outside its closed set, forwards the original bytes and headers
         and is logged at once."""
         # Imported here because subagent_prefix imports cache_keepalive, which imports this module.
-        from agent_tools.subagent_prefix import OUTCOMES
+        from agent_tools.hosts.subagent_prefix import OUTCOMES
         try:
             forwarded, sent, outcome = self.server.reorder.transform(self.command, self.path,
                                                                      headers, body)
@@ -477,14 +477,14 @@ def main(argv: list[str] | None = None) -> int:
     keepalive = None
     if args.keepalive:
         # Imported here because cache_keepalive imports this module's transport constants (D24).
-        from agent_tools import cache_keepalive
+        from agent_tools.hosts import cache_keepalive
         keepalive = cache_keepalive.Keepalive(
             log, functools.partial(open_upstream, args.upstream, upstream_tls(args.upstream)),
             time.monotonic)
     reorder = None
     if args.reorder:
         # Imported here because subagent_prefix imports cache_keepalive, which imports this module.
-        from agent_tools import subagent_prefix
+        from agent_tools.hosts import subagent_prefix
         reorder = subagent_prefix.SubagentPrefix()
     try:
         server = ProxyServer(args.port, args.upstream, log, keepalive, reorder)

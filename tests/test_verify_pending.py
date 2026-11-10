@@ -18,13 +18,13 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.claims import forge_markers as fm
-from agent_tools import verify_exec as vx
-from agent_tools import verify_facts as vf
-from agent_tools import verify_issues as vi
-from agent_tools import verify_pending
-from agent_tools import verify_run as vr
+from agent_tools.verification import verify_exec as vx
+from agent_tools.verification import verify_facts as vf
+from agent_tools.verification import verify_issues as vi
+from agent_tools.verification import verify_pending
+from agent_tools.verification import verify_run as vr
 from agent_tools.project_contract.resolve_project import resolve
-from agent_tools.verify_block import lint_block
+from agent_tools.verification.verify_block import lint_block
 
 from .forge_world import ForgeWorld, host_clock
 
@@ -1526,5 +1526,5 @@ class RecipeTest(unittest.TestCase):
         lines = (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines()
         start = lines.index("verify host *args:")
         self.assertEqual(lines[start + 1],
-                         '  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verify_pending run --host {{host}} {{args}}')
+                         '  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}')
         self.assertIn("    tests/test_verify_pending.py \\", lines)

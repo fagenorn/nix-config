@@ -207,7 +207,7 @@ agent-instruction-budget *args:
 
 # Run this host's due read-only verification checks and close passing issues (issue 630)
 verify host *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verify_pending run --host {{host}} {{args}}
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
 # Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build

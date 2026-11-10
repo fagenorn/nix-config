@@ -30,16 +30,25 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.release.release_profile",
     }),
     "release": frozenset({"agent_tools.project_contract.resolve_project"}),
+    "verification": frozenset({
+        "agent_tools.project_contract.resolve_project",
+        "agent_tools.project_contract.agent_platform",
+        "agent_tools.claims.forge_markers",
+        "agent_tools.claims.forge_claim",
+        "agent_tools.claims.forge_owner_action",
+        "agent_tools.claims.owner_actions",
+        "agent_tools.guard.push_fixture",
+        "agent_tools.guard.guard_policy",
+        "agent_tools.project_contract.adopt_inspection",
+        "agent_tools.project_contract.adopt_verify",
+    }),
 }
 
 # Flat modules that have not moved into their area yet; each move removes a name.
 UNMOVED: frozenset[str] = frozenset({
     "agent_gate_bundle", "agent_gate_corpus", "agnostic_lint", "artifact_budget",
-    "cache_keepalive", "cache_proxy", "context_map_lint", "diff_scope", "host_admission",
-    "issue_branch", "keepalive_pings", "lane_triage", "model_pricing", "promotion",
-    "promotion_lifecycle", "promotion_schema", "run_profile", "subagent_prefix",
-    "suite_runner", "verified_tree", "verify_block", "verify_checks", "verify_exec",
-    "verify_facts", "verify_issues", "verify_owner", "verify_pending", "verify_run",
+    "context_map_lint", "diff_scope", "host_admission", "issue_branch", "lane_triage",
+    "promotion", "promotion_lifecycle", "promotion_schema", "run_profile", "suite_runner",
     "worktree_forge",
 })
 

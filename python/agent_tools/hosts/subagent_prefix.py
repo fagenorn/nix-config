@@ -44,7 +44,7 @@ that reached the transform gains `reorder`: `applied`, `applied_at_cap`, `not_su
 (`411`, `400`) and the health path carry none. An exception from the transform, or an outcome
 outside that set, forwards the original bytes and headers and is logged at once as a
 `reorder_error` line with `method`, `path` and `error`. Without the flag no transform object
-exists, and every byte sent upstream and every log line is as `agent_tools.cache_proxy`
+exists, and every byte sent upstream and every log line is as `agent_tools.hosts.cache_proxy`
 describes.
 
 """
@@ -57,7 +57,7 @@ import re
 import threading
 from urllib.parse import urlsplit
 
-from agent_tools.cache_keepalive import AGENT_HEADER, Headers, header_value
+from agent_tools.hosts.cache_keepalive import AGENT_HEADER, Headers, header_value
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
 MESSAGES_PATH = "/v1/messages"

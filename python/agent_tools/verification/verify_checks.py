@@ -18,7 +18,7 @@ than the merge (a commit status names no app, so it never satisfies a bound chec
 `contexts` list never loosens one); not met otherwise (and when nothing is required); not yet when
 no pull request has merged; and it exits 2 on a forge error.
 
-`keepalive-end-turn-cap` is documented in `agent_tools.keepalive_pings`.
+`keepalive-end-turn-cap` is documented in `agent_tools.hosts.keepalive_pings`.
 
 `platform-status` runs the installed `resolve-project platform-status` (from `~/.agents/bin`,
 prepended to `PATH`) and passes its output and exit through, so a block judges it with `expect`.

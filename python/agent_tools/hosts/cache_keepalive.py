@@ -82,7 +82,7 @@ without the flag; when a later track call raises, the track is dropped and the r
 untracked, its headers already sent as the track gave them (`Accept-Encoding: identity`); a
 dropped track is still told its request is done (unless `done` itself raised), so its flight
 never keeps the session active. Without the flag no keepalive object exists, no thread runs, and
-every byte sent upstream and every log line is as `agent_tools.cache_proxy` describes.
+every byte sent upstream and every log line is as `agent_tools.hosts.cache_proxy` describes.
 
 `Keepalive` holds each subagent conversation's candidate request, `tick` returns the pings now
 due, `send` sends one, and `run` is the production loop, which only a command's `main` starts.
@@ -102,7 +102,7 @@ from agent_tools.canonical import (
     reject_nonfinite_literal,
     telemetry_digest,
 )
-from agent_tools.cache_proxy import ERROR_BODY_LIMIT, READ_SIZE, UPSTREAM_FAILURES
+from agent_tools.hosts.cache_proxy import ERROR_BODY_LIMIT, READ_SIZE, UPSTREAM_FAILURES
 
 OUTCOMES = ("untracked", "main", "unparsed", "no_tail_mark", "ttl_1h", "thinking_budget",
             "tracked")

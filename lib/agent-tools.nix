@@ -42,7 +42,7 @@ let
     "adopt-project" = "project_contract.adopt_project";
     "agent-model-matrix" = "agent_model_matrix";
     "artifact-budget" = "artifact_budget";
-    "cache-proxy" = "cache_proxy";
+    "cache-proxy" = "hosts.cache_proxy";
     "conformance" = "project_contract.conformance";
     "context-map-lint" = "context_map_lint";
     "diff-scope" = "diff_scope";
@@ -57,8 +57,8 @@ let
     "release" = "release.release";
     "resolve-project" = "project_contract.resolve_project";
     "skill-lint" = "skill_lint";
-    "verified-tree" = "verified_tree";
-    "verify-pending" = "verify_pending";
+    "verified-tree" = "verification.verified_tree";
+    "verify-pending" = "verification.verify_pending";
   };
 
   # A launcher script: bash under `-p`, which ignores BASH_ENV and the functions

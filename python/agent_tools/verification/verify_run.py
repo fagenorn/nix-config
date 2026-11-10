@@ -70,7 +70,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools import verify_block, verify_exec, verify_facts, verify_issues, verify_owner
+from agent_tools.verification import verify_block, verify_exec, verify_facts, verify_issues, verify_owner
 from agent_tools.claims import forge_markers, forge_owner_action
 from agent_tools.claims.forge_markers import Marker
 from agent_tools.system import forge_api

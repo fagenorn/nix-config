@@ -1,4 +1,4 @@
-"""`agent_tools.verify_checks`: the committed verify checks of issue 638."""
+"""`agent_tools.verification.verify_checks`: the committed verify checks of issue 638."""
 import json
 import os
 import shutil
@@ -11,9 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import agent_gate_bundle, verify_checks
+from agent_tools import agent_gate_bundle
+from agent_tools.verification import verify_checks
 from agent_tools.system import forge_api
-from agent_tools.verify_checks import required_checks, self_hosted_runner
+from agent_tools.verification.verify_checks import required_checks, self_hosted_runner
 
 from .guard_policy_world import GuardPolicyWorld
 from .pre_push_world import PrePushWorld
@@ -235,7 +236,7 @@ class RequiredChecksCommandTest(unittest.TestCase):
         self.assertIn("forge_error", done.stderr)
 
     def test_bad_repo_is_a_usage_error(self):
-        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "required-checks",
+        done = run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks", "required-checks",
                               "--repo", "nodocom", "--base", "dev", "--since", "2026-11-06T17:37:11Z"])
         self.assertEqual(done.returncode, 2)
 
@@ -284,7 +285,7 @@ class ManagedPrePushHookTest(unittest.TestCase):
             encoding="utf-8")
 
     def check(self):
-        return run_from_root(["python3", "-m", "agent_tools.verify_checks",
+        return run_from_root(["python3", "-m", "agent_tools.verification.verify_checks",
                               "managed-pre-push-hook", "--slug", self.SLUG],
                              env_extra=self.world.env)
 
@@ -451,7 +452,7 @@ class DeprecationsRetiredTest(unittest.TestCase):
 
     def test_the_nix_config_root_is_scoped_to_its_skills(self):
         self.answer(deprecated=[], adapter="none", project_id="fagenorn/nix-config")
-        self.commit("python/agent_tools/verify_checks.py", 'RETIRED_COMMAND = "release deploy inspect"\n')
+        self.commit("python/agent_tools/verification/verify_checks.py", 'RETIRED_COMMAND = "release deploy inspect"\n')
         self.commit("tests/test_verify_checks.py", "release deploy inspect\n")
         code, report = self.check()
         self.assertEqual((code, report["roots"][0]["verdict"]), (0, "green"))
@@ -772,12 +773,12 @@ class CutoverManifestTest(unittest.TestCase):
 
     def test_the_command_prints_the_report_and_exits_with_its_code(self):
         world = CutoverWorld(self)
-        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "cutover-manifest",
+        done = run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks", "cutover-manifest",
                               "--repo-root", str(world.clone)])
         self.assertEqual(done.returncode, 75, done.stderr)
         self.assertEqual(json.loads(done.stdout)["verdict"], "absent")
         world.publish_candidate()
-        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "cutover-manifest",
+        done = run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks", "cutover-manifest",
                               "--repo-root", str(world.clone), "--main-ref", "HEAD"])
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.loads(done.stdout)["verdict"], "green")

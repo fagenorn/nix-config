@@ -3,7 +3,7 @@
 `verify-pending` (issue 625, parent 572) gives the pending check of a held issue one strict,
 machine-readable form, the verify block, and refuses at hold time the avoidable holds the history
 study found. This module is the pure policy (`parse_block`, `lint_block`, `count_since`) and the
-one home of the grammar; `agent_tools.verify_pending` is the thin shell that parses argv, reads the
+one home of the grammar; `agent_tools.verification.verify_pending` is the thin shell that parses argv, reads the
 input, builds the real reference lookups and prints the verdict. The lint is read-only: it never
 runs a check and never calls `gh`. Its only child processes are the `git` probes below, and only
 when `--repo-root` is given.
@@ -130,7 +130,7 @@ without `--pr-head` or `--pr-branch`. The error codes are closed: `not_json`, `f
 returns 0 when the count is at least `n`, else 75 ("not yet", never a failure); an `n` below 1, or
 a naive or unparsable time, raises `ValueError`. The `count_since` probe uses it, and a check
 script answers "at least N runs since T" with `verify-pending count-since --input <path|-> --since
-T --n N [--key K]` (the command is in `agent_tools.verify_pending`).
+T --n N [--key K]` (the command is in `agent_tools.verification.verify_pending`).
 
 The block below is the host-bound deploy check; `lint` accepts it, and the test file pins that,
 and that the same block with an inline `python3 -c` run in place of the probe is refused
