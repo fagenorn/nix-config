@@ -1121,6 +1121,54 @@ class LandTest(unittest.TestCase):
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))
 
 
+class AllChecksLandTest(unittest.TestCase):
+    """#756: the landing waits for every check on head, required or not."""
+
+    def test_land_checks_step_lists_every_check_and_can_answer_pending(self):
+        _, calls, _ = run()
+        checks = prompt(calls, "land-checks-1-1")
+        for argv in ("gh pr checks 41 --repo owner/repo --json name,bucket,link",
+                     "gh api repos/owner/repo/rules/branches/dev"):
+            self.assertIn(argv, checks)
+        schema = schema_of(calls, "land-checks-1-1")
+        self.assertIn("pending", schema["properties"])
+        self.assertIn("pending", schema["properties"]["state"]["enum"])
+
+    def test_a_pending_non_required_check_is_waited_for_before_the_merge(self):
+        result, calls, _ = run(replies={
+            "land-checks-1-1": {"state": "passed", "head": SHA, "required": ["ci"], "passed": ["ci"], "pending": ["e2e"]},
+            "land-checks-1-2": {"state": "passed", "head": SHA, "required": ["ci"], "passed": ["ci", "e2e"]}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        names = labels(calls)
+        self.assertLess(names.index("land-checks-1-2"), names.index("land-merge-1"))
+        self.assertNotIn("land-fix-1", names)
+
+    def test_checks_still_pending_after_three_waits_stop_unmerged(self):
+        waiting = {"state": "pending", "head": SHA, "pending": ["e2e"]}
+        result, calls, _ = run(replies={f"land-checks-1-{k}": waiting for k in (1, 2, 3)})
+        r = row(result, 1)
+        self.assertEqual((r["outcome"], r["stage"], r["pending"]), ("stopped", "checks-pending", ["e2e"]))
+        names = labels(calls)
+        self.assertNotIn("land-merge-1", names)
+        self.assertNotIn("land-checks-1-4", names)
+        self.assertIn("land-unlock-1", names)
+
+    def test_a_failing_non_required_check_in_a_passed_reply_is_never_merged(self):
+        red = {"state": "passed", "head": SHA, "required": ["ci"], "passed": ["ci"], "failing": ["e2e"]}
+        result, calls, _ = run(replies={"land-checks-1-1": red, "land-checks-1-2": dict(red, head=FIX)})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["failing"]), ("ci-failed", ["e2e"]))
+        self.assertIn("e2e", prompt(calls, "land-fix-1"))
+        self.assertNotIn("land-merge-1", labels(calls))
+
+    def test_an_explicit_failed_state_outranks_a_pending_list(self):
+        red = {"state": "failed", "head": SHA, "pending": ["slow"], "details": "e2e failed"}
+        result, calls, _ = run(replies={"land-checks-1-1": red, "land-checks-1-2": dict(red, head=FIX)})
+        r = row(result, 1)
+        self.assertEqual((r["outcome"], r["details"]), ("ci-failed", "e2e failed"))
+        self.assertIn("e2e failed", prompt(calls, "land-fix-1"))
+        self.assertNotIn("land-merge-1", labels(calls))
+
+
 TRANSIENT = {"verdict": "error", "detail": "gh_failed: dial tcp: connect: network is unreachable", "transient": True}
 
 
