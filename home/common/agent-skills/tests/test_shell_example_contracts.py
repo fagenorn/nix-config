@@ -8,11 +8,6 @@ command with literal targets, so an example refuses when it carries one of the
 closed forms in FORMS: a chain, a pipe, a redirect, a heredoc, or text the
 scanner cannot close (unparseable, fail-closed). The one sanctioned chain is the
 lifecycle guard's own token-scrub prefix, read from the guard, never restated.
-The one sanctioned pipeline is a lifecycle helper call: a pipeline whose every
-segment is headed by a helper that `default.nix`'s permission allow list admits
-whole, whose heredocs are `<<` with a quoted delimiter, and which carries no
-chain, redirect or command substitution; the helpers are read from that allow
-list, never restated.
 
 `refused_examples(document_text)` is the boundary for refused forms: every form
 sweep and form fixture below calls it on a document's text.
@@ -53,17 +48,15 @@ COMMAND_VOCABULARY = frozenset({
     "echo", "env", "eval", "export", "find", "gh", "git", "glab", "go",
     "grep", "head", "jq", "just", "kubectl", "ls", "make", "mkdir", "mktemp",
     "mv", "nix", "nixos-rebuild", "node", "npm", "pnpm", "printf", "pytest",
-    "python3", "railway", "release", "resolve-project", "review-package", "review-range", "rg", "rm",
-    "sdd-gate", "sdd-workspace", "sed", "sh", "ship-delivery", "skill-sections", "sleep", "sops", "sort", "source", "ssh",
-    "tail", "tar", "task-brief", "tee", "terraform", "test", "timeout",
-    "touch", "unset", "uv", "verification-observe", "wc", "workflow-state", "xargs", "yarn", "zsh",
+    "python3", "railway", "release", "resolve-project", "rg", "rm",
+    "sed", "sh", "sleep", "sops", "sort", "source", "ssh",
+    "tail", "tar", "tee", "terraform", "test", "timeout",
+    "touch", "unset", "uv", "wc", "xargs", "yarn", "zsh",
 })
 
 # The one sanctioned chain lives in the lifecycle guard's own Python source; it
-# is read, never restated. The whole-allowed helpers live in the permission
-# allow list, which stays in the claude-code module (spec D30).
+# is read, never restated.
 GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
-ALLOW_LIST_SOURCE = REPO_ROOT / "home/common/claude-code/default.nix"
 GUARD_ASSIGNMENT = re.compile(
     r'^\s*UNSET_GITHUB_TOKEN_PREFIX = "([^"\n]*)"\s*$', re.M
 )
@@ -80,22 +73,7 @@ def guard_prefix(guard_text):
     return matches[0]
 
 
-# A single-word allow entry admits a command whole, whatever its arguments.
-WHOLE_ALLOW_ENTRY = re.compile(r'^\s*"Bash\(([^\s()"]+):\*\)"', re.M)
-
-
-def whole_allowed_helpers(nix_text):
-    """Basenames of the allow list's single-word `"Bash(<word>:*)"` entries."""
-    words = WHOLE_ALLOW_ENTRY.findall(nix_text)
-    if not words:
-        raise ValueError(
-            f"expected a single-word Bash allow entry in {ALLOW_LIST_SOURCE}, found none"
-        )
-    return frozenset(word.rsplit("/", 1)[-1] for word in words)
-
-
 SANCTIONED_PREFIX = guard_prefix(GUARD_SOURCE.read_text(encoding="utf-8"))
-LIFECYCLE_HELPERS = whole_allowed_helpers(ALLOW_LIST_SOURCE.read_text(encoding="utf-8"))
 
 
 @dataclass(frozen=True)
@@ -361,17 +339,6 @@ def _still_open(text):
     return _scan(_reduction(text)[0]).is_open
 
 
-def _is_lifecycle_call(reduced, scan):
-    """One pipeline of whole-allowed helpers fed only by quoted `<<` heredocs,
-    with no chain, redirect or command substitution (D23, D26)."""
-    if "chain" in scan.firsts or "redirect" in scan.firsts or scan.substituted:
-        return False
-    if not all(scan.heredocs) or not all(plain for plain, _ in scan.pipes):
-        return False
-    starts = [0] + [end for _, end in scan.pipes]
-    return all(command_head(reduced[start:]) in LIFECYCLE_HELPERS for start in starts)
-
-
 class _Example(NamedTuple):
     """One example's text and the document lines it was read from."""
     text: str
@@ -400,8 +367,6 @@ def _classify(example):
     if scan.is_open:
         return (Finding(example.numbers[0], "unparseable", example.text),)
     forms = [form for form in FORMS if form in scan.firsts]
-    if _is_lifecycle_call(reduced, scan):
-        forms = [form for form in forms if form not in ("pipe", "heredoc")]
     return tuple(Finding(example.line_at(origins[scan.firsts[form]]), form, example.text)
                  for form in forms)
 
@@ -799,71 +764,16 @@ class RefusedFormFixtureTest(unittest.TestCase):
                                  [(first + offset, form) for offset, form in expected])
 
 
-# A retired shipping skill's "Delivery loop" checkpoint call, verbatim at a311fda:
-# three helper segments, a quoted heredoc feeding the first (per D23).
-CHECKPOINT_CALL = """artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
-<ship-checkpoint/v2 JSON>
-EOF"""
-PATH_NAMED_CALL = ("~/.agents/bin/workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> "
-                   "| ~/.agents/bin/artifact-budget validate-report --boundary workflow-response --input -")
-# Each variant misses one D23/D26 condition, so the call is classified in full.
-LIFECYCLE_VARIANTS = (
-    ("non-helper segment",
-     "| artifact-budget validate-report --boundary workflow-response --input -", "| jq -r .state",
-     ("pipe", "heredoc")),
-    ("non-helper first segment",
-     "artifact-budget validate-report --boundary ship-checkpoint --input -", "cat -",
-     ("pipe", "heredoc")),
-    ("chain", "--boundary workflow-response --input -",
-     "--boundary workflow-response --input - && git status", ("chain", "pipe", "heredoc")),
-    ("redirect", "--boundary workflow-response --input -",
-     "--boundary workflow-response --input - > reply.json", ("pipe", "redirect", "heredoc")),
-    ("unquoted delimiter", "<<'EOF'", "<<EOF", ("pipe", "heredoc")),
-    ("substitution argument", "--run-id <run-id>", '--run-id "$(cat run-id)"', ("pipe", "heredoc")),
-    ("escaped delimiter", "<<'EOF'", "<<\\EOF", ("pipe", "heredoc")),
-    ("stderr pipe", "<<'EOF' | workflow-state", "<<'EOF' |& workflow-state", ("pipe", "heredoc")),
-    ("dash heredoc", "<<'EOF'", "<<-'EOF'", ("pipe", "heredoc")),
-    ("here-string", "<<'EOF'", "<<< text", ("pipe", "heredoc")),
-    ("backtick argument", "--run-id <run-id>", "--run-id `cat run-id`", ("pipe", "heredoc")),
-)
-# The same call with its delimiter double-quoted: still sanctioned (per D23, D27).
-DQUOTED_CHECKPOINT_CALL = CHECKPOINT_CALL.replace("<<'EOF'", '<<"EOF"')
-
-
-class LifecycleHelperCallTest(unittest.TestCase):
-    def setUp(self):
-        self.host = _host()
-
-    def test_single_word_allow_entries_name_the_helpers_by_basename(self):
-        text = ('        "Bash(git fetch:*)"\n'
-                '        "Bash(workflow-state:*)"\n'
-                '        "Bash(~/.agents/bin/workflow-state:*)"\n')
-        self.assertEqual(whole_allowed_helpers(text), frozenset({"workflow-state"}))
-
-    def test_no_single_word_allow_entry_fails_loud(self):
-        with self.assertRaises(ValueError):
-            whole_allowed_helpers('        "Bash(git fetch:*)"\n')
-
-    def test_sanctioned_calls_yield_nothing_in_every_region(self):
-        for name, call in (("checkpoint", CHECKPOINT_CALL), ("path-named", PATH_NAMED_CALL),
-                           ("compiled checkpoint", CHECKPOINT_CALL.replace(
-                               "artifact-budget validate-report --boundary ship-checkpoint --input -",
-                               "ship-delivery checkpoint --context /runtime/context.json --input -")),
-                           ("double-quoted delimiter", DQUOTED_CHECKPOINT_CALL)):
-            for region in _regions_for((call,)):
-                with self.subTest(call=name, region=region):
-                    document, _ = _appended(self.host, _wrap(region, (call,)))
-                    self.assertEqual(refused_examples(document), ())
-
-    def test_a_call_missing_any_condition_is_classified_in_full(self):
-        for name, old, new, forms in LIFECYCLE_VARIANTS:
-            self.assertEqual(CHECKPOINT_CALL.count(old), 1, name)
-            call = CHECKPOINT_CALL.replace(old, new)
-            for region in _regions_for((call,)):
-                with self.subTest(variant=name, region=region):
-                    document, first = _appended(self.host, _wrap(region, (call,)))
-                    self.assertEqual(_lines_and_forms(document),
-                                     [(first + 1, form) for form in forms])
+class NoSanctionedPipelineTest(unittest.TestCase):
+    def test_a_whole_allowed_helper_pipeline_is_a_refused_pipe(self):
+        host = _host()
+        call = ("artifact-budget validate-report --boundary producer --input - <<'EOF' "
+                "| artifact-budget validate-report --boundary producer --input -\n{}\nEOF")
+        for region in _regions_for((call,)):
+            with self.subTest(region=region):
+                document, first = _appended(host, _wrap(region, (call,)))
+                self.assertEqual(_lines_and_forms(document),
+                                 [(first + 1, "pipe"), (first + 1, "heredoc")])
 
 
 class FenceIndentationTest(unittest.TestCase):

@@ -329,15 +329,6 @@ let
             command = "${lifecycleGuard}/bin/claude-bash-lifecycle-guard";
             timeout = 30;
           }
-          # The context meter (issue 424): rewrites each `workflow-state progress` call to
-          # carry this agent's measured context and, once per crossing of the hand-off
-          # threshold, tells an owner to run its phase gate. It never grants or denies,
-          # so the guard above still judges every call.
-          {
-            type = "command";
-            command = "${agentTools.launchers.context-meter}";
-            timeout = 10;
-          }
         ];
       }
     ];
@@ -345,13 +336,9 @@ let
     # The broad push, PR-create, branch-delete and PR-merge entries are usable only
     # through the lifecycle guard above, which adjudicates every one of them at the
     # command position of a segment. Bare `Agent` remains inert while defaultMode is "auto".
-    # The lifecycle helpers workflow-state, artifact-budget and ship-delivery
-    # are allowed whole, bare and by their ~/.agents/bin path: their only writes are validated
-    # ledger transitions under .superpowers/workflows/, and every lifecycle call is one
-    # heredoc-fed command, so each pipeline segment matches a rule. The verification-observe adapter is allowed the same way:
-    # its only write is fetching the integration branch into refs/remotes/origin/<branch>.
-    # forge-issue is allowed the same way (issue 697): its only writes are one issue and its
-    # dependency links, each linked by database id and read back.
+    # artifact-budget and forge-issue are allowed whole, bare and by their ~/.agents/bin path.
+    # artifact-budget reads a file and prints a verdict, writing nothing. forge-issue's only
+    # writes are one issue and its dependency links, each linked by database id and read back.
     permissions = {
       defaultMode = "auto";
       allow = [
@@ -372,14 +359,8 @@ let
         "Bash(gh pr create:*)"
         "Bash(git branch -d:*)"
         "Bash(gh pr merge:*)"
-        "Bash(workflow-state:*)"
-        "Bash(~/.agents/bin/workflow-state:*)"
         "Bash(artifact-budget:*)"
         "Bash(~/.agents/bin/artifact-budget:*)"
-        "Bash(ship-delivery:*)"
-        "Bash(~/.agents/bin/ship-delivery:*)"
-        "Bash(verification-observe:*)"
-        "Bash(~/.agents/bin/verification-observe:*)"
         "Bash(forge-issue:*)"
         "Bash(~/.agents/bin/forge-issue:*)"
         "Agent"

@@ -54,7 +54,7 @@ NOT_LAUNCHERS = ("workflow-state",)
 # The commands #175, #179, #177, #249, #264, #279, #353, #403, #424, #623, #624 and #697 accepted as launchers: a floor, not the
 # full set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
-                  "context-map-lint", "context-meter", "derive-review-feasibility-fixtures",
+                  "context-map-lint", "derive-review-feasibility-fixtures",
                   "diff-scope", "forge-claim", "forge-issue", "lane-triage", "owner-actions",
                   "replay-retained", "resolve-project", "review-package", "review-range", "sdd-gate",
                   "ship-delivery")

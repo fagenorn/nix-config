@@ -55,7 +55,6 @@
  "tests/test_promotion_documents.py": 8.7,
  "tests/test_review_limits_replay.py": 8.4,
  "tests/test_review_range.py": 8.4,
- "tests/test_context_meter.py": 8.2,
  "home/common/agent-skills/tests/test_diff_scope.py": 6.2,
  "tests/test_release_adapter_core.py": 6.1,
  "home/common/agent-skills/tests/test_adopt_project_boundaries.py": 5.8,
