@@ -127,7 +127,7 @@ FOLDED_READ = {
     "owner-answer": ({"verdict", "decisions", "comment_id", "questions"}, {"renew": RENEW_READ}),
     "verify": ({"head", "clean", "results"}, {"renew": RENEW_READ, "results[]": {"id", "status", "summary"}}),
     "pr": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
-    "checks-1": ({"state", "head", "failing", "details"}, {"renew": RENEW_READ}),
+    "checks-1": ({"state", "head", "failing", "details", "pending"}, {"renew": RENEW_READ}),
     "merge": ({"merged", "behind", "merge_commit", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
                "worktree_path", "head", "merged_pr", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
@@ -1794,6 +1794,8 @@ class LandLockTest(unittest.TestCase):
             "checks": {"replies": {"checks-1": {"state": "failed", "head": SHA},
                                    "checks-2": {"state": "failed", "head": fix}},
                        "patch": {"fix-ci": {"start_head": SHA, "commit": fix}}},
+            "checks-pending": {"replies": {f"checks-{k}": {"state": "pending", "head": SHA, "pending": ["e2e"]}
+                                           for k in (1, 2, 3)}},
             "head-moved": {"patch": {"checks-1": {"head": "c" * 40}}},
             "merge": {"replies": {"merge": {"merged": False, "notes": "head moved"}}},
             "sync-contention": {"replies": {"checks-1": self.BEHIND, "checks-2": self.BEHIND,
@@ -1986,6 +1988,55 @@ class ShipFixWaveTest(unittest.TestCase):
         self.assertEqual(result["stage"], "sync")
         self.assertNotIn("checks_fixes", result["cont"])
         self.assertNotIn("sync_fixes", result["cont"])
+
+
+class AllChecksTest(unittest.TestCase):
+    """#756: the checks step waits for every check on head, required or not."""
+
+    def test_checks_step_lists_every_check_and_can_answer_pending(self):
+        _, calls = run()
+        checks = prompt(calls, "checks-1")
+        for argv in ("gh pr checks 42 --repo owner/repo --json name,bucket,link",
+                     "gh api repos/owner/repo/rules/branches/dev"):
+            self.assertIn(argv, checks)
+        schema = schema_of(calls, "checks-1")
+        self.assertIn("pending", schema["properties"])
+        self.assertIn("pending", schema["properties"]["state"]["enum"])
+
+    def test_a_pending_non_required_check_is_waited_for_before_the_merge(self):  # AC1
+        waiting = {"state": "passed", "head": SHA, "required": ["lint"], "passed": ["lint"], "pending": ["e2e"]}
+        green = {"state": "passed", "head": SHA, "required": ["lint"], "passed": ["lint", "e2e"]}
+        result, calls = run(replies={"checks-1": waiting, "checks-2": green})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("checks-1"):],
+                         ["checks-1", "checks-2", "merge", "land-unlock", "hold", "close-out"])
+
+    def test_a_pending_state_is_waited_for_and_never_synced(self):
+        result, calls = run(replies={"checks-1": {"state": "pending", "head": SHA, "pending": ["e2e"]}})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertNotIn("sync-1", names)
+        self.assertLess(names.index("checks-2"), names.index("merge"))
+
+    def test_checks_still_pending_after_three_waits_stop_unmerged(self):  # AC1
+        waiting = {"state": "pending", "head": SHA, "pending": ["e2e"]}
+        result, calls = run(replies={f"checks-{k}": waiting for k in (1, 2, 3)})
+        self.assertEqual((result["stage"], result["pending"]), ("checks-pending", ["e2e"]))
+        self.assertIn("cont", result)
+        names = labels(calls)
+        self.assertNotIn("merge", names)
+        self.assertNotIn("checks-4", names)
+        self.assertEqual(names.count("land-unlock"), 1)
+
+    def test_a_failing_non_required_check_stops_the_merge_named(self):  # AC2
+        red = {"state": "passed", "head": SHA, "required": ["lint"], "passed": ["lint"], "failing": ["e2e"],
+               "details": "e2e: 2 failed"}
+        result, calls = run(replies={"checks-1": red, "checks-2": dict(red, head=FIX)},
+                            patch={"fix-ci": {"start_head": SHA, "commit": FIX}})
+        self.assertEqual((result["stage"], result["failing"]), ("checks", ["e2e"]))
+        self.assertNotIn("merge", labels(calls))
+        self.assertIn("e2e", prompt(calls, "fix-ci"))
 
 
 class ShaNormalisationTest(unittest.TestCase):
