@@ -38,7 +38,7 @@ const DEFAULTS = [
   [/^land-sync-review-|^land-fix-review-/, () => PASS],
   [/^land-record-/, (l, p) => { const head = promptHead(p); return { ok: true, head, lock: { verdict: 'moved', lock_sha: head } } }],
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
-  [/^land-pr-/, l => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } })],
+  [/^land-pr-/, (l, p) => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: promptHead(p), required: ['ci'], passed: ['ci'] } })],
   [/^land-lock-/, () => ({ verdict: 'already_held', lock_sha: SHA })],
   [/^land-checks-/, () => ({ state: 'passed', head: SHA, required: ['ci'], passed: ['ci'] })],
   [/^land-fix-/, () => DONE],
@@ -47,7 +47,7 @@ const DEFAULTS = [
   [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, decision_ended: true, branch_deleted: true, notes: 'ok', release: { verdict: 'released' } })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^land-(pr|merge)-/, ['renew', 'lock']], [/^land-record-/, ['lock']], [/^close-out-/, ['release']]]
+const NESTED = [[/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock']], [/^close-out-/, ['release']]]
 
 const calls = []
 let factsPending = 0 // facts agents started and not yet answered
