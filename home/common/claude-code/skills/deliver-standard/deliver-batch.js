@@ -552,7 +552,7 @@ ${RULES}`, label, { ...clerk, schema: LAND_CHECKS_SCHEMA })
       const failingNames = ck.failing || []
       const pendingNames = ck.pending || []
       const state = ck.state === 'behind' || ck.state === 'needs_label' ? ck.state
-        : failingNames.length ? 'failed'
+        : ck.state === 'failed' || failingNames.length ? 'failed'
         : ck.state === 'pending' || pendingNames.length ? 'pending'
         : ck.state
 
@@ -562,7 +562,7 @@ ${RULES}`, label, { ...clerk, schema: LAND_CHECKS_SCHEMA })
       }
       if (state === 'failed') {
         c.ciFails++
-        if (c.ciFails >= 2) return out('ci-failed', { failing: failingNames })
+        if (c.ciFails >= 2) return out('ci-failed', { failing: failingNames, details: ck.details })
         const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${ck.details || 'none given'}.
 Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}). Never weaken, skip or delete a test or check to make it pass. ${IMPL_RETURN}
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })

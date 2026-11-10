@@ -1152,7 +1152,7 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
     head = expected
     const failingNames = Array.isArray(ck.failing) ? ck.failing : []
     const pendingNames = Array.isArray(ck.pending) ? ck.pending : []
-    const state = ck.state === 'behind' ? 'behind' : failingNames.length ? 'failed' : ck.state === 'pending' || pendingNames.length ? 'pending' : ck.state
+    const state = ck.state === 'behind' ? 'behind' : ck.state === 'failed' || failingNames.length ? 'failed' : ck.state === 'pending' || pendingNames.length ? 'pending' : ck.state
     if (state === 'pending') {
       if (++pendingWaits >= PENDING_WAITS) return stop('checks-pending', { pr: PR, pending: pendingNames, checks: ck })
       continue

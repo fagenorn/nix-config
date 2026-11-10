@@ -1159,6 +1159,14 @@ class AllChecksLandTest(unittest.TestCase):
         self.assertIn("e2e", prompt(calls, "land-fix-1"))
         self.assertNotIn("land-merge-1", labels(calls))
 
+    def test_an_explicit_failed_state_outranks_a_pending_list(self):
+        red = {"state": "failed", "head": SHA, "pending": ["slow"], "details": "e2e failed"}
+        result, calls, _ = run(replies={"land-checks-1-1": red, "land-checks-1-2": dict(red, head=FIX)})
+        r = row(result, 1)
+        self.assertEqual((r["outcome"], r["details"]), ("ci-failed", "e2e failed"))
+        self.assertIn("e2e failed", prompt(calls, "land-fix-1"))
+        self.assertNotIn("land-merge-1", labels(calls))
+
 
 class LandOrderTest(unittest.TestCase):
     """#677: the land lock is taken, waiting, before the first resync, held through the merge,

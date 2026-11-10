@@ -2038,6 +2038,16 @@ class AllChecksTest(unittest.TestCase):
         self.assertNotIn("merge", labels(calls))
         self.assertIn("e2e", prompt(calls, "fix-ci"))
 
+    def test_an_explicit_failed_state_outranks_a_pending_list(self):  # AC2
+        red = {"state": "failed", "head": SHA, "pending": ["slow"], "details": "e2e failed"}
+        result, calls = run(replies={"checks-1": red, "checks-2": dict(red, head=FIX)},
+                            patch={"fix-ci": {"start_head": SHA, "commit": FIX}})
+        self.assertEqual(result["stage"], "checks")
+        self.assertEqual(result["checks"]["details"], "e2e failed")
+        self.assertIn("e2e failed", prompt(calls, "fix-ci"))
+        self.assertNotIn("checks-3", labels(calls))
+        self.assertNotIn("merge", labels(calls))
+
 
 class ShaNormalisationTest(unittest.TestCase):
     """#649 defect 1: a head reported in short form is the same head; a different head still stops."""
