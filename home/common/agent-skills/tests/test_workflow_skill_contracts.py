@@ -73,7 +73,7 @@ SHARED_SKILL_MACHINE_TEXT = {
 CODEX_COLLABORATION_MACHINE_TEXT = {
     COLLABORATION: (
         "bindings.commands[review_id].argv", "--model gpt-6-astra", "--effort xhigh",
-        "--cwd <absolute-worktree> --json",
+        "--cwd <absolute-worktree> --json", "`error`",
     ),
     DIFF_REVIEW: (
         "`~/.agents/bin/diff-scope`",

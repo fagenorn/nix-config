@@ -55,7 +55,7 @@ files, and exits 2 on a file it cannot read.
 `deprecations-retired [--red-pending] [--watch-adapter A] --repo-root R...` (issue 582) states the
 #130 checklist C11 rule over each root, read-only: no deprecated use reported by
 `resolve-project platform-status` (a), no tracked legacy skills config (b), `bindings.deploy.adapter`
-resolved to `none` (c), and no skill text naming the retired command (d); with `--watch-adapter A`
+resolved to `none` or absent from a schema 2 snapshot (c), and no skill text naming the retired command (d); with `--watch-adapter A`
 it also reads whether the release target A is adopted and available. It exits 0 when every root is
 green, 1 when one is red, 75 when none is red and one is pending, and 2 on a tool error. Under
 `--red-pending` any root that is not green exits 75.
@@ -690,7 +690,13 @@ def _resolve_reading(binary: str, root: Path,
     bindings = snapshot.get("bindings") if snapshot else None
     deploy = bindings.get("deploy") if isinstance(bindings, dict) else None
     adapter = deploy.get("adapter") if isinstance(deploy, dict) else None
-    green = done.returncode == 0 and adapter == "none"
+    # Schema 2 moved deploy targets to `release.targets`: a snapshot of integer `schema_version` 2 or
+    # later with a `bindings` object and no `deploy` member is the retired state, as
+    # `adapter == "none"` is for schema 1, where an absent `deploy` is not.
+    version = snapshot.get("schema_version") if snapshot else None
+    no_deploy_binding = (isinstance(bindings, dict) and "deploy" not in bindings
+                         and type(version) is int and version >= 2)
+    green = done.returncode == 0 and (adapter == "none" or no_deploy_binding)
     return ({"exit": done.returncode, "adapter": adapter,
              "status": "green" if green else "red"}, snapshot)
 

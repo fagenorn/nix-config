@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
-  description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children in ready mode, a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
@@ -16,7 +16,7 @@ export const meta = {
 // (positive integers, distinct) or label (every open issue carrying it; exactly one of the two),
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
 // continuation}, only for listed issues, D9), unattended (boolean, default false: true only for a run
-// no session watches, D12).
+// no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747).
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
@@ -34,6 +34,11 @@ export const meta = {
 // acquire is re-queued once behind the issues waiting for a slot, then stops at acquire with transient: true (#740). Every policy
 // value comes from the project contract that setup resolves; this file carries no project
 // literal and defaults no policy value (D3).
+// #744: a standard-lane issue plans ahead: it is claimed under a PLAN slot, runs its child in mode plan, keeps that slot until a RUN slot
+// is free, then resumes the planned cont in mode ready. PLAN and RUN have MAX slots each and RUN hands a freed slot to a planned issue
+// before any other waiter, so at most MAX issues wait planned and each waits at most one delivery slot. A child on this path that stops
+// without a cont (and is not dead) makes the forwarded cont obsolete: it is dropped, so the relaunch plans afresh. A direct-lane or
+// readoptable issue, a re-adopted merged landing, or one whose cont already carries a reviewed plan or a PR, goes straight to RUN.
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const HOLDER_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -61,6 +66,7 @@ if (args.decisions !== undefined) {
   if (!isObj(args.decisions) || !Object.values(args.decisions).every(v => typeof v === 'string' && v)) return bad('every decisions value must be a non-empty string')
 }
 if (args.unattended !== undefined && typeof args.unattended !== 'boolean') return bad('unattended must be a boolean')
+if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean') return bad('review_sizing must be a boolean')
 if (args.conts !== undefined) {
   if (!isObj(args.conts)) return bad('conts must be an object')
   if (!HAS_ISSUES) return bad('conts requires issues')
@@ -71,6 +77,7 @@ if (args.conts !== undefined) {
 }
 const DECISIONS = args.decisions
 const UNATTENDED = args.unattended === true
+const REVIEW_SIZING = args.review_sizing === true
 const CONTS = args.conts || {}
 
 const BASE_RULES = `
@@ -333,11 +340,19 @@ const ASK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', en
 const SETTLE_SCHEMA = { type: 'object', properties: { state: { type: 'string', enum: ['OPEN', 'CLOSED'] }, release: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['state'] }
 const ENDED_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
 
-// A FIFO semaphore of MAX child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted.
-let inUse = 0
-const waiters = []
-const admit = () => new Promise(resolve => { if (inUse < MAX) { inUse++; resolve() } else waiters.push(resolve) })
-const leave = () => { const next = waiters.shift(); if (next) next(); else inUse-- }
+// A FIFO semaphore of child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted.
+// A waiter admitted with `first` (a planned issue) is handed a freed slot before every other waiter, so a finished plan waits at most one delivery slot.
+const semaphore = size => {
+  let inUse = 0
+  const firsts = []
+  const rest = []
+  return {
+    admit: (first = false) => new Promise(resolve => { if (inUse < size) { inUse++; resolve() } else (first ? firsts : rest).push(resolve) }),
+    leave: () => { const next = firsts.shift() || rest.shift(); if (next) next(); else inUse-- },
+  }
+}
+const RUN = semaphore(MAX)
+const PLAN = semaphore(MAX)
 
 // The owner's answer the batch itself carries: the relaunch's decisions only. A ticked decision prompt is read by the child.
 const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
@@ -345,17 +360,20 @@ const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
 const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
 // A stop the child raised after the merge (a re-adopted landing) still has close-out work its cont finishes; it is never settled (#714).
+// #790: a codex-unavailable child stop shows the Codex reviewer's reason in its row.
+const stopDetail = r => (r.stage === 'codex-unavailable' && typeof r.details === 'string' && r.details ? { detail: r.details } : {})
 const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
 const readyOf = n => READY[n]
-// The child's whole input (D1): the batch args, the issue's cont, its lane and the owner's answer, nothing else.
-const childArgs = (n, lane) => {
-  const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode: 'ready' }
+// The child's whole input (D1): the batch args, the mode (plan or ready), the issue's cont, its lane, the owner's answer and the review_sizing setting (#747), nothing else.
+const childArgs = (n, lane, mode) => {
+  const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode }
   if (CONTS[n]) a.cont = CONTS[n]
   else a.lane = lane
   const answer = answerOf(n)
   if (answer !== null) a.decisions = answer
+  if (REVIEW_SIZING) a.review_sizing = true
   return a
 }
 
@@ -383,6 +401,8 @@ const IMPL = {
   required: ['status', 'notes'],
 }
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
+// #787: the same text as WHOLE in deliver-standard.js.
+const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
 const findingsOf = r => (r.findings || []).filter(f => f.severity !== 'minor')
 const RENEW_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' }, transient: { type: 'boolean' } }, required: ['verdict'] }
 const LOCK_SCHEMA = {
@@ -509,7 +529,7 @@ ${RULES}`, label, { ...clerk, schema: { ...RECORD_SCHEMA, properties: { ...RECOR
 2. Otherwise merge it: git -C ${W} merge origin/${INT}. A clean merge: answer status done, conflicted false, head (the full sha of the merge commit).
 3. ${second
       ? `This landing already resolved one conflict. If the merge conflicts, run git merge --abort inside ${W} and answer status blocked, conflicted true, with head (the full sha of HEAD) and notes. Do not resolve it.`
-      : `If the merge conflicts, resolve each conflict keeping both sides' intent, commit the merge, and run only the tests covering the files the resolution touched; answer status done, conflicted true, with head (the full sha of the merge commit), resolved_files and tests. If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.`}
+      : `If the merge conflicts, resolve each conflict keeping both sides' intent, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}; answer status done, conflicted true, with head (the full sha of the merge commit) and resolved_files. If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.`}
 ${pr ? `4. After a merge you completed, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
 ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
     if (!sy) return out('stopped', { stage: 'land-sync', detail: `${label} returned nothing` })
@@ -593,7 +613,7 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: 'sonnet', effort: 'high'
       const ck = await call(`Wait for every check of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head, required or not.
 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${B}, push it. head is git -C ${W} rev-parse HEAD (the full sha).
 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), answer state behind at once with head.
-3. Otherwise wait in this turn until every check on head has completed, required or not: the required checks are the floor, not the bar. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting for it, never treat it as absent or green.
+3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
 4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.
 ${RULES}`, label, { ...clerk, schema: LAND_CHECKS_SCHEMA })
       if (!ck) return out('stopped', { stage: 'checks', detail: `${label} returned nothing` })
@@ -614,11 +634,11 @@ ${RULES}`, label, { ...clerk, schema: LAND_CHECKS_SCHEMA })
         c.ciFails++
         if (c.ciFails >= 2) return out('ci-failed', { failing: failingNames, details: ck.details })
         const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${ck.details || 'none given'}.
-Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}). Never weaken, skip or delete a test or check to make it pass. ${IMPL_RETURN}
+Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. Never weaken, skip or delete a test or check to make it pass. ${IMPL_RETURN}
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
         if (!fix || fix.status !== 'done' || !fix.commit || fix.commit === expected) return out('ci-failed', { failing: failingNames, detail: 'the fix round did not finish' })
         const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-Review this fix for failing checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(failingNames)}; the implementer's notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
+Review this fix for failing checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(failingNames)}; the notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
 ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
         if (!rv || findingsOf(rv).length) return out('ci-failed', { failing: failingNames, review: rv })
         expected = fix.commit
@@ -707,6 +727,9 @@ const readoptable = n => {
   const f = FACTS[n] || {}
   return !!(f.open_pr && f.branch && f.open_pr.head_branch === f.branch)
 }
+// A standard-lane issue plans ahead (#744 D3) unless it is re-adopted, a merged landing's close-out, or its cont already holds a reviewed plan or a PR.
+const plansAhead = (n, lane, readopt) => lane === 'standard' && !readopt && !mergedReadopt(n, FACTS[n]) &&
+  !(isObj(CONTS[n]) && (CONTS[n].plan_reviewed === true || Number.isInteger(CONTS[n].pr)))
 const READOPT_SCHEMA = {
   type: 'object',
   properties: {
@@ -766,8 +789,11 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
   // Every claim, release and lane step below names the branch: without a derived one nothing is claimed (never `--branch undefined`).
   if (!nonEmpty(f.branch)) { rows[n] = { issue: n, outcome: 'stopped', stage: 'branch', detail: nonEmpty(f.branch_error) ? f.branch_error : 'issue-branch derived no branch' }; return }
-  await admit()
-  let admitted = true
+  const ahead = plansAhead(n, laneName, readopt)
+  const FIRST = ahead ? PLAN : RUN
+  await FIRST.admit()
+  let held = FIRST // the semaphore whose slot this issue holds, or null
+  const release = () => { if (held) { const sem = held; held = null; sem.leave() } }
   try {
     if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
     // The child's setup acquires again and answers already_held (its setup then renews the claim); this acquire is kept because it gates the readopt path (issue 745).
@@ -778,10 +804,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     let acq = await recall(acquireStep)
     if (transientError(acq)) {
       // #740 D7: re-queued once, behind every issue waiting for a slot now: give the slot back and ask for one again.
-      leave()
-      admitted = false
-      await admit()
-      admitted = true
+      release()
+      await FIRST.admit()
+      held = FIRST
       if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
       acq = await recall(acquireStep)
     }
@@ -799,8 +824,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           return
         }
         // No child: the slot goes back and the PR lands as it stands, through the same path as a ready child.
-        leave()
-        admitted = false
+        release()
         READY[n] = { head: ro.head, branch: ro.branch, worktree: ro.worktree, acceptance: ro.acceptance, verify: [], tasks: [], cont: CONTS[n] }
         rows[n] = await enqueue(INT, () => land(n, READY[n]))
         return
@@ -818,23 +842,37 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
 
     let r = null
     try {
-      try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
-      if (r && r.stage === 'ineligible' && !terminalChild(r)) {
-        // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
-        delete CONTS[n]
-        laneName = 'standard'
-        rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
-        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
+      if (ahead) {
+        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'plan')) } catch (e) { r = null }
+        if (r && r.stage === 'planned' && isObj(r.cont) && !terminalChild(r)) {
+          CONTS[n] = r.cont
+          if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
+          await RUN.admit(true) // ahead of unplanned waiters; the PLAN slot is kept while this waits
+          PLAN.leave()
+          held = RUN
+          if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
+          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        }
+        // D9: a live stop with no cont makes the forwarded or planned cont obsolete (terminalChild(null) is true: a dead child keeps it).
+        if (!terminalChild(r) && !r.cont) delete CONTS[n]
+      } else {
+        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        if (r && r.stage === 'ineligible' && !terminalChild(r)) {
+          // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
+          delete CONTS[n]
+          laneName = 'standard'
+          rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
+          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        }
       }
       if (terminalChild(r)) trip(`child-${n}`)
     } finally {
-      leave()
-      admitted = false
+      release()
     }
 
     if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `child-${n} returned nothing` }; return }
     if (r.cont) CONTS[n] = r.cont
-    if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents }; return }
+    if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents, ...stopDetail(r) }; return }
     if (r.stage === 'done') {
       // A re-adopted merged landing: the child closed it out (claim released, worktree and branch removed). End the landing markers the merge resolved.
       const ended = await ask(agent(`The landing of issue #${n} of ${SLUG} (the git repository at ${REPO}) is merged and closed out. End its landing owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict and then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label. A verdict none is fine.
@@ -885,7 +923,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           return
         }
       }
-      rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }
+      rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
       return
     }
     // A stop with nothing to resume: give the claim back.
@@ -893,9 +931,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
 Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
-    rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }
+    rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
   } finally {
-    if (admitted) leave()
+    release()
   }
 }
 await parallel(toDeliver.map(n => async () => {
@@ -923,6 +961,7 @@ const relaunchArgs = () => {
   for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
   if (Object.keys(conts).length) a.conts = conts
   if (UNATTENDED) a.unattended = true
+  if (REVIEW_SIZING) a.review_sizing = true
   return a
 }
 for (const r of table) log(`#${r.issue}: ${r.outcome}${r.detail ? ` (${r.detail})` : ''}`)

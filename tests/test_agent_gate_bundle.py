@@ -7,7 +7,10 @@ import contextlib
 import inspect
 import io
 import json
+import math
+import random
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -96,6 +99,27 @@ def full_cases(tmp, totals=None):
     """One case per core class, all with the same trial totals."""
     totals = totals or {s: ([1000, 1000, 1000], [800, 800, 800]) for s in gate.STRATA}
     return [make_case(tmp, klass, klass, totals) for klass in gate.CORE_CASE_CLASSES]
+
+
+def seeded_totals(seed, n, effect_pct, mean=200_000, cv=0.20):
+    """Seeded fixture (P7): `n` base input totals with population CV `cv` around
+    `mean`, and `n` candidate totals built from the same standardized noise,
+    permuted by the seed and scaled by `1 + effect_pct / 100`, so the realized
+    mean ratio is the true effect while the index-aligned pairs scatter. Only
+    `Random.random()` is drawn: it alone is reproducible across Python versions."""
+    rng = random.Random(seed)
+    draws = []
+    for _ in range(n):
+        radius = math.sqrt(-2.0 * math.log(1.0 - rng.random()))
+        draws.append(radius * math.cos(2.0 * math.pi * rng.random()))
+    centre, spread = statistics.fmean(draws), statistics.pstdev(draws)
+    unit = [(value - centre) / spread for value in draws]
+    base = [round(mean * (1 + cv * value)) for value in unit]
+    keys = [rng.random() for _ in range(n)]
+    order = sorted(range(n), key=keys.__getitem__)
+    candidate = [round(mean * (1 + effect_pct / 100) * (1 + cv * unit[index]))
+                 for index in order]
+    return base, candidate
 
 
 class ManifestDocumentTest(unittest.TestCase):
@@ -489,6 +513,95 @@ class GatePrimitiveTest(unittest.TestCase):
             "base": 1, "candidate": 1})))                            # no site removed
         self.assertFalse(gate.maintenance_saves(dict(
             fires, new_hand_authored_projections=1)))
+
+
+class DistributionalIntervalTest(unittest.TestCase):
+    """Issue 757: the bootstrap mean-ratio interval against the cutover materiality."""
+
+    FIXTURES = ((7570, 40, 0), (7571, 10, 40), (7572, 10, 10), (7573, 10, 0))
+
+    def verdict(self, seed, n, effect_pct):
+        base, candidate = seeded_totals(seed, n, effect_pct)
+        return gate.materiality_verdict(gate.mean_ratio_interval(base, candidate),
+                                        gate.MATERIALITY_PCT["cutover"])
+
+    def test_the_pinned_constants(self):
+        self.assertEqual(gate.MATERIALITY_PCT, {"cutover": 10.0})
+        self.assertEqual((gate.BOOTSTRAP_RESAMPLES, gate.BOOTSTRAP_SEED,
+                          gate.BOOTSTRAP_CONFIDENCE), (2000, 757, 0.90))
+
+    def test_the_fixtures_carry_twenty_percent_cv_and_the_true_effect(self):
+        for seed, n, effect in self.FIXTURES:
+            with self.subTest(seed=seed):
+                base, candidate = seeded_totals(seed, n, effect)
+                self.assertEqual((len(base), len(candidate)), (n, n))
+                self.assertTrue(all(value > 0 for value in base + candidate))
+                self.assertAlmostEqual(statistics.pstdev(base) / statistics.fmean(base),
+                                       0.20, places=3)
+                self.assertAlmostEqual(statistics.fmean(candidate) / statistics.fmean(base),
+                                       1 + effect / 100, places=4)
+                self.assertNotEqual(candidate, [round(v * (1 + effect / 100)) for v in base])
+                self.assertEqual(seeded_totals(seed, n, effect), (base, candidate))
+
+    def test_a_flat_candidate_at_forty_trials_approves(self):
+        self.assertEqual(self.verdict(7570, 40, 0), "approved")
+
+    def test_a_forty_percent_regression_at_ten_trials_rejects(self):
+        self.assertEqual(self.verdict(7571, 10, 40), "rejected")
+
+    def test_a_ten_percent_regression_at_ten_trials_is_unmeasured(self):
+        self.assertEqual(self.verdict(7572, 10, 10), "unmeasured")
+
+    def test_a_flat_candidate_at_ten_trials_is_unmeasured(self):
+        self.assertEqual(self.verdict(7573, 10, 0), "unmeasured")
+
+    def test_the_interval_is_deterministic_and_ordered(self):
+        base, candidate = seeded_totals(7572, 10, 10)
+        first = gate.mean_ratio_interval(base, candidate)
+        self.assertEqual(first, gate.mean_ratio_interval(list(base), list(candidate)))
+        self.assertLessEqual(first[0], first[1])
+        self.assertEqual(gate.mean_ratio_interval([1000] * 3, [2000] * 3), (2.0, 2.0))
+
+    def test_the_bounds_are_the_resampled_extremes_of_each_side(self):
+        # Pinned by hand from the sampling distribution, not from the implementation:
+        # with two values per side, a resampled side mean takes its low and high value
+        # with probability 1/4 each, about 500 of the 2000 resamples (sd about 19),
+        # so the sorted ratios at the tail indices 100 and 1899 are those extremes.
+        # Only the candidate side varies: ratios {1.0, 2.0, 3.0}.
+        self.assertEqual(gate.mean_ratio_interval([1000, 1000], [1000, 3000]), (1.0, 3.0))
+        # Only the base side varies: ratios {3.0, 2.0, 1.5}; candidate over base.
+        self.assertEqual(gate.mean_ratio_interval([1000, 2000], [3000, 3000]), (1.5, 3.0))
+        # A 90% interval is narrower than a 99.9% one over the same resamples.
+        base, candidate = seeded_totals(7572, 10, 10)
+        narrow = gate.mean_ratio_interval(base, candidate)
+        wide = gate.mean_ratio_interval(base, candidate, confidence=0.999)
+        self.assertLess(wide[0], narrow[0])
+        self.assertLess(narrow[1], wide[1])
+
+    def test_the_interval_follows_its_seed_not_the_global_random_state(self):
+        base, candidate = seeded_totals(7572, 10, 10)
+        random.seed(1)
+        first = gate.mean_ratio_interval(base, candidate)
+        random.seed(2)
+        self.assertEqual(gate.mean_ratio_interval(base, candidate), first)
+        self.assertEqual(gate.mean_ratio_interval(base, candidate, seed=gate.BOOTSTRAP_SEED),
+                         first)
+        self.assertNotEqual(gate.mean_ratio_interval(base, candidate, seed=758), first)
+
+    def test_an_undefined_ratio_has_no_interval(self):
+        for base, candidate in (([], []), ([0, 100, 100], [100] * 3),
+                                ([100, -1, 100], [100] * 3), ([100, True, 100], [100] * 3),
+                                ([100] * 3, [100, -5, 100]), ([100] * 3, [])):
+            with self.subTest(base=base, candidate=candidate):
+                self.assertIsNone(gate.mean_ratio_interval(base, candidate))
+        self.assertEqual(gate.materiality_verdict(None, 10.0), "unmeasured")
+
+    def test_the_verdict_boundaries(self):
+        for interval, expected in (((1.1, 1.3), "unmeasured"), ((1.1000001, 1.3), "rejected"),
+                                   ((0.9, 1.1), "unmeasured"), ((0.9, 1.0999999), "approved"),
+                                   ((1.0, 1.0), "approved")):
+            with self.subTest(interval=interval):
+                self.assertEqual(gate.materiality_verdict(interval, 10.0), expected)
 
 
 class DecideTest(unittest.TestCase):
@@ -1309,6 +1422,325 @@ class NoRegressionCriterionTest(unittest.TestCase):
                 self.assertEqual(gate.decide(forged["evidence"], self.cutover), "unmeasured")
                 with self.assertRaises(gate.BundleIntegrityError):
                     gate.verify_bundle(forged, kind="cutover")
+
+
+COMMITTED_V2 = ("cutover-130", "cutover-130-x10", "cutover-130-x10r")
+CHECKPOINT = {"expanded": True, "checkpoint_ref": "https://example.invalid/issues/757#checkpoint"}
+
+
+def absolute_trials(tmp, name):
+    """A committed trials manifest with every cited record made absolute, so the CLI
+    resolves it from any working directory; no recorded field reaches a bundle."""
+    manifest = json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-trials.json")
+                          .read_text(encoding="utf-8"))
+    for case in manifest["cases"]:
+        for block in case["strata"].values():
+            for side in gate.SIDES:
+                for entry in block[side]:
+                    entry["record"] = str(REPO_ROOT / entry["record"])
+    path = Path(tmp) / f"{name}-trials.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+def load_committed(name):
+    return json.loads((REPO_ROOT / f".agents/artifacts/evidence/{name}-bundle.json")
+                      .read_text(encoding="utf-8"))
+
+
+class GateVersionTwoUnchangedTest(unittest.TestCase):
+    """Issue 757 AC2: the committed version-2 bundles verify exactly as before."""
+
+    def test_the_committed_version_two_bundles_verify_as_before(self):
+        for name in COMMITTED_V2:
+            with self.subTest(name=name):
+                committed = load_committed(name)
+                self.assertEqual((committed["gate_version"], committed["bundle_kind"]),
+                                 (2, "cutover"))
+                self.assertEqual(gate.verify_bundle(committed, kind="cutover"), "unmeasured")
+                for kind in (None, "promotion", "release"):
+                    with self.assertRaises(gate.BundleIntegrityError):
+                        gate.verify_bundle(committed, kind=kind)
+
+    def test_the_version_two_cli_reproduces_every_committed_bundle_id(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        for name in COMMITTED_V2:
+            with self.subTest(name=name):
+                code, out, err = run_cli_text(["--trials", str(absolute_trials(tmp, name)),
+                                               "--gate-version", "2", "--kind", "cutover"])
+                self.assertEqual(code, 3, err)
+                emitted = json.loads(out)
+                self.assertEqual(emitted["bundle_id"], load_committed(name)["bundle_id"])
+
+
+def seeded_cases(tmp, seed, n, effect_pct, quality=None):
+    base, candidate = seeded_totals(seed, n, effect_pct)
+    return claude_cases(tmp, base, candidate,
+                        quality=quality or NoRegressionCriterionTest.QUALITY)
+
+
+def tagged(tag, base_trials, candidate_trials):
+    """A context block whose trial identities carry `tag`, so cases never share one."""
+    block = context(statistics.median(base_trials), statistics.median(candidate_trials),
+                    base_trials, candidate_trials)
+    for side in gate.SIDES:
+        for trial in block["trials"][side]:
+            trial["run_id"] = f"{tag}-{trial['run_id']}"
+    return block
+
+
+def claude_evidence(*blocks):
+    """One claude-only case per (case_id, context block)."""
+    return evidence(*((case_id, "cold-resolution", {"claude": stratum(block)})
+                      for case_id, block in blocks))
+
+
+class DistributionalGateTest(unittest.TestCase):
+    """Issue 757: gate version 3, the cutover kind judged by the mean-ratio interval."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.cutover = gate.gate_profile(3, "cutover")
+
+    def manifest(self, seed, n, effect_pct, quality=None, expanded=True):
+        tmp = Path(tempfile.mkdtemp(dir=self.tmp))
+        manifest = claude_only_manifest(tmp, seeded_cases(tmp, seed, n, effect_pct, quality))
+        if expanded:
+            manifest["expansion"] = dict(CHECKPOINT)
+        return manifest
+
+    def run_gate(self, seed, n, effect_pct, quality=None):
+        path = Path(tempfile.mkdtemp(dir=self.tmp)) / "trials.json"
+        path.write_text(json.dumps(self.manifest(seed, n, effect_pct, quality)), encoding="utf-8")
+        code, out, err = run_cli_text(["--trials", str(path), "--gate-version", "3",
+                                       "--kind", "cutover"])
+        self.assertIn(code, (0, 3), err)
+        return code, json.loads(out)
+
+    def test_the_version_three_profile(self):
+        self.assertIn(3, gate.GATE_VERSIONS)
+        self.assertEqual(self.cutover, gate.GateProfile(3, ("claude",), "no_regression", "cutover"))
+        for kind in (None, "promotion", "release"):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                gate.gate_profile(3, kind)
+
+    def test_a_flat_candidate_at_forty_trials_is_approved(self):
+        code, bundle = self.run_gate(7570, 40, 0)
+        self.assertEqual((code, bundle["state"], bundle["gate_version"], bundle["bundle_kind"]),
+                         (0, "approved", 3, "cutover"))
+        self.assertEqual(gate.verify_bundle(bundle, kind="cutover"), "approved")
+        rows = bundle["gates"]["distribution"]["claude"]
+        self.assertEqual([row["case_id"] for row in rows], list(gate.CORE_CASE_CLASSES))
+        for row in rows:
+            self.assertEqual(set(row), {"case_id", "lower", "upper", "verdict"})
+            self.assertEqual(row["verdict"], "approved")
+            self.assertLess(row["upper"], 1.1)
+            for bound in ("lower", "upper"):
+                self.assertEqual(row[bound], round(row[bound], 6))
+
+    def test_a_forty_percent_regression_at_ten_trials_is_rejected(self):
+        code, bundle = self.run_gate(7571, 10, 40)
+        self.assertEqual((code, bundle["state"]), (3, "rejected"))
+        self.assertEqual(bundle["gates"]["no_regression"]["context_breaching"],
+                         sorted(f"{name}/claude" for name in gate.CORE_CASE_CLASSES))
+        self.assertEqual(gate.verify_bundle(bundle, kind="cutover"), "rejected")
+
+    def test_a_ten_percent_regression_at_ten_trials_is_unmeasured(self):
+        code, bundle = self.run_gate(7572, 10, 10)
+        self.assertEqual((code, bundle["state"]), (3, "unmeasured"))
+        self.assertEqual(len(bundle["diagnostics"]), len(gate.CORE_CASE_CLASSES))
+        for line in bundle["diagnostics"]:
+            self.assertTrue(line.startswith("CASE_INTERVAL_CONTAINS_MATERIALITY $.cases["), line)
+        self.assertEqual(gate.verify_bundle(bundle, kind="cutover"), "unmeasured")
+        block = bundle["gates"]["no_regression"]
+        self.assertEqual(block["context_unmeasured"],
+                         sorted(f"{name}/claude" for name in gate.CORE_CASE_CLASSES))
+        self.assertFalse(block["passed"])
+
+    def test_a_quality_regression_still_rejects(self):
+        fallen = dict(NoRegressionCriterionTest.QUALITY,
+                      noncritical_median={"base": 87.0, "candidate": 86.0})
+        code, bundle = self.run_gate(7570, 40, 0, quality=fallen)
+        self.assertEqual((code, bundle["state"]), (3, "rejected"))
+        self.assertTrue(bundle["gates"]["no_regression"]["quality_failing"])
+
+    def test_ten_or_forty_trials_need_a_declared_expansion(self):
+        for n, expanded, profile, admitted in (
+                (10, False, self.cutover, False), (40, True, self.cutover, True),
+                (10, True, self.cutover, True), (3, False, self.cutover, True),
+                (40, True, gate.gate_profile(2, "cutover"), False)):
+            with self.subTest(n=n, expanded=expanded, version=profile.version):
+                manifest = self.manifest(7570, n, 0, expanded=expanded)
+                found, diagnostics = gate.resolve_trials(manifest, gate=profile)
+                codes = {d.code for d in diagnostics}
+                self.assertEqual(found is not None, admitted, codes)
+                if not admitted:
+                    self.assertIn("TRIALS_CARDINALITY", codes)
+
+    def test_a_run_cited_on_both_sides_is_refused(self):
+        manifest = self.manifest(7570, 3, 0, expanded=False)
+        claude = manifest["cases"][0]["strata"]["claude"]
+        claude["candidate"] = json.loads(json.dumps(claude["base"]))
+        found, diagnostics = gate.resolve_trials(manifest, gate=self.cutover)
+        self.assertIsNone(found)
+        self.assertIn("TRIALS_CROSS_SIDE", {d.code for d in diagnostics})
+
+    def test_decide_admits_only_the_listed_trial_counts(self):
+        for n, expected in ((3, "approved"), (4, "unmeasured"), (10, "approved"),
+                            (40, "approved"), (11, "unmeasured")):
+            with self.subTest(n=n):
+                flat_case = claude_evidence(("c1", tagged("c1", [1000] * n, [1000] * n)))
+                self.assertEqual(gate.decide(flat_case, self.cutover), expected)
+
+    def test_a_definite_regression_outranks_an_uncertain_case(self):
+        regressing = ("c1", tagged("c1", [1000] * 3, [2000] * 3))
+        uncertain = ("c2", tagged("c2", [1000] * 3, [1000, 1100, 1300]))
+        self.assertEqual(gate.decide(claude_evidence(uncertain), self.cutover), "unmeasured")
+        self.assertEqual(gate.decide(claude_evidence(regressing, uncertain), self.cutover),
+                         "rejected")
+
+    def test_a_non_positive_base_trial_is_unmeasured(self):
+        self.assertEqual(gate.decide(claude_evidence(("c1", tagged("c1", [0, 1000, 1000],
+                                                                    [1000] * 3))),
+                                     self.cutover), "unmeasured")
+
+    def test_tampered_version_three_bundles_are_refused(self):
+        manifest = {"identity": json.loads(json.dumps(IDENTITY)),
+                    "expansion": {"expanded": False, "checkpoint_ref": None}}
+        del manifest["identity"]["pinned"]["builds"]["codex"]
+        approved = claude_evidence(("c1", tagged("c1", [1000] * 3, [1000] * 3)))
+        bundle = gate.assemble_bundle(manifest, approved, [], None, "approved", self.cutover)
+        self.assertEqual(gate.verify_bundle(bundle, kind="cutover"), "approved")
+        for kind in (None, "promotion", "release"):
+            with self.subTest(kind=kind), self.assertRaises(gate.BundleIntegrityError):
+                gate.verify_bundle(bundle, kind=kind)
+        relabelled = dict(bundle, state="rejected")
+        rekinded = dict(bundle, bundle_kind="promotion")
+        rekinded["bundle_id"] = body_digest(rekinded)
+        worse = json.loads(json.dumps(bundle))
+        worse["evidence"]["cases"][0]["strata"]["claude"]["context"]["trials"]["candidate"][0][
+            "input_total"] = 5000
+        worse["bundle_id"] = body_digest(worse)
+        for document, kind in ((relabelled, "cutover"), (rekinded, "promotion"),
+                               (worse, "cutover")):
+            with self.subTest(state=document["state"], kind=kind), \
+                    self.assertRaises(gate.BundleIntegrityError):
+                gate.verify_bundle(document, kind=kind)
+
+    def test_version_three_bundles_reusing_runs_are_refused(self):
+        manifest = {"identity": json.loads(json.dumps(IDENTITY)),
+                    "expansion": {"expanded": False, "checkpoint_ref": None}}
+        del manifest["identity"]["pinned"]["builds"]["codex"]
+        approved = claude_evidence(("c1", tagged("c1", [1000] * 3, [1000] * 3)),
+                                   ("c2", tagged("c2", [1000] * 3, [1000] * 3)))
+        bundle = gate.assemble_bundle(manifest, approved, [], None, "approved", self.cutover)
+        self.assertEqual(gate.verify_bundle(bundle, kind="cutover"), "approved")
+
+        def cross_side(cases):
+            trials = cases[0]["strata"]["claude"]["context"]["trials"]
+            trials["candidate"] = json.loads(json.dumps(trials["base"]))
+
+        def cross_case(cases):
+            cases[0]["strata"]["claude"]["context"]["trials"]["base"] = json.loads(json.dumps(
+                cases[1]["strata"]["claude"]["context"]["trials"]["base"]))
+
+        for tamper in (cross_side, cross_case):
+            with self.subTest(tamper=tamper.__name__):
+                forged = json.loads(json.dumps(bundle))
+                tamper(forged["evidence"]["cases"])
+                forged["bundle_id"] = body_digest(forged)
+                self.assertEqual(gate.decide(forged["evidence"], self.cutover), "unmeasured")
+                with self.assertRaises(gate.BundleIntegrityError):
+                    gate.verify_bundle(forged, kind="cutover")
+
+    def test_a_stripped_expansion_declaration_is_refused(self):
+        code, bundle = self.run_gate(7570, 40, 0)
+        self.assertEqual((code, bundle["expansion"]), (0, CHECKPOINT))
+        self.assertEqual(gate.verify_bundle(bundle, kind="cutover"), "approved")
+        for expansion in (None, {"expanded": False, "checkpoint_ref": None},
+                          {"expanded": True, "checkpoint_ref": None},
+                          {"expanded": True, "checkpoint_ref": "  "},
+                          {"expanded": False, "checkpoint_ref": CHECKPOINT["checkpoint_ref"]}):
+            with self.subTest(expansion=expansion):
+                forged = json.loads(json.dumps(bundle))
+                if expansion is None:
+                    del forged["expansion"]
+                else:
+                    forged["expansion"] = expansion
+                forged["bundle_id"] = body_digest(forged)
+                self.assertEqual(gate.decide(forged["evidence"], self.cutover), "approved")
+                with self.assertRaises(gate.BundleIntegrityError):
+                    gate.verify_bundle(forged, kind="cutover")
+
+    def test_an_unexpanded_bundle_beyond_three_trials_is_not_emitted(self):
+        manifest = {"identity": json.loads(json.dumps(IDENTITY)),
+                    "expansion": {"expanded": False, "checkpoint_ref": None}}
+        del manifest["identity"]["pinned"]["builds"]["codex"]
+        flat_ten = claude_evidence(("c1", tagged("c1", [1000] * 10, [1000] * 10)))
+        self.assertEqual(gate.decide(flat_ten, self.cutover), "approved")
+        with self.assertRaises(gate.BundleIntegrityError):
+            gate.assemble_bundle(manifest, flat_ten, [], None, "approved", self.cutover)
+        self.assertFalse(gate.expansion_covers(manifest["expansion"], flat_ten, self.cutover))
+        expanded = dict(manifest, expansion=dict(CHECKPOINT))
+        bundle = gate.assemble_bundle(expanded, flat_ten, [], None, "approved", self.cutover)
+        self.assertEqual(gate.verify_bundle(bundle, kind="cutover"), "approved")
+        # Versions 1 and 2 keep today's behaviour: the bundle check is version 3 only.
+        for profile in (gate.DEFAULT_GATE, gate.gate_profile(2, "cutover")):
+            with self.subTest(version=profile.version):
+                self.assertTrue(gate.expansion_covers(None, flat_ten, profile))
+
+    def test_the_cli_pairs_version_three_with_the_cutover_kind(self):
+        path = Path(tempfile.mkdtemp(dir=self.tmp)) / "trials.json"
+        path.write_text(json.dumps(self.manifest(7570, 3, 0, expanded=False)), encoding="utf-8")
+        for argv in (["--gate-version", "3"], ["--gate-version", "3", "--kind", "promotion"],
+                     ["--gate-version", "3", "--kind", "release"]):
+            with self.subTest(argv=argv):
+                code, out, _ = run_cli_text(["--trials", str(path)] + argv)
+                self.assertEqual((code, out), (2, ""))
+        code, out, _ = run_cli_text(["--help"])
+        self.assertEqual(code, 0)
+        # argparse wraps help to the terminal width and may break at a hyphen,
+        # so compare with every whitespace run removed.
+        text = "".join(out.split())
+        self.assertIn("onlyvalidwith,--gate-version2or3", text)
+        self.assertIn("--gate-version3acceptsonlycutover", text)
+
+
+FIXTURE_DIR = REPO_ROOT / "tests/fixtures/agent-gate-bundle"
+
+
+def load_fixture(name):
+    return json.loads((FIXTURE_DIR / f"{name}-v3-bundle.json").read_text(encoding="utf-8"))
+
+
+class RecomputedCutoverBundlesTest(unittest.TestCase):
+    """Issue 757: the three issue-130 runs recomputed under gate version 3."""
+
+    def test_each_fixture_judges_the_committed_measurements(self):
+        for name in COMMITTED_V2:
+            with self.subTest(name=name):
+                fixture, committed = load_fixture(name), load_committed(name)
+                self.assertEqual((fixture["gate_version"], fixture["bundle_kind"]),
+                                 (3, "cutover"))
+                for key in ("evidence", "identity", "expansion"):
+                    self.assertEqual(fixture[key], committed[key], key)
+                self.assertEqual(gate.verify_bundle(fixture, kind="cutover"), fixture["state"])
+                self.assertEqual([row["case_id"] for row in
+                                  fixture["gates"]["distribution"]["claude"]],
+                                 [case["case_id"] for case in committed["evidence"]["cases"]])
+
+    def test_the_version_three_cli_reproduces_each_fixture(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        for name in COMMITTED_V2:
+            with self.subTest(name=name):
+                fixture = load_fixture(name)
+                code, out, err = run_cli_text(["--trials", str(absolute_trials(tmp, name)),
+                                               "--gate-version", "3", "--kind", "cutover"])
+                self.assertEqual(code, 0 if fixture["state"] == "approved" else 3, err)
+                self.assertEqual(json.loads(out)["bundle_id"], fixture["bundle_id"])
 
 
 if __name__ == "__main__":

@@ -2099,6 +2099,7 @@ class VerificationConditionsTest(ResolverTestCase):
     CONDITION = {"when_changed": ["python/*", "tests/*", "justfile"],
                  "skip_reason": "no agent-tooling paths changed"}
     VALID = {"agent-workflow-tests": CONDITION}
+    FLAG = {"pre_commit": True}
     ABSENT = object()
 
     def contract_with(self, conditions):
@@ -2175,7 +2176,36 @@ class VerificationConditionsTest(ResolverTestCase):
          "/agent-workflow-tests/skip_reason", "contract.workflow.not_string"),
         ({"nix-build": CONDITION, "agent-workflow-tests": CONDITION}, "",
          "contract.workflow.no_unconditional_verification"),
+        # Issue 771 D2: the pre_commit flag.
+        ({"agent-workflow-tests": {"pre_commit": "yes"}},
+         "/agent-workflow-tests/pre_commit", "contract.workflow.not_boolean"),
+        ({"agent-workflow-tests": {"pre_commit": True, "skip_reason": "x"}},
+         "/agent-workflow-tests/when_changed", "contract.workflow.member_missing"),
+        ({"agent-workflow-tests": {"pre_commit": True, "when_changed": ["python/*"]}},
+         "/agent-workflow-tests/skip_reason", "contract.workflow.member_missing"),
+        ({"nix-build": {**CONDITION, "pre_commit": True}, "agent-workflow-tests": CONDITION},
+         "", "contract.workflow.no_unconditional_verification"),
     )
+
+    def test_a_pre_commit_flag_resolves_into_the_snapshot(self):
+        # Issue 771 AC1 (D2, D3): the flag rides alone or beside a condition, and a
+        # flag-only entry on every declared id leaves them all unconditional.
+        for conditions in (
+                {"agent-workflow-tests": self.FLAG},
+                {"agent-workflow-tests": {**self.CONDITION, "pre_commit": True}},
+                {"agent-workflow-tests": {"pre_commit": False}},
+                {"nix-build": self.FLAG, "agent-workflow-tests": self.CONDITION},
+                {"nix-build": self.FLAG, "agent-workflow-tests": self.FLAG}):
+            with self.subTest(conditions=conditions):
+                workflow = self.resolved_member(conditions)
+                self.assertEqual(workflow["verification_conditions"], conditions)
+
+    def test_a_pre_commit_flag_on_an_undeclared_id_is_refused(self):
+        # Issue 771 AC1 (D4): the unknown-id rule covers a flag-only entry.
+        code, payload, _ = self.resolve(self.make_root(self.contract_with({"lint": self.FLAG})))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual(error["repair_id"], "contract.workflow.unknown_verification_id")
+        self.assertEqual([v["pointer"] for v in error["violations"]], [self.POINTER + "/lint"])
 
     def test_each_malformed_member_is_refused_with_its_pointer(self):
         for conditions, suffix, repair_id in self.REFUSALS:

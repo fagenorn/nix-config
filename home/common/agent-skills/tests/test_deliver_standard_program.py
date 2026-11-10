@@ -41,6 +41,10 @@ HUMAN = {"id": "AC3", "text": "looks right", "kind": "human",
          "lint": OK_LINT}
 NOTE = {"id": "AC4", "text": "the next session's first-turn prompt reads under 30k tokens", "kind": "note"}
 RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
+SIZED = dict(ARGS, review_sizing=True)
+FULL_RUBRIC = "a task whose test cannot fail, wrong or missing interfaces"
+CODEX_OWNS = "The Codex plan review running beside you owns code correctness"
+RULE_ID = "put the broken rule's id in the finding's rule)."
 
 
 def refused(*errors):
@@ -143,7 +147,7 @@ FOLDED_READ = {
                "merged_refs[]": {"number", "closes"}, "merged_heads[]": {"number", "commits"},
                "review": {"code", "plan"}, "review_state": {"code", "plan"},
                "knowledge": {"standards", "hints", "rejections"},
-               "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason"},
+               "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason", "pre_commit"},
                "acquire": {"verdict", "by", "detail", "transient"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"},
                "answer": {"verdict", "comment_id", "questions", "decisions"}, "renew": RENEW_READ}),
 }
@@ -1295,6 +1299,71 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(labels(calls).count("plan-revise"), 1)
 
 
+class ReviewSizingArgTest(unittest.TestCase):
+    """#747: review_sizing is an opt-in boolean, checked before any agent."""
+
+    def test_review_sizing_must_be_a_boolean(self):
+        for bad in ("yes", 1, None):
+            with self.subTest(bad=bad):
+                result, calls = run(args=dict(ARGS, review_sizing=bad))
+                self.assertEqual(result, {"stage": "args", "error": "review_sizing must be a boolean"})
+                self.assertEqual(calls, [])
+
+    def test_false_runs_like_absent(self):
+        absent, absent_calls = run()
+        off, off_calls = run(args=dict(ARGS, review_sizing=False))
+        self.assertEqual(off["stage"], "done")
+        self.assertEqual([(c["label"], c["prompt"]) for c in off_calls],
+                         [(c["label"], c["prompt"]) for c in absent_calls])
+
+
+class ReviewSizingPlanTest(unittest.TestCase):
+    """#747: with sizing on and the Codex plan review configured, the Claude plan review narrows to rules, conventions and consistency."""
+
+    def test_off_keeps_the_full_rubric(self):
+        _, calls = run()
+        text = prompt(calls, "plan-review")
+        self.assertIn(FULL_RUBRIC, text)
+        self.assertNotIn(CODEX_OWNS, text)
+
+    def test_on_with_the_codex_plan_review_narrows_the_claude_rubric(self):
+        result, calls = run(args=SIZED)
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("plan-codex", labels(calls))
+        text = prompt(calls, "plan-review")
+        self.assertIn(CODEX_OWNS, text)
+        self.assertNotIn(FULL_RUBRIC, text)
+        self.assertNotIn("wrong or missing interfaces", text)
+        for needle in ("an acceptance criterion with no task", "acceptance-planning.md", "documented conventions",
+                       "internal inconsistency", "project-specific literal written into global skills or agents",
+                       "/r/docs/standards", "context.md", "--json title,body,comments"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        # The rule-id instruction stays whole and comes before the Codex sentence, never inside its "do not sweep" clause.
+        self.assertLess(text.index(RULE_ID), text.index(CODEX_OWNS))
+        self.assertNotIn("do not sweep for it, or", text)
+        off = prompt(run()[1], "plan-review")
+        self.assertEqual(text.count("acceptance-planning.md"), off.count("acceptance-planning.md"))
+        self.assertEqual(text.count(RULE_ID), 1)
+        review = next(c for c in calls if c["label"] == "plan-review")
+        self.assertEqual((review["agentType"], review["schema"]["properties"]["findings"]["items"]["properties"]["rule"]["enum"][0]),
+                         ("reviewer", "R1"))
+
+    def test_on_keeps_the_full_rubric_for_the_planner(self):
+        _, calls = run(args=SIZED, replies={"plan-review": {"verdict": "findings",
+                                                             "findings": [{"severity": "important", "summary": "gap"}]}})
+        for label in ("plan", "plan-revise"):
+            with self.subTest(label=label):
+                self.assertIn(FULL_RUBRIC, prompt(calls, label))
+
+    def test_on_without_a_plan_review_capability_keeps_the_full_rubric(self):
+        _, calls = run(args=SIZED, patch={"setup": {"review_state": {"code": "available", "plan": "unsupported"}}})
+        self.assertNotIn("plan-codex", labels(calls))
+        text = prompt(calls, "plan-review")
+        self.assertIn(FULL_RUBRIC, text)
+        self.assertNotIn(CODEX_OWNS, text)
+
+
 class PlanRulesTest(unittest.TestCase):
     """#634 AC1: plan review rejects each acceptance planning rule's violation and accepts a compliant plan."""
 
@@ -1623,6 +1692,64 @@ class PlanRulesTest(unittest.TestCase):
                 self.assertNotIn(line.split("** ", 1)[1][:40], source)
 
 
+class PlanTestCaseFormTest(unittest.TestCase):
+    """#746 trial: only the plan step's task files state each failing test as a case, not as code."""
+
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise")
+    MARK = "state each failing test as a case"
+
+    @staticmethod
+    def rule():
+        found = re.search(r"const TEST_CASES = `([^`]*)`", PROGRAM.read_text(encoding="utf-8"))
+        if found is None:
+            raise AssertionError("TEST_CASES is not a shared constant")
+        return found.group(1)
+
+    def test_the_rule_names_every_part_of_a_case_and_keeps_the_carve_out(self):
+        text = self.rule()
+        for needle in (self.MARK, "its name", "the arrange", "the act", "the exact assertion",
+                       "the expected failure", "carve-out", "an exact wire format",
+                       "Write failing tests out in full.", "The implementer writes the test code from the case."):
+            self.assertIn(needle, text)
+        self.assertEqual(PROGRAM.read_text(encoding="utf-8").count(text), 1)
+
+    def test_every_planner_prompt_prohibits_full_test_code_outside_the_carve_out(self):
+        # Literals are pinned here, not read back from the constant under test.
+        restrictions = ("not as code", "full test code stays only under its carve-out")
+        seen = set()
+        for call in all_calls():
+            if call["label"] in self.PLANNERS:
+                for needle in restrictions:
+                    self.assertIn(needle, call["prompt"], call["label"])
+                seen.add(call["label"])
+        self.assertEqual(seen, set(self.PLANNERS))
+
+    def test_only_planner_prompts_carry_the_rule(self):
+        text = self.rule()
+        seen = set()
+        for call in all_calls():
+            label = call["label"]
+            if label in self.PLANNERS:
+                self.assertIn(text, call["prompt"], label)
+                seen.add(label)
+            else:
+                self.assertNotIn(self.MARK, call["prompt"], label)
+        self.assertEqual(seen, set(self.PLANNERS))
+
+    def test_writing_plans_and_deliver_batch_keep_full_test_code(self):
+        skill = (REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Write failing tests out in full.", skill)
+        self.assertNotIn(self.MARK, skill)
+        batch = (PROGRAM.parent / "deliver-batch.js").read_text(encoding="utf-8")
+        self.assertNotIn(self.MARK, batch)
+
+    def test_the_implementer_prompt_still_demands_red_first_and_a_mutation_check(self):
+        _, calls = run()
+        impl = prompt(calls, "impl-1")
+        self.assertIn("write the failing test first and see it fail", impl)
+        self.assertIn("temporarily remove the code it pins and confirm it fails", impl)
+
+
 class TaskTest(unittest.TestCase):
     def test_blocked_task_stops_with_cont_marking_it_partial(self):
         result, _ = run(replies={"impl-1": {"status": "blocked", "notes": "no"}})
@@ -1817,6 +1944,125 @@ WS_SCENARIO = {"args": dict(ARGS, mode="ready"),
                "replies": {"verify": LINT_RED, "ws-check-1": WS_ONLY, "verify-fix-review-1": ATTESTED,
                            "verify-2": LINT_GREEN},
                "patch": {"setup": {"verification": TWO_IDS}, "verify-fix-1": {"start_head": SHA, "commit": FIXED}}}
+
+
+FOUR = {"plan": dict(PLAN, tasks=tasks(4))}
+
+
+def sized(lines):
+    return dict(FOUR, **{"diff-size": {"measured": True, "changed_lines": lines}})
+
+
+class ReviewSizingFinalTest(unittest.TestCase):
+    """#747: with sizing on, the final review is chunked, and the integration review runs, only above 1500 changed lines."""
+
+    def test_off_chunks_four_tasks_by_three_without_measuring(self):
+        result, calls = run(replies=FOUR)
+        names = labels(calls)
+        self.assertTrue(result["chunked"])
+        for label in ("final-1", "final-2", "final-integration"):
+            self.assertIn(label, names)
+        self.assertNotIn("diff-size", names)
+
+    def test_on_at_the_threshold_reviews_the_whole_delivery_once(self):
+        result, calls = run(args=SIZED, replies=sized(1500))
+        self.assertEqual(result["stage"], "done")
+        self.assertFalse(result["chunked"])
+        names = labels(calls)
+        self.assertEqual([l for l in names if l.startswith("final-")], ["final-codex", "final-1"])
+        self.assertIn("of the whole delivery", prompt(calls, "final-1"))
+        self.assertLess(names.index("renew-final-review"), names.index("diff-size"))
+        self.assertLess(names.index("diff-size"), names.index("final-codex"))
+        self.assertLess(names.index("diff-size"), names.index("final-1"))
+        self.assertIn("final review whole", prompt(calls, "pr"))
+
+    def test_on_above_the_threshold_chunks_with_an_integration_review(self):
+        result, calls = run(args=SIZED, replies=sized(1501))
+        self.assertTrue(result["chunked"])
+        names = labels(calls)
+        for label in ("final-1", "final-2", "final-integration"):
+            self.assertIn(label, names)
+        self.assertIn("chunk 1/2", prompt(calls, "final-1"))
+        self.assertEqual(names.count("diff-size"), 1)
+        self.assertIn("final review chunked", prompt(calls, "pr"))
+
+    def test_on_with_three_tasks_never_measures(self):
+        result, calls = run(args=SIZED, replies={"plan": dict(PLAN, tasks=tasks(3))})
+        self.assertFalse(result["chunked"])
+        names = labels(calls)
+        self.assertNotIn("diff-size", names)
+        self.assertNotIn("final-integration", names)
+
+    def test_on_with_an_unread_size_falls_back_to_task_chunks(self):
+        for reply in ("throw", None, {"measured": False}, {"measured": False, "changed_lines": 10},
+                      {"changed_lines": 10}, {"measured": True}, {"measured": True, "changed_lines": "many"},
+                      {"measured": True, "changed_lines": -1}, {"measured": True, "changed_lines": 12.5}):
+            with self.subTest(reply=reply):
+                result, calls = run(args=SIZED, replies=dict(FOUR, **{"diff-size": reply}))
+                self.assertEqual(result["stage"], "done")
+                self.assertTrue(result["chunked"])
+                for label in ("final-1", "final-2", "final-integration"):
+                    self.assertIn(label, labels(calls))
+
+    def test_a_recovered_size_failure_is_not_a_dead_agent_on_a_later_stop(self):
+        # deliver-batch's breaker reads dead_agents; an optional measurement that fell back must not trip it.
+        for reply in ("throw", None):
+            with self.subTest(reply=reply):
+                result, _ = run(args=SIZED, replies=dict(FOUR, **{"diff-size": reply, "final-1": FINDING,
+                                                                  "fix-wave": {"status": "blocked", "notes": "no"}}))
+                self.assertEqual(result["stage"], "fix-wave")
+                self.assertNotIn("dead_agents", result)
+
+    def test_the_size_step_is_a_low_clerk_reading_shortstat_of_every_range(self):
+        _, calls = run(args=SIZED, replies=FOUR)
+        size = next(c for c in calls if c["label"] == "diff-size")
+        self.assertEqual((size["agentType"], size["model"], size["effort"]), ("clerk", "sonnet", "low"))
+        self.assertEqual(size["schema"]["required"], ["measured"])
+        self.assertEqual(size["schema"]["properties"]["measured"], {"type": "boolean"})
+        self.assertEqual(size["schema"]["properties"]["changed_lines"], {"type": "integer", "minimum": 0})
+        for needle in ("git -C /r/.wt/w-issue-9-x fetch origin",
+                       "git -C /r/.wt/w-issue-9-x diff --shortstat origin/dev...HEAD",
+                       "measured false", "Hard rules for this step"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, size["prompt"])
+        self.assertNotIn("--numstat", size["prompt"])
+        branched = bplan()
+        branched["tasks"] = tasks(3) + [dict(branched["tasks"][1], n=4, file="/g/task-4.md")]
+        _, calls = run(args=SIZED, replies={"plan": branched})
+        self.assertIn("git -C /r/.wt/cand diff --shortstat origin/dev...cand", prompt(calls, "diff-size"))
+
+    def test_cont_records_a_whole_review_only_when_sizing_collapsed_it(self):
+        for args, replies, expected in ((ARGS, FOUR, None), (SIZED, sized(1501), None),
+                                        (SIZED, {"plan": dict(PLAN, tasks=tasks(3))}, None), (SIZED, sized(1500), True)):
+            with self.subTest(args=args, replies=replies):
+                stopped, _ = run(args=args, replies=dict(replies, verify=None), patch={"impl-4": {"commit": TIP}, "impl-3": {"commit": TIP}})
+                self.assertEqual(stopped["stage"], "verify")
+                if expected is None:
+                    self.assertNotIn("whole", stopped["cont"]["final_reviewed"])
+                else:
+                    self.assertIs(stopped["cont"]["final_reviewed"]["whole"], expected)
+
+    def test_a_resume_that_skips_the_final_review_keeps_its_shape(self):
+        for lines, chunked, word in ((1500, False, "whole"), (1501, True, "chunked")):
+            with self.subTest(lines=lines):
+                # A stop after the final review (verify): the resume skips the review on the reviewed head (SKIP_FINAL).
+                stopped, _ = run(args=SIZED, replies=dict(sized(lines), verify=None), patch={"impl-4": {"commit": TIP}})
+                self.assertEqual(stopped["stage"], "verify")
+                result, calls = run(args=dict(SIZED, cont=stopped["cont"]), patch={"setup": {"head": TIP}})
+                self.assertEqual(result["stage"], "done")
+                names = labels(calls)
+                self.assertNotIn("diff-size", names)
+                self.assertNotIn("final-1", names)
+                self.assertIs(result["chunked"], chunked)
+                self.assertIn(f"final review {word}", prompt(calls, "pr"))
+                # A ready stop: the resume skips review and verify on the verified head (SKIP_REVIEW).
+                ready, _ = run(args=dict(SIZED, mode="ready"), replies=sized(lines))
+                self.assertEqual(ready["stage"], "ready")
+                result, calls = run(args=dict(SIZED, cont=ready["cont"]), patch={"setup": {"head": SHA}})
+                self.assertEqual(result["stage"], "done")
+                self.assertNotIn("final-1", labels(calls))
+                self.assertIs(result["chunked"], chunked)
+                self.assertIn(f"final review {word}", prompt(calls, "pr"))
 
 
 class WhitespaceCarryForwardTest(unittest.TestCase):
@@ -3507,7 +3753,7 @@ class SourceTest(unittest.TestCase):
     def test_meta_names_the_new_args(self):
         text = PROGRAM.read_text(encoding="utf-8")
         meta = text[:text.index("\n}\n")]
-        for arg in ("session_id", "batch_id", "mode?", "lane?"):
+        for arg in ("session_id", "batch_id", "mode?", "lane?", "review_sizing?"):
             self.assertIn(arg, meta)
 
 
@@ -3825,7 +4071,7 @@ class DeclaredBranchTest(unittest.TestCase):
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
-    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex",
+    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size",
              "verify", "verify-", "ws-check-", "land-lock-", "land-unlock", "land-push-", "pr", "checks-", "merge",
              "hold", "close-out")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise")),
@@ -3856,6 +4102,7 @@ SCENARIOS = (
     {"replies": {"plan": dict(PLAN, tasks=tasks(1, "low"))}},
     {"replies": {"review-1": BAD, "rereview-1-1": BAD, "rereview-1-2": BAD}},
     {"replies": {"plan": dict(PLAN, tasks=tasks(4)), "final-1": FINDING, "fix-wave-review": NARROWING}},
+    {"args": dict(ARGS, review_sizing=True), "replies": {"plan": dict(PLAN, tasks=tasks(4))}},
     {"replies": {"verify": VERIFY_RED}},
     {"replies": {"checks-1": RED, "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
      "patch": {"fix-ci": {"start_head": SHA, "commit": FIX}}},
@@ -3931,6 +4178,267 @@ class PromptCommandFormTest(unittest.TestCase):
                 self.assertNotIn("--comments", view, call["label"])
             seen.add(call["label"])
         self.assertEqual(seen, set(self.BODY_READERS))
+
+
+MAP_PATH = "/r/.git/worktrees/w/deliver-standard/context.md"
+MAP_TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
+MAP_READERS = re.compile(r"plan|plan-review|plan-codex|plan-revise|plan-rules-revise|impl-\d+|fix-\d+-\d+")
+
+
+def map_carriers(calls):
+    return [c["label"] for c in calls if "context.md" in c["prompt"]]
+
+
+class CodeMapTest(unittest.TestCase):
+    """#743: the planner writes a code map beside the plan; plan reviewers, revisers and task implementers are pointed at it, nobody else."""
+
+    def assert_no_map(self, calls, expected):
+        # prompt() raises when a label is missing, so each expected call is shown to have run.
+        for label in expected:
+            with self.subTest(label=label):
+                self.assertNotIn("context.md", prompt(calls, label))
+        self.assertEqual([l for l in map_carriers(calls) if not MAP_READERS.fullmatch(l)], [])
+
+    def test_the_planner_writes_the_map_in_the_plan_directory(self):
+        _, calls = run()
+        self.assertIn(MAP_PATH, prompt(calls, "plan"))
+
+    def test_plan_reviewers_reviser_and_implementers_name_the_map(self):
+        _, calls = run(replies={"plan-review": MAP_TASK_FINDING, "review-1": MAP_TASK_FINDING})
+        for label in ("plan-review", "plan-codex", "plan-revise", "impl-1", "fix-1-1"):
+            with self.subTest(label=label):
+                self.assertIn(MAP_PATH, prompt(calls, label))
+
+    def test_the_rules_only_reviser_names_the_map(self):
+        # The scenario of PlanRulesTest.keep_stop: both reviews return an R2 rule finding, so plan-rules-revise runs.
+        plan = with_criteria(HUMAN)
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": PlanRulesTest.REVISED,
+                                "plan-review": PlanRulesTest.RULE_FINDING,
+                                "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        self.assertIn(MAP_PATH, prompt(calls, "plan-rules-revise"))
+
+    def test_task_reviewers_get_no_map(self):
+        _, calls = run(replies={"review-1": MAP_TASK_FINDING})
+        self.assert_no_map(calls, ("review-1", "rereview-1-1", "final-1", "final-codex"))
+
+    def test_chunked_final_review_and_integration_get_no_map(self):
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(4))})
+        self.assert_no_map(calls, ("review-1", "review-4", "final-1", "final-2", "final-integration", "final-codex"))
+
+    def test_the_final_fix_wave_and_its_review_get_no_map(self):
+        _, calls = run(replies={"final-1": BAD})
+        self.assert_no_map(calls, ("fix-wave", "fix-wave-review"))
+
+    def test_the_direct_lane_and_its_repair_get_no_map(self):
+        _, calls = run(args=DIRECT, replies={"direct-review": BAD})
+        self.assert_no_map(calls, ("direct-impl", "direct-review", "direct-fix", "direct-rereview"))
+        self.assertEqual(map_carriers(calls), [])
+
+
+class PlannerReadsTest(unittest.TestCase):
+    """#737: only the plan step may batch-read through Explore agents; every other step keeps the no-subagent rule."""
+
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise")
+    NO_SUBAGENTS = "- Do not dispatch subagents unless this step says so."
+    HARD_RULES = "Hard rules for this step"
+    GRANT = "up to 3 read-only Explore agents"
+    BATCH = "issue independent reads together in one message"
+
+    def test_only_planner_prompts_grant_explore_and_every_ruled_prompt_keeps_the_rule(self):
+        granted, ruled = set(), set()
+        for call in all_calls():
+            text, label = call["prompt"], call["label"]
+            if self.HARD_RULES in text:
+                self.assertIn(self.NO_SUBAGENTS, text, label)
+                ruled.add(label)
+            if label in self.PLANNERS:
+                for needle in (self.GRANT, self.BATCH, "Do not build, prototype or run the change", self.NO_SUBAGENTS):
+                    self.assertIn(needle, text, label)
+                self.assertLess(text.index(self.GRANT), text.index(self.HARD_RULES), label)
+                self.assertLess(text.index(self.BATCH), text.index(self.HARD_RULES), label)
+                granted.add(label)
+            else:
+                self.assertNotIn("Explore", text, label)
+        self.assertEqual(granted, set(self.PLANNERS))
+        self.assertLessEqual({"setup", "impl-1", "pr", "merge"}, ruled)
+
+    def test_the_shared_rules_keep_the_no_subagent_line_and_name_no_grant(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        start = source.index("const BASE_RULES = `")
+        base_rules = source[start:source.index("`", start + len("const BASE_RULES = `"))]
+        self.assertIn(self.NO_SUBAGENTS, base_rules)
+        self.assertNotIn("Explore", base_rules)
+
+
+class PreCommitFocusTest(unittest.TestCase):
+    """#771: FOCUSED and FIX_TESTS name the contract's fast pre-commit ids, with argv and cwd, to every implementer."""
+
+    # The flagged entry keeps the stub's id build, so every scenario's verify replies still answer the contract.
+    UNFLAGGED = [{"id": "build", "argv": ["treefmt", "--fail-on-change"], "cwd": "tools"}]
+    FLAGGED = [dict(UNFLAGGED[0], pre_commit=True)]
+    NAMED = json.dumps(UNFLAGGED, separators=(",", ":"))
+    GENERIC = "run any formatter or lint fix the project's standards (/r/docs/standards) name on the files you changed"
+    PASSED = {"state": "passed", "head": FIX, "required": ["ci-tests"]}
+    # One scenario per implementer prompt family that interpolates FOCUSED, with the labels it must reach.
+    SCENARIOS = (
+        ({"replies": {"review-1": TASK_FINDING}}, {"impl-1", "fix-1-1"}),
+        ({"replies": {"final-1": FINDING}}, {"fix-wave"}),
+        ({"replies": {"verify": VERIFY_RED}}, {"verify-fix-1"}),
+        ({"replies": {"checks-1": RED, "checks-2": PASSED},
+          "patch": {"fix-ci": {"start_head": SHA, "commit": FIX}}}, {"fix-ci"}),
+        ({"replies": {"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING, "checks-2": PASSED},
+          "patch": CONFLICT}, {"sync-1", "fix-sync-1"}),
+        ({"args": DIRECT, "replies": {"direct-review": BAD}}, {"direct-impl", "direct-fix"}),
+    )
+    FAMILIES = frozenset().union(*(want for _, want in SCENARIOS))
+
+    def implementer_prompts(self, verification):
+        """Every FOCUSED-carrying implementer prompt, by label, over SCENARIOS with this verification contract."""
+        found = {}
+        for scenario, expected in self.SCENARIOS:
+            patched = dict(scenario, patch={**scenario.get("patch", {}), "setup": {"verification": verification}})
+            _, calls = run(**patched)
+            prompts = {c["label"]: c["prompt"] for c in calls
+                       if c["agentType"] == "implementer" and c["label"] in expected}
+            self.assertLessEqual(expected, set(prompts), scenario)
+            found.update(prompts)
+        self.assertLessEqual(self.FAMILIES, set(found))
+        return found
+
+    def test_every_focused_site_has_a_scenario(self):
+        # A prompt family that gains or loses FOCUSED must be reflected in SCENARIOS.
+        source = PROGRAM.read_text(encoding="utf-8")
+        # The merge sync names FMT directly (it runs WHOLE, not FOCUSED); two of the FMT uses are the FOCUSED and FIX_TESTS definitions.
+        sites = source.count("${FOCUSED}") + source.count("${FIX_TESTS}") + source.count("${FMT}") - 2
+        self.assertEqual(sites, len(self.FAMILIES))
+
+    def test_every_implementer_prompt_names_the_flagged_argv(self):
+        for label, text in self.implementer_prompts(self.FLAGGED).items():
+            with self.subTest(label=label):
+                self.assertIn(self.NAMED, text)
+                self.assertIn("fast pre-commit", text)
+                self.assertNotIn(self.GENERIC, text)
+
+    def test_with_none_flagged_the_generic_sentence_stays(self):
+        for label, text in self.implementer_prompts(self.UNFLAGGED).items():
+            with self.subTest(label=label):
+                self.assertIn(self.GENERIC, text)
+                self.assertNotIn("fast pre-commit", text)
+
+    def test_only_the_flagged_ids_are_named(self):
+        lint = {"id": "lint", "argv": ["make", "lint"], "cwd": "."}
+        _, calls = run(replies={"verify": None}, patch={"setup": {"verification": [lint] + self.FLAGGED}})
+        text = prompt(calls, "impl-1")
+        self.assertIn(self.NAMED, text)
+        self.assertNotIn('"make","lint"', text)
+
+    def test_the_contract_read_asks_for_the_flag(self):
+        _, calls = run()
+        self.assertIn("pre_commit: true", prompt(calls, "setup"))
+        item = schema_of(calls, "setup")["properties"]["verification"]["items"]
+        self.assertEqual(item["properties"]["pre_commit"], {"type": "boolean"})
+
+
+WHOLE_RUN = ("run in full every test file among or covering", "never a single test class",
+             "any fast suite the project declares", "each command and its result")
+FOCUSED_RUN = "Run only the tests covering the files you changed"
+
+
+class WholeTestFileTest(unittest.TestCase):
+    """#787: every implementer step after the task loop runs whole test files and any fast suite, and reports each command and its result."""
+
+    def assert_whole(self, text, files):
+        for needle in WHOLE_RUN + (f"covering {files}",):
+            self.assertIn(needle, text)
+        self.assertNotIn("Run only the tests", text)
+        self.assertNotIn("run only the tests", text)
+
+    def test_both_fix_waves_run_whole_files(self):
+        _, calls = run(replies={"final-1": FixWaveTest.FIRST, "fix-wave-review": FixWaveTest.narrowing()})
+        for label in ("fix-wave", "fix-wave-2"):
+            with self.subTest(label=label):
+                self.assert_whole(prompt(calls, label), "the files you changed")
+
+    def test_verify_fix_runs_whole_files(self):
+        _, calls = run(replies={"verify": VERIFY_RED})
+        self.assert_whole(prompt(calls, "verify-fix-1"), "the files you changed")
+
+    def test_checks_fix_runs_whole_files(self):
+        _, calls = run(replies={"checks-1": {"state": "failed", "head": SHA}},
+                       patch={"fix-ci": {"start_head": SHA, "commit": "f" * 40}})
+        self.assert_whole(prompt(calls, "fix-ci"), "the files you changed")
+
+    def test_conflicted_sync_and_its_fix_run_whole_files(self):
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": BAD},
+                       patch={"sync-1": {"conflicted": True, "merge_commit": "d" * 40},
+                              "fix-sync-1": {"start_head": "d" * 40, "commit": "f" * 40}})
+        self.assert_whole(prompt(calls, "sync-1"), "the files the merge changed against its first parent")
+        self.assert_whole(prompt(calls, "fix-sync-1"), "the files you changed")
+
+    def test_task_loop_and_direct_lane_keep_the_focused_run(self):
+        _, calls = run(replies={"review-1": BAD})
+        _, direct = run(args=DIRECT, replies={"direct-review": BAD})
+        for label, text in (("impl-1", prompt(calls, "impl-1")), ("fix-1-1", prompt(calls, "fix-1-1")),
+                            ("direct-fix", prompt(direct, "direct-fix"))):
+            with self.subTest(label=label):
+                self.assertIn(FOCUSED_RUN, text)
+                self.assertNotIn(WHOLE_RUN[0], text)
+
+
+class KeptObligationTest(unittest.TestCase):
+    """#787: the byte-budget trims left these obligations of the post-loop prompts in place."""
+
+    def test_the_whitespace_attestation_stays_a_question(self):
+        _, calls = WhitespaceCarryForwardTest.scenario(WS_ONLY)
+        self.assertIn("Also judge whether each of its whitespace changes is insignificant:",
+                      prompt(calls, "verify-fix-review-1"))
+
+    def test_a_rejected_finding_needs_evidence_in_notes(self):
+        _, calls = run(replies={"final-1": FixWaveTest.FIRST})
+        self.assertIn("If a finding is wrong, explain with evidence in notes.", prompt(calls, "fix-wave"))
+
+    def test_the_verify_body_asks_for_precise_failure_summaries(self):
+        _, calls = run(replies={"verify": VERIFY_RED})
+        self.assertIn("summarize the failing tests or errors precisely.", prompt(calls, "verify"))
+
+    def test_the_sync_fix_may_not_rewrite_the_merge_and_its_rebuttal_is_checked_yourself(self):
+        fix = {"start_head": "d" * 40, "commit": "d" * 40, "notes": "the finding is wrong because x"}
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": BAD},
+                       patch={"sync-1": {"conflicted": True, "merge_commit": "d" * 40}, "fix-sync-1": fix})
+        self.assertIn("never redo or rewrite the merge", prompt(calls, "fix-sync-1"))
+        self.assertIn("Check each rebuttal against the code yourself", prompt(calls, "fix-sync-review-1"))
+
+
+class CodexUnavailableReasonTest(unittest.TestCase):
+    """#790: a codex-unavailable stop carries the Codex reviewer's reported reason."""
+
+    REASON = ("runtime failure: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
+              "to purchase more credits or try again at Nov 12th, 2026 5:34 AM.")
+    SITES = ((ARGS, "plan-codex", "plan"), (ARGS, "final-codex", "code"), (DIRECT, "direct-codex", "code"))
+
+    def test_each_codex_unavailable_stop_carries_the_reviewers_reason(self):
+        for args, label, step in self.SITES:
+            with self.subTest(label=label):
+                reply = {"available": False, "verdict": "pass", "findings": [], "raw_summary": self.REASON}
+                result, _ = run(args=args, replies={label: reply})
+                self.assertEqual((result["stage"], result["step"]), ("codex-unavailable", step))
+                self.assertEqual(result["details"], self.REASON)
+                self.assertEqual(result["codex"], reply)
+
+    def test_a_reply_without_a_reason_still_names_one(self):
+        for raw in ({}, {"raw_summary": "  "}):
+            with self.subTest(raw=raw):
+                reply = {"available": False, "verdict": "pass", "findings": [], **raw}
+                result, _ = run(replies={"final-codex": reply})
+                self.assertEqual(result["details"], "the Codex review step gave no reason")
+
+    def test_no_reply_is_named_and_stays_a_dead_agent(self):
+        for args, label, step in self.SITES:
+            with self.subTest(label=label):
+                result, _ = run(args=args, replies={label: None})
+                self.assertEqual((result["stage"], result["step"]), ("codex-unavailable", step))
+                self.assertEqual(result["details"], "the Codex review step returned nothing")
+                self.assertEqual(result["dead_agents"], [label])
 
 
 if __name__ == "__main__":
