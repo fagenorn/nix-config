@@ -22,7 +22,12 @@ ADR_PATH_RE = re.compile(r"docs/areas/[a-z0-9-]+/adr/\d{3}-[a-z0-9-]+\.md")
 
 # The audited (source, section, kind) classification of every README section
 # this issue moves text out of; each task adds exactly the triples of its rows.
-AUDITED: frozenset[tuple[str, str, str]] = frozenset()
+AUDITED: frozenset[tuple[str, str, str]] = frozenset({
+    ("python/README.md", "`verified-tree`", "contract"),
+    ("python/README.md", "`verified-tree`", "decision"),
+    ("python/README.md", "verify-pending", "contract"),
+    ("python/README.md", "verify-pending", "decision"),
+})
 
 # The base sections no text leaves.
 KEPT: frozenset[tuple[str, str]] = frozenset({

@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools import verify_block
 from agent_tools.verify_block import count_since
 
 SHA = "a" * 40
@@ -439,16 +440,9 @@ class CountSinceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
 
-README = Path(__file__).parents[1] / "python/README.md"
-
-
-class ReadmeDemoTest(unittest.TestCase):
+class DocumentedExampleTest(unittest.TestCase):
     def example(self):
-        text = README.read_text(encoding="utf-8")
-        start = text.index("\n## verify-pending\n")
-        end = text.find("\n## ", start + 1)
-        section = text[start:end if end != -1 else len(text)]
-        return section
+        return verify_block.__doc__
 
     def test_documented_example_is_accepted(self):
         result, verdict = lint(self.example())

@@ -1,11 +1,12 @@
-"""Record a verification pass against the git tree it verified.
+"""Record a verification pass against the git tree it verified (#263).
 
 `verified-tree check` resolves the worktree's project, computes the current
 tree and the verification plan, and exits 0 printing one line of canonical
 JSON, {"run": ["<id>", ...], "skipped": [{"id": "<id>", "reason": "<text>"},
 ...], "status": "verified" | "unverified", "tree": "<tree id>"}. It answers
 `verified` only when a record exists, its `tree` equals the current tree and
-its `verification` list equals `run`, element for element.
+its `verification` list equals `run`, element for element, which is how a planned run's final gate
+lets the ship stage skip a rerun.
 
 The plan reads `bindings.workflow.verification`,
 `bindings.workflow.verification_conditions` and `bindings.vcs.integration_branch`
@@ -19,6 +20,16 @@ each with its authored `skip_reason`. The changed paths are the names
 tree, so a rename counts as both of its paths and a deletion counts. They are
 computed only when some declared id has a condition, so a contract without
 conditions needs no `origin` ref and runs every id.
+
+`bindings.workflow.verification_conditions` (issue 437) is an optional `resolve-project` member;
+absent or `null` means no id is conditional. It maps a `workflow.verification` id to
+`{"when_changed": [<glob>, ...], "skip_reason": "<text>"}`, with those two members, which come
+together; an entry may also carry an optional boolean `pre_commit` (issue 771) marking the id a
+fast pre-commit check that deliver-standard names to every implementer, and an entry holding only
+`pre_commit` leaves its id unconditional. `when_changed` is a non-empty list of globs under the
+`light_lane.risk_paths` rules: repository-relative, canonically spelled, and matched with
+`fnmatch.fnmatchcase`, so `*` crosses `/`. `skip_reason` is a non-empty string, reported
+verbatim. At least one declared id must stay unconditional (the resolver validates all of this).
 
 `check` also persists the plan it printed, atomically replacing
 `<git rev-parse --absolute-git-dir>/verified-tree-plan.json` with exactly
@@ -56,7 +67,8 @@ paths that differ between that commit's tree and the current tree, in the same
 record's repository-relative path, and exits 0 printing {"changed": ["<path>",
 ...], "since": "<commit sha>", "status": "fresh" | "stale", "tree": "<tree
 id>"}, `fresh` exactly when `changed` is empty. It reads no project contract
-and takes no lock.
+and takes no lock; a planned run's final review and conformance reviewer run it instead of
+judging a measured surface by hand (issue 477).
 
 The tree is what a Git-backed build sees: the index's entries, staged new
 files included, with tracked files' working-tree edits and deletions applied,

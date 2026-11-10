@@ -4,20 +4,32 @@
 `json.dumps(verdict, sort_keys=True)` and exits 0 when the block is accepted,
 1 when it is refused and 2 on a usage error, a `--repo-root` that is not a git
 work tree, an unreadable input path, a `--pr-head` that is not a sha, or `--pr-workflow`
-with neither `--pr-head` nor `--pr-branch`.
+with neither `--pr-head` nor `--pr-branch`. The grammar, the findings and the context options
+(`--repo-root`, `--code-unmet`, `--pr-workflow` with `--pr-head` or `--pr-branch`, `--blocks`) are
+in `agent_tools.verify_block`; this module builds the real reference lookups and prints the verdict.
 
 `verify-pending count-since --input <path|-> --since T --n N [--key K]` reads a
 JSON array whose elements are times or objects with a time at `K` (default
 `createdAt`), prints `{"count", "needed"}` and exits 0 when at least N are
 strictly after T, 75 ("not yet", never a failure) when fewer are, and 2 on bad input.
 
-`verify-pending run --host H [--repo SLUG] [--issue N] [--report]` runs, for every project in
-the fleet registry, the read-only checks of the open `needs-verification` issues that are due on
+`verify-pending run --host H [--repo SLUG] [--issue N] [--report]` (and `just verify H [args...]`,
+which passes the rest through) runs, for every project in the fleet registry, the read-only checks of the open `needs-verification` issues that are due on
 host H (issue 630). The contract of each project is read at the integration branch commit
 `origin` lists, never the checkout; `--repo` keeps the one project whose tracker repository is
-SLUG and `--issue` keeps one issue number in every project it runs over (the two are
-independent); `--report` prints what is due and runs and writes nothing. Stdout is one
-`json.dumps(line, sort_keys=True)` per line, each `{repo, issue, check, ac, state, reason}`.
+SLUG and `--issue` keeps one issue number in every project it runs over, as that project's tracker
+writes it (the two are independent, P14, and both may be given); `--report` (P11) prints what is
+due and posts, labels, files and runs nothing. Stdout is one `json.dumps(line, sort_keys=True)` per
+line, each `{repo, issue, check, ac, state, reason}`, with `issue`, `check` and `ac` null for a
+project or issue level line. The states are `due`, `pending`, `pass`, `fail`, `hit`, `miss`, `expired`,
+`rejected`, `closed` and `skipped`; the reasons are closed (`due`, `changed`, `unchanged`,
+`resolved`, `verified`, `not_verified`, `not_this_host`, `lost_contest`, `owner_check`,
+`effects_live`, `effects_paid`, `command_not_verification`, `not_yet`, `timeout`,
+`exit_unexpected`, `fail_ask`, `no_block`, `block_invalid`, `block_changed`, `project_unresolved`,
+`tracker_not_github`, `forge_error`, `runner_untrusted`, `owner_asked`, `owner_waiting`,
+`owner_ambiguous`, `owner_answered`, `owner_waived`, plus the `when` reasons that name what is
+awaited). The `ask`, `act`, `live` and `paid` checks and the `on_fail: ask` and `on_expire: ask`
+decisions reach the owner through the prompts of `agent_tools.verify_owner`.
 A project that cannot be read is a `skipped` line with reason `project_unresolved`, one whose
 tracker is not GitHub is `tracker_not_github` (both omitted when `--repo` is given), and a forge
 failure while listing is `forge_error`. A write pass whose `gh` account the forge would not label
@@ -35,7 +47,9 @@ incomplete listing. Stdout is one `json.dumps(line, sort_keys=True)` per prompt 
 `{repo, issue, check, ac, comment, state, reason}`; a second call ticks nothing. Exit 1 when a line
 is a `forge_error` or `runner_untrusted` (the `gh` account could not read its own markers), 2 when
 `--repo` is not `owner/name` or an argument is missing, otherwise 0. Only the host a prompt names
-runs the command, and only when the prompt's digest still matches it.
+runs the command, and only when the prompt's digest still matches it: the tick only permits a run,
+and the runner still consumes it on the named host. An issue with more comments than the listing
+returned is read from the REST listing.
 """
 
 import argparse

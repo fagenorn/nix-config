@@ -9,6 +9,37 @@
 # home-manager's darwin activation runs before /run/current-system is repointed
 # (D11). The darwin launchd agent also lives there, in
 # hosts/common/darwin-verify-pending.nix (D2).
+#
+# The host is the flake `hostname` special argument baked into the command, never the OS
+# hostname. On darwin a nix-darwin `launchd.user.agents.verify-pending` (label
+# `org.nixos.verify-pending`, `command`, `StartInterval` 900, `RunAtLoad`) runs the pass; on NixOS a
+# systemd user `verify-pending.service` (oneshot) and `verify-pending.timer` (`OnBootSec=2min`,
+# `OnUnitActiveSec=15min`) do.
+#
+# After each switch the kick (`verify-pending-kick`) writes
+# `~/.agents/state/verify-pending/switch-request` and starts the job without blocking
+# (`launchctl kickstart` / `systemctl --user start --no-block`): from home-manager activation on
+# NixOS, and on darwin from the last `postActivation` entry with the new system's path, which the
+# pass waits (up to 300 s) to see at `/run/current-system` because nix-darwin repoints it only after
+# `postActivation`. A request that lands mid-round earns one more round. A launchd `WatchPaths` on
+# `/run/current-system` never fires (spike S2), hence the kick (D1, D11).
+#
+# Each round appends `pass start host=H` and `pass end host=H verify=N owner_actions=N|skipped`
+# lines (preceded by `switch host=H target=T current=yes|timeout` for a switch) with UTC times to
+# `~/.agents/state/verify-pending/runner.log`, rotated to `runner.log.1` above 1 MiB, then runs
+# `owner-actions refresh`, and the pass always exits 0; what runs unattended is decided by
+# `verify-pending run` itself (see `agent_tools.verify_exec`).
+#
+# Every Mac is logged-in only (issue 668): the darwin job is a launchd user agent in `gui/<uid>`,
+# and gh reads its token from the login keychain, so neither exists while nobody is logged in at
+# the console. On such a host the agent never loads and no pass runs; the kick still writes the
+# switch request, then prints one `verify-pending-kick:` notice instead of starting the job, and
+# the switch exits 0. The host's held checks surface through the stale-check owner prompt
+# (`verify-stale-check`, cause `silent`), which another host's pass posts once the host has not
+# reported for 7 days. nix-darwin's user-agent reload step is guarded the same way, with or without
+# a tty (issue 705): `hosts/common/darwin-user-agent-reload-guard.sh` skips its `launchctl asuser`
+# calls with one log line when `gui/<uid>` is absent, and the plist is still installed for the next
+# login. There is no LaunchDaemon form and no credential outside the keychain; NixOS is unaffected.
 {
   config,
   lib,

@@ -8,10 +8,39 @@ miss under a claim (P10) and closes the issue once through a contested `verify-c
 associations, so a marker by any other author neither wins a contest nor ends one (P3). "Now" is
 only `Context.now()`, the forge's clock (P6, P7).
 
-A run of a check holds a lease, a `verify-run` marker it wins and deletes when it is done, so no
-two runs of one check overlap whatever their host (a run that died leaves a claim `LEASE` ends),
-and it re-reads the markers once it holds it. The issue is finished only if the block it ran is
-still the held one.
+A check is this host's when its `host` equals the host, is `any`, or lists it. A run of a check
+holds a lease (P8), a `verify-run` marker it wins and deletes when it is done, so no two runs of
+one check overlap whatever their host (a run that died leaves a claim `LEASE`, 30 minutes, ends:
+the next run ends it). The lease is a marker contest settled by the smallest live comment id, this
+host's own earlier run included, and the loser reports `lost_contest`; the winner re-reads the
+markers once it holds the lease, and reports `lost_contest` itself when another run recorded a
+result it had not seen. The issue is finished only if the block it ran is still the held one.
+
+A write pass first checks that its own `gh` account would be trusted, since it reads back only
+trusted markers: the owner of a user-owned repository or an active member of the owning
+organization. Any other account (a collaborator) ends the project with one `runner_untrusted` line
+and a stderr message before any write or run, and exit 1.
+
+The markers a pass writes are `verify-result` (`block`, `check`, `ac`, `state`, `host`, plus
+`exit`, `rev`, `tag` and, on a `miss`, `followup`), `verify-run`, `verify-due` and `window-open`,
+`verify-followup`, `verify-followup-of` and `verify-closed` (`block`, `outcome`); the `block` field
+carries the block version of `verify_issues`. One result is posted per state change (P4): `assert`
+checks end `pass` or `fail`, `observe` checks `hit` or `miss`, and an `expires_after_days` window
+(default 21) from the `verify-due` marker ends `expired` when `on_expire` is `close`. A `fail` adds
+the `verification-failed` label (P16) unless `on_fail` is `ask`. A `miss` files one
+`verification-follow-up` issue under a `verify-followup` claim and records its number on the
+result (P10): the claim names a host, so after filing a run lists the tagged issues again and
+closes its own when a lower number exists, which leaves one open follow-up when two runs of one
+host overlap, and closes every other tagged follow-up it finds, a duplicate an earlier run left
+open included, before it records the number on the result. The issue closes once through a
+contested `verify-closed` marker when every check has ended (P9), after re-reading that the block
+the pass ran is still the issue's held block; otherwise the issue stays open with a
+`block_changed` line and the next pass runs the replacement. `verified` removes the delivery labels
+`in-progress` and `agent:ready` (an absent one is a no-op) and `verification-failed`, closes the
+issue completed and removes `needs-verification` last: every other label goes before the close,
+because a closed issue is no longer listed and could not retry a failed removal, so a failure
+between steps leaves the issue listed for the next pass to finish (P18). The recovery order of P4,
+P6, P9, P10, P16 and P18 lets a re-run post nothing twice.
 
 Every forge write is ordered so that the step that takes the issue out of the listing, or makes the
 next pass skip work, comes after the step it would strand; a `ForgeError` ends the pass with a

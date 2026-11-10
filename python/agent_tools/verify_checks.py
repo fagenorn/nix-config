@@ -1,28 +1,66 @@
 """The committed read-only checks that verify blocks name (issue 638).
 
 Each check is a pure function plus one `main` subcommand, run through a wrapper in
-`home/common/verify-pending/checks/`. Every check prints one JSON line and exits 0 when met,
+`home/common/verify-pending/checks/`: an `sh` script committed with mode `100755`. A wrapper runs
+from the repository root at the block's commit, so `PYTHONPATH=python` is that commit's source, and
+its logic lives in `agent_tools`. Every check prints one JSON line and exits 0 when met,
 1 when not met, 75 when not yet, and 2 on a usage error or an unreadable input.
 
 `required-checks --repo R --base B --since T` is met when the first pull request merged into B
 after T had every required check pass before its merge, each from the app its protection binds
 it to. It only reads the forge, across every page of each listing, and refuses an incomplete or
-truncated listing rather than judging it.
+truncated listing rather than judging it. It is `verify_checks.required_checks`: it finds the first
+pull request merged into B after T through the search API, read across every page, and refuses an
+incomplete or truncated listing of the search or of the head's check runs. It is met when every
+check that B's protection requires has a successful check run from the app it binds (any app when
+it binds none), or, for a check bound to no app, a latest status of success, completed no later
+than the merge (a commit status names no app, so it never satisfies a bound check, and the legacy
+`contexts` list never loosens one); not met otherwise (and when nothing is required); not yet when
+no pull request has merged; and it exits 2 on a forge error.
 
-`managed-pre-push-hook --slug S` (issue 672) is met when the global `core.hooksPath` is the
+`keepalive-end-turn-cap` is documented in `agent_tools.keepalive_pings`.
+
+`platform-status` runs the installed `resolve-project platform-status` (from `~/.agents/bin`,
+prepended to `PATH`) and passes its output and exit through, so a block judges it with `expect`.
+
+`managed-pre-push-hook --slug S` (`verify_checks.managed_pre_push_hook`, issue 672) is met when the
+global `core.hooksPath` is the
 managed `-agent-git-hooks` directory and, in a local fixture of S whose own git configuration
 holds only that hooks path, an agent push of `main` is refused by its `pre-push` with the
-remote unchanged while a feature-branch push is admitted. It exits 2 on a fixture error.
+remote unchanged while a feature-branch push is admitted; the fixture's transport is a fake `ssh`
+limited to `ssh:file`, so no URL rewrite reaches the network. It exits 0 when met, 1 when not and 2
+on a usage or fixture error, writes only to a temporary directory, and S's owner must be an
+authorized owner in the installed guard policy.
 
-`cutover-manifest [--repo-root R] [--branch B] [--main-ref REV]` (issue 579, C4.a) is met (0, `green`)
+`cutover-manifest [--repo-root R] [--branch B] [--main-ref REV]` (`verify_checks.cutover_manifest`,
+issue 579, C4.a) is met (0, `green`)
 when the manifest at the tip of origin's candidate branch is a major-2 manifest whose `removals`
 are non-empty and each equal, in all six members, to a `deprecations` entry of a major-1 manifest
 on main. It is 75 when anything of that is not yet so (`absent` when the branch does not exist) and
-2 when a manifest cannot be read. It only reads: it fetches objects, and writes no ref.
+2 when a manifest cannot be read. It only reads: it fetches objects, and writes no ref. The candidate
+sha is read with `git ls-remote origin refs/heads/B` (B defaults to `cutover-130-candidate`; no ref
+is 75 with verdict `absent`) and fetched as objects only. `--main-ref REV` reads REV and fetches
+nothing for it; otherwise `git fetch --no-tags --refmap= origin refs/heads/main` is read as
+`FETCH_HEAD`. `manifest_verdict` is 0 (`green`) only when main is major 1, the candidate is major 2,
+the candidate's `removals` are non-empty and every removal equals, in all six members, a
+`deprecations` entry of main; any other readable pair is 75 (`red`, with the unmatched ids in
+`undeclared`), and a manifest that is not an object or lacks a member is 2 (`unreadable`).
 
-`cutover-preflight [--repo-root R] [--branch B]` (issue 579, C4.b) is met when `cutover-manifest` is
-green and both the installed bridge and the candidate's own code judge every registered project
-compatible, with no removed use. It is 75 otherwise, and 0 only when green.
+`cutover-preflight [--repo-root R] [--branch B]` (`verify_checks.cutover_preflight`, issue 579, C4.b)
+is met when `cutover-manifest` is green and both the installed bridge and the candidate's own code
+judge every registered project compatible, with no removed use. It is 75 otherwise, and 0 only when
+green. It computes the manifest report from the same fetch, unpacks `python/` and the manifest at
+the candidate sha into a temporary directory that is always removed, and runs two
+`platform-status --fleet` reports, each with a 120-second timeout: the installed `resolve-project`
+found on `PATH` (with `PYTHONPATH` removed) and the candidate's `python3 -m agent_tools.resolve_project
+... --manifest <tmp>/...` with `PYTHONPATH=<tmp>/python` and `cwd=<tmp>`. A side that exits non-zero,
+times out or prints something other than a JSON object is 75 with verdict `unreadable` and `side`
+naming it. `preflight_verdict` is 0 (`green`) only when C4.a is green, the bridge is major 1 and at
+least `1.2.0`, the candidate is major 2, both fleets are non-empty and name the same `(project_id,
+root)` set, every row is compatible on both sides, and every candidate row's `removed_uses` is `[]`;
+otherwise 75 (`not_yet`), and each row's `reason` is the first rule it fails (`bridge_missing`,
+`candidate_missing`, `bridge_incompatible`, `candidate_incompatible`, `removed_use`). The wrapper
+`cutover-preflight` runs it with `~/.agents/bin` prepended to `PATH`.
 
 `cutover-bundle [--repo-root R] [--branch B]` (issue 579, C3) is met (0, `green`) when a `*-bundle.json`
 under `.agents/artifacts/evidence/` at origin's main verifies, through `agent_gate_bundle.verify_bundle`,
@@ -32,12 +70,14 @@ never counts. It is 75 otherwise (`absent` when the branch does not exist) and 2
 driven. It only reads: it fetches objects, and writes no ref. A gate-version-2 (claude-only) bundle is
 verified as the cutover kind, under the no-regression criterion.
 
-`self-hosted-runner --repo R --runner N --label L...` (issue 680) is met when R lists a runner
+`self-hosted-runner --repo R --runner N --label L [--label L ...]` (`verify_checks.self_hosted_runner`,
+issue 680) is met when R lists a runner
 named N whose status is online and whose labels include `self-hosted` and every L; not met when
 it is online but lacks one (a wrong registration), and not yet when it is unlisted or not online.
 It only reads one paginated runner listing and refuses a truncated or malformed one.
 
-`guard-policy-fleet [--repo-root R] [--branch B] [--registry FILE]` (issue 765, C13.a) is met (0, `green`)
+`guard-policy-fleet [--repo-root R] [--branch B] [--registry FILE]` (`verify_checks.guard_policy_fleet`,
+issue 765, C13.a) is met (0, `green`)
 when, with the candidate's own `python/` and platform manifest unpacked from origin's candidate branch into a
 temporary `HOME`, `python -m agent_tools.guard_policy derive --repository S` exits 0 with a derived row for
 every slug S named by a registry entry's `origin` (the host's own registry unless `--registry` names another
@@ -45,18 +85,31 @@ file). Any other exit, outcome or unreadable answer makes that row, and the chec
 branch that does not exist is 75 (`absent`) and an unreadable registry or unpackable candidate is 75
 (`unreadable`). The installed bridge is never asked: it still accepts what the candidate refuses. Like the
 lifecycle guard, `derive` writes the objects and remote-tracking refs it fetches into the registered checkouts.
+The candidate's `python/` and manifest are unpacked as `cutover-preflight` does, after fetching the
+sha as objects, into a temporary `HOME` holding that manifest and a copy of the registry. A row is
+green only on exit 0, outcome `derived` and a row object; an entry whose `origin` names no slug is a
+red `origin_unproven` row. The child keeps the host's `GH_CONFIG_DIR` and `GIT_CONFIG_GLOBAL`
+(defaulting to the real `HOME`'s) so the temporary `HOME` does not strand the forge login.
 
-`registry-agreement --registry HOST=FILE... [--intentional PROJECT_ID]...` (issue 765, C13.b) is met (0,
+`registry-agreement --registry HOST=FILE... [--intentional PROJECT_ID]...`
+(`verify_checks.registry_agreement`, issue 765, C13.b) is met (0,
 `green`) when every project registered on more than one of the named hosts carries the same `branch_override`
 (absent counts as a value) in each of those registries; a project whose registries differ is `red` (1)
 unless its id is named by `--intentional`, which records the difference as `intentional`. It reads only the
 files, and exits 2 on a file it cannot read.
 
-`deprecations-retired [--red-pending] [--watch-adapter A] --repo-root R...` (issue 582) states the
+`deprecations-retired [--red-pending] [--watch-adapter A] --repo-root R...`
+(`verify_checks.deprecations_retired_check`, issue 582) states the
 #130 checklist C11 rule over each root, read-only: no deprecated use reported by
 `resolve-project platform-status` (a), no tracked legacy skills config (b), `bindings.deploy.adapter`
 resolved to `none` or absent from a schema 2 snapshot (c), and no skill text naming the retired command (d); with `--watch-adapter A`
-it also reads whether the release target A is adopted and available. It exits 0 when every root is
+it also reads whether the release target A is adopted and available. Concretely: `resolve-project
+platform-status` reports no `project.deprecated_uses` (a), `.claude/skills.config.json` is not
+tracked (b), `resolve-project resolve` exits 0 with `bindings.deploy.adapter` `none` (c), and `git
+grep` finds no `release deploy inspect` (d) outside `.agents/artifacts`, narrowed to
+`home/common/agent-skills/skills` for `fagenorn/nix-config` (the checklist's documented pathspec,
+keyed on the resolved `project.id`). With `--watch-adapter A` a fifth reading is pending until a
+`release.targets[]` entry names A and red unless that release capability is `available`. It exits 0 when every root is
 green, 1 when one is red, 75 when none is red and one is pending, and 2 on a tool error. Under
 `--red-pending` any root that is not green exits 75.
 """
