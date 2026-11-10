@@ -862,12 +862,12 @@ def emitted(state, candidate):
         value, [], None, state)
 
 
-def emitted_claude_only(state, candidate, kind="cutover"):
-    """A real version-2 bundle: claude-only evidence, bound to `candidate`, of reader kind `kind`."""
+def emitted_claude_only(state, candidate, kind="cutover", version=2):
+    """A real version-2 or version-3 bundle: claude-only evidence, bound to `candidate`, of reader kind `kind`."""
     identity = json.loads(json.dumps(IDENTITY))
     identity["bound"]["commit"]["candidate"] = candidate
     identity["pinned"]["builds"].pop("codex", None)
-    profile = agent_gate_bundle.gate_profile(2, kind)
+    profile = agent_gate_bundle.gate_profile(version, kind)
     value = {"approved": {"cases": [
                  dict(case, strata={"claude": case["strata"]["claude"]})
                  for case in flat(stratum(context(1000, 1000)))["cases"]]},
@@ -884,6 +884,12 @@ class BundleVerdictTest(unittest.TestCase):
              "release-128-bundle.json": emitted("unmeasured", "b" * 40)}, SHA)
         self.assertEqual((code, report["verdict"], report["approved"]),
                          (0, "green", ["cutover-130-bundle.json"]))
+
+    def test_an_approved_distributional_cutover_bundle_is_green(self):
+        code, report = verify_checks.bundle_verdict(
+            {"cutover-757-bundle.json": emitted_claude_only("approved", SHA, version=3)}, SHA)
+        self.assertEqual((code, report["verdict"], report["approved"]),
+                         (0, "green", ["cutover-757-bundle.json"]))
 
     def test_a_version_two_bundle_of_another_kind_is_unreadable(self):
         for kind in ("promotion", "release"):
