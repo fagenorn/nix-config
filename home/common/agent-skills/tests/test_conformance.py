@@ -587,7 +587,7 @@ class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
         with fixture() as tmp:
             code, out, err = run("run", "--purpose", "workflow_entry",
                                  "--repo-root", str(make_root(tmp)),
-                                 "--require", "knowledge.context")
+                                 "--require", "knowledge.hints")
             self.assertEqual(code, 2, err)
             report = json.loads(out)
             self.assertEqual(len(report["checks"]), 1)
@@ -597,7 +597,7 @@ class RequiredCapabilityTest(ReportAssertions, unittest.TestCase):
                  check["repair_id"]],
                 ["host.capability.required", "failed", "capability_unavailable",
                  "capability.required.unavailable"])
-            self.assertEqual(report["request"]["required_capabilities"], ["knowledge.context"])
+            self.assertEqual(report["request"]["required_capabilities"], ["knowledge.hints"])
             self.assert_validates(report)
 
     def test_repeated_requires_are_deduplicated_sorted_and_known_names(self):
