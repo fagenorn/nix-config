@@ -237,6 +237,13 @@ class DocsTreeTest(unittest.TestCase):
                 (True, True, False),
             )
 
+    def test_the_codesigned_artifact_docstring_states_no_limitation(self):
+        import ast
+
+        source = (REPO_ROOT / "python/agent_tools/codesigned_artifact_adapter.py").read_text()
+        docstring = " ".join((ast.get_docstring(ast.parse(source)) or "").split())
+        self.assertNotIn("cannot prove", docstring)
+
 
 if __name__ == "__main__":
     unittest.main()
