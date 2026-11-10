@@ -14,6 +14,7 @@ from unittest import mock
 from agent_tools import agent_gate_bundle, forge_markers, verify_checks
 from agent_tools.verify_checks import required_checks, self_hosted_runner
 
+from .guard_policy_world import GuardPolicyWorld
 from .pre_push_world import PrePushWorld
 from .test_agent_gate_bundle import IDENTITY, context, flat, stratum  # the emitted-bundle builders
 
@@ -1080,3 +1081,253 @@ class SelfHostedRunnerCommandTest(unittest.TestCase):
         readme = (ROOT / "python" / "README.md").read_text(encoding="utf-8")
         for needle in ("self-hosted-runner --repo R --runner N --label L", "verify_checks.self_hosted_runner"):
             self.assertIn(needle, readme)
+
+
+class GuardFleetWorld(GuardPolicyWorld):
+    """A hermetic fleet plus a clone whose origin carries the cutover candidate: the real
+    `python/` tree and platform manifest, committed on `cutover-130-candidate`."""
+
+    def __init__(self, test_case):
+        super().__init__(test_case)
+        bare = self.tmp / "candidate-origin.git"
+        pusher = self.tmp / "candidate-pusher"
+        self.clone = self.tmp / "candidate-clone"
+        self.git(self.tmp, "init", "--quiet", "--bare", "-b", "main", str(bare))
+        self.git(self.tmp, "init", "--quiet", "-b", "main", str(pusher))
+        self.git(pusher, "config", "commit.gpgsign", "false")
+        self.git(pusher, "remote", "add", "origin", str(bare))
+        (pusher / "README").write_text("main\n", encoding="utf-8")
+        self.git(pusher, "add", "-A")
+        self.git(pusher, "commit", "--quiet", "-m", "main")
+        self.git(pusher, "push", "--quiet", "origin", "main")
+        self.git(pusher, "checkout", "--quiet", "-b", CANDIDATE_BRANCH)
+        shutil.copytree(ROOT / "python", pusher / "python",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (pusher / verify_checks.MANIFEST_PATH).parent.mkdir(parents=True)
+        shutil.copy(ROOT / verify_checks.MANIFEST_PATH, pusher / verify_checks.MANIFEST_PATH)
+        self.git(pusher, "add", "-A")
+        self.git(pusher, "commit", "--quiet", "-m", "candidate")
+        self.git(pusher, "push", "--quiet", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        self.git(self.tmp, "clone", "--quiet", str(bare), str(self.clone))
+
+    def fleet(self, registry=None):
+        # The host's own PYTHONPATH must not decide whose code derives: the check does.
+        environ = {key: value for key, value in self.env.items() if key != "PYTHONPATH"}
+        return verify_checks.guard_policy_fleet(
+            self.clone, CANDIDATE_BRANCH, environ=environ, registry=registry)
+
+    def lagging_default(self, project_id, slug, *, override):
+        """The anis-desktop nodocom entry: `main` is a schema-1 contract, `dev` a schema-2 one,
+        and the registry entry carries the `branch_override` only when `override` is true."""
+        root = self.project(project_id, slug, integration_branch="dev", register=False)
+        self.git(root, "checkout", "--quiet", "main")
+        old = self.contract(project_id, slug)
+        old["schema_version"] = 1
+        self.commit_contract(root, old, "the project's schema-1 default branch", render=False)
+        self.publish(root, ["main", "dev"])
+        entry = {"project_id": project_id, "root": str(root)}
+        if override:
+            entry["branch_override"] = {"branch": "dev", "default_branch": "main",
+                                        "reason": "default_contract_unresolved"}
+        self.register(entry)
+
+
+class GuardPolicyFleetTest(unittest.TestCase):
+    def setUp(self):
+        self.world = GuardFleetWorld(self)
+
+    def test_every_registered_slug_deriving_is_green(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        self.world.project("fixture/two", "fagenorn/two")
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"]), (0, "green"), report)
+        self.assertEqual([(r["repository"], r["exit"], r["outcome"]) for r in report["rows"]],
+                         [("fagenorn/one", 0, "derived"), ("fagenorn/two", 0, "derived")])
+
+    def test_the_anis_desktop_nodocom_entry_reads_red(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        self.world.lagging_default("elevenyellow/nodocom", "elevenyellow/nodocom",
+                                   override=False)
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"]), (1, "red"), report)
+        [bad] = [r for r in report["rows"] if r["verdict"] == "red"]
+        self.assertEqual((bad["repository"], bad["exit"], bad["outcome"], bad["reason_codes"]),
+                         ("elevenyellow/nodocom", 1, "refused", ["contract_unresolved"]))
+        [good] = [r for r in report["rows"] if r["verdict"] == "green"]
+        self.assertEqual(good["repository"], "fagenorn/one")
+
+    def test_the_same_entry_with_the_override_is_green(self):
+        self.world.lagging_default("elevenyellow/nodocom", "elevenyellow/nodocom",
+                                   override=True)
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"]), (0, "green"), report)
+
+    def test_an_entry_whose_origin_names_no_slug_is_red(self):
+        root = self.world.project("fixture/one", "fagenorn/one")
+        self.world.identity(root, "git@gitlab.com:fagenorn/one.git")
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"]), (1, "red"), report)
+        self.assertEqual([(r["repository"], r["outcome"]) for r in report["rows"]],
+                         [(None, "origin_unproven")])
+
+    def test_an_unreadable_registry_is_red_not_empty(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        self.world.write_registry("{not json")
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"]), (75, "unreadable"), report)
+
+    def test_a_named_registry_file_that_is_missing_is_unreadable(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        code, report = self.world.fleet(registry=self.world.tmp / "no-such-registry.json")
+        self.assertEqual((code, report["verdict"], report["side"], report["rows"]),
+                         (75, "unreadable", "registry", []))
+
+    def test_an_absent_default_registry_is_the_empty_fleet(self):
+        (self.world.home / ".agents/state/fleet/registry.json").unlink(missing_ok=True)
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"], report["rows"]), (0, "green", []))
+
+    def test_a_registry_the_guard_would_refuse_is_unreadable(self):
+        root = self.world.project("fixture/one", "fagenorn/one")
+        entries = [{"project_id": "fixture/one", "root": str(root)}]
+        for name, document in (
+                ("no-schema", {"projects": entries}),
+                ("wrong-schema", {"schema_version": "1", "projects": entries}),
+                ("extra-member", {"schema_version": 1, "projects": entries, "note": "x"})):
+            with self.subTest(name=name):
+                path = self.world.tmp / f"{name}.json"
+                path.write_text(json.dumps(document), encoding="utf-8")
+                code, report = self.world.fleet(registry=path)
+                self.assertEqual((code, report["verdict"], report["side"]),
+                                 (75, "unreadable", "registry"), report)
+
+    def test_a_registry_file_replaces_the_hosts_own(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        empty = self.world.tmp / "empty-registry.json"
+        empty.write_text(json.dumps({"schema_version": 1, "projects": []}), encoding="utf-8")
+        code, report = self.world.fleet(registry=empty)
+        self.assertEqual((code, report["verdict"], report["rows"]), (0, "green", []))
+
+    def test_an_absent_candidate_branch_is_not_yet(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        code, report = verify_checks.guard_policy_fleet(
+            self.world.clone, "no-such-branch", environ=self.world.env)
+        self.assertEqual((code, report["verdict"]), (75, "absent"))
+
+    def test_a_candidate_without_its_python_tree_is_unreadable(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        pusher = self.world.tmp / "candidate-pusher"
+        self.world.git(pusher, "rm", "-rq", "python")
+        self.world.git(pusher, "commit", "--quiet", "-m", "no python")
+        self.world.git(pusher, "push", "--quiet", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"], report["side"]), (75, "unreadable", "candidate"))
+
+    def test_the_candidate_home_keeps_the_hosts_forge_and_git_configuration(self):
+        home = self.world.tmp / "real-home"
+        home.mkdir()
+        (home / ".gitconfig").write_text("[user]\n\tname = t\n", encoding="utf-8")
+        env = verify_checks._candidate_env({"HOME": str(home), "PYTHONPATH": "host"},
+                                           Path("/c/home"), Path("/c/python"))
+        self.assertEqual((env["HOME"], env["PYTHONPATH"]), ("/c/home", "/c/python"))
+        self.assertEqual(env["GH_CONFIG_DIR"], str(home / ".config/gh"))
+        self.assertEqual(env["GIT_CONFIG_GLOBAL"], str(home / ".gitconfig"))
+        kept = verify_checks._candidate_env(
+            {"HOME": str(home), "GH_CONFIG_DIR": "/gh", "GIT_CONFIG_GLOBAL": "/dev/null"},
+            Path("/c/home"), Path("/c/python"))
+        self.assertEqual((kept["GH_CONFIG_DIR"], kept["GIT_CONFIG_GLOBAL"]), ("/gh", "/dev/null"))
+
+    def test_the_candidates_code_derives_not_the_hosts(self):
+        # A candidate whose guard-policy is broken reads unreadable even though the host's
+        # own PYTHONPATH (the world's) holds a working one.
+        self.world.project("fixture/one", "fagenorn/one")
+        pusher = self.world.tmp / "candidate-pusher"
+        (pusher / "python/agent_tools/guard_policy.py").write_text(
+            "import sys\nsys.exit(4)\n", encoding="utf-8")
+        self.world.git(pusher, "commit", "--quiet", "-am", "break")
+        self.world.git(pusher, "push", "--quiet", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"]), (1, "red"), report)
+        self.assertEqual(report["rows"][0]["outcome"], "unreadable")
+
+
+class RegistryAgreementTest(unittest.TestCase):
+    OVERRIDE = {"branch": "dev", "default_branch": "main",
+                "reason": "default_contract_unresolved"}
+
+    def entries(self, override=None):
+        entry = {"project_id": "elevenyellow/nodocom", "root": "/x"}
+        if override is not None:
+            entry["branch_override"] = override
+        return [entry]
+
+    def test_hosts_that_agree_are_green(self):
+        for override in (None, self.OVERRIDE):
+            with self.subTest(override=override):
+                code, report = verify_checks.registry_agreement(
+                    {"mbp": self.entries(override), "anis-desktop": self.entries(override)})
+                self.assertEqual((code, report["verdict"]), (0, "green"), report)
+
+    def test_the_anis_desktop_entry_without_the_override_is_red(self):
+        code, report = verify_checks.registry_agreement(
+            {"mbp": self.entries(self.OVERRIDE), "anis-desktop": self.entries()})
+        self.assertEqual((code, report["verdict"]), (1, "red"), report)
+        [row] = report["rows"]
+        self.assertEqual((row["project_id"], row["verdict"]), ("elevenyellow/nodocom", "red"))
+        self.assertEqual(row["branch_override"], {"mbp": self.OVERRIDE, "anis-desktop": None})
+
+    def test_a_recorded_intentional_difference_is_green(self):
+        code, report = verify_checks.registry_agreement(
+            {"mbp": self.entries(self.OVERRIDE), "anis-desktop": self.entries()},
+            intentional={"elevenyellow/nodocom"})
+        self.assertEqual((code, report["verdict"]), (0, "green"), report)
+        self.assertEqual(report["rows"][0]["verdict"], "intentional")
+
+    def test_a_project_on_one_host_is_not_compared(self):
+        code, report = verify_checks.registry_agreement(
+            {"mbp": self.entries(self.OVERRIDE), "anis-desktop": []})
+        self.assertEqual((code, report["verdict"], report["rows"]), (0, "green", []))
+
+    def test_main_reads_registry_files_and_exits_with_the_verdict(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        files = []
+        for host, override in (("mbp", self.OVERRIDE), ("anis-desktop", None)):
+            path = Path(tmp.name) / f"{host}.json"
+            path.write_text(json.dumps({"schema_version": 1, "projects": self.entries(override)}),
+                            encoding="utf-8")
+            files.append(f"{host}={path}")
+        with mock.patch("sys.stdout"):
+            red = verify_checks.main(["registry-agreement", "--registry", *files])
+            green = verify_checks.main(["registry-agreement", "--registry", *files,
+                                        "--intentional", "elevenyellow/nodocom"])
+        self.assertEqual((red, green), (1, 0))
+
+    def test_main_refuses_a_missing_registry_file(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        good = Path(tmp.name) / "good.json"
+        good.write_text(json.dumps({"schema_version": 1, "projects": self.entries()}),
+                        encoding="utf-8")
+        with mock.patch("sys.stderr"), mock.patch("sys.stdout"):
+            self.assertEqual(verify_checks.main(
+                ["registry-agreement", "--registry", f"mbp={good}",
+                 f"anis-desktop={Path(tmp.name) / 'absent.json'}"]), 2)
+
+    def test_main_refuses_a_registry_file_the_guard_would_refuse(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        bad = Path(tmp.name) / "no-schema.json"
+        bad.write_text(json.dumps({"projects": self.entries()}), encoding="utf-8")
+        with mock.patch("sys.stderr"), mock.patch("sys.stdout"):
+            self.assertEqual(verify_checks.main(
+                ["registry-agreement", "--registry", f"mbp={bad}", f"x={bad}"]), 2)
+
+    def test_main_refuses_an_unreadable_registry_file(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        bad = Path(tmp.name) / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        with mock.patch("sys.stderr"):
+            self.assertEqual(verify_checks.main(
+                ["registry-agreement", "--registry", f"mbp={bad}", f"x={bad}"]), 2)

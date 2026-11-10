@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import forge_markers as fm
-from .forge_world import ForgeWorld, host_clock
+from .forge_world import ForgeWorld, NETWORK_DOWN, host_clock
 
 SLUG, ISSUE = "octo/widgets", 7
 LIST = ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues/{ISSUE}/comments?per_page=100"]
@@ -252,6 +252,12 @@ OID_A, OID_B = "a" * 40, "b" * 40
 NODE = "R_kgDOtest"
 
 
+def cas_code(*args):
+    """The code of `cas_ref`'s failure, None when applied (issue 740: it returns the ForgeError)."""
+    failure = fm.cas_ref(*args)
+    return None if failure is None else failure.code
+
+
 class RefTest(unittest.TestCase):
     def setUp(self):
         self.world = ForgeWorld(self)
@@ -276,9 +282,9 @@ class RefTest(unittest.TestCase):
 
     def test_cas_moves_only_from_the_observed_oid(self):
         self.world.ref_store(SLUG, {REF: OID_A})
-        self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_B, OID_B), "gh_failed")
+        self.assertEqual(cas_code(SLUG, NODE, REF, OID_B, OID_B), "gh_failed")
         self.assertEqual(self.world.refs(), {REF: OID_A})
-        self.assertIsNone(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B))
+        self.assertIsNone(cas_code(SLUG, NODE, REF, OID_A, OID_B))
         self.assertEqual(self.world.refs(), {REF: OID_B})
         self.assertEqual(self.world.argvs("gh")[-1],
                          ["api", "graphql", "-f", f"query={fm.UPDATE_REFS}", "-f", f"repositoryId={NODE}",
@@ -287,22 +293,26 @@ class RefTest(unittest.TestCase):
 
     def test_cas_delete_only_from_the_observed_oid(self):
         self.world.ref_store(SLUG, {REF: OID_A})
-        self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_B, fm.ZERO_OID), "gh_failed")
+        self.assertEqual(cas_code(SLUG, NODE, REF, OID_B, fm.ZERO_OID), "gh_failed")
         self.assertEqual(self.world.refs(), {REF: OID_A})
-        self.assertIsNone(fm.cas_ref(SLUG, NODE, REF, OID_A, fm.ZERO_OID))
+        self.assertIsNone(cas_code(SLUG, NODE, REF, OID_A, fm.ZERO_OID))
         self.assertEqual(self.world.refs(), {})
-        self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, fm.ZERO_OID), "gh_failed")
+        self.assertEqual(cas_code(SLUG, NODE, REF, OID_A, fm.ZERO_OID), "gh_failed")
 
     def test_a_lying_cas_reports_failure_but_applied(self):
         self.world.ref_store(SLUG, {REF: OID_A}, cas_lies=1)
-        self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B), "gh_failed")
+        self.assertEqual(cas_code(SLUG, NODE, REF, OID_A, OID_B), "gh_failed")
         self.assertEqual(fm.read_ref(SLUG, REF), OID_B)
 
     def test_cas_keeps_the_failure_code(self):
         for code in ("gh_failed", "gh_timeout"):
             with self.subTest(code=code), \
                     mock.patch.object(fm, "_gh", side_effect=fm.ForgeError(code, "x")):
-                self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B), code)
+                self.assertEqual(cas_code(SLUG, NODE, REF, OID_A, OID_B), code)
+        for code, transient in (("gh_failed", False), ("gh_timeout", True)):
+            with self.subTest(code=code), \
+                    mock.patch.object(fm, "_gh", side_effect=fm.ForgeError(code, "x")):
+                self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B).transient, transient)
         with mock.patch.object(fm, "_gh", side_effect=fm.ForgeError("gh_missing", "x")), \
                 self.assertRaises(fm.ForgeError) as caught:
             fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B)
@@ -313,7 +323,8 @@ class RefTest(unittest.TestCase):
                         {"data": {"updateRefs": None}}):
             with self.subTest(payload=payload), \
                     mock.patch.object(fm, "_gh", return_value=(0, json.dumps(payload))):
-                self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B), "gh_failed")
+                self.assertEqual(cas_code(SLUG, NODE, REF, OID_A, OID_B), "gh_failed")
+                self.assertFalse(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B).transient)
 
     def test_node_id_outside_the_grammar_is_invalid(self):
         with mock.patch.object(fm, "_gh", return_value=(0, "not a node id\n")), \
@@ -390,3 +401,92 @@ class RefTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TransportTest(unittest.TestCase):
+    """Issue 740 D2: `_gh` marks a transport failure transient; the fake gh's outage and lost replies."""
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def raised(self, call):
+        with self.assertRaises(fm.ForgeError) as caught:
+            call()
+        return caught.exception
+
+    def test_transport_failures_are_transient(self):
+        for stderr in (NETWORK_DOWN, "error connecting to api.github.com\ncheck your internet connection",
+                       "gh: Server Error (HTTP 500)", "gh: Bad Gateway (HTTP 502)",
+                       'Get "https://api.github.com/": net/http: TLS handshake timeout',
+                       "read tcp 10.0.0.2:5000->20.250.119.72:443: read: connection reset by peer",
+                       "x" * 300 + " dial tcp: lookup api.github.com: no such host"):
+            with self.subTest(stderr=stderr[:40]):
+                self.world.respond("gh", LIST, exit=1, stderr=stderr)
+                error = self.raised(lambda: fm.list_markers(SLUG, ISSUE))
+                self.assertEqual((error.code, error.transient), ("gh_failed", True))
+
+    def test_other_failures_are_not_transient(self):
+        for stderr in ("gh: Forbidden (HTTP 403)", "gh: Not Found (HTTP 404)",
+                       "gh: Validation Failed (HTTP 422)", "HTTP 401: Bad credentials"):
+            with self.subTest(stderr=stderr):
+                self.world.respond("gh", LIST, exit=1, stderr=stderr)
+                error = self.raised(lambda: fm.list_markers(SLUG, ISSUE))
+                self.assertEqual((error.code, error.transient), ("gh_failed", False))
+        error = self.raised(lambda: fm.read_ref(SLUG, "refs/heads/x"))  # unregistered: the fake exits 64
+        self.assertEqual((error.code, error.transient), ("gh_failed", False))
+
+    def test_a_timeout_is_transient(self):
+        with mock.patch.object(fm.subprocess, "run",
+                               side_effect=fm.subprocess.TimeoutExpired("gh", fm.TIMEOUT)):
+            error = self.raised(lambda: fm.list_markers(SLUG, ISSUE))
+        self.assertEqual((error.code, error.transient), ("gh_timeout", True))
+
+    def test_constructed_errors_default_by_code(self):
+        self.assertTrue(fm.ForgeError("gh_timeout", "x").transient)
+        for code in ("gh_failed", "gh_missing", "payload_invalid"):
+            with self.subTest(code=code):
+                self.assertFalse(fm.ForgeError(code, "x").transient)
+        self.assertTrue(fm.ForgeError("gh_failed", "x", transient=True).transient)
+        self.assertFalse(fm.ForgeError("gh_timeout", "x", transient=False).transient)
+
+    def test_an_outage_fails_the_next_calls_and_changes_nothing(self):
+        self.world.comment_store(SLUG, ISSUE, [comment(5, claim_body(A))])
+        self.world.outage(2)
+        for _ in range(2):
+            self.assertTrue(self.raised(lambda: fm.post(SLUG, ISSUE, "hello")).transient)
+        self.assertEqual([c["id"] for c in self.world.stored()], [5])
+        self.assertEqual([m.comment_id for m in fm.list_markers(SLUG, ISSUE)], [5])
+        self.world.outage()
+        for _ in range(3):
+            self.assertTrue(self.raised(lambda: fm.list_markers(SLUG, ISSUE)).transient)
+        self.world.outage(0)
+        self.assertEqual([m.comment_id for m in fm.list_markers(SLUG, ISSUE)], [5])
+
+    def test_reset_forgets_the_outage(self):
+        self.world.outage()
+        self.world.reset()
+        self.world.comment_store(SLUG, ISSUE, [comment(5, claim_body(A))])
+        self.assertEqual([m.comment_id for m in fm.list_markers(SLUG, ISSUE)], [5])
+
+    def test_a_lost_reply_applies_then_fails_transient_once(self):
+        self.world.comment_store(SLUG, ISSUE, [], next_id=40, lose_reply=["post"])
+        self.assertTrue(self.raised(lambda: fm.post(SLUG, ISSUE, "hello")).transient)
+        self.assertEqual([c["id"] for c in self.world.stored()], [40])
+        self.assertEqual(fm.post(SLUG, ISSUE, "again"), 41)  # the entry was consumed
+        ref = "refs/agent-locks/land/main"
+        self.world.ref_store(SLUG, {}, lose_reply=["create", "get"])
+        self.assertTrue(self.raised(lambda: fm.create_ref(SLUG, ref, "a" * 40)).transient)
+        self.assertEqual(self.world.refs(), {ref: "a" * 40})
+        self.assertTrue(self.raised(lambda: fm.read_ref(SLUG, ref)).transient)
+        self.assertEqual(fm.read_ref(SLUG, ref), "a" * 40)
+
+    def test_a_cas_transport_failure_is_returned_with_its_class(self):
+        self.world.ref_store(SLUG, {REF: OID_A})
+        bad_gateway = fm.subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="gh: Bad Gateway (HTTP 502)\n")
+        with mock.patch.object(fm.subprocess, "run", return_value=bad_gateway):
+            failure = fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B)
+        self.assertIsInstance(failure, fm.ForgeError)
+        self.assertEqual((failure.code, failure.transient), ("gh_failed", True))
+        self.assertEqual(self.world.refs(), {REF: OID_A})
+        failure = fm.cas_ref(SLUG, NODE, REF, OID_B, OID_B)  # the fake's GraphQL error answer: not a transport error
+        self.assertEqual((failure.code, failure.transient), ("gh_failed", False))

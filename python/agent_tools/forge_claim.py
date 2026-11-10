@@ -12,7 +12,7 @@ D7, labels: a label is ensured (HTTP 422 means it exists) before it is added; re
 that is not there is success.
 
 D8, output: every call, a usage error included, prints exactly one JSON object on one stdout
-line. Exit 0 success, 3 contention or `not_held`, 1 forge error, 2 usage.
+line. Exit 0 success, 3 contention or `not_held`, 1 forge error (carrying `transient`), 2 usage.
 
 D9, ending is append-only: `release` posts an `end` marker first and then edits the claim to
 `released=<reason>`, so a delayed `renew` PATCH can drop that field but never the `end`, and a
@@ -52,11 +52,23 @@ then takes a fresh listing and ends the claim right after judging that listing's
 a renewal that landed before that listing is never undone. One that lands between that listing
 and the end can still lose the claim; the holder's `renew` then reports `not_held` (D3), so
 holders run `renew` before each irreversible step and stop on `not_held`.
+
+D11, transport retry (issue 740): `acquire`, `renew`, `release`, `status`, a one-shot `land
+acquire`, `land release` and `owner-action status` retry the whole verb when it fails with a
+transient `ForgeError` (a `gh` timeout, an HTTP 5xx or a connection failure): three tries, 20 s
+then 40 s between them. The verb is retried whole, never one gh call inside it, because each is
+idempotent for its holder under a lost reply (#623). `land acquire --wait` keeps its own D8 bound
+and is never wrapped; `owner-action post`, `owner-action end` and `land status` run once. Every
+exit-1 line carries `transient`: true when the error was a transport error (the tries ran out).
+A retried `land acquire` that raised after it sent a create or a swap reports `acquired`, not
+`already_held`, for a lock then found at its sha: the programs recheck the base on `acquired`.
+A retried `renew` also sheds the `owner-action` label its lost-reply retirement left behind.
 """
 import argparse
 import json
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -74,6 +86,10 @@ RELEASE_BOX = "Release this claim"
 TICKED = re.compile(rf"\s*[-*] \[[xX]\] {RELEASE_BOX}\s*")
 
 CONTENDED, FORGE_ERROR, USAGE = 3, 1, 2
+
+TRIES = 3
+BACKOFF = (20, 40)  # seconds slept after the first and after the second transient failure
+sleep = time.sleep  # a module attribute so tests patch it
 
 
 class UsageError(Exception):
@@ -327,7 +343,8 @@ def renew(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     again = fm.list_markers(args.repo, args.issue)
     if not any(m.comment_id == winner.comment_id and fm.is_live(m, again) for m in again):
         return CONTENDED, _result(args, "not_held", winner.comment_id)
-    retire_owner_actions(args.repo, args.issue, again, winner.comment_id, "renewed")
+    if not retire_owner_actions(args.repo, args.issue, again, winner.comment_id, "renewed"):
+        _retired_owner_action_label(args.repo, args.issue, again, winner.comment_id)  # a retried renew
     return 0, _result(args, "renewed", winner.comment_id)
 
 
@@ -437,6 +454,41 @@ def _emit(result: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
 
 
+def retried(args: argparse.Namespace) -> bool:
+    """True for the verbs retried whole on a transport error (issue 740, D3)."""
+    if args.command in COMMANDS:
+        return True
+    if args.command == "land":
+        return args.action == "release" or (args.action == "acquire" and not args.wait)
+    return args.command == "owner-action" and args.action == "status"
+
+
+def _error_result(args: argparse.Namespace, error: ForgeError) -> dict[str, Any]:
+    fields = {"error": error.code, "detail": error.detail, "transient": error.transient}
+    if args.command == "land":
+        return forge_land_lock.result(args, "error", **fields)
+    if args.command == "owner-action":
+        return forge_owner_action.result(args, "error", **fields)
+    return _result(args, "error", **fields)
+
+
+def run_verb(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+    """Run the parsed verb once, or up to `TRIES` times when `retried` and the failure is transient."""
+    tries = TRIES if retried(args) else 1
+    attempts = forge_land_lock.Attempts()
+    for attempt in range(tries):
+        try:
+            return (forge_land_lock.run(args, attempts) if args.command == "land"
+                    else forge_owner_action.run(args) if args.command == "owner-action"
+                    else COMMANDS[args.command](args))
+        except ForgeError as error:
+            attempts.failed()
+            if not error.transient or attempt + 1 >= tries:
+                return FORGE_ERROR, _error_result(args, error)
+            sleep(BACKOFF[attempt])
+    raise AssertionError("unreachable")
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     try:
@@ -454,17 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         return USAGE
     except SystemExit as stop:  # -h/--help: argparse printed the help text
         return stop.code if isinstance(stop.code, int) else 0
-    try:
-        code, result = (forge_land_lock.run(args) if args.command == "land"
-                        else forge_owner_action.run(args) if args.command == "owner-action"
-                        else COMMANDS[args.command](args))
-    except ForgeError as error:
-        code, result = FORGE_ERROR, (
-            forge_land_lock.result(args, "error", error=error.code, detail=error.detail)
-            if args.command == "land"
-            else forge_owner_action.result(args, "error", error=error.code, detail=error.detail)
-            if args.command == "owner-action"
-            else _result(args, "error", error=error.code, detail=error.detail))
+    code, result = run_verb(args)
     _emit(result)
     return code
 
