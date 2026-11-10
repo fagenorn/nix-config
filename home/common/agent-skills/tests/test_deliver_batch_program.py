@@ -2014,7 +2014,8 @@ class SourceTest(unittest.TestCase):
     def test_meta_names_the_args(self):
         text = PROGRAM.read_text(encoding="utf-8")
         meta = text[:text.index("\n}\n")]
-        for arg in ("repo_root", "batch_id", "child_script", "issues", "label", "decisions", "review_sizing"):
+        for arg in ("repo_root", "batch_id", "child_script", "issues", "label", "decisions", "review_sizing",
+                    "clerk_model"):
             self.assertIn(arg, meta)
 
     def test_deliver_batch_skill_is_small_and_names_the_program_and_its_args(self):
@@ -2112,6 +2113,70 @@ class AgentTypeTest(unittest.TestCase):
         self.assertTrue(found)
         for call in found:
             self.assertEqual((call["agentType"], call["effort"]), ("clerk", "high"), call["label"])
+
+
+class ClerkModelTest(unittest.TestCase):
+    """#803: clerk_model is checked, sets the model of every clerk call, and is passed to every child and the relaunch only when haiku."""
+
+    def test_clerk_model_must_be_sonnet_or_haiku(self):
+        for bad in ("opus", "Haiku", "", 1, None, True):
+            with self.subTest(bad=bad):
+                result, calls, _ = run(args=dict(ARGS, clerk_model=bad))
+                self.assertEqual(result, {"stage": "args", "error": "clerk_model must be sonnet or haiku"})
+                self.assertEqual(calls, [])
+
+    def test_sonnet_passes_nothing(self):
+        for args in (ARGS, dict(ARGS, clerk_model="sonnet")):
+            with self.subTest(args=args):
+                result, calls, _ = run(args=args, children={"1": ReviewSizingTest.STOP})
+                self.assertEqual(child(calls, 1)["args"],
+                                 {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "plan", "lane": "standard"})
+                self.assertNotIn("clerk_model", result["relaunch"])
+
+    def test_haiku_reaches_the_child_the_relaunch_and_the_resumed_child(self):
+        result, calls, _ = run(args=dict(ARGS, clerk_model="haiku"), children={"1": ReviewSizingTest.STOP})
+        self.assertEqual(child(calls, 1)["args"], {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "plan",
+                                                   "lane": "standard", "clerk_model": "haiku"})
+        self.assertEqual(result["relaunch"]["clerk_model"], "haiku")
+        _, calls, _ = run(args=result["relaunch"], patch={"facts-1": {"claim": {"verdict": "held_by", "by": HOLDER}}})
+        self.assertEqual(child(calls, 1)["args"], {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready",
+                                                   "cont": {"setup": {}}, "clerk_model": "haiku"})
+
+    def test_haiku_reaches_the_standard_rerun_of_an_ineligible_direct_child(self):
+        ineligible = {"stage": "ineligible", "cont": {"setup": {}, "lane": "direct"}}
+        _, calls, _ = run(args=dict(ARGS, clerk_model="haiku"), patch={"facts-1": {"lane": "direct", "why": "small"}},
+                          children={"1": [ineligible, ReviewSizingTest.STOP]})
+        runs = [c for c in calls if c["label"] == "child-1"]
+        self.assertEqual(len(runs), 2)
+        for c in runs:
+            self.assertEqual(c["args"]["clerk_model"], "haiku")
+
+    def test_every_clerk_call_takes_the_clerk_model(self):
+        clerk_stems = {stem for stem, kinds in EXPECTED.items() if kinds == frozenset({CLERK})}
+        reached = set()
+        for index, scenario in enumerate(SCENARIOS):
+            with self.subTest(i=index):
+                base = [c for c in run(**scenario)[1] if c.get("kind", "agent") == "agent"]
+                trial_args = dict(scenario.get("args", ARGS), clerk_model="haiku")
+                trial = [c for c in run(**dict(scenario, args=trial_args))[1] if c.get("kind", "agent") == "agent"]
+                self.assertEqual(labels(trial), labels(base))
+                for b, t in zip(base, trial):
+                    self.assertEqual(t["agentType"], b["agentType"], t["label"])
+                    self.assertEqual(t["effort"], b["effort"], t["label"])
+                    if b["agentType"] == CLERK:
+                        self.assertEqual(b["model"], "sonnet", b["label"])
+                        self.assertEqual(t["model"], "haiku", t["label"])
+                        reached.add(AgentTypeTest.stem_of(t["label"]))
+                    else:
+                        self.assertEqual(t["model"], b["model"], t["label"])
+        self.assertEqual(reached, clerk_stems)
+
+    def test_every_clerk_site_names_the_clerk_model(self):
+        text = PROGRAM.read_text(encoding="utf-8")
+        sites = re.findall(r"agentType: 'clerk', model: ([^,]+),", text)
+        self.assertEqual(len(sites), text.count("agentType: 'clerk'"))
+        self.assertGreater(len(sites), 0)
+        self.assertEqual(set(sites), {"CLERK_MODEL"})
 
 
 WHOLE_RUN = ("run in full every test file among or covering", "never a single test class",
