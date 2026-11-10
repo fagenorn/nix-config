@@ -41,9 +41,9 @@ bindings.commands[review_id].argv \
   --cwd <absolute-worktree> --json
 ```
 
-**Validation.** Require exit 0 and stdout that parses as exactly one JSON object with `status` `0`, empty `touchedFiles`, `runtime.model` `gpt-6-astra`, `runtime.reasoningEffort` `xhigh` and a non-empty `rawOutput` string (the companion's last agent message); then validate the operation's headings. Only that success establishes reviewer identity `Codex`.
+**Validation.** Require exit 0 and stdout that parses as exactly one JSON object with `status` `0`, empty `touchedFiles`, `runtime.model` `gpt-6-astra`, `runtime.reasoningEffort` `xhigh` and a non-empty `rawOutput` string; then validate the operation's headings. Only that success establishes reviewer identity `Codex`.
 
-On the `available` route a daemon, slot or capacity rejection, a completed runtime failure, a malformed or mismatched payload, or an operation-schema failure each stops the operation: no retry, no other reviewer. It is returned to the calling controller as `available: false` with the failure class and the verbatim message. A Codex call under `unsupported` is a routing error.
+On the `available` route a daemon, slot or capacity rejection, a failed run, a malformed or mismatched payload, or an operation-schema failure stops the operation: no retry, no other reviewer. Return `available: false` with the failure class and verbatim message (a failed run's payload `error`, else stderr), naming a usage or quota limit with its reset time. A Codex call under `unsupported` is a routing error.
 
 ## Disposition
 
