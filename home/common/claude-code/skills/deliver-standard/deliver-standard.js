@@ -109,6 +109,8 @@ const CODEX = {
   properties: { available: { type: 'boolean' }, verdict: { type: 'string', enum: ['pass', 'findings'] }, findings: FINDINGS.properties.findings, raw_summary: { type: 'string' } },
   required: ['available', 'verdict', 'findings'],
 }
+// The delivery's changed-line count from the diff-size clerk; measured false means it could not be read.
+const SIZE_SCHEMA = { type: 'object', properties: { measured: { type: 'boolean' }, changed_lines: { type: 'integer', minimum: 0 } }, required: ['measured'] }
 const IMPL = {
   type: 'object',
   properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: { type: 'string' }, commit: { type: 'string' }, tests: { type: 'array', items: { type: 'string' } }, mutation_checked: { type: 'boolean' }, notes: { type: 'string' } },
@@ -963,15 +965,41 @@ Re-review only these previously reported findings for task ${t.n} against the fi
 
 // ---------------- Final review ----------------
 phase('Final review')
-const groups = []
+// #747: with review_sizing on, a delivery of more tasks than one chunk holds is split for review only above this many changed lines.
+const SIZED_CHUNK_LINES = 1500
+let groups = []
+let sizedWhole = false
 const PER = 3
 for (let i = 0; i < plan.tasks.length; i += PER) groups.push(plan.tasks.slice(i, i + PER))
 chunked = groups.length > 1
+// A resume that skips the final review reports the shape it had (#747).
+if ((SKIP_REVIEW || SKIP_FINAL) && finalReviewed && finalReviewed.whole === true) chunked = false
 if (SKIP_FINAL) log(`final review passed at ${finalReviewed.head}; skipped`)
 if (!SKIP_REVIEW && !SKIP_FINAL) {
 {
   const lost = await renew('final-review', 'Final review')
   if (lost) return lost
+}
+if (REVIEW_SIZING && chunked) {
+  let sizeReply = null
+  let sizeWhy = 'no usable reply'
+  try {
+    sizeReply = await call(`${CTX}
+Measure the delivery's diff size. Run git -C ${W} fetch origin, then git -C ${W} diff --shortstat ${RANGE}${declared(plan).map(b => `, then git -C ${b.worktree} diff --shortstat ${b.base}...${b.name}`).join('')}. Each prints at most one line (N files changed, X insertions(+), Y deletions(-)); an empty output or a missing count is 0. Return measured true and changed_lines: the sum of the insertions and deletions over those lines. If any of these commands exits non-zero or prints an error, return measured false and no changed_lines; never return a partial sum. Run nothing else and change nothing.
+${RULES}`, { label: 'diff-size', phase: 'Final review', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: SIZE_SCHEMA })
+  } catch (e) {
+    // The measurement is optional: an agent exception must never abort the delivery.
+    sizeReply = null
+    sizeWhy = `the size step threw: ${e && e.message}`
+  }
+  const lines = sizeReply && typeof sizeReply === 'object' && sizeReply.measured === true && Number.isInteger(sizeReply.changed_lines) && sizeReply.changed_lines >= 0 ? sizeReply.changed_lines : null
+  if (lines === null) log(`final review size not read (${sizeWhy}); keeping the task chunks`)
+  else if (lines <= SIZED_CHUNK_LINES) {
+    groups = [plan.tasks.slice()]
+    chunked = false
+    sizedWhole = true
+    log(`final review: ${lines} changed lines, at most ${SIZED_CHUNK_LINES}; one whole-delivery review`)
+  } else log(`final review: ${lines} changed lines, above ${SIZED_CHUNK_LINES}; keeping the task chunks`)
 }
 const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
@@ -1021,7 +1049,7 @@ if (finalFindings.length) {
     waveFindings = next
   }
 }
-if (present(tip)) finalReviewed = { head: tip, ...branchSnap() }
+if (present(tip)) finalReviewed = { head: tip, ...branchSnap(), ...(sizedWhole ? { whole: true } : {}) }
 }
 }
 

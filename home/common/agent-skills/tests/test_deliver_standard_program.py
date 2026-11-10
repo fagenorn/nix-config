@@ -1888,6 +1888,116 @@ WS_SCENARIO = {"args": dict(ARGS, mode="ready"),
                "patch": {"setup": {"verification": TWO_IDS}, "verify-fix-1": {"start_head": SHA, "commit": FIXED}}}
 
 
+FOUR = {"plan": dict(PLAN, tasks=tasks(4))}
+
+
+def sized(lines):
+    return dict(FOUR, **{"diff-size": {"measured": True, "changed_lines": lines}})
+
+
+class ReviewSizingFinalTest(unittest.TestCase):
+    """#747: with sizing on, the final review is chunked, and the integration review runs, only above 1500 changed lines."""
+
+    def test_off_chunks_four_tasks_by_three_without_measuring(self):
+        result, calls = run(replies=FOUR)
+        names = labels(calls)
+        self.assertTrue(result["chunked"])
+        for label in ("final-1", "final-2", "final-integration"):
+            self.assertIn(label, names)
+        self.assertNotIn("diff-size", names)
+
+    def test_on_at_the_threshold_reviews_the_whole_delivery_once(self):
+        result, calls = run(args=SIZED, replies=sized(1500))
+        self.assertEqual(result["stage"], "done")
+        self.assertFalse(result["chunked"])
+        names = labels(calls)
+        self.assertEqual([l for l in names if l.startswith("final-")], ["final-codex", "final-1"])
+        self.assertIn("of the whole delivery", prompt(calls, "final-1"))
+        self.assertLess(names.index("renew-final-review"), names.index("diff-size"))
+        self.assertLess(names.index("diff-size"), names.index("final-codex"))
+        self.assertLess(names.index("diff-size"), names.index("final-1"))
+        self.assertIn("final review whole", prompt(calls, "pr"))
+
+    def test_on_above_the_threshold_chunks_with_an_integration_review(self):
+        result, calls = run(args=SIZED, replies=sized(1501))
+        self.assertTrue(result["chunked"])
+        names = labels(calls)
+        for label in ("final-1", "final-2", "final-integration"):
+            self.assertIn(label, names)
+        self.assertIn("chunk 1/2", prompt(calls, "final-1"))
+        self.assertEqual(names.count("diff-size"), 1)
+        self.assertIn("final review chunked", prompt(calls, "pr"))
+
+    def test_on_with_three_tasks_never_measures(self):
+        result, calls = run(args=SIZED, replies={"plan": dict(PLAN, tasks=tasks(3))})
+        self.assertFalse(result["chunked"])
+        names = labels(calls)
+        self.assertNotIn("diff-size", names)
+        self.assertNotIn("final-integration", names)
+
+    def test_on_with_an_unread_size_falls_back_to_task_chunks(self):
+        for reply in ("throw", None, {"measured": False}, {"measured": False, "changed_lines": 10},
+                      {"changed_lines": 10}, {"measured": True}, {"measured": True, "changed_lines": "many"},
+                      {"measured": True, "changed_lines": -1}, {"measured": True, "changed_lines": 12.5}):
+            with self.subTest(reply=reply):
+                result, calls = run(args=SIZED, replies=dict(FOUR, **{"diff-size": reply}))
+                self.assertEqual(result["stage"], "done")
+                self.assertTrue(result["chunked"])
+                for label in ("final-1", "final-2", "final-integration"):
+                    self.assertIn(label, labels(calls))
+
+    def test_the_size_step_is_a_low_clerk_reading_shortstat_of_every_range(self):
+        _, calls = run(args=SIZED, replies=FOUR)
+        size = next(c for c in calls if c["label"] == "diff-size")
+        self.assertEqual((size["agentType"], size["model"], size["effort"]), ("clerk", "sonnet", "low"))
+        self.assertEqual(size["schema"]["required"], ["measured"])
+        self.assertEqual(size["schema"]["properties"]["measured"], {"type": "boolean"})
+        self.assertEqual(size["schema"]["properties"]["changed_lines"], {"type": "integer", "minimum": 0})
+        for needle in ("git -C /r/.wt/w-issue-9-x fetch origin",
+                       "git -C /r/.wt/w-issue-9-x diff --shortstat origin/dev...HEAD",
+                       "measured false", "Hard rules for this step"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, size["prompt"])
+        self.assertNotIn("--numstat", size["prompt"])
+        branched = bplan()
+        branched["tasks"] = tasks(3) + [dict(branched["tasks"][1], n=4, file="/g/task-4.md")]
+        _, calls = run(args=SIZED, replies={"plan": branched})
+        self.assertIn("git -C /r/.wt/cand diff --shortstat origin/dev...cand", prompt(calls, "diff-size"))
+
+    def test_cont_records_a_whole_review_only_when_sizing_collapsed_it(self):
+        for args, replies, expected in ((ARGS, FOUR, None), (SIZED, sized(1501), None),
+                                        (SIZED, {"plan": dict(PLAN, tasks=tasks(3))}, None), (SIZED, sized(1500), True)):
+            with self.subTest(args=args, replies=replies):
+                stopped, _ = run(args=args, replies=dict(replies, verify=None), patch={"impl-4": {"commit": TIP}, "impl-3": {"commit": TIP}})
+                self.assertEqual(stopped["stage"], "verify")
+                if expected is None:
+                    self.assertNotIn("whole", stopped["cont"]["final_reviewed"])
+                else:
+                    self.assertIs(stopped["cont"]["final_reviewed"]["whole"], expected)
+
+    def test_a_resume_that_skips_the_final_review_keeps_its_shape(self):
+        for lines, chunked, word in ((1500, False, "whole"), (1501, True, "chunked")):
+            with self.subTest(lines=lines):
+                # A stop after the final review (verify): the resume skips the review on the reviewed head (SKIP_FINAL).
+                stopped, _ = run(args=SIZED, replies=dict(sized(lines), verify=None), patch={"impl-4": {"commit": TIP}})
+                self.assertEqual(stopped["stage"], "verify")
+                result, calls = run(args=dict(SIZED, cont=stopped["cont"]), patch={"setup": {"head": TIP}})
+                self.assertEqual(result["stage"], "done")
+                names = labels(calls)
+                self.assertNotIn("diff-size", names)
+                self.assertNotIn("final-1", names)
+                self.assertIs(result["chunked"], chunked)
+                self.assertIn(f"final review {word}", prompt(calls, "pr"))
+                # A ready stop: the resume skips review and verify on the verified head (SKIP_REVIEW).
+                ready, _ = run(args=dict(SIZED, mode="ready"), replies=sized(lines))
+                self.assertEqual(ready["stage"], "ready")
+                result, calls = run(args=dict(SIZED, cont=ready["cont"]), patch={"setup": {"head": SHA}})
+                self.assertEqual(result["stage"], "done")
+                self.assertNotIn("final-1", labels(calls))
+                self.assertIs(result["chunked"], chunked)
+                self.assertIn(f"final review {word}", prompt(calls, "pr"))
+
+
 class WhitespaceCarryForwardTest(unittest.TestCase):
     """#741: after a whitespace-only verify fix whose whitespace the reviewer attests insignificant, only the ids
     that did not pass re-run and the passes carry forward."""
@@ -3894,7 +4004,7 @@ class DeclaredBranchTest(unittest.TestCase):
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
-    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex",
+    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size",
              "verify", "verify-", "ws-check-", "land-lock-", "land-unlock", "land-push-", "pr", "checks-", "merge",
              "hold", "close-out")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise")),
@@ -3925,6 +4035,7 @@ SCENARIOS = (
     {"replies": {"plan": dict(PLAN, tasks=tasks(1, "low"))}},
     {"replies": {"review-1": BAD, "rereview-1-1": BAD, "rereview-1-2": BAD}},
     {"replies": {"plan": dict(PLAN, tasks=tasks(4)), "final-1": FINDING, "fix-wave-review": NARROWING}},
+    {"args": dict(ARGS, review_sizing=True), "replies": {"plan": dict(PLAN, tasks=tasks(4))}},
     {"replies": {"verify": VERIFY_RED}},
     {"replies": {"checks-1": RED, "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
      "patch": {"fix-ci": {"start_head": SHA, "commit": FIX}}},

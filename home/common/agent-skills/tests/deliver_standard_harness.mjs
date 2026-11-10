@@ -51,6 +51,7 @@ const DEFAULTS = [
   [/^direct-impl$/, { ...DONE, acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }], sensitive: false, ineligible: false, renew: { verdict: 'renewed' } }],
   [/^direct-fix$/, DONE],
   [/-codex$/, { available: true, ...PASS }],
+  [/^diff-size$/, { measured: true, changed_lines: 10 }],
   [/^owner-answer$/, { verdict: 'none', comment_id: null, questions: [], decisions: '', renew: { verdict: 'renewed' } }],
   [/^direct-review/, { ...PASS, acceptance: [{ id: 'AC1', met: true, evidence: 'test_a.py:10 test_works' }] }],
   [/review|^final-/, PASS],
