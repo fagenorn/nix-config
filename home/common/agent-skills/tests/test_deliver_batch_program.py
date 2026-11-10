@@ -35,12 +35,12 @@ def untyped(calls):
             if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
 
 
-def run(args=None, replies=None, patch=None, children=None):
+def run_full(args=None, replies=None, patch=None, children=None, turns=None):
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the deliver-batch scenarios need it")
     scenario = {"args": ARGS if args is None else args, "replies": replies or {},
-                "patch": patch or {}, "children": children or {}}
+                "patch": patch or {}, "children": children or {}, "turns": turns or {}}
     done = subprocess.run([node, str(HARNESS), str(PROGRAM)], input=json.dumps(scenario),
                           capture_output=True, text=True, timeout=60, check=False)
     if done.returncode != 0:
@@ -49,6 +49,11 @@ def run(args=None, replies=None, patch=None, children=None):
     bad = untyped(out["calls"])
     if bad:
         raise AssertionError(f"agent calls without a program agentType: {bad}")
+    return out
+
+
+def run(args=None, replies=None, patch=None, children=None, turns=None):
+    out = run_full(args=args, replies=replies, patch=patch, children=children, turns=turns)
     return out["result"], out["calls"], out["max_active"]
 
 
@@ -629,7 +634,7 @@ class ContTest(unittest.TestCase):
 
 B = "b" * 40
 FIX = "c0ffee"
-HAPPY = ["facts-1", "lane-1", "acquire-1", "child-1", "land-pr-1", "land-sync-1-1", "land-checks-1-1",
+HAPPY = ["facts-1", "lane-1", "acquire-1", "child-1", "child-1", "land-pr-1", "land-sync-1-1", "land-checks-1-1",
          "land-merge-1", "land-unlock-1", "close-out-1"]
 
 
@@ -815,7 +820,7 @@ class LandTest(unittest.TestCase):
         result, calls, _ = run()
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["pr"]), ("landed", 41))
         self.assertEqual(of(calls, 1), HAPPY)
-        self.assertLessEqual(len(of(calls, 1)), 10)
+        self.assertLessEqual(len(of(calls, 1)), 11)
         self.assertIsNone(result["relaunch"])
 
     def test_landing_commands_are_exact(self):
@@ -1604,6 +1609,258 @@ class DemoTest(unittest.TestCase):
         self.assertEqual(result["relaunch"], dict(ARGS, issues=[2], conts={"2": {"setup": {}}}))
         ls = labels(calls)
         self.assertLess(ls.index("close-out-1"), ls.index("acquire-3"))
+
+
+def planned(n):
+    """A plan child's planned stop for issue n, with a cont that names its plan."""
+    cont = {"setup": {"holder": HOLDER, "branch": f"issue-{n}-x", "worktree": f"/r/.wt/w-issue-{n}-x"},
+            "lane": "standard", "plan_reviewed": True, "plan": {"id": f"plan-{n}"}}
+    return {"stage": "planned", "plan": {"id": f"plan-{n}"}, "cont": cont}
+
+
+DIRECT = {"lane": "direct", "why": "small"}
+# A resume whose worktree or plan dir is gone: deliver-standard's setup refuses with no cont.
+NOT_RESUMABLE = {"stage": "setup", "result": {"ok": False, "reason": "not-resumable", "details": "the worktree is gone"}}
+CLAIMED = {"stage": "claimed", "verdict": "held_by", "by": "h2/b9"}
+
+
+def direct_lane(*issues):
+    """Scenario keys that make each issue direct-lane, whether the program reads its lane from lane-<n> or from facts-<n>."""
+    return {"replies": {f"lane-{n}": DIRECT for n in issues}, "patch": {f"facts-{n}": DIRECT for n in issues}}
+
+
+def children_of(calls, n, mode):
+    return [c for c in calls if c["kind"] == "workflow" and c["args"]["issue"] == n and c["args"]["mode"] == mode]
+
+
+def event_index(events, event, issue, mode):
+    wanted = {"event": event, "issue": issue, "mode": mode}
+    for i, e in enumerate(events):
+        if e == wanted:
+            return i
+    raise AssertionError(f"no child event {wanted}: {events}")
+
+
+class PlanAheadTest(unittest.TestCase):
+    """#744: a standard-lane issue plans under a second semaphore ahead of a free delivery slot."""
+
+    ONE_SLOT = {"args": dict(ARGS, issues=[1, 2, 3]), "patch": {"setup": {"max_parallel": 1}}}
+
+    def test_with_one_slot_the_next_plan_starts_before_the_first_ready_child_returns(self):
+        out = run_full(**self.ONE_SLOT)
+        events = out["child_events"]
+        self.assertLess(event_index(events, "start", 2, "plan"), event_index(events, "return", 1, "ready"))
+        self.assertLess(event_index(events, "start", 3, "plan"), event_index(events, "return", 2, "ready"))
+        self.assertEqual([row(out["result"], n)["outcome"] for n in (1, 2, 3)], ["landed"] * 3)
+        self.assertEqual((out["max_active"], out["max_planning"]), (1, 1))
+
+    def test_a_finished_plan_keeps_its_plan_slot_until_it_holds_a_delivery_slot(self):
+        # D4: issue 1's ready child is held for 200 turns. Issue 2 finishes planning long before that and waits for
+        # the one delivery slot with its plan slot kept, so issue 3 is neither claimed nor planned until issue 2 holds it.
+        # A program that gives the plan slot back before it waits for the delivery slot starts issue 3's plan at once.
+        out = run_full(turns={"1:ready": 200}, **self.ONE_SLOT)
+        events, ls = out["child_events"], labels(out["calls"])
+        ready1_done = event_index(events, "return", 1, "ready")
+        self.assertLess(event_index(events, "return", 2, "plan"), ready1_done,
+                        "premise: issue 2 finished planning while issue 1 delivered")
+        plan3 = event_index(events, "start", 3, "plan")
+        self.assertLess(ready1_done, plan3)
+        self.assertLess(event_index(events, "start", 2, "ready"), plan3)
+        child2 = [i for i, label in enumerate(ls) if label == "child-2"]
+        self.assertEqual(len(child2), 2)
+        self.assertLess(child2[1], ls.index("acquire-3"))
+        self.assertEqual([row(out["result"], n)["outcome"] for n in (1, 2, 3)], ["landed"] * 3)
+
+    def test_every_ready_child_of_a_planned_issue_receives_that_plans_cont(self):
+        kids = {str(n): [planned(n), ready(n)] for n in (1, 2, 3)}
+        result, calls, _ = run(children=kids, **self.ONE_SLOT)
+        for n in (1, 2, 3):
+            with self.subTest(issue=n):
+                self.assertEqual([c["args"] for c in children_of(calls, n, "plan")],
+                                 [{"repo_root": "/r", "issue": n, "batch_id": "b1", "mode": "plan", "lane": "standard"}])
+                self.assertEqual([c["args"] for c in children_of(calls, n, "ready")],
+                                 [{"repo_root": "/r", "issue": n, "batch_id": "b1", "mode": "ready", "cont": planned(n)["cont"]}])
+                self.assertEqual(row(result, n)["outcome"], "landed")
+
+    def test_a_direct_issue_never_runs_a_plan_child(self):
+        ineligible = {"stage": "ineligible", "cont": {"setup": {}, "lane": "direct"}}
+        lane = direct_lane(2)
+        for kids in ({}, {"2": [ineligible, ready(2)]}):
+            with self.subTest(children=kids):
+                result, calls, _ = run(args=self.ONE_SLOT["args"], replies=lane["replies"],
+                                       patch={**self.ONE_SLOT["patch"], **lane["patch"]}, children=kids)
+                self.assertEqual(children_of(calls, 2, "plan"), [])
+                self.assertTrue(children_of(calls, 2, "ready"))
+                self.assertEqual(len(children_of(calls, 1, "plan")), 1)
+                self.assertEqual(row(result, 2)["outcome"], "landed")
+
+    def test_a_finished_plan_takes_the_next_delivery_slot_before_queued_direct_issues(self):
+        # With one slot, direct issue 1 running and direct issues 2 and 3 queued, the plan of
+        # standard issue 4 must not wait behind both of them (D4).
+        lane = direct_lane(1, 2, 3)
+        out = run_full(args=dict(ARGS, issues=[1, 2, 3, 4]), replies=lane["replies"],
+                       patch={"setup": {"max_parallel": 1}, **lane["patch"]})
+        events = out["child_events"]
+        after_plan = [e["issue"] for e in events[event_index(events, "return", 4, "plan"):]
+                      if e["event"] == "start" and e["mode"] == "ready"]
+        self.assertEqual(after_plan[0], 4, events)
+        self.assertIn(3, after_plan[1:], "premise: a direct issue was still queued when the plan finished")
+        self.assertEqual([e["issue"] for e in events if e["mode"] == "plan" and e["event"] == "start"], [4])
+        self.assertEqual([row(out["result"], n)["outcome"] for n in (1, 2, 3, 4)], ["landed"] * 4)
+        self.assertEqual((out["max_active"], out["max_planning"]), (1, 1))
+
+    def test_only_one_child_at_a_time_touches_an_issue(self):
+        out = run_full(args=dict(ARGS, issues=[1, 2, 3]))
+        for n in (1, 2, 3):
+            with self.subTest(issue=n):
+                self.assertEqual([(e["event"], e["mode"]) for e in out["child_events"] if e["issue"] == n],
+                                 [("start", "plan"), ("return", "plan"), ("start", "ready"), ("return", "ready")])
+
+    def test_a_plan_ahead_issue_is_claimed_once_before_its_plan_child(self):
+        out = run_full()
+        calls = out["calls"]
+        ls = labels(calls)
+        self.assertEqual(ls.count("acquire-1"), 1)
+        first_child = next(i for i, c in enumerate(calls) if c["kind"] == "workflow")
+        self.assertLess(ls.index("acquire-1"), first_child)
+        self.assertEqual(calls[first_child]["args"]["mode"], "plan")
+        self.assertNotIn("release-1", ls)
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+
+    def test_a_plan_child_that_stops_takes_no_delivery_slot(self):
+        no_cont = {"stage": "setup", "result": {"ok": False, "reason": "no-longer-applies"}}
+        for stop, outcome in ((QUESTION, "questions"), (no_cont, "stopped")):
+            with self.subTest(stop=stop):
+                out = run_full(children={"1": [stop, ready(1)]})
+                self.assertEqual(row(out["result"], 1)["outcome"], outcome)
+                self.assertEqual([c["args"]["mode"] for c in out["calls"] if c["kind"] == "workflow"], ["plan"])
+                self.assertEqual(out["max_active"], 0)
+        _, calls, _ = run(children={"1": [no_cont, ready(1)]})
+        self.assertIn("release-1", labels(calls))
+
+    def test_a_forwarded_cont_without_a_reviewed_plan_plans_ahead_with_it(self):
+        result, calls, _ = run(args=dict(ARGS, conts={"1": QUESTION["cont"]}, decisions={"1": "Use the flag."}),
+                               patch={"facts-1": dict(HELD, decision=OPEN)},
+                               children={"1": [planned(1), ready(1)]})
+        self.assertEqual([c["args"] for c in calls if c["kind"] == "workflow"], [
+            {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "plan", "cont": QUESTION["cont"],
+             "decisions": "Use the flag."},
+            {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready", "cont": planned(1)["cont"],
+             "decisions": "Use the flag."}])
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+
+    def test_a_plan_child_that_cannot_resume_a_forwarded_cont_drops_it(self):
+        # D9: the forwarded cont names a worktree that is gone; the claim is released and the relaunch starts afresh.
+        result, calls, _ = run(args=dict(ARGS, conts={"1": QUESTION["cont"]}), patch={"facts-1": HELD},
+                               children={"1": NOT_RESUMABLE})
+        self.assertEqual([c["args"]["mode"] for c in calls if c["kind"] == "workflow"], ["plan"])
+        self.assertIn("release-1", labels(calls))
+        self.assertEqual(result["relaunch"], ARGS)
+
+    def test_a_reviewed_plan_or_a_merged_pr_goes_straight_to_a_delivery_slot(self):
+        # Regression guard for D3: it passes before and after the change.
+        cont = planned(1)["cont"]
+        _, calls, _ = run(args=dict(ARGS, conts={"1": cont}), patch={"facts-1": HELD})
+        self.assertEqual([c["args"] for c in calls if c["kind"] == "workflow"],
+                         [{"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready", "cont": cont}])
+        merged = {**landing(41), "state": "CLOSED", "claim": {"verdict": "held_by", "by": HOLDER}}
+        _, calls, _ = run(args=dict(ARGS, conts={"1": {"setup": {}, "pr": 41}}), patch={"facts-1": merged},
+                          children={"1": {"stage": "close-out", "pr": 41, "cont": {"setup": {}}}})
+        self.assertEqual([c["args"]["mode"] for c in calls if c["kind"] == "workflow"], ["ready"])
+        # A forwarded cont whose own landing merged (a done commit, no pr) is closed out, never planned.
+        own = {"setup": {"holder": HOLDER, "branch": "issue-1-x", "worktree": "/r/.wt/w-issue-1-x"},
+               "done": [{"n": 1, "commit": "d" * 40}]}
+        landed_own = dict(HELD, labels=["needs-verification"], merged_refs=[{"number": 41, "closes": False}],
+                          landed=[{"number": 41, "commits": ["d" * 40]}])
+        result, calls, _ = run(args=dict(ARGS, conts={"1": own}), patch={"facts-1": landed_own},
+                               children={"1": {"stage": "done", "pr": 41, "merged": True, "acceptance": [],
+                                               "close_out": {"issue_state": "CLOSED", "released": True}}})
+        self.assertEqual([c["args"]["mode"] for c in calls if c["kind"] == "workflow"], ["ready"])
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+
+    def test_a_cont_with_a_pr_or_a_readoptable_open_pr_never_runs_a_plan_child(self):
+        # D3: an integer pr in the cont, or an open PR on the derived branch, sends the issue straight to a delivery slot.
+        _, calls, _ = run(args=dict(ARGS, conts={"1": {"setup": {}, "lane": "standard", "pr": 41}}),
+                          patch={"facts-1": HELD})
+        self.assertEqual([c["args"]["mode"] for c in calls if c["kind"] == "workflow"], ["ready"])
+        _, calls, _ = run(args=dict(ARGS, conts={"1": QUESTION["cont"]}),
+                          patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}},
+                                 "readopt-1": {"ok": False, "reason": "unaccepted"}})
+        self.assertEqual(children_of(calls, 1, "plan"), [])
+        self.assertTrue(children_of(calls, 1, "ready"))
+
+
+class ReadyPathTest(unittest.TestCase):
+    """#744 D7, D9: each failure family the existing tests pin on the first child, on the ready child of a planned issue."""
+
+    def ready_args(self, calls, n):
+        return [c["args"] for c in children_of(calls, n, "ready")]
+
+    def test_a_ready_child_that_cannot_resume_releases_the_claim_and_the_relaunch_plans_afresh(self):
+        first, calls, _ = run(children={"1": [planned(1), NOT_RESUMABLE]})
+        self.assertEqual(self.ready_args(calls, 1)[0]["cont"], planned(1)["cont"])
+        self.assertEqual((row(first, 1)["outcome"], row(first, 1)["stage"]), ("stopped", "setup"))
+        self.assertIn(f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason skipped",
+                      prompt(calls, "release-1"))
+        self.assertEqual(first["relaunch"], ARGS)  # D9: the obsolete plan cont is not forwarded
+        _, calls, _ = run(args=first["relaunch"])
+        self.assertEqual([c["args"] for c in calls if c["kind"] == "workflow"][0],
+                         {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "plan", "lane": "standard"})
+
+    def test_a_ready_child_stop_with_cont_keeps_the_claim_and_forwards_its_own_cont(self):
+        result, calls, _ = run(children={"1": [planned(1), TASK_STOP]})
+        self.assertEqual(self.ready_args(calls, 1)[0]["cont"], planned(1)["cont"])
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "task"))
+        self.assertNotIn("release-1", labels(calls))
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertEqual(result["relaunch"]["conts"], {"1": TASK_STOP["cont"]})
+
+    def test_a_ready_child_that_lost_its_claim_is_claim_lost_without_a_cont(self):
+        result, calls, _ = run(children={"1": [planned(1), CLAIMED]})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["by"]), ("claim-lost", "h2/b9"))
+        self.assertEqual(len(self.ready_args(calls, 1)), 1)
+        self.assertEqual(result["relaunch"], ARGS)
+
+    def test_a_ready_child_stop_on_a_closed_issue_settles(self):
+        for release in ("released", "not_held"):
+            with self.subTest(release=release):
+                result, calls, _ = run(children={"1": [planned(1), TASK_STOP]},
+                                       replies={"settle-1": {"state": "CLOSED", "release": release}})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "stage": "task",
+                                                  "released": release == "released"})
+                self.assertEqual(of(calls, 1)[-2:], ["child-1", "settle-1"])
+                self.assertIn(CLOSED_RELEASE, prompt(calls, "settle-1"))
+                self.assertIsNone(result["relaunch"])
+        result, _, _ = run(children={"1": [planned(1), TASK_STOP]},
+                           replies={"settle-1": {"state": "CLOSED", "release": "error"}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "task"))
+        self.assertEqual(result["relaunch"]["conts"], {"1": TASK_STOP["cont"]})
+
+    def test_every_dead_ready_child_shape_trips_the_breaker_and_a_planned_neighbour_keeps_its_cont(self):
+        # Issue 1's ready child is held for 50 turns, so issue 2 is planned and waiting for the one delivery slot
+        # when the breaker trips: it is refused that slot, keeps its claim and forwards its plan cont (D5).
+        cont = {"setup": {}, "lane": "standard", "partial": 1}
+        shapes = [
+            ("throw", planned(1)["cont"]),
+            ({"stage": "task-review", "task": {"n": 1}, "review": None, "dead_agents": ["review-1"], "cont": cont}, cont),
+            ({"stage": "final-review", "details": "a final reviewer returned nothing",
+              "finals": [None, {"verdict": "pass", "findings": []}], "dead_agents": ["final-1"], "cont": {"setup": {}}},
+             {"setup": {}}),
+            ({"stage": "setup", "result": None, "dead_agents": ["setup"]}, planned(1)["cont"]),
+        ]
+        for dead, kept in shapes:
+            with self.subTest(child=dead):
+                result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"setup": {"max_parallel": 1}},
+                                       children={"1": [planned(1), dead], "2": [planned(2), ready(2)]},
+                                       turns={"1:ready": 50})
+                self.assertEqual(result["stage"], "breaker")
+                self.assertEqual(len(self.ready_args(calls, 1)), 1)
+                self.assertEqual(self.ready_args(calls, 2), [])
+                self.assertEqual(row(result, 2), {"issue": 2, "outcome": "not-admitted", "stage": "planned"})
+                self.assertNotIn("release-1", labels(calls))
+                self.assertNotIn("release-2", labels(calls))
+                self.assertEqual(result["relaunch"]["issues"], [1, 2])
+                self.assertEqual(result["relaunch"]["conts"], {"1": kept, "2": planned(2)["cont"]})
 
 
 class SourceTest(unittest.TestCase):

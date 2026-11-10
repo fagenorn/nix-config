@@ -1,6 +1,6 @@
 export const meta = {
   name: 'deliver-batch',
-  description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children in ready mode, a serial land queue under the cross-host land lock, one table',
+  description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
   whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
@@ -34,6 +34,11 @@ export const meta = {
 // acquire is re-queued once behind the issues waiting for a slot, then stops at acquire with transient: true (#740). Every policy
 // value comes from the project contract that setup resolves; this file carries no project
 // literal and defaults no policy value (D3).
+// #744: a standard-lane issue plans ahead: it is claimed under a PLAN slot, runs its child in mode plan, keeps that slot until a RUN slot
+// is free, then resumes the planned cont in mode ready. PLAN and RUN have MAX slots each and RUN hands a freed slot to a planned issue
+// before any other waiter, so at most MAX issues wait planned and each waits at most one delivery slot. A child on this path that stops
+// without a cont (and is not dead) makes the forwarded cont obsolete: it is dropped, so the relaunch plans afresh. A direct-lane or
+// readoptable issue, a re-adopted merged landing, or one whose cont already carries a reviewed plan or a PR, goes straight to RUN.
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const HOLDER_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -331,11 +336,19 @@ const ASK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', en
 const SETTLE_SCHEMA = { type: 'object', properties: { state: { type: 'string', enum: ['OPEN', 'CLOSED'] }, release: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['state'] }
 const ENDED_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
 
-// A FIFO semaphore of MAX child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted.
-let inUse = 0
-const waiters = []
-const admit = () => new Promise(resolve => { if (inUse < MAX) { inUse++; resolve() } else waiters.push(resolve) })
-const leave = () => { const next = waiters.shift(); if (next) next(); else inUse-- }
+// A FIFO semaphore of child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted.
+// A waiter admitted with `first` (a planned issue) is handed a freed slot before every other waiter, so a finished plan waits at most one delivery slot.
+const semaphore = size => {
+  let inUse = 0
+  const firsts = []
+  const rest = []
+  return {
+    admit: (first = false) => new Promise(resolve => { if (inUse < size) { inUse++; resolve() } else (first ? firsts : rest).push(resolve) }),
+    leave: () => { const next = firsts.shift() || rest.shift(); if (next) next(); else inUse-- },
+  }
+}
+const RUN = semaphore(MAX)
+const PLAN = semaphore(MAX)
 
 // The owner's answer the batch itself carries: the relaunch's decisions only. A ticked decision prompt is read by the child.
 const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
@@ -347,9 +360,9 @@ const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
 const readyOf = n => READY[n]
-// The child's whole input (D1): the batch args, the issue's cont, its lane and the owner's answer, nothing else.
-const childArgs = (n, lane) => {
-  const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode: 'ready' }
+// The child's whole input (D1): the batch args, the mode (plan or ready), the issue's cont, its lane and the owner's answer, nothing else.
+const childArgs = (n, lane, mode) => {
+  const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode }
   if (CONTS[n]) a.cont = CONTS[n]
   else a.lane = lane
   const answer = answerOf(n)
@@ -705,6 +718,9 @@ const readoptable = n => {
   const f = FACTS[n] || {}
   return !!(f.open_pr && f.branch && f.open_pr.head_branch === f.branch)
 }
+// A standard-lane issue plans ahead (#744 D3) unless it is re-adopted, a merged landing's close-out, or its cont already holds a reviewed plan or a PR.
+const plansAhead = (n, lane, readopt) => lane === 'standard' && !readopt && !mergedReadopt(n, FACTS[n]) &&
+  !(isObj(CONTS[n]) && (CONTS[n].plan_reviewed === true || Number.isInteger(CONTS[n].pr)))
 const READOPT_SCHEMA = {
   type: 'object',
   properties: {
@@ -768,8 +784,11 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
   // Every claim, release and lane step below names the branch: without a derived one nothing is claimed (never `--branch undefined`).
   if (!nonEmpty(f.branch)) { rows[n] = { issue: n, outcome: 'stopped', stage: 'branch', detail: nonEmpty(f.branch_error) ? f.branch_error : 'issue-branch derived no branch' }; return }
-  await admit()
-  let admitted = true
+  const ahead = plansAhead(n, laneName, readopt)
+  const FIRST = ahead ? PLAN : RUN
+  await FIRST.admit()
+  let held = FIRST // the semaphore whose slot this issue holds, or null
+  const release = () => { if (held) { const sem = held; held = null; sem.leave() } }
   try {
     if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
     const acquireStep = () => ask(agent(`You claim issue #${n} of ${SLUG} (the git repository at ${REPO}) for the batch holder ${HOLDER}.
@@ -779,10 +798,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     let acq = await recall(acquireStep)
     if (transientError(acq)) {
       // #740 D7: re-queued once, behind every issue waiting for a slot now: give the slot back and ask for one again.
-      leave()
-      admitted = false
-      await admit()
-      admitted = true
+      release()
+      await FIRST.admit()
+      held = FIRST
       if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
       acq = await recall(acquireStep)
     }
@@ -800,8 +818,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           return
         }
         // No child: the slot goes back and the PR lands as it stands, through the same path as a ready child.
-        leave()
-        admitted = false
+        release()
         READY[n] = { head: ro.head, branch: ro.branch, worktree: ro.worktree, acceptance: ro.acceptance, verify: [], tasks: [], cont: CONTS[n] }
         rows[n] = await enqueue(INT, () => land(n, READY[n]))
         return
@@ -819,18 +836,32 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
 
     let r = null
     try {
-      try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
-      if (r && r.stage === 'ineligible' && !terminalChild(r)) {
-        // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
-        delete CONTS[n]
-        laneName = 'standard'
-        rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
-        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
+      if (ahead) {
+        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'plan')) } catch (e) { r = null }
+        if (r && r.stage === 'planned' && isObj(r.cont) && !terminalChild(r)) {
+          CONTS[n] = r.cont
+          if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
+          await RUN.admit(true) // ahead of unplanned waiters; the PLAN slot is kept while this waits
+          PLAN.leave()
+          held = RUN
+          if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
+          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        }
+        // D9: a live stop with no cont makes the forwarded or planned cont obsolete (terminalChild(null) is true: a dead child keeps it).
+        if (!terminalChild(r) && !r.cont) delete CONTS[n]
+      } else {
+        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        if (r && r.stage === 'ineligible' && !terminalChild(r)) {
+          // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
+          delete CONTS[n]
+          laneName = 'standard'
+          rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
+          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        }
       }
       if (terminalChild(r)) trip(`child-${n}`)
     } finally {
-      leave()
-      admitted = false
+      release()
     }
 
     if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `child-${n} returned nothing` }; return }
@@ -896,7 +927,7 @@ Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
     rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }
   } finally {
-    if (admitted) leave()
+    release()
   }
 }
 await parallel(toDeliver.map(n => async () => {
