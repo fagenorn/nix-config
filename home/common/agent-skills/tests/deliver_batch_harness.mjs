@@ -36,7 +36,7 @@ const DEFAULTS = [
   [/^recover-end-/, () => ({ verdict: 'ended' })],
   [/^readopt-/, l => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: AC })],
   [/^land-sync-review-|^land-fix-review-/, () => PASS],
-  [/^land-record-/, (l, p) => { const head = promptHead(p); return { ok: true, head, lock: { verdict: 'moved', lock_sha: head } } }],
+  [/^land-record-/, (l, p) => { const head = promptHead(p); return { ok: true, head, lock: { verdict: 'moved', lock_sha: head }, checks: { state: 'passed', head, required: ['ci'], passed: ['ci'] } } }],
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
   [/^land-pr-/, (l, p) => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: promptHead(p), required: ['ci'], passed: ['ci'] } })],
   [/^land-lock-/, () => ({ verdict: 'already_held', lock_sha: SHA })],
@@ -47,7 +47,7 @@ const DEFAULTS = [
   [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, decision_ended: true, branch_deleted: true, notes: 'ok', release: { verdict: 'released' } })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock']], [/^close-out-/, ['release']]]
+const NESTED = [[/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock', 'checks']], [/^close-out-/, ['release']]]
 
 const calls = []
 let factsPending = 0 // facts agents started and not yet answered
@@ -74,8 +74,8 @@ async function agent(prompt, opts = {}) {
     const row = NESTED.find(([re]) => re.test(label))
     if (row && out && typeof out === 'object' && !Array.isArray(out)) {
       const base = DEFAULTS.find(([re]) => re.test(label))[1](label, prompt)
-      // A record's default lock is moved at the head the reply itself reports.
-      if (/^land-record-/.test(label) && typeof out.head === 'string') base.lock = { verdict: 'moved', lock_sha: out.head }
+      // A record's default lock is moved, and its default checks pass, at the head the reply itself reports.
+      if (/^land-record-/.test(label) && typeof out.head === 'string') { base.lock = { verdict: 'moved', lock_sha: out.head }; base.checks.head = out.head }
       for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
     }
     return out

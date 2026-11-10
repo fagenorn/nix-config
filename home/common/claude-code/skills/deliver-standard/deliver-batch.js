@@ -436,6 +436,10 @@ const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, ren
 const complete = (r, schema) => !!r && schema.required.every(k => r[k] !== undefined && r[k] !== null)
 const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 
+// FOLDS (#801): three consecutive-call pairs are one call each. The release of the land lock leads the close-out call; the first checks poll
+// rides in land-pr (so there is no first resync: the poll already answers behind); and the next poll rides in the record step that follows a head
+// change (a CI fix or a resync). Two pairs stay separate: land-checks then land-merge, because the state picks fix, sync, re-poll or merge; and
+// land-merge then the release, because a retaken lock resyncs first and an unmerged PR stops.
 // The landing of one ready issue (D10). The order is: renew, open or re-adopt the PR at the ready head,
 // take the land lock with --wait and wait for the first checks (one agent call, land-pr), the checks loop (a resync only on a behind answer or a retaken lock), renew, the one-shot
 // pre-merge acquire and the merge (one agent call, land-merge), close out with the lock release first in that call (#677, #716, #801). Every exit goes through the wrapper at the bottom: a landing that holds the
@@ -519,7 +523,10 @@ Accepted head: ${expected}
 Return ok true and head (the headRefOid you read).
 Only when ok is true, move the cross-host landing lock of the branch ${INT} to the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
 ${LOCK_RETURN} Return it as lock; otherwise return lock null.
-${RULES}`, label, { ...clerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA) } } })
+Then, only when ok is true and lock's verdict is acquired, already_held or moved, wait for every check of PR #${pr} at the head, required or not:
+${CHECKS_STEPS(pr)}
+Return those fields as checks; otherwise return checks null.
+${RULES}`, label, { ...clerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
     const lv = rec && rec.lock ? rec.lock.verdict : null
     if (HOLDING(lv)) {
       lockHeld = true
@@ -528,6 +535,7 @@ ${RULES}`, label, { ...clerk, schema: { ...RECORD_SCHEMA, properties: { ...RECOR
     } else if (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to' || (rec && rec.ok === false && !rec.lock)) lockMaybe = null
     if (!rec || rec.ok !== true || rec.head !== expected) return out('stopped', { stage: 'land-record', detail: rec ? rec.detail : `${label} returned nothing`, head: rec ? rec.head : undefined })
     if (!HOLDING(lv)) return out('land-contended', { detail: `the lock did not move to ${expected}` })
+    carried = { label, reply: rec.checks || null }
     return null
   }
 
