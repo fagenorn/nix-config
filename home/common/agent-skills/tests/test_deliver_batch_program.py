@@ -181,12 +181,12 @@ class ReviewSizingTest(unittest.TestCase):
             with self.subTest(args=args):
                 result, calls, _ = run(args=args, children={"1": self.STOP})
                 self.assertEqual(child(calls, 1)["args"],
-                                 {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready", "lane": "standard"})
+                                 {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "plan", "lane": "standard"})
                 self.assertNotIn("review_sizing", result["relaunch"])
 
     def test_on_reaches_the_child_the_relaunch_and_the_resumed_child(self):
         result, calls, _ = run(args=dict(ARGS, review_sizing=True), children={"1": self.STOP})
-        self.assertEqual(child(calls, 1)["args"], {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "ready",
+        self.assertEqual(child(calls, 1)["args"], {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "plan",
                                                    "lane": "standard", "review_sizing": True})
         self.assertIs(result["relaunch"]["review_sizing"], True)
         _, calls, _ = run(args=result["relaunch"], patch={"facts-1": {"claim": {"verdict": "held_by", "by": HOLDER}}})
