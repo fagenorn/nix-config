@@ -133,6 +133,10 @@ const SLUG = SETUP.slug, INT = SETUP.integration_branch, MAX = SETUP.max_paralle
 const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
 const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
+const RELEASE_FIRST = (sha, maybe) => `First, before anything below, release the cross-host landing lock of the branch ${INT}: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
+released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail as release.
+${maybe ? RELEASE_AGAIN(maybe) : ''}Then, whatever its verdict, go on with the steps below.
+`
 
 let ISSUES
 if (HAS_LABEL) {
@@ -424,17 +428,22 @@ const LAND_SYNC_SCHEMA = {
 }
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
 const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes_posted: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
-const MAX_SYNCS = 3
+// Resyncs a landing runs on a behind answer or a retaken lock. With no unconditional first resync, the third behind answer is still contention (#801).
+const MAX_SYNCS = 2
 // A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable (#716).
 const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
 const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, renew: RENEW_SCHEMA, ...extra }, required: ['renew'] })
 const complete = (r, schema) => !!r && schema.required.every(k => r[k] !== undefined && r[k] !== null)
 const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 
+// FOLDS (#801): three consecutive-call pairs are one call each. The release of the land lock leads the close-out call; the first checks poll
+// rides in land-pr (so there is no first resync: the poll already answers behind); and the next poll rides in the record step that follows a head
+// change (a CI fix or a resync). Two pairs stay separate: land-checks then land-merge, because the state picks fix, sync, re-poll or merge; and
+// land-merge then the release, because a retaken lock resyncs first and an unmerged PR stops.
 // The landing of one ready issue (D10). The order is: renew, open or re-adopt the PR at the ready head,
-// take the land lock with --wait (one agent call, land-pr), resync, the checks loop, renew, the one-shot
-// pre-merge acquire and the merge (one agent call, land-merge), release, close out (#677, #716). Every exit goes through the wrapper at the bottom: a landing that holds the
-// lock releases it exactly once, at the last sha it was held at (P8), and a failed landing keeps the
+// take the land lock with --wait and wait for the first checks (one agent call, land-pr), the checks loop (a resync only on a behind answer or a retaken lock), renew, the one-shot
+// pre-merge acquire and the merge (one agent call, land-merge), close out with the lock release first in that call (#677, #716, #801). Every exit goes through the wrapper at the bottom: a landing that holds the
+// lock releases it exactly once, at the last sha it was held at (P8): in the close-out call, and the wrapper releases only what that call did not confirm. A failed landing keeps the
 // claim and its cont (D9).
 // The kinds a criterion row can carry. A note is the orchestrator's own observation: never held, listed in a close-out comment (#736).
 // This copy of the rule lives here because the program has no filesystem access and shares no module with deliver-standard.js.
@@ -454,11 +463,18 @@ const land = async (n, ready) => {
   let lockSha = null
   // A move of the lock whose answer may have been lost (P10): the sha it may now be held at, released after lockSha.
   let lockMaybe = null
+  // The poll a previous call carried for the next round: { label, reply } or null (#801).
+  let carried = null
   const PENDING_WAITS = 3
   const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0, pending: 0 }
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
   const clerk = { agentType: 'clerk', model: 'sonnet', effort: 'low' }
+  // The checks poll steps, shared by the standalone poll and the poll land-pr carries (#801).
+  const CHECKS_STEPS = prRef => `1. git -C ${W} fetch origin; if the local branch is ahead of origin/${B}, push it. head is git -C ${W} rev-parse HEAD (the full sha).
+2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), answer state behind at once with head.
+3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
+4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.`
 
   const RENEW_FIRST = `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
   // The nested renew of a folded reply: a row ends the landing, null continues.
@@ -507,7 +523,10 @@ Accepted head: ${expected}
 Return ok true and head (the headRefOid you read).
 Only when ok is true, move the cross-host landing lock of the branch ${INT} to the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
 ${LOCK_RETURN} Return it as lock; otherwise return lock null.
-${RULES}`, label, { ...clerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA) } } })
+Then, only when ok is true and lock's verdict is acquired, already_held or moved, wait for every check of PR #${pr} at the head, required or not:
+${CHECKS_STEPS(pr)}
+Return those fields as checks; otherwise return checks null.
+${RULES}`, label, { ...clerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
     const lv = rec && rec.lock ? rec.lock.verdict : null
     if (HOLDING(lv)) {
       lockHeld = true
@@ -516,6 +535,7 @@ ${RULES}`, label, { ...clerk, schema: { ...RECORD_SCHEMA, properties: { ...RECOR
     } else if (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to' || (rec && rec.ok === false && !rec.lock)) lockMaybe = null
     if (!rec || rec.ok !== true || rec.head !== expected) return out('stopped', { stage: 'land-record', detail: rec ? rec.detail : `${label} returned nothing`, head: rec ? rec.head : undefined })
     if (!HOLDING(lv)) return out('land-contended', { detail: `the lock did not move to ${expected}` })
+    carried = { label, reply: rec.checks || null }
     return null
   }
 
@@ -572,9 +592,9 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
   const body = async () => {
     if (unknownKinds.length) return out('stopped', { stage: 'plan', detail: 'a ready criterion has a kind that is not code, evidence, human or note', bad_kinds: unknownKinds })
     // The order (#677): the PR opens at the ready head, the land lock is taken waiting (the CLI waits
-    // within its bound, so the acquire is sent once), and only then does the first resync run, so no
-    // resync, check or merge happens outside the lock. A resync that changes the head pushes it and
-    // advance() moves the lock; lockSha changes only on a holding verdict, so the release below always
+    // within its bound, so the acquire is sent once) and the first checks are waited for in the same call
+    // (#801), so no check or merge happens outside the lock. A resync runs only on a behind answer or a
+    // retaken lock; one that changes the head pushes it and advance() moves the lock; lockSha changes only on a holding verdict, so the release below always
     // names the last sha the lock was held at, even when a move fails.
     // The pr call may take the lock (--wait) after opening the PR: mark the ready head as possibly held before it, so a lost reply still reaches the release (P5).
     lockHeld = true
@@ -587,7 +607,10 @@ Body, plain prose, no single or double quotes, dollar signs, backticks or backsl
 Return pr (number) and head (the full sha of the pushed head).
 Take the cross-host landing lock of the branch ${INT} for that PR at the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null.
-${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: 'sonnet', effort: 'high', schema: withRenew(LAND_PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
+Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait for every check of that PR at the head, required or not:
+${CHECKS_STEPS('<the PR number>')}
+Return those fields as checks; otherwise return checks null.
+${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: 'sonnet', effort: 'high', schema: withRenew(LAND_PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) }) }), r => r.renew)
     if (!prR) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
     // A renew that ended ran nothing after it; a refused lock holds nothing (P5). Otherwise the lock stays marked held at expected (O2).
     if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
@@ -604,19 +627,17 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: 'sonnet', effort: 'high'
       return out('stopped', { stage: 'land-lock', detail: v1 === null ? `land-pr-${n} returned no lock verdict` : v1 })
     }
 
-    const first = await resync()
-    if (first) return first
+    carried = { label: `land-pr-${n}`, reply: prR.checks || null }
 
     for (;;) {
       c.checks++
       const label = `land-checks-${n}-${c.checks}`
-      const ck = await call(`Wait for every check of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head, required or not.
-1. git -C ${W} fetch origin; if the local branch is ahead of origin/${B}, push it. head is git -C ${W} rev-parse HEAD (the full sha).
-2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), answer state behind at once with head.
-3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
-4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.
+      const fold = carried
+      carried = null
+      const ck = fold ? fold.reply : await call(`Wait for every check of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head, required or not.
+${CHECKS_STEPS(pr)}
 ${RULES}`, label, { ...clerk, schema: LAND_CHECKS_SCHEMA })
-      if (!ck) return out('stopped', { stage: 'checks', detail: `${label} returned nothing` })
+      if (!ck) return out('stopped', { stage: 'checks', detail: fold ? `${fold.label} returned no checks` : `${label} returned nothing` })
       if (ck.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: ck.head })
 
       const failingNames = ck.failing || []
@@ -690,21 +711,23 @@ ${RULES}`, `land-merge-${n}`, { ...clerk, schema: withRenew(LAND_MERGE_SCHEMA, {
       if (!complete(mg, LAND_MERGE_SCHEMA) || mg.merged !== true) return out('stopped', { stage: 'merge', detail: mg.notes })
       break
     }
-    await unlock()
     // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
     CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
 
     const openCriteria = ready.acceptance.filter(isOpen)
     const notes = ready.acceptance.filter(a => a && a.kind === 'note')
+    // The lock release rides first in the close-out call (#801); the wrapper releases only what that call did not confirm.
+    const folding = lockHeld
     const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
-1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
+${folding ? RELEASE_FIRST(lockSha, lockMaybe && lockMaybe !== lockSha ? lockMaybe : null) : ''}1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
 2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released. ${FORGE_TIMEOUT}
 3. End the owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision. The merge proves the conflict and the label resolved and the decision settled; a verdict none is fine. decision_ended is true only when the decision end exited 0 (verdict ended or none).
 ${notes.length ? `4. Unless a comment starting Orchestrator notes for PR ${pr} already exists on #${n} (an earlier attempt), write to a file outside any work tree a comment whose first line is Orchestrator notes for PR ${pr} (observations the orchestrator records itself; not graded, not held): and then one line <id>: <text> per note of ${JSON.stringify(notes.map(a => ({ id: a.id, text: a.text })))}, and post it with ${UNSET}gh issue comment ${n} --repo ${SLUG} --body-file <file>. Return notes_posted true once that comment exists.\n` : ''}${notes.length ? 5 : 4}. ${noHold
       ? `Every criterion is of kind code or note. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
       : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
 Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended${notes.length ? ', notes_posted' : ''} and notes.
-${RULES}`, `close-out-${n}`, { ...clerk, schema: CLOSE_SCHEMA })
+${RULES}`, `close-out-${n}`, { ...clerk, schema: folding ? { ...CLOSE_SCHEMA, properties: { ...CLOSE_SCHEMA.properties, release: NULLABLE(RELEASE_SCHEMA) } } : CLOSE_SCHEMA })
+    if (folding && co && co.release && (co.release.verdict === 'released' || co.release.verdict === 'not_held')) lockHeld = false
     const want = noHold ? 'CLOSED' : 'OPEN'
     if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true || (notes.length && co.notes_posted !== true)) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
     return out(noHold ? 'landed' : 'landed-held')
