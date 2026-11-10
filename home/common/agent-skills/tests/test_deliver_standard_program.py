@@ -124,7 +124,6 @@ RENEW_READ = {"verdict", "by", "detail", "transient"}
 # label: (top-level fields the program or a later prompt reads, {member: fields read inside it}); a member
 # named "<name>[]" is an array whose items object is checked.
 FOLDED_READ = {
-    "owner-answer": ({"verdict", "decisions", "comment_id", "questions"}, {"renew": RENEW_READ}),
     "verify": ({"head", "clean", "results"}, {"renew": RENEW_READ, "results[]": {"id", "status", "summary"}}),
     "pr": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "checks-1": ({"state", "head", "failing", "details", "pending"}, {"renew": RENEW_READ}),
@@ -132,12 +131,13 @@ FOLDED_READ = {
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
                "worktree_path", "head", "merged_pr", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
                "existing", "unset_env", "merge_strategy", "delete_branch", "review", "review_state", "knowledge",
-               "verification", "holder", "acquire", "claim"},
+               "verification", "holder", "acquire", "claim", "answer", "renew"},
               {"existing": {"local_branch", "remote_branch", "worktree", "dirty", "status"},
                "review": {"code", "plan"}, "review_state": {"code", "plan"},
                "knowledge": {"standards", "hints", "rejections"},
                "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason"},
-               "acquire": {"verdict", "by", "detail", "transient"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"}}),
+               "acquire": {"verdict", "by", "detail", "transient"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"},
+               "answer": {"verdict", "comment_id", "questions", "decisions"}, "renew": RENEW_READ}),
 }
 
 
@@ -165,14 +165,26 @@ class FoldTest(unittest.TestCase):
                 self.assertLessEqual(top, set(schema["properties"]))
                 for name, fields in nested.items():
                     branch = member(schema, name)
-                    if name in ("acquire", "claim", "lock"):
+                    folded = label == "setup" and name in ("answer", "renew")
+                    if name in ("acquire", "claim", "lock") or folded:
                         self.assertIn({"type": "null"}, schema["properties"][name]["anyOf"])
                     self.assertLessEqual(fields, set(branch["properties"]), name)
                     if name == "renew":
                         self.assertEqual(branch, renew)
-                        self.assertEqual(schema["required"], ["renew"])
+                        if folded:
+                            self.assertNotIn("renew", schema.get("required", []))
+                        else:
+                            self.assertEqual(schema["required"], ["renew"])
+                    if folded:
+                        self.assertNotIn(name, schema.get("required", []))
                     if name == "lock":
                         self.assertEqual(branch, lock)
+        with self.subTest(label="owner-answer"):
+            _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
+            schema = schema_of(resumed, "owner-answer")
+            self.assertLessEqual({"verdict", "decisions", "comment_id", "questions"}, set(schema["properties"]))
+            self.assertEqual(schema["properties"]["renew"], renew)
+            self.assertEqual(schema["required"], ["renew"])
 
     def test_gate_failure_after_a_folded_claim_keeps_a_claim_incomplete_cont(self):
         derive = "Derive branch from bindings.vcs.branch_pattern"
@@ -193,7 +205,7 @@ class FoldTest(unittest.TestCase):
                 cont = result["cont"]
                 self.assertTrue(cont["claim_incomplete"])
                 self.assertEqual(cont["setup"]["holder"], HOLDER)
-                for nested in ("acquire", "claim"):
+                for nested in ("acquire", "claim", "answer", "renew"):
                     self.assertNotIn(nested, cont["setup"])
                 resumed, calls = run(args=dict(ARGS, cont=cont))
                 self.assertEqual(resumed["stage"], "done")
@@ -300,7 +312,7 @@ class FoldTest(unittest.TestCase):
         self.assertLess(names.index("renew-plan"), names.index("plan-review"))
 
 
-CHILD_HAPPY = ["setup", "owner-answer", "plan", "plan-codex", "plan-review", "renew-tasks", "impl-1", "review-1",
+CHILD_HAPPY = ["setup", "plan", "plan-codex", "plan-review", "renew-tasks", "impl-1", "review-1",
                "renew-final-review", "final-codex", "final-1", "verify", "pr", "checks-1", "merge",
                "land-unlock", "hold", "close-out"]
 
@@ -479,22 +491,68 @@ ANSWER = {"verdict": "answered", "comment_id": 30, "decisions": "May the deliver
 ASKED = {"status": "needs_user", "questions": [{"question": "Which host?", "options": ["Host one.", "Host two."]}]}
 
 
+# A resume that has no plan yet: it reads the owner's answer through the owner-answer step.
+RESUME_FOR_ANSWER = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                               "holder": HOLDER, "base_sha": SHA}, "plan": None, "plan_reviewed": False, "done": []}
+SETUP_ACQUIRE = "forge-claim acquire --repo <slug> --issue 9 --holder <host>/session-s1 --branch <branch>"
+SETUP_RENEW = "forge-claim renew --repo <slug> --issue 9 --holder <host>/session-s1 --branch <branch>"
+SETUP_STATUS = "forge-claim owner-action status --repo <slug> --issue 9 --reason decision"
+
+
 class OwnerAnswerTest(unittest.TestCase):
-    def test_the_answer_is_read_after_the_claim_and_reaches_the_planner(self):
-        result, calls = run(replies={"owner-answer": ANSWER})
+    def test_a_fresh_setup_reads_the_answer_after_the_claim_and_runs_no_owner_answer_step(self):
+        result, calls = run(args=dict(ARGS, mode="plan"), patch={"setup": {"answer": ANSWER}})
+        self.assertEqual(result["stage"], "planned")
+        names = labels(calls)
+        self.assertNotIn("owner-answer", names)
+        self.assertFalse([l for l in names if l.startswith("renew-")], names)
+        setup = prompt(calls, "setup")
+        self.assertLess(setup.index(SETUP_ACQUIRE), setup.index(SETUP_RENEW))
+        self.assertLess(setup.index(SETUP_RENEW), setup.index(SETUP_STATUS))
+        self.assertLess(setup.index(SETUP_STATUS), setup.index("worktree add <worktree_path> <branch>"))
+        schema = schema_of(calls, "setup")
+        self.assertNotIn("answer", schema.get("required", []))
+        self.assertNotIn("renew", schema.get("required", []))
+        self.assertIn(ANSWER["decisions"], prompt(calls, "plan"))
+        self.assertNotIn("answer", result["cont"]["setup"])
+        self.assertNotIn("renew", result["cont"]["setup"])
+        self.assertEqual(result["cont"]["decisions"], [ANSWER["decisions"]])
+
+    def test_an_unusable_folded_answer_stops_before_planning_and_the_resume_reads_it(self):
+        for answer in (None, {"verdict": "error"}, {"verdict": "answered"}, dict(ANSWER, decisions=""),
+                       dict(ANSWER, decisions="  ")):
+            with self.subTest(answer=answer):
+                result, calls = run(patch={"setup": {"answer": answer}})
+                self.assertEqual(result["stage"], "owner-answer")
+                self.assertEqual(labels(calls), ["setup"])
+                cont = result["cont"]
+                self.assertNotIn("claim_incomplete", cont)
+                self.assertNotIn("answer", cont["setup"])
+                resumed, calls = run(args=dict(ARGS, cont=cont), replies={"owner-answer": ANSWER})
+                self.assertEqual(resumed["stage"], "done")
+                names = labels(calls)
+                self.assertLess(names.index("owner-answer"), names.index("plan"))
+
+    def test_the_direct_lane_setup_reads_no_answer_and_renews_nothing(self):
+        _, calls = run(args=dict(ARGS, lane="direct"))
+        setup = prompt(calls, "setup")
+        self.assertNotIn("owner-action status", setup)
+        self.assertNotIn("forge-claim renew", setup)
+
+    def test_a_resumed_answer_read_still_renews_first(self):
+        result, calls = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER), replies={"owner-answer": ANSWER})
         self.assertEqual(result["stage"], "done")
-        ls = labels(calls)
-        self.assertLess(ls.index("setup"), ls.index("owner-answer"))
         answer = prompt(calls, "owner-answer")
-        self.assertIn(RENEW, answer)
         self.assertLess(answer.index(RENEW), answer.index("forge-claim owner-action status"))
-        self.assertLess(ls.index("owner-answer"), ls.index("plan"))
-        self.assertIn("forge-claim owner-action status --repo owner/repo --issue 9 --reason decision",
-                      prompt(calls, "owner-answer"))
-        self.assertIn(f"they are binding: {ANSWER['decisions']}", prompt(calls, "plan"))
+        self.assertIn(ANSWER["decisions"], prompt(calls, "plan"))
+        result, calls = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER),
+                            patch={"owner-answer": {"renew": {"verdict": "not_held", "by": "h2/b1"}}})
+        self.assertEqual((result["stage"], result["at"]), ("claim-lost", "plan"))
+        self.assertNotIn("plan", labels(calls))
 
     def test_decisions_ride_in_cont_and_merge_without_repeats(self):
-        first, _ = run(args=dict(ARGS, decisions="Use the flag."), replies={"owner-answer": ANSWER, "plan": ASKED})
+        first, _ = run(args=dict(ARGS, decisions="Use the flag."), patch={"setup": {"answer": ANSWER}},
+                       replies={"plan": ASKED})
         self.assertEqual(first["stage"], "plan")
         self.assertEqual(first["cont"]["decisions"], ["Use the flag.", ANSWER["decisions"]])
         second, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"owner-answer": ANSWER, "plan": ASKED})
@@ -504,7 +562,7 @@ class OwnerAnswerTest(unittest.TestCase):
     def test_an_open_or_absent_prompt_adds_nothing(self):
         for verdict in ("none", "open"):
             with self.subTest(verdict=verdict):
-                result, calls = run(replies={"owner-answer": dict(ANSWER, verdict=verdict, decisions="")})
+                result, calls = run(patch={"setup": {"answer": dict(ANSWER, verdict=verdict, decisions="")}})
                 self.assertNotIn("The owner has answered", prompt(calls, "plan"))
                 self.assertNotIn("decisions", result.get("cont") or {})
 
@@ -512,7 +570,7 @@ class OwnerAnswerTest(unittest.TestCase):
         for reply in (None, {"verdict": "error"}, {"verdict": "answered"}, dict(ANSWER, decisions=""),
                       dict(ANSWER, decisions="  ")):
             with self.subTest(reply=reply):
-                result, calls = run(replies={"owner-answer": reply})
+                result, calls = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER), replies={"owner-answer": reply})
                 self.assertEqual(result["stage"], "owner-answer")
                 self.assertIn("cont", result)
                 self.assertNotIn("plan", labels(calls))
@@ -558,13 +616,55 @@ class OwnerAnswerTest(unittest.TestCase):
         self.assertEqual(result["stage"], "close-out")
 
 
+HELD = {"verdict": "already_held", "comment_id": 5}
+BATCH_CHILD = {"repo_root": "/r", "issue": 9, "batch_id": "b7"}
+
+
+class FoldedSetupRenewTest(unittest.TestCase):
+    """#745 D1: an already_held acquire refreshes nothing, so the fresh setup renews before planning."""
+
+    def test_an_already_held_setup_renews_and_plans_without_an_owner_answer_step(self):
+        for args in (ARGS, BATCH_CHILD):
+            with self.subTest(args=args):
+                result, calls = run(args=args, patch={"setup": {"acquire": HELD, "renew": {"verdict": "renewed"}}})
+                self.assertEqual(result["stage"], "done")
+                self.assertNotIn("owner-answer", labels(calls))
+
+    def test_a_lost_setup_renew_after_already_held_stops_before_plan(self):
+        for renew in ({"verdict": "not_held", "by": "h2/b1"}, {"verdict": "error", "detail": "forge down"}, None):
+            with self.subTest(renew=renew):
+                result, calls = run(args=BATCH_CHILD, patch={"setup": {"acquire": HELD, "renew": renew,
+                                                                       "answer": ANSWER}})
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", "plan"))
+                self.assertEqual(labels(calls), ["setup"])
+                if renew and renew["verdict"] == "not_held":
+                    self.assertNotIn("cont", result)
+                else:
+                    self.assertTrue(result["cont"]["claim_incomplete"])
+                    self.assertNotIn("renew", result["cont"]["setup"])
+                    self.assertNotIn(ANSWER["decisions"], result["cont"].get("decisions") or [])
+
+    def test_a_transient_setup_renew_renews_again_through_the_owner_answer_step(self):
+        result, calls = run(args=BATCH_CHILD, patch={"setup": {"acquire": HELD, "renew": TRANSIENT}},
+                            replies={"owner-answer": ANSWER})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[:3], ["setup", "owner-answer", "plan"])
+        self.assertIn(RENEW.replace(HOLDER, "h1/b7"), prompt(calls, "owner-answer"))
+
+    def test_an_acquired_setup_reads_no_renew(self):
+        result, calls = run(patch={"setup": {"renew": None}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("owner-answer", labels(calls))
+
+
 RENEW = f"forge-claim renew --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x"
 # (at, the call that renews, nested): a nested renew rides in that call's reply as renew.
-BOUNDARIES = [("plan", "owner-answer", True), ("tasks", "renew-tasks", False),
+BOUNDARIES = [("tasks", "renew-tasks", False),
               ("final-review", "renew-final-review", False), ("verify", "verify", True),
               ("ship", "pr", True), ("checks-1", "checks-1", True), ("merge", "merge", True)]
 # The text each folded prompt runs after its renew.
-STEP_MARK = {"owner-answer": "forge-claim owner-action status", "verify": "Run the project's declared verification",
+STEP_MARK = {"verify": "Run the project's declared verification",
              "pr": "open the pull request", "checks-1": "to be mergeable", "merge": "forge-claim land acquire"}
 
 
@@ -705,7 +805,6 @@ class ClaimTest(unittest.TestCase):
 TRANSIENT = {"verdict": "error", "detail": "gh_failed: dial tcp: connect: network is unreachable", "transient": True}
 # The full second reply of each folded step whose first renew ran out of transport retries; the harness fills renew and lock.
 SECOND = {
-    "owner-answer": {"verdict": "none", "comment_id": None, "questions": [], "decisions": ""},
     "verify": {"head": SHA, "clean": True, "results": [{"id": "build", "status": "pass", "summary": "ok"}]},
     "pr": {"pr": 42, "head": SHA},
     "checks-1": {"state": "passed", "head": SHA, "required": ["ci"]},
@@ -776,12 +875,19 @@ class TransientTest(unittest.TestCase):
                 self.assertEqual(labels(calls).count("acquire"), 2)
                 self.assertEqual("worktree" in labels(calls), stage == "done")
 
+    def test_a_transient_folded_acquire_reads_the_answer_through_the_owner_answer_step(self):
+        result, calls = run(patch={"setup": {"acquire": TRANSIENT, "claim": None, "answer": None}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:5], ["setup", "acquire", "worktree", "owner-answer", "plan"])
+
     def test_every_renew_and_acquire_asks_for_transient(self):
         _, calls = run()
         self.assertEqual(schema_of(calls, "renew-tasks")["properties"]["transient"], {"type": "boolean"})
-        for via in ("setup", "renew-tasks", "owner-answer", "verify", "pr", "checks-1", "merge"):
+        for via in ("setup", "renew-tasks", "verify", "pr", "checks-1", "merge"):
             with self.subTest(via=via):
                 self.assertIn("transient", prompt(calls, via))
+        _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
+        self.assertIn("transient", prompt(resumed, "owner-answer"))
         stopped, _ = run(patch={"pr": {"renew": None}})
         _, calls = run(args=dict(ARGS, cont=stopped["cont"]))
         self.assertEqual(schema_of(calls, "acquire")["properties"]["transient"], {"type": "boolean"})
@@ -790,9 +896,11 @@ class TransientTest(unittest.TestCase):
     def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
         timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
         _, calls = run()
-        for via in ("setup", "renew-tasks", "owner-answer", "verify", "pr", "checks-1", "merge"):
+        for via in ("setup", "renew-tasks", "verify", "pr", "checks-1", "merge"):
             with self.subTest(via=via):
                 self.assertIn(timeout, prompt(calls, via))
+        _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
+        self.assertIn(timeout, prompt(resumed, "owner-answer"))
         _, calls = run(patch={"pr": {"head": "c" * 40}})  # a head-moved stop releases the lock
         self.assertIn(timeout, prompt(calls, "land-unlock"))
         stopped, _ = run(patch={"pr": {"renew": None}})
@@ -3468,7 +3576,7 @@ NARROWING = {"verdict": "findings",
              "findings": [{"severity": "critical", "summary": "race in release", "relation": "narrowing"}]}
 SCENARIOS = (
     {},
-    {"replies": {"owner-answer": ANSWER}},
+    {"args": dict(ARGS, cont=RESUME_FOR_ANSWER), "replies": {"owner-answer": ANSWER}},
     {"replies": {"plan": with_criteria(PlanRulesTest.ROWS[0][1]), "plan-revise": with_criteria(PlanRulesTest.ROWS[0][1]),
                  "plan-rules-revise": with_criteria(PlanRulesTest.ROWS[0][1])}},
     {"replies": {"plan-review": FINDING}},

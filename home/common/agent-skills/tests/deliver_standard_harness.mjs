@@ -4,7 +4,7 @@
 // A label with no reply gets the default for its kind (DEFAULTS below); a patch
 // is merged over that default; a reply "throw" throws, and a program throw prints { result: null, error, calls }. A folded label (NESTED) given an explicit object reply with no own key for a nested step
 // gets that step's default; a key present with null stays null. The fresh setup prompt (it names `--holder <host>/<id> `)
-// also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire and claim; a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}] }.
+// also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire, claim, answer (the owner's answer) and renew (the already_held claim renew); a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}] }.
 import { readFileSync } from 'node:fs'
 
 const program = readFileSync(process.argv[2], 'utf8')
@@ -24,6 +24,8 @@ const HOLDER_ID = prompt => { const m = /--holder <host>\/([A-Za-z0-9._-]+) /.ex
 const FOLDED_SETUP = {
   acquire: { verdict: 'acquired', comment_id: 7 },
   claim: { ok: true, worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard' },
+  answer: { verdict: 'none', comment_id: null, questions: [], decisions: '' },
+  renew: { verdict: 'renewed' },
 }
 const holderOf = (host, prompt) => (typeof host === 'string' && host ? { holder: `${host}/${HOLDER_ID(prompt)}` } : {})
 const PLAN = {
@@ -63,7 +65,7 @@ const DEFAULTS = [
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok' }],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim']], [/^(pr|merge)$/, ['renew', 'lock']], [/^checks-/, ['renew']]]
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^(pr|merge)$/, ['renew', 'lock']], [/^checks-/, ['renew']]]
 const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)
