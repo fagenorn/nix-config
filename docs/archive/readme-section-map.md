@@ -58,3 +58,18 @@ Where each section of the three READMEs that issue 694 dissolved went: contract 
 | `home/common/claude-code/README.md` | Cache proxy | decision | `docs/areas/hosts/adr/004-claude-routes-through-the-proxy-by-default.md` |
 | `home/common/claude-code/README.md` | Accounts | decision | `docs/areas/hosts/adr/005-account-profiles-link-shared-config.md` |
 | `home/common/claude-code/README.md` | Plugins | decision | `docs/areas/hosts/adr/006-codex-plugin-is-a-pinned-input-plus-patch.md` |
+| `python/README.md` | Package and launchers | overview | `python/README.md` |
+| `python/README.md` | Package and launchers | decision | `docs/areas/system/adr/002-one-agent-tools-package.md` |
+| `python/README.md` | artifact-budget | contract | `python/agent_tools/artifact_budget.py` |
+| `python/README.md` | issue-branch | contract | `python/agent_tools/issue_branch.py` |
+| `python/README.md` | `lane-triage` | contract | `python/agent_tools/lane_triage.py` |
+| `python/README.md` | `lane-triage` | decision | `docs/areas/delivery/adr/005-the-light-lane-runs-in-shadow.md` |
+| `python/README.md` | `agent-workflow-tests` runner | contract | `python/agent_tools/suite_runner.py` |
+| `python/README.md` | `agent-workflow-tests` runner | decision | `docs/areas/delivery/adr/006-suite-members-run-in-parallel.md` |
+| `python/README.md` | `agent-workflow-tests` runner | evidence | `docs/archive/suite-runner-job-count.md` |
+| `python/README.md` | agent-run-profile | contract | `python/agent_tools/run_profile.py` |
+| `home/common/agent-skills/README.md` | Global guidance and skill sources | decision | `docs/areas/delivery/adr/001-codex-is-a-reviewer-only.md` |
+| `home/common/agent-skills/README.md` | Claude-only skills | decision | `docs/areas/delivery/adr/002-delivery-skills-are-claude-only.md` |
+| `home/common/agent-skills/README.md` | Vendored skills | decision | `docs/areas/delivery/adr/003-vendored-skills-refresh-by-hand.md` |
+| `home/common/agent-skills/README.md` | Code map | decision | `docs/areas/delivery/adr/004-code-maps-are-leads.md` |
+| `home/common/agent-skills/README.md` | Host admission | contract | `python/agent_tools/host_admission.py` |

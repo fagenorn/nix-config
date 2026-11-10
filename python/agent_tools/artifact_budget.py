@@ -1,10 +1,18 @@
 """The `artifact-budget` command: artifact budget and producer-report validation.
 
-The design, grill-with-docs, writing-plans and handoff skills are the callers. The
-surface is `check` (measure a design-spec, an implementation-plan or a handoff
-against the policy; exit 0 within budget, 3 over budget) and `validate-report
---boundary producer` (a phase report holding exactly `state`, `artifact` and
-`notes`). Standard library only.
+The design, grill-with-docs, writing-plans and handoff skills call it by bare name and
+are the callers. It measures a skill artifact root against the policy and validates a
+producer phase report. Standard library only.
+
+Commands:
+
+- `check --kind {design-spec,implementation-plan,handoff} --root PATH --format json`
+  measures the artifacts of that kind under the root against the policy. Exit 0 is
+  within budget, 3 over budget, 2 refused.
+- `validate-report --boundary producer --input PATH|-` validates a phase report holding
+  exactly `state`, `artifact` and `notes`. Exit 0 prints the canonical report, 2 refused.
+
+`--policy` defaults to `~/.agents/share/artifact-budget-policy.json`.
 """
 
 from __future__ import annotations

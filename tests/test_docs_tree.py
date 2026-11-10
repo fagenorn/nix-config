@@ -19,6 +19,10 @@ SECTION_MAP_REL = "docs/archive/readme-section-map.md"
 SECTION_MAP = REPO_ROOT / SECTION_MAP_REL
 KINDS = frozenset({"contract", "decision", "evidence", "how-to", "overview", "superseded"})
 ADR_PATH_RE = re.compile(r"docs/areas/[a-z0-9-]+/adr/\d{3}-[a-z0-9-]+\.md")
+# The [E] and [l] classes match the same text as the letters; they keep this
+# line from matching its own pattern, so a grep for the phrases skips this file.
+ROUTING_RE = re.compile(r"python/READM[E].*goes there|new detai[l][^.;]*python/README|home is python/READM[E]")
+SECTION_CITE_RE = re.compile(r"python/README\.md\S*\s*§")
 
 # The audited (source, section, kind) classification of every README section
 # this issue moves text out of; each task adds exactly the triples of its rows.
@@ -77,6 +81,21 @@ AUDITED: frozenset[tuple[str, str, str]] = frozenset({
     ("home/common/claude-code/README.md", "Cache proxy", "decision"),
     ("home/common/claude-code/README.md", "Accounts", "decision"),
     ("home/common/claude-code/README.md", "Plugins", "decision"),
+    ("python/README.md", "Package and launchers", "overview"),
+    ("python/README.md", "Package and launchers", "decision"),
+    ("python/README.md", "artifact-budget", "contract"),
+    ("python/README.md", "issue-branch", "contract"),
+    ("python/README.md", "`lane-triage`", "contract"),
+    ("python/README.md", "`lane-triage`", "decision"),
+    ("python/README.md", "`agent-workflow-tests` runner", "contract"),
+    ("python/README.md", "`agent-workflow-tests` runner", "decision"),
+    ("python/README.md", "`agent-workflow-tests` runner", "evidence"),
+    ("python/README.md", "agent-run-profile", "contract"),
+    ("home/common/agent-skills/README.md", "Global guidance and skill sources", "decision"),
+    ("home/common/agent-skills/README.md", "Claude-only skills", "decision"),
+    ("home/common/agent-skills/README.md", "Vendored skills", "decision"),
+    ("home/common/agent-skills/README.md", "Code map", "decision"),
+    ("home/common/agent-skills/README.md", "Host admission", "contract"),
 })
 
 # The base sections no text leaves.
@@ -116,6 +135,26 @@ def base_text(source: str) -> str:
         ["git", "-C", str(REPO_ROOT), "show", f"{BASE}:{source}"],
         check=True, capture_output=True, text=True,
     ).stdout
+
+
+def tracked_text(exclude: tuple[str, ...]) -> list[tuple[str, list[str]]]:
+    listing = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+        check=True, capture_output=True,
+    ).stdout.decode("utf-8")
+    found: list[tuple[str, list[str]]] = []
+    for path in listing.split("\0"):
+        if not path or path.startswith(exclude):
+            continue
+        full = REPO_ROOT / path
+        if full.is_symlink() or not full.is_file():
+            continue
+        try:
+            text = full.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        found.append((path, text.splitlines()))
+    return found
 
 
 def parse_section_map(text: str) -> tuple[list[Row], list[str]]:
@@ -267,6 +306,54 @@ class DocsTreeTest(unittest.TestCase):
                  destination_exists("never.py", root)),
                 (True, True, False),
             )
+
+    def test_dissolved_readmes_fit_150_lines(self):
+        too_long = []
+        for path in SOURCES:
+            count = len((REPO_ROOT / path).read_text(encoding="utf-8").splitlines())
+            if count > 150:
+                too_long.append(f"{path}: {count} lines")
+        self.assertEqual(too_long, [])
+
+    def test_no_living_file_routes_new_detail_to_python_readme(self):
+        hits = [
+            f"{path}:{number}"
+            for path, lines in tracked_text((".agents/artifacts/", "docs/archive/"))
+            for number, line in enumerate(lines, start=1)
+            if ROUTING_RE.search(line)
+        ]
+        self.assertEqual(hits, [])
+
+    def test_no_living_file_cites_a_python_readme_section(self):
+        hits = [
+            f"{path}:{number}"
+            for path, lines in tracked_text((".agents/artifacts/", "docs/archive/", "docs/spikes/"))
+            for number, line in enumerate(lines, start=1)
+            if SECTION_CITE_RE.search(line)
+        ]
+        self.assertEqual(hits, [])
+
+    def test_every_area_holds_an_adr(self):
+        empty = sorted(
+            d.name for d in (REPO_ROOT / "docs/areas").iterdir()
+            if d.is_dir() and not list((d / "adr").glob("*.md"))
+        )
+        self.assertEqual(empty, [])
+
+    def test_every_base_section_is_audited_or_kept(self):
+        problems = []
+        for source in SOURCES:
+            base = headings(base_text(source))
+            audited = {section for s, section, _ in AUDITED if s == source}
+            kept = {section for s, section in KEPT if s == source}
+            for heading in base:
+                if heading not in audited and heading not in kept:
+                    problems.append(f"{source}: {heading}: neither audited nor kept")
+                if heading in audited and heading in kept:
+                    problems.append(f"{source}: {heading}: both audited and kept")
+            for heading in sorted(kept - set(base)):
+                problems.append(f"{source}: {heading}: kept but not a base heading")
+        self.assertEqual(problems, [])
 
     def test_the_codesigned_artifact_docstring_states_no_limitation(self):
         import ast
