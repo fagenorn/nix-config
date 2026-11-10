@@ -147,7 +147,7 @@ FOLDED_READ = {
                "merged_refs[]": {"number", "closes"}, "merged_heads[]": {"number", "commits"},
                "review": {"code", "plan"}, "review_state": {"code", "plan"},
                "knowledge": {"standards", "hints", "rejections"},
-               "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason"},
+               "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason", "pre_commit"},
                "acquire": {"verdict", "by", "detail", "transient"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"},
                "answer": {"verdict", "comment_id", "questions", "decisions"}, "renew": RENEW_READ}),
 }
@@ -4268,6 +4268,74 @@ class PlannerReadsTest(unittest.TestCase):
         base_rules = source[start:source.index("`", start + len("const BASE_RULES = `"))]
         self.assertIn(self.NO_SUBAGENTS, base_rules)
         self.assertNotIn("Explore", base_rules)
+
+
+class PreCommitFocusTest(unittest.TestCase):
+    """#771: FOCUSED names the contract's fast pre-commit ids, with argv and cwd, to every implementer."""
+
+    # The flagged entry keeps the stub's id build, so every scenario's verify replies still answer the contract.
+    UNFLAGGED = [{"id": "build", "argv": ["treefmt", "--fail-on-change"], "cwd": "tools"}]
+    FLAGGED = [dict(UNFLAGGED[0], pre_commit=True)]
+    NAMED = json.dumps(UNFLAGGED, separators=(",", ":"))
+    GENERIC = ("run the project's formatter or lint fix on the files you changed, "
+               "as the project's standards (/r/docs/standards) name it")
+    PASSED = {"state": "passed", "head": FIX, "required": ["ci-tests"]}
+    # One scenario per implementer prompt family that interpolates FOCUSED, with the labels it must reach.
+    # The merge sync (sync-N) never carries FOCUSED (plan D5), so it is left out.
+    SCENARIOS = (
+        ({"replies": {"review-1": TASK_FINDING}}, {"impl-1", "fix-1-1"}),
+        ({"replies": {"final-1": FINDING}}, {"fix-wave"}),
+        ({"replies": {"verify": VERIFY_RED}}, {"verify-fix-1"}),
+        ({"replies": {"checks-1": RED, "checks-2": PASSED},
+          "patch": {"fix-ci": {"start_head": SHA, "commit": FIX}}}, {"fix-ci"}),
+        ({"replies": {"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING, "checks-2": PASSED},
+          "patch": CONFLICT}, {"fix-sync-1"}),
+        ({"args": DIRECT, "replies": {"direct-review": BAD}}, {"direct-impl", "direct-fix"}),
+    )
+    FAMILIES = frozenset().union(*(want for _, want in SCENARIOS))
+
+    def implementer_prompts(self, verification):
+        """Every FOCUSED-carrying implementer prompt, by label, over SCENARIOS with this verification contract."""
+        found = {}
+        for scenario, expected in self.SCENARIOS:
+            patched = dict(scenario, patch={**scenario.get("patch", {}), "setup": {"verification": verification}})
+            _, calls = run(**patched)
+            prompts = {c["label"]: c["prompt"] for c in calls
+                       if c["agentType"] == "implementer" and not c["label"].startswith("sync-")}
+            self.assertLessEqual(expected, set(prompts), scenario)
+            found.update(prompts)
+        self.assertLessEqual(self.FAMILIES, set(found))
+        return found
+
+    def test_every_focused_site_has_a_scenario(self):
+        # A prompt family that gains or loses FOCUSED must be reflected in SCENARIOS.
+        self.assertEqual(PROGRAM.read_text(encoding="utf-8").count("${FOCUSED}"), len(self.FAMILIES))
+
+    def test_every_implementer_prompt_names_the_flagged_argv(self):
+        for label, text in self.implementer_prompts(self.FLAGGED).items():
+            with self.subTest(label=label):
+                self.assertIn(self.NAMED, text)
+                self.assertIn("fast pre-commit", text)
+                self.assertNotIn(self.GENERIC, text)
+
+    def test_with_none_flagged_the_generic_sentence_stays(self):
+        for label, text in self.implementer_prompts(self.UNFLAGGED).items():
+            with self.subTest(label=label):
+                self.assertIn(self.GENERIC, text)
+                self.assertNotIn("fast pre-commit", text)
+
+    def test_only_the_flagged_ids_are_named(self):
+        lint = {"id": "lint", "argv": ["make", "lint"], "cwd": "."}
+        _, calls = run(replies={"verify": None}, patch={"setup": {"verification": [lint] + self.FLAGGED}})
+        text = prompt(calls, "impl-1")
+        self.assertIn(self.NAMED, text)
+        self.assertNotIn('"make","lint"', text)
+
+    def test_the_contract_read_asks_for_the_flag(self):
+        _, calls = run()
+        self.assertIn("pre_commit: true", prompt(calls, "setup"))
+        item = schema_of(calls, "setup")["properties"]["verification"]["items"]
+        self.assertEqual(item["properties"]["pre_commit"], {"type": "boolean"})
 
 
 if __name__ == "__main__":
