@@ -21,6 +21,13 @@ chosen on the command line (`--gate-version 2 --kind <kind>`), never by the
 manifest, and the bundle it emits is bound to its kind: `bundle_kind` sits
 inside the `bundle_id` digest, and `verify_bundle` accepts a version-2 bundle
 only from a reader that names that same kind. Version 1 is unchanged.
+
+Gate version 3 is the claude-only cutover profile judged distributionally: per
+case, the bootstrap 90% interval of the mean ratio against the kind's pinned
+materiality replaces the per-pair straddle rule (rejected above it, approved
+below it, unmeasured when the interval contains it). Ten or forty trials per
+side need a declared expansion, which the emitter and `verify_bundle` both
+enforce on the bundle itself. Versions 1 and 2 are unchanged.
 """
 
 import argparse
@@ -47,10 +54,13 @@ GATE_VERSION = 1
 STRATA = ("claude", "codex")
 
 # Gate version 2 is the claude-only profile: one stratum, and a bundle bound to
-# the kind of reader it was emitted for. `GATE_VERSION` stays 1 because
-# `promotion_lifecycle` and `promotion_schema` import it.
-GATE_VERSIONS = (1, 2)
+# the kind of reader it was emitted for. Version 3 is the same profile for the
+# cutover kind judged by the mean-ratio interval. `GATE_VERSION` stays 1
+# because `promotion_lifecycle` and `promotion_schema` import it.
+GATE_VERSIONS = (1, 2, 3)
 CLAUDE_ONLY_GATE_VERSION = 2
+DISTRIBUTIONAL_GATE_VERSION = 3
+DISTRIBUTIONAL_TRIAL_COUNTS = (3, 10, 40)
 CLAUDE_ONLY_STRATA = ("claude",)
 BUNDLE_KINDS = ("cutover", "promotion", "release")
 NO_REGRESSION_KINDS = ("cutover",)
@@ -66,6 +76,9 @@ def gate_profile(version=GATE_VERSION, kind=None):
         return GateProfile(CLAUDE_ONLY_GATE_VERSION, CLAUDE_ONLY_STRATA,
                            "no_regression" if kind in NO_REGRESSION_KINDS
                            else "savings", kind)
+    if version == DISTRIBUTIONAL_GATE_VERSION and kind in MATERIALITY_PCT:
+        return GateProfile(DISTRIBUTIONAL_GATE_VERSION, CLAUDE_ONLY_STRATA,
+                           "no_regression", kind)
     raise ValueError(f"no gate profile for version {version!r} and kind {kind!r}")
 
 
@@ -492,12 +505,15 @@ def _expanded(manifest):
     return isinstance(expansion, dict) and expansion.get("expanded") is True
 
 
+def _checkpoint_recorded(expansion):
+    """Whether an expansion declaration carries a non-blank checkpoint reference."""
+    reference = expansion.get("checkpoint_ref") if isinstance(expansion, dict) else None
+    return isinstance(reference, str) and bool(reference.strip())
+
+
 def _check_expansion(manifest, diagnostics):
     """An expansion and its human checkpoint each imply the other (D36)."""
-    expansion = manifest.get("expansion")
-    expansion = expansion if isinstance(expansion, dict) else {}
-    reference = expansion.get("checkpoint_ref")
-    declared = isinstance(reference, str) and bool(reference.strip())
+    declared = _checkpoint_recorded(manifest.get("expansion"))
     if _expanded(manifest) and not declared:
         _add(diagnostics, "EXPANSION_INCONSISTENT", "$.expansion",
              "an expansion must record its human checkpoint")
@@ -695,8 +711,12 @@ def resolve_trials(manifest, loader=load_record, gate=DEFAULT_GATE):
     diagnostics = []
     _check_identity(manifest, diagnostics, gate.strata)
     _check_expansion(manifest, diagnostics)
-    allowed = ({MIN_TRIALS, EXPANDED_TRIALS} if _expanded(manifest)
-               else {MIN_TRIALS})
+    if gate.version == DISTRIBUTIONAL_GATE_VERSION:
+        allowed = (set(DISTRIBUTIONAL_TRIAL_COUNTS) if _expanded(manifest)
+                   else {MIN_TRIALS})
+    else:
+        allowed = ({MIN_TRIALS, EXPANDED_TRIALS} if _expanded(manifest)
+                   else {MIN_TRIALS})
 
     missing_message = ("both strata are required evidence" if gate.version == 1
                        else f"every declared stratum ({', '.join(gate.strata)}) "
@@ -924,6 +944,39 @@ def evidence_trials_distinct(evidence, strata):
     return True
 
 
+def distribution_verdicts(evidence, gate):
+    """Contract: sorted (case_index, case_id, stratum, interval, verdict) for every
+    case and every stratum of `gate.strata` it carries, from the mean-ratio
+    interval of that stratum's trial totals against the kind's materiality."""
+    materiality = MATERIALITY_PCT[gate.kind]
+    verdicts = []
+    for index, case in enumerate(evidence["cases"]):
+        for stratum in gate.strata:
+            if stratum not in case["strata"]:
+                continue
+            trials = case["strata"][stratum]["context"]["trials"]
+            interval = mean_ratio_interval(
+                [trial["input_total"] for trial in trials["base"]],
+                [trial["input_total"] for trial in trials["candidate"]])
+            verdicts.append((index, case["case_id"], stratum, interval,
+                             materiality_verdict(interval, materiality)))
+    return sorted(verdicts, key=lambda row: (row[0], row[1], row[2]))
+
+
+def expansion_covers(expansion, evidence, gate):
+    """Contract: whether a bundle's expansion declaration licenses its trial
+    counts. Only version 3 reads it: every side of every case and stratum
+    citing exactly MIN_TRIALS trials needs none; any other count needs
+    `expanded: true` and a non-blank `checkpoint_ref`."""
+    if gate.version != DISTRIBUTIONAL_GATE_VERSION:
+        return True
+    if all(len(case["strata"][stratum]["context"]["trials"][side]) == MIN_TRIALS
+           for case in evidence["cases"] for stratum in gate.strata for side in SIDES):
+        return True
+    return (isinstance(expansion, dict) and expansion.get("expanded") is True
+            and _checkpoint_recorded(expansion))
+
+
 def _declared_axis(blocks, key, saves):
     """One optional-declaration axis over a stratum's cases: which fire, and whether."""
     firing = [case_id for case_id, block in blocks if saves(block[key])]
@@ -963,7 +1016,30 @@ def gate_results(evidence, gate=DEFAULT_GATE):
     results = {"quality": {"passed": not failing, "failing": failing},
                "context": context, "checks": checks, "maintenance": maintenance,
                "cross_stratum": cross}
-    if gate.criterion == "no_regression":
+    if gate.version == DISTRIBUTIONAL_GATE_VERSION:
+        verdicts = distribution_verdicts(evidence, gate)
+        regressing = sorted(f"{case['case_id']}/{stratum}"
+                            for case in cases for stratum in gate.strata
+                            if quality_regresses(case["strata"][stratum]["quality"]))
+        breaching_cases = sorted(f"{case_id}/{stratum}"
+                                 for _, case_id, stratum, _, verdict in verdicts
+                                 if verdict == "rejected")
+        unmeasured = sorted(f"{case_id}/{stratum}"
+                            for _, case_id, stratum, _, verdict in verdicts
+                            if verdict == "unmeasured")
+        results["distribution"] = {
+            stratum: [{"case_id": case_id,
+                       "lower": None if interval is None else round(interval[0], 6),
+                       "upper": None if interval is None else round(interval[1], 6),
+                       "verdict": verdict}
+                      for _, case_id, name, interval, verdict in verdicts
+                      if name == stratum]
+            for stratum in gate.strata}
+        results["no_regression"] = {
+            "passed": not regressing and not breaching_cases and not unmeasured,
+            "quality_failing": regressing, "context_breaching": breaching_cases,
+            "context_unmeasured": unmeasured}
+    elif gate.criterion == "no_regression":
         regressing = sorted(f"{case['case_id']}/{stratum}"
                             for case in cases for stratum in gate.strata
                             if quality_regresses(case["strata"][stratum]["quality"]))
@@ -978,6 +1054,24 @@ def gate_results(evidence, gate=DEFAULT_GATE):
     return results
 
 
+def _decide_distributional(evidence, gate):
+    """Gate version 3: no straddle rule; each case's interval decides (P5)."""
+    if not evidence_trials_distinct(evidence, gate.strata):
+        return "unmeasured"
+    for case in evidence["cases"]:
+        for stratum in gate.strata:
+            trials = case["strata"][stratum]["context"]["trials"]
+            if any(len(trials[side]) not in DISTRIBUTIONAL_TRIAL_COUNTS for side in SIDES):
+                return "unmeasured"
+    if any(quality_regresses(case["strata"][stratum]["quality"])
+           for case in evidence["cases"] for stratum in gate.strata):
+        return "rejected"
+    verdicts = [row[4] for row in distribution_verdicts(evidence, gate)]
+    if "rejected" in verdicts:
+        return "rejected"
+    return "unmeasured" if "unmeasured" in verdicts else "approved"
+
+
 def decide(evidence, gate=DEFAULT_GATE):
     """Contract: the sole verdict authority. Takes the resolved evidence and
     nothing else — no authorization block, no manifest, no clock (D14)."""
@@ -986,6 +1080,8 @@ def decide(evidence, gate=DEFAULT_GATE):
     if gate.version != 1 and any(set(case["strata"]) != set(gate.strata)
                                  for case in evidence["cases"]):
         return "unmeasured"
+    if gate.version == DISTRIBUTIONAL_GATE_VERSION:
+        return _decide_distributional(evidence, gate)
     if straddling_cases(evidence):
         return "unmeasured"
     if (gate.criterion == "no_regression"
@@ -1011,6 +1107,11 @@ def decide(evidence, gate=DEFAULT_GATE):
 class BundleIntegrityError(Exception):
     """The emitter's refusal to write: the assembled body does not earn the
     state it was handed (D14). No document reaches stdout on this path."""
+
+
+EXPANSION_REFUSAL = (f"a gate-version-{DISTRIBUTIONAL_GATE_VERSION} bundle citing more "
+                     f"than {MIN_TRIALS} trials per side must declare its expansion "
+                     "and checkpoint")
 
 
 def build_override(reason, authorized_by, authorized_at):
@@ -1043,7 +1144,20 @@ def assemble_bundle(manifest, evidence, diagnostics, override, state,
     resolved = evidence if evidence else {"cases": []}
 
     reasons = list(diagnostics)
-    if state == "unmeasured" and evidence:
+    if state == "unmeasured" and evidence and gate.version == DISTRIBUTIONAL_GATE_VERSION:
+        threshold = 1 + MATERIALITY_PCT[gate.kind] / 100
+        for index, case_id, stratum, interval, verdict in distribution_verdicts(
+                evidence, gate):
+            if verdict != "unmeasured":
+                continue
+            message = (f"case {case_id!r} has no mean ratio: a trial total is not "
+                       "a usable number" if interval is None else
+                       f"case {case_id!r} mean-ratio 90% interval "
+                       f"[{interval[0]:.4f}, {interval[1]:.4f}] contains the "
+                       f"{gate.kind} materiality {threshold:.2f}")
+            _add(reasons, "CASE_INTERVAL_CONTAINS_MATERIALITY",
+                 f"$.cases[{index}].strata.{stratum}", message)
+    elif state == "unmeasured" and evidence:
         for index, case_id, stratum in straddling_cases(evidence):
             _add(reasons, "CASE_STRADDLES_GATE",
                  f"$.cases[{index}].strata.{stratum}",
@@ -1070,6 +1184,8 @@ def assemble_bundle(manifest, evidence, diagnostics, override, state,
     if earned != body["state"]:
         raise BundleIntegrityError(
             f"the bundle's own evidence earns {earned!r}, not {body['state']!r}")
+    if not expansion_covers(manifest["expansion"], resolved, gate):
+        raise BundleIntegrityError(EXPANSION_REFUSAL)
     return dict(body, bundle_id=telemetry_digest(body),
                 generated_at=_generated_at())
 
@@ -1079,8 +1195,10 @@ def verify_bundle(document: object, kind=None) -> str:
     BundleIntegrityError. The id is recomputed over the body without `bundle_id`
     and `generated_at`, and the state is re-decided from the bundle's own evidence.
 
-    The reader names its `kind`. A version-1 bundle ignores it; a version-2
-    bundle is refused unless it was emitted for exactly that kind."""
+    The reader names its `kind`. A version-1 bundle ignores it; a version-2 or
+    version-3 bundle is refused unless it was emitted for exactly that kind. A
+    version-3 bundle citing more than MIN_TRIALS trials per side is also refused
+    unless its own `expansion` declares the expansion and its checkpoint."""
     if not isinstance(document, dict):
         raise BundleIntegrityError("a bundle is a JSON object")
     if document.get("kind") != BUNDLE_KIND:
@@ -1098,7 +1216,8 @@ def verify_bundle(document: object, kind=None) -> str:
     else:
         if kind is None:
             raise BundleIntegrityError(
-                "a gate-version-2 bundle is verified only for a named reader kind")
+                f"a gate-version-{document['gate_version']} bundle is verified "
+                "only for a named reader kind")
         if document.get("bundle_kind") != kind:
             raise BundleIntegrityError(f"bundle_kind is not {kind!r}")
         try:
@@ -1115,10 +1234,14 @@ def verify_bundle(document: object, kind=None) -> str:
         raise BundleIntegrityError("bundle_id does not match the bundle body")
     try:
         earned = decide(document["evidence"], profile)
+        covered = expansion_covers(document.get("expansion"), document["evidence"],
+                                   profile)
     except (TypeError, KeyError, AttributeError, ValueError,
             ArithmeticError) as error:
         raise BundleIntegrityError(
             f"the bundle's evidence cannot be decided: {error!r}") from error
+    if not covered:
+        raise BundleIntegrityError(EXPANSION_REFUSAL)
     if earned != document["state"]:
         raise BundleIntegrityError(
             f"the bundle's own evidence earns {earned!r}, not {document['state']!r}")
@@ -1141,15 +1264,22 @@ def main(argv=None):
                          "declared, not sampled, so the bundle id stays reproducible")
     ap.add_argument("--gate-version", type=int, choices=GATE_VERSIONS,
                     default=GATE_VERSION,
-                    help="1 adjudicates both strata; 2 is the claude-only profile")
+                    help="1 adjudicates both strata; 2 is the claude-only profile; "
+                         "3 is the claude-only cutover profile judged by the "
+                         "mean-ratio interval")
     ap.add_argument("--kind", choices=BUNDLE_KINDS,
                     help="the bundle kind; required by, and only valid with, "
-                         "--gate-version 2")
+                         "--gate-version 2 or 3; --gate-version 3 accepts only "
+                         + ", ".join(sorted(MATERIALITY_PCT)))
     args = ap.parse_args(argv)
-    if args.gate_version == CLAUDE_ONLY_GATE_VERSION and args.kind is None:
-        ap.error("--gate-version 2 requires --kind")
+    if args.gate_version != GATE_VERSION and args.kind is None:
+        ap.error(f"--gate-version {args.gate_version} requires --kind")
     if args.gate_version == GATE_VERSION and args.kind is not None:
-        ap.error("--kind is valid only with --gate-version 2")
+        ap.error("--kind is valid only with --gate-version 2 or 3")
+    if (args.gate_version == DISTRIBUTIONAL_GATE_VERSION
+            and args.kind not in MATERIALITY_PCT):
+        ap.error(f"--gate-version {DISTRIBUTIONAL_GATE_VERSION} is defined only "
+                 f"for --kind {', '.join(sorted(MATERIALITY_PCT))}")
     gate = gate_profile(args.gate_version, args.kind)
 
     # Presence is `is not None`: absence is what waives the companions, and an
