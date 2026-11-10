@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).parents[4]
 PROGRAM = REPO_ROOT / "home/common/claude-code/skills/deliver-standard/deliver-standard.js"
 HARNESS = Path(__file__).with_name("deliver_standard_harness.mjs")
 SHA = "a" * 40
+ISSUE_BRANCH_ARGV = re.compile(r"\bissue-branch --repo-root (\S+) --issue (\d+)\b")
 ARGS = {"repo_root": "/r", "issue": 9, "session_id": "s1"}
 HOLDER = "h1/session-s1"
 PLAN = {
@@ -175,7 +176,6 @@ class FoldTest(unittest.TestCase):
                         self.assertEqual(branch, lock)
 
     def test_gate_failure_after_a_folded_claim_keeps_a_claim_incomplete_cont(self):
-        derive = "Derive branch from bindings.vcs.branch_pattern"
         # gate: (setup patch, stage, the resume re-derives the location)
         cases = {
             "ok-false": ({"ok": False, "reason": "worktree add failed"}, "setup", False),
@@ -198,7 +198,7 @@ class FoldTest(unittest.TestCase):
                 resumed, calls = run(args=dict(ARGS, cont=cont))
                 self.assertEqual(resumed["stage"], "done")
                 self.assertEqual(labels(calls)[:3], ["setup", "acquire", "worktree"])
-                self.assertEqual(derive in prompt(calls, "setup"), rederive)
+                self.assertEqual(bool(ISSUE_BRANCH_ARGV.search(prompt(calls, "setup"))), rederive)
                 self.assertIn("--branch issue-9-x", prompt(calls, "acquire"))
                 self.assertIn("/r/.wt/w-issue-9-x", prompt(calls, "worktree"))
         # No claim taken: a refusal still stops with no cont.
@@ -305,6 +305,22 @@ CHILD_HAPPY = ["setup", "owner-answer", "plan", "plan-codex", "plan-review", "re
                "land-unlock", "hold", "close-out"]
 
 
+class IssueBranchStepTest(unittest.TestCase):
+    """#748: the setup takes branch and worktree_path from issue-branch, fresh or re-deriving."""
+
+    def test_the_fresh_setup_runs_issue_branch_once(self):
+        _, calls = run()
+        self.assertEqual(ISSUE_BRANCH_ARGV.findall(prompt(calls, "setup")), [("/r", "9")])
+
+    def test_only_a_resume_that_lacks_its_location_runs_it(self):
+        first, _ = run(patch={"setup": {"branch": None}})
+        _, calls = run(args=dict(ARGS, cont=first["cont"]))
+        self.assertEqual(ISSUE_BRANCH_ARGV.findall(prompt(calls, "setup")), [("/r", "9")])
+        kept, _ = run(patch={"setup": {"merge_strategy": None}})
+        _, calls = run(args=dict(ARGS, cont=kept["cont"]))
+        self.assertEqual(ISSUE_BRANCH_ARGV.findall(prompt(calls, "setup")), [])
+
+
 class HappyPathTest(unittest.TestCase):
     def test_one_task_runs_every_stage_in_order(self):
         result, calls = run()
@@ -381,9 +397,7 @@ class ContractTest(unittest.TestCase):
     def test_setup_preflight_names_merged_pr_existing_branch_and_applicability(self):
         _, calls = run()
         setup = prompt(calls, "setup")
-        for needle in ("duplicate", "re-adopt", "no-longer-applies",
-                       "bindings.vcs.worktree.prefix", "bindings.vcs.worktree.root",
-                       "--state all --search 9"):
+        for needle in ("duplicate", "re-adopt", "no-longer-applies", "--state all --search 9"):
             self.assertIn(needle, setup)
         self.assertNotIn("--add-label", setup)
         for needle in ("worktree add --no-track -b <branch> <worktree_path> origin/<integration_branch>",

@@ -170,6 +170,7 @@ agent-workflow-tests *args:
     tests/test_worktree_mapping.py \
     tests/test_worktree_reconcile.py \
     tests/test_worktree_reconcile_audit.py \
+    tests/test_issue_branch.py \
     tests/test_keepalive_end_turn_cap.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \

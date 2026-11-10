@@ -20,6 +20,7 @@ HARNESS = Path(__file__).with_name("deliver_batch_harness.mjs")
 SHA = "a" * 40
 ARGS = {"repo_root": "/r", "batch_id": "b1", "child_script": "/s/deliver-standard.js", "issues": [1]}
 HOLDER = "h1/b1"
+ISSUE_BRANCH_ARGV = re.compile(r"\bissue-branch --repo-root (\S+) --issue (\d+)\b")
 
 
 PROGRAM_AGENT_TYPES = {"clerk", "planner", "implementer", "reviewer", "reviewer-lite"}
@@ -1494,6 +1495,29 @@ class ReadoptTest(unittest.TestCase):
         self.assertIn("forge-claim owner-action end --repo owner/repo --issue 1 --reason needs-label",
                       prompt(calls, "close-out-1"))
         self.assertNotIn("land-ask-1", labels(calls))
+
+
+class IssueBranchFactsTest(unittest.TestCase):
+    """#748: the facts step takes the branch from issue-branch, the command deliver-standard runs."""
+
+    def test_the_facts_step_runs_issue_branch_for_its_issue(self):
+        _, calls, _ = run()
+        self.assertEqual(ISSUE_BRANCH_ARGV.findall(prompt(calls, "facts-1")), [("/r", "1")])
+
+    def test_a_failed_derivation_never_claims_and_keeps_the_failure_detail(self):
+        reply = {"branch": None, "branch_error": "issue-branch exited 1: forge_failed"}
+        result, calls, _ = run(patch={"facts-1": reply})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "branch",
+                                          "detail": "issue-branch exited 1: forge_failed"})
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertNotIn("acquire-1", labels(calls))
+        self.assertNotIn("child-1", labels(calls))
+        self.assertFalse([c for c in calls if "undefined" in c["prompt"]])
+
+    def test_a_failed_derivation_without_a_detail_still_stops_before_the_claim(self):
+        result, calls, _ = run(patch={"facts-1": {"branch": None}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "branch"))
+        self.assertNotIn("acquire-1", labels(calls))
 
 
 class DemoTest(unittest.TestCase):
