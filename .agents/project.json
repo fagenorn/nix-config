@@ -36,7 +36,9 @@
         "specs": ".agents/artifacts/specs",
         "plans": ".agents/artifacts/plans"
       },
-      "context": [],
+      "context": [
+        "docs/CONTEXT-MAP.md"
+      ],
       "standards": [
         "home/common/agent-skills/standards",
         "docs/standards"
@@ -131,7 +133,7 @@
       "support": "supported"
     },
     "knowledge.context": {
-      "support": "unsupported"
+      "support": "supported"
     },
     "knowledge.standards": {
       "support": "supported"

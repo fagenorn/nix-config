@@ -111,7 +111,8 @@ def make_root(tmp: Path) -> Path:
 
     The committed contract, its instruction source and both projection targets
     are copied byte-for-byte, every directory a knowledge path names is
-    created, and the root ignore file covers `.agents/runtime/`, so a fixture
+    created (a file-shaped one, such as `docs/CONTEXT-MAP.md`, as an empty
+    file), and the root ignore file covers `.agents/runtime/`, so a fixture
     refuses only for the mutation a case applies to it.
     """
     root = tmp / "project"
@@ -126,7 +127,12 @@ def make_root(tmp: Path) -> Path:
                    "hints", "rejections"):
         for entry in paths[member]:
             target = root / entry
-            if not target.exists():  # `architecture` names CLAUDE.md, already copied
+            if target.exists():  # `architecture` names CLAUDE.md, already copied
+                continue
+            if target.suffix:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.touch()
+            else:
                 target.mkdir(parents=True)
     (root / ".gitignore").write_text(".agents/runtime/\n", encoding="utf-8")
     return root

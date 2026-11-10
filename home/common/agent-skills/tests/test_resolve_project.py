@@ -1920,6 +1920,11 @@ class DriftGateTest(ResolverTestCase):
         self.assertEqual(sorted(snapshot["capabilities"]), sorted(CAPABILITY_NAMES))
         self.assertEqual(snapshot["project"]["id"], "fagenorn/nix-config")
         self.assertEqual(snapshot["project"]["root"], str(REPO_ROOT))
+        # Resolution also succeeds when context is unsupported, so pin it.
+        self.assertEqual(snapshot["capabilities"]["knowledge.context"]["state"],
+                         "available")
+        self.assertEqual(snapshot["bindings"]["paths"]["context"],
+                         [str(REPO_ROOT / "docs/CONTEXT-MAP.md")])
 
     def test_the_repository_check_projections_is_clean(self):
         code, out, err = run("check-projections", "--repo-root", str(REPO_ROOT),
