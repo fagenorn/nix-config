@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_claim
-from agent_tools import forge_markers as fm
-from agent_tools import forge_owner_action as foa
+from agent_tools.claims import forge_claim
+from agent_tools.claims import forge_markers as fm
+from agent_tools.claims import forge_owner_action as foa
 from .forge_world import ForgeWorld
 
 SLUG, ISSUE = "octo/widgets", 7
@@ -452,7 +452,7 @@ class ClaimInteractionTest(Base):
 class CliTest(Base):
     def test_cli_prints_one_json_line_and_forge_errors_exit_1(self):
         self.store(comment(30, marker_body()))
-        done = subprocess.run([sys.executable, "-m", "agent_tools.forge_claim", *action("status")],
+        done = subprocess.run([sys.executable, "-m", "agent_tools.claims.forge_claim", *action("status")],
                               capture_output=True, text=True, env=dict(os.environ), timeout=120)
         self.assertEqual(done.returncode, 0)
         self.assertEqual(len(done.stdout.splitlines()), 1)

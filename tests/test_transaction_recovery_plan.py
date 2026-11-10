@@ -6,9 +6,9 @@ Run: just agent-workflow-tests
 import copy
 import unittest
 
-from agent_tools import transaction_core, transaction_recovery_plan
+from agent_tools.release import transaction_core, transaction_recovery_plan
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_core import (
+from agent_tools.release.transaction_core import (
     EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, CreationConflict,
     ProofPlanRejected, RecoveryPlanRejected, TransactionError, action_id, bind_recovery,
     compile_proof, compile_recovery, materialize_recovery)

@@ -2,7 +2,7 @@
 import copy
 import unittest
 
-from agent_tools import forge_adapter, release_adapter, release_profile
+from agent_tools.release import forge_adapter, release_adapter, release_profile
 from . import release_test_support as support
 
 def violations(release, contract=None):

@@ -117,9 +117,9 @@
         "budget_minutes": 90,
         "risk_paths": [
           "home/common/claude-code/lifecycle_guard.py",
-          "python/agent_tools/transaction_*.py",
-          "python/agent_tools/resolve_project.py",
-          "python/agent_tools/lane_triage.py",
+          "python/agent_tools/release/transaction_*.py",
+          "python/agent_tools/project_contract/resolve_project.py",
+          "python/agent_tools/delivery/lane_triage.py",
           ".agents/project.json"
         ]
       }

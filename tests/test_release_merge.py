@@ -4,7 +4,7 @@ import inspect
 import time
 import unittest
 
-from agent_tools import release_merge
+from agent_tools.release import release_merge
 from .actions_world import BASE_TIP, HEAD, MERGE, PR, PR_VIEW, SLUG, ActionsWorld, commit_argv
 
 

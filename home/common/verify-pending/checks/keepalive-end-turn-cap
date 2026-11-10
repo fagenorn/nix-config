@@ -2,4 +2,4 @@
 # Verify check for issue 502 (issue 638): end_turn keepalive pings stay within the cap.
 # verify-pending runs it from the repository root at the commit the block names, so
 # `python` below is that commit's agent_tools source. Exit 0 met, 1 not met, 75 not yet.
-PYTHONPATH=python exec python3 -m agent_tools.keepalive_pings end-turn-cap "$@"
+PYTHONPATH=python exec python3 -m agent_tools.hosts.keepalive_pings end-turn-cap "$@"

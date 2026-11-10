@@ -21,7 +21,7 @@ PYTHON = REPO / "python"
 SHARE = REPO / "home/common/agent-skills"
 
 class ReleaseCommandCase(unittest.TestCase):
-    """Runs `python -m agent_tools.release` against a temporary copy of this repository's
+    """Runs `python -m agent_tools.release.release` against a temporary copy of this repository's
     contract under a temporary HOME holding the committed platform manifest, as the
     resolver suite's `install_home` does."""
 
@@ -49,7 +49,7 @@ class ReleaseCommandCase(unittest.TestCase):
     def run_release(self, *args, env=None, repo_root=True, cwd=None):
         env = dict(os.environ, PYTHONPATH=str(PYTHON), HOME=str(self.home), **(env or {}))
         tail = ["--repo-root", str(self.root)] if repo_root else []
-        result = subprocess.run([sys.executable, "-m", "agent_tools.release", *args, *tail],
+        result = subprocess.run([sys.executable, "-m", "agent_tools.release.release", *args, *tail],
                                 capture_output=True, text=True, env=env, timeout=120,
                                 cwd=cwd)
         return result.returncode, json.loads(result.stdout), result.stderr
@@ -179,7 +179,7 @@ class DeployInspectRemovedTest(ReleaseCommandCase):
     def test_the_deploy_subcommand_is_an_invalid_choice(self):
         env = dict(os.environ, PYTHONPATH=str(PYTHON), HOME=str(self.home))
         result = subprocess.run(
-            [sys.executable, "-m", "agent_tools.release", "deploy", "inspect",
+            [sys.executable, "-m", "agent_tools.release.release", "deploy", "inspect",
              "--commit", MERGE, "--repo-root", str(self.root)],
             capture_output=True, text=True, env=env, timeout=120)
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -277,8 +277,8 @@ class TransactionCommandTest(ReleaseCommandCase):
         def raw(*argv):
             return subprocess.run([sys.executable, "-m", *argv, "--repo-root", str(bare)],
                                   capture_output=True, env=env, timeout=120)
-        ours = raw("agent_tools.release", "transaction", "status")
-        theirs = raw("agent_tools.resolve_project", "resolve", "--require", "release")
+        ours = raw("agent_tools.release.release", "transaction", "status")
+        theirs = raw("agent_tools.project_contract.resolve_project", "resolve", "--require", "release")
         self.assertEqual((ours.returncode, ours.stdout), (2, theirs.stdout))
         self.assertEqual(theirs.returncode, 2)
 

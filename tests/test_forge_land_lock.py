@@ -10,9 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 from datetime import datetime, timezone
 
-from agent_tools import forge_claim
-from agent_tools import forge_land_lock as land_lock
-from agent_tools import forge_markers as fm
+from agent_tools.claims import forge_claim
+from agent_tools.claims import forge_land_lock as land_lock
+from agent_tools.claims import forge_markers as fm
 from .forge_world import ForgeWorld, host_clock
 
 SLUG, BRANCH = "octo/widgets", "main"
@@ -42,7 +42,7 @@ def run(*argv):
 
 
 def start_cli(*argv):
-    return subprocess.Popen([sys.executable, "-m", "agent_tools.forge_claim", *argv], stdout=subprocess.PIPE,
+    return subprocess.Popen([sys.executable, "-m", "agent_tools.claims.forge_claim", *argv], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, env=dict(os.environ))
 
 
@@ -470,7 +470,7 @@ class TransientRetryTest(Base):
 
 
 class ConcurrencyTest(Base):
-    """Children of `python -m agent_tools.forge_claim land` racing on one ref store."""
+    """Children of `python -m agent_tools.claims.forge_claim land` racing on one ref store."""
 
     def test_racing_acquires_leave_one_holder(self):
         self.lock()

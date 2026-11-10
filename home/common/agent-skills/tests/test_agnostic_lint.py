@@ -8,7 +8,8 @@ import subprocess
 import sys
 import unittest
 
-from agent_tools import agnostic_lint, skill_lint
+from agent_tools import skill_lint
+from agent_tools.delivery import agnostic_lint
 
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -78,7 +79,7 @@ class LiveTreeTest(unittest.TestCase):
         self.assertEqual(agnostic_lint.hosting_specifics(skill_lint.working_tree(REPO_ROOT)), [])
 
     def test_the_command_exits_zero_on_the_live_tree(self):
-        done = subprocess.run([sys.executable, "-m", "agent_tools.agnostic_lint", "--root", str(REPO_ROOT)],
+        done = subprocess.run([sys.executable, "-m", "agent_tools.delivery.agnostic_lint", "--root", str(REPO_ROOT)],
                               capture_output=True, text=True, env={"PYTHONPATH": str(REPO_ROOT / "python")})
         self.assertEqual((done.returncode, done.stdout), (0, ""))
 

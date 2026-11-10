@@ -46,7 +46,7 @@ proof refusal not named above, parks the transaction in attention_required with 
 observation or the refusal's reason.
 """
 
-from agent_tools.transaction_core import (
+from agent_tools.release.transaction_core import (
     DispositionRefused, InvocationRefused, ProofRefused, RecoveryRefused, StaleCustody,
     TransactionStore)
 

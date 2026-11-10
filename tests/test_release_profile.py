@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import release_profile
-from agent_tools.transaction_core import TransactionStore
-from agent_tools.transaction_storage import ProofPlanRejected
+from agent_tools.release import release_profile
+from agent_tools.release.transaction_core import TransactionStore
+from agent_tools.release.transaction_storage import ProofPlanRejected
 from . import release_driver_support as rs
 from . import release_test_support as support
 

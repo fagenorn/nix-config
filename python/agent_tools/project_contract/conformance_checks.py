@@ -1,0 +1,939 @@
+"""The conformance evaluators: one function per registered check.
+
+Every `check_*` here answers with an `Outcome` and nothing else — it neither
+assembles a report nor decides an exit status, both of which belong to the
+entry module. The resolver ladder is the one stateful evaluator:
+`check_contract_resolvable` runs the resolver once and caches every stage it
+settles, and the five dependent evaluators are pure reads of that cache (D17).
+
+`agent_tools.project_contract.conformance` imports this module as `CHECKS_MODULE`; its vocabulary
+comes from `agent_tools.project_contract.conformance_registry` (D2, D40).
+"""
+
+from __future__ import annotations
+
+import fcntl
+import fnmatch
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+
+from agent_tools.delivery import host_admission
+from agent_tools.release import release_adapter, release_profile
+from agent_tools.project_contract.conformance_registry import (
+    CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER,
+    NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,
+    PROMOTED_DUPLICATE_DRIFTED, PROMOTED_DUPLICATE_FINDINGS,
+    PROMOTED_DUPLICATE_PRESENT, PROMOTION_CANDIDATE_KIND,
+    PROMOTION_CANDIDATES_RELATIVE, PROMOTION_DUPLICATE_MEMBERS,
+    PROMOTION_DUPLICATES_MEMBER, PROMOTION_PROJECT_ONLY_RESIDUE,
+    PROMOTION_PROMOTED_STATE, PROMOTION_REMOVE_DISPOSITION,
+    REGISTRY_BY_ID, RESOLVABLE_CHECK_ID, STAGE_CHECKS, STAGE_ORDER,
+    TERMINAL_RESIDUE, TOOL_REASON_CODES, UNACKNOWLEDGED_RESIDUE, bound_fact,
+    bound_facts,
+)
+
+
+def bounded_run(argv: list[str], cwd, env: dict | None = None):
+    """Contract: a completed read-only child, or None when it could not run.
+
+    Every child the engine starts is read-only and bounded; a failure to
+    launch, a timeout or a signal yields None so the caller records a null
+    fact or a finding rather than letting an environment fact escape (D19).
+    """
+    try:
+        return subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True,
+                              text=True, timeout=CHILD_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+# --------------------------------------------------------------------------
+# The resolver ladder
+# --------------------------------------------------------------------------
+
+
+def dedup_violations(violations: list[dict]) -> list[dict]:
+    """The list with each `(pointer, message)` kept once, in first-seen order.
+
+    `validate_contract` re-runs `validate_schema_version` internally, so a
+    malformed version would otherwise be counted twice in the `violations`
+    fact.
+    """
+    seen = set()
+    ordered = []
+    for item in violations:
+        key = (item["pointer"], item["message"])
+        if key not in seen:
+            seen.add(key)
+            ordered.append(item)
+    return ordered
+
+
+def stage_repair_id(stage: str, reason_code: str) -> str:
+    """The repair the stage's own check declares for that code (D31)."""
+    return dict(REGISTRY_BY_ID[STAGE_CHECKS[stage]].findings)[reason_code]
+
+
+def suppress_unset_stages(context: Context, suppressed_by: str) -> None:
+    """Every stage still unset becomes `suppressed` by the named check.
+
+    Those *before* the failing stage in ladder order as well as those after:
+    an unparseable contract fails `valid` while `schema_supported` never ran,
+    and an unset stage is a hole an evaluator would raise on (D33).
+    """
+    for name in STAGE_ORDER:
+        if context.stages[name] is None:
+            context.stages[name] = Outcome(
+                "suppressed", facts={"suppressed_by": suppressed_by})
+
+
+def settle(context: Context, error, facts: dict | None = None) -> bool:
+    """Record one resolver refusal against the stage its code names (D33).
+
+    `facts` are the stage's own facts; the refusal's `violations` and
+    `first_pointer` are merged over them. The ladder passes the compatibility
+    facts this way for an `unsupported_schema` refusal (#147 D6). Returns
+    False for a code no stage owns, which the caller reports on
+    `repository.contract.resolvable` itself.
+    """
+    stage = CODE_STAGES.get(error.code)
+    if stage is None:
+        return False
+    check_id = STAGE_CHECKS[stage]
+    # Overwrites a `passed` recording when the code names an earlier stage:
+    # `validate_projections` refuses `invalid_contract` after `valid` passed.
+    context.stages[stage] = Outcome(
+        "failed", error.code, stage_repair_id(stage, error.code),
+        {**(facts or {}),
+         "violations": len(error.violations),
+         "first_pointer": bound_fact(error.violations[0]["pointer"])})
+    suppress_unset_stages(context, check_id)
+    return True
+
+
+def compatibility_facts(resolver, manifest: dict, source) -> dict:
+    """What `compatibility.contract.schema_supported` reports (#147 D6).
+
+    The installed platform's version and supported project schemas always;
+    the contract's declared schema version and interval only as far as the
+    resolver's defensive `declared_facts` reads them, so an absent or
+    malformed member is left out rather than defaulted. At most five keys,
+    which leaves a failed check room for `schema_reason_code`, `violations`
+    and `first_pointer` within the eight-key cap (D9).
+    """
+    facts = {
+        "platform_version": bound_fact(manifest["platform_version"]),
+        "supported_project_schemas": bound_facts(
+            str(version) for version in manifest["project_schema_versions"]),
+    }
+    declared = resolver.declared_facts(source)
+    if declared["project_schema_version"] is not None:
+        facts["project_schema_version"] = declared["project_schema_version"]
+    interval = declared["platform_interval"]
+    if interval is not None:
+        facts["platform_min_inclusive"] = bound_fact(interval["min_inclusive"])
+        facts["platform_max_exclusive"] = bound_fact(interval["max_exclusive"])
+    return facts
+
+
+def check_contract_resolvable(context: Context) -> Outcome:
+    """Run the resolver ladder once and cache every stage it settles (D17).
+
+    The steps follow `resolve`'s refusal precedence (#147 D4): load the
+    platform manifest, discover the root, check the declared
+    schema version against the manifest's supported set, validate the
+    contract's shape, and only then check the installed platform version
+    against the declared interval. `schema_supported` is recorded as passed
+    after that range check, so a passed compatibility check always means the
+    interval was evaluated.
+
+    This is the engine's one declared exception to the single boundary in
+    `main`: a failure *of the resolver* is this check's finding — a broken
+    platform installation among them, reported at the `platform` stage with
+    the resolver's own repair id (#147 D5) — while a failure of anything else
+    is the refusal (D29).
+    """
+    resolver = context.resolver
+    stage = "platform"
+    manifest = None
+    try:
+        try:
+            manifest, _ = resolver.require_platform_manifest()
+        except resolver.ContractError as error:
+            return resolver_failed(context, stage, error.repair_id)
+
+        stage = "present"
+        root = resolver.discover_root(context.root_arg)
+        context.root = root
+        context.stages["present"] = Outcome("passed")
+
+        stage = "schema_supported"
+        source = resolver.load_contract(root)
+        context.contract = source
+        violations: list[dict] = []
+        resolver.validate_schema_version(
+            source, violations, manifest["project_schema_versions"])
+
+        stage = "valid"
+        violations += resolver.validate_contract(source, manifest)
+        resolver.raise_for_violations(dedup_violations(violations))
+        context.stages["valid"] = Outcome("passed")
+
+        stage = "schema_supported"
+        resolver.raise_for_platform_range(
+            source["platform"], manifest["platform_version"])
+        context.stages["schema_supported"] = Outcome(
+            "passed", facts=compatibility_facts(resolver, manifest, source))
+
+        stage = "projection_fresh"
+        context.bindings = resolver.normalize_bindings(source["bindings"], root)
+        context.capabilities = resolver.compute_capabilities(
+            context.bindings, root, source["capabilities"], source["release"],
+            source)
+        resolver.validate_projections(root, source)
+        context.stages["projection_fresh"] = Outcome("passed")
+
+        stage = "capability_required"
+        resolver.raise_for_unavailable(list(context.required), context.capabilities)
+        context.stages["capability_required"] = Outcome("passed")
+    except resolver.ContractError as error:
+        facts = None
+        if error.code == "unsupported_schema":
+            # Both raise sites run after the manifest and the contract are
+            # bound, so the refusal can say what it was measured against.
+            facts = {**compatibility_facts(resolver, manifest, context.contract),
+                     "schema_reason_code": error.reason_code}
+        if not settle(context, error, facts):
+            return resolver_failed(context, stage)
+    except Exception:
+        return resolver_failed(context, stage)
+    return Outcome("passed")
+
+
+def resolver_failed(context: Context, stage: str,
+                    resolver_repair_id: str | None = None) -> Outcome:
+    """The ladder itself broke: every unsettled stage suppresses under it.
+
+    `stage` names the ladder step that broke. A broken platform installation
+    also carries the resolver's own repair id, so the report names what to
+    reinstall without a new repair in the closed set (#147 D5).
+    """
+    suppress_unset_stages(context, RESOLVABLE_CHECK_ID)
+    facts = {"stage": stage}
+    if resolver_repair_id is not None:
+        facts["resolver_repair_id"] = bound_fact(resolver_repair_id)
+    return Outcome("failed", "resolver_failure", "conformance.internal", facts)
+
+
+def stage_result(context: Context, stage: str) -> Outcome:
+    """The cached verdict for `stage`.
+
+    After `check_contract_resolvable` returns, no stage is unset; finding one
+    here is a control-flow bug in the ladder, not a finding about the subject.
+    """
+    outcome = context.stages[stage]
+    if outcome is None:
+        raise ValueError(f"the ladder left the {stage!r} stage unsettled")
+    return outcome
+
+
+def check_contract_present(context: Context) -> Outcome:
+    return stage_result(context, "present")
+
+
+def check_schema_supported(context: Context) -> Outcome:
+    return stage_result(context, "schema_supported")
+
+
+def check_contract_valid(context: Context) -> Outcome:
+    return stage_result(context, "valid")
+
+
+def check_projection_fresh(context: Context) -> Outcome:
+    return stage_result(context, "projection_fresh")
+
+
+def check_capability_required(context: Context) -> Outcome:
+    return stage_result(context, "capability_required")
+
+
+# --------------------------------------------------------------------------
+# Host installation
+#
+# Both checks depend on `repository.contract.valid`, so the authored contract
+# is parsed and the resolver's capability states are computed before either
+# runs. Neither opens a file, follows a link to read its target, or starts a
+# process.
+# --------------------------------------------------------------------------
+
+
+def declared_policy_paths(contract: dict) -> list[str]:
+    """Every repository-relative policy path the contract declares, sorted.
+
+    Read from the authored contract rather than `context.bindings`, whose
+    entries are already absolute: an absolute path in `facts` would leak the
+    caller's home directory.
+    """
+    paths = contract["bindings"]["paths"]
+    subjects = {entry for member in POLICY_PATH_MEMBERS for entry in paths[member]}
+    subjects.update(projection["source"] for projection in contract["projections"])
+    return sorted(subjects)
+
+
+def first_symlinked_component(root: Path, relative: str) -> tuple[int, Path] | None:
+    """The 1-based depth and path of `relative`'s first symlinked component.
+
+    The walk accumulates from `root` and never tests `root` itself or any of
+    its parents (D18). The resolver resolves the root before any evaluator sees
+    it, so today the bound is defense-in-depth rather than a falsifiable
+    invariant (D39). A component that does not exist ends the walk without a
+    finding: an absent knowledge path is the resolver's own refusal, not a
+    symlinked one.
+    """
+    current = root
+    for depth, part in enumerate(Path(relative).parts, start=1):
+        current = current / part
+        if current.is_symlink():       # an lstat: the link is never followed
+            return depth, current
+        if not current.exists():
+            return None
+    return None
+
+
+def points_into_nix_store(component: Path) -> bool:
+    """Whether the link points into the Nix store — the bool only, never the
+    store path itself, which would be an absolute path in `facts` (D9)."""
+    target = os.readlink(component)
+    if not os.path.isabs(target):
+        target = os.path.join(str(component.parent), target)
+    return target.startswith(NIX_STORE_PREFIX)
+
+
+def check_policy_path_no_follow_readable(context: "Context") -> "Outcome":
+    """Contract: failed when any declared policy path reaches its target through
+    a symlink at or below the project root, never above it (D18)."""
+    offending: list[str] = []
+    first: tuple[int, Path] | None = None
+    for relative in declared_policy_paths(context.contract):
+        found = first_symlinked_component(context.root, relative)
+        if found is None:
+            continue
+        offending.append(relative)
+        if first is None:
+            first = found
+    if first is None:
+        return Outcome("passed")
+    depth, component = first
+    return Outcome("failed", "policy_path_symlinked", "host.policy_path.materialize",
+                   {"paths": bound_facts(offending),
+                    "count": len(offending),
+                    "link_depth": depth,
+                    "in_nix_store": points_into_nix_store(component)})
+
+
+def check_executor_helper_on_path(context: "Context") -> "Outcome":
+    """Contract: failed when the resolver computed a capability as blocked for a
+    tool-shaped reason; performs no PATH search of its own."""
+    offending = [name for name, entry in sorted(context.capabilities.items())
+                 if entry["state"] == "blocked"
+                 and entry["reason_code"] in TOOL_REASON_CODES]
+    if not offending:
+        return Outcome("passed")
+    codes = {context.capabilities[name]["reason_code"] for name in offending}
+    return Outcome("failed", "helper_missing", "host.helper.install",
+                   {"capabilities": bound_facts(offending),
+                    "count": len(offending),
+                    "reason_codes": bound_facts(codes)})
+
+
+# --------------------------------------------------------------------------
+# The tracker credential
+#
+# The one network-flagged check (D7): the only evaluator that starts a child
+# reaching beyond this machine. `TRACKERS` is the closed dispatch on
+# `tracker.kind`, so the kind, its subcommand and its hostname have a single
+# home and an unrecognised kind cannot fall back onto another tracker's.
+# --------------------------------------------------------------------------
+
+
+TRACKERS: dict[str, dict] = {
+    # `argv` is completed with `host` at the call site. An unscoped
+    # `gh auth status` exits 0 when *any* configured host holds a credential,
+    # which would report `github.com` authenticated on the strength of another
+    # forge's login — and fail it on an unrelated host's broken one.
+    "github": {"argv": ("auth", "status", "--hostname"), "host": "github.com"},
+}
+
+
+def check_tracker_credential(context: "Context") -> "Outcome":
+    """Contract: passed when the declared tracker CLI reports an authenticated
+    credential; not_run for a tracker kind this engine cannot interrogate.
+    Records a boolean and a hostname from the closed table, never CLI output."""
+    tracker = context.contract["bindings"]["tracker"]
+    kind, cli = tracker["kind"], tracker["cli"]
+    if kind not in TRACKERS:
+        # Authored data the resolver accepts as a free string, so a finding
+        # rather than an engine bug — and never a pass (D20).
+        return Outcome("not_run", "unsupported_tracker_kind",
+                       "host.tracker.authenticate",
+                       {"kind": bound_fact(kind), "cli": bound_fact(cli)})
+    env = dict(os.environ)
+    for name in tracker["credential_env"]["unset_before_invocation"]:
+        env.pop(name, None)   # the contract is the single home for the scrub
+    host = TRACKERS[kind]["host"]
+    proc = bounded_run([cli, *TRACKERS[kind]["argv"], host],
+                       cwd=context.root, env=env)
+    if proc is None:
+        # A tracker CLI that cannot be spawned is host.executor.helper_on_path's
+        # finding, not this one's.
+        return Outcome("not_run", "tracker_credential_missing",
+                       "host.tracker.authenticate",
+                       {"authenticated": False, "cli_invoked": False})
+    # The table, never stdout: `gh auth status` prints the account name.
+    if proc.returncode == 0:
+        return Outcome("passed", None, None,
+                       {"authenticated": True, "cli_invoked": True,
+                        "host": host})
+    return Outcome("failed", "tracker_credential_missing",
+                   "host.tracker.authenticate",
+                   {"authenticated": False, "cli_invoked": True, "host": host})
+
+
+def check_admission_declaration(context: "Context") -> "Outcome":
+    """Contract: passed when the installed host declaration is valid, with its
+    supported routes (`<route>=<agent_slots>`) and unsupported route names as
+    facts; failed with the library's own reason code otherwise, naming the
+    declaration path. It reports the declaration and route support only: it
+    never reads or writes a ledger or a claim (#150 D13, D24)."""
+    try:
+        declaration = host_admission.load_declaration()
+    except host_admission.DeclarationError as error:
+        path = host_admission.declaration_path()
+        facts = {} if path is None else {"declaration_path": bound_fact(str(path))}
+        return Outcome("failed", error.reason_code, "host.admission.declare", facts)
+    routes = declaration["routes"]
+    return Outcome("passed", None, None, {
+        "supported_routes": bound_facts(
+            f"{name}={route['agent_slots']}" for name, route in routes.items()
+            if route["support"] == "supported"),
+        "unsupported_routes": bound_facts(
+            name for name, route in routes.items()
+            if route["support"] == "unsupported"),
+    })
+
+
+# --------------------------------------------------------------------------
+# Repository policy
+#
+# Three pure reads of the working tree and the authored contract: no process,
+# no write, no network. Every fact is a repository-relative path, an ignore
+# rule or a command id — never an absolute path, and never a command's argv.
+# --------------------------------------------------------------------------
+
+
+# The four lifecycle classes are closed (#72): a path matching none of them is
+# a finding, never a new implicit class. The four names unpack from the tuple,
+# so no class can exist outside it.
+LIFECYCLE_CLASSES = ("canonical_tracked", "tracked_projection",
+                     "ignored_runtime", "allowlisted_bookkeeping")
+(CANONICAL_TRACKED, TRACKED_PROJECTION,
+ IGNORED_RUNTIME, ALLOWLISTED_BOOKKEEPING) = LIFECYCLE_CLASSES
+
+AGENTS_DIR = ".agents"
+CANONICAL_AGENTS_PREFIXES = (
+    "project.json", "instructions/", "skills/", "adapters/",
+    "extensions/", "knowledge/", "artifacts/",
+)
+RUNTIME_PREFIX = "runtime/"
+ARTIFACTS_PREFIX = "artifacts/"
+# The buckets `artifacts/` admits; any other second segment is unclassified.
+# `replays` holds committed replay records (#283's light-lane triage replay).
+ARTIFACTS_BUCKETS = ("specs", "plans", "evidence", "handoffs", "notes",
+                     "replays")
+# Closed and empty in v1: nothing outside .agents/ is admitted as
+# non-behavioral bookkeeping yet.
+BOOKKEEPING_ALLOWLIST: tuple[str, ...] = ()
+
+RUNTIME_IGNORE_PATTERNS = (".agents/runtime/", ".agents/runtime",
+                           "/.agents/runtime/", "/.agents/runtime")
+OVERBROAD_IGNORE_PATTERNS = (".agents/*", "/.agents/*", ".claude/*", "/.claude/*")
+RUNTIME_SENTINEL_BYTES = b"*\n"
+
+SHELL_ARGV0 = ("sh", "bash", "zsh", "dash", "ksh")
+SHELL_METACHARACTERS = (";", "|", "&&", "`", "$(")
+
+
+def classify_agents_relative(relative: str) -> str | None:
+    """The lifecycle class of a path relative to `<root>/.agents/`, or None."""
+    if relative.startswith(RUNTIME_PREFIX):
+        return IGNORED_RUNTIME
+    if relative.startswith(ARTIFACTS_PREFIX):
+        segments = relative.split("/")
+        if len(segments) > 1 and segments[1] in ARTIFACTS_BUCKETS:
+            return CANONICAL_TRACKED
+        return None
+    for prefix in CANONICAL_AGENTS_PREFIXES:
+        if relative == prefix or (prefix.endswith("/")
+                                  and relative.startswith(prefix)):
+            return CANONICAL_TRACKED
+    return None
+
+
+def classify_path(relative: str, targets: frozenset) -> str | None:
+    """Contract: `relative`'s lifecycle class, or None when it matches none of
+    the four. `relative` and every member of `targets` are repository-relative,
+    so a projection target that lives under `.agents/` classifies as the
+    projection it is rather than as an unadmitted file."""
+    if relative in targets:
+        return TRACKED_PROJECTION
+    if relative in BOOKKEEPING_ALLOWLIST:
+        return ALLOWLISTED_BOOKKEEPING
+    if relative.startswith(AGENTS_DIR + "/"):
+        return classify_agents_relative(relative[len(AGENTS_DIR) + 1:])
+    return None
+
+
+def agents_tree_paths(root: Path) -> set[str]:
+    """Every file or symlink under `<root>/.agents/`, repository-relative.
+
+    A path carrying a `.git` component is skipped: a nested repository's own
+    bookkeeping is not this repository's classification subject.
+
+    A symlink is a subject in its own right, not merely when it resolves to a
+    file: `rglob` does not descend through a directory symlink, so a link that
+    `is_file()` rejects for pointing at a directory — or at nothing — would
+    otherwise contribute no subject at all and escape classification entirely.
+    """
+    found = set()
+    for path in (root / AGENTS_DIR).rglob("*"):
+        relative = path.relative_to(root)
+        if ".git" not in relative.parts and (path.is_symlink()
+                                             or path.is_file()):
+            found.add(relative.as_posix())
+    return found
+
+
+def check_paths_classified(context: "Context") -> "Outcome":
+    """Contract: failed when a file under .agents/ or a declared projection
+    target matches none of the four closed lifecycle classes (#72)."""
+    targets = frozenset(projection["target"]
+                        for projection in context.contract["projections"])
+    subjects = agents_tree_paths(context.root) | targets
+    offending = [relative for relative in sorted(subjects)
+                 if classify_path(relative, targets) is None]
+    if not offending:
+        return Outcome("passed")
+    return Outcome("failed", "unclassified_path", "lifecycle.path.classify",
+                   {"paths": bound_facts(offending), "count": len(offending)})
+
+
+def ignore_rules(path: Path) -> list[str]:
+    """Every stripped, non-empty, non-comment line of `path`.
+
+    An unreadable or absent file yields an empty rule list rather than an
+    exception: a repository carrying no ignore file states no rule.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    stripped = (line.strip() for line in text.splitlines())
+    return [rule for rule in stripped if rule and not rule.startswith("#")]
+
+
+def holds_runtime_sentinel(path: Path) -> bool:
+    """Whether `path` is #72's committed sentinel: exactly the bytes `*\\n`."""
+    try:
+        return path.read_bytes() == RUNTIME_SENTINEL_BYTES
+    except OSError:
+        return False
+
+
+def check_ignore_runtime_sentinel(context: "Context") -> "Outcome":
+    """Contract: failed for a broad .agents/* or .claude/* ignore rule, or when
+    .agents/runtime/ is covered by neither a root rule nor the committed
+    sentinel; the overbroad finding outranks the missing one.
+
+    Only the tracked ignore files are read. `.git/info/exclude` is deliberately
+    not consulted: a machine-local rule cannot be the repository's own
+    classification of a path.
+    """
+    root_gitignore = context.root / ".gitignore"
+    rules = ignore_rules(root_gitignore)
+    offending = [rule for rule in rules if rule in OVERBROAD_IGNORE_PATTERNS]
+    if offending:
+        return Outcome("failed", "overbroad_ignore", "lifecycle.ignore.repair",
+                       {"rules": bound_facts(offending), "count": len(offending)})
+    # Either spelling covers the subtree, so a conformant repository that
+    # commits only one of the two is not failed for the other's absence.
+    sentinel = context.root / AGENTS_DIR / "runtime" / ".gitignore"
+    if (any(rule in RUNTIME_IGNORE_PATTERNS for rule in rules)
+            or holds_runtime_sentinel(sentinel)):
+        return Outcome("passed")
+    return Outcome("failed", "runtime_ignore_missing", "lifecycle.ignore.repair",
+                   {"root_gitignore": root_gitignore.exists(),
+                    "sentinel": sentinel.exists()})
+
+
+def asks_a_shell_to_read_a_command(word: str) -> bool:
+    """Whether `word` is a short-option cluster carrying a shell's `-c`.
+
+    A shell accepts `-c` bundled with its other short options, so matching the
+    exact word `-c` lets `bash -lc '<script>'` through — and a script naming no
+    metacharacter then reaches a shell unnoticed.
+    """
+    return (word.startswith("-") and not word.startswith("--")
+            and "c" in word[1:])
+
+
+def reaches_through_a_shell(argv: list) -> bool:
+    """Whether `argv` reaches its command through a shell rather than naming it.
+
+    `argv` is non-empty and every word is a string: the resolver validated
+    command shape before `repository.contract.valid` passed, which this check
+    declares as its dependency, so the two never re-implement one another.
+    """
+    if (Path(argv[0]).name in SHELL_ARGV0
+            and any(asks_a_shell_to_read_a_command(word)
+                    for word in argv[1:])):
+        return True
+    return any(meta in word for word in argv for meta in SHELL_METACHARACTERS)
+
+
+def check_commands_no_shell_indirection(context: "Context") -> "Outcome":
+    """Contract: failed when a declared command's argv[0] is a shell asked to
+    read a command, or any argv element carries a shell metacharacter.
+
+    Read from the authored contract rather than `context.bindings`:
+    normalization rewrites `cwd` and leaves `argv` alone, so the authored form
+    keeps the reported ids and the authored text in one correspondence.
+    """
+    offending = [command_id for command_id, entry
+                 in sorted(context.contract["bindings"]["commands"].items())
+                 if reaches_through_a_shell(entry["argv"])]
+    if not offending:
+        return Outcome("passed")
+    return Outcome("failed", "shell_indirection", "contract.commands.destructure",
+                   {"commands": bound_facts(offending), "count": len(offending)})
+
+
+# --------------------------------------------------------------------------
+# Residue
+# --------------------------------------------------------------------------
+
+# Only `merged` admits the removal repair: a run that stopped or failed
+# terminated without the outcome the lifecycle was after, and a reader — not
+# the engine — decides what it owes.
+REMOVABLE_LEDGER_STATE = "merged"
+
+LEDGER_RUNS_RELATIVE = (".superpowers", "workflows")
+LEDGER_STATE_FILE = "state.json"
+LEDGER_LOCK_FILE = "state.lock"
+
+# The fact key each class is counted under; the codes read as reason codes and
+# the keys read as a tally, so neither borrows the other's spelling.
+RESIDUE_FACT_KEYS = {LIVE_OWNER: "live_owner",
+                     UNACKNOWLEDGED_RESIDUE: "unacknowledged",
+                     TERMINAL_RESIDUE: "terminal"}
+
+ROOT_SCRATCH_PATTERNS = ("producer-report-*.json", "*.tmp.??????",
+                         ".resolve-project.*.tmp")
+
+
+def listed(directory: Path) -> list:
+    """Contract: `directory`'s children sorted by path, or none at all.
+
+    `Path.is_dir` swallows an OSError and answers False, so it never protects
+    the listing that follows it: an absent path, a file, and a directory that
+    stats fine but cannot be read all land here. None of the three is an engine
+    bug — an unlistable directory is an environment fact that contributes no
+    subject, exactly as an unreadable ledger records no attempt (D19, D32).
+    """
+    try:
+        return sorted(directory.iterdir())
+    except OSError:
+        return []
+
+
+def nested_ledger_runs(context: "Context") -> list:
+    """Every ledger run directory living inside a worktree, sorted by path.
+
+    A run in the primary checkout is where the ledger belongs; only a copy
+    that a worktree carried away is residue.
+    """
+    worktree_root = (context.root
+                     / context.contract["bindings"]["vcs"]["worktree"]["root"])
+    return [run
+            for worktree in listed(worktree_root)
+            for run in listed(worktree.joinpath(*LEDGER_RUNS_RELATIVE))
+            if run.is_dir()]
+
+
+def ledger_attempts(run: Path) -> list | None:
+    """Every attempt the run's ledger records, or None when it records none.
+
+    An absent, unreadable, non-JSON or unexpectedly-shaped ledger is None
+    rather than an exception: a ledger nothing can read proves nothing, which
+    is exactly what an unacknowledged run means (D19).
+    """
+    try:
+        state = json.loads(
+            (run / LEDGER_STATE_FILE).read_text(encoding="utf-8"))
+        return [attempt for issue in state["issues"].values()
+                for attempt in issue["attempts"]]
+    except (OSError, UnicodeDecodeError, ValueError,
+            TypeError, AttributeError, KeyError):
+        return None
+
+
+def durably_merged(attempts) -> bool:
+    """Contract: whether every attempt is merged and says so twice (D34).
+
+    An attempt carrying no result, or a result whose state disagrees with the
+    attempt's, is a termination nobody wrote down — the ledger's own validator
+    refuses that shape, and D10 admits removal only against a record.
+    """
+    if not attempts:
+        return False
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            return False
+        result = attempt.get("result")
+        if (attempt.get("state") != REMOVABLE_LEDGER_STATE
+                or not isinstance(result, dict)
+                or result.get("state") != attempt.get("state")):
+            return False
+    return True
+
+
+def classify_residue_run(run: Path) -> str:
+    """Contract: `run`'s residue class, proved by a lock and then by a ledger.
+
+    The lock is opened read-only and never created: a run with no `state.lock`
+    proved nothing and is unacknowledged, because creating one to probe would
+    be a write under the subject root and reading its absence as freedom would
+    offer removal with no evidence at all behind it (D34). Elapsed time is
+    consulted nowhere.
+    """
+    lock = run / LEDGER_LOCK_FILE
+    if not lock.is_file():
+        return UNACKNOWLEDGED_RESIDUE
+    try:
+        fd = os.open(lock, os.O_RDONLY)
+    except OSError:  # a lock this process cannot even open proves nothing
+        return UNACKNOWLEDGED_RESIDUE
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:  # BlockingIOError included: someone else holds it
+            return LIVE_OWNER
+        return (TERMINAL_RESIDUE if durably_merged(ledger_attempts(run))
+                else UNACKNOWLEDGED_RESIDUE)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def check_residue_nested_ledger(context: "Context") -> "Outcome":
+    """Contract: warning when a ledger run directory lives inside a worktree.
+    A run is removable only when a non-blocking flock on its existing
+    state.lock succeeded and every attempt is merged with a matching durable
+    result; anything less is unacknowledged. Nothing is deleted, no lock is
+    created, and elapsed time is never consulted (D10, D34)."""
+    runs = nested_ledger_runs(context)
+    if not runs:
+        return Outcome("passed")
+    counts = {code: 0 for code, _ in NESTED_LEDGER_FINDINGS}
+    for run in runs:
+        counts[classify_residue_run(run)] += 1
+    reason_code, repair_id = next(
+        finding for finding in NESTED_LEDGER_FINDINGS if counts[finding[0]])
+    facts = {"runs": bound_facts(run.relative_to(context.root).as_posix()
+                                 for run in runs),
+             "count": len(runs)}
+    facts.update((RESIDUE_FACT_KEYS[code], counts[code]) for code in counts)
+    return Outcome("warning", reason_code, repair_id, facts)
+
+
+def check_residue_root_scratch(context: "Context") -> "Outcome":
+    """Contract: warning when an immediate child file of the project root
+    matches the closed scratch pattern set.
+
+    Never recursive: these are `mktemp` outputs that escaped `$TMPDIR` into the
+    repository root and nowhere else, and a deeper walk would sweep in the real
+    homes the same names legitimately have.
+    """
+    names = [entry.name for entry in listed(context.root)
+             if entry.is_file()
+             and any(fnmatch.fnmatch(entry.name, pattern)
+                     for pattern in ROOT_SCRATCH_PATTERNS)]
+    if not names:
+        return Outcome("passed")
+    return Outcome("warning", "root_scratch_present", "lifecycle.residue.root_scratch",
+                   {"files": bound_facts(names), "count": len(names)})
+
+
+def promoted_candidates(context: "Context") -> list:
+    """Contract: every promoted candidate document, in file-name order.
+
+    Only a regular, non-symlinked `*.json` file directly in the candidates
+    directory is read. One that cannot be read or parsed, is not an object, or
+    names another kind or state is skipped: judging it is `promotion
+    validate`'s job, not this check's (D33).
+    """
+    candidates = []
+    for entry in listed(context.root.joinpath(*PROMOTION_CANDIDATES_RELATIVE)):
+        if (not entry.name.endswith(".json") or entry.is_symlink()
+                or not entry.is_file()):
+            continue
+        try:
+            document = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if (isinstance(document, dict)
+                and document.get("kind") == PROMOTION_CANDIDATE_KIND
+                and document.get("state") == PROMOTION_PROMOTED_STATE):
+            candidates.append(document)
+    return candidates
+
+
+def judge_promoted_duplicate(root: Path, path, sha256) -> str | None:
+    """Contract: the finding one of this project's removable copies yields —
+    drifted, present, or None when nothing exists at its path (D15)."""
+    if (not isinstance(path, str) or not path or os.path.isabs(path)
+            or ".." in Path(path).parts):
+        return PROMOTED_DUPLICATE_DRIFTED
+    if first_symlinked_component(root, path) is not None:
+        return PROMOTED_DUPLICATE_DRIFTED
+    target = root / path
+    if not os.path.lexists(target):
+        return None
+    if not target.is_file():
+        return PROMOTED_DUPLICATE_DRIFTED
+    try:
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    except OSError:
+        return PROMOTED_DUPLICATE_DRIFTED
+    if not isinstance(sha256, str) or sha256 != digest:
+        return PROMOTED_DUPLICATE_DRIFTED
+    return PROMOTED_DUPLICATE_PRESENT
+
+
+def check_residue_promoted_duplicate(context: "Context") -> "Outcome":
+    """Contract: failed when a promoted lesson's declared local copy in this
+    repository still exists.
+
+    Each promoted candidate's `local_duplicates` is walked in order. Project-only
+    residue is counted as retained and another repository's copy as deferred,
+    so a passing report states its own scope; this repository's `remove`
+    entries are judged. Nothing is spawned, imported or removed (D10, D11).
+    """
+    repository_key, path_key, sha_key, disposition_key = PROMOTION_DUPLICATE_MEMBERS
+    project_id = context.contract["project"]["id"]
+    counts = {code: 0 for code, _ in PROMOTED_DUPLICATE_FINDINGS}
+    offenders, deferred, retained = [], 0, 0
+    for candidate in promoted_candidates(context):
+        duplicates = candidate.get(PROMOTION_DUPLICATES_MEMBER)
+        if not isinstance(duplicates, list):
+            continue
+        for entry in duplicates:
+            if (not isinstance(entry, dict)
+                    or not {repository_key, path_key, disposition_key} <= entry.keys()):
+                continue
+            disposition = entry[disposition_key]
+            if disposition == PROMOTION_PROJECT_ONLY_RESIDUE:
+                retained += 1
+            elif disposition != PROMOTION_REMOVE_DISPOSITION:
+                continue
+            elif entry[repository_key] != project_id:
+                deferred += 1
+            else:
+                finding = judge_promoted_duplicate(
+                    context.root, entry[path_key], entry.get(sha_key))
+                if finding is not None:
+                    counts[finding] += 1
+                    offenders.append(str(entry[path_key]))
+    facts = {"duplicates": bound_facts(offenders), "count": len(offenders),
+             "deferred_count": deferred, "retained_count": retained}
+    if not offenders:
+        return Outcome("passed", facts=facts)
+    reason_code, repair_id = next(
+        finding for finding in PROMOTED_DUPLICATE_FINDINGS if counts[finding[0]])
+    return Outcome("failed", reason_code, repair_id, facts)
+
+
+# --------------------------------------------------------------------------
+# The release-profile lint items
+#
+# Three #86 findings, each the live verdict of one admissibility rule of the
+# release-profile compiler (#124 D14): `observation_deadline`,
+# `rolled_back_reachable` and `restore_anchor`. `not_run` with
+# `subject_absent` where the contract declares `release: "unsupported"`;
+# otherwise `failed` for the first profile, in sorted id order, that the rule
+# refuses, and `passed` when none does. The contract has already passed the
+# release grammar by the time these run (they depend on
+# `repository.contract.valid`), which is the compiler's precondition.
+# `RELEASE_DESCRIPTORS` is the descriptor registry the rules read, a module
+# global so a test can inject a descriptor the closed registry does not carry.
+# --------------------------------------------------------------------------
+
+
+RELEASE_DESCRIPTORS = release_adapter.DESCRIPTORS
+
+
+def find_release_profile(context: "Context") -> tuple[str, dict | None]:
+    """Contract: ("absent", None) when the contract declares `release:
+    "unsupported"`, else ("profiles", <the contract's `profiles` object>)."""
+    release = context.contract["release"]
+    if release == "unsupported":
+        return ("absent", None)
+    return ("profiles", release["profiles"])
+
+
+def release_profile_outcome(context: "Context", rule: str) -> "Outcome":
+    """The verdict every release-profile item shares, given its own rule.
+
+    Absent subjects are `not_run`; they cannot read as a pass, and neither
+    drives `incomplete`, because all three checks are optional (D6). The facts
+    of a failure name the first offending profile and its first finding.
+    """
+    _, reason_code, repair_id = release_profile.RULE_CHECKS[rule]
+    state, profiles = find_release_profile(context)
+    if state == "absent":
+        return Outcome("not_run", "subject_absent", repair_id, {"declared": False})
+    if state != "profiles":
+        raise ValueError(f"unknown release profile state: {state!r}")
+    for profile_id in sorted(profiles):
+        findings = release_profile.rule_findings(
+            rule, profile_id, profiles[profile_id], context.contract,
+            RELEASE_DESCRIPTORS)
+        if findings:
+            return Outcome("failed", reason_code, repair_id, {
+                "declared": True, "profile_id": bound_fact(profile_id),
+                "pointer": bound_fact(findings[0]["pointer"]),
+                "finding": bound_fact(findings[0]["reason"])})
+    return Outcome("passed", facts={"declared": True})
+
+
+def check_release_profile_rolled_back_reachable(context: "Context") -> "Outcome":
+    """Fails a profile whose recovery declaration leaves `rolled_back`
+    structurally unreachable for a unit that has activation and immutable
+    publication but no residue-only compensate edge (#86)."""
+    return release_profile_outcome(context, "rolled_back_reachable")
+
+
+def check_release_profile_restore_anchor(context: "Context") -> "Outcome":
+    """Fails a profile with a restore edge whose anchor the unit's own
+    `in_place` publication destroys, which the profile has to materialize
+    before the unit runs (#86)."""
+    return release_profile_outcome(context, "restore_anchor")
+
+
+def check_release_profile_observation_deadline(context: "Context") -> "Outcome":
+    """Fails a profile with a publication action whose observation deadline is
+    left out, so an observation that never concludes never resolves the unit
+    (#86)."""
+    return release_profile_outcome(context, "observation_deadline")

@@ -15,7 +15,7 @@
 |---|---|
 | A term | The owning area's `CONTEXT.md` |
 | A decision | That area's `adr/` (`areas/system/adr/` when it spans areas), under the ADR-FORMAT gate |
-| A command's contract | Its module docstring in `python/agent_tools/<module>.py` (the lifecycle guard's in `home/common/claude-code/lifecycle_guard.py`) |
+| A command's contract | Its module docstring in `python/agent_tools/<area>/<module>.py`, or `python/agent_tools/<module>.py` for a top-level module (the lifecycle guard's in `home/common/claude-code/lifecycle_guard.py`) |
 | A procedure (how-to) | `guides/`, one file per task, named for what it does |
 | The behaviour of a Nix module with no Python home | That module's README (`home/common/claude-code/README.md`, `home/common/agent-skills/README.md`, `home/linux/claude-local/README.md`) |
 | A measurement or other retained evidence | `archive/` |

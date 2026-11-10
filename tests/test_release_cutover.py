@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import release_cutover as cutover
-from agent_tools import release_driver
+from agent_tools.release import release_cutover as cutover
+from agent_tools.release import release_driver
 from . import release_driver_support as rs
 from .forge_world import ForgeWorld
 

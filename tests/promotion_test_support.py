@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from agent_tools import agent_gate_bundle as gate
+from agent_tools.delivery import agent_gate_bundle as gate
 from agent_tools.canonical import telemetry_digest
 
 from .test_agent_gate_bundle import context, flat, stratum
@@ -55,8 +55,8 @@ def make_env(tmp: Path, resolved=None, *, resolver_exit=0, resolver_stdout=None)
 
 
 def run(env, *args, cwd=None):
-    """One `python -m agent_tools.promotion` run: (exit, parsed stdout or None, stderr)."""
-    proc = subprocess.run([sys.executable, "-m", "agent_tools.promotion", *args],
+    """One `python -m agent_tools.delivery.promotion` run: (exit, parsed stdout or None, stderr)."""
+    proc = subprocess.run([sys.executable, "-m", "agent_tools.delivery.promotion", *args],
                           capture_output=True, text=True, timeout=60, env=env,
                           cwd=None if cwd is None else str(cwd), check=False)
     return (proc.returncode, json.loads(proc.stdout) if proc.stdout.strip() else None,

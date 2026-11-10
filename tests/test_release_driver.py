@@ -6,12 +6,12 @@ import re
 import unittest
 from unittest import mock
 
-from agent_tools import forge_adapter, release_driver, release_profile
+from agent_tools.release import forge_adapter, release_driver, release_profile
 from agent_tools.canonical import telemetry_digest
-from agent_tools import transaction_core, transaction_storage
-from agent_tools.transaction_core import TransactionStore
-from agent_tools.transaction_proof import proof_refused
-from agent_tools.transaction_storage import ProofRefused, StateInvalid
+from agent_tools.release import transaction_core, transaction_storage
+from agent_tools.release.transaction_core import TransactionStore
+from agent_tools.release.transaction_proof import proof_refused
+from agent_tools.release.transaction_storage import ProofRefused, StateInvalid
 from . import release_driver_support as rs
 from . import release_test_support as support
 from .forge_world import CANONICAL, ROWS, ForgeWorld

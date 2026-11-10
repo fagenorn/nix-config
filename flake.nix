@@ -120,7 +120,7 @@
           };
           # Required through the `Nix Eval` job: the global agent corpus stays project-agnostic.
           agnostic-lint = pkgs.runCommand "agnostic-lint" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-            PYTHONPATH=${self}/python python3 -m agent_tools.agnostic_lint --root ${self}
+            PYTHONPATH=${self}/python python3 -m agent_tools.delivery.agnostic_lint --root ${self}
             touch "$out"
           '';
         }

@@ -29,8 +29,8 @@ import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
 
-from agent_tools import (adopt_apply, adopt_inspection, adopt_links,
-                         adopt_planning, resolve_project)
+from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_links,
+                                          adopt_planning, resolve_project)
 
 from .test_adopt_project import (
     CHECK_LINKS,

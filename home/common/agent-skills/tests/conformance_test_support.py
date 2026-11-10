@@ -31,7 +31,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import conformance
+from agent_tools.project_contract import conformance
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -79,7 +79,7 @@ def run(*args: str, env: dict | None = None,
         cwd: str | Path | None = None) -> tuple[int, str, str]:
     """One S1 subprocess run of the engine."""
     proc = subprocess.run(
-        [sys.executable, "-m", "agent_tools.conformance", *args],
+        [sys.executable, "-m", "agent_tools.project_contract.conformance", *args],
         capture_output=True, text=True, timeout=60,
         env=HERMETIC_ENV if env is None else env, cwd=None if cwd is None else str(cwd),
     )
@@ -139,7 +139,7 @@ def make_root(tmp: Path) -> Path:
 
 
 def load_module():
-    """The engine module, `agent_tools.conformance`, for the S3 seams."""
+    """The engine module, `agent_tools.project_contract.conformance`, for the S3 seams."""
     return conformance
 
 

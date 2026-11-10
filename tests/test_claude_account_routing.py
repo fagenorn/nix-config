@@ -19,7 +19,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools import cache_proxy
+from agent_tools.hosts import cache_proxy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ACCOUNTS = REPO_ROOT / "home" / "common" / "claude-code" / "accounts"

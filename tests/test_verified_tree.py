@@ -1,6 +1,6 @@
 """verified-tree: a verification pass recorded against the tree it saw (#263, issue 437).
 
-Each test drives `python -m agent_tools.verified_tree` in a throwaway git
+Each test drives `python -m agent_tools.verification.verified_tree` in a throwaway git
 repository, the way the other command tests drive theirs (#263 D6). The
 repository is a copy of the eval fixture project whose contract gains a second,
 conditional verification id, resolved under a temporary HOME holding the
@@ -73,7 +73,7 @@ class VerifiedTreeTest(unittest.TestCase):
         self.git("commit", "-q", "-m", message)
 
     def run_tool(self, *args, cwd=None, env=None):
-        return subprocess.run([sys.executable, "-m", "agent_tools.verified_tree", *args],
+        return subprocess.run([sys.executable, "-m", "agent_tools.verification.verified_tree", *args],
                               cwd=cwd or self.repo, capture_output=True, text=True,
                               check=False, env=env or self.env)
 

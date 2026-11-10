@@ -1,0 +1,642 @@
+"""Answering the conformance question, and recording the answer in the fleet.
+
+Everything `adopt-project verify` is made of below its command function: the
+ordered conformance checks and the report they compose (R6.4, D34), the closed
+result set's exit codes and registration policy, and the one write to the
+user-scope fleet registry (D18, D19).
+
+It reads one pinned revision and nothing else, as a `VerificationSource`:
+plain `verify` reads `HEAD` (the resolver runs on the working tree, the
+inventory comes from the index, and every record is read at the `HEAD` commit
+it pins), while `--register` reads nothing from the checkout's branches or
+files. It lists `origin`, then pins the remote default branch and, when the
+contract there names another integration branch, that branch too, and exports
+each pinned commit into a temporary directory removed on every exit and runs
+every check there. A `SourceReader` passed as `remote_source`'s `reader`
+decides how a branch is pinned and exported; `--register` uses the default,
+`FETCH_READER`, which fetches each branch into `refs/remotes/origin/<branch>`
+(the fetched objects and those remote-tracking refs are the only repository
+writes) and exports its commit with `git archive`. When the default branch's contract does not resolve, the
+`--integration-branch` operand names the integration branch to read instead,
+under the conditions `remote_source` states; the report then carries a
+`branch_override` member recording the branch read, the default branch passed
+over and the reason. No snapshot of a `ResolvedProject` and no capability
+verdict is kept anywhere. What registration persists is an identity and a
+location: `{project_id, root}` with the real root (#148 D18), plus the same
+`branch_override` member when, and only when, the run selected its branch
+through the operand; a later registration of the project without an override
+drops it (issue 363).
+
+The default branch's contract stays the authority when it resolves:
+`--integration-branch NAME` equal to the branch it names (or to the default
+branch when it names none) changes nothing, and any other operand refuses. The
+operand is accepted only with `--register` and at most once, refusing
+`adopt.verify.integration_branch_without_register` and
+`adopt.verify.integration_branch_repeated` as `adopt_failure`. A run that
+selects its branch through it carries a `branch_override` object (`branch`,
+`default_branch` and `reason`, whose one value is `default_contract_unresolved`)
+in the report and in its registry entry, and in no other run; a later
+registration of the project that did not need the operand drops it from the
+entry, another project's registration leaves it, and a repeated operand
+registration writes the same bytes. The report `schema_version` stays 2 and the
+registry `schema_version` 1, and no reader decides anything from the member.
+Every operand that the remote or the branch's contract does not confirm refuses
+`not_integrated` with `adopt.registration.integration_branch_unresolved`; a
+pinned commit with no adoption evidence record refuses `not_integrated` with
+`adopt.registration.not_integrated`, and when the default contract did not
+resolve and no operand was given its message names `--integration-branch`.
+
+The resolver is not reached from this module. `adopt-project` owns the one
+seam it is consumed through — invoked as a child process through
+`agent_tools.system.siblings.sibling_argv`, never imported (D26) — and hands that
+call in.
+
+Like its sibling libraries it is imported, never run: no `main` and no
+argparse. It is a module of the `agent_tools` package, and every name it reads
+from `adopt_inspection` is named in the `from` import below.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+import tempfile
+
+from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract.adopt_inspection import (
+    AdoptError,
+    EVIDENCE_RECORD_DIR,
+    GIT_TIMEOUT_SECONDS,
+    REMOTE,
+    VERIFY_RESULTS,
+    blob_at,
+    classify,
+    commit_is_ancestor,
+    evidence_records_at,
+    export_commit,
+    fetch_pinned,
+    git_or_fail,
+    has_remote,
+    introducing_commit,
+    is_agent_path,
+    parses_as_evidence_record,
+    parses_as_migration_map,
+    refuse,
+    remote_heads,
+    resolver_error_code,
+    resolver_violation_pointers,
+    tracked_inventory,
+    tree_inventory,
+    verify_check_entry,
+)
+
+# The entry point's resolver call, as this layer receives it: `(root, *args)`
+# to the resolver's exit code and its parsed JSON, or an `AdoptError`.
+Resolver = Callable[..., tuple[int, object]]
+
+VERIFY_SCHEMA_VERSION = 2
+
+
+@dataclass(frozen=True)
+class VerificationSource:
+    """The one revision a verification reads, pinned once.
+
+    `ref` is the report's label for it and `commit` the 40-hex id every record
+    is read at. `resolver_root` is the directory the resolver is called on and
+    `inventory` the `(path, object id)` pairs the unclassified-path check
+    reads, or `None` when the reader that produced the source took no inventory.
+    `verify_repository` has no inventory to read on such a source: its
+    unclassified-path check iterates `None` and raises `TypeError`, an error
+    rather than an `AdoptError` refusal, so it fails loud instead of passing an
+    empty inventory (D5). `branch` is the branch read, pinned
+    through the reader; it is always `None` for `HEAD`.
+    `override_default` is the default branch the `--integration-branch` operand
+    passed over, and `override_reason` why it was passed over; both are `None`
+    unless the operand selected `branch`. `default_contract_resolved` records
+    whether the contract on the default branch resolved, which `HEAD` has no
+    default branch to ask about and so leaves `True`. `remote_default` is the
+    branch `origin`'s `HEAD` names, set by `remote_source` on every source it
+    yields and `None` on the `HEAD` source, which asks no remote.
+    """
+
+    ref: str
+    commit: str
+    resolver_root: Path
+    inventory: list[tuple[str, str]] | None
+    branch: str | None = None
+    override_default: str | None = None
+    override_reason: str | None = None
+    default_contract_resolved: bool = True
+    remote_default: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceReader:
+    """How `remote_source` reads one listed branch of `origin`.
+
+    `pin` takes the checkout root, the branch, the commit id `origin` listed
+    for it (or `None`) and the network timeout, and returns the commit to read.
+    `export` takes the root, that commit and a new destination directory and
+    writes what the resolver is run on. `inventory` is whether the source
+    carries the commit's tree inventory.
+    """
+
+    pin: Callable[[Path, str, str | None, float], str]
+    export: Callable[[Path, str, Path], None]
+    inventory: bool
+
+
+def _fetch_pin(root: Path, branch: str, listed: str | None,
+               timeout: float) -> str:
+    """The default reader's pin: always a fetch, whatever `origin` listed."""
+    return fetch_pinned(root, branch, timeout)
+
+
+# Today's read: fetch the branch, export its whole tree and take its inventory.
+FETCH_READER = SourceReader(pin=_fetch_pin, export=export_commit, inventory=True)
+
+
+def branch_override(source: VerificationSource) -> dict | None:
+    """The `branch_override` member for `source`, or `None` when it has none.
+
+    It names `source.branch`, so it cannot describe a branch other than the
+    pinned one the report was read at.
+    """
+    if source.override_default is None:
+        return None
+    return {"branch": source.branch, "default_branch": source.override_default,
+            "reason": source.override_reason}
+
+
+def head_source(root: Path) -> VerificationSource:
+    """The source plain `verify` reads: the checkout's own `HEAD` commit."""
+    commit = git_or_fail(root, "rev-parse", "--verify",
+                         "HEAD^{commit}").decode("ascii", "strict").strip()
+    return VerificationSource(
+        ref="HEAD", commit=commit, resolver_root=root,
+        inventory=tracked_inventory(root), branch=None)
+
+
+@contextlib.contextmanager
+def remote_source(root: Path, run_resolver: Resolver,
+                  operand: str | None = None, *,
+                  network_timeout: float = GIT_TIMEOUT_SECONDS,
+                  reader: SourceReader = FETCH_READER
+                  ) -> Iterator[VerificationSource]:
+    """The source `--register` reads: the contract's integration branch.
+
+    Nothing is read from the checkout's branches or files. `origin` is listed,
+    its default branch `D` pinned to a commit `R`, and `R` exported into a
+    scratch directory the resolver runs on. If the contract there names another
+    integration branch `B`, that is the one hop made: `B` must be listed by
+    `origin`, is pinned to `R2` the same way, exported, and its own contract
+    must still name `B`, so there is no second hop. Every later check reads the
+    one pinned commit, and the scratch directory lives as long as the caller's
+    `with` block and is removed on success and on every refusal.
+
+    `reader` decides how each branch is pinned and exported, and is handed the
+    commit `origin` listed for the branch. The default, `FETCH_READER`, fetches
+    the branch into `refs/remotes/origin/<branch>` whatever was listed, exports
+    the pinned commit with `git archive` and takes the tree inventory of the
+    pinned commit. Every pin and export goes through `reader`, and the yielded
+    source's `inventory` is `None` when `reader.inventory` is false.
+
+    `operand` is the `--integration-branch` value and is consulted only after
+    the default branch was pinned, exported and resolved. A default contract
+    that resolves keeps its own answer: an operand equal to the branch it names
+    (or to `D` when it names none) changes nothing and any other refuses. A
+    default contract that does not resolve takes the operand as the integration
+    branch `B` when `origin` lists `B` and `B` is not `D`: `B` is pinned
+    through `reader`, exported and confirmed like the hop above, and its own
+    contract must resolve and name `B`, so there is no further hop. The source then carries the
+    default branch and the reason, which `branch_override` reports.
+
+    `network_timeout` bounds the `ls-remote` child and is handed to every
+    `reader.pin`, which bounds each `fetch` child it starts with it, so one
+    that outlasts it refuses `adopt.git.unavailable`. `FETCH_READER`'s pin
+    fetches every branch it pins; a pin that returns a listed commit the
+    checkout already holds starts no `fetch` child at all. Every source
+    carries the branch `origin`'s `HEAD` names as `remote_default`, whichever
+    branch it pins.
+
+    No `origin` refuses `not_integrated` with `adopt.registration.no_remote`,
+    an `origin` that advertises no default branch with
+    `adopt.registration.remote_default_unknown`, and a `B` that `origin` does
+    not list, whose contract does not resolve or does not name `B` with
+    `adopt.registration.integration_branch_unresolved`, as is an operand that
+    breaks any condition above. A default branch whose contract does not
+    resolve and that no operand replaces is yielded as it is:
+    `contract-resolves` then fails in the report.
+    """
+    if not has_remote(root):
+        raise refuse(
+            "not_integrated", "adopt.registration.no_remote", "",
+            "the repository has no `origin` remote to register against")
+    heads = remote_heads(root, network_timeout)
+    default = heads.default
+    if default is None:
+        raise refuse(
+            "not_integrated", "adopt.registration.remote_default_unknown", "",
+            "`origin` does not name a default branch it also lists")
+    with tempfile.TemporaryDirectory() as scratch:
+        branch = default
+        pinned = reader.pin(root, default, heads.listed.get(default),
+                            network_timeout)
+        exported = Path(scratch) / "default"
+        reader.export(root, pinned, exported)
+        exit_code, payload = run_resolver(exported, "resolve")
+        default_resolved = exit_code == 0
+        named = integration_branch(payload) if default_resolved else None
+        override_default = None
+        if default_resolved:
+            if operand is not None and operand != (named or default):
+                raise unresolved_integration_branch(
+                    "the default branch's contract resolves and names another "
+                    "integration branch than `--integration-branch`")
+        elif operand is not None:
+            if operand not in heads.branches:
+                raise unresolved_integration_branch(
+                    "`--integration-branch` names a branch `origin` does not "
+                    "list")
+            if operand == default:
+                raise unresolved_integration_branch(
+                    "`--integration-branch` names the default branch, whose "
+                    "contract does not resolve")
+            branch = operand
+            pinned, exported = pin_integration_branch(
+                root, run_resolver, branch, Path(scratch) / "integration",
+                "the contract on the `--integration-branch` branch does not "
+                "resolve or does not name that branch", network_timeout,
+                listed=heads.listed.get(branch), reader=reader)
+            override_default = default
+        if named is not None and named != default:
+            if named not in heads.branches:
+                raise unresolved_integration_branch(
+                    "the contract's integration branch is not a branch "
+                    "`origin` lists")
+            branch = named
+            pinned, exported = pin_integration_branch(
+                root, run_resolver, branch, Path(scratch) / "integration",
+                "the contract on the integration branch does not resolve or "
+                "does not name that branch", network_timeout,
+                listed=heads.listed.get(branch), reader=reader)
+        yield VerificationSource(
+            ref=f"refs/remotes/{REMOTE}/{branch}", commit=pinned,
+            resolver_root=exported,
+            inventory=tree_inventory(root, pinned) if reader.inventory else None,
+            branch=branch, override_default=override_default,
+            override_reason=(agent_platform.BRANCH_OVERRIDE_REASONS[0]
+                             if override_default is not None else None),
+            default_contract_resolved=default_resolved,
+            remote_default=default)
+
+
+def pin_integration_branch(root: Path, run_resolver: Resolver, branch: str,
+                           destination: Path,
+                           unconfirmed: str,
+                           network_timeout: float = GIT_TIMEOUT_SECONDS,
+                           *, listed: str | None = None,
+                           reader: SourceReader = FETCH_READER
+                           ) -> tuple[str, Path]:
+    """Pin `branch` through `reader`, export it and require it to name itself.
+
+    Returns the pinned commit id and the directory it was exported to. The
+    contract exported there must resolve and name `branch` as its integration
+    branch, or the run refuses `not_integrated` with
+    `adopt.registration.integration_branch_unresolved` and `unconfirmed` as its
+    message. This is the one confirmation both ways of reaching an integration
+    branch other than the default go through, so neither can admit a branch the
+    other would refuse; checking that `origin` lists `branch` stays with the
+    caller, whose refusal wording differs. `listed` is the commit `origin` listed
+    for `branch`, handed to `reader`'s pin, whose default still fetches the
+    branch; `network_timeout` bounds that pin's network read.
+    """
+    pinned = reader.pin(root, branch, listed, network_timeout)
+    reader.export(root, pinned, destination)
+    exit_code, payload = run_resolver(destination, "resolve")
+    if exit_code != 0 or integration_branch(payload) != branch:
+        raise unresolved_integration_branch(unconfirmed)
+    return pinned, destination
+
+
+def unresolved_integration_branch(message: str) -> AdoptError:
+    return refuse(
+        "not_integrated", "adopt.registration.integration_branch_unresolved",
+        "", message)
+
+
+def require_integrated(verification: Verification) -> None:
+    """Refuse `not_integrated` when the pinned commit carries no adoption.
+
+    Called only under `--register`, before `registration_allowed`: a remote
+    revision with no adoption evidence record is not an integrated adoption
+    whatever else the report says (D7). When that revision is a default branch
+    whose contract does not resolve and no operand replaced it, the message
+    names `--integration-branch`, the one repair that reaches the adoption;
+    every other missing record keeps the plain message.
+    """
+    if verification.evidence_candidates:
+        return
+    source = verification.source
+    if not source.default_contract_resolved and source.override_default is None:
+        raise refuse(
+            "not_integrated", "adopt.registration.not_integrated", "",
+            "the contract on the remote default branch does not resolve and "
+            "that branch carries no adoption evidence record; name the "
+            "integration branch with `--integration-branch`")
+    raise refuse(
+        "not_integrated", "adopt.registration.not_integrated", "",
+        "the remote integration branch carries no adoption evidence record")
+
+
+def registration_allowed(result: str) -> bool:
+    """Whether `result` may register. Every member named, default raises."""
+    if result == "adopted":
+        return True
+    if result == "adopted_with_blockers":
+        return True
+    if result == "not_conformant":
+        return False
+    raise ValueError(f"unknown verify result: {result!r}")
+
+
+def verify_exit_code(result: str) -> int:
+    """The exit code each result publishes. Every member named, default raises.
+
+    All three are 0 on purpose and each is written out rather than folded into
+    one return, so a fourth result added to the closed set has to be given an
+    answer here instead of inheriting a plausible success.
+    """
+    if result == "adopted":
+        return 0
+    if result == "adopted_with_blockers":
+        return 0
+    if result == "not_conformant":
+        return 0
+    raise ValueError(f"unknown verify result: {result!r}")
+
+
+def resolved_project_id(payload: object) -> str | None:
+    project = payload.get("project") if isinstance(payload, dict) else None
+    identifier = project.get("id") if isinstance(project, dict) else None
+    return identifier if isinstance(identifier, str) and identifier else None
+
+
+def integration_branch(payload: object) -> str | None:
+    """The contract's declared integration branch, out of the resolver's view.
+
+    Read from the validated snapshot rather than from the contract file, for
+    the reason D26 exists: the resolver is the only reader of contract policy.
+    """
+    bindings = payload.get("bindings") if isinstance(payload, dict) else None
+    vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
+    branch = vcs.get("integration_branch") if isinstance(vcs, dict) else None
+    return branch if isinstance(branch, str) and branch else None
+
+
+def blocked_capabilities(payload: object) -> list[dict]:
+    """Every declared capability the host cannot deliver, and its repair id.
+
+    `unsupported` is a deliberate absence and never a blocker; only `blocked`
+    is a capability the contract claims and the machine withholds (R6.4).
+    """
+    capabilities = payload.get("capabilities") if isinstance(payload, dict) \
+        else None
+    if not isinstance(capabilities, dict):
+        return []
+    return [{"capability": name, "repair_id": entry.get("repair_id")}
+            for name, entry in sorted(capabilities.items())
+            if isinstance(entry, dict) and entry.get("state") == "blocked"]
+
+
+def projection_check(root: Path,
+                     run_resolver: Resolver) -> tuple[str, str | None]:
+    """The `projections-in-sync` verdict and the reason it failed.
+
+    Drift is the resolver's `invalid_projection` refusal, whose violation
+    pointers name each drifted projection by id, so the reason published here
+    is the resolver's own answer rather than a second opinion about it.
+    """
+    exit_code, payload = run_resolver(root, "check-projections")
+    if exit_code == 0 and isinstance(payload, dict):
+        entries = payload.get("projections")
+        if isinstance(entries, list) and all(
+                isinstance(entry, dict) and entry.get("action") == "unchanged"
+                for entry in entries):
+            return "passed", None
+    code = resolver_error_code(payload)
+    # Drift is one refusal — `invalid_projection`, whose pointers name the
+    # drifted projections by id. Every other refusal carries pointers too
+    # (`not_onboarded` carries one empty pointer), so reading them as drift
+    # would put a false claim in the row a diagnostic verb exists to publish.
+    if code == "invalid_projection":
+        return "failed", ("the projection targets have drifted: "
+                          + ", ".join(resolver_violation_pointers(payload)))
+    return "failed", f"the projections could not be checked: {code}"
+
+
+class Verification:
+    """One repository's conformance verdict, and what registration needs.
+
+    `report` is exactly what is printed. `resolve_payload` is kept beside it
+    rather than folded in, because the integration branch registration checks
+    is contract policy the report has no business publishing. `source` is the
+    pinned revision the report was read at, which registration walks ancestry
+    from, and `evidence_candidates` every adoption evidence record path found
+    in it, which `require_integrated` reads: an empty list is no adoption.
+    """
+
+    def __init__(self, report: dict, resolve_payload: object,
+                 source: VerificationSource,
+                 evidence_candidates: list[str]) -> None:
+        self.report = report
+        self.resolve_payload = resolve_payload
+        self.source = source
+        self.evidence_candidates = evidence_candidates
+
+
+def verify_repository(root: Path, source: VerificationSource,
+                      run_resolver: Resolver) -> Verification:
+    """Run the ordered conformance checks and build the report.
+
+    Every check runs where its inputs exist and is recorded as `not_run` where
+    they do not, so a report always carries one row per declared check: an
+    absent evidence record is a named failure with two consequences, never two
+    silent omissions.
+    """
+    checks: list[dict] = []
+
+    def record(check_id: str, status: str, detail: str | None) -> None:
+        checks.append(verify_check_entry(
+            check_id, status, detail))
+
+    exit_code, payload = run_resolver(source.resolver_root, "resolve")
+    resolves = exit_code == 0 and isinstance(payload, dict)
+    record("contract-resolves", "passed" if resolves else "failed",
+           None if resolves else
+           f"the contract does not resolve: {resolver_error_code(payload)}")
+
+    # Asked even when `resolve` refused, because the commonest reason it
+    # refuses *is* projection drift: reporting the drift as "not run" would
+    # hide the one check that names which projection went stale.
+    record("projections-in-sync",
+           *projection_check(source.resolver_root, run_resolver))
+
+    unclassified = sorted(
+        path for path, _ in source.inventory
+        if classify(path) is None
+        and is_agent_path(path))
+    record("no-unclassified-agent-path",
+           "failed" if unclassified else "passed",
+           ("no lifecycle class covers: " + ", ".join(unclassified))
+           if unclassified else None)
+
+    record_path, map_path = None, None
+    candidates = evidence_records_at(root, source.commit)
+    # Other evidence files share the directory (gate bundles, trials): only a
+    # file that parses as an adoption record is a record to count. When none
+    # parses, every candidate stays in view so a lone malformed file still
+    # reports "does not parse" and several still report the ambiguity.
+    parsed = [path for path in candidates if parses_as_evidence_record(
+        blob_at(root, source.commit, path)) is not None]
+    candidates = parsed or candidates
+    if not candidates:
+        record("adoption-evidence-record", "failed",
+               "no adoption evidence record is committed under "
+               f"{EVIDENCE_RECORD_DIR}/")
+    elif len(candidates) > 1:
+        record("adoption-evidence-record", "failed",
+               "more than one adoption evidence record is committed: "
+               + ", ".join(candidates))
+    else:
+        found = parses_as_evidence_record(
+            blob_at(root, source.commit, candidates[0]))
+        if found is None:
+            record("adoption-evidence-record", "failed",
+                   "the committed file does not parse as an adoption "
+                   f"evidence record: {candidates[0]}")
+        else:
+            record_path = candidates[0]
+            map_path = found["path_migration_map"]
+            record("adoption-evidence-record", "passed", None)
+
+    commit = None
+    if record_path is None:
+        record("adoption-commit-derived", "not_run",
+               "no adoption evidence record was discovered")
+    else:
+        commit = introducing_commit(root, source.commit, record_path)
+        record("adoption-commit-derived",
+               "failed" if commit is None else "passed",
+               None if commit is not None else
+               "git records no commit introducing the adoption evidence "
+               f"record: {record_path}")
+
+    if record_path is None:
+        record("path-migration-map", "not_run",
+               "no adoption evidence record was discovered")
+        map_path = None
+    elif not isinstance(map_path, str) or not map_path:
+        record("path-migration-map", "failed",
+               "the evidence record names no path migration map")
+        map_path = None
+    elif parses_as_migration_map(
+            blob_at(root, source.commit, map_path)) is None:
+        record("path-migration-map", "failed",
+               f"the path migration map is absent or does not parse: "
+               f"{map_path}")
+    else:
+        record("path-migration-map", "passed", None)
+
+    blockers = blocked_capabilities(payload) if resolves else []
+    if any(entry["status"] != "passed" for entry in checks):
+        result = "not_conformant"
+    elif blockers:
+        result = "adopted_with_blockers"
+    else:
+        result = "adopted"
+    # Defence in depth behind the two exhaustive dispatches below: a result
+    # invented here crashes rather than reaching an operator.
+    if result not in VERIFY_RESULTS:
+        raise ValueError(f"unknown verify result: {result!r}")
+
+    report = {
+        "schema_version": VERIFY_SCHEMA_VERSION,
+        "result": result,
+        "project_id": resolved_project_id(payload),
+        "root": str(root),
+        "revision": {"ref": source.ref, "commit": source.commit},
+        "adoption_commit": commit,
+        "evidence_record": record_path,
+        "migration_map": map_path,
+        "checks": checks,
+        "blockers": blockers,
+        "registered": False,
+    }
+    override = branch_override(source)
+    if override is not None:
+        report["branch_override"] = override
+    return Verification(report, payload, source, candidates)
+
+
+def register_project(root: Path, verification: Verification) -> None:
+    """Record the project in the fleet, or refuse and change nothing.
+
+    The entry is `{project_id, root}`, plus the source's `branch_override` when
+    the operand selected its branch; an entry replaced by a run without one
+    loses the member it had. The root is the real checkout's, not the temporary
+    directory the checks ran in. The ancestry check is the ordering #67
+    documents and D19 makes checked: a commit that lives only on a feature
+    branch names a state the integration branch does not have. It is walked
+    from the pinned commit id of the fetched remote branch, never a branch name
+    (D7); an adoption commit that is not its ancestor refuses `not_integrated`.
+    The duplicate check and the replacement then happen inside one exclusive
+    lock over a registry reread underneath it, so two registrations racing
+    under one `HOME` serialize instead of one overwriting the other.
+    """
+    report = verification.report
+    source = verification.source
+    project_id = report["project_id"]
+    commit = report["adoption_commit"]
+    branch = integration_branch(verification.resolve_payload)
+    if branch is None or project_id is None or commit is None:
+        raise refuse(
+            "adopt_failure", "adopt.registration.incomplete", "",
+            "registration needs a project id, an adoption commit and a "
+            "declared integration branch")
+    if source.branch is None or branch != source.branch:
+        raise refuse(
+            "not_integrated", "adopt.registration.integration_branch_unresolved",
+            "", "the contract's integration branch is not the remote branch "
+            "the verification read")
+    if not commit_is_ancestor(root, commit, source.commit):
+        raise refuse(
+            "not_integrated", "adopt.registration.not_integrated", "",
+            "the adoption commit is not reachable from the remote "
+            "integration branch")
+    registered = {"project_id": project_id, "root": str(root)}
+    override = branch_override(source)
+    if override is not None:
+        registered["branch_override"] = override
+    try:
+        with agent_platform.registry_transaction() as entries:
+            for entry in entries:
+                if entry["project_id"] != project_id:
+                    continue
+                if Path(entry["root"]).resolve() != root:
+                    raise refuse(
+                        "duplicate_project_id", "adopt.registry.duplicate",
+                        "/projects",
+                        "the fleet registry already holds this project id at "
+                        "another root")
+            agent_platform.write_registry(
+                [entry for entry in entries
+                 if entry["project_id"] != project_id]
+                + [registered])
+    except agent_platform.PlatformManifestError as error:
+        raise AdoptError(
+            "adopt_failure", "adopt.registry.invalid",
+            error.violations) from None
+    report["registered"] = True
