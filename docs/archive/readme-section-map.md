@@ -35,3 +35,21 @@ Where each section of the three READMEs that issue 694 dissolved went: contract 
 | `python/README.md` | Project schema 2 | contract | `python/agent_tools/resolve_project.py` |
 | `python/README.md` | Project schema 2 | decision | `docs/areas/project-contract/adr/001-schema-2-drops-the-deploy-watch.md` |
 | `python/README.md` | fallback-audit | contract | `python/agent_tools/fallback_audit.py` |
+| `home/common/claude-code/README.md` | Allow surface and lifecycle guard | contract | `home/common/claude-code/lifecycle_guard.py` |
+| `home/common/claude-code/README.md` | Detaching words | contract | `home/common/claude-code/lifecycle_guard.py` |
+| `home/common/claude-code/README.md` | Detaching words | decision | `docs/areas/guard/adr/001-detaching-words-refused-in-raw-text.md` |
+| `home/common/claude-code/README.md` | Transmitting git invocations | contract | `home/common/claude-code/lifecycle_guard.py` |
+| `home/common/claude-code/README.md` | Transmitting git invocations | decision | `docs/areas/guard/adr/002-transmitting-git-refused-as-push.md` |
+| `home/common/claude-code/README.md` | Adjudicated verbs | contract | `home/common/claude-code/lifecycle_guard.py` |
+| `home/common/claude-code/README.md` | Adjudicated verbs | decision | `docs/areas/guard/adr/003-lifecycle-commands-in-an-allowlist-grammar.md`, `docs/areas/guard/adr/008-merge-arms-keep-the-required-check-floor.md` |
+| `home/common/claude-code/README.md` | Pre-push hook | contract | `home/common/claude-code/lifecycle_guard.py` |
+| `home/common/claude-code/README.md` | Pre-push hook | decision | `docs/areas/guard/adr/004-pre-push-hook-judges-what-git-pushes.md` |
+| `home/common/claude-code/README.md` | The raise label | contract | `home/common/claude-code/lifecycle_guard.py` |
+| `home/common/claude-code/README.md` | The raise label | decision | `docs/areas/guard/adr/005-raise-label-refusal-catches-mistakes.md` |
+| `home/common/claude-code/README.md` | Guard policy | contract | `home/common/claude-code/lifecycle_guard.py`, `python/agent_tools/guard_policy.py` |
+| `home/common/claude-code/README.md` | Guard policy | decision | `docs/areas/guard/adr/006-two-policy-files-one-trust-rule-each.md`, `docs/areas/guard/adr/007-derived-rows-rechecked-at-use.md` |
+| `home/common/claude-code/README.md` | Guard policy | evidence | `docs/archive/guard-row-check-cost-2026-10-13.md` |
+| `home/common/claude-code/README.md` | Guard policy | how-to | `docs/guides/start-a-new-session-after-a-switch.md` |
+| `home/common/claude-code/README.md` | Guard/core decision | decision | `docs/areas/guard/adr/008-merge-arms-keep-the-required-check-floor.md` |
+| `python/README.md` | guard-policy | contract | `python/agent_tools/guard_policy.py` |
+| `python/README.md` | guard-policy | decision | `docs/areas/guard/adr/006-two-policy-files-one-trust-rule-each.md`, `docs/areas/guard/adr/007-derived-rows-rechecked-at-use.md` |
