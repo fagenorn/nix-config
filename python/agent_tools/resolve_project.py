@@ -89,6 +89,7 @@ import shutil
 import sys
 
 from agent_tools import agent_platform, release_adapter, release_profile
+from agent_tools.system import semver
 
 
 CAPABILITY_NAMES = (
@@ -616,7 +617,7 @@ def validate_platform(source: dict, violations: list[dict]) -> None:
         # A non-string bound and a loose spelling are one violation at one
         # pointer: `parse_semver` returns None for both, and for a pre-release
         # or build-metadata suffix (D9).
-        if agent_platform.parse_semver(value[name]) is None:
+        if semver.parse_semver(value[name]) is None:
             violations.append(violation(
                 f"/platform/{name}",
                 "must be a strict MAJOR.MINOR.PATCH version string",
@@ -627,7 +628,7 @@ def validate_platform(source: dict, violations: list[dict]) -> None:
         return
     # R2.2: strictly greater. An exact pin (equal bounds) and a minimum-only
     # range (an absent `max_exclusive`, reported above) are both invalid.
-    if agent_platform.compare_semver(
+    if semver.compare_semver(
             bounds["max_exclusive"], bounds["min_inclusive"]) <= 0:
         violations.append(violation(
             "/platform/max_exclusive",

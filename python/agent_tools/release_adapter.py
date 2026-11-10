@@ -47,8 +47,8 @@ from typing import Any
 from agent_tools import (actions_health_adapter, codesigned_artifact_adapter, forge_adapter,
                          launchd_agent_adapter, railway_deploy_adapter,
                          transaction_invocation, transaction_plan)
-from agent_tools.agent_platform import parse_semver
 from agent_tools.canonical import telemetry_digest
+from agent_tools.system.semver import parse_semver
 
 PUBLICATION_MODES = ("materialize", "promote", "index")
 ACTIVATION_MODES = ("local_apply", "provider_deploy", "publication_triggered", "convergent_pull")

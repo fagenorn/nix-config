@@ -29,6 +29,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools import agent_platform
+from agent_tools.system import semver
 
 from .test_resolve_project import (
     COMMITTED,
@@ -607,10 +608,10 @@ class CommittedManifestTest(ResolverTestCase):
     def test_every_deprecation_began_in_this_major(self):
         """Issue 580 D3: pinned on the committed file, not in the validator."""
         manifest = committed_manifest()
-        version = agent_platform.parse_semver(manifest["platform_version"])
+        version = semver.parse_semver(manifest["platform_version"])
         for entry in manifest["deprecations"]:
             with self.subTest(id=entry["id"]):
-                since = agent_platform.parse_semver(entry["since"])
+                since = semver.parse_semver(entry["since"])
                 self.assertEqual(since[0], version[0])
                 self.assertLessEqual(since, version)
 

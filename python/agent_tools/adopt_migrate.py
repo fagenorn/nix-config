@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Callable
 
 from agent_tools import adopt_inspection, agent_platform
+from agent_tools.system import semver
 
 PLATFORM_FLOOR = "1.2.0"
 PLATFORM_CEILING = "3.0.0"
@@ -69,7 +70,7 @@ def retire_bindings_deploy(source: dict) -> dict:
     out["bindings"].pop("deploy", None)
     out["capabilities"].pop("deploy", None)
     minimum = source["platform"]["min_inclusive"]
-    if agent_platform.compare_semver(minimum, PLATFORM_FLOOR) < 0:
+    if semver.compare_semver(minimum, PLATFORM_FLOOR) < 0:
         minimum = PLATFORM_FLOOR
     out["platform"] = {"min_inclusive": minimum,
                        "max_exclusive": PLATFORM_CEILING}

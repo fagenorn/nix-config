@@ -1,6 +1,5 @@
 """Shared platform facts for the agent binaries: the installed manifest,
-strict SemVer, the user-scope state root, the fleet registry, and the atomic
-writer.
+the user-scope state root, the fleet registry, and the atomic writer.
 
 This module is imported, never run: it has no `main`, no argparse, and no
 adoption or resolver logic. It exists so that every binary reads one manifest
@@ -46,6 +45,8 @@ from pathlib import Path
 import re
 import tempfile
 from typing import Iterator
+
+from agent_tools.system import semver
 
 
 # R1.2: the manifest's members, exactly. An absent or unexpected member is a
@@ -104,10 +105,6 @@ SCHEMA_REASON_CODES = (
     "project_identity_mismatch",
 )
 
-# D9: strict `MAJOR.MINOR.PATCH` only. No pre-release, no build metadata, no
-# leading `v`, no leading zeros, no fourth component.
-SEMVER_PATTERN = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
-
 
 class PlatformManifestError(Exception):
     """One refusal from a platform data-file loader — the manifest or the fleet
@@ -120,41 +117,6 @@ class PlatformManifestError(Exception):
         self.violations = violations
 
 
-# --------------------------------------------------------------------------
-# Strict SemVer
-# --------------------------------------------------------------------------
-
-
-def parse_semver(value: object) -> tuple[int, int, int] | None:
-    """The `(major, minor, patch)` triple, or None when `value` is not strict.
-
-    None is the whole vocabulary for "not a version" (D9): a pre-release or
-    build-metadata suffix, a leading `v`, a fourth component and a leading zero
-    all return it, so no caller can accept a looser spelling by accident.
-    """
-    if not isinstance(value, str):
-        return None
-    match = SEMVER_PATTERN.fullmatch(value)
-    if match is None:
-        return None
-    major, minor, patch = match.groups()
-    return (int(major), int(minor), int(patch))
-
-
-def compare_semver(a: str, b: str) -> int:
-    """-1, 0 or 1 by tuple comparison over the two parsed triples.
-
-    Both arguments must already parse; an unparseable one is a programming
-    error here, not an authored one, because shape validation is the caller's
-    job and has already run.
-    """
-    left = parse_semver(a)
-    right = parse_semver(b)
-    if left is None or right is None:
-        raise ValueError("compare_semver requires two strict SemVer strings")
-    return (left > right) - (left < right)
-
-
 def interval_verdict(platform_version: str, min_inclusive: str,
                      max_exclusive: str) -> str | None:
     """None when `min <= version < max`, else the failing `SCHEMA_REASON_CODES`.
@@ -162,9 +124,9 @@ def interval_verdict(platform_version: str, min_inclusive: str,
     Shape checking is the caller's job: all three arguments are assumed to
     parse, so this answers the range question and nothing else.
     """
-    if compare_semver(platform_version, min_inclusive) < 0:
+    if semver.compare_semver(platform_version, min_inclusive) < 0:
         return "platform_too_old"
-    if compare_semver(platform_version, max_exclusive) >= 0:
+    if semver.compare_semver(platform_version, max_exclusive) >= 0:
         return "platform_too_new"
     return None
 
@@ -366,7 +328,7 @@ def _validate_deprecation_entry(entry: object, pointer: str,
             "must be one of: " + ", ".join(DEPRECATION_KINDS),
             f"platform.manifest.{section}.kind_unknown"))
     if "since" in entry:
-        parsed = parse_semver(entry["since"])
+        parsed = semver.parse_semver(entry["since"])
         if parsed is None or parsed[2] != 0 or parsed[1] < 1:
             violations.append(_violation(
                 f"{pointer}/since",
@@ -442,7 +404,7 @@ def validate_manifest(source: object) -> list[dict]:
     if "schema_version" in source:
         _check_positive_int(source["schema_version"], "/schema_version",
                             "schema_version", violations)
-    if "platform_version" in source and parse_semver(
+    if "platform_version" in source and semver.parse_semver(
             source["platform_version"]) is None:
         violations.append(_violation(
             "/platform_version",

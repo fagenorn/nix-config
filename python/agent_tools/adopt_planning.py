@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
 from agent_tools import adopt_links, adopt_references, agent_platform
+from agent_tools.system import semver
 from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     APPROVAL_CLASSES,
@@ -502,7 +503,7 @@ def derived_interval(platform_version: str) -> dict:
     interval that is legal under R2.2 (a strict, non-pin range) and that admits
     exactly the compatibility the current generation promises.
     """
-    parsed = agent_platform.parse_semver(platform_version)
+    parsed = semver.parse_semver(platform_version)
     if parsed is None:
         raise refuse("adopt_failure", "adopt.manifest.invalid",
                      "/platform_version",

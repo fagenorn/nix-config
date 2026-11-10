@@ -123,6 +123,7 @@ agent-workflow-tests *args:
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
     tests/test_agent_tools_layout.py \
+    tests/test_agent_tools_semver.py \
     tests/test_lane_triage.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
