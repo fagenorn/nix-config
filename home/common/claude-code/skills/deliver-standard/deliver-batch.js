@@ -167,7 +167,8 @@ const FACTS_SCHEMA = {
   properties: {
     state: { type: 'string' }, labels: STRS, title: { type: 'string' }, branch: { type: 'string' }, branch_error: { type: 'string' },
     claim: { type: 'object', properties: { verdict: { type: 'string', enum: ['free', 'held_by', 'stale', 'error'] }, by: { type: ['string', 'null'] } }, required: ['verdict'] },
-    merged_pr: { type: ['integer', 'null'] },
+    merged_refs: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, closes: { type: 'boolean' } }, required: ['number', 'closes'] } },
+    landed: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, commits: STRS }, required: ['number', 'commits'] } },
     already_fixed: { anyOf: [{ type: 'object', properties: { commit: { type: 'string' }, evidence: { type: 'string' } }, required: ['commit', 'evidence'] }, { type: 'null' }] },
     open_pr: { anyOf: [{ type: 'object', properties: { number: { type: 'integer' }, head_branch: { type: 'string' } } }, { type: 'null' }] },
     blockers: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, state: { type: 'string' } }, required: ['issue', 'state'] } },
@@ -175,11 +176,47 @@ const FACTS_SCHEMA = {
   },
   required: ['state', 'labels', 'claim', 'blockers'],
 }
+// Copied from deliver-standard.js: the two programs share no code.
+const normSha = x => x.trim().toLowerCase()
+const sameSha = (a, b) => {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const x = normSha(a), y = normSha(b)
+  if (x === y) return x !== ''
+  const ok = /^[0-9a-f]{7,40}$/
+  if (!ok.test(x) || !ok.test(y)) return false
+  return x.length >= y.length ? x.startsWith(y) : y.startsWith(x)
+}
+const closingOf = f => {
+  const r = (Array.isArray(f.merged_refs) ? f.merged_refs : []).find(m => isObj(m) && m.closes === true && Number.isInteger(m.number))
+  return r ? r.number : null
+}
+const ownOf = n => {
+  const c = CONTS[n]
+  if (!isObj(c)) return null
+  const pr = Number.isInteger(c.pr) ? c.pr : null
+  const commits = (Array.isArray(c.done) ? c.done : []).filter(d => isObj(d) && nonEmpty(d.commit)).map(d => d.commit)
+  return pr === null && !commits.length ? null : { pr, commits }
+}
+const landedOf = (n, f) => {
+  const own = ownOf(n)
+  if (!own) return null
+  const l = (Array.isArray(f.landed) ? f.landed : []).find(m => isObj(m) && Number.isInteger(m.number)
+    && (m.number === own.pr || (Array.isArray(m.commits) && m.commits.some(c => own.commits.some(o => sameSha(c, o))))))
+  return l ? l.number : null
+}
+// #752: a merged PR that merely mentions the issue (a spec PR saying Refs) is no duplicate and no landing; only one that closes the issue is a duplicate.
+// A forwarded cont names its own landing by its PR number or one of its done commits, and the landed read looks for exactly that on the cont's branch.
+const landedRead = n => {
+  if (!ownOf(n)) return ''
+  const s = (CONTS[n] || {}).setup
+  const b = isObj(s) && nonEmpty(s.branch) ? s.branch : '<branch>'
+  return ` landed: one {number, commits (every commit oid, from gh pr view <number> --repo ${SLUG} --json commits)} per merged PR whose head is ${b} (gh pr list --repo ${SLUG} --state merged --head ${b} --json number), [] when none.`
+}
 const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git repository at ${REPO}) for a batch delivery with claim holder ${HOLDER}. Change nothing (a git fetch is fine), apart from what forge-claim status itself posts. ${FORGE_TIMEOUT}
 1. gh issue view ${n} --repo ${SLUG} --json state,labels,title,body,createdAt: return state, the label names as labels, and title; keep createdAt for step 7 (it is not returned).
 2. branch: run alone and exactly issue-branch --repo-root ${REPO} --issue ${n} and return the branch member of the one JSON line it prints; on a non-zero exit omit branch and return branch_error: the exit code and the code and message of the JSON error it printed.
 3. claim: run alone and exactly forge-claim status --repo ${SLUG} --issue ${n} --holder ${HOLDER} and return its verdict (free, held_by or stale) and by; on exit 1 or 2 return verdict error.
-4. merged_pr: the number of a merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,body,title), else null. open_pr: {number, head_branch} of an open PR referencing the issue, else null.
+4. merged_refs: one {number, closes} per merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,closingIssuesReferences), closes true only when its closingIssuesReferences lists issue ${n}, [] when none.${landedRead(n)} open_pr: {number, head_branch} of an open PR referencing the issue, else null.
 5. blockers: the issues this one is blocked by, from the body's "Blocked by" list and the tracker's issue dependencies, each as {issue, state} with the state from gh issue view.
 6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id and questions.
 7. already_fixed: name the issue's concrete symptom as one literal string taken from its body (an error string, a quoted code literal, or the quoted output of a failing command; never run the failing command). Run git -C ${REPO} fetch origin ${INT}, then git -C ${REPO} grep -n -F '<literal>' origin/${INT} and git -C ${REPO} log origin/${INT} -S'<literal>' --since=<createdAt> --format='%H %s'. Return already_fixed {commit (the full sha of the commit since the issue opened that removed the literal), evidence (the literal and what both commands printed)} only when the grep finds the literal nowhere at origin/${INT} and the log names such a commit; otherwise, or with no concrete literal, return already_fixed null.
@@ -196,9 +233,11 @@ await parallel(ISSUES.map(n => async () => {
 // Eligibility is plain JS over the facts, first match wins; null means eligible.
 // A forwarded cont names a landing this batch started; its PR now reads as merged and the claim is still ours (or already released):
 // the merge happened after the cont was forwarded, so the issue is re-adopted for its close-out, never skipped as a duplicate or closed.
+// A landing is the cont's own merged PR (by its pr or a done commit), whether it closes the issue or only says Refs: a merged PR that
+// closes the issue but is not the cont's own is a duplicate, never a re-adoption.
 const mergedReadopt = (n, f) => {
   const claim = f.claim || {}
-  return !!(CONTS[n] && f.merged_pr && (claim.verdict === 'free' || claim.by === HOLDER))
+  return !!(CONTS[n] && landedOf(n, f) !== null && (claim.verdict === 'free' || claim.by === HOLDER))
 }
 const eligibility = (n, f) => {
   const readopt = mergedReadopt(n, f)
@@ -211,7 +250,8 @@ const eligibility = (n, f) => {
   for (const [label, outcome] of [['needs-verification', 'needs-verification'], ['parked', 'parked'], ['agent:human-required', 'human-required']]) {
     if (labels.includes(label) && !(readopt && label === 'needs-verification')) return { issue: n, outcome }
   }
-  if (f.merged_pr && !readopt) return { issue: n, outcome: 'duplicate', pr: f.merged_pr }
+  const dup = closingOf(f)
+  if (dup && !readopt) return { issue: n, outcome: 'duplicate', pr: dup }
   // A failed claim lookup proves nothing about ownership: it falls through to the claim-error stop below, never to a final row.
   const fixed = f.already_fixed
   if (isObj(fixed) && nonEmpty(fixed.commit) && !CONTS[n] && (f.claim || {}).by !== HOLDER && (f.claim || {}).verdict !== 'error') {
@@ -630,7 +670,7 @@ ${RULES}`, `land-merge-${n}`, { ...clerk, schema: withRenew(LAND_MERGE_SCHEMA, {
     }
     await unlock()
     // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
-    if (!CONTS[n]) CONTS[n] = { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }
+    CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
 
     const openCriteria = ready.acceptance.filter(isOpen)
     const notes = ready.acceptance.filter(a => a && a.kind === 'note')

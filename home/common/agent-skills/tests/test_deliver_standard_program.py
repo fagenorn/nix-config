@@ -97,6 +97,11 @@ def labels(calls):
     return [c["label"] for c in calls]
 
 
+def merged(pr, *commits):
+    """A resume setup reply naming merged PR `pr` on the branch, with its commit oids."""
+    return {"merged_pr": pr, "merged_heads": [{"number": pr, "commits": list(commits)}]}
+
+
 def prompt(calls, label):
     found = [c["prompt"] for c in calls if c["label"] == label]
     if not found:
@@ -131,10 +136,11 @@ FOLDED_READ = {
     "checks-1": ({"state", "head", "failing", "details", "pending"}, {"renew": RENEW_READ}),
     "merge": ({"merged", "behind", "merge_commit", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
-               "worktree_path", "head", "merged_pr", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
+               "worktree_path", "head", "merged_pr", "merged_refs", "merged_heads", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
                "existing", "unset_env", "merge_strategy", "delete_branch", "review", "review_state", "knowledge",
                "verification", "holder", "acquire", "claim"},
               {"existing": {"local_branch", "remote_branch", "worktree", "dirty", "status"},
+               "merged_refs[]": {"number", "closes"}, "merged_heads[]": {"number", "commits"},
                "review": {"code", "plan"}, "review_state": {"code", "plan"},
                "knowledge": {"standards", "hints", "rejections"},
                "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason"},
@@ -883,7 +889,7 @@ class SetupIdempotenceTest(unittest.TestCase):
         result, calls = run(replies={"setup": {"ok": False, "reason": "duplicate", "duplicate_pr": 41}})
         self.assertEqual(result["stage"], "setup")
         self.assertEqual(labels(calls), ["setup"])
-        result, calls = run(patch={"setup": {"merged_pr": 41}})
+        result, calls = run(patch={"setup": {"merged_refs": [{"number": 41, "closes": True}]}})
         self.assertEqual((result["stage"], result["duplicate"]), ("setup", 41))
         self.assertEqual(labels(calls), ["setup"])
 
@@ -913,6 +919,100 @@ class SetupIdempotenceTest(unittest.TestCase):
                        "never reset, clean, restore or stash", "worktree-mismatch"):
             self.assertIn(needle, setup)
         self.assertNotIn("existing-branch", setup)
+
+
+class SpecPrTest(unittest.TestCase):
+    """#752: a spec merged in its own docs PR is no duplicate and never the delivery's own merged PR."""
+
+    MINE, SPEC = "d" * 40, "5" * 40
+
+    def cont(self, **extra):
+        setup = {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                 "holder": HOLDER, "base_sha": SHA}
+        return dict({"setup": setup, "plan": dict(PLAN, tasks=tasks(2)), "plan_reviewed": True,
+                     "done": [{"n": 1, "commit": self.MINE}]}, **extra)
+
+    def test_a_closing_merged_pr_is_a_duplicate_even_when_setup_proceeds(self):
+        result, calls = run(patch={"setup": {"merged_refs": [{"number": 41, "closes": True}]}})
+        self.assertEqual((result["stage"], result["duplicate"]), ("setup", 41))
+        self.assertEqual(labels(calls), ["setup"])
+
+    def test_a_refs_only_merged_pr_lets_setup_proceed(self):
+        result, _ = run(args=dict(ARGS, spec="/r/spec.md"),
+                        patch={"setup": {"merged_refs": [{"number": 7, "closes": False}]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("duplicate", result)
+
+    def test_a_refs_only_pr_is_no_duplicate_whatever_merged_pr_says(self):
+        result, _ = run(args=dict(ARGS, spec="/r/spec.md"),
+                        patch={"setup": {"merged_pr": 7, "merged_refs": [{"number": 7, "closes": False}]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("duplicate", result)
+
+    def test_a_close_out_cont_keeps_its_pr_through_successive_stops(self):
+        cont = {"setup": {"holder": HOLDER, "branch": "issue-9-x", "worktree": "/r/.wt/w-issue-9-x",
+                          "worktree_path": "/r/.wt/w-issue-9-x"},
+                "lane": "standard", "plan": {"acceptance": PLAN["acceptance"]}, "pr": 42}
+        facts = {"merged_heads": [{"number": 42, "commits": []}]}
+        failed = {"close-out": {"issue_state": "OPEN", "released": False}}
+        first, calls = run(args=dict(ARGS, cont=cont), patch={"setup": facts, **failed})
+        self.assertEqual((first["stage"], first["cont"]["pr"]), ("close-out", 42))
+        second, calls = run(args=dict(ARGS, cont=first["cont"]), patch={"setup": facts, **failed})
+        self.assertEqual((second["stage"], second["cont"]["pr"]), ("close-out", 42))
+        self.assertIn("--state merged --head issue-9-x", prompt(calls, "setup"))
+        third, _ = run(args=dict(ARGS, cont=second["cont"]), patch={"setup": facts})
+        self.assertEqual((third["stage"], third["pr"]), ("done", 42))
+
+    def test_resume_never_closes_out_a_same_named_spec_pr(self):
+        # Squash strategy: the adopted spec branch put base_sha before the spec, so no ancestry rule can tell.
+        cont = self.cont()
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(7, self.SPEC)})
+        self.assertEqual((result["stage"], result["invalid"]), ("setup", "merged_pr"))
+        self.assertEqual(result["cont"], cont)
+        self.assertEqual(labels(calls), ["setup"])
+        # Listed but not claimed as merged: the resume carries on with its tasks.
+        result, calls = run(args=dict(ARGS, cont=cont),
+                            patch={"setup": {"merged_heads": [{"number": 7, "commits": [self.SPEC]}]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("impl-2", labels(calls))
+        # The hold of a normal ship comes last; a close-out straight after setup is what is refused.
+        self.assertEqual(labels(calls)[:3], ["setup", "renew-tasks", "impl-2"])
+
+    def test_resume_closes_out_its_own_merged_pr_found_by_its_commits(self):
+        heads = [{"number": 7, "commits": [self.SPEC]}, {"number": 42, "commits": [self.SPEC, self.MINE]}]
+        result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
+
+    def test_a_recorded_pr_outranks_a_commit_match_on_another_pr(self):
+        """DR-001: a reused branch can list the same commit on two merged PRs; the recorded number decides."""
+        heads = [{"number": 43, "commits": [self.MINE]}, {"number": 42, "commits": [self.MINE]}]
+        cont = self.cont(pr=42)
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42, "merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        # Only when no PR is recorded does a commit decide.
+        result, _ = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 43))
+
+    def test_a_cont_with_no_commit_and_no_pr_never_closes_out(self):
+        failed, _ = run(patch={"setup": {"claim": {"ok": False, "reason": "worktree add failed"}}})
+        self.assertTrue(failed["cont"]["claim_incomplete"])
+        result, calls = run(args=dict(ARGS, cont=failed["cont"]), patch={"setup": merged(7, self.SPEC)})
+        self.assertEqual((result["stage"], result["invalid"]), ("setup", "merged_pr"))
+        self.assertTrue(result["cont"]["claim_incomplete"])
+        self.assertNotIn("hold", labels(calls))
+        self.assertNotIn("--state merged", prompt(calls, "setup"))
+
+    def test_a_batch_close_out_cont_finds_its_pr_by_number(self):
+        cont = {"setup": {"holder": HOLDER, "branch": "issue-9-x", "worktree": "/r/.wt/w-issue-9-x",
+                          "worktree_path": "/r/.wt/w-issue-9-x"},
+                "lane": "standard", "plan": {"acceptance": PLAN["acceptance"]}, "pr": 42}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_heads": [{"number": 42, "commits": []}]}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
 
 
 class PlanTest(unittest.TestCase):
@@ -1387,12 +1487,12 @@ class ResumeTest(unittest.TestCase):
 
     def test_resume_after_merge_closes_out_even_with_a_blocked_review(self):
         result, calls = run(args=dict(ARGS, cont=self.cont()),
-                            patch={"setup": {"merged_pr": 42, "review_state": {"code": "blocked", "plan": "blocked"}}})
+                            patch={"setup": dict(merged(42, "c1"), review_state={"code": "blocked", "plan": "blocked"})})
         self.assertEqual(result["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
 
     def test_resume_after_merge_goes_to_close_out(self):
-        result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_pr": 42}})
+        result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": merged(42, "c1")})
         self.assertEqual(result["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
         self.assertIn("gh issue close 9", prompt(calls, "close-out"))
@@ -2448,7 +2548,7 @@ class HoldTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": with_criteria(EVIDENCE), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
-        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42},
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee"),
                                                                "close-out": {"issue_state": "OPEN"}})
         self.assertEqual(result["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
@@ -2462,14 +2562,14 @@ class HoldTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": with_criteria(EVIDENCE), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
-        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}, "close-out": {"issue_state": "OPEN"}})
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee"), "close-out": {"issue_state": "OPEN"}})
         hold = prompt(calls, "hold")
         self.assertIn("verify-pending lint --input", hold)
         self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
         self.assertEqual(result["stage"], "done")
         stale = {"lint": {"ok": False, "errors": [{"code": "unverified_reference"}]}}
         result, _ = run(args=dict(ARGS, cont=cont), replies={"hold": dict(self.HOLD, **stale)},
-                        patch={"setup": {"merged_pr": 42}})
+                        patch={"setup": merged(42, "c0ffee")})
         self.assertEqual(result["stage"], "hold")
 
 
@@ -2548,7 +2648,7 @@ class NoteCloseOutTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": with_criteria(typo), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
-        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee")})
         self.assertEqual((result["stage"], result["bad_kinds"]), ("close-out", ["AC4"]))
         self.assertNotIn("close-out", labels(calls))
         self.assertNotIn("hold", labels(calls))
@@ -3199,8 +3299,8 @@ class DeclaredBranchTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": bplan(), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}, {"n": 2, "commit": "d" * 40}]}
-        merged, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
-        self.assertEqual(merged["stage"], "done")
+        closed, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee")})
+        self.assertEqual(closed["stage"], "done")
         for label in ("hold", "close-out"):
             self.assertNotIn(BR_PUSH, prompt(calls, label))
 
