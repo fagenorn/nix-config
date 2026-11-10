@@ -122,6 +122,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
+    tests/test_agent_tools_layout.py \
     tests/test_lane_triage.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \

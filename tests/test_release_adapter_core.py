@@ -88,7 +88,7 @@ class RegistryTest(unittest.TestCase):
 
     def test_no_agent_tools_module_names_argus(self):
         """AC2: the vocabulary is neutral."""
-        modules = sorted((REPO / "python/agent_tools").glob("*.py"))
+        modules = sorted((REPO / "python/agent_tools").rglob("*.py"))
         self.assertGreater(len(modules), 50)
         for path in modules:
             with self.subTest(module=path.name):
