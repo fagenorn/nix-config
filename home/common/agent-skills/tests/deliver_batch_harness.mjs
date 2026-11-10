@@ -44,10 +44,10 @@ const DEFAULTS = [
   [/^land-fix-/, () => DONE],
   [/^land-merge-/, () => ({ merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } })],
   [/^land-unlock-/, () => ({ verdict: 'released' })],
-  [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, decision_ended: true, branch_deleted: true, notes: 'ok' })],
+  [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, decision_ended: true, branch_deleted: true, notes: 'ok', release: { verdict: 'released' } })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^land-(pr|merge)-/, ['renew', 'lock']], [/^land-record-/, ['lock']]]
+const NESTED = [[/^land-(pr|merge)-/, ['renew', 'lock']], [/^land-record-/, ['lock']], [/^close-out-/, ['release']]]
 
 const calls = []
 let factsPending = 0 // facts agents started and not yet answered

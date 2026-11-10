@@ -133,6 +133,10 @@ const SLUG = SETUP.slug, INT = SETUP.integration_branch, MAX = SETUP.max_paralle
 const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
 const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
+const RELEASE_FIRST = (sha, maybe) => `First, before anything below, release the cross-host landing lock of the branch ${INT}: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
+released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail as release.
+${maybe ? RELEASE_AGAIN(maybe) : ''}Then, whatever its verdict, go on with the steps below.
+`
 
 let ISSUES
 if (HAS_LABEL) {
@@ -433,8 +437,8 @@ const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 
 // The landing of one ready issue (D10). The order is: renew, open or re-adopt the PR at the ready head,
 // take the land lock with --wait (one agent call, land-pr), resync, the checks loop, renew, the one-shot
-// pre-merge acquire and the merge (one agent call, land-merge), release, close out (#677, #716). Every exit goes through the wrapper at the bottom: a landing that holds the
-// lock releases it exactly once, at the last sha it was held at (P8), and a failed landing keeps the
+// pre-merge acquire and the merge (one agent call, land-merge), close out with the lock release first in that call (#677, #716, #801). Every exit goes through the wrapper at the bottom: a landing that holds the
+// lock releases it exactly once, at the last sha it was held at (P8): in the close-out call, and the wrapper releases only what that call did not confirm. A failed landing keeps the
 // claim and its cont (D9).
 // The kinds a criterion row can carry. A note is the orchestrator's own observation: never held, listed in a close-out comment (#736).
 // This copy of the rule lives here because the program has no filesystem access and shares no module with deliver-standard.js.
@@ -690,21 +694,23 @@ ${RULES}`, `land-merge-${n}`, { ...clerk, schema: withRenew(LAND_MERGE_SCHEMA, {
       if (!complete(mg, LAND_MERGE_SCHEMA) || mg.merged !== true) return out('stopped', { stage: 'merge', detail: mg.notes })
       break
     }
-    await unlock()
     // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
     CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
 
     const openCriteria = ready.acceptance.filter(isOpen)
     const notes = ready.acceptance.filter(a => a && a.kind === 'note')
+    // The lock release rides first in the close-out call (#801); the wrapper releases only what that call did not confirm.
+    const folding = lockHeld
     const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
-1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
+${folding ? RELEASE_FIRST(lockSha, lockMaybe && lockMaybe !== lockSha ? lockMaybe : null) : ''}1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
 2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released. ${FORGE_TIMEOUT}
 3. End the owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision. The merge proves the conflict and the label resolved and the decision settled; a verdict none is fine. decision_ended is true only when the decision end exited 0 (verdict ended or none).
 ${notes.length ? `4. Unless a comment starting Orchestrator notes for PR ${pr} already exists on #${n} (an earlier attempt), write to a file outside any work tree a comment whose first line is Orchestrator notes for PR ${pr} (observations the orchestrator records itself; not graded, not held): and then one line <id>: <text> per note of ${JSON.stringify(notes.map(a => ({ id: a.id, text: a.text })))}, and post it with ${UNSET}gh issue comment ${n} --repo ${SLUG} --body-file <file>. Return notes_posted true once that comment exists.\n` : ''}${notes.length ? 5 : 4}. ${noHold
       ? `Every criterion is of kind code or note. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
       : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
 Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended${notes.length ? ', notes_posted' : ''} and notes.
-${RULES}`, `close-out-${n}`, { ...clerk, schema: CLOSE_SCHEMA })
+${RULES}`, `close-out-${n}`, { ...clerk, schema: folding ? { ...CLOSE_SCHEMA, properties: { ...CLOSE_SCHEMA.properties, release: NULLABLE(RELEASE_SCHEMA) } } : CLOSE_SCHEMA })
+    if (folding && co && co.release && (co.release.verdict === 'released' || co.release.verdict === 'not_held')) lockHeld = false
     const want = noHold ? 'CLOSED' : 'OPEN'
     if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true || (notes.length && co.notes_posted !== true)) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
     return out(noHold ? 'landed' : 'landed-held')

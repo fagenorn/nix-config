@@ -730,7 +730,7 @@ class ContTest(unittest.TestCase):
 B = "b" * 40
 FIX = "c0ffee"
 HAPPY = ["facts-1", "acquire-1", "child-1", "child-1", "land-pr-1", "land-sync-1-1", "land-checks-1-1",
-         "land-merge-1", "land-unlock-1", "close-out-1"]
+         "land-merge-1", "close-out-1"]
 
 
 def ready(n, acceptance=None, head=SHA):
@@ -738,6 +738,11 @@ def ready(n, acceptance=None, head=SHA):
             "verify": [{"id": "build", "status": "pass", "summary": "ok"}], "tasks": [{"n": 1}],
             "acceptance": acceptance or [{"id": "AC1", "text": "works", "kind": "code"}], "fix_waves": 0,
             "cont": {"setup": {"holder": HOLDER, "branch": f"issue-{n}-x", "worktree": f"/r/.wt/w-issue-{n}-x"}}}
+
+# The relaunch conts of a landing of issue 1: one that stops before its merge keeps the child's ready cont, one that
+# stops after it adds the merged PR (the harness's default land-pr PR is 41).
+PRE_MERGE_CONTS = {"1": ready(1)["cont"]}
+POST_MERGE_CONTS = {"1": dict(ready(1)["cont"], pr=41)}
 
 
 CHILD_PROGRAM = PROGRAM.with_name("deliver-standard.js")
@@ -795,6 +800,7 @@ FOLDED_READ = {
     "land-pr-1": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "land-merge-1": ({"merged", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "land-record-1-1": ({"ok", "head", "detail"}, {"lock": {"verdict"}}),
+    "close-out-1": ({"issue_state", "released", "decision_ended", "notes_posted"}, {"release": {"verdict", "detail"}}),
 }
 
 
@@ -809,7 +815,7 @@ class FoldTest(unittest.TestCase):
                 schema = schema_of(calls, label)
                 self.assertLessEqual(top, set(schema["properties"]))
                 for name, fields in nested.items():
-                    if name == "lock":
+                    if name in ("lock", "release"):
                         self.assertIn({"type": "null"}, schema["properties"][name]["anyOf"])
                     branch = object_branch(schema["properties"][name])
                     self.assertLessEqual(fields, set(branch["properties"]))
@@ -931,7 +937,7 @@ class LandTest(unittest.TestCase):
         self.assertNotIn(" --wait\n", prompt(calls, "land-merge-1"))
         self.assertIn(f"gh pr merge 41 --repo owner/repo --merge --match-head-commit {SHA} --delete-branch",
                       prompt(calls, "land-merge-1"))
-        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}", prompt(calls, "land-unlock-1"))
+        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}", prompt(calls, "close-out-1"))
         self.assertIn("rules/branches/dev", prompt(calls, "land-checks-1-1"))
         close = prompt(calls, "close-out-1")
         for needle in ("deliver-direct", "step 7", f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason done",
@@ -1114,7 +1120,7 @@ class LandTest(unittest.TestCase):
         # the resync answers current (no head change), so nothing is recorded
         self.assertEqual(row(result, 1)["outcome"], "landed")
         ls = of(calls, 1)
-        self.assertEqual(ls[ls.index("land-merge-1"):ls.index("land-unlock-1")],
+        self.assertEqual(ls[ls.index("land-merge-1"):ls.index("close-out-1")],
                          ["land-merge-1", "land-sync-1-2", "land-checks-1-2", "land-merge-1"])
         self.assertNotIn("land-record-1-1", ls)
 
@@ -1407,9 +1413,11 @@ class TransientTest(unittest.TestCase):
     def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
         timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
         _, calls, _ = run()
-        for label in ("acquire-1", "land-pr-1", "land-merge-1", "land-unlock-1"):
+        for label in ("acquire-1", "land-pr-1", "land-merge-1", "close-out-1"):
             with self.subTest(label=label):
                 self.assertIn(timeout, prompt(calls, label))
+        _, calls, _ = run(replies={"close-out-1": None})
+        self.assertIn(timeout, prompt(calls, "land-unlock-1"))
 
     RETRIED = re.compile(r"forge-claim (?:acquire|renew|release|status|land acquire|land release|owner-action status)\b")
 
@@ -1442,7 +1450,8 @@ class LandOrderTest(unittest.TestCase):
         self.assertLess(ls.index("land-pr-1"), ls.index("land-sync-1-1"))
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait",
                       prompt(calls, "land-pr-1"))
-        self.assertLess(ls.index("land-merge-1"), ls.index("land-unlock-1"))
+        self.assertLess(ls.index("land-merge-1"), ls.index("close-out-1"))
+        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "close-out-1"))
 
     def test_a_waited_acquire_goes_on_to_the_resync(self):
         waited = {"verdict": "acquired", "lock_sha": SHA, "waited_s": 1800, "took_over": "idle"}
@@ -1474,7 +1483,7 @@ class LandOrderTest(unittest.TestCase):
         self.assertIn(f"--sha {B}\n", prompt(calls, "land-record-1-1"))
         self.assertNotIn(" --wait\n", prompt(calls, "land-record-1-1"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {B}",
-                      prompt(calls, "land-unlock-1"))
+                      prompt(calls, "close-out-1"))
 
     def test_a_failed_move_releases_the_last_held_sha(self):
         result, calls, _ = run(replies={"land-sync-1-1": self.MERGED,
@@ -2159,6 +2168,63 @@ class CodexUnavailableDetailTest(unittest.TestCase):
             with self.subTest(stage=c["stage"]):
                 result, _, _ = run(children={"1": c})
                 self.assertNotIn("detail", row(result, 1))
+
+
+class FoldedCloseOutReleaseTest(unittest.TestCase):
+    """#801: the lock release rides first in the close-out call."""
+
+    REL = f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n"
+    CLAIM_RELEASE = f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason done"
+
+    def test_the_close_out_releases_the_land_lock_first(self):
+        result, calls, _ = run()
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertIsNone(result["relaunch"])
+        ls = of(calls, 1)
+        self.assertEqual(ls[-2:], ["land-merge-1", "close-out-1"])
+        self.assertNotIn("land-unlock-1", ls)
+        text = prompt(calls, "close-out-1")
+        self.assertIn(self.REL, text)
+        self.assertLess(text.index(self.REL), text.index(self.CLAIM_RELEASE))
+        member = schema_of(calls, "close-out-1")["properties"]["release"]
+        self.assertLessEqual({"verdict", "detail"}, set(object_branch(member)["properties"]))
+        self.assertIn({"type": "null"}, member["anyOf"])
+
+    def test_an_unconfirmed_folded_release_falls_back_to_one_standalone_release(self):
+        for release in (None, {"verdict": "error", "detail": "gh failed"}):
+            with self.subTest(release=release):
+                result, calls, _ = run(patch={"close-out-1": {"release": release}})
+                self.assertEqual(row(result, 1)["outcome"], "landed")
+                self.assertIsNone(result["relaunch"])
+                ls = of(calls, 1)
+                self.assertEqual(ls[-2:], ["close-out-1", "land-unlock-1"])
+                self.assertEqual(ls.count("land-unlock-1"), 1)
+                self.assertIn(f"--sha {SHA}\n", prompt(calls, "land-unlock-1"))
+        result, calls, _ = run(patch={"close-out-1": {"release": {"verdict": "not_held"}}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertNotIn("land-unlock-1", labels(calls))
+
+    def test_a_lost_close_out_reply_releases_once_and_keeps_the_cont(self):
+        result, calls, _ = run(replies={"close-out-1": None})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertEqual(result["relaunch"]["conts"], POST_MERGE_CONTS)
+        ls = of(calls, 1)
+        self.assertEqual(ls[-2:], ["close-out-1", "land-unlock-1"])
+        self.assertEqual(ls.count("land-unlock-1"), 1)
+        result, calls, _ = run(replies={"close-out-1": "throw"})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land"))
+        self.assertEqual(result["relaunch"]["conts"], POST_MERGE_CONTS)
+        ls = of(calls, 1)
+        self.assertEqual(ls.count("land-unlock-1"), 1)
+        self.assertLess(ls.index("close-out-1"), ls.index("land-unlock-1"))
+
+    def test_a_close_out_that_stops_keeps_its_stage_and_cont_and_needs_no_fallback(self):
+        result, calls, _ = run(replies={"close-out-1": {"issue_state": "OPEN", "released": True, "decision_ended": True}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "close-out"))
+        self.assertEqual(row(result, 1)["expected_issue_state"], "CLOSED")
+        self.assertNotIn("land-unlock-1", labels(calls))
+        self.assertEqual(result["relaunch"]["conts"], POST_MERGE_CONTS)
 
 
 if __name__ == "__main__":
