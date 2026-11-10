@@ -13,19 +13,19 @@ import tempfile
 import unittest
 from unittest import mock
 
+from agent_tools import artifact_budget
+
 
 ROOT = Path(__file__).parents[4]
-SCRIPT = ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
+COMMAND = (sys.executable, "-m", "agent_tools.artifact_budget")
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 FIXTURES = Path(__file__).parent / "fixtures/artifact-budgets"
-sys.path.insert(0, str(SCRIPT.parent))
-import artifact_budget
 
 
 class ArtifactBudgetCliTest(unittest.TestCase):
     def run_check(self, kind: str, root: Path, policy: Path = POLICY):
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "check", "--kind", kind,
+            [*COMMAND, "check", "--kind", kind,
              "--root", str(root), "--policy", str(policy), "--format", "json"],
             text=True, capture_output=True, check=False,
         )
@@ -34,7 +34,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if use_stdin:
             return subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", boundary,
+                [*COMMAND, "validate-report", "--boundary", boundary,
                  "--input", "-", "--policy", str(POLICY)],
                 input=encoded, capture_output=True, check=False,
             )
@@ -42,7 +42,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             candidate = Path(raw) / "candidate.json"
             candidate.write_bytes(encoded)
             return subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", boundary,
+                [*COMMAND, "validate-report", "--boundary", boundary,
                  "--input", str(candidate), "--policy", str(POLICY)],
                 capture_output=True, check=False,
             )
@@ -176,14 +176,14 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             root = directory / "handoff.md"
             root.write_text("small", encoding="utf-8")
             default = subprocess.run(
-                [sys.executable, str(SCRIPT), "check", "--kind", "handoff",
+                [*COMMAND, "check", "--kind", "handoff",
                  "--root", str(root), "--format", "json"],
                 text=True, capture_output=True, check=False,
                 env={**os.environ, "HOME": str(directory)},
             )
             self.assertEqual(default.returncode, 0, default.stderr)
             report = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+                [*COMMAND, "validate-report", "--boundary", "producer",
                  "--input", "-"],
                 input=b'{"state":"failed","artifact":null,"notes":"installed"}',
                 capture_output=True, check=False,
@@ -329,12 +329,12 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                      b"\xff", b"[]", b"{}{}", b'{"value":NaN}')
         for raw in malformed:
             result = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+                [*COMMAND, "validate-report", "--boundary", "producer",
                  "--input", "-", "--policy", str(POLICY)], input=raw,
                 capture_output=True, check=False)
             self.assert_refusal(result, "invalid report")
         missing = subprocess.run(
-            [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+            [*COMMAND, "validate-report", "--boundary", "producer",
              "--input", "/definitely/missing/report.json", "--policy", str(POLICY)],
             capture_output=True, check=False)
         self.assert_refusal(missing, "cannot read report")
@@ -344,7 +344,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             link = Path(raw) / "link.json"
             link.symlink_to(target)
             symlinked = subprocess.run(
-                [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+                [*COMMAND, "validate-report", "--boundary", "producer",
                  "--input", str(link), "--policy", str(POLICY)], capture_output=True, check=False)
             self.assert_refusal(symlinked, "cannot read report")
         policy = json.loads(POLICY.read_text(encoding="utf-8"))
@@ -356,7 +356,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
 
     def test_validate_report_rejects_escaped_lone_surrogate_without_traceback(self):
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+            [*COMMAND, "validate-report", "--boundary", "producer",
              "--input", "-", "--policy", str(POLICY)],
             input=b'{"state":"failed","artifact":null,"notes":"\\ud800"}',
             capture_output=True, check=False,
@@ -365,13 +365,13 @@ class ArtifactBudgetCliTest(unittest.TestCase):
 
     def test_refusal_reasons_name_the_wire_parse_read_and_policy_failure(self):
         """Issue 472 D1-D3, D13: a refusal names its failure, never a path or an input value."""
-        report = [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer"]
+        report = [*COMMAND, "validate-report", "--boundary", "producer"]
         good = b'{"state":"failed","artifact":null,"notes":"x"}'
         bound = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["wire_max_bytes"]
         stdin_cases = (
             (b'{"state":"failed","state":"failed","artifact":null,"notes":"x"}',
-             ('duplicate key "state"',)),
-            (b'{"st\\nate":1,"st\\nate":2}', ('duplicate key "st\\nate"',)),
+             ("duplicate JSON key 'state'",)),
+            (b'{"st\\nate":1,"st\\nate":2}', ("duplicate JSON key 'st\\nate'",)),
             (b"\xff", ("invalid JSON", "UTF-8")),
             (b"{}{}", ("invalid JSON", "column")),
             (b'{"value":NaN}', ("invalid JSON", "constant")),
@@ -396,7 +396,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         padded["artifact"]["path"] = "x" * (bound - len(compact(padded)))
         self.assertEqual(len(compact(padded)), bound)
         canonical = subprocess.run(
-            [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
+            [*COMMAND, "validate-report", "--boundary", "producer",
              "--input", "-", "--policy", str(POLICY)],
             input=compact(padded), capture_output=True, check=False)
         self.assertIn(str(bound), self.assert_refusal(canonical, "invalid report"))
@@ -632,7 +632,7 @@ class InvokeParityTest(unittest.TestCase):
                 with self.subTest(name):
                     argv = [*argv, "--policy", str(POLICY)]
                     outcome = artifact_budget.invoke(argv, io.BytesIO(stdin).read)
-                    process = subprocess.run([sys.executable, str(SCRIPT), *argv], input=stdin,
+                    process = subprocess.run([*COMMAND, *argv], input=stdin,
                                              capture_output=True, check=False)
                     self.assertEqual(
                         (outcome.exit_code, outcome.stdout, outcome.stderr),
@@ -672,7 +672,7 @@ class SkillSurfaceTest(unittest.TestCase):
     """Issue 689 D3: only the surface design, grill-with-docs, writing-plans and handoff call."""
 
     def run_cli(self, *argv, stdin="{}"):
-        return subprocess.run([sys.executable, str(SCRIPT), *argv], input=stdin,
+        return subprocess.run([*COMMAND, *argv], input=stdin,
                               capture_output=True, text=True, timeout=60)
 
     def assert_parser_refusal(self, done, token):

@@ -92,8 +92,6 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
 # other order (D2).
 SIBLING_CANDIDATE_RE = re.compile(r"sibling(?:\s+\S+){0,2}\s+candidate")
 
-SDD_SCRIPTS = REPO_ROOT / "home/common/agent-skills/scripts"
-
 # The superseded claim: the workspace has not been repo-root-relative since the
 # primary-checkout move (D3).
 REPO_ROOT_WORKSPACE_LITERAL = "<repo-root>/.superpowers/sdd"
@@ -371,7 +369,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             if not path.is_file():
                 continue
             if path.suffix not in text_suffixes and path.name not in {
-                "resolve-project", "context-map-lint", "artifact-budget",
+                "resolve-project", "context-map-lint",
                 "agent-model-matrix", "diff-scope",
             }:
                 continue
@@ -723,18 +721,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             REPO_ROOT / "home/common/agent-skills/default.nix"
         ).read_text(encoding="utf-8")
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
+        # artifact-budget has one command-table owner and no hand-written entry (issue 689).
+        command_table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
+        self.assertIn('"artifact-budget"', command_table)
+        self.assertNotIn('".agents/bin/artifact-budget"', nix_module)
+        self.assertNotIn('".agents/lib/', nix_module)
 
     def test_no_document_or_script_claims_a_repo_root_workspace(self):
         offenders = [
             str(path.relative_to(REPO_ROOT))
             for path, text in corpus_documents()
             if REPO_ROOT_WORKSPACE_LITERAL in text
-        ]
-        offenders += [
-            str(path.relative_to(REPO_ROOT))
-            for path in sorted(SDD_SCRIPTS.iterdir())
-            if path.is_file()
-            and REPO_ROOT_WORKSPACE_LITERAL in path.read_text(encoding="utf-8")
         ]
         self.assertEqual(offenders, [])
 

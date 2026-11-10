@@ -70,8 +70,7 @@ installed ones. The root also holds the copied `settings.json` above. That root 
 non-zero claude exit, Ctrl-C (exit 130) and SIGTERM (exit 143). A plan-only eval creates
 none of it. The sandbox, with its `.claude/` links, is kept like any other.
 
-Tree mode does not cover the remaining flat helper (`artifact-budget`),
-`~/.agents/standards` and `~/.agents/share`: those still come from the deployed home. An
+Tree mode does not cover `~/.agents/standards` and `~/.agents/share`: those still come from the deployed home. An
 absolute `~/.agents/bin/...` path some skills name still reaches the deployed helper.
 Changes to those helpers are outside what this mode measures.
 

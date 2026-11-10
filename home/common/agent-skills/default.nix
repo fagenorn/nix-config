@@ -32,13 +32,6 @@ in
     # deltas) stays in each repo under docs/standards/.
     ".agents/standards".source = ./standards;
 
-    ".agents/bin/artifact-budget" = {
-      source = ./scripts/artifact-budget;
-      executable = true;
-    };
-
-    # The artifact-budget module, run by the `artifact-budget` wrapper.
-    ".agents/lib/python/artifact_budget.py".source = ./scripts/artifact_budget.py;
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
 
     # The platform manifest: authored data with nothing templated, so this
@@ -93,16 +86,6 @@ in
       done
     done
     unset skillRoot skillName target foreign entry
-  '';
-
-  # Installed agent modules are links into the store, where every file has
-  # modification time 1, so bytecode cached beside a link could outlive a
-  # same-size edit. Once the links are updated, every activation removes the
-  # library's bytecode cache; a failure is reported and the switch goes on
-  # (issue 567; README § Installed module library).
-  home.activation.clearAgentModuleBytecode = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
-    run ${pkgs.runtimeShell} ${./scripts/clear-library-bytecode} "$HOME/.agents/lib/python" \
-      || errorEcho "Clearing $HOME/.agents/lib/python/__pycache__ failed (see the error above). While it remains, an installed agent module may run stale bytecode: remove it and any .pycache-clear.* directory beside it by hand."
   '';
 
   # The workflow skills invoke these helpers by bare name (`forge-issue`,

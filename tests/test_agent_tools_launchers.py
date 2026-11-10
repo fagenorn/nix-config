@@ -9,6 +9,7 @@ and a fake top-level `agent_platform` on the `PYTHONPATH`, `NIX_PYTHONPATH` (wit
 a `.pth` file) and working-directory channels.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -33,7 +34,7 @@ HOSTILE_EXIT = 97
 TIMEOUT_SECONDS = 60
 # The commands #175, #179, #177, #249, #264, #279, #353, #403, #424, #623, #624 and #697 accepted as launchers: a floor, not the
 # full set, which the command table in lib/agent-tools.nix owns (#175 D8).
-LAUNCHER_FLOOR = ("adopt-project", "agent-model-matrix", "conformance",
+LAUNCHER_FLOOR = ("adopt-project", "agent-model-matrix", "artifact-budget", "conformance",
                   "context-map-lint", "diff-scope", "forge-claim", "forge-issue", "lane-triage",
                   "owner-actions", "resolve-project")
 # Legacy commands may treat --help as misuse, including parser-backed commands
@@ -172,6 +173,31 @@ class AgentToolsLauncherTest(unittest.TestCase):
         for name in LAUNCHER_FLOOR:
             with self.subTest(launcher=name):
                 self.assertIn(name, launchers)
+
+    def test_the_installed_home_holds_no_module_library(self):
+        # Issue 689: every helper runs from the store; nothing is imported from ~/.agents/lib.
+        library = self.root / ".agents/lib"
+        self.assertFalse(library.exists(), sorted(str(p) for p in library.rglob("*")))
+
+    def test_artifact_budget_runs_the_installed_policy_from_its_launcher(self):
+        entry = self.root / ".agents/bin/artifact-budget"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "handoff.md"
+            root.write_text("# Handoff\n", encoding="utf-8")
+            env = dict(self.hostile_env(), HOME=str(self.root))
+            checked = self.run_child([str(entry), "check", "--kind", "handoff", "--root", str(root),
+                                      "--format", "json"], env, self.hostile)
+            report = subprocess.run([str(entry), "validate-report", "--boundary", "producer",
+                                     "--input", "-"], env=env, cwd=self.hostile,
+                                    input='{"state":"failed","artifact":null,"notes":"installed"}',
+                                    capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(json.loads(checked.stdout)["status"], "within_budget")
+        self.assertEqual((report.returncode, report.stderr), (0, ""))
+        self.assertEqual(json.loads(report.stdout),
+                         {"state": "failed", "artifact": None, "notes": "installed"})
+        for done in (checked, report):
+            self.assertNotIn(MARKER, done.stdout + done.stderr)
 
     def test_each_launcher_is_named_for_its_module(self):
         for name, (_python, module) in self.launchers().items():

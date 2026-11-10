@@ -57,6 +57,6 @@ The implementer carries the most context pressure (exploration, code, debugging)
 - **Docs**: reference files pointed to from elsewhere; look for an existing doc before writing one.
 - **Skills**: for docs whose description earns its place in every context, or for user-invoked commands. Global skills live in nix-config's `home/common/agent-skills/skills/`, Claude-only ones in `home/common/claude-code/skills/`.
 - **Agents, settings and guard**: agent definitions in `home/common/claude-code/agents/`; settings and the permission allow surface in `home/common/claude-code/default.nix`; the `PreToolUse` lifecycle guard in `home/common/claude-code/lifecycle_guard.py`.
-- **Helpers**: the `~/.agents/bin` commands are built from nix-config's command table, `lib/agent-tools.nix`, and its `home/common/agent-skills/scripts/`.
+- **Helpers**: the `~/.agents/bin` commands are built from nix-config's command table, `lib/agent-tools.nix`.
 
 _Adapted from Matt Pocock's `retro` skill; provenance and the upstream MIT notice are recorded in [LICENSE](LICENSE)._

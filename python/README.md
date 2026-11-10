@@ -8,7 +8,11 @@ Agent-workflow Python is moving into one standard-library package, `agent_tools`
 
 `home/common/agent-tools/default.nix` applies that builder once per home configuration as the `agentTools` module argument, which agent-skills and claude-code consume. The installed-layout check pins the built system closure to one agent_tools package build, every agent-tools launcher to one Python environment, and that environment's imports to the closure's package build. `just agent-installed-skill-tests` passes `AGENT_TOOLS_SYSTEM_RESULT` to the check.
 
-Each row becomes a `~/.agents/bin/<command>` launcher, which unsets the `NIX_PYTHON*` variables and runs `python3 -I -m agent_tools.<module>` from that environment, so nothing on `PYTHONPATH` or in the working directory can shadow the store copy; `just agent-installed-skill-tests` proves it.
+Each row becomes a `~/.agents/bin/<command>` launcher, which unsets the `NIX_PYTHON*` variables and runs `python3 -I -m agent_tools.<module>` from that environment, so nothing on `PYTHONPATH` or in the working directory can shadow the store copy; `just agent-installed-skill-tests` proves it. Every agent-workflow helper is a module of the package, and each command-table row is its only install route.
+
+## artifact-budget
+
+`artifact-budget` measures a skill artifact root against the policy and validates a producer phase report; the design, grill-with-docs, writing-plans and handoff skills call it by bare name. Its commands are `check --kind {design-spec,implementation-plan,handoff} --root PATH --format json` (exit 0 within budget, 3 over budget, 2 refused) and `validate-report --boundary producer --input PATH|-` (exit 0 with the canonical report, 2 refused). `--policy` defaults to `~/.agents/share/artifact-budget-policy.json`.
 
 ## `verified-tree`
 

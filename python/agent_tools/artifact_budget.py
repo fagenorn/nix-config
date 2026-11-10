@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Artifact budget and producer-report validation for the skills that call it.
+"""The `artifact-budget` command: artifact budget and producer-report validation.
 
 The design, grill-with-docs, writing-plans and handoff skills are the callers. The
 surface is `check` (measure a design-spec, an implementation-plan or a handoff
@@ -19,6 +18,8 @@ import re
 import stat
 import sys
 from typing import Callable, Mapping, Sequence
+
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
 
 KINDS = ("design-spec", "implementation-plan", "handoff")
@@ -90,31 +91,18 @@ def _integer(value: object, *, minimum: int = 0) -> bool:
     return type(value) is int and value >= minimum
 
 
-def _pairs_no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ArtifactBudgetError(f"duplicate key {json.dumps(key)}")
-        result[key] = value
-    return result
-
-
-def _reject_constant(_: str) -> object:
-    raise ArtifactBudgetError("non-standard constant")
-
-
 def _decode_json(raw: bytes, subject: str = "JSON") -> object:
     try:
         text = raw.decode("utf-8", errors="strict")
-        return json.loads(text, object_pairs_hook=_pairs_no_duplicates,
-                          parse_constant=_reject_constant)
+        return json.loads(text, object_pairs_hook=reject_duplicate_keys,
+                          parse_constant=reject_nonfinite_literal)
     except UnicodeDecodeError as exc:
         raise ArtifactBudgetError(
             f"invalid {subject}: invalid UTF-8 at byte {exc.start}: {exc.reason}") from exc
     except json.JSONDecodeError as exc:
         raise ArtifactBudgetError(
             f"invalid {subject}: {exc.msg} at line {exc.lineno} column {exc.colno}") from exc
-    except ArtifactBudgetError as exc:
+    except ValueError as exc:
         raise ArtifactBudgetError(f"invalid {subject}: {exc}") from exc
 
 

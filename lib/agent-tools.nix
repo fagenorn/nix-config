@@ -40,6 +40,7 @@ let
   commands = [
     "adopt-project"
     "agent-model-matrix"
+    "artifact-budget"
     "cache-proxy"
     "conformance"
     "context-map-lint"

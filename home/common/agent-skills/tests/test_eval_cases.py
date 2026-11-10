@@ -18,7 +18,7 @@ SKILL_ROOTS = (
     REPO_ROOT / "home/common/agent-skills/skills",
     REPO_ROOT / "home/common/claude-code/skills",
 )
-BUDGET = REPO_ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
+BUDGET = (sys.executable, "-m", "agent_tools.artifact_budget")
 POLICY = REPO_ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 SETUP_KINDS = {"dirty-worktree", "shippable-worktree", "planned-worktree", "release-ready", "tracked-issue"}
 PIPELINE_SKILLS = ("ship-release",)
@@ -136,7 +136,7 @@ class EvalCasesTest(unittest.TestCase):
 
     def assert_within_budget(self, kind, root):
         done = subprocess.run(
-            [sys.executable, str(BUDGET), "check", "--kind", kind, "--root", str(root),
+            [*BUDGET, "check", "--kind", kind, "--root", str(root),
              "--policy", str(POLICY), "--format", "json"],
             capture_output=True, text=True, timeout=120)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
