@@ -9,6 +9,34 @@ readers that feed it a tree's Markdown (`index_records`, `markdown_texts`,
 `derive_link_rewrites`, over `adopt_inspection.tree_records`, which it
 re-exports).
 
+Scope: outbound links in every Markdown file a `git-mv` moves, inbound links in
+every other tracked Markdown file, a regular `.md` or `.markdown` blob at the
+base revision that is strict UTF-8 and not secret-shaped; a `generated_file`
+projection target is left to its regeneration. The grammar finds inline links
+and images on one line and reference definitions, outside fenced code, code
+spans and link titles. A target resolves against the tracked paths of a tree,
+never the filesystem: it is relative unless it is empty, starts with `#` or
+`/`, carries a URL scheme or holds a backslash, and it resolves when its
+percent-decoded path, joined to the containing directory, names a tracked file
+or a directory inside the root.
+
+The rewritten bytes come from the plan's base revision. Each changed file is a
+`write-file` at the path the file has after the moves, placed before the
+projection regenerations. A rewritten target keeps its anchor or query, title,
+angle brackets and trailing slash, and its leading `./` unless the new path
+climbs out with `../`. A bare target is percent-encoded; an angle target
+encodes only `%`, `#`, `?`, `<`, `>` and line breaks. A path that would
+otherwise open with a URL scheme (`urn:x.md`) gains a leading `./`, so the
+emitted path names the same file and stays relative. A link that already fails
+to resolve, a URL and a link the moves leave correct stay byte-identical.
+Prose mentions of moved paths, inline HTML and root-relative targets are never
+rewritten, and a path literal in a non-Markdown file is left to the
+`path-reference` question.
+
+`link_rewrites`, in the plan document and the adoption evidence record, carries
+the `inbound` and `outbound` link counts and sorted files, the `unrewritable`
+`path`/`target` entries and an `already_broken` count.
+
 It is imported and never run. It reads blobs only through git, never the
 working tree, and imports `adopt_inspection` and nothing that imports the
 resolver (#148 D26). Standard library only.

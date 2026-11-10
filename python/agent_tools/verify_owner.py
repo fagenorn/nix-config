@@ -4,6 +4,23 @@ A prompt is an `owner-action` marker the runner posts for a check only the owner
 module names the reasons and box labels, reads the boxes a prompt carries, finds the prompts of one
 identity (an ended prompt still counts as posted) and says why a live prompt is settled. It runs no
 process, reads no clock and calls no forge: every function takes the markers it judges.
+
+Each prompt is an `owner-action` marker (`reason` `verify-ask`, `verify-approve`, `verify-act`,
+`verify-decision` or `verify-stale-check`, with `block` and `check`), posted once per identity
+ever, ended prompts included (plan D1), with its boxes (plan D5). Who honours a tick, how an
+approve prompt is bound to its command by the `run` digest and consumed once, by the named host
+only, through a `verify-run consumed=<id>` marker, and how a changed command is ended `changed` and
+asked again are plan D2 and D3; approval lifts only the effects gate (D4). The outcomes, `rejected`
+included, and the rule that only the owner's recorded answer or a final state settles a prompt are
+D6; `act` is D10. A pass writes a `verify-seen` report marker for its host, and stale-check reads
+it: a concrete host only, after 7 days, with the `unresolved` and `silent` causes and the `last`
+report date (D7).
+
+The sweep of `verify_run` (it ends the prompts the freshly read held block no longer needs and
+keeps the `owner-action` label while one live marker stands) counts only a trusted (`OWNER` or
+`MEMBER`) author's marker, leaves every other `owner-action` marker live and never touches
+`agent:human-required` (D8). A decision whose post was lost is posted by the next pass (D13), and
+`--report` touches nothing (D12). `apply_labels` removes a label an answered prompt `clears`.
 """
 import hashlib
 import json

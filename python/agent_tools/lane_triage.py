@@ -1,7 +1,14 @@
 """`lane-triage`: the deterministic light-lane verdict over an owner's triage record (#279).
 
-It reads `bindings.workflow.light_lane` through `resolve_project.resolve`, prints
-`{hits, lane, mode}` and writes no file.
+`lane-triage evaluate --repo-root <root> --input -` reads the triage record on stdin and
+`bindings.workflow.light_lane` (an optional `resolve-project` member) through
+`agent_tools.resolve_project.resolve`, the one public function that composes exactly what
+`resolve-project resolve` prints. It prints the verdict `{hits, lane, mode}` and writes
+no file.
+
+`lane` is `light` only when no signal is `hit` or `doubt` and no predicted path matches a
+`risk_paths` glob. An absent or `null` member means the light lane is unsupported and
+exits 2 with `light_lane_unsupported`. The owner's Phase 0 records the verdict.
 """
 
 from __future__ import annotations

@@ -1,5 +1,14 @@
 """Trusted block and marker selection for the verify-pending run (issue 630).
 
+The forge is read with one GraphQL listing per project (P12), the open `needs-verification` issues
+with their last comments, whose ids it reads from `fullDatabaseId` (a BigInt, so a string of
+decimal digits; `databaseId` is a 32-bit Int the forge cannot fill for this repository's comment
+ids).
+
+Only blocks and markers by an `OWNER` or `MEMBER` author count, a contest re-read included, because
+the repository may be public (P3); another author's block is never selected and another author's
+marker neither wins nor ends a contest.
+
 An issue's held verification is the newest `verify` block posted by a trusted author (P3): a
 comment whose association is in `TRUSTED`, that is not itself a marker and whose body carries a
 `verify` fence. Unfenced JSON is never a block, an unparsable newest block never falls back to
@@ -12,7 +21,8 @@ event, not to a block, so a replacement block inherits it. Every other author's 
 A result's identity is its block version and check index; the `ac` field is never part of it (P15).
 A block version is the block comment's id and a digest of the block's content (`block_key`), so
 editing or reordering the checks of a comment keeps the id but starts a new version: a marker
-written for an earlier version names another `block` and is never read back as this one's.
+written for an earlier version names another `block` (every marker but `window-open`, which
+names none, carries the field) and is never read back as this one's.
 
 This module runs no process, reads no clock and touches no file.
 """

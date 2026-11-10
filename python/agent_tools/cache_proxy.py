@@ -1,12 +1,32 @@
 """`cache-proxy`: a loopback pass-through from Claude Code to the Anthropic API (#422).
 
 `cache-proxy --port N [--upstream URL] [--keepalive] [--reorder]` binds 127.0.0.1 only and
-serves until killed. It forwards requests and responses unchanged apart from `Host` and
-hop-by-hop headers, answers `GET /_proxy/health` itself, and writes one JSON line per forwarded
-request to stderr. With `--keepalive` it also replays idle subagent conversations' last requests
-with `max_tokens=1` (`agent_tools.cache_keepalive`, #423); with `--reorder` it reorders each
+serves until killed. Without `--keepalive` or `--reorder` it forwards each request's method, path,
+query and body bytes and each response's status, headers and body unchanged: only `Host` is
+rewritten and hop-by-hop headers are dropped, and nothing is added, decoded or retried. Without
+`--keepalive` the client's `Accept-Encoding` is forwarded verbatim and bodies are never decoded.
+An unsized (streamed) response is re-chunked one upstream read at a time, and one keep-alive
+upstream connection is held per client connection.
+
+`GET /_proxy/health` answers `{"service":"cache-proxy","status":"ok"}` without being forwarded or
+logged. An upstream that fails before responding gets the client a `502` Anthropic error
+envelope; one that fails mid-body gets the client connection closed without the terminating
+chunk.
+
+stderr carries one JSON line per request: `method`, `path`, `status`, `upstream_conn`, `ttfb_ms`,
+`duration_ms`, `bytes`, `outcome`, plus `error` and up to 4 KiB of an upstream error body as
+`error_body`, and never a header value. `bytes` counts the body bytes
+written to the client, a reply the proxy makes itself (a `502` or a rejection envelope) included;
+a `HEAD` reply ends after its headers, so it logs 0. An exception no request step expected (a
+client reset on an idle connection) is one `handler_error` line with `error`, never a traceback.
+
+With `--keepalive` it also replays idle subagent conversations' last requests with
+`max_tokens=1` (`agent_tools.cache_keepalive`, #423); with `--reorder` it reorders each
 subagent's first user message (`agent_tools.subagent_prefix`, #429) before the keepalive sees the
-request. Its forwarding changes only as those modules describe.
+request. Its forwarding changes only as those modules describe. The launchd agent or systemd
+user unit that runs it and the `claude` launcher that routes through it are in
+`home/common/claude-code/README.md`.
+
 """
 
 from __future__ import annotations

@@ -1,10 +1,21 @@
 """The keepalive pings of one cache-proxy log (issue 503).
 
 `read_pings` reads the `ping` lines of one log that `cache-proxy --keepalive` writes (through
-agent_tools.cache_proxy.LineLog) and prices them through agent_tools.model_pricing. The contract
-home is python/README.md (cache-proxy). `end_turn_cap` is the measurement of issue 502's AC2 (no ping after a completed
-`end_turn` reply once its period holds the cap), run as `python -m agent_tools.keepalive_pings
-end-turn-cap` by the verify check home/common/verify-pending/checks/keepalive-end-turn-cap.
+agent_tools.cache_proxy.LineLog) and prices them through agent_tools.model_pricing. The ping
+contract is the docstring of agent_tools.cache_keepalive. `end_turn_cap` is the measurement of
+issue 502's AC2 (no ping after a completed `end_turn` reply once its period holds the cap), run
+as `python -m agent_tools.keepalive_pings end-turn-cap` by the verify check
+home/common/verify-pending/checks/keepalive-end-turn-cap.
+
+The check runs `end_turn_cap` over the trailing `--days` (7) window ending at `--end` (now) of
+`--log` (`~/Library/Logs/claude-cache-proxy.log`): per proxy run (a `listening` line starts a new
+one), it counts the keepalive periods whose conversation's last reply was `end_turn` when they
+closed and how many sent a ping after that reply completed while already holding the cap (pings
+sent while the reply still streamed count toward the total but never mark a period over; a `ping`
+line is written when its exchange completes, so its send time is its `ts` minus `duration_ms`, and
+lines are judged and assigned to periods in send order). It prints one JSON line and exits 0 when
+at least one such period exists and none is over, 1 when one is over, 75 when none exists yet, and
+2 on a usage error or an unreadable log; the cap is `cache_keepalive.END_TURN_PINGS`.
 """
 
 import argparse

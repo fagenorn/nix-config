@@ -1,11 +1,92 @@
 """Keepalive pings for idle subagent conversations behind `cache-proxy --keepalive` (#423).
 
-`classify` sorts each forwarded request into one outcome of `OUTCOMES`; `ping_body` and
-`ping_headers` rebuild a candidate request as its `max_tokens=1` replay; `SseReader` reads a
-streamed response's `stop_reason` and usage.
+`--keepalive` keeps a subagent conversation's prompt cache warm while it is idle, by replaying
+its last request with `max_tokens=1`. A conversation is a pair of the `X-Claude-Code-Session-Id`
+and `x-claude-code-agent-id` headers. `classify` sorts each `POST /v1/messages` the proxy is about
+to forward into one outcome of `OUTCOMES`; `ping_body` and `ping_headers` rebuild a candidate
+request as its `max_tokens=1` replay; `SseReader` reads a streamed response's `stop_reason` and
+usage.
+
+Outcomes. `untracked` (not a messages `POST`, or no session header), `main` (no agent header: the
+main conversation) and `unparsed` (the body is not a strict JSON object, or arrives with a
+`Content-Encoding`) are not candidates. `no_tail_mark` (the last message carries no
+`cache_control`), `ttl_1h` (some mark asks `ttl` `1h`) and `thinking_budget` (`thinking.type` is
+`enabled`) are subagent requests that are left alone as well. `tracked` is a subagent request that
+can be replayed. A `no_tail_mark` request is a side request (Claude Code's forks and side queries
+look like this), and a request with any other outcome but `untracked` is a thread request, its
+conversation's own turn. A side request counts as session activity only while it is in flight:
+whatever its `stop_reason`, it never clears or sets its conversation's pending tool, ends an idle
+period, restarts the ceiling, moves the eviction order or supersedes a ping in flight.
+
+Candidates. A `tracked` request whose response starts 2xx becomes its conversation's candidate (a
+newer one replaces an older one; a candidate is held for at most `MAX_CANDIDATES` = 64
+conversations, and the 65th evicts the one whose last thread request is oldest). A later 2xx
+`unparsed`, `ttl_1h` or `thinking_budget` request clears it; `main` and `no_tail_mark` requests
+leave it as it is. Every request with an outcome other than `untracked` is forwarded with
+`Accept-Encoding: identity`, and its response chunks are tapped, after they have been written to
+the client, by an incremental SSE reader that keeps the final `stop_reason`; the bytes the client
+gets are unchanged. The candidate's headers, `authorization` among them, are held in process
+memory only, from its 2xx response start until it is cleared, replaced or ended; they are never
+logged or written anywhere, and a proxy restart forgets every conversation.
+
+Activity. A session counts as active for a candidate when one of its conversations has a request
+in flight (under 60 minutes old, side requests included), is pending a tool (the 2xx response to
+its newest thread request completed with `stop_reason` `tool_use`, under 60 minutes ago), or has
+sent a thread request since the candidate's last touch; pings never count. A conversation's last
+reply is the `stop_reason` the tap read from the 2xx response to its newest thread request once
+that response completed; it has none while that response streams, or when the response was not
+2xx, was cut short or carried no `stop_reason` the tap could read, and a side request never sets
+or clears it.
+
+Ticks. A tick every `TICK_INTERVAL` = 5 s finds each candidate untouched for `DUE_AFTER` = 270 s
+(the touch is the upstream send time of its last 2xx `tracked` request or ping). It ends the
+conversation with `ceiling` when 60 minutes (`WINDOW`) have passed since its last thread request,
+with `session_idle` when the session is not active, with `end_turn_cap` when its last reply was
+`end_turn` and its idle period already holds at least `END_TURN_PINGS` = 2 pings (the pings sent
+since its last thread request, those sent while that reply streamed included), checked in that
+order, and otherwise sends the ping.
+
+Pings. A ping travels on a fresh upstream connection (never a client's) with a `PING_TIMEOUT` =
+30 s socket timeout and is never retried; its response is read to the end, its usage logged, and
+the bytes discarded. The whole exchange is also bounded by that 30 s from the ping's send time,
+checked on the keepalive's clock between reads and enforced by a wall-clock watchdog that shuts
+the ping connection's socket, so a read still blocked ends too, the response's headers and chunk
+framing included: once it has passed, the read stops, no usage is parsed, the connection is
+closed and the `ping` line reads `upstream_error` with `error` `ping exceeded 30.0 s`, so a
+response that keeps trickling bytes cannot hold a ping, or its conversation's credentials, in
+flight. The ping keeps the candidate's headers, `Accept-Encoding: identity` and a recomputed
+`Content-Length` included, and its body is the candidate's with `max_tokens` set to `1` and
+nothing else changed. Only a 2xx ping whose body was read whole (outcome `complete`) becomes the
+new touch; any other result (a non-2xx status, an upstream error such as a timeout or a
+connection failure, a body cut short of its declared length, or the overall bound) ends the
+conversation with `ping_failed`, and a ping superseded by a newer thread request of its
+conversation while in flight changes nothing.
+
+End reasons (`END_REASONS`). A thread request that arrives after at least one ping ends that idle
+period with `resumed`; the others are `ceiling`, `session_idle`, `end_turn_cap`, `ping_failed`
+and `evicted`.
+
+Log lines. With the flag, the `listening` line gains `"keepalive":true`, and each `request` line
+that reached the keepalive gains `keepalive` (the outcome) and, unless it is `untracked`,
+`conversation` (12 hex digits of the `telemetry_digest` of the session and agent, never a header
+value) and the `stop_reason` the tap saw. A request rejected while its body was read (`411`,
+`400`) and the health path carry none of these. Three events are new: `ping` (`conversation`,
+`model`, `idle_s`, `status`, `ttfb_ms`, `duration_ms`, `outcome`, `usage` and, on failure, `error`
+and up to 4 KiB of an error body), `keepalive_end` (`conversation`, `reason`, `pings` and
+`idle_s`) and `keepalive_error` (`stage` `observe`, `track`, `tick` or `send`, and `error`).
+
+Failure. A keepalive bug never blocks traffic: an exception from `observe`, a track call, `tick`
+or `send` is one `keepalive_error` line, the request carries `"keepalive":"untracked"`, and the
+scheduler keeps running. When `observe` raises, the request is forwarded exactly as it would be
+without the flag; when a later track call raises, the track is dropped and the request continues
+untracked, its headers already sent as the track gave them (`Accept-Encoding: identity`); a
+dropped track is still told its request is done (unless `done` itself raised), so its flight
+never keeps the session active. Without the flag no keepalive object exists, no thread runs, and
+every byte sent upstream and every log line is as `agent_tools.cache_proxy` describes.
 
 `Keepalive` holds each subagent conversation's candidate request, `tick` returns the pings now
 due, `send` sends one, and `run` is the production loop, which only a command's `main` starts.
+
 """
 
 import http.client

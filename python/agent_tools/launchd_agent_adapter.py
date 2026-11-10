@@ -82,6 +82,14 @@ The plist (issue 547 D8, D18) holds `Label`, `ProgramArguments` (the resolved pr
 `RunAtLoad`, `KeepAlive`, `EnvironmentVariables` (exactly the two stamp variables),
 `ProcessType` `Background` only when `background` is true, and the two log paths joined to the
 checkout root only when configured.
+
+It is registered as `launchd-agent`. Its one operation, `activate`, has both non-spend effect
+classes, and it answers `agent_running` and `running_subject_identity`. The `launchd_gui_agent`
+target's `label` is the only choice a profile has: the domain and the plist path are fixed, so
+a profile cannot name another, and uid 0 is refused. `program` is a bare name resolved on
+`PATH`. Install, restart and status are this one operation and its inspection. `inspect` and
+its classification are the issue 547 spec's tables. `watch_operation` is `None` for it (issue
+547 D10). `tests/host_world.py` also fakes `launchctl`.
 """
 
 import os

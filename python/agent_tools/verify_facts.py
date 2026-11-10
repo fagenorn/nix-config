@@ -6,6 +6,12 @@ through `Context.now()` (P7). Every `gh` call goes through `forge_markers`, so n
 it; the version tool and every `git` child also run with `GITHUB_TOKEN` and `GH_TOKEN` removed
 (P16). This module only reads: the `window-open` marker a
 `days_after` condition waits for is posted by the caller.
+
+A `when` is evaluated per member: a `-dirty` suffix is stripped from the deployed revision, the
+forge must hold the commit, a compare answers ancestry when git cannot, and no adapter runs in
+process (P16). `released_includes` reads the forge: the latest release tag must contain the sha and
+be on the default branch. A deploy-observed release is the release core's activation-unit
+observation (#555, #582), which no verify check reads.
 """
 import json
 import os

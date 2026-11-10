@@ -8,6 +8,26 @@ through one loader and writes through one atomic writer (D37) — `adopt-project
 must not import `agent_tools.resolve_project` (D26), and a second copy of either helper
 is the duplication the plan forbids.
 
+A `deprecations` entry of `platform-manifest.json` is closed on exactly `id`,
+`kind`, `subject`, `since`, `successor` and `migration` (issue 580). `id`,
+`subject`, `successor` and `migration` are non-empty strings and `id` is
+distinct across entries; `kind` is `project_file` (the `subject` is a
+repository-relative POSIX path a project may hold: not absolute, no backslash,
+no empty, `.` or `..` segment), `platform_behavior` (the `subject` names shipped
+platform behaviour; nothing per project) or `project_schema` (the `subject` is
+a decimal project schema version: digits only, no sign, no leading zero;
+anything else is `subject_not_schema_version`); `since` is strict SemVer
+`MAJOR.MINOR.0` with `MINOR >= 1`, because deprecation begins only in a minor.
+A violation refuses the manifest as `resolver_failure` with the repair id
+`platform.manifest.deprecations.<not_array|not_object|member_missing|member_unexpected|not_string|duplicate_id|kind_unknown|since_not_minor|subject_not_relative_path|subject_not_schema_version>`.
+That each `since` is at most `platform_version` and shares its major is pinned
+on the committed file by `CommittedManifestTest`, not by the validator. A
+`removals` entry is closed on the same six members under the same member rules,
+with the repair ids `platform.manifest.removals.<...>` of the list above, and a
+removal `id` that is also a deprecation `id` is
+`platform.manifest.removals.still_deprecated` at `/removals/<n>/id`. A manifest
+that removes nothing keeps `removals: []`.
+
 The manifest is authored data installed at exactly `$HOME/.agents/share/
 platform-manifest.json` (R1.1, D1). There is no default, no fallback path and
 no discovery ladder: a missing, unreadable, malformed or schema-invalid

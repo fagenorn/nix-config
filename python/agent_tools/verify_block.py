@@ -1,9 +1,156 @@
 """The `verify` block grammar: parsing a hold comment and checking its structure.
 
+`verify-pending` (issue 625, parent 572) gives the pending check of a held issue one strict,
+machine-readable form, the verify block, and refuses at hold time the avoidable holds the history
+study found. This module is the pure policy (`parse_block`, `lint_block`, `count_since`) and the
+one home of the grammar; `agent_tools.verify_pending` is the thin shell that parses argv, reads the
+input, builds the real reference lookups and prints the verdict. The lint is read-only: it never
+runs a check and never calls `gh`. Its only child processes are the `git` probes below, and only
+when `--repo-root` is given.
+
 `parse_block` extracts the block from a hold comment (or a bare JSON text) and
 `lint_block` walks it, collecting every finding as `{"field", "code",
 "message"}`. A finding's `field` is a path into the block
 (`checks[0].when.not_before`); an unknown member's path is its own path.
+
+Where a block lives. A verify block sits in the hold comment, as the one fenced block whose info
+string is `verify` (a line of three backticks plus `verify`, closed by a line of three backticks,
+either line allowing trailing spaces or tabs, and CRLF line endings read as LF). Only a comment
+whose author association is `OWNER` or `MEMBER` carries a block the runner trusts, and a block
+trusts only installed or committed code, never code in the comment. That holds by construction:
+the run forms are an allowlist (below), so a block can name a contract command, a committed script
+or a built-in probe, and nothing else. `lint --input <path|->` reads either a whole hold comment
+or a bare JSON block; with no fence the whole input is the block, two or more fences are refused
+(`block`, `fence_count`), and JSON that is unparsable or not strict (a repeated key, `NaN`,
+nesting too deep to decode, a string holding a lone surrogate) is refused (`block`, `not_json`).
+
+Fields. The top level holds `v` (the integer 1), `merge` (the merge commit, a 40-character
+lowercase hex sha) and `checks` (a non-empty list). A check holds `ac` (an acceptance criterion id
+such as `AC1`), `kind` (`evidence` or `human`), `host` (a hostname, `any`, or a non-empty list of
+distinct hostnames), `when`, `run`, and the optional `expect`, `effects`, `mode`, `on_fail`,
+`expires_after_days`, `on_expire` and `reason`. Every object is closed: a member outside the
+grammar is refused `unknown_field`, a missing required one `missing_field`, a malformed value
+`invalid_value`. The optional fields default as follows, and the defaults are documented, not
+enforced by the lint (the runner applies them): `effects: none` (the others are `live` and
+`paid`), `mode: assert` (`observe` reports a metric instead of gating), `on_fail: label` (or
+`ask`), `expires_after_days: 21` counted from when the check became due (an integer of at least
+1), `on_expire: close` (closed as not verified; or `ask`).
+
+`when`. A non-empty object of these members: `deployed_includes` and `released_includes` (a sha),
+`ci_run_includes` (`{workflow, branch, sha}`, all three required), `not_before` (an ISO 8601 time
+that carries a UTC offset) and `days_after` (`{event, days}` with `event` one of `deployed` or
+`released` and `days` an integer of at least 1).
+
+`run`. Exactly one form key, else `run_form` at the run. The system forms are an allowlist of
+three; a run of any other shape, such as `{"tool": "git", ...}`, `{"tool": "python3", "args":
+["-c", ...]}`, `nix`, `gh`, `curl` or a shell, is refused `run_form`, because the lint does not
+try to tell safe arguments of a general tool from code-carrying ones.
+
+- `{"command"}` runs a command id declared in the project contract (`bindings.commands`) with its
+  declared argv and nothing else. `args` on a command is `inline_code` at `<run>.args`: a declared
+  argv is often a `just` recipe, which pastes its parameters into shell lines unquoted and runs a
+  surplus argument as another recipe, so no appended argument is data. A `command` that is not an
+  id is `inline_code`.
+- `{"script", "at"?, "args"?}` runs a file committed in the repository, executed directly (no
+  shell, no interpreter in the block), resolved at `at` or, without `at`, at the block's `merge`.
+  `script` is a relative POSIX path with no empty, `.` or `..` segment, no backslash and no NUL
+  (else `inline_code`); at the commit it must be a regular file committed with mode `100755` at
+  exactly that path, so a missing path, a directory, a non-executable file, a symbolic link (one
+  pointing outside the repository included) and a path through a symlinked directory are each
+  `not_committed`. `args` is a list of strings, handed to the committed script as data.
+- `{"probe", ...parameters}` runs a built-in read-only probe of `verify-pending` by name; its
+  parameters are data members of the run object, closed per probe (`unknown_field`,
+  `missing_field`, `invalid_value`): `deployed_includes` `{sha}` (the check's host runs a
+  deployment that includes `sha`), `released_includes` `{sha}` (the latest release includes `sha`),
+  `ci_run_includes` `{workflow, branch, sha}` (a run of that workflow on that branch at that sha
+  passed), and `count_since` `{source, since, n, workflow?, branch?}` (at least `n` runs or
+  releases strictly after `since`, through `count_since` below; `source` is `runs`, which needs
+  `workflow` and takes an optional `branch`, or `releases`, which takes neither). Runs are read
+  from that workflow's own run listing, so `workflow` names its file (or id), and a listing the
+  forge truncated below its `total_count` is refused as a forge error rather than counted low. An
+  unknown probe name is `invalid_value` at `<run>.probe`.
+
+Two owner forms need a person: `{"ask"}` is a non-empty single-line question for the owner, and
+`{"act", "then"}` is a non-empty single-line instruction for the owner followed by a system run
+(`then` takes no `ask` and no nested `act`, else `run_form` at `<run>.then`). A member outside the
+chosen form is `unknown_field`. A system run ends with exit 0 (met), 1 (not met) or 75 (not yet);
+these meanings are fixed and not configurable. `expect` is optional and, when present, is
+`{"json": [test, ...]}` over the run's JSON output, each test `{"pointer", "equals"}` or
+`{"pointer", "min_len"}`, with `pointer` either `""` or starting with `/`.
+
+Kind and run agree. An `ask` or `act` run needs the owner, so it requires `kind: human`; a
+`command`, `script` or `probe` run is something the system runs, so it requires `kind: evidence`.
+A mismatch is `kind_mismatch` at `checks[i].kind`, which keeps an owner-needing check from dodging
+the `reason` rule by calling itself `evidence`. A `human` check needs a `reason` from the set
+`senses`, `hands`, `credentials`, `money` and `taste` (else `reason_required`); an `evidence`
+check takes none (`reason_not_allowed`). A check whose `effects` is `paid` or `live` must name
+exactly one host, so `any` and a list are refused `host_not_concrete`. An `ask` that,
+case-insensitively, asks for approval of a document (an approval word together with `design`,
+`adr`, `runbook`, `path list`, `paths`, `spec` or `plan`) is refused `approval_ask`.
+
+References must resolve. Checked after the shape rules, and an unconfirmable reference is refused
+(fail closed). A `command` needs `--repo-root`: the project contract is resolved in process
+through `resolve_project.resolve` and the id must be a member of `bindings.commands` (else
+`not_declared` at `<run>.command`; without `--repo-root`, or when resolution is refused,
+`unverified_reference`). A `script` needs `--repo-root` too, and is looked up with `git ls-tree`
+at its commit: a commit absent from the repository is `unverified_reference` at `<run>.at` (or at
+`merge` when the script takes the merge commit), a path that is not an executable committed file
+is `not_committed` at `<run>.script`, and no `--repo-root` is `unverified_reference` at
+`<run>.script`. A probe references nothing outside the block.
+
+Context options. Three refusals depend on facts only the caller knows. `--code-unmet ID`
+(repeatable) refuses the block once, `code_unmet`, because an acceptance criterion that is unmet
+in code cannot be held for verification. `--pr-workflow NAME` (repeatable, the pull request's
+required workflows) with `--pr-head SHA` or `--pr-branch NAME` refuses `pre_merge_only` at
+`checks[i].when` an `evidence` check that awaits only a `ci_run_includes` of one of those
+workflows at that head or on that branch, since a run of the pull request cannot be observed after
+the merge; the same workflow awaited on another branch at another revision is a post-merge
+observation and is accepted, and `--pr-workflow` with neither is a usage error. Three warnings
+leave the block accepted: `--blocks ISSUE` (repeatable) warns `ask_blocks_issues` at
+`checks[i].run.ask` for each `ask` check, because it holds the issue open and blocks the named
+issues; `--repo-root PATH` (which must be a git work tree, else exit 2) with a block whose `merge`
+is a valid sha and a check that has `deployed_includes` warns `no_flake_at_merge` at
+`checks[i].when.deployed_includes` when the merge commit has no `flake.nix`, or once
+`merge_not_found` at `merge` when the repository does not have the commit (the repository cannot
+say, so no flake warning).
+
+Verdict. stdout is one line, `json.dumps(verdict, sort_keys=True)`: `{"ok", "errors", "warnings"}`,
+each finding `{"field", "code", "message"}`, `field` a path into the block
+(`checks[0].when.deployed_includes`, `checks[0].run.command`) and `ok` true exactly when `errors`
+is empty. Every finding is collected, in traversal order. The exit status is 0 when the block is
+accepted (warnings allowed), 1 when it is refused, and 2 on a usage error, an unreadable input, a
+`--repo-root` that is not a git work tree, a `--pr-head` that is not a sha, or `--pr-workflow`
+without `--pr-head` or `--pr-branch`. The error codes are closed: `not_json`, `fence_count`,
+`unknown_field`, `missing_field`, `invalid_value`, `host_not_concrete`, `reason_required`,
+`reason_not_allowed`, `kind_mismatch`, `run_form`, `inline_code`, `not_declared`, `not_committed`,
+`unverified_reference`, `approval_ask`, `pre_merge_only` and `code_unmet`; the warning codes are
+`ask_blocks_issues`, `no_flake_at_merge` and `merge_not_found`. No other code is emitted.
+
+`count_since(timestamps, since, n)` counts the aware ISO timestamps strictly after `since` and
+returns 0 when the count is at least `n`, else 75 ("not yet", never a failure); an `n` below 1, or
+a naive or unparsable time, raises `ValueError`. The `count_since` probe uses it, and a check
+script answers "at least N runs since T" with `verify-pending count-since --input <path|-> --since
+T --n N [--key K]` (the command is in `agent_tools.verify_pending`).
+
+The block below is the host-bound deploy check; `lint` accepts it, and the test file pins that,
+and that the same block with an inline `python3 -c` run in place of the probe is refused
+`run_form` at `checks[0].run`.
+
+```verify
+{
+  "v": 1,
+  "merge": "0123456789abcdef0123456789abcdef01234567",
+  "checks": [
+    {
+      "ac": "AC1",
+      "kind": "evidence",
+      "host": "mbp",
+      "when": {"deployed_includes": "0123456789abcdef0123456789abcdef01234567"},
+      "run": {"probe": "deployed_includes", "sha": "0123456789abcdef0123456789abcdef01234567"}
+    }
+  ]
+}
+```
 """
 
 import json

@@ -19,6 +19,22 @@ and `core_binding`, which projects them onto the shapes the transaction core alr
 The binding adds no retry, ordering or outcome policy: it pins the adapter implementation to
 the compiled profile by descriptor digest, refuses a request that is not exactly a compiled
 node of its alias, and validates what the adapter returns.
+
+An adapter is a module with `describe`, `inspect` and `invoke`. `inspect` returns a closed
+effect or predicate `Observation` and `invoke` the closed `InvokeResult`
+`{result, error_class, reference}`: `result` is `accepted`, `rejected` or `unknown`,
+`error_class` is null exactly when `accepted`, and there is no `succeeded` because only the
+core's later inspection can say an effect landed (D7; #85, #206). `core_binding(adapter,
+compiled, alias)` refuses an implementation whose name or descriptor digest differs from the
+one the compiled profile pins, refuses any request whose `operation`, `target` or `config` is
+not exactly a compiled node of its alias (D24), and validates every result it returns, adding
+no retry or ordering policy.
+
+`tests/test_release_adapter_core.py` drives the real `TransactionStore` through `core_binding`
+and shows that an `accepted` invoke which never lands is recorded and then observed `absent` by
+a second inspection (AC8). `HostLocalCoreTest` in the same file drives the host-local fixture
+profile to `succeeded` through both host-local adapters over `tests/host_world.py`, and
+replaces both units at a new commit (issue 547 D16).
 """
 
 import copy

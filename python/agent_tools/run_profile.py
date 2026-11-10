@@ -1,18 +1,34 @@
 """Profile the token cost of Workflow runs from their agent transcripts (#715).
 
+Usage: `just agent-run-profile <run-dir>... [--json] [--top N]`, or
+`python -m agent_tools.run_profile`. It reads the Workflow run directories given as
+arguments and prints phase totals, the costliest agents, label families and a per-issue
+table as text or, with `--json`, one JSON document with the keys `incomplete`, `runs`,
+`phases`, `agents`, `families`, `issues`. `--top N` (default 15) caps agents and families.
+
 Each run dir holds one `agent-<id>.jsonl` transcript per agent, an optional
 `journal.jsonl` naming each agent's phase, label and result, and optional
-`agent-<id>.meta.json` files. This module reads them and reports tokens per
-phase, per agent, per label family and per delivered issue.
+`agent-<id>.meta.json` files.
 
 `fresh` = input + cache_creation + output tokens. Cache reads are reported
-separately (`cache_read`) because they cost about a tenth of a fresh token.
+separately (`cache_read`) because they cost about a tenth of a fresh token. Usage is
+deduplicated per message id (the per-field maximum) and tool calls per tool_use id.
 
-A transcript or journal that cannot be read in full (including one holding a
-malformed record) is listed under `incomplete`
-(and on stderr) and the command exits 1; an absent journal or meta file is normal.
+A label's family drops its numeric parts. For a label in a batch phase (`Intake`,
+`Deliver`, `Land`) the first numeric part of the label names the issue; any other agent
+takes the first explicit `issue #N` of its first prompt, else its first bare `#N` that is
+not a pull request (`PR #N`), skipping the workflow harness's user-request relay. An
+agent's model is the meta file's `model`, else the commonest model recorded in its
+transcript's assistant messages, else `?`. Issues are keyed by the run's repository slug
+from its setup result. An issue is listed only once a `close-out` agent for it returned
+`released: true`, and its planner calls count its `plan`, `plan-revise` and
+`plan-rules-revise` agents.
 
-Usage: `just agent-run-profile <run-dir>... [--json] [--top N]`
+A transcript or journal that cannot be read in full (including one holding a line that is
+not a JSON object: truncated, not UTF-8) is listed under `incomplete` (a table in text
+mode) and on stderr as `incomplete evidence:` lines, the totals omit what could not be
+read, and the command exits 1. An absent journal or meta file is normal. Exit 2 is a
+usage error or a run directory that does not exist.
 """
 
 import argparse

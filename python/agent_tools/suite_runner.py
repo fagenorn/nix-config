@@ -1,4 +1,81 @@
-"""Run the agent workflow suite's members, each in its own process, at most --jobs at a time (issue 436)."""
+"""Run the agent workflow suite's members, each in its own process, at most --jobs at a time (issue 436).
+
+`just agent-workflow-tests` hands its curated member list to this module
+(`python -m agent_tools.suite_runner`; it has no command-table row). Each member runs from
+the working directory with the recipe's environment plus two git configuration entries and
+the run's bytecode cache: a `.py` member as `python -m unittest -v <path>`, a `.sh` member
+as `bash <path>`.
+
+Git entries (issue 496). `maintenance.auto=false` and `gc.auto=0` are appended to
+`GIT_CONFIG_PARAMETERS` in the form `git -c` exports (`member_environment`), so a commit or
+a fetch in a test's repository starts no detached `git maintenance run --auto`, which would
+create `.git/objects/maintenance.lock` while the test reads that repository. Every git
+command that inherits a member's environment, at any depth, reads them as if given
+`git -c maintenance.auto=false -c gc.auto=0`: they win over an inherited entry, a test's own
+`GIT_CONFIG_COUNT` entry and any config file for the same key, a test's other count entries
+still apply, and a `git -c` option a command adds comes after them and wins.
+
+Bytecode cache (issue 499). It is one directory per run. Before the first member starts the
+runner creates a `suite-runner-pycache-*` directory in the default temporary directory, sets
+`PYTHONPYCACHEPREFIX` to it, replacing an inherited value, and drops an inherited
+`PYTHONDONTWRITEBYTECODE` (`member_environment`). Every Python process that inherits a
+member's environment, at any depth, writes the bytecode of the source modules it imports
+there, under each source's absolute path, and reads what an earlier process of the same run
+wrote instead of compiling again. Parallel writers need no coordination: CPython writes each
+file under a temporary name and renames it into place, and skips a write it cannot make. The
+prefix redirects every bytecode lookup, the standard library's included, so a run compiles
+the standard-library source modules its processes import instead of reading the
+interpreter's own bytecode, and its later processes read that result.
+A script run as a main file is compiled on every start. The runner removes
+the directory when the run ends, after the report, after an interrupted run has waited for
+its members, or on an error, and a failure to remove it is raised, never ignored.
+
+Jobs and order (issue 604). At most `--jobs N` members run at once. The default is
+`SUITE_RUNNER_JOBS` when that variable is set and non-empty, else `min(8, CPUs - 2)` with a
+floor of 1 (also when the CPU count is unknown); an explicit `--jobs` wins over both, and a
+bad `SUITE_RUNNER_JOBS` is a usage error (exit 2). In parallel mode members start
+longest-first (LPT): the order comes from `python/agent_tools/suite_timings.json`, a
+committed map of member path to wall seconds taken from a full run's timing table, with
+members it does not name starting first in list order, ties in list order, and a missing or
+malformed file meaning list order. Serial mode keeps list order, and the report stays in
+list order for ties. Refresh the file from a run's `suite-runner: <wall>s wall ... <member>`
+rows when the suite's shape changes; a stale file only costs wall time.
+
+Output. In parallel mode each member's stdout and stderr are captured together and printed
+as one block when it exits, from `suite-runner: begin <member>` to
+`suite-runner: end <member> passed|failed exit=<code> <seconds>s`. A
+`suite-runner: start <member>` line marks each launch, so a run cut off by a time limit names
+the members still running. `--jobs 1` is serial mode: members run one at a time with stdin,
+stdout and stderr passed straight through, for a hang or a `breakpoint()`.
+
+Verdict. A member passes only on exit 0. Unittest's exit 5 for a module that ran no tests, a
+death by signal (`exit=signal-<n>`) and a failure to launch (`exit=launch-error`) all fail
+it, and every member still runs after a failure.
+
+Timing table. Every completed run ends with one
+`suite-runner: <wall>s wall <cpu>s cpu passed|failed <member>` row per member, slowest first
+with ties in list order, then one `suite-runner: failed <member>` line per failure and
+`suite-runner: summary members=<n> passed=<p> failed=<f> jobs=<N> wall=<seconds>s cpu=<seconds>s`.
+A row's CPU figure is the member's child CPU time: the user plus system seconds in the
+resource usage that `os.wait4` returns when the runner reaps the member. That covers the
+member's own process and every descendant that it, or a descendant in between, waited for,
+such as the `git` and `python -m agent_tools.…` processes a test runs. A descendant still
+running when the member exits, or never waited for, is not counted, and a member that failed
+to launch shows `0.0`. The summary's `cpu=` adds up the members' unrounded figures and never
+the runner's own CPU, so rounding can make it differ from the sum of the printed rows. A
+member whose CPU is close to its wall time, or above it when its descendants ran at once, was
+computing. One far below it was waiting, for I/O, a sleep or a CPU it could not get. Set
+`cpu=` against `wall=` times the CPUs the run could use, the smaller of `--jobs` and the
+host's CPUs. Near it, every slot was computing and the CPUs were saturated; well below it,
+the members were waiting on something else. A module whose CPU grows from a `--jobs 1` run to
+a parallel one ran on slower, shared CPUs.
+
+Exits. 0 means every member passed and 1 that one failed. 2 is a usage error, raised before
+anything starts: a bad `--jobs`, no members, a duplicate, a member that is missing, is not a
+file or lies outside the working directory, or a suffix other than `.py` or `.sh`. 130 is an
+interrupt: the runner starts nothing more, prints `suite-runner: interrupted, waiting for
+running members`, waits for those members and prints no report.
+"""
 
 from __future__ import annotations
 

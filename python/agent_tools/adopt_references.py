@@ -17,6 +17,62 @@ over `adopt_inspection.tree_records` and `blob_at`), from two `git grep` scans:
 the first segments of the moved paths, and `..` or `__file__` within the
 moves' trees, kept to moved files (`depth_texts`).
 
+The scan reads the base revision's regular, non-Markdown, non-secret blobs
+that git judges text and that decode as strict UTF-8, found by one `git grep`
+for the first path segment of each move source (the depth reading has a read
+set of its own), leaving out `.agents/artifacts/` and
+`.agents/knowledge/archive/` (each tested on the base path, so a file under
+them is editable only by the adoption that moves it) and the files adoption
+itself may write: the contract, `.gitignore`, the runtime sentinel, a legacy
+binding config and a `generated_file` projection target. A token is a run of
+characters bounded by whitespace or one of `"`, `'`, `` ` ``, `,`, `;`, `:`,
+`=`, `(`, `)`, `<`, `>`, `|`, `&`, `#`, `!`, read as an optional leading `./`
+or `/`, a path up to its first glob segment and a tail. It is an occurrence
+when it contains `/` or is the whole content of a quoted string, and a reading
+of it (the plain one, the pattern, variable and climb ones below) gives a path
+that names a file or directory of the base tree, where a move source is that
+path or lies under it, so `.claude/` counts when `.claude/specs` moves. A moved
+file, or a directory whose members all moved by the same relative tails under
+one new directory, has a single successor; a path that survives or dissolves
+maps to the successors of its wholly moved subtrees, carried only for an empty,
+`/` or `/**` tail.
+
+An occurrence that no answer decides (its own, or its policy's, below) opens a
+`path-reference` question unless its policy's question is open. The question is
+keyed by its `subject`, `<path>:<line>:<column>`, with an `answers` list and no
+recommended value: `extend`, offered when the token is a quoted element of a
+bracketed, braced or parenthesised sequence (it follows `[`, `{`, `,`, a `(`
+that does not open a call, or the start of its line, and ends the line or
+precedes `,`, `]`, `)` or `}`) or the only content of its line after
+indentation and an optional `- `, adds one quoted element or one copied line
+per successor beside the literal; `rewrite`, offered for a single successor,
+replaces the token; `retain`, always offered, leaves the file as it is.
+`plan --answer path-reference SUBJECT VALUE` settles one, after any
+`candidate-class` answers, whose moves the references are derived from; an
+unknown subject refuses `adopt.decisions.unmatched_answer` and a repeated
+subject or a value the occurrence does not offer refuses
+`adopt.decisions.invalid_answer`. An open reference keeps the plan `draft`
+through `no-open-decisions`; no gate and no `verify` check is added. Each file
+with an `extend` or `rewrite` answer is one `write-file` after the Markdown
+link rewrites and before the projection regenerations, in the same commit as
+the moves, unless another file is left at its `target`. The plan document and
+the adoption evidence record carry `path_references`, one row per occurrence
+sorted by path, line and column (`subject`, `path`, `line`, `column`,
+`literal`, `answers`, `answer`, `additions`, `replacement`, `target`, `policy`,
+`decided_by`; `answer` is the effective answer), and the record's
+`decisions_accepted` lists the answers.
+
+A variable is never followed to its definition (the one exception is the climb
+reading's Python names), a regular-expression spelling is read only as the
+pattern reading describes, and a path joined to a variable only as the variable
+reading describes; outside the variable reading a joined path is not resolved
+as a whole (a quoted segment that alone names a path of the tree is still an
+occurrence). URLs and bare unquoted single words are not recognised. An
+unquoted element of a YAML flow sequence that shares its line with other
+flow-sequence text (a bracket, a comma or another element) is never offered
+`extend` (one that touches its bracket is no occurrence at all); one alone on
+its line counts as the only content of its line.
+
 A file the plan moves is read at its base path and edited at its destination:
 an occurrence's `path` and `subject` are the base path, its `target` is where
 the plan leaves the file. An answer is the occurrence's own, or else the one
@@ -24,6 +80,72 @@ given to its policy, `<tree>:<class>`, the moved tree and the class of the
 file name; `effective_answer` is the one place that precedence is decided.
 A path the moves would leave more than one file at is `contested`, and no edit
 is made at it: `rewritten` returns no file for such a path.
+
+An edited moved file is one `write-file` at its `target`, after its `git-mv`
+and in the same commit, with `before` the hash of the base bytes (#372). A path
+that more than one file of the base tree is left at (two moves onto it, or one
+move onto a tracked file that stays) gets no such write, whatever the answers:
+the rows keep their answers, and two moves onto one path keep the plan `draft`
+through `no-existing-destination`. `apply` treats such a write like any other:
+it recomputes the plan from the stored answers, applies the operations the plan
+lists, and then runs the formatting step below over the edited files.
+
+Every occurrence in a moved file belongs to one policy, whose subject is
+`<tree>:<class>`. The tree is the path of the classification row that moved the
+file, or the candidate's own path for an `archive-history` answer; the class is
+the lower-cased text from the last dot of the file name, or `-` for a name with
+no such suffix (a dotfile included). A file the plan does not move has no
+policy. The `reference-policy` question has seven members: `id`, `subject`,
+`answers` (`rewrite` and `retain`, never `extend`), `value`, `basis`, `impact`
+and `recommendation`. `value` comes from a closed table
+(`recommended_answer`): `rewrite` for the classes `.py`, `.sh`, `.bash`, `.zsh`,
+`.nix`, `.yaml`, `.yml`, `.toml`, `.js`, `.mjs`, `.cjs` and `.ts`; `retain` for
+`.json`, `.jsonl`, `.ndjson`, `.csv`, `.tsv`, `.txt` and `.log`; null for every
+other class. The recommendation is printed and never applied. The class of an
+occurrence the variable reading made is `<file class>/variable`, so its
+policy is `<tree>:<class>/variable`: its `reference-policy` question's `value`
+is null, being outside the table, and a `<tree>:<class>` answer never decides
+it, so `.claude/notes:.sh` and `.claude/notes:.sh/variable` are two questions
+and answering one leaves the other open. In a file the plan does not move, a
+variable-joined occurrence has no policy and opens an ordinary `path-reference`
+question; its `path_references` row has the same members as any other, and its
+`literal` shows the variable. The class of a depth occurrence (#380, below) is
+`<file class>/depth`, so its policy is `<tree>:<class>/depth`: its
+`reference-policy` question's `value` is null, and neither a `<tree>:<class>`
+nor a `<tree>:<class>/variable` answer ever decides it. A lock file is its own
+class (`uv.lock` is `.lock`, so `.lock/depth`), and a manifest's policy is
+never paired with its lock file's.
+
+An occurrence is decided by its own `path-reference` answer; else by its
+policy's answer when the occurrence offers that value; else by none, so a
+`rewrite` policy leaves an occurrence that offers no `rewrite` open, and
+`extend` is never a policy answer. A policy opens its question while it is
+unanswered and at least one of its occurrences has no answer of its own; during
+that time its occurrences open no question of their own, though they stay
+listed in `path_references` and can still be answered one by one. Once the
+policy is answered, each occurrence still without an effective answer opens a
+`path-reference` question. The open questions are ordered by id as in
+`QUESTION_IDS`, the `reference-policy` ones by subject. `plan --answer
+reference-policy SUBJECT VALUE` is checked after the other two ids: a subject
+that is the policy of no occurrence of this inspection refuses
+`adopt.decisions.unmatched_answer`, and a value outside `rewrite` and `retain`
+or a subject answered twice refuses `adopt.decisions.invalid_answer`. The
+`reference-format` answers are checked after it.
+
+Each `path_references` row carries `target`, `policy` (null for a file the plan
+does not move) and `decided_by` (`occurrence`, `policy` or null), and the plan
+document and the adoption evidence record carry `reference_policies`, one row
+per policy that has an occurrence, sorted by subject. A row has thirteen
+members: `subject`, `tree`, `class`, `recommended`, `answer` (the policy's
+answer or null), `files` (distinct base paths), `occurrences`, `rewritable`
+(occurrences that offer `rewrite`), `rewritten`, `retained` and `extended`
+(occurrences decided with that answer, whoever decided it), `open` (occurrences
+no answer decides) and `overridden` (occurrences their own answer decides). The
+human view adds one `policy <subject>: ...` line per row after the
+`references:` line and an `open reference-policy <subject> (answers: ...,
+recommended: ...): ...` line per open policy. A plan stored before this
+contract no longer equals its re-derivation, so `apply` refuses it and the
+operator plans again.
 
 A token is read as a plain path first (`split_token`). Only when that reading
 names no moved path is it read a second time as a regular-expression spelling
@@ -35,6 +157,26 @@ neither reading makes an occurrence is read a third time as a `$name/` or
 `rewrite` and `retain` only, keeps the variable and the tail in the form it
 rewrites to (`variable_form`), and belongs to the `<tree>:<class>/variable`
 policy, never to the `<tree>:<class>` one.
+
+The pattern reading takes the anchor `^`, one escape for the whole token, an
+optional `/` prefix, the path decoded segment by segment (the escape replaced
+by `.`) up to its first empty, glob or backslash-bearing segment, and the rest
+verbatim as the tail. A carried form exists only for a successor made of
+letters, digits, `_`, `-`, `.` and `/`. Not read: an end anchor, character
+classes, groups, alternation and a `./` prefix inside a pattern. The plain
+reading decides alone whenever it yields an occurrence.
+
+The variable reading takes a prefix `$name/` or `${name}/` at the start of the
+token, `name` being a letter or `_` and then letters, digits and `_`; the path
+is the longest leading run of non-empty segments after it that hold neither a
+glob character nor a `$`, and the rest is the tail (#376). The carried form is
+the prefix, the successor and the tail, and it must be one token that reads
+back to the successor; such an occurrence offers `rewrite` (for a single
+successor with a carried form) and `retain`, never `extend`. Not read:
+positional and special parameters, parameter expansions, a variable that is not
+at the start of the token and a second variable before the path. A `$(...)/path`
+is already a plain root-anchored occurrence, because `(`, `)` and the backtick
+delimit tokens.
 
 A file the plan moves and that is in the depth read set (`depth_texts`) is read
 a fourth time, for the `../` climbs that leave its moved tree (`split_climb`).
@@ -49,6 +191,33 @@ below that root); it then offers `retain` alone. It belongs to the
 when it ends above the repository root or at an ancestor of the destination's
 directory, its target is neither a moved path nor back inside the tree and the
 shifted climb is valid, and `retain` alone otherwise.
+
+The depth reading (#380) has its own read set: the moved files that a second
+`git grep` for `..` and `__file__`, limited to the trees of the moves (each
+named both as a `:(literal)` pathspec and plainly, so a `GIT_LITERAL_PATHSPECS`,
+`GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS` or `GIT_ICASE_PATHSPECS`
+environment finds the same files), returns, under the filters of the
+prefilter's files (regular, non-Markdown, non-secret, not excluded, not under a
+record home, strict UTF-8). A blob both searches return is read once, a file
+the plan does not move is never read for climbs, and the plain, pattern and
+variable readings stay limited to the files of the first search. The tree root
+is the group directory the file moves with, or, for a file the plan archives,
+the file's own directory; a climb's landing point is the directory it ends at
+from the file's directory, or the repository root when it climbs past it. A
+text climb is a token with at least one `/` made of an optional `./`, one or
+more `..` segments and a rest that is empty or starts with `/`, taken from the
+file's own directory; a bare `..` and a rest that holds a `..` segment are not
+read. A text climb whose base target (its rest joined to the landing point) is
+back inside the tree root, which moves with the file, is an occurrence only
+when its unchanged spelling, taken from the destination's directory, misses the
+target's successor, as for `../../research/data.txt` in
+`.claude/research/tool/config.toml` when `.claude/research` is filed under
+`.agents/artifacts/specs`. The shift of a `rewrite` is the difference between
+the depths of the destination's and the base directories, applied to the
+`.parents[N]` index or to the number of `.parent`s of a chain; the shifted form
+is valid when it climbs at least one level and its index is non-negative.
+Climbs in Markdown, which the link rewrites own, and in files the plan does not
+move are not read.
 
 In a file whose base path has class `.py`, the depth reading also takes the
 parent-count chains of `python_climbs`, as climbs with no target text. An
@@ -74,6 +243,61 @@ from another name, a binding inside a function or class, a name bound more
 than once, a chain continued by `.parent` after its end, a chain with
 whitespace or a non-literal index, and a chain overlapping a text climb or an
 occurrence another reading made in the file.
+
+Headers and target lists of a Python name's rebinding are read loosely, so any
+mention there counts and the name is not followed.
+
+A tracked `.claude/settings.json` is classified `legacy-native-store` and
+`retain-product`, so classification opens no `candidate-class` question for it
+and plans no relocation of it; it appears in the plan's `evidence` and in the
+record's `sources` with `after` null. The path literals inside it are ordinary
+occurrences: each may open a `path-reference` question, and an `extend` or
+`rewrite` answer produces one in-place `write-file` of the settings file.
+
+`reference_formatting`, in the plan document and the adoption evidence record,
+is one `{class, command, files}` row, sorted by class, for each class with a
+file the `path-reference` answers edit, `files` being the edited files'
+destination paths and `command` the class's `reference-format` answer or null
+(#376); Markdown link rewrites, the contract, the records and the projections
+never appear in it. The human view prints one `format <class>: <n> files,
+command <id or none>` line per row. A plan stored before this row existed no
+longer equals its re-derivation, and `apply` refuses it as stale. `apply` runs
+the formatting step once, after every operation has executed and matched its
+`after` and before the commit gates, so the gates judge the formatted tree: it
+takes its own `resolve` of the worktree, and for each row with a command runs
+that command's `argv` followed by the row's files as absolute worktree paths,
+in row order, at the entry's `cwd`, output captured and no timeout, as a
+verification command is run, then stages the row's files. A plan with no
+`reference-format` answer formats nothing and makes no extra `resolve`. The
+step then proves the formatter stayed on the files it was given: for every
+other path some operation targets, the last operation naming it still produces
+its published `after` (a moved file that a later write edits is judged by the
+write), and for a path whose `after` is a `git-object:` hash, as a move-only
+destination's is, the bytes on disk must also hash to it as `git add` would
+store them (a symlink as its link text), so an unstaged edit is caught; every
+formatted file must remain a regular file and not a symlink. Before any command
+runs, a file of a row with a command that is the source of a
+`regenerate-projection` operation for a `generated_file` projection refuses
+`adopt.format.failed`, naming the file, the two paths compared after
+`posixpath.normpath` so a source spelled with `./` or a repeated `/` is still
+matched: the projection was regenerated from the unformatted bytes, and
+regenerating it again would change a planned `after`. A `managed_import`
+projection's source may be formatted, since its managed line names only the
+source's path. A failure refuses `verification_failed` with
+`adopt.format.failed` (a formatted projection source, the worktree resolves to
+no command set, the id is no command of it, the command cannot start, exits
+non-zero, or a file cannot be staged; a command that cannot start is named in
+the message with its launch error, and one that exits non-zero with its exit
+status and the last 2000 characters of its stderr) or
+`adopt.format.unplanned_content` (a confinement check), pointer
+`/reference_formatting`, with the worktree and branch retained and every commit
+gate recorded `not_run`. A formatter that changes some other tracked file or
+leaves an untracked one is refused by the `worktree-status-matches-operations`
+gate, which this step does not duplicate. A formatted file's `write-file` keeps
+the hash of the planned, unformatted bytes as its published `after`, and
+`verify` is unchanged. The command must take file paths as trailing arguments,
+rewrite them in place, format whole files, and leave no untracked, unignored
+file.
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, writes nothing, and imports `adopt_inspection` and `adopt_links`

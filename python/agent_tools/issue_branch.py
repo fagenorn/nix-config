@@ -1,8 +1,22 @@
 """`issue-branch`: the branch a delivery of one issue works on (issue 748).
 
-It renders `bindings.vcs.branch_pattern` with a short title slug, then re-adopts an earlier
-branch of the same issue when the whole pattern, with the issue number filled in, matches
-one. It writes no file; git and gh run only through `derive`.
+`issue-branch --repo-root <path> --issue <n>` prints one JSON line
+`{adopted, branch, derived, worktree_path}`. It writes no file; git and gh run only
+through `derive`.
+
+`derived` renders `bindings.vcs.branch_pattern` with the title slug: at most 6 ASCII
+words and 40 characters, cut at a word boundary, `untitled` when empty. After
+`git fetch origin` the command re-adopts an earlier branch of the issue: a local or
+origin branch that fully matches the pattern with the issue number filled in and only
+`<slug>` as a wildcard. A pattern without both placeholders, or with them adjacent,
+re-adopts only the derived name, and the integration and default branches never count.
+The order is the derived branch, else the head of the lowest-numbered open
+same-repository PR, else the newest commit. `worktree_path` is
+`<worktree.root>/<worktree.prefix><branch>` under the project root.
+
+Exit 2 refuses (`resolver_refused`, `tracker_unsupported`, `derived_is_protected`);
+exit 1 is a `forge_failed` or `git_failed` failure. Both write
+`{"error": {code, detail}}` to stderr.
 """
 
 from __future__ import annotations

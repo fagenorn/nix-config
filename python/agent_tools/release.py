@@ -17,10 +17,39 @@ adapter read (D15): it resolves no project, calls the registered adapter's `insp
 effect and prints the observation.
 
 `release transaction status|preview|run|abandon` drives one release through the transaction
-core (`release_driver`; python/README.md § Release driver). Adapter `invoke` is reachable
+core (the contract is the docstring of `release_driver`). Adapter `invoke` is reachable
 only through `release transaction run`, which drives the core (§9). The command resolves the
 project with `release` required, so a resolver refusal reaches the caller unchanged, and
 prints one document; a driver `Refusal` prints `{"error": ...}` and exits 3.
+
+`release profile inspect <profile-id> [--repo-root PATH]` (#124 D15, D18) exits 0 whether the
+profile is admissible or not, because diagnosis never mutates (#69), and prints one compact
+sorted-key JSON `ReleaseProfileInspection`. A publication-free profile is reported with empty
+`publication` and `activation` graphs and an empty `handoffs` list (#368 D7). The child process
+is bounded to 10 seconds, and a failure of `git rev-parse HEAD` reports `source_revision: null`.
+`"unsupported"` is the refusal `release_unsupported` (repair `release.profile.declare`) and an
+unknown id is `profile_unknown` (repair `release.profile.unknown`), both exit 2. The report has
+exactly seven members:
+
+- `schema_version`;
+- `subject`: project, root, revision and installed platform;
+- `profile`: id, version, digest, target, per-node deadlines, limits and `admissible`;
+- `graphs`: the ordered publication and activation nodes, the handoff, the derived and
+  authored proof obligations and the recovery units;
+- `bindings`: adapter identities with each node's config, targets, principals and credential
+  handles and classes, never credential material;
+- `conformance`: per-adapter operation, predicate and executable support, the three linted
+  checks and every finding;
+- `repairs`: one per finding, then one per missing executable, all `user_action`.
+
+The transaction verbs each take `[--profile P] [--repo-root R]`; `preview` and `run` also take
+`[--commit C --version V --title T --notes-file F]`, and `run` takes `--confirm TOKEN` once per
+token. The four candidate flags are all absent (no candidate) or all present: some absent
+refuses `candidate_required` naming them, and a notes file that cannot be read as UTF-8 refuses
+`candidate_invalid`. The candidate is `{version, commit, title, notes}`. A driver refusal prints
+`{"error": {"code", "repair_id", "detail"}}` (`repair_id` null where none is named) and exits 3;
+a resolver refusal is untouched with exit 2, and any other failure keeps the `release`
+command's `resolver_failure` envelope (D18).
 """
 
 import argparse

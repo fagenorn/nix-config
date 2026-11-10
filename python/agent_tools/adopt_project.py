@@ -22,6 +22,59 @@ bytes, the base revision's Markdown blobs and its non-Markdown text blobs that
 name a moved path's first segment, and writes only under
 `~/.agents/state/` (R4.1, D14).
 
+`plan` asks four kinds of open question. `project-id` is answered by declaring
+exactly one remote or authoring a contract with the project id.
+`candidate-class` (#340) is one per tracked or targeted-ignored agent path that
+no classification row settles (none covers it, or a targeted-ignored one it
+covers resolves outside the repository or cannot be read), keyed by its
+`subject`, the path, and carrying the one `value` the question accepts:
+`archive-history` for a tracked path, which plans a `git mv` to
+`.agents/knowledge/archive/adopted/<path>`; `retain-product` for an ignored
+one; and `null`, no answer, for a secret-shaped tracked path, which stays open
+until a central classification row covers it or it leaves the repository, and
+for a tracked symlink resolving outside the repository, which stays open until
+it leaves the repository. The third and fourth kinds, `path-reference` and
+`reference-policy`, are described in `adopt_references`.
+
+`plan --answer QUESTION SUBJECT VALUE` (repeatable, order-independent) settles
+one question. It refuses the first violation as `adopt.decisions.invalid_answer`
+(an id other than `candidate-class`, `path-reference`, `reference-policy` or
+`reference-format`, a subject answered twice, or a value other than the offered
+one) or `adopt.decisions.unmatched_answer` (a subject that is not an undecided
+candidate, a path occurrence or a reference policy of this inspection, by the
+answered id). It checks each `candidate-class`, `path-reference` and
+`reference-policy` answer in `(id, subject, value)` order, then the
+`reference-format` answers in `(subject, value)` order, and changes nothing on
+a refusal. The answers enter `decisions.answered` and therefore `plan_id`, and
+`apply --plan-id` re-applies them from the stored plan (refusing a malformed
+`decisions.answered` as `adopt.plan.malformed`), so the plan id, not an `apply`
+flag, authenticates them. `reference-format` opens no question and so is not
+one of the four kinds: its subject is a file class and its value a command id
+of the contract. It is checked after every other answer, so its subject must be
+the class of a file the other answers edit (`adopt.decisions.unmatched_answer`
+otherwise) and its value must be a command the contract declares
+(`adopt.decisions.invalid_answer` otherwise, as for a subject answered twice);
+the plan document publishes the answer as the `command` of its class's row in
+`reference_formatting`.
+
+`plan` rewrites relative Markdown link targets across its moves (#345);
+`adopt_links` owns the grammar and the `link_rewrites` member. The ready gate
+`no-unrewritable-link` (`adopt.link.unrewritable`) keeps the plan `draft` when
+a link targets a file the plan deletes or a directory that no longer exists
+after the moves and whose files did not all move, by the same relative tails,
+under one new directory. `apply`'s commit gate `no-new-broken-link`
+(`adopt.gate.no-new-broken-link`), before `cold-clone-resolves`, fails when any
+Markdown file in the index has more non-resolving relative links, each side
+counted against its own tree, than its pre-move counterpart at `HEAD` (a file
+with no counterpart is compared with zero). Because the verification commands
+and a `pre-commit` hook run after it, the same count over the commit against
+its parent is proved again once the commit exists, and a failure there refuses
+`adopt.commit.new_broken_link` with the worktree and branch retained.
+
+A schema-1 contract is routed as `migration_required` with the
+`bindings-deploy.retire` step (issue 579 P11); `resolve_project` states the
+schema that refuses it.
+
 `apply` takes a stored `ready` plan by that id, refuses on any drift, and
 carries the whole transformation out in an isolated worktree in the same user
 scope — outside the target checkout, so it cannot appear in the target's own

@@ -2,45 +2,180 @@
 
 `guard-policy compile --base <path> --output <path>` reads the base policy, the
 fleet registry (`agent_platform.read_registry`) and, for each registered
-project, the contract on its registered branch of `origin`: the checkout's
-working tree, index and local branches are never read. Each branch is read at
-the commit `origin` lists for it, which is fetched only when the checkout lacks
-that commit, and the contract and its projection files are exported sparsely
-(`contract_export`) with no tree inventory. A project earns a derived row only
-when all twelve proof steps hold in this run and the guard's loader accepts the
-row's slug and two branch names (`unsupported_name`); the steps are `derive`,
-`target_profiles` and `compile_policy`, and each refusal carries one of
-`REASON_CODES`.
+project, the contract on its registered branch of `origin`, through
+`adopt_verify.remote_source` with the resolver run in process (issue 126 D13):
+the checkout's working tree, index and local branches are never read. Each
+branch is read at the commit `origin` lists for it, through
+`adopt_verify.SourceReader`: `adopt_inspection.pin_listed` fetches the branch
+only when the checkout lacks that commit, and `contract_export.export_contract`
+exports the contract and its projection files (`resolve_project.projection_paths`)
+sparsely (`contract_export`), with no tree inventory. The base policy must be an
+object with exactly the five trusted members `authorized_owners`,
+`integration_bases`, `git_bin`, `gh_bin` and `jq_bin`, where the owners and
+branches are non-empty strings and the three tools are absolute paths; anything
+else, an unreadable file included, is the cause `base_invalid`.
 
-It writes one JSON document with exactly two members, `derived_repositories` and
-`derivation` (`derivation.schema_version` is `DERIVATION_SCHEMA_VERSION`),
-atomically to `--output`; the base policy is only validated and consulted for
-`literal_conflict`, and none of its members is copied into the output. Evidence is identity only: a
-digest of the registry entry, the pinned commit and contract blob, the
-provider's answer and each profile's version and digest. No resolved snapshot
-and no contract body is kept. The only repository writes are the
-remote-tracking refs of the branches fetched and the fetched objects.
+Row derivation. A project earns a derived row only when twelve steps all hold in
+this run and the guard can load the row, and the first of those to fail names
+the reason code of its refusal (one of `REASON_CODES`). `derive` runs steps 1 to
+10: the registered root is a git repository (`root_unavailable`); `origin`'s
+fetch url and its single push url name one `github.com` slug, spelt as
+`github_remote.github_slug` reads it and never case-folded (`origin_unproven`,
+issue 126 D9); `origin` yields a default branch and the contract's branch
+(`branch_unresolved` for `adopt.registration.remote_default_unknown` and
+`adopt.registration.integration_branch_unresolved`, `fetch_failed` for every
+other `AdoptError`); the resolver accepts that contract (`contract_unresolved`,
+with its repair id in the detail). `target_profiles` runs steps 5 to 8 on the
+resolved snapshot: the contract's project id is the registered one
+(`identity_mismatch`), its tracker is the `github` repository named by the slug
+(`tracker_mismatch`), it has a `github_repository` release target
+(`no_forge_target`), and every such target names the slug and the default
+branch (`target_mismatch`); each selected profile then compiles through
+`release_profile.compile_profile` (`profile_inadmissible`). Step 9 requires the
+contract's integration and default branches to be the branch read and
+`origin`'s default (`branch_mismatch`), and step 10 that `gh api repos/<slug>
+--jq .full_name` answers the slug (`provider_unproven`). `compile_policy` runs
+steps 11 and 12 over the projects that passed: a slug derived by more than one
+is `duplicate_repository` for each, and a slug that is also a key of the base
+`integration_bases` is `literal_conflict`: that project gets no row and the
+literal row stays in the base policy, and each compile reports the conflict
+(issue 377 D5). A project that passed all twelve is then refused
+`name_unsupported` when `unsupported_name` finds its slug or either of its
+branches outside the shapes the guard's `load_compiled_policy` demands of a
+derived row: git and the contract grammar take a branch such as `dev+ci`, and
+the guard drops the whole compiled policy over one such row, which removes every
+derived row and blocks nothing the base policy allows (issue 377 D4). The guard
+is a standalone file the package cannot import, so this module restates its two
+shapes as `GUARD_SLUG` and `GUARD_REF_NAME`, and a guard-suite test holds them
+to the built guard by loading a policy compiled from a fleet that has such a
+branch.
 
-Exit statuses: 0 when every entry derived (an absent registry is the empty
-fleet), 1 when the file was written but at least one project has no row, and 2
-when no policy could be compiled, in which case no file is left at `--output`.
-Exit 1 is also `kept_previous`: every registered project was refused and the file
-at `--output` already held a derived row, so it is left byte-identical rather
-than replaced by an empty policy (issue 470); the refusals are still reported.
-The report, one line of JSON on stdout, names the outcome, the derived slugs,
-each refusal and the cause of an exit 2 (`CAUSES`).
+Every child of the identity steps, the two `git remote get-url` reads and the
+`gh api` read, runs by name with `cwd` at the registered root, stdin at
+`/dev/null`, `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1`, a 30-second timeout
+and `GITHUB_TOKEN` and `GH_TOKEN` removed, so `gh` answers with the keyring
+credential (issue 126 D7); the fetch and the listing are bounded at the same 30
+seconds. A timeout or a missing executable is a failed read. A failed read puts
+its reason in the refusal's detail (`timed out`, the executable error, or `exit
+<n>` with the child's stderr), and a `gh` answer other than the slug puts the
+name it gave.
 
-`guard-policy derive --repository <slug>` re-derives one repository's row, the
-check the lifecycle guard runs before it trusts a compiled row. It reads the
-registry, runs the first two proof steps for every entry (`entry_slug`) and the
-rest (`prove`) only for entries whose `origin` names the slug, then the duplicate
-and name checks among them (`_admit`); it reads no base policy, so it never
-reports `literal_conflict`, and it writes no file beyond the fetched objects and
-the remote-tracking refs of the branches fetched. The report, one line of JSON on stdout, has the members
-`schema_version`, `repository`, `outcome`, `row`, `refused` and `cause`. Exit 0
-is `derived` with the row; exit 1 is `refused`, with the `refused` entries that
-name the slug (empty when none does); exit 2 is `unavailable`, with a `cause`
-from `CAUSES` (`registry_invalid`, `platform_unavailable` or `internal`).
+The compiled policy. A row is `{default_branch, integration_branch,
+required_checks, evidence}`. `required_checks` is the contract's
+`bindings.vcs.merge.required_checks`, read from the resolved snapshot of the
+pinned contract as the two branches are, sorted, or `[]` when the contract
+declares none; the guard's loader accepts exactly the entries the resolver
+accepts, so `unsupported_name` does not check them. The evidence is identity
+only (issue 126 D11): the project id, the digest of the registry entry
+(`canonical.telemetry_digest`), the pinned `ref` and `commit`, the contract's
+blob id at that commit, the provider's `full_name` and each compiled profile's
+`id`, `version` and `digest`. No resolved snapshot and no contract body is
+persisted. The written document has exactly two members, the rows under
+`derived_repositories` and `derivation`: `{schema_version, platform_version,
+registry_digest}`, where `schema_version` is `DERIVATION_SCHEMA_VERSION` (3) and
+the digest is `null` when no registry file exists. The base policy is only
+validated and consulted for `literal_conflict`, and none of its members is
+copied into the output. The lifecycle guard reads its trusted members
+(`authorized_owners`, `integration_bases` and the three tools) from the base
+policy only and takes nothing but a row's two branches and its required checks
+from this file. The only repository writes are the remote-tracking refs of the
+branches fetched and the fetched objects. The write is atomic
+(`agent_platform.write_atomically`), so a reader sees the old file or the new
+one.
+
+`bindings.vcs.merge.required_checks` (issue 552) is an optional
+`resolve-project` member beside `strategy` and `delete_branch`; absent or `null`
+means the project declares no required checks, and the resolver never inserts
+it, so the project schema version stays 1. A present value is a non-empty list
+of distinct non-empty strings, each the exact name GitHub shows for a check (a
+check run's `name` or a commit status's `context`), with no character
+restricted. A value that is not a list is `contract.vcs.not_list`, an empty list
+`contract.vcs.empty_required_checks`, an entry that is not a non-empty string
+`contract.vcs.not_string` at that entry's pointer, and a repeated entry
+`contract.vcs.duplicate_required_check` at its second occurrence's pointer. The
+snapshot passes the member through unchanged.
+
+Outcomes. The three outcomes are the exit statuses: 0 when every entry derived
+(an absent registry is the empty fleet) and the file was written (`complete`),
+1 when the file was written but at least one project has no row, one stderr line
+each (`written_with_refusals`), and 2 when no policy could be compiled, in which
+case no file is left at `--output` (`refused`). Exit 1 is also `kept_previous`:
+every registered project was refused and the file at `--output` already held a
+derived row, so it is left byte-identical rather than replaced by an empty
+policy (issue 470: a shell that cannot reach the forge refuses every project,
+and the guard re-derives a row before it trusts it anyway); the refusals are
+still reported. Exit 2 removes the previous file whatever it held: a missing
+file or a parent that is not a directory counts as removed, and any other
+failure to remove it is appended to the cause's detail without replacing the
+cause. The cause is one of `CAUSES`: `base_invalid`, `registry_invalid`,
+`platform_unavailable`, `output_unwritable` (issue 126 D14) or `internal`, which
+carries the exception's type and message. The report, one line of sorted-key
+JSON on stdout, has `schema_version`, `outcome`, `derived` (the sorted slugs),
+`refused` (`project_id`, `root`, `reason_code` and a `detail` cut to 240
+characters) and `cause` (`null` or `{reason_code, detail}`). Any argument after
+the fixed ones of `claude-guard-policy` reaches `compile`, so
+`claude-guard-policy --help` prints usage and writes nothing.
+
+`guard-policy derive --repository <slug>` re-derives one repository's row
+(issue 377), the check the lifecycle guard runs before it trusts a compiled row.
+It reads the registry, runs the first two proof steps for every entry
+(`entry_slug`) and the rest (`prove`) only for entries whose `origin` names the
+slug, so an entry naming another repository is never fetched and never asks the
+provider; then the duplicate and name checks among them (`_admit`). It reads each
+branch the same way `compile` does, so it writes no file beyond the fetched
+objects and the remote-tracking refs of the branches fetched; it reads no base
+policy, so it never reports `literal_conflict`. The report, one line of JSON on
+stdout, has the members `schema_version` (`DERIVE_REPORT_SCHEMA_VERSION`, 2),
+`repository` (the argument), `outcome`, `row`, `refused` and `cause`. Exit 0 is
+`derived` with the row `compile` would write; exit 1 is `refused`, with the
+`refused` entries that name the slug (empty when none does); exit 2 is
+`unavailable`, with a `cause` from `CAUSES` (`registry_invalid`,
+`platform_unavailable` or `internal`).
+
+The row check. `claude-guard-row-check` is the store script the lifecycle guard
+runs as `<derive-bin> --repository <slug>` for a repository that has a compiled
+row. It is a bash script under `-p`, which ignores `BASH_ENV` and exported
+functions; it unsets `BASH_ENV` and `ENV`, puts the store `git`, `gh` and `ssh`
+first on `PATH`, as `claude-guard-policy` does, and execs the `guard-policy`
+launcher, itself a bash script under `-p`, as `guard-policy derive` with its
+arguments; it is not installed on `PATH`. That launcher, and the one
+`claude-guard-policy` execs, come from the `agentTools` module argument, which
+`home/common/agent-tools/default.nix` sets as the one application of
+`lib/agent-tools.nix` per home configuration, so the row check, the compile
+wrapper and every `~/.agents/bin` launcher exec one agent_tools environment
+(issue 467). `home/common/claude-code/lifecycle_guard.py` documents what the
+guard checks against the report and how it bounds the run.
+
+The activation step. The installed `claude-guard-policy` runs `compile` with
+fixed arguments, the base policy and the compiled path, and takes none of its
+own; the home-manager activation step `claudeGuardPolicy` runs that command on
+every home-manager activation, after `linkGeneration` and before the settings
+copy, and never aborts the activation. It treats the compiler's three outcomes
+as follows. Status 0 leaves the complete compiled policy. Status 1 leaves a
+compiled policy without the refused projects' rows, and the compiler's stderr
+line names each refused project with its reason code. Any other status removes
+the compiled policy, and the step says that registered projects have lost their
+derived guard row and with it their derived integration branch. In both cases
+only a repository that relies on a derived row for its authorization is refused
+until `claude-guard-policy` succeeds; authorization from the base policy (an
+authorized owner or a literal integration row) still applies, and no call is
+blocked by it. If the removal fails, the step reports that the path could not be
+removed, and the guard reads whatever is there: a directory or an unreadable or
+malformed file contributes no row, and a readable earlier policy stays in
+force, its rows still rechecked at use. The repair is `claude-guard-policy`, run
+from a shell that can fetch each project's `origin` and whose `gh` keyring
+credential reaches the provider; a rerun repairs only the refusals a missing
+network or credential causes, which are `fetch_failed` and `provider_unproven`,
+because it can only re-derive from the registry and `origin`, and the other
+codes name a registry, contract or remote that has to change first.
+
+Tests. `tests/test_guard_policy.py` drives the commands as `python -m
+agent_tools.guard_policy compile` and `derive` over
+`tests/guard_policy_world.py`, and calls two functions directly for the checks no
+command input reaches: `target_profiles` on a hand-built snapshot for the one
+step the release grammar hides (issue 126 D10, D15), and `unsupported_name` on a
+hand-built row for the slug, because `github_remote.github_slug` already reads
+no slug the guard would refuse.
 """
 
 from __future__ import annotations

@@ -1,36 +1,66 @@
 """Owner-action markers a batch posts for the owner (issue 636): `forge-claim owner-action`.
 
+Decision prompts are issue 670.
+
+`post`, `end` and `status` each take `--repo <owner/name> --issue <n> --reason
+<decision|conflict|needs-label>`. `post` also takes `--holder <host>/<batch_id>`, and then
+`--items-file <path>` for `conflict` and `needs-label`, or `--questions-file <path>` (and
+optionally `--clears <label>`) for `decision`.
+
 1. A marker's first line is `<!-- agent:owner-action v1 issue=<n> reason=<reason> holder=<holder> -->`
-   (a decision prompt adds `round=<k>`, `opts=<digest of its question and option text>` and
-   optionally `clears=<label>`), line 2 is the sentence
-   of its reason. A `conflict` or `needs-label` marker follows with one line `- <item>` per item
-   with its whitespace collapsed (D1). A `decision` prompt follows with, per question, an empty
-   line, `**Q<i>.** <question>` and one line `- [ ] <option>` per option; the owner ticks exactly
-   one box under each question (D11). `reason` is `decision`, `conflict` or `needs-label`.
+   (a decision prompt adds `round=<k>`, `opts=<digest of its question and option text, never of
+   the ticks>` and optionally `clears=<label>`), line 2 is the sentence of its reason. A `conflict`
+   or `needs-label` marker follows with one line `- <item>` per item with its whitespace
+   collapsed (D1). A `decision` prompt is a box prompt: line 2 is `Delivery waits for the owner's
+   choice: tick exactly one box under each question.`, and per question an empty line,
+   `**Q<i>.** <question>` and one line `- [ ] <option>` per option (one option is the approve box
+   of a yes or no); the owner ticks exactly one box under each question (D11). `reason` is
+   `decision`, `conflict` or `needs-label`.
 2. The marker carries no `claim` field (D6): claim retirement (`forge_claim.retire_obsolete`,
    `retire_owner_actions`) ends only owner-action markers that name a claim, so `forge-claim
    status`, `renew` and `release` never end one of these.
 3. `post` of `conflict` / `needs-label` never posts while a live marker of the same issue and
-   reason exists (`already_posted` with the smallest live id). `post` of `decision` posts a new
-   round (`round` one above every trusted decision prompt ever posted) unless a live prompt is not
-   yet answered, which it re-adopts (D15, D20) unless its `opts` digest is absent or names other
-   questions, when it is ended (`superseded`) and a new round posted. Both always ensure and add
-   the `owner-action` label afterwards; only trusted markers (`TRUSTED`) are read for a decision prompt.
-4. `end` ends every live marker of the reason (end reason `resolved`) and removes the label only
-   when no live owner-action of any reason remains; nothing live is `none`, with no mutation. For
-   `decision` it also always removes the `owner-answered` label and then the `owner-action` label
-   (when no live trusted owner-action remains), nothing live included, so a retry after an
-   interrupted removal repairs both (D21).
+   reason exists (`already_posted` with the smallest live id); otherwise it writes the marker
+   through the marker contest (`posted`, or `already_posted` for the winner when it lost). `post` of
+   `decision` posts a new round (`round` one above the highest round of every trusted decision
+   prompt ever posted, live or ended, so an answered prompt is never reused) unless a live prompt
+   is not yet answered, which it re-adopts (`already_posted` with the smallest such id; D15, D20)
+   unless its `opts` digest is absent or names other questions than the call's (the session
+   answered the old ones), when it is ended (`superseded`) and a new round posted. Both always
+   ensure and add the `owner-action` label afterwards, so a failed label call is repaired by the
+   next `post`. Only trusted markers (`TRUSTED`, authors `OWNER`, `MEMBER` or `COLLABORATOR`) are
+   read for a decision prompt, so an untrusted marker never suppresses a post, ends a prompt or
+   raises the round.
+4. `end` ends every live marker of the reason with an `end` marker (reason `resolved`) and removes
+   the label only when no live owner-action of any reason remains; nothing live is `none` (exit 0),
+   with no mutation. For `decision` it reads trusted markers and also always removes the
+   `owner-answered` label and then the `owner-action` label (when no live trusted owner-action
+   remains), nothing live included, so a retry after an interrupted removal repairs both (D21). A
+   forge error on any step exits 1.
 5. `status` only reads. A decision prompt is `answered` when every one of its questions has exactly
-   one ticked box, read from the box lines alone, never from a comment (D1, D15), and only while the
-   question and option text still matches its `opts` digest (a prompt the owner edited is open and
-   shows no questions); the verdict is
-   `none`, `open` or `answered`.
-6. `--items-file` holds a JSON array of 1 to `MAX_ITEMS` strings, each non-empty once its
+   one ticked box (`- [x]` or `- [X]`), read from the box lines alone, never from a comment (D1,
+   D15), and only while the question and option text still matches its `opts` digest (a prompt the
+   owner edited, or added box lines to, is `open` and shows no questions: restore the text or end
+   it); a legacy decision prompt (no `**Q` header) is never answered. The verdict is `none` (no
+   live decision prompt), `open` or `answered` (every live one is answered).
+6. `--items-file` holds a JSON array of 1 to `MAX_ITEMS` (20) strings, each non-empty once its
    whitespace is collapsed; `--questions-file` holds a JSON array of 1 to `MAX_ITEMS` objects with
-   exactly the keys `question` and `options` (1 to `MAX_OPTIONS` distinct strings), likewise
-   collapsed and non-empty; anything else is a usage error before any `gh` call.
-7. Every call prints one JSON object on one line; exit 0 success, 1 forge error, 2 usage.
+   exactly the keys `question` (string) and `options` (1 to `MAX_OPTIONS` (8) distinct strings),
+   likewise collapsed and non-empty; `--clears` names a label (recorded as `clears=<label>`) that
+   fits the marker value grammar. Anything else, a missing or unreadable file, `--items-file` with
+   `decision`, or `--questions-file` or `--clears` with another reason, is a usage error before
+   any `gh` call.
+7. Every call prints one JSON object on one stdout line with `command` (`owner-action`), `action`,
+   `repo`, `issue`, `reason`, `verdict` and `comment_id` (the smallest live prompt id or null);
+   `post` adds `holder`, `end` adds `ended` (ascending ids) and `status` adds `items` for
+   `conflict` and `needs-label`, or for `decision` `questions` (every question of every live
+   prompt, id order, as `{question, options, chosen, comment_id}`) and `decisions` (`<question>
+   Chosen: <option>` lines when the verdict is `answered`, else empty). Exit 0 success, 1 a forge
+   error (`verdict: "error"`, `error` the `ForgeError` code, `detail`), 2 usage (`error: "usage"`,
+   `detail`).
+
+The labels `owner-action` and `owner-answered` (color `0E8A16`) are filters; the markers decide.
+Whole-verb transport retry (issue 740) wraps `status` only; `post` and `end` run once.
 """
 import hashlib
 import json

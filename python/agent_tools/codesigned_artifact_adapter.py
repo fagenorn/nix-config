@@ -57,6 +57,14 @@ refusal, in this order:
    `rejected`/`provider_unavailable` with staging removed, after one it is
    `unknown`/`transient_transport` with the files left as they are. Then the previous sibling and
    the staging directory are removed and the result is `accepted` with the install path.
+
+It is registered as `codesigned-artifact`. Its one operation, `install`, has both non-spend
+effect classes and no recovery operation. It signs with the hash of the `identity_env` value
+when set, else of the first listed identity starting with `identity_prefix`, else ad hoc only
+when `adhoc_fallback` is true. It never builds: it installs what the checkout holds when HEAD
+is the candidate and no tracked file changed (issue 547 D9). A failure before the first rename is `rejected` and leaves the install
+path as it was, and a rename that fails after the old bundle moved is `unknown` (issue 547
+D15). `tests/host_world.py` fakes `security` and `codesign` behind a fake-only `PATH`.
 """
 
 import os

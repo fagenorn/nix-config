@@ -24,6 +24,62 @@ completed, one `GET` of the health URL that follows no redirect and reads at mos
 endpoint also reports (D6, D7).
 
 `invoke(request)` refuses every request with `unsupported_operation` and starts no child process.
+
+It is registered as `github-actions-health` at contract version 1.1.0. Its closed config is
+all required; `services` is the `string_list` config type, a non-empty list of unique
+non-empty strings. The target is a `github_repository` of `kind`, `repository` and `branch`
+with one optional `handle`, the name the compiled profile carries and `CoreBinding` forwards;
+a `handle` that is not a non-empty string is `parameters_invalid`. The candidate is exactly
+`{commit}`, `{version, commit}` or `{version, commit, merge}`, where `merge` is `{pr,
+base_tip}`.
+
+With a `merge`, the released commit is the merge commit of that release PR (issue 555 D6):
+`gh pr view <pr> --json state,baseRefName,mergeCommit`, then for `MERGED` one `gh api
+repos/<slug>/git/commits/<oid>`, all under the one budget. `OPEN` is `absent`
+(`release_unmerged`); `CLOSED`, another base branch or parents other than `[merge.base_tip,
+candidate.commit]` is `diverged` (`release_merge_mismatch`); any other state or a malformed
+`mergeCommit` or parents list is `unknown` (`payload_invalid`); and a failed read is `unknown`
+with the run-list read statuses. An unresolved merge reads neither the run list nor the health
+URL. Every effect observation's `facts.released` is the released commit, or `None` when
+unresolved.
+
+`running_subject_identity` makes no run-list read: it reads the merge (when bound) and one
+health URL, and is `satisfied` (`running`) when the health commit names the released commit,
+`unsatisfied` (`subject_mismatch`) when it does not, and otherwise `unknown`
+(`identity_unobservable`). `release_adapter.watch_operation(descriptor)` names a descriptor's
+single inspectable `publication_triggered` operation, or returns `None` when there is none or
+more than one.
+
+`inspect` answers `parameters_invalid` unless the request carries a target and candidate of
+the shapes above, with a 40-lowercase-hex candidate `commit`, a `vMAJOR.MINOR.PATCH` `version`
+when present, and a config of exactly the five members, whose `string` members are non-empty
+and free of control characters, whose `services` is a non-empty list of unique non-empty
+strings, whose `branch` equals the target's, and whose `health_url` parses with
+`urllib.parse.urlsplit` and is `http` or `https` with a host. It then makes at most two reads
+under one 30-second budget. The first is `gh run list --repo <repository> --workflow
+<workflow> --branch <branch> --limit 5 --json databaseId,status,conclusion,headSha,headBranch,
+createdAt`, run by name; the adapter strips no variable, and the release driver applies
+`bindings.tracker.credential_env` (D10). The second, made only when the newest run at the
+candidate on that branch is completed, is one `GET <health_url>` that follows no redirect,
+reads at most 65,536 bytes and loads the body strictly through the `canonical` hooks (D8).
+Runs are ordered newest first by `createdAt`, which must be an ISO 8601 time with an offset
+(D14), and a commit matches when it is 7 to 40 hex characters and the candidate starts with
+it, case-insensitively (D7).
+
+The outcome follows the spec's classification table (D6): `absent` (`run_absent`);
+`in_progress` (`run_in_progress`); `satisfied` (`deployed`) only for a `success` run whose
+health commit matches; `diverged` (`superseded`) for a completed, unsatisfied run that a run at
+another commit followed; otherwise `diverged` (`health_commit_mismatch`, `silent_rollback` or
+`run_failed`) or `unknown` (`health_unreachable` or `health_payload_invalid`). A failed run-list
+read is `unknown`, with `facts.detail` bounded to 240 characters: `lookup_failed` carries the
+stderr of a non-zero exit, or `gh could not be started: <error>` when the operating system
+refuses the argument list; `lookup_timeout` carries an empty detail; `executable_missing`
+carries the operating-system error; and `payload_invalid` carries the stderr when stdout is
+not JSON, or the first shape violation (for example `run 0 headSha is not 40 hex characters`)
+when the JSON is not the closed run-list shape. Every effect observation's `facts` hold `runs`
+(each `{id, status, commit, branch, createdAt}`, newest first), `run`, `health`, the
+configured `services` and `released`. `tests/actions_world.py` is its fake `gh`, which logs
+token visibility, and loopback HTTP server.
 """
 
 import http.client

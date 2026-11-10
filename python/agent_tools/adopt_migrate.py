@@ -8,6 +8,39 @@ if either refuses. The resolver is never imported (D26): `adopt_project` hands
 in `run_resolver`, so validation and the projection writer both run in the
 resolver of this process's own store environment.
 
+`adopt-project migrate --migration ID [--repo-root R]` executes one manifest
+`migrations` entry (issue 579). `MIGRATIONS` maps an id to a pure executor, and
+an id the manifest lists without an executor, or an executor the manifest does
+not list, refuses `adopt.migration.unknown`. The contract's `schema_version`
+must equal the entry's `from_schema` (`adopt.migration.not_applicable`
+otherwise, which is also what a second run over a migrated tree gets).
+`bindings-deploy.retire` returns a deep copy of the contract with
+`schema_version` 2, no `bindings.deploy`, no `capabilities.deploy` and
+the platform interval `[max(min_inclusive, 1.2.0), 3.0.0)`, every other member
+keeping its authored order, and refuses `adopt.migration.deploy_in_use` at the
+first of `/bindings/deploy/adapter`, `/bindings/deploy/command` and
+`/capabilities/deploy/support` that keeps the watch alive.
+
+Before any write it refuses `adopt.migration.path_outside_checkout` for a
+touched path that resolves outside the checkout (a symlinked directory
+included, checked with `adopt_inspection.contained_relative`),
+`adopt.migration.symlink_target` for a touched file that is itself a symbolic
+link (the projection writer would replace it with a regular file and the byte
+restore would not bring the link back), and `adopt.migration.unreadable` for a
+touched file that exists but cannot be read, since no backup of it could be
+restored. It then reads the bytes of `.agents/project.json`, `AGENTS.md` and
+`CLAUDE.md`, writes the contract with the serialiser `apply` uses for an
+amended authored file, runs the resolver children `write-projections` and
+`resolve` through `run_resolver`, and prints `{"migration": ID, "written":
+[...]}` with the sorted repository-relative paths whose bytes changed. Both
+children run in the resolver of this process's store environment, so a host
+whose installed manifest does not admit the target schema refuses
+`adopt.migration.result_invalid`, carrying the child's `error.code` and
+`repair_id` in `violations[0].message`. This is the one place `adopt-project`
+rewrites a file it already wrote: on a refusal after the write, every byte is
+restored (and each file's timestamps), so the tree is as before. Every refusal
+exits 2 with the adopt error envelope.
+
 It never stages, commits or fetches and touches only the contract and the
 `target` of each projection the source contract declares; the operator commits.
 """

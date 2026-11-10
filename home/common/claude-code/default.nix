@@ -222,9 +222,10 @@ let
   # `pre-push` guard wrapper and, for every other hook git runs, a shim that
   # chains to the repository's own hook and serves git-lfs. `agentGitHookNames`
   # leaves out `push-to-checkout`, `fsmonitor-watchman`, `reference-transaction`
-  # and `post-index-change` (README § Pre-push hook, D5). The `pre-push` text is
-  # the lifecycleGuard exec line plus `--mode pre-push`, the LFS binary and the
-  # hook's own arguments, so both read the same interpreter, source and policy.
+  # and `post-index-change` (the Pre-push hook section of the docstring of
+  # `lifecycle_guard.py`, D5). The `pre-push` text is the lifecycleGuard exec
+  # line plus `--mode pre-push`, the LFS binary and the hook's own arguments,
+  # so both read the same interpreter, source and policy.
   agentGitHookNames = [
     "applypatch-msg"
     "pre-applypatch"
@@ -423,7 +424,8 @@ let
   settingsFile = (pkgs.formats.json { }).generate "claude-code-settings.json" settings;
 in
 {
-  # The managed global git hooks, on every host (issue 672 O4); README § Pre-push hook.
+  # The managed global git hooks, on every host (issue 672 O4); the Pre-push
+  # hook section of the docstring of `lifecycle_guard.py`.
   programs.git.settings.core.hooksPath = "${agentGitHooks}";
 
   programs.claude-code = {

@@ -13,6 +13,33 @@ budget; `transaction_custody` the lease authority and admissibility; `transactio
 the receipts, hazard markers and post-terminal observations; `transaction_storage` the
 durable-file primitives and the refusal classes. The store adds the locks, the clock, the
 fenced check and the writes. Its caller is the release driver.
+
+It is the library surface of the transaction core, with no command-table row. Slice 1 (#204)
+holds caller-rooted transaction state under a closed schema and lifecycle. Slice 2 (#205) adds
+fenced custody: a lease authority over concurrency keys in `transaction_custody`, epoch-fenced
+writes, and evidence and grant admissibility derived from the fence. Slice 3 (#206) adds the
+administrative protocol in `transaction_invocation`: a durable write intent before every
+external call, inspection before any retry, and an automatic-retry budget.
+
+Slice 4 (#207) adds an immutable proof plan compiled at creation (`transaction_plan`),
+core-collected obligations, and one convergence cohort (at most three attempts) that
+`settle_proof` alone seals into `succeeded` or parks as `proof_rejected` or
+`proof_did_not_converge`, never rolling back (`transaction_proof`). Slice 5 (#208) adds an
+immutable recovery plan compiled at creation beside the proof plan
+(`transaction_recovery_plan`), rollback anchors verified in `ready` before publication,
+`abandoned` only while no action has had an effect, and `begin_recovery`, `settle_recovery`
+and `roll_forward` as the only ways into `recovering`, into `rolled_back` and to a linked
+child transaction (`transaction_recovery`).
+
+Slice 6 (#209) writes a permanent, content-addressed terminal receipt under the store root's
+`receipts/` and reads it back before the one `state.json` write that enters any terminal,
+which ends with a `receipt_sealed` event naming it, then re-reads that receipt on every load
+(`transaction_receipt`). It makes `dispose_failed` the only way into `failed`: it takes a
+fresh grant and one closed ground, and it yields an `effects_unobservable` qualifier with
+per-key hazard markers only when a human grant at the transaction's authority class asserts
+an observability ground (`transaction_disposition`). The `transaction-state/v6` validator and
+snapshot fold are in `transaction_history`, over the durable-file primitives in
+`transaction_storage`.
 """
 
 import contextlib

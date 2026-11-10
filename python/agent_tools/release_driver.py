@@ -22,6 +22,108 @@ normal return; a raised effect leaves custody to lapse (D21).
 A `publication_triggered` activation unit is a deploy watch: the driver inspects it and never
 invokes it, waits while it is pending inside its observation deadline and parks when it is
 diverged or past the deadline (issue 555 D4, D5).
+
+Entry and gates (D1, D13, D15, D19, D26). The command resolves the project as `resolve-project
+resolve --require release` does, so a resolver refusal reaches the caller byte for byte with
+exit 2 (divergence 4). Then `--repo-root` must be a main checkout, read from the filesystem
+with no git child: its `.git` is a real directory, which is the common dir, else
+`not_main_checkout`. `run` and `abandon` also refuse `cwd_mismatch` unless the nearest ancestor
+of the working directory holding a `.git` entry is `--repo-root`. Selection picks `--profile`
+when given (an unknown id is `profile_unknown`), else the sole profile whose `publication` is
+not `"none"`, else refuses `profile_ambiguous` listing the ids, or `profile_unknown` when none
+publishes; a profile the compiler refuses is `profile_inadmissible`. `preview` and `run` then
+refuse the first shape problem, and `status` reports it in its `shape` member instead:
+`merge_not_declared` (integration and default branches differ and no `materialize` action
+merges them; repair `release.profile.merge_unsupported`) and `anchors_unsupported` (a
+`restorable` recovery unit; repair `release.profile.anchor_unbound`). For a profile that
+consumes `merge`, the driver adds `merge: {pr, base_tip}` to the candidate, which it observes
+itself (issue 554 D3).
+
+Store and reservation (D4, D16). Only `run` creates the store, and it and its parent
+`agent-release` are mode `0700`. The probe over `n` stops at the first key that is not indexed
+or whose transaction has no `state.json` (a create that died before writing it), so that key is
+created again. The current release is the last key found. A new release takes `n + 1` only when
+the current one is terminal, and refuses `version_reserved` when any earlier transaction not
+`abandoned` holds the candidate's version (an `abandoned` one never published it). While one
+is nonterminal the verbs work on it: a candidate is refused `release_in_flight`, a release
+created under another profile digest than the current compiled profile's refuses
+`profile_drift` (restore that profile or abandon the release), and `preview` shows mode
+`resume`. The store is host-local; a concurrent `run` that loses on creation or custody
+refuses `release_busy`.
+
+Verification (D5, D22). For a profile that consumes `merge`, `release_verification.observe_merge`
+first reads under its own 30-second budget. It refuses `release_pr_missing`,
+`release_pr_stale`, `release_pr_behind` or `verification_unavailable`, and `preview` then
+reads no receipt and shows `verification` null (issue 554 D3). In mode `new`,
+`release_verification.observe` makes the three `gh api` reads under one 30-second budget and
+returns a `release-verification/v1` receipt. `candidate_stale` and `verification_unavailable`
+come from the reads, `verification_failed` and `verification_pending` from the receipt's
+`result`. Before `create`, `run` raises each as a refusal, so a red or unfinished CI reserves
+no version; `preview` carries it in its own document (D18). Once the transaction exists,
+`run` records the receipt as one `event` evidence entry, `verification:<digest>`, before the
+transaction advances to `ready`. A resumed release re-observes its stored candidate and parks
+`attention_required` unless that passes.
+
+Preview, `plan_digest` and tokens (D6, D17, D18). `preview` prints `{schema_version, mode,
+profile, plan_digest, candidate, verification, actions, confirmations, runnable, refusal}`,
+each `actions` entry carrying `phase` (`publication` or `activation`; the digest still selects
+only `name, operation, mode, effect, target`), where `candidate` is `{version, commit, title,
+merge}` and `merge` is null without one. It exits 0 when `runnable`, else 3 with the reason in
+`refusal`. `plan_digest` is `telemetry_digest` of the profile digest, the next ordinal, the
+candidate (notes as their digest, and its `merge`), the verification result with its
+per-context conclusions and the ordered actions in mode `new`, and of the transaction id and
+the proof plan digest in mode `resume`. One confirmation is listed per `irreversible` action
+not last seen `satisfied`, with token `<action>:<first 12 hex of telemetry_digest([plan_digest,
+action, next attempt, next acquisition ordinal])>`, so a retry, a re-acquisition or a changed
+input yields a new token and an unchanged one prints the same.
+
+Run (D6, D7, D14, D20, D21). `run` re-derives the plan as `preview` does and writes nothing
+until it passes: a refused plan raises its refusal, a token outside the recomputed set refuses
+`confirmation_stale`, and a missing one `confirmation_required` (all-or-nothing). It then
+creates the transaction (mode `new`), acquires custody as executor `release-driver` with a
+900000 ms TTL and issues one grant per token (`release-irreversible`, actor `operator`, kind
+`human`) and, when the plan has a non-irreversible action, `release-scope:<acquisition
+ordinal>` (`release-scope`). It renews custody before each phase and each action, so a lapsed
+lease refuses and propagates. A `attention_required` release first advances back to
+`parked_from`. It drives `awaiting_verification`, `ready`, `publishing`, `published`, then
+`activating` or, with no activation, records the `activation-not-applicable` evidence entry
+(divergence 1) and goes to `proving`, where it collects every required obligation and every
+optional one whose collector supports its predicate (an optional unsupported one is never
+collected), starts one cohort, collects its members and settles.
+
+Each action is inspected, an `irreversible` one is invoked only under a valid grant for its
+token of this attempt, and one `InvocationRefused` or an `absent` or `diverged` result parks
+`attention_required`. After an invoke whose result was not `accepted`, the park reason is
+`<name>: <status> after <result> <error_class>: <reference>`, read from the action's latest
+`invocation_returned` event, so `status` shows, for example, `protection_floor_unmet:
+enforce_admins` (issue 554 D12). A deploy watch is inspected and never invoked (issue 555 D4,
+D5): `satisfied` goes on to proving; `absent`, `in_progress` or `unknown` is `wait` while now
+minus the first `action_declared` stamp is at most the node's `observation_deadline_ms`, and
+past it parks `<name>: <status> past <deadline> ms: <reference>`; `diverged` parks `<name>:
+diverged: <reference>`, `<reference>` being the latest inspection's reason and references (an
+`absent` one names no run).
+
+The result is `{schema_version, transaction_id, state, next, actions, receipt_digest}`,
+`actions` being `{name, status, attempts}`, with `next` one of `done` (terminal `succeeded`),
+`confirm` (an irreversible action has no valid grant), `wait` (an action is `in_progress` or
+`unknown`, or a watch is pending inside its deadline, or the proof cohort is still open) or
+`attention` (parked). Exit is 0 for any recorded progress. Custody is released on every normal
+return of `run` that does not end terminal and never in a `finally`, so a raised effect leaves
+it to lapse at its TTL (D21). Every adapter is reached through one router over per-alias
+`core_binding`s, so tests enter fixture adapters only as `registry` entries.
+
+Abandon (D14). `abandon` acquires custody and advances the current nonterminal release to
+`abandoned` with external state `known`, printing `{schema_version, transaction_id, state}`.
+With no nonterminal release it refuses `no_release`, and it refuses `abandon_refused` when the
+core does, which it does once any action had an effect. It releases custody on that refusal.
+
+Status (D3, D25). `status` reads only and prints `{schema_version, profile, shape, legacy,
+release}`; `release` is null with no transaction and otherwise `{transaction_id, ordinal,
+state, parked_from, reason, version, commit, actions, grants, evidence_ids, terminal, receipt,
+hazard_markers}`. `reason` is the latest transition's reason when the state is
+`attention_required`, an `actions` entry is `{name, phase, operation, effect, status, attempts,
+reference}`, a grant is `{grant_id, authority_class, valid}`, and `terminal` and `receipt` are
+the core's views, null until terminal. Legacy state is classified by `release_cutover`.
 """
 
 import os

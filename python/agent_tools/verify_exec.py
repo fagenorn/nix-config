@@ -1,12 +1,16 @@
 """Unattended-run gate, project read at origin, detached worktree and execution (issue 630).
 
-What `verify-pending` may run without a person (P1: only read-only, non-paid
-checks; a contract `command` only when it is a declared verification command),
-how a project is read (P17: the contract at the registered `origin` branch, never
-the checkout's working tree, index or local branches), where a check runs (a
-detached worktree at the one commit the caller chose) and how its exit is read
-(P5: 0 met, 1 not met, 75 not yet, anything else unexpected; P2: output is
-trimmed, never trusted). No shell is ever involved: a run becomes an argv or
+What `verify-pending` may run without a person (P1: only a `kind: evidence` check with no `ask` or
+`act` run and `effects` of `none`, never `live` or `paid`; P2, the lead decision: a contract
+`command` only when it is a declared `workflow.verification` command, no other runs unattended),
+how a project is read (P17: the contract at the integration branch commit the registered `origin` lists, through the
+guard-policy reader, never the checkout's working tree, index or local branches), where a check
+runs (a detached worktree at the one commit the caller chose, removed afterwards: a `command` run
+executes at the contract commit, a `script` or `at` run at the commit the lint checked, the block's
+`merge` unless `at` names another) and how its exit is read (P5: 0 met, 1 not met, 75 not yet,
+anything else, or the 10-minute timeout, leaves the check pending; P2: output is trimmed, never
+trusted). Every git child, the source reader's included, runs without `GITHUB_TOKEN` and
+`GH_TOKEN` (P16). No shell is ever involved: a run becomes an argv or
 nothing.
 """
 from __future__ import annotations

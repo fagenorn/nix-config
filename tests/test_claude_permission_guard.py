@@ -1,3 +1,4 @@
+import ast
 import concurrent.futures
 import importlib.util
 import json
@@ -2641,16 +2642,15 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     TOKEN_PREFIX = "unset GITHUB_TOKEN && "
     ENV_TOKEN_PREFIX = "env -u GITHUB_TOKEN "
 
-    def test_readme_names_only_readers_of_the_shape_fixture(self):
-        """The README may credit a test file with reading the shape fixture only
+    def test_guard_docstring_names_only_readers_of_the_shape_fixture(self):
+        """The guard docstring may credit a test file with reading the shape fixture only
         if that file mentions it (a rename once left a check that no longer existed)."""
-        readme = (Path(__file__).parent.parent
-                  / "home/common/claude-code/README.md").read_text(encoding="utf-8")
+        readme = ast.get_docstring(ast.parse(GUARD_SOURCE.read_text(encoding="utf-8")))
         fixture = "guarded-command-shapes.json"
         start = readme.index(f"The shape fixture `tests/fixtures/{fixture}`")
         sentence = readme[start:readme.index("`form_values`", start)]
         named = re.findall(r"[\w/.-]*test_\w+\.py", sentence)
-        self.assertTrue(named, "the README sentence names no reading suite")
+        self.assertTrue(named, "the guard docstring sentence names no reading suite")
         for name in named:
             candidates = [Path(__file__).parent.parent / name,
                           Path(__file__).parent.parent / "tests" / name]
