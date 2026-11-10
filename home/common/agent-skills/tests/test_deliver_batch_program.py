@@ -820,6 +820,7 @@ class LandTest(unittest.TestCase):
         result, calls, _ = run()
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["pr"]), ("landed", 41))
         self.assertEqual(of(calls, 1), HAPPY)
+        # 10 agent calls as before #744, plus the plan child (a workflow call): see the plan-ahead budget test.
         self.assertLessEqual(len(of(calls, 1)), 11)
         self.assertIsNone(result["relaunch"])
 
@@ -1726,6 +1727,15 @@ class PlanAheadTest(unittest.TestCase):
         self.assertEqual(calls[first_child]["args"]["mode"], "plan")
         self.assertNotIn("release-1", ls)
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+
+    def test_plan_ahead_adds_a_workflow_child_but_no_agent_call_to_the_landing_budget(self):
+        # The landing test bounds one issue's calls at 10 before #744; the plan child is the one added call, a
+        # workflow() child, so the agent calls stay within that original bound.
+        _, calls, _ = run()
+        mine = [c for c in calls if c["label"] in set(of(calls, 1))]
+        self.assertEqual(len([c for c in mine if c["kind"] == "workflow"]), 2)
+        self.assertLessEqual(len([c for c in mine if c["kind"] == "agent"]), 10)
+        self.assertEqual(len(mine), len(HAPPY))
 
     def test_a_plan_child_that_stops_takes_no_delivery_slot(self):
         no_cont = {"stage": "setup", "result": {"ok": False, "reason": "no-longer-applies"}}
