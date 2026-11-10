@@ -3799,7 +3799,7 @@ class SourceTest(unittest.TestCase):
     def test_meta_names_the_new_args(self):
         text = PROGRAM.read_text(encoding="utf-8")
         meta = text[:text.index("\n}\n")]
-        for arg in ("session_id", "batch_id", "mode?", "lane?", "review_sizing?"):
+        for arg in ("session_id", "batch_id", "mode?", "lane?", "review_sizing?", "clerk_model?"):
             self.assertIn(arg, meta)
 
 
@@ -4200,6 +4200,58 @@ class AgentTypeTest(unittest.TestCase):
         self.assertEqual({c["label"] for c in found}, {"plan", "plan-revise", "plan-rules-revise"})
         for call in found:
             self.assertEqual((call["agentType"], call["model"], call["effort"]), ("planner", None, None), call["label"])
+
+
+class ClerkModelTest(unittest.TestCase):
+    """#803: clerk_model (sonnet, the default, or haiku) is checked before any agent and sets the model of every clerk call."""
+
+    def test_clerk_model_must_be_sonnet_or_haiku(self):
+        for bad in ("opus", "Haiku", "", 1, None, True):
+            with self.subTest(bad=bad):
+                result, calls = run(args=dict(ARGS, clerk_model=bad))
+                self.assertEqual(result, {"stage": "args", "error": "clerk_model must be sonnet or haiku"})
+                self.assertEqual(calls, [])
+
+    def test_explicit_sonnet_runs_like_absent(self):
+        absent, absent_calls = run()
+        explicit, explicit_calls = run(args=dict(ARGS, clerk_model="sonnet"))
+        self.assertEqual(explicit["stage"], "done")
+        self.assertEqual([(c["label"], c["prompt"], c["model"]) for c in explicit_calls],
+                         [(c["label"], c["prompt"], c["model"]) for c in absent_calls])
+
+    def test_every_clerk_call_takes_the_clerk_model(self):
+        clerk_stems = {stem for stem, kinds in EXPECTED.items() if kinds == frozenset({CLERK})}
+        seen = set()
+        for index, scenario in enumerate(SCENARIOS):
+            with self.subTest(i=index):
+                base = run(**scenario)[1]
+                trial = run(**dict(scenario, args=dict(scenario.get("args", ARGS), clerk_model="haiku")))[1]
+                self.assertEqual(labels(trial), labels(base))
+                for b, t in zip(base, trial):
+                    self.assertEqual(t["agentType"], b["agentType"], b["label"])
+                    self.assertEqual(t["effort"], b["effort"], b["label"])
+                    if b["agentType"] == CLERK:
+                        self.assertEqual(b["model"], "sonnet", b["label"])
+                        self.assertEqual(t["model"], "haiku", b["label"])
+                        seen.add(AgentTypeTest.stem_of(t["label"]))
+                    else:
+                        self.assertEqual(t["model"], b["model"], b["label"])
+        self.assertEqual(seen, clerk_stems)
+
+    def test_clerk_model_is_never_kept_in_cont(self):
+        result, calls = run(args=dict(ARGS, mode="plan", clerk_model="haiku"))
+        self.assertEqual(result["stage"], "planned")
+        self.assertNotIn("clerk_model", json.dumps(result["cont"]))
+        models = [c["model"] for c in calls if c["agentType"] == CLERK]
+        self.assertTrue(models)
+        self.assertEqual(set(models), {"haiku"})
+
+    def test_every_clerk_site_names_the_clerk_model(self):
+        text = PROGRAM.read_text(encoding="utf-8")
+        sites = re.findall(r"agentType: 'clerk', model: ([^,]+),", text)
+        self.assertEqual(len(sites), text.count("agentType: 'clerk'"))
+        self.assertGreater(len(sites), 0)
+        self.assertEqual(set(sites), {"CLERK_MODEL"})
 
 
 class PromptCommandFormTest(unittest.TestCase):
