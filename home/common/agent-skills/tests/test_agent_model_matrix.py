@@ -138,14 +138,16 @@ class AgentToolSetTest(unittest.TestCase):
         self.assertEqual(tool_list(metadata["tools"]), ["Bash", "Read", "Skill"])
         self.assertEqual(body_of(path).strip(), "")
 
-    def test_planner_reads_writes_plan_files_and_loads_skills(self):
+    def test_planner_reads_writes_plan_files_loads_skills_and_lists_agent_explore(self):
+        # Issue 737: the planner gets an Agent tool for the plan step's Explore grant. The Explore-only,
+        # read-only limit is carried by the plan prompt; this pins only the declared tool entry.
         path = AGENTS / "planner.md"
         metadata = frontmatter(path)
         self.assertEqual(set(metadata), {"name", "description", "model", "effort", "tools"})
         self.assertEqual((metadata["name"], metadata["model"], metadata["effort"]),
                          ("planner", "opus", "high"))
         self.assertEqual(tool_list(metadata["tools"]),
-                         ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "Skill"])
+                         ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "Skill", "Agent(Explore)"])
         self.assertEqual(body_of(path).strip(), "")
 
     def test_implementer_blocks_the_closed_tools_and_keeps_its_own(self):
