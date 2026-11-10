@@ -43,8 +43,8 @@ bindings.commands[review_id].argv \
 
 **Validation.** Require exit 0 and stdout that parses as exactly one JSON object with `status` `0`, empty `touchedFiles`, `runtime.model` `gpt-6-astra`, `runtime.reasoningEffort` `xhigh` and a non-empty `rawOutput` string; then validate the operation's headings. Only that success establishes reviewer identity `Codex`.
 
-On the `available` route a daemon, slot or capacity rejection, a failed run, a malformed or mismatched payload, or an operation-schema failure stops the operation: no retry, no other reviewer. Return `available: false` with the failure class and verbatim message (a failed run's payload `error`, else stderr), naming a usage or quota limit with its reset time. A Codex call under `unsupported` is a routing error.
+On the `available` route a daemon, slot or capacity rejection, a failed run, a malformed or mismatched payload, or an operation-schema failure gets one fresh retry of the same packet, never another reviewer. A second failure returns `available: false` with the failure class and verbatim message (a failed run's payload `error`, else stderr), naming a usage or quota limit with its reset time. A Codex call under `unsupported` is a routing error.
 
 ## Disposition
 
-Both operations return the validated result to the calling controller as one object with the keys `available`, `verdict`, `findings` and `raw_summary`; a sliced `diff-review` is folded into it by the aggregation rule in DIFF-REVIEW.md `## Disposition`. The controller verifies, dispositions and revises; this skill edits nothing.
+Both operations return the validated result to the calling controller as one object with the keys `available`, `verdict`, `findings` and `raw_summary`; a sliced `diff-review` is folded into it by DIFF-REVIEW.md `## Disposition`. The controller verifies, dispositions and revises; this skill edits nothing.

@@ -81,6 +81,7 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
         "--format json", "`product.changed_files`", "`files[].path`",
         "`files[].changed_lines`", "`git diff <base>..<head> -- ':(literal)<path>'`",
         "`git merge-base <left> <right>`", "`scope: <K> slices over <M> product files`",
+        "`failed slices: <i>[, <j>]`",
     ),
     PLAN_REVIEW: ("`Blocking`", "`Should fix`", "`Discussion`"),
 }
@@ -2066,6 +2067,28 @@ class CodexCollaborationContractTest(unittest.TestCase):
 
     def documents(self):
         return sorted(p for p in self.SKILL_DIR.rglob("*") if p.is_file())
+
+    GROWTH_BASE = "7e1ebb64b35c2d3f2b80b9b9bfe1127de9d46655"  # #789 AC3: main before the retry rule
+
+    def markdown_bytes(self, revision):
+        """Byte sum of the skill's *.md documents at `revision` (None: the working tree)."""
+        if revision is None:
+            return sum(p.stat().st_size for p in self.documents() if p.suffix == ".md")
+        relative = self.SKILL_DIR.relative_to(REPO_ROOT).as_posix()
+        listed = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-tree", "-r", "-l", revision, "--", relative],
+            capture_output=True, text=True, check=False)
+        if listed.returncode:
+            self.skipTest("size baseline not in this clone")
+        total = 0
+        for line in listed.stdout.splitlines():
+            meta, path = line.split("\t", 1)
+            if path.endswith(".md"):
+                total += int(meta.split()[3])
+        return total
+
+    def test_the_skill_documents_do_not_grow(self):  # #789 AC3: the instruction budget stays flat
+        self.assertLessEqual(self.markdown_bytes(None), self.markdown_bytes(self.GROWTH_BASE))
 
     def test_the_skill_names_no_retired_pipeline(self):  # AC2
         for path in self.documents():
