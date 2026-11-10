@@ -23,7 +23,10 @@ member's environment, at any depth, writes the bytecode of the source modules it
 there, under each source's absolute path, and reads what an earlier process of the same run
 wrote instead of compiling again. Parallel writers need no coordination: CPython writes each
 file under a temporary name and renames it into place, and skips a write it cannot make. The
-prefix redirects every bytecode lookup, the standard library's included. The runner removes
+prefix redirects every bytecode lookup, the standard library's included, so a run compiles
+the standard-library source modules its processes import instead of reading the
+interpreter's own bytecode, and its later processes read that result.
+A script run as a main file is compiled on every start. The runner removes
 the directory when the run ends, after the report, after an interrupted run has waited for
 its members, or on an error, and a failure to remove it is raised, never ignored.
 
@@ -56,7 +59,8 @@ with ties in list order, then one `suite-runner: failed <member>` line per failu
 A row's CPU figure is the member's child CPU time: the user plus system seconds in the
 resource usage that `os.wait4` returns when the runner reaps the member. That covers the
 member's own process and every descendant that it, or a descendant in between, waited for,
-such as the `git` and `python -m agent_tools.…` processes a test runs; a member that failed
+such as the `git` and `python -m agent_tools.…` processes a test runs. A descendant still
+running when the member exits, or never waited for, is not counted, and a member that failed
 to launch shows `0.0`. The summary's `cpu=` adds up the members' unrounded figures and never
 the runner's own CPU, so rounding can make it differ from the sum of the printed rows. A
 member whose CPU is close to its wall time, or above it when its descendants ran at once, was

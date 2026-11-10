@@ -1007,6 +1007,24 @@ class BytecodeCacheTest(RunnerCase):
         self.assert_members_share_one_removed_cache("2")
 
 
+class DocstringContractTest(unittest.TestCase):
+    """The module docstring is the contract's home (issue 694); these sentences
+    were once in the runner's README section and must not be lost."""
+
+    SENTENCES = (
+        "A descendant still running when the member exits, or never waited for, is not counted",
+        "so a run compiles the standard-library source modules its processes import "
+        "instead of reading the interpreter's own bytecode, and its later processes "
+        "read that result",
+        "A script run as a main file is compiled on every start.",
+    )
+
+    def test_docstring_keeps_the_cpu_and_bytecode_limits(self):
+        doc = " ".join((suite_runner.__doc__ or "").split())
+        for sentence in self.SENTENCES:
+            self.assertIn(sentence, doc)
+
+
 class RecipeWiringTest(unittest.TestCase):
     def test_the_recipe_hands_its_curated_members_to_the_runner(self):
         lines = (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines()
