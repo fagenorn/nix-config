@@ -257,6 +257,7 @@ class FoldTest(unittest.TestCase):
                     self.assertNotIn("When it prints not_held", prompt(calls, "land-unlock"))
                     if reply is None:
                         self.assertEqual(result["stage"], label)
+                        self.assertEqual(result["cont"], ship_cont())
                     else:
                         self.assertIsNone(result)
         # A move lock that never answered: the release tries the old sha, then the move target.

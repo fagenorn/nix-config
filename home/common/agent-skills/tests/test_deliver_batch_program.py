@@ -852,18 +852,29 @@ class FoldTest(unittest.TestCase):
                  f"forge-claim land release --repo owner/repo --branch dev --sha {B}")
         synced = {"land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "ok"}}
         # The initial --wait lock and the pre-merge re-check: the lock is held (or may be) at one sha only.
+        # A lost reply stops at its step's own stage; a thrown agent stops at "land". Neither reached the merge
+        # as far as the program knows, so the relaunch keeps the child's ready cont.
         for label, extra in (("land-pr-1", {}), ("land-merge-1", {})):
             for reply in (None, "throw"):
                 with self.subTest(label=label, reply=reply):
                     result, calls, _ = run(replies=dict(extra, **{label: reply}))
                     self.assertEqual(row(result, 1)["outcome"], "stopped")
+                    self.assertEqual(row(result, 1)["stage"], {"land-pr-1": "pr", "land-merge-1": "merge"}[label] if reply is None else "land")
+                    self.assertEqual(result["relaunch"]["issues"], [1])
+                    self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
                     ls = of(calls, 1)
                     self.assertEqual(ls[ls.index(label):], [label, "land-unlock-1"])
                     self.assertNotIn("When it prints not_held", prompt(calls, "land-unlock-1"))
         # The record step's move: unanswered, it may or may not have moved the lock to B, so both are released.
         for reply in (None, "throw", {"ok": True, "head": B, "lock": {"verdict": "error", "detail": "gh failed"}}):
             with self.subTest(record=reply):
-                _, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": synced["land-sync-1-1"], "land-record-1-1": reply})
+                result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": synced["land-sync-1-1"], "land-record-1-1": reply})
+                graded = row(result, 1)
+                if isinstance(reply, dict):
+                    self.assertEqual(graded["outcome"], "land-contended")
+                else:
+                    self.assertEqual((graded["outcome"], graded["stage"]), ("stopped", "land-record" if reply is None else "land"))
+                self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
                 text = prompt(calls, "land-unlock-1")
                 self.assertIn(release, text)
                 self.assertIn(again, text)
@@ -872,7 +883,13 @@ class FoldTest(unittest.TestCase):
         for reply in ({"ok": False, "head": "d" * 40, "detail": "head differs", "lock": None},
                       {"ok": True, "head": B, "lock": {"verdict": "held_by", "lock_sha": "c" * 40, "by": "h2/b9"}}):
             with self.subTest(record=reply):
-                _, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": synced["land-sync-1-1"], "land-record-1-1": reply})
+                result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": synced["land-sync-1-1"], "land-record-1-1": reply})
+                graded = row(result, 1)
+                if reply["ok"]:
+                    self.assertEqual(graded["outcome"], "land-contended")
+                else:
+                    self.assertEqual((graded["outcome"], graded["stage"]), ("stopped", "land-record"))
+                self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
                 self.assertIn(release, prompt(calls, "land-unlock-1"))
                 self.assertNotIn("When it prints not_held", prompt(calls, "land-unlock-1"))
         # A land-pr whose renew ended ran no lock command: nothing to release.
