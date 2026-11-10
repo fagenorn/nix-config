@@ -659,7 +659,19 @@ const canon = v => Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeo
 const VERIFY_CONTRACT = canon(setup.verification)
 const VERIFY_CACHED = SKIP_REVIEW && verified.contract === VERIFY_CONTRACT
 const DIRECT_IMPL = { ...IMPL, properties: { ...IMPL.properties, acceptance: PLAN_SCHEMA.properties.acceptance, sensitive: { type: 'boolean' }, ineligible: { type: 'boolean' } } }
-const DIRECT_FINDINGS = { ...FINDINGS, properties: { ...FINDINGS.properties, escalate: { type: 'boolean' } } }
+// The direct lane's first-pass review grades each criterion: met, and the test (name, file:line) or command that shows it.
+const GRADED_FINDINGS = {
+  ...FINDINGS,
+  properties: { ...FINDINGS.properties, acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, met: { type: 'boolean' }, evidence: { type: 'string' } }, required: ['id', 'met', 'evidence'] } } },
+  required: [...FINDINGS.required, 'acceptance'],
+}
+const DIRECT_FINDINGS = { ...GRADED_FINDINGS, properties: { ...GRADED_FINDINGS.properties, escalate: { type: 'boolean' } } }
+// A code criterion the review did not grade met with evidence is an Important finding; a human or evidence criterion cannot be shown by a test or command here, so it is not held to this.
+const ungradedFindings = (review, criteria) => criteria.filter(a => a.kind === 'code').flatMap(a => {
+  const g = (Array.isArray(review.acceptance) ? review.acceptance : []).find(x => x && x.id === a.id)
+  if (g && g.met === true && typeof g.evidence === 'string' && g.evidence.trim()) return []
+  return [{ severity: 'important', summary: `Acceptance criterion ${a.id} (${a.text}) is not shown met with evidence: ${g ? (g.met === true ? 'the review gave no evidence' : 'the review graded it unmet') : 'the review did not grade it'}. Assert it with a test, or show the command that proves it.` }]
+})
 
 // ---------------- Direct lane ----------------
 if (LANE === 'direct') {
@@ -698,17 +710,17 @@ ${RULES}`, { label: 'direct-codex', phase: 'Final review', agentType: 'clerk', m
     // The stored plan's risk, not this run's reply, picks the reviewer, so a resumed review keeps the implementer's choice.
     const lite = plan.tasks[0].risk !== 'security'
     const reviewPrompt = isLite => `${CTX}
-${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RANGE} for issue #${ISSUE} against its acceptance criteria ${ACS}. ${KNOW} Report Important or Critical correctness defects and unmet criteria only, each with a concrete failing input. ${isLite ? 'If the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations, set escalate true. ' : ''}Do not edit anything.`
+${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RANGE} for issue #${ISSUE} against its acceptance criteria ${ACS}. ${KNOW} Report Important or Critical correctness defects and unmet criteria only, each with a concrete failing input. Return acceptance with one entry per criterion id: met, and evidence, which is the test name and file:line that asserts the criterion, or the command that shows it; a criterion that is not met, or has no evidence, is an Important finding. ${isLite ? 'If the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations, set escalate true. ' : ''}Do not edit anything.`
     let review = await call(reviewPrompt(lite), { label: 'direct-review', phase: 'Final review', agentType: lite ? 'reviewer-lite' : 'reviewer', schema: DIRECT_FINDINGS })
     let passedBy = lite ? 'reviewer-lite' : 'reviewer'
     if (lite && review && review.escalate === true) {
-      review = await call(reviewPrompt(false), { label: 'direct-review-full', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+      review = await call(reviewPrompt(false), { label: 'direct-review-full', phase: 'Final review', agentType: 'reviewer', schema: GRADED_FINDINGS })
       passedBy = 'reviewer'
     }
     const codexR = await codexP
     if (!review) return stop('direct-review', { review: null })
     if (REVIEW_CODE && (!codexR || !codexR.available)) return stop('codex-unavailable', { step: 'code', codex: codexR })
-    const findings = findingsOf(review).concat(REVIEW_CODE ? findingsOf(codexR).map(f => ({ ...f, source: 'codex' })) : [])
+    const findings = findingsOf(review).concat(ungradedFindings(review, plan.acceptance), REVIEW_CODE ? findingsOf(codexR).map(f => ({ ...f, source: 'codex' })) : [])
     if (REVIEW_CODE) log(`codex review: ${findingsOf(codexR).length} blocking findings`)
     if (findings.length) {
       log(`direct review: ${findings.length} blocking findings, one fix round`)

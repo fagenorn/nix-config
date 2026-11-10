@@ -2939,6 +2939,47 @@ class DirectLaneTest(unittest.TestCase):
         self.assertEqual(rereview["agentType"], "reviewer-lite")
         self.assertIn("bug", rereview["prompt"])
 
+    def test_a_criterion_without_evidence_is_a_blocking_finding_and_the_fix_round(self):
+        graded = {"verdict": "pass", "findings": [], "acceptance": [{"id": "AC1", "met": True, "evidence": ""}]}
+        result, calls = run(args=DIRECT, replies={"direct-review": graded})
+        self.assertEqual(result["stage"], "done")
+        fix = prompt(calls, "direct-fix")
+        self.assertIn("AC1", fix)
+        self.assertIn('"severity":"important"', fix)
+        self.assertEqual(labels(calls).count("direct-rereview"), 1)
+
+    def test_an_unmet_or_ungraded_criterion_is_a_blocking_finding(self):
+        unmet = {"verdict": "pass", "findings": [], "acceptance": [{"id": "AC1", "met": False, "evidence": "t.py:1"}]}
+        for reply in (unmet, {"verdict": "pass", "findings": []}):
+            _, calls = run(args=DIRECT, replies={"direct-review": reply})
+            self.assertIn("AC1", prompt(calls, "direct-fix"))
+
+    def test_a_criterion_met_with_evidence_needs_no_fix_round(self):
+        _, calls = run(args=DIRECT)
+        self.assertNotIn("direct-fix", labels(calls))
+
+    def test_a_criterion_no_test_can_show_is_not_held_to_evidence(self):
+        acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "feels right", "kind": "human"}]
+        _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance}})
+        self.assertNotIn("direct-fix", labels(calls))
+
+    def test_the_escalated_full_review_is_graded_too(self):
+        replies = {"direct-review": {"verdict": "pass", "findings": [], "escalate": True},
+                   "direct-review-full": {"verdict": "pass", "findings": []}}
+        _, calls = run(args=DIRECT, replies=replies)
+        self.assertIn("AC1", prompt(calls, "direct-fix"))
+
+    def test_every_direct_review_prompt_and_schema_asks_for_graded_criteria(self):
+        for label, patch in (("direct-review", {}), ("direct-review", {"direct-impl": {"sensitive": True}})):
+            _, calls = run(args=DIRECT, patch=patch)
+            self.assertIn("acceptance with one entry per criterion id", prompt(calls, label))
+            item = schema_of(calls, label)["properties"]["acceptance"]["items"]
+            self.assertEqual(set(item["required"]), {"id", "met", "evidence"})
+        replies = {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}
+        _, calls = run(args=DIRECT, replies=replies)
+        self.assertIn("acceptance with one entry per criterion id", prompt(calls, "direct-review-full"))
+        self.assertIn("acceptance", schema_of(calls, "direct-review-full")["properties"])
+
     def test_one_fix_round_that_resolves_continues(self):
         result, _ = run(args=DIRECT, replies={"direct-review": BAD})
         self.assertEqual(result["stage"], "done")
