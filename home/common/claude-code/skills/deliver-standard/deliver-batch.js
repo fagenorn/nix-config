@@ -1,11 +1,11 @@
 export const meta = {
   name: 'deliver-batch',
-  description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children in ready mode, a serial land queue under the cross-host land lock, one table',
+  description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
   whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
-    { title: 'Intake', detail: 'read every issue facts behind one barrier, decide eligibility in code' },
-    { title: 'Deliver', detail: 'lane per eligible issue, then the delivery children' },
+    { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
+    { title: 'Deliver', detail: 'the delivery children' },
     { title: 'Land', detail: 'serial land queue under the cross-host land lock' },
   ],
 }
@@ -34,6 +34,11 @@ export const meta = {
 // acquire is re-queued once behind the issues waiting for a slot, then stops at acquire with transient: true (#740). Every policy
 // value comes from the project contract that setup resolves; this file carries no project
 // literal and defaults no policy value (D3).
+// #744: a standard-lane issue plans ahead: it is claimed under a PLAN slot, runs its child in mode plan, keeps that slot until a RUN slot
+// is free, then resumes the planned cont in mode ready. PLAN and RUN have MAX slots each and RUN hands a freed slot to a planned issue
+// before any other waiter, so at most MAX issues wait planned and each waits at most one delivery slot. A child on this path that stops
+// without a cont (and is not dead) makes the forwarded cont obsolete: it is dropped, so the relaunch plans afresh. A direct-lane or
+// readoptable issue, a re-adopted merged landing, or one whose cont already carries a reviewed plan or a PR, goes straight to RUN.
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const HOLDER_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -159,30 +164,70 @@ const ask = async (pending, label) => {
 const transientError = r => !!r && r.verdict === 'error' && r.transient === true
 const recall = async (make, pick = r => r) => { const r = await make(); return r && transientError(pick(r)) ? make() : r }
 
-// --- Intake: every facts agent runs before any lane agent (one barrier) ---
+// --- Intake: every facts agent answers before any acquire (one barrier) ---
 phase('Intake')
 const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
+const LANES = ['direct', 'standard', 'needs-design']
 const FACTS_SCHEMA = {
   type: 'object',
   properties: {
     state: { type: 'string' }, labels: STRS, title: { type: 'string' }, branch: { type: 'string' }, branch_error: { type: 'string' },
     claim: { type: 'object', properties: { verdict: { type: 'string', enum: ['free', 'held_by', 'stale', 'error'] }, by: { type: ['string', 'null'] } }, required: ['verdict'] },
-    merged_pr: { type: ['integer', 'null'] },
+    merged_refs: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, closes: { type: 'boolean' } }, required: ['number', 'closes'] } },
+    landed: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, commits: STRS }, required: ['number', 'commits'] } },
     already_fixed: { anyOf: [{ type: 'object', properties: { commit: { type: 'string' }, evidence: { type: 'string' } }, required: ['commit', 'evidence'] }, { type: 'null' }] },
     open_pr: { anyOf: [{ type: 'object', properties: { number: { type: 'integer' }, head_branch: { type: 'string' } } }, { type: 'null' }] },
     blockers: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, state: { type: 'string' } }, required: ['issue', 'state'] } },
     decision: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: {} } } },
+    lane: { type: 'string', enum: LANES }, why: { type: 'string' },
   },
-  required: ['state', 'labels', 'claim', 'blockers'],
+  required: ['state', 'labels', 'claim', 'blockers', 'lane'],
+}
+// Copied from deliver-standard.js: the two programs share no code.
+const normSha = x => x.trim().toLowerCase()
+const sameSha = (a, b) => {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const x = normSha(a), y = normSha(b)
+  if (x === y) return x !== ''
+  const ok = /^[0-9a-f]{7,40}$/
+  if (!ok.test(x) || !ok.test(y)) return false
+  return x.length >= y.length ? x.startsWith(y) : y.startsWith(x)
+}
+const closingOf = f => {
+  const r = (Array.isArray(f.merged_refs) ? f.merged_refs : []).find(m => isObj(m) && m.closes === true && Number.isInteger(m.number))
+  return r ? r.number : null
+}
+const ownOf = n => {
+  const c = CONTS[n]
+  if (!isObj(c)) return null
+  const pr = Number.isInteger(c.pr) ? c.pr : null
+  const commits = (Array.isArray(c.done) ? c.done : []).filter(d => isObj(d) && nonEmpty(d.commit)).map(d => d.commit)
+  return pr === null && !commits.length ? null : { pr, commits }
+}
+const landedOf = (n, f) => {
+  const own = ownOf(n)
+  if (!own) return null
+  const l = (Array.isArray(f.landed) ? f.landed : []).find(m => isObj(m) && Number.isInteger(m.number)
+    && (m.number === own.pr || (Array.isArray(m.commits) && m.commits.some(c => own.commits.some(o => sameSha(c, o))))))
+  return l ? l.number : null
+}
+// #752: a merged PR that merely mentions the issue (a spec PR saying Refs) is no duplicate and no landing; only one that closes the issue is a duplicate.
+// A forwarded cont names its own landing by its PR number or one of its done commits, and the landed read looks for exactly that on the cont's branch.
+const landedRead = n => {
+  if (!ownOf(n)) return ''
+  const s = (CONTS[n] || {}).setup
+  const b = isObj(s) && nonEmpty(s.branch) ? s.branch : '<branch>'
+  return ` landed: one {number, commits (every commit oid, from gh pr view <number> --repo ${SLUG} --json commits)} per merged PR whose head is ${b} (gh pr list --repo ${SLUG} --state merged --head ${b} --json number), [] when none.`
 }
 const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git repository at ${REPO}) for a batch delivery with claim holder ${HOLDER}. Change nothing (a git fetch is fine), apart from what forge-claim status itself posts. ${FORGE_TIMEOUT}
-1. gh issue view ${n} --repo ${SLUG} --json state,labels,title,body,createdAt: return state, the label names as labels, and title; keep createdAt for step 7 (it is not returned).
+1. gh issue view ${n} --repo ${SLUG} --json state,labels,title,body,createdAt,comments: return state, the label names as labels, and title; keep createdAt for step 7 and the comments for step 8 (they are not returned).
 2. branch: run alone and exactly issue-branch --repo-root ${REPO} --issue ${n} and return the branch member of the one JSON line it prints; on a non-zero exit omit branch and return branch_error: the exit code and the code and message of the JSON error it printed.
 3. claim: run alone and exactly forge-claim status --repo ${SLUG} --issue ${n} --holder ${HOLDER} and return its verdict (free, held_by or stale) and by; on exit 1 or 2 return verdict error.
-4. merged_pr: the number of a merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,body,title), else null. open_pr: {number, head_branch} of an open PR referencing the issue, else null.
+4. merged_refs: one {number, closes} per merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,closingIssuesReferences), closes true only when its closingIssuesReferences lists issue ${n}, [] when none.${landedRead(n)} open_pr: {number, head_branch} of an open PR referencing the issue, else null.
 5. blockers: the issues this one is blocked by, from the body's "Blocked by" list and the tracker's issue dependencies, each as {issue, state} with the state from gh issue view.
 6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id and questions.
 7. already_fixed: name the issue's concrete symptom as one literal string taken from its body (an error string, a quoted code literal, or the quoted output of a failing command; never run the failing command). Run git -C ${REPO} fetch origin ${INT}, then git -C ${REPO} grep -n -F '<literal>' origin/${INT} and git -C ${REPO} log origin/${INT} -S'<literal>' --since=<createdAt> --format='%H %s'. Return already_fixed {commit (the full sha of the commit since the issue opened that removed the literal), evidence (the literal and what both commands printed)} only when the grep finds the literal nowhere at origin/${INT} and the log names such a commit; otherwise, or with no concrete literal, return already_fixed null.
+8. lane: invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is. Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
 ${RULES_FOR(REPO, '<branch>')}`
 const releaseClosedPrompt = n => `Issue #${n} of ${SLUG} (the git repository at ${REPO}) is closed and this batch still holds its claim. Release it.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed
@@ -190,15 +235,17 @@ Return its verdict (released on exit 0, not_held (exit 3) when the claim is alre
 ${RULES_FOR(REPO, (FACTS[n] || {}).branch || '<branch>')}`
 
 await parallel(ISSUES.map(n => async () => {
-  FACTS[n] = await ask(agent(factsPrompt(n), { label: `facts-${n}`, phase: 'Intake', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: FACTS_SCHEMA }), `facts-${n}`)
+  FACTS[n] = await ask(agent(factsPrompt(n), { label: `facts-${n}`, phase: 'Intake', agentType: 'clerk', model: 'sonnet', effort: 'medium', schema: FACTS_SCHEMA }), `facts-${n}`)
 }))
 
 // Eligibility is plain JS over the facts, first match wins; null means eligible.
 // A forwarded cont names a landing this batch started; its PR now reads as merged and the claim is still ours (or already released):
 // the merge happened after the cont was forwarded, so the issue is re-adopted for its close-out, never skipped as a duplicate or closed.
+// A landing is the cont's own merged PR (by its pr or a done commit), whether it closes the issue or only says Refs: a merged PR that
+// closes the issue but is not the cont's own is a duplicate, never a re-adoption.
 const mergedReadopt = (n, f) => {
   const claim = f.claim || {}
-  return !!(CONTS[n] && f.merged_pr && (claim.verdict === 'free' || claim.by === HOLDER))
+  return !!(CONTS[n] && landedOf(n, f) !== null && (claim.verdict === 'free' || claim.by === HOLDER))
 }
 const eligibility = (n, f) => {
   const readopt = mergedReadopt(n, f)
@@ -211,7 +258,8 @@ const eligibility = (n, f) => {
   for (const [label, outcome] of [['needs-verification', 'needs-verification'], ['parked', 'parked'], ['agent:human-required', 'human-required']]) {
     if (labels.includes(label) && !(readopt && label === 'needs-verification')) return { issue: n, outcome }
   }
-  if (f.merged_pr && !readopt) return { issue: n, outcome: 'duplicate', pr: f.merged_pr }
+  const dup = closingOf(f)
+  if (dup && !readopt) return { issue: n, outcome: 'duplicate', pr: dup }
   // A failed claim lookup proves nothing about ownership: it falls through to the claim-error stop below, never to a final row.
   const fixed = f.already_fixed
   if (isObj(fixed) && nonEmpty(fixed.commit) && !CONTS[n] && (f.claim || {}).by !== HOLDER && (f.claim || {}).verdict !== 'error') {
@@ -256,7 +304,7 @@ await parallel(ISSUES.filter(n => rows[n] && rows[n].outcome === 'closed' && rel
 const inBatchBlockers = n => Array.from(new Set(((FACTS[n] || {}).blockers || [])
   .filter(b => b.state === 'OPEN' && ISSUES.includes(b.issue)).map(b => b.issue))).sort((a, b) => a - b)
 
-// A dependency cycle among the issues still to deliver is found here, right after intake and before any lane agent:
+// A dependency cycle among the issues still to deliver is found here, right after intake and before any acquire:
 // an issue is on a cycle when a depth-first walk over in-batch blockers returns to it.
 const onCycle = n => {
   const seen = new Set()
@@ -281,7 +329,6 @@ for (const n of ISSUES) if (!toDeliver.includes(n)) settle[n](rows[n] || { issue
 
 // --- Deliver ---
 phase('Deliver')
-const LANE_SCHEMA = { type: 'object', properties: { lane: { type: 'string', enum: ['direct', 'standard', 'needs-design'] }, why: { type: 'string' } }, required: ['lane'] }
 const ACQUIRE_SCHEMA = {
   type: 'object',
   properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'held_by', 'lost_to', 'error'] }, by: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' }, transient: { type: 'boolean' } },
@@ -291,11 +338,19 @@ const ASK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', en
 const SETTLE_SCHEMA = { type: 'object', properties: { state: { type: 'string', enum: ['OPEN', 'CLOSED'] }, release: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['state'] }
 const ENDED_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
 
-// A FIFO semaphore of MAX child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted.
-let inUse = 0
-const waiters = []
-const admit = () => new Promise(resolve => { if (inUse < MAX) { inUse++; resolve() } else waiters.push(resolve) })
-const leave = () => { const next = waiters.shift(); if (next) next(); else inUse-- }
+// A FIFO semaphore of child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted.
+// A waiter admitted with `first` (a planned issue) is handed a freed slot before every other waiter, so a finished plan waits at most one delivery slot.
+const semaphore = size => {
+  let inUse = 0
+  const firsts = []
+  const rest = []
+  return {
+    admit: (first = false) => new Promise(resolve => { if (inUse < size) { inUse++; resolve() } else (first ? firsts : rest).push(resolve) }),
+    leave: () => { const next = firsts.shift() || rest.shift(); if (next) next(); else inUse-- },
+  }
+}
+const RUN = semaphore(MAX)
+const PLAN = semaphore(MAX)
 
 // The owner's answer the batch itself carries: the relaunch's decisions only. A ticked decision prompt is read by the child.
 const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
@@ -307,9 +362,9 @@ const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
 const readyOf = n => READY[n]
-// The child's whole input (D1): the batch args, the issue's cont, its lane and the owner's answer, nothing else.
-const childArgs = (n, lane) => {
-  const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode: 'ready' }
+// The child's whole input (D1): the batch args, the mode (plan or ready), the issue's cont, its lane and the owner's answer, nothing else.
+const childArgs = (n, lane, mode) => {
+  const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode }
   if (CONTS[n]) a.cont = CONTS[n]
   else a.lane = lane
   const answer = answerOf(n)
@@ -630,7 +685,7 @@ ${RULES}`, `land-merge-${n}`, { ...clerk, schema: withRenew(LAND_MERGE_SCHEMA, {
     }
     await unlock()
     // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
-    if (!CONTS[n]) CONTS[n] = { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }
+    CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
 
     const openCriteria = ready.acceptance.filter(isOpen)
     const notes = ready.acceptance.filter(a => a && a.kind === 'note')
@@ -665,6 +720,9 @@ const readoptable = n => {
   const f = FACTS[n] || {}
   return !!(f.open_pr && f.branch && f.open_pr.head_branch === f.branch)
 }
+// A standard-lane issue plans ahead (#744 D3) unless it is re-adopted, a merged landing's close-out, or its cont already holds a reviewed plan or a PR.
+const plansAhead = (n, lane, readopt) => lane === 'standard' && !readopt && !mergedReadopt(n, FACTS[n]) &&
+  !(isObj(CONTS[n]) && (CONTS[n].plan_reviewed === true || Number.isInteger(CONTS[n].pr)))
 const READOPT_SCHEMA = {
   type: 'object',
   properties: {
@@ -690,14 +748,10 @@ const deliverOne = async n => {
   const f = FACTS[n]
   const readopt = readoptable(n)
   let laneName
-  // The lane step; false when it ended the issue (its row is set). A readoptable issue defers it until its PR is found unaccepted.
+  // The lane step; false when it ended the issue (its row is set). It reads the lane facts-n answered. A readoptable issue defers it until its PR is found unaccepted.
   const chooseLane = async () => {
-    const lane = await ask(agent(`You choose the delivery lane of issue #${n} of ${SLUG} (the git repository at ${REPO}). Change nothing in this step.
-Read the issue with its comments (gh issue view ${n} --repo ${SLUG} --comments) and invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is.
-Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
-${RULES_FOR(REPO, f.branch || '<branch>')}`, { label: `lane-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'medium', schema: LANE_SCHEMA }), `lane-${n}`)
-    if (lane === null || lane === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `lane-${n} returned nothing` }; return false }
-    if (lane.lane === 'needs-design') {
+    if (!LANES.includes(f.lane)) { rows[n] = { issue: n, outcome: 'stopped', detail: `facts-${n} returned no lane` }; return false }
+    if (f.lane === 'needs-design') {
       if (readopt) {
         // The claim is already held: give it back, as the row says nothing is left to resume.
         await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) needs a design before it can be delivered. Release the batch claim.
@@ -705,10 +759,10 @@ Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder 
 Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
       }
-      rows[n] = { issue: n, outcome: 'needs-design', lane: lane.lane }
+      rows[n] = { issue: n, outcome: 'needs-design', lane: f.lane }
       return false
     }
-    laneName = lane.lane
+    laneName = f.lane
     return true
   }
   if (CONTS[n]) laneName = CONTS[n].lane || 'standard'
@@ -728,10 +782,14 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
   // Every claim, release and lane step below names the branch: without a derived one nothing is claimed (never `--branch undefined`).
   if (!nonEmpty(f.branch)) { rows[n] = { issue: n, outcome: 'stopped', stage: 'branch', detail: nonEmpty(f.branch_error) ? f.branch_error : 'issue-branch derived no branch' }; return }
-  await admit()
-  let admitted = true
+  const ahead = plansAhead(n, laneName, readopt)
+  const FIRST = ahead ? PLAN : RUN
+  await FIRST.admit()
+  let held = FIRST // the semaphore whose slot this issue holds, or null
+  const release = () => { if (held) { const sem = held; held = null; sem.leave() } }
   try {
     if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
+    // The child's setup acquires again and answers already_held (its setup then renews the claim); this acquire is kept because it gates the readopt path (issue 745).
     const acquireStep = () => ask(agent(`You claim issue #${n} of ${SLUG} (the git repository at ${REPO}) for the batch holder ${HOLDER}.
 Run alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${f.branch}
 Return its verdict (acquired, already_held, held_by, lost_to, or error on any other exit), by, comment_id and transient (true only when its JSON line has transient true) from its output. ${FORGE_TIMEOUT} Run nothing else.
@@ -739,10 +797,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     let acq = await recall(acquireStep)
     if (transientError(acq)) {
       // #740 D7: re-queued once, behind every issue waiting for a slot now: give the slot back and ask for one again.
-      leave()
-      admitted = false
-      await admit()
-      admitted = true
+      release()
+      await FIRST.admit()
+      held = FIRST
       if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
       acq = await recall(acquireStep)
     }
@@ -760,8 +817,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           return
         }
         // No child: the slot goes back and the PR lands as it stands, through the same path as a ready child.
-        leave()
-        admitted = false
+        release()
         READY[n] = { head: ro.head, branch: ro.branch, worktree: ro.worktree, acceptance: ro.acceptance, verify: [], tasks: [], cont: CONTS[n] }
         rows[n] = await enqueue(INT, () => land(n, READY[n]))
         return
@@ -779,18 +835,32 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
 
     let r = null
     try {
-      try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
-      if (r && r.stage === 'ineligible' && !terminalChild(r)) {
-        // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
-        delete CONTS[n]
-        laneName = 'standard'
-        rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
-        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName)) } catch (e) { r = null }
+      if (ahead) {
+        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'plan')) } catch (e) { r = null }
+        if (r && r.stage === 'planned' && isObj(r.cont) && !terminalChild(r)) {
+          CONTS[n] = r.cont
+          if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
+          await RUN.admit(true) // ahead of unplanned waiters; the PLAN slot is kept while this waits
+          PLAN.leave()
+          held = RUN
+          if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
+          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        }
+        // D9: a live stop with no cont makes the forwarded or planned cont obsolete (terminalChild(null) is true: a dead child keeps it).
+        if (!terminalChild(r) && !r.cont) delete CONTS[n]
+      } else {
+        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        if (r && r.stage === 'ineligible' && !terminalChild(r)) {
+          // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
+          delete CONTS[n]
+          laneName = 'standard'
+          rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
+          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        }
       }
       if (terminalChild(r)) trip(`child-${n}`)
     } finally {
-      leave()
-      admitted = false
+      release()
     }
 
     if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `child-${n} returned nothing` }; return }
@@ -856,7 +926,7 @@ Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
     rows[n] = { issue: n, outcome: 'stopped', stage: r.stage }
   } finally {
-    if (admitted) leave()
+    release()
   }
 }
 await parallel(toDeliver.map(n => async () => {

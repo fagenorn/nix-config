@@ -97,6 +97,11 @@ def labels(calls):
     return [c["label"] for c in calls]
 
 
+def merged(pr, *commits):
+    """A resume setup reply naming merged PR `pr` on the branch, with its commit oids."""
+    return {"merged_pr": pr, "merged_heads": [{"number": pr, "commits": list(commits)}]}
+
+
 def prompt(calls, label):
     found = [c["prompt"] for c in calls if c["label"] == label]
     if not found:
@@ -125,20 +130,22 @@ RENEW_READ = {"verdict", "by", "detail", "transient"}
 # label: (top-level fields the program or a later prompt reads, {member: fields read inside it}); a member
 # named "<name>[]" is an array whose items object is checked.
 FOLDED_READ = {
-    "owner-answer": ({"verdict", "decisions", "comment_id", "questions"}, {"renew": RENEW_READ}),
     "verify": ({"head", "clean", "results"}, {"renew": RENEW_READ, "results[]": {"id", "status", "summary"}}),
     "pr": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "checks-1": ({"state", "head", "failing", "details", "pending"}, {"renew": RENEW_READ}),
     "merge": ({"merged", "behind", "merge_commit", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
+    "impl-1": ({"status", "start_head", "commit", "notes"}, {"renew": RENEW_READ}),
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
-               "worktree_path", "head", "merged_pr", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
+               "worktree_path", "head", "merged_pr", "merged_refs", "merged_heads", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
                "existing", "unset_env", "merge_strategy", "delete_branch", "review", "review_state", "knowledge",
-               "verification", "holder", "acquire", "claim"},
+               "verification", "holder", "acquire", "claim", "answer", "renew"},
               {"existing": {"local_branch", "remote_branch", "worktree", "dirty", "status"},
+               "merged_refs[]": {"number", "closes"}, "merged_heads[]": {"number", "commits"},
                "review": {"code", "plan"}, "review_state": {"code", "plan"},
                "knowledge": {"standards", "hints", "rejections"},
                "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason"},
-               "acquire": {"verdict", "by", "detail", "transient"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"}}),
+               "acquire": {"verdict", "by", "detail", "transient"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"},
+               "answer": {"verdict", "comment_id", "questions", "decisions"}, "renew": RENEW_READ}),
 }
 
 
@@ -154,7 +161,7 @@ class FoldTest(unittest.TestCase):
 
     def test_folded_schemas_keep_every_read_field(self):
         _, calls = run()
-        renew = schema_of(calls, "renew-tasks")
+        renew = member(schema_of(calls, "verify"), "renew")
         merge = "d" * 40
         _, moved_calls = run(replies={"checks-1": {"state": "behind", "head": SHA},
                                       "checks-2": {"state": "passed", "head": merge}},
@@ -166,14 +173,26 @@ class FoldTest(unittest.TestCase):
                 self.assertLessEqual(top, set(schema["properties"]))
                 for name, fields in nested.items():
                     branch = member(schema, name)
-                    if name in ("acquire", "claim", "lock"):
+                    folded = label == "setup" and name in ("answer", "renew")
+                    if name in ("acquire", "claim", "lock") or folded:
                         self.assertIn({"type": "null"}, schema["properties"][name]["anyOf"])
                     self.assertLessEqual(fields, set(branch["properties"]), name)
                     if name == "renew":
                         self.assertEqual(branch, renew)
-                        self.assertEqual(schema["required"], ["renew"])
+                        if folded:
+                            self.assertNotIn("renew", schema.get("required", []))
+                        else:
+                            self.assertEqual(schema["required"], ["renew"])
+                    if folded:
+                        self.assertNotIn(name, schema.get("required", []))
                     if name == "lock":
                         self.assertEqual(branch, lock)
+        with self.subTest(label="owner-answer"):
+            _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
+            schema = schema_of(resumed, "owner-answer")
+            self.assertLessEqual({"verdict", "decisions", "comment_id", "questions"}, set(schema["properties"]))
+            self.assertEqual(schema["properties"]["renew"], renew)
+            self.assertEqual(schema["required"], ["renew"])
 
     def test_gate_failure_after_a_folded_claim_keeps_a_claim_incomplete_cont(self):
         # gate: (setup patch, stage, the resume re-derives the location)
@@ -193,7 +212,7 @@ class FoldTest(unittest.TestCase):
                 cont = result["cont"]
                 self.assertTrue(cont["claim_incomplete"])
                 self.assertEqual(cont["setup"]["holder"], HOLDER)
-                for nested in ("acquire", "claim"):
+                for nested in ("acquire", "claim", "answer", "renew"):
                     self.assertNotIn(nested, cont["setup"])
                 resumed, calls = run(args=dict(ARGS, cont=cont))
                 self.assertEqual(resumed["stage"], "done")
@@ -300,9 +319,87 @@ class FoldTest(unittest.TestCase):
         self.assertLess(names.index("renew-plan"), names.index("plan-review"))
 
 
-CHILD_HAPPY = ["setup", "owner-answer", "plan", "plan-codex", "plan-review", "renew-tasks", "impl-1", "review-1",
+CHILD_HAPPY = ["setup", "plan", "plan-codex", "plan-review", "impl-1", "review-1",
                "renew-final-review", "final-codex", "final-1", "verify", "pr", "checks-1", "merge",
                "land-unlock", "hold", "close-out"]
+
+
+class FoldedTaskRenewTest(unittest.TestCase):
+    """#745: the first implementer call of a run renews the claim first; its renew is graded before any task field."""
+
+    def test_only_the_first_implementer_of_a_run_renews(self):
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(2))})
+        self.assertNotIn("renew-tasks", labels(calls))
+        first = prompt(calls, "impl-1")
+        self.assertLess(first.index(RENEW), first.index("/g/task-1.md"))
+        self.assertEqual(schema_of(calls, "impl-1")["required"], ["renew"])
+        self.assertEqual(next(c for c in calls if c["label"] == "impl-1")["agentType"], "implementer")
+        self.assertNotIn(RENEW, prompt(calls, "impl-2"))
+        self.assertNotIn("renew", schema_of(calls, "impl-2")["properties"])
+
+    def test_a_lost_renew_inside_impl_1_stops_before_any_task_result_is_used(self):
+        done = {"status": "done", "start_head": "b0", "commit": "c0ffee", "tests": ["t"], "notes": "ok"}
+        for renew in ({"verdict": "not_held", "by": "h2/b1"}, {"verdict": "error", "detail": "forge down"}, None):
+            with self.subTest(renew=renew):
+                result, calls = run(replies={"impl-1": dict(done, renew=renew)})
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", "tasks"))
+                self.assertNotIn("review-1", labels(calls))
+                if renew and renew["verdict"] == "not_held":
+                    self.assertNotIn("cont", result)
+                else:
+                    self.assertTrue(result["cont"]["claim_incomplete"])
+                    self.assertEqual(result["cont"]["done"], [])
+                    self.assertNotIn("partial", result["cont"])
+
+    def test_direct_impl_renews_first_and_a_lost_renew_stops_before_its_result(self):
+        _, calls = run(args=DIRECT)
+        self.assertNotIn("renew-tasks", labels(calls))
+        text = prompt(calls, "direct-impl")
+        self.assertLess(text.index(RENEW), text.index("deliver-direct"))
+        self.assertEqual(schema_of(calls, "direct-impl")["required"], ["renew"])
+        result, calls = run(args=DIRECT, patch={"direct-impl": {"renew": {"verdict": "not_held", "by": "h2/b1"},
+                                                                "ineligible": True}})
+        self.assertEqual((result["stage"], result["at"]), ("claim-lost", "tasks"))
+        self.assertNotIn("direct-review", labels(calls))
+
+
+class FinalRenewStaysOutOfTheReviewersTest(unittest.TestCase):
+    """#745: the renew is a mutating forge-claim command, so it never rides in a reviewer-profile call (read-only Bash)."""
+
+    def test_the_final_review_renews_in_its_own_clerk_step_before_every_final_reviewer(self):
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(4))})
+        names = labels(calls)
+        renew = next(c for c in calls if c["label"] == "renew-final-review")
+        self.assertEqual(renew["agentType"], "clerk")
+        self.assertLess(names.index("renew-final-review"), names.index("final-1"))
+        self.assertLess(names.index("renew-final-review"), names.index("final-codex"))
+        self.assertEqual(names.count("renew-final-review"), 1)
+
+    def test_no_reviewer_call_is_asked_to_renew_the_claim(self):
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(4))})
+        reviewers = [c for c in calls if c["agentType"] in ("reviewer", "reviewer-lite")]
+        self.assertTrue(any(c["label"] == "final-1" for c in reviewers))
+        for c in reviewers:
+            with self.subTest(label=c["label"]):
+                self.assertNotIn("forge-claim renew", c["prompt"])
+                self.assertNotIn("renew", c["schema"]["properties"])
+
+
+# The bookkeeping agents of one fresh standard issue's happy path at e0c0656d (issue 745 baseline): setup,
+# owner-answer, renew-tasks, renew-final-review, land-unlock and close-out.
+BOOKKEEPING = re.compile(r"^(setup|acquire|worktree|renew|owner-answer|land-lock|land-unlock|close-out)(-|$)")
+BOOKKEEPING_BASELINE = 6
+
+
+class StandardBookkeepingCountTest(unittest.TestCase):
+    def test_a_standard_issue_runs_at_least_two_fewer_bookkeeping_agents(self):
+        # Standalone (acquired), and as a batch child whose folded acquire answers already_held (D1, D6).
+        for kw in ({}, {"args": BATCH_CHILD, "patch": {"setup": {"acquire": HELD}}}):
+            with self.subTest(kw=kw):
+                result, calls = run(**kw)
+                self.assertEqual(result["stage"], "done")
+                book = [l for l in labels(calls) if BOOKKEEPING.match(l)]
+                self.assertLessEqual(len(book), BOOKKEEPING_BASELINE - 2, book)
 
 
 class IssueBranchStepTest(unittest.TestCase):
@@ -493,22 +590,68 @@ ANSWER = {"verdict": "answered", "comment_id": 30, "decisions": "May the deliver
 ASKED = {"status": "needs_user", "questions": [{"question": "Which host?", "options": ["Host one.", "Host two."]}]}
 
 
+# A resume that has no plan yet: it reads the owner's answer through the owner-answer step.
+RESUME_FOR_ANSWER = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                               "holder": HOLDER, "base_sha": SHA}, "plan": None, "plan_reviewed": False, "done": []}
+SETUP_ACQUIRE = "forge-claim acquire --repo <slug> --issue 9 --holder <host>/session-s1 --branch <branch>"
+SETUP_RENEW = "forge-claim renew --repo <slug> --issue 9 --holder <host>/session-s1 --branch <branch>"
+SETUP_STATUS = "forge-claim owner-action status --repo <slug> --issue 9 --reason decision"
+
+
 class OwnerAnswerTest(unittest.TestCase):
-    def test_the_answer_is_read_after_the_claim_and_reaches_the_planner(self):
-        result, calls = run(replies={"owner-answer": ANSWER})
+    def test_a_fresh_setup_reads_the_answer_after_the_claim_and_runs_no_owner_answer_step(self):
+        result, calls = run(args=dict(ARGS, mode="plan"), patch={"setup": {"answer": ANSWER}})
+        self.assertEqual(result["stage"], "planned")
+        names = labels(calls)
+        self.assertNotIn("owner-answer", names)
+        self.assertFalse([l for l in names if l.startswith("renew-")], names)
+        setup = prompt(calls, "setup")
+        self.assertLess(setup.index(SETUP_ACQUIRE), setup.index(SETUP_RENEW))
+        self.assertLess(setup.index(SETUP_RENEW), setup.index(SETUP_STATUS))
+        self.assertLess(setup.index(SETUP_STATUS), setup.index("worktree add <worktree_path> <branch>"))
+        schema = schema_of(calls, "setup")
+        self.assertNotIn("answer", schema.get("required", []))
+        self.assertNotIn("renew", schema.get("required", []))
+        self.assertIn(ANSWER["decisions"], prompt(calls, "plan"))
+        self.assertNotIn("answer", result["cont"]["setup"])
+        self.assertNotIn("renew", result["cont"]["setup"])
+        self.assertEqual(result["cont"]["decisions"], [ANSWER["decisions"]])
+
+    def test_an_unusable_folded_answer_stops_before_planning_and_the_resume_reads_it(self):
+        for answer in (None, {"verdict": "error"}, {"verdict": "answered"}, dict(ANSWER, decisions=""),
+                       dict(ANSWER, decisions="  ")):
+            with self.subTest(answer=answer):
+                result, calls = run(patch={"setup": {"answer": answer}})
+                self.assertEqual(result["stage"], "owner-answer")
+                self.assertEqual(labels(calls), ["setup"])
+                cont = result["cont"]
+                self.assertNotIn("claim_incomplete", cont)
+                self.assertNotIn("answer", cont["setup"])
+                resumed, calls = run(args=dict(ARGS, cont=cont), replies={"owner-answer": ANSWER})
+                self.assertEqual(resumed["stage"], "done")
+                names = labels(calls)
+                self.assertLess(names.index("owner-answer"), names.index("plan"))
+
+    def test_the_direct_lane_setup_reads_no_answer_and_renews_nothing(self):
+        _, calls = run(args=dict(ARGS, lane="direct"))
+        setup = prompt(calls, "setup")
+        self.assertNotIn("owner-action status", setup)
+        self.assertNotIn("forge-claim renew", setup)
+
+    def test_a_resumed_answer_read_still_renews_first(self):
+        result, calls = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER), replies={"owner-answer": ANSWER})
         self.assertEqual(result["stage"], "done")
-        ls = labels(calls)
-        self.assertLess(ls.index("setup"), ls.index("owner-answer"))
         answer = prompt(calls, "owner-answer")
-        self.assertIn(RENEW, answer)
         self.assertLess(answer.index(RENEW), answer.index("forge-claim owner-action status"))
-        self.assertLess(ls.index("owner-answer"), ls.index("plan"))
-        self.assertIn("forge-claim owner-action status --repo owner/repo --issue 9 --reason decision",
-                      prompt(calls, "owner-answer"))
-        self.assertIn(f"they are binding: {ANSWER['decisions']}", prompt(calls, "plan"))
+        self.assertIn(ANSWER["decisions"], prompt(calls, "plan"))
+        result, calls = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER),
+                            patch={"owner-answer": {"renew": {"verdict": "not_held", "by": "h2/b1"}}})
+        self.assertEqual((result["stage"], result["at"]), ("claim-lost", "plan"))
+        self.assertNotIn("plan", labels(calls))
 
     def test_decisions_ride_in_cont_and_merge_without_repeats(self):
-        first, _ = run(args=dict(ARGS, decisions="Use the flag."), replies={"owner-answer": ANSWER, "plan": ASKED})
+        first, _ = run(args=dict(ARGS, decisions="Use the flag."), patch={"setup": {"answer": ANSWER}},
+                       replies={"plan": ASKED})
         self.assertEqual(first["stage"], "plan")
         self.assertEqual(first["cont"]["decisions"], ["Use the flag.", ANSWER["decisions"]])
         second, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"owner-answer": ANSWER, "plan": ASKED})
@@ -518,7 +661,7 @@ class OwnerAnswerTest(unittest.TestCase):
     def test_an_open_or_absent_prompt_adds_nothing(self):
         for verdict in ("none", "open"):
             with self.subTest(verdict=verdict):
-                result, calls = run(replies={"owner-answer": dict(ANSWER, verdict=verdict, decisions="")})
+                result, calls = run(patch={"setup": {"answer": dict(ANSWER, verdict=verdict, decisions="")}})
                 self.assertNotIn("The owner has answered", prompt(calls, "plan"))
                 self.assertNotIn("decisions", result.get("cont") or {})
 
@@ -526,7 +669,7 @@ class OwnerAnswerTest(unittest.TestCase):
         for reply in (None, {"verdict": "error"}, {"verdict": "answered"}, dict(ANSWER, decisions=""),
                       dict(ANSWER, decisions="  ")):
             with self.subTest(reply=reply):
-                result, calls = run(replies={"owner-answer": reply})
+                result, calls = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER), replies={"owner-answer": reply})
                 self.assertEqual(result["stage"], "owner-answer")
                 self.assertIn("cont", result)
                 self.assertNotIn("plan", labels(calls))
@@ -572,13 +715,83 @@ class OwnerAnswerTest(unittest.TestCase):
         self.assertEqual(result["stage"], "close-out")
 
 
+HELD = {"verdict": "already_held", "comment_id": 5}
+BATCH_CHILD = {"repo_root": "/r", "issue": 9, "batch_id": "b7"}
+
+
+class FoldedSetupRenewTest(unittest.TestCase):
+    """#745 D1: an already_held acquire refreshes nothing, so the fresh setup renews before planning."""
+
+    def test_an_already_held_setup_renews_and_plans_without_an_owner_answer_step(self):
+        for args in (ARGS, BATCH_CHILD):
+            with self.subTest(args=args):
+                result, calls = run(args=args, patch={"setup": {"acquire": HELD, "renew": {"verdict": "renewed"}}})
+                self.assertEqual(result["stage"], "done")
+                self.assertNotIn("owner-answer", labels(calls))
+
+    def test_a_lost_setup_renew_after_already_held_stops_before_plan(self):
+        for renew in ({"verdict": "not_held", "by": "h2/b1"}, {"verdict": "error", "detail": "forge down"}, None):
+            with self.subTest(renew=renew):
+                result, calls = run(args=BATCH_CHILD, patch={"setup": {"acquire": HELD, "renew": renew,
+                                                                       "answer": ANSWER}})
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", "plan"))
+                self.assertEqual(labels(calls), ["setup"])
+                if renew and renew["verdict"] == "not_held":
+                    self.assertNotIn("cont", result)
+                else:
+                    self.assertTrue(result["cont"]["claim_incomplete"])
+                    self.assertNotIn("renew", result["cont"]["setup"])
+                    self.assertNotIn(ANSWER["decisions"], result["cont"].get("decisions") or [])
+
+    def test_a_transient_setup_renew_renews_again_through_the_owner_answer_step(self):
+        result, calls = run(args=BATCH_CHILD, patch={"setup": {"acquire": HELD, "renew": TRANSIENT}},
+                            replies={"owner-answer": ANSWER})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[:3], ["setup", "owner-answer", "plan"])
+        self.assertIn(RENEW.replace(HOLDER, "h1/b7"), prompt(calls, "owner-answer"))
+
+    def test_a_lost_setup_renew_is_graded_before_a_worktree_failure_or_a_dirty_worktree(self):
+        masks = ({"claim": {"ok": False, "reason": "worktree add failed"}},
+                 {"existing": {"worktree": True, "dirty": True, "status": " M a.js"}},
+                 {"ok": False, "reason": "closed"})
+        for mask in masks:
+            for renew in ({"verdict": "not_held", "by": "h2/b1"}, {"verdict": "error", "detail": "forge down"}, None):
+                with self.subTest(mask=mask, renew=renew):
+                    result, calls = run(args=BATCH_CHILD, patch={"setup": dict(mask, acquire=HELD, renew=renew)})
+                    self.assertEqual((result["stage"], result["at"]), ("claim-lost", "plan"))
+                    self.assertEqual(labels(calls), ["setup"])
+                    if renew and renew["verdict"] == "not_held":
+                        self.assertNotIn("cont", result)
+                    else:
+                        self.assertTrue(result["cont"]["claim_incomplete"])
+
+    def test_a_transient_setup_renew_is_retried_once_not_twice(self):
+        for second in (TRANSIENT, {"verdict": "renewed"}):
+            with self.subTest(second=second):
+                answer = {"verdict": "none", "comment_id": None, "questions": [], "decisions": ""}
+                result, calls = run(args=BATCH_CHILD, patch={"setup": {"acquire": HELD, "renew": TRANSIENT}},
+                                    replies={"owner-answer": [dict(answer, renew=second), dict(answer, renew={"verdict": "renewed"})]})
+                self.assertEqual(labels(calls).count("owner-answer"), 1)
+                if second is TRANSIENT:
+                    self.assertEqual((result["stage"], result["at"]), ("claim-lost", "plan"))
+                    self.assertNotIn("plan", labels(calls))
+                else:
+                    self.assertEqual(result["stage"], "done")
+
+    def test_an_acquired_setup_reads_no_renew(self):
+        result, calls = run(patch={"setup": {"renew": None}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("owner-answer", labels(calls))
+
+
 RENEW = f"forge-claim renew --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x"
 # (at, the call that renews, nested): a nested renew rides in that call's reply as renew.
-BOUNDARIES = [("plan", "owner-answer", True), ("tasks", "renew-tasks", False),
+BOUNDARIES = [("tasks", "impl-1", True),
               ("final-review", "renew-final-review", False), ("verify", "verify", True),
               ("ship", "pr", True), ("checks-1", "checks-1", True), ("merge", "merge", True)]
 # The text each folded prompt runs after its renew.
-STEP_MARK = {"owner-answer": "forge-claim owner-action status", "verify": "Run the project's declared verification",
+STEP_MARK = {"impl-1": "task-1.md", "verify": "Run the project's declared verification",
              "pr": "open the pull request", "checks-1": "to be mergeable", "merge": "forge-claim land acquire"}
 
 
@@ -719,7 +932,7 @@ class ClaimTest(unittest.TestCase):
 TRANSIENT = {"verdict": "error", "detail": "gh_failed: dial tcp: connect: network is unreachable", "transient": True}
 # The full second reply of each folded step whose first renew ran out of transport retries; the harness fills renew and lock.
 SECOND = {
-    "owner-answer": {"verdict": "none", "comment_id": None, "questions": [], "decisions": ""},
+    "impl-1": {"status": "done", "start_head": "b0", "commit": "c0ffee", "tests": ["t"], "notes": "ok"},
     "verify": {"head": SHA, "clean": True, "results": [{"id": "build", "status": "pass", "summary": "ok"}]},
     "pr": {"pr": 42, "head": SHA},
     "checks-1": {"state": "passed", "head": SHA, "required": ["ci"]},
@@ -790,12 +1003,19 @@ class TransientTest(unittest.TestCase):
                 self.assertEqual(labels(calls).count("acquire"), 2)
                 self.assertEqual("worktree" in labels(calls), stage == "done")
 
+    def test_a_transient_folded_acquire_reads_the_answer_through_the_owner_answer_step(self):
+        result, calls = run(patch={"setup": {"acquire": TRANSIENT, "claim": None, "answer": None}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:5], ["setup", "acquire", "worktree", "owner-answer", "plan"])
+
     def test_every_renew_and_acquire_asks_for_transient(self):
         _, calls = run()
-        self.assertEqual(schema_of(calls, "renew-tasks")["properties"]["transient"], {"type": "boolean"})
-        for via in ("setup", "renew-tasks", "owner-answer", "verify", "pr", "checks-1", "merge"):
+        self.assertEqual(member(schema_of(calls, "verify"), "renew")["properties"]["transient"], {"type": "boolean"})
+        for via in ("setup", "impl-1", "renew-final-review", "verify", "pr", "checks-1", "merge"):
             with self.subTest(via=via):
                 self.assertIn("transient", prompt(calls, via))
+        _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
+        self.assertIn("transient", prompt(resumed, "owner-answer"))
         stopped, _ = run(patch={"pr": {"renew": None}})
         _, calls = run(args=dict(ARGS, cont=stopped["cont"]))
         self.assertEqual(schema_of(calls, "acquire")["properties"]["transient"], {"type": "boolean"})
@@ -804,9 +1024,11 @@ class TransientTest(unittest.TestCase):
     def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
         timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
         _, calls = run()
-        for via in ("setup", "renew-tasks", "owner-answer", "verify", "pr", "checks-1", "merge"):
+        for via in ("setup", "impl-1", "renew-final-review", "verify", "pr", "checks-1", "merge"):
             with self.subTest(via=via):
                 self.assertIn(timeout, prompt(calls, via))
+        _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
+        self.assertIn(timeout, prompt(resumed, "owner-answer"))
         _, calls = run(patch={"pr": {"head": "c" * 40}})  # a head-moved stop releases the lock
         self.assertIn(timeout, prompt(calls, "land-unlock"))
         stopped, _ = run(patch={"pr": {"renew": None}})
@@ -883,7 +1105,7 @@ class SetupIdempotenceTest(unittest.TestCase):
         result, calls = run(replies={"setup": {"ok": False, "reason": "duplicate", "duplicate_pr": 41}})
         self.assertEqual(result["stage"], "setup")
         self.assertEqual(labels(calls), ["setup"])
-        result, calls = run(patch={"setup": {"merged_pr": 41}})
+        result, calls = run(patch={"setup": {"merged_refs": [{"number": 41, "closes": True}]}})
         self.assertEqual((result["stage"], result["duplicate"]), ("setup", 41))
         self.assertEqual(labels(calls), ["setup"])
 
@@ -913,6 +1135,100 @@ class SetupIdempotenceTest(unittest.TestCase):
                        "never reset, clean, restore or stash", "worktree-mismatch"):
             self.assertIn(needle, setup)
         self.assertNotIn("existing-branch", setup)
+
+
+class SpecPrTest(unittest.TestCase):
+    """#752: a spec merged in its own docs PR is no duplicate and never the delivery's own merged PR."""
+
+    MINE, SPEC = "d" * 40, "5" * 40
+
+    def cont(self, **extra):
+        setup = {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
+                 "holder": HOLDER, "base_sha": SHA}
+        return dict({"setup": setup, "plan": dict(PLAN, tasks=tasks(2)), "plan_reviewed": True,
+                     "done": [{"n": 1, "commit": self.MINE}]}, **extra)
+
+    def test_a_closing_merged_pr_is_a_duplicate_even_when_setup_proceeds(self):
+        result, calls = run(patch={"setup": {"merged_refs": [{"number": 41, "closes": True}]}})
+        self.assertEqual((result["stage"], result["duplicate"]), ("setup", 41))
+        self.assertEqual(labels(calls), ["setup"])
+
+    def test_a_refs_only_merged_pr_lets_setup_proceed(self):
+        result, _ = run(args=dict(ARGS, spec="/r/spec.md"),
+                        patch={"setup": {"merged_refs": [{"number": 7, "closes": False}]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("duplicate", result)
+
+    def test_a_refs_only_pr_is_no_duplicate_whatever_merged_pr_says(self):
+        result, _ = run(args=dict(ARGS, spec="/r/spec.md"),
+                        patch={"setup": {"merged_pr": 7, "merged_refs": [{"number": 7, "closes": False}]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("duplicate", result)
+
+    def test_a_close_out_cont_keeps_its_pr_through_successive_stops(self):
+        cont = {"setup": {"holder": HOLDER, "branch": "issue-9-x", "worktree": "/r/.wt/w-issue-9-x",
+                          "worktree_path": "/r/.wt/w-issue-9-x"},
+                "lane": "standard", "plan": {"acceptance": PLAN["acceptance"]}, "pr": 42}
+        facts = {"merged_heads": [{"number": 42, "commits": []}]}
+        failed = {"close-out": {"issue_state": "OPEN", "released": False}}
+        first, calls = run(args=dict(ARGS, cont=cont), patch={"setup": facts, **failed})
+        self.assertEqual((first["stage"], first["cont"]["pr"]), ("close-out", 42))
+        second, calls = run(args=dict(ARGS, cont=first["cont"]), patch={"setup": facts, **failed})
+        self.assertEqual((second["stage"], second["cont"]["pr"]), ("close-out", 42))
+        self.assertIn("--state merged --head issue-9-x", prompt(calls, "setup"))
+        third, _ = run(args=dict(ARGS, cont=second["cont"]), patch={"setup": facts})
+        self.assertEqual((third["stage"], third["pr"]), ("done", 42))
+
+    def test_resume_never_closes_out_a_same_named_spec_pr(self):
+        # Squash strategy: the adopted spec branch put base_sha before the spec, so no ancestry rule can tell.
+        cont = self.cont()
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(7, self.SPEC)})
+        self.assertEqual((result["stage"], result["invalid"]), ("setup", "merged_pr"))
+        self.assertEqual(result["cont"], cont)
+        self.assertEqual(labels(calls), ["setup"])
+        # Listed but not claimed as merged: the resume carries on with its tasks.
+        result, calls = run(args=dict(ARGS, cont=cont),
+                            patch={"setup": {"merged_heads": [{"number": 7, "commits": [self.SPEC]}]}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("impl-2", labels(calls))
+        # The hold of a normal ship comes last; a close-out straight after setup is what is refused.
+        self.assertEqual(labels(calls)[:3], ["setup", "impl-2", "review-2"])
+
+    def test_resume_closes_out_its_own_merged_pr_found_by_its_commits(self):
+        heads = [{"number": 7, "commits": [self.SPEC]}, {"number": 42, "commits": [self.SPEC, self.MINE]}]
+        result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
+
+    def test_a_recorded_pr_outranks_a_commit_match_on_another_pr(self):
+        """DR-001: a reused branch can list the same commit on two merged PRs; the recorded number decides."""
+        heads = [{"number": 43, "commits": [self.MINE]}, {"number": 42, "commits": [self.MINE]}]
+        cont = self.cont(pr=42)
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42, "merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        # Only when no PR is recorded does a commit decide.
+        result, _ = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_heads": heads}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 43))
+
+    def test_a_cont_with_no_commit_and_no_pr_never_closes_out(self):
+        failed, _ = run(patch={"setup": {"claim": {"ok": False, "reason": "worktree add failed"}}})
+        self.assertTrue(failed["cont"]["claim_incomplete"])
+        result, calls = run(args=dict(ARGS, cont=failed["cont"]), patch={"setup": merged(7, self.SPEC)})
+        self.assertEqual((result["stage"], result["invalid"]), ("setup", "merged_pr"))
+        self.assertTrue(result["cont"]["claim_incomplete"])
+        self.assertNotIn("hold", labels(calls))
+        self.assertNotIn("--state merged", prompt(calls, "setup"))
+
+    def test_a_batch_close_out_cont_finds_its_pr_by_number(self):
+        cont = {"setup": {"holder": HOLDER, "branch": "issue-9-x", "worktree": "/r/.wt/w-issue-9-x",
+                          "worktree_path": "/r/.wt/w-issue-9-x"},
+                "lane": "standard", "plan": {"acceptance": PLAN["acceptance"]}, "pr": 42}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_heads": [{"number": 42, "commits": []}]}})
+        self.assertEqual((result["stage"], result["pr"]), ("done", 42))
+        self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
 
 
 class PlanTest(unittest.TestCase):
@@ -1409,7 +1725,8 @@ class ResumeTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=self.cont(partial=2)))
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[:4], ["setup", "renew-tasks", "impl-2", "review-2"])
+        self.assertEqual(names[:3], ["setup", "impl-2", "review-2"])
+        self.assertIn(RENEW, prompt(calls, "impl-2"))
         self.assertNotIn("plan", names)
         self.assertNotIn("impl-1", names)
         self.assertIn("re-adopt", prompt(calls, "setup"))
@@ -1445,12 +1762,12 @@ class ResumeTest(unittest.TestCase):
 
     def test_resume_after_merge_closes_out_even_with_a_blocked_review(self):
         result, calls = run(args=dict(ARGS, cont=self.cont()),
-                            patch={"setup": {"merged_pr": 42, "review_state": {"code": "blocked", "plan": "blocked"}}})
+                            patch={"setup": dict(merged(42, "c1"), review_state={"code": "blocked", "plan": "blocked"})})
         self.assertEqual(result["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
 
     def test_resume_after_merge_goes_to_close_out(self):
-        result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": {"merged_pr": 42}})
+        result, calls = run(args=dict(ARGS, cont=self.cont()), patch={"setup": merged(42, "c1")})
         self.assertEqual(result["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
         self.assertIn("gh issue close 9", prompt(calls, "close-out"))
@@ -2506,7 +2823,7 @@ class HoldTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": with_criteria(EVIDENCE), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
-        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42},
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee"),
                                                                "close-out": {"issue_state": "OPEN"}})
         self.assertEqual(result["stage"], "done")
         self.assertEqual(labels(calls), ["setup", "hold", "close-out"])
@@ -2520,14 +2837,14 @@ class HoldTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": with_criteria(EVIDENCE), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
-        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}, "close-out": {"issue_state": "OPEN"}})
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee"), "close-out": {"issue_state": "OPEN"}})
         hold = prompt(calls, "hold")
         self.assertIn("verify-pending lint --input", hold)
         self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
         self.assertEqual(result["stage"], "done")
         stale = {"lint": {"ok": False, "errors": [{"code": "unverified_reference"}]}}
         result, _ = run(args=dict(ARGS, cont=cont), replies={"hold": dict(self.HOLD, **stale)},
-                        patch={"setup": {"merged_pr": 42}})
+                        patch={"setup": merged(42, "c0ffee")})
         self.assertEqual(result["stage"], "hold")
 
 
@@ -2606,7 +2923,7 @@ class NoteCloseOutTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": with_criteria(typo), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}]}
-        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee")})
         self.assertEqual((result["stage"], result["bad_kinds"]), ("close-out", ["AC4"]))
         self.assertNotIn("close-out", labels(calls))
         self.assertNotIn("hold", labels(calls))
@@ -2974,7 +3291,7 @@ class DirectLaneTest(unittest.TestCase):
         self.assertIn("lane: direct.", reviewers[0]["prompt"])
         self.assertIn("direct-codex", names)
         self.assertNotIn("final-1", names)
-        self.assertEqual(names[names.index("direct-impl") - 1], "renew-tasks")
+        self.assertEqual(names[names.index("direct-impl") - 1], "setup")
         self.assertIn("renew-final-review", names[:names.index("direct-review")])
         self.assertIn("direct-lane review", prompt(calls, "pr"))
 
@@ -3010,6 +3327,55 @@ class DirectLaneTest(unittest.TestCase):
         rereview = [c for c in calls if c["label"] == "direct-rereview"][0]
         self.assertEqual(rereview["agentType"], "reviewer-lite")
         self.assertIn("bug", rereview["prompt"])
+
+    def test_a_criterion_without_evidence_is_a_blocking_finding_and_the_fix_round(self):
+        graded = {"verdict": "pass", "findings": [], "acceptance": [{"id": "AC1", "met": True, "evidence": ""}]}
+        result, calls = run(args=DIRECT, replies={"direct-review": graded})
+        self.assertEqual(result["stage"], "done")
+        fix = prompt(calls, "direct-fix")
+        self.assertIn("AC1", fix)
+        self.assertIn('"severity":"important"', fix)
+        self.assertEqual(labels(calls).count("direct-rereview"), 1)
+
+    def test_an_unmet_or_ungraded_criterion_is_a_blocking_finding(self):
+        unmet = {"verdict": "pass", "findings": [], "acceptance": [{"id": "AC1", "met": False, "evidence": "t.py:1"}]}
+        for reply in (unmet, {"verdict": "pass", "findings": []}):
+            _, calls = run(args=DIRECT, replies={"direct-review": reply})
+            self.assertIn("AC1", prompt(calls, "direct-fix"))
+
+    def test_a_criterion_met_with_evidence_needs_no_fix_round(self):
+        _, calls = run(args=DIRECT)
+        self.assertNotIn("direct-fix", labels(calls))
+
+    def test_a_criterion_no_test_can_show_is_not_held_to_evidence(self):
+        acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "feels right", "kind": "human"}]
+        _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance}})
+        self.assertNotIn("direct-fix", labels(calls))
+
+    def test_the_review_prompt_holds_only_code_criteria_to_the_blocking_evidence_rule(self):
+        for patch in ({}, {"direct-impl": {"sensitive": True}}):
+            _, calls = run(args=DIRECT, patch=patch)
+            text = prompt(calls, "direct-review")
+            self.assertIn("a code criterion that is not met, or has no evidence, is an Important finding", text)
+            self.assertIn("other kinds are not findings", text)
+            self.assertNotIn("unmet criteria only", text)
+
+    def test_the_escalated_full_review_is_graded_too(self):
+        replies = {"direct-review": {"verdict": "pass", "findings": [], "escalate": True},
+                   "direct-review-full": {"verdict": "pass", "findings": []}}
+        _, calls = run(args=DIRECT, replies=replies)
+        self.assertIn("AC1", prompt(calls, "direct-fix"))
+
+    def test_every_direct_review_prompt_and_schema_asks_for_graded_criteria(self):
+        for label, patch in (("direct-review", {}), ("direct-review", {"direct-impl": {"sensitive": True}})):
+            _, calls = run(args=DIRECT, patch=patch)
+            self.assertIn("acceptance with one entry per criterion id", prompt(calls, label))
+            item = schema_of(calls, label)["properties"]["acceptance"]["items"]
+            self.assertEqual(set(item["required"]), {"id", "met", "evidence"})
+        replies = {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}
+        _, calls = run(args=DIRECT, replies=replies)
+        self.assertIn("acceptance with one entry per criterion id", prompt(calls, "direct-review-full"))
+        self.assertIn("acceptance", schema_of(calls, "direct-review-full")["properties"])
 
     def test_one_fix_round_that_resolves_continues(self):
         result, _ = run(args=DIRECT, replies={"direct-review": BAD})
@@ -3237,7 +3603,7 @@ class DeclaredBranchTest(unittest.TestCase):
         cut = labels(calls).index("plan-review") + 1
         post = calls[cut:]
         granted = {c["label"] for c in post if c["agentType"] not in REVIEWERS}
-        self.assertLessEqual({"renew-tasks", "impl-1", "impl-2", "fix-2-1", "renew-final-review", "final-codex",
+        self.assertLessEqual({"impl-1", "impl-2", "fix-2-1", "final-codex",
                               "verify", "pr", "checks-1", "merge", "land-unlock", "hold",
                               "close-out"}, granted)
         for c in post:
@@ -3257,8 +3623,8 @@ class DeclaredBranchTest(unittest.TestCase):
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g",
                           "holder": HOLDER, "base_sha": SHA},
                 "plan": bplan(), "plan_reviewed": True, "done": [{"n": 1, "commit": "c0ffee"}, {"n": 2, "commit": "d" * 40}]}
-        merged, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_pr": 42}})
-        self.assertEqual(merged["stage"], "done")
+        closed, calls = run(args=dict(ARGS, cont=cont), patch={"setup": merged(42, "c0ffee")})
+        self.assertEqual(closed["stage"], "done")
         for label in ("hold", "close-out"):
             self.assertNotIn(BR_PUSH, prompt(calls, label))
 
@@ -3540,7 +3906,7 @@ NARROWING = {"verdict": "findings",
              "findings": [{"severity": "critical", "summary": "race in release", "relation": "narrowing"}]}
 SCENARIOS = (
     {},
-    {"replies": {"owner-answer": ANSWER}},
+    {"args": dict(ARGS, cont=RESUME_FOR_ANSWER), "replies": {"owner-answer": ANSWER}},
     {"replies": {"plan": with_criteria(PlanRulesTest.ROWS[0][1]), "plan-revise": with_criteria(PlanRulesTest.ROWS[0][1]),
                  "plan-rules-revise": with_criteria(PlanRulesTest.ROWS[0][1])}},
     {"replies": {"plan-review": FINDING}},
@@ -3623,6 +3989,96 @@ class PromptCommandFormTest(unittest.TestCase):
                 self.assertNotIn("--comments", view, call["label"])
             seen.add(call["label"])
         self.assertEqual(seen, set(self.BODY_READERS))
+
+
+MAP_PATH = "/r/.git/worktrees/w/deliver-standard/context.md"
+MAP_TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
+MAP_READERS = re.compile(r"plan|plan-review|plan-codex|plan-revise|plan-rules-revise|impl-\d+|fix-\d+-\d+")
+
+
+def map_carriers(calls):
+    return [c["label"] for c in calls if "context.md" in c["prompt"]]
+
+
+class CodeMapTest(unittest.TestCase):
+    """#743: the planner writes a code map beside the plan; plan reviewers, revisers and task implementers are pointed at it, nobody else."""
+
+    def assert_no_map(self, calls, expected):
+        # prompt() raises when a label is missing, so each expected call is shown to have run.
+        for label in expected:
+            with self.subTest(label=label):
+                self.assertNotIn("context.md", prompt(calls, label))
+        self.assertEqual([l for l in map_carriers(calls) if not MAP_READERS.fullmatch(l)], [])
+
+    def test_the_planner_writes_the_map_in_the_plan_directory(self):
+        _, calls = run()
+        self.assertIn(MAP_PATH, prompt(calls, "plan"))
+
+    def test_plan_reviewers_reviser_and_implementers_name_the_map(self):
+        _, calls = run(replies={"plan-review": MAP_TASK_FINDING, "review-1": MAP_TASK_FINDING})
+        for label in ("plan-review", "plan-codex", "plan-revise", "impl-1", "fix-1-1"):
+            with self.subTest(label=label):
+                self.assertIn(MAP_PATH, prompt(calls, label))
+
+    def test_the_rules_only_reviser_names_the_map(self):
+        # The scenario of PlanRulesTest.keep_stop: both reviews return an R2 rule finding, so plan-rules-revise runs.
+        plan = with_criteria(HUMAN)
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": PlanRulesTest.REVISED,
+                                "plan-review": PlanRulesTest.RULE_FINDING,
+                                "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        self.assertIn(MAP_PATH, prompt(calls, "plan-rules-revise"))
+
+    def test_task_reviewers_get_no_map(self):
+        _, calls = run(replies={"review-1": MAP_TASK_FINDING})
+        self.assert_no_map(calls, ("review-1", "rereview-1-1", "final-1", "final-codex"))
+
+    def test_chunked_final_review_and_integration_get_no_map(self):
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(4))})
+        self.assert_no_map(calls, ("review-1", "review-4", "final-1", "final-2", "final-integration", "final-codex"))
+
+    def test_the_final_fix_wave_and_its_review_get_no_map(self):
+        _, calls = run(replies={"final-1": BAD})
+        self.assert_no_map(calls, ("fix-wave", "fix-wave-review"))
+
+    def test_the_direct_lane_and_its_repair_get_no_map(self):
+        _, calls = run(args=DIRECT, replies={"direct-review": BAD})
+        self.assert_no_map(calls, ("direct-impl", "direct-review", "direct-fix", "direct-rereview"))
+        self.assertEqual(map_carriers(calls), [])
+
+
+class PlannerReadsTest(unittest.TestCase):
+    """#737: only the plan step may batch-read through Explore agents; every other step keeps the no-subagent rule."""
+
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise")
+    NO_SUBAGENTS = "- Do not dispatch subagents unless this step says so."
+    HARD_RULES = "Hard rules for this step"
+    GRANT = "up to 3 read-only Explore agents"
+    BATCH = "issue independent reads together in one message"
+
+    def test_only_planner_prompts_grant_explore_and_every_ruled_prompt_keeps_the_rule(self):
+        granted, ruled = set(), set()
+        for call in all_calls():
+            text, label = call["prompt"], call["label"]
+            if self.HARD_RULES in text:
+                self.assertIn(self.NO_SUBAGENTS, text, label)
+                ruled.add(label)
+            if label in self.PLANNERS:
+                for needle in (self.GRANT, self.BATCH, "Do not build, prototype or run the change", self.NO_SUBAGENTS):
+                    self.assertIn(needle, text, label)
+                self.assertLess(text.index(self.GRANT), text.index(self.HARD_RULES), label)
+                self.assertLess(text.index(self.BATCH), text.index(self.HARD_RULES), label)
+                granted.add(label)
+            else:
+                self.assertNotIn("Explore", text, label)
+        self.assertEqual(granted, set(self.PLANNERS))
+        self.assertLessEqual({"setup", "impl-1", "pr", "merge"}, ruled)
+
+    def test_the_shared_rules_keep_the_no_subagent_line_and_name_no_grant(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        start = source.index("const BASE_RULES = `")
+        base_rules = source[start:source.index("`", start + len("const BASE_RULES = `"))]
+        self.assertIn(self.NO_SUBAGENTS, base_rules)
+        self.assertNotIn("Explore", base_rules)
 
 
 if __name__ == "__main__":
