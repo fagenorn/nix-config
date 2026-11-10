@@ -64,7 +64,7 @@ loaded).
 
 The runner also builds a temporary root `${TMPDIR:-/tmp}/run-eval-tree.XXXXXX` whose
 `bin/` goes first on `PATH`: one shim per command in the tree's `lib/agent-tools.nix`
-table, each running `python3 -P -m agent_tools.<module>` from the tree's `python/`, so
+table, each running `python3 -P -m agent_tools.<module path>` (the module its row names) from the tree's `python/`, so
 `resolve-project` and the rest of the package commands are the tree's code, not the
 installed ones. The root also holds the copied `settings.json` above. That root is removed on every exit path: a normal end, an error, a
 non-zero claude exit, Ctrl-C (exit 130) and SIGTERM (exit 143). A plan-only eval creates

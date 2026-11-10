@@ -41,7 +41,8 @@ cat >"$FAKE_BIN/claude" <<'FAKE'
 # timed-out run does. Any non -p invocation (an auth probe) is recorded as `other=`.
 # A -p run also leaves, in $FAKE_STATE: the --settings file it was given (settings.json),
 # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS (print-bg-wait-ceiling), where
-# `resolve-project` resolved (resolve_project=) and the `gh` it resolves (gh=).
+# `resolve-project` resolved (resolve_project=), the module its shim runs
+# (resolve_project_module=) and the `gh` it resolves (gh=).
 if [ "${1:-}" != -p ]; then
   printf 'other=%s\n' "$*" >>"$FAKE_STATE/record"
   exit 0
@@ -51,6 +52,7 @@ fi
   printf 'run_config_dir=%s\n' "${CLAUDE_CONFIG_DIR:-}"
   printf 'force_session_persistence=%s\n' "${CLAUDE_CODE_FORCE_SESSION_PERSISTENCE:-}"
   printf 'resolve_project=%s\n' "$(command -v resolve-project)"
+  printf 'resolve_project_module=%s\n' "$(sed -n 's/.* -m \([^ ]*\) .*/\1/p' "$(command -v resolve-project)")"
   printf 'gh=%s\n' "$(command -v gh)"
   printf 'cwd=%s\n' "$(pwd -P)"
   printf 'args=%s\n' "$(printf '%s' "$*" | tr '\n' ' ')"
@@ -290,6 +292,7 @@ run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE"
 check "settings: the --settings copy is byte-identical to EVAL_SETTINGS" cmp -s "$SETTINGS_FIXTURE" "$STATE/settings.json"
 check "settings: the guard entry is unchanged" jq -e '.hooks.PreToolUse[0].hooks[0].command == "/nix/store/0000-claude-bash-lifecycle-guard/bin/claude-bash-lifecycle-guard"' "$STATE/settings.json"
 check "shim: resolve-project resolves to the tree shim" grep -q '^resolve_project=.*/run-eval-tree\.[^/]*/bin/resolve-project$' "$STATE/record"
+check "shim: the resolve-project shim runs its table module" grep -qxF 'resolve_project_module=agent_tools.resolve_project' "$STATE/record"
 check "row: no policy key" jq -e 'select(has("policy") | not)' "$COPY/results/results.jsonl"
 
 # --- a settings file without any hook is accepted unchanged ------------------------

@@ -224,14 +224,14 @@ prepare_tree_env() {
   local SHIM_BIN="$TREE_ROOT/bin"
   mkdir -p "$SHIM_BIN" || die "could not create the shim dir under $TREE_ROOT"
 
-  local commands cmd
-  commands=$(awk '/^[[:space:]]*commands = \[/ {inside = 1; next} inside && /\];/ {exit} inside {gsub(/[" \t]/, ""); if ($0 != "") print}' "$EVAL_TREE/lib/agent-tools.nix")
+  local commands cmd path
+  commands=$(awk '/^[[:space:]]*commands = \{/ {inside = 1; next} inside && /^[[:space:]]*\};/ {exit} inside && /^[[:space:]]*"[^"]+"[[:space:]]*=[[:space:]]*"[^"]+";/ {split($0, part, "\""); print part[2], part[4]}' "$EVAL_TREE/lib/agent-tools.nix")
   [ -n "$commands" ] || die "no commands found in $EVAL_TREE/lib/agent-tools.nix"
-  while IFS= read -r cmd; do
+  while read -r cmd path; do
     {
       echo '#!/usr/bin/env bash'
       echo 'unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE'
-      printf 'PYTHONPATH=%q exec python3 -P -m agent_tools.%s "$@"\n' "$EVAL_TREE/python" "${cmd//-/_}"
+      printf 'PYTHONPATH=%q exec python3 -P -m agent_tools.%s "$@"\n' "$EVAL_TREE/python" "$path"
     } >"$SHIM_BIN/$cmd" || die "could not write the $cmd shim"
     chmod +x "$SHIM_BIN/$cmd" || die "could not make the $cmd shim executable"
   done <<<"$commands"

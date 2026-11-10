@@ -35,30 +35,31 @@ let
 
   env = python.withPackages (_: [ package ]);
 
-  # A command's module is its name with each "-" replaced by "_".
+  # A row maps a command to its module path under agent_tools, and the module is named for the command:
+  # its last segment is the command with each "-" replaced by "_".
   # context-map-lint is a stable path other projects' CIs call without vendoring it (parent D15).
-  commands = [
-    "adopt-project"
-    "agent-model-matrix"
-    "artifact-budget"
-    "cache-proxy"
-    "conformance"
-    "context-map-lint"
-    "diff-scope"
-    "fallback-audit"
-    "forge-claim"
-    "forge-issue"
-    "guard-policy"
-    "issue-branch"
-    "lane-triage"
-    "owner-actions"
-    "promotion"
-    "release"
-    "resolve-project"
-    "skill-lint"
-    "verified-tree"
-    "verify-pending"
-  ];
+  commands = {
+    "adopt-project" = "adopt_project";
+    "agent-model-matrix" = "agent_model_matrix";
+    "artifact-budget" = "artifact_budget";
+    "cache-proxy" = "cache_proxy";
+    "conformance" = "conformance";
+    "context-map-lint" = "context_map_lint";
+    "diff-scope" = "diff_scope";
+    "fallback-audit" = "fallback_audit";
+    "forge-claim" = "forge_claim";
+    "forge-issue" = "forge_issue";
+    "guard-policy" = "guard_policy";
+    "issue-branch" = "issue_branch";
+    "lane-triage" = "lane_triage";
+    "owner-actions" = "owner_actions";
+    "promotion" = "promotion";
+    "release" = "release";
+    "resolve-project" = "resolve_project";
+    "skill-lint" = "skill_lint";
+    "verified-tree" = "verified_tree";
+    "verify-pending" = "verify_pending";
+  };
 
   # A launcher script: bash under `-p`, which ignores BASH_ENV and the functions
   # an environment exports, so neither can run in place of its two lines (issue
@@ -83,15 +84,19 @@ let
   # A row whose module does not exist fails evaluation rather than building a
   # launcher that can only fail at run time (D14).
   launcher =
-    name:
+    name: path:
     let
-      module = "agent_tools.${lib.replaceStrings [ "-" ] [ "_" ] name}";
+      module = "agent_tools.${path}";
     in
-    assert lib.assertMsg (lib.elem module modules) "agent-tools: command ${name} has no module ${module}";
+    assert lib.assertMsg (lib.elem module modules)
+      "agent-tools: command ${name} has no module ${module}";
+    assert lib.assertMsg (
+      lib.last (lib.splitString "." path) == lib.replaceStrings [ "-" ] [ "_" ] name
+    ) "agent-tools: command ${name} runs ${module}, which is not named for it";
     launcherScript name ''
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
       exec ${env}/bin/python3 -I -m ${module} "$@"'';
 in
 {
-  launchers = lib.genAttrs commands launcher;
+  launchers = lib.mapAttrs launcher commands;
 }
