@@ -23,9 +23,9 @@ from collections import Counter
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_invocation import action_id, action_violation
-from agent_tools.transaction_plan import compile_proof, declaration_of
-from agent_tools.transaction_storage import (
+from agent_tools.release.transaction_invocation import action_id, action_violation
+from agent_tools.release.transaction_plan import compile_proof, declaration_of
+from agent_tools.release.transaction_storage import (
     RecoveryPlanRejected, TransactionError, json_object_violation, serialize)
 
 RECOVERY_PLAN_SCHEMA = "transaction-recovery-plan/v1"

@@ -28,14 +28,14 @@ selection in one write (D9): every edge `satisfied` yields `recovery_settled`, c
 `diverged`, `unknown` or unretryable edge yields `recovery_incomplete` and its park; anything
 else is `recovery_pending`. `roll_forward_refusal` refuses `state_not_attention`, then
 `grant_required`, as `begin_refusal` does, and `link_events` yields one `roll_forward_linked`
-naming a child, or nothing once a link names it (D11). `agent_tools.transaction_history`
+naming a child, or nothing once a link names it (D11). `agent_tools.release.transaction_history`
 hands every `RECOVERY_EVENT_KEYS` event to `recovery_event_violation`, which re-derives a
 `recovery_started` and a `recovery_settled`'s citations through the same functions, every
 event pair to `recovery_pairing_violation`, and every transition to
 `recovery_transition_violation`, which refuses `abandoned` while `effecting_action` names an
 action and `ready -> publishing` for a plan with a `restorable` unit unless an
 `anchors_verified` carries the open span's fence;
-`agent_tools.transaction_core`'s `advance` applies the same gates through
+`agent_tools.release.transaction_core`'s `advance` applies the same gates through
 `recovery_advance_violation` with the held fence, and refuses `recovering`, `rolled_back` and
 the `RESERVED_RECOVERY_REASONS` (D7, D9, D10, D22).
 
@@ -51,11 +51,11 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
-from agent_tools.transaction_custody import fence_violation
-from agent_tools.transaction_invocation import (
+from agent_tools.release.transaction_custody import fence_violation
+from agent_tools.release.transaction_invocation import (
     ActionFold, fold_actions, refusal, satisfied, status, unresolved)
-from agent_tools.transaction_proof import closed_result_violation
-from agent_tools.transaction_storage import RecoveryRefused, TransitionRefused
+from agent_tools.release.transaction_proof import closed_result_violation
+from agent_tools.release.transaction_storage import RecoveryRefused, TransitionRefused
 
 RECOVERY_REFUSAL_REASONS = (
     "state_not_ready", "state_not_attention", "state_not_recovering", "history_changed",
@@ -482,7 +482,7 @@ def recovery_event_violation(event: dict, events_before: Sequence[Mapping], docu
     edges in selection order, none `satisfied`, and does not re-judge the retry window (D9,
     D10). A `roll_forward_linked` happens in `attention_required` under a `fresh_grant`, and
     names a child that is neither the transaction nor an earlier link, with a non-empty
-    `reason`; `agent_tools.transaction_history` checks the child is a transaction id (D11)."""
+    `reason`; `agent_tools.release.transaction_history` checks the child is a transaction id (D11)."""
     kind = event["type"]
     if kind in _EVENT_STATES and state != _EVENT_STATES[kind]:
         return f"{kind} happens in {state}, not {_EVENT_STATES[kind]}"

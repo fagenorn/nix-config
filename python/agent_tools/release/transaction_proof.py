@@ -7,10 +7,10 @@ of `start_cohort` (`cohort_start`) and `settle_proof` (`settlement`), the lifecy
 (`gate_violation`) and what `advance` may not write (`advance_violation`), the validator's
 proof event and reserved-reason pairing rules, and the derived `proof` view.
 
-`agent_tools.transaction_history` hands every proof event to `proof_event_violation` and
+`agent_tools.release.transaction_history` hands every proof event to `proof_event_violation` and
 `apply_proof_event`, every adjacent pair of events to `pairing_violation` and every
 transition to `gate_violation`, and
-`agent_tools.transaction_core` keeps only the locks, the clock, the observer call and the
+`agent_tools.release.transaction_core` keeps only the locks, the clock, the observer call and the
 writes around the pure halves held here. Every function here is pure: the module reads no
 file, lock or clock.
 """
@@ -22,10 +22,10 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
-from agent_tools.transaction_custody import EVIDENCE_EVENTS, admissibility, fence_violation
-from agent_tools.transaction_invocation import ActionFold, fold_actions, status, unresolved
-from agent_tools.transaction_plan import DERIVED_REASONS, MAX_COHORT_ATTEMPTS
-from agent_tools.transaction_storage import ProofRefused, TransitionRefused, format_at, parse_at
+from agent_tools.release.transaction_custody import EVIDENCE_EVENTS, admissibility, fence_violation
+from agent_tools.release.transaction_invocation import ActionFold, fold_actions, status, unresolved
+from agent_tools.release.transaction_plan import DERIVED_REASONS, MAX_COHORT_ATTEMPTS
+from agent_tools.release.transaction_storage import ProofRefused, TransitionRefused, format_at, parse_at
 
 OUTCOMES = ("satisfied", "unsatisfied", "unknown")
 EVALUATIONS = ("accepted", "rejected", "indeterminate", "not_applicable", "unsupported")

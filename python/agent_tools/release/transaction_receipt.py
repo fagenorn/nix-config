@@ -43,11 +43,11 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_disposition import (
+from agent_tools.release.transaction_disposition import (
     FAILURE_REASON, OBSERVABILITY_GROUNDS, action_effects)
-from agent_tools.transaction_invocation import fold_actions, status
-from agent_tools.transaction_proof import closed_result_violation, evaluate
-from agent_tools.transaction_storage import (
+from agent_tools.release.transaction_invocation import fold_actions, status
+from agent_tools.release.transaction_proof import closed_result_violation, evaluate
+from agent_tools.release.transaction_storage import (
     ReceiptInvalid, StateInvalid, fsync_directory, lstat_mode, parse_at, require_directory,
     serialize, strict_loads)
 

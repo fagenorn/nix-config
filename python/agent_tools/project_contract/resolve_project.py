@@ -88,7 +88,7 @@ import re
 import shutil
 import sys
 
-from agent_tools import release_adapter, release_profile
+from agent_tools.release import release_adapter, release_profile
 from agent_tools.project_contract import agent_platform
 from agent_tools.system import semver
 

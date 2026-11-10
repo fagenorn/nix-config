@@ -22,24 +22,25 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.adopt_verify",
         "agent_tools.project_contract.agent_platform",
         "agent_tools.project_contract.resolve_project",
+        "agent_tools.release.forge_adapter",
+        "agent_tools.release.release_profile",
     }),
+    "project_contract": frozenset({
+        "agent_tools.release.release_adapter",
+        "agent_tools.release.release_profile",
+    }),
+    "release": frozenset({"agent_tools.project_contract.resolve_project"}),
 }
 
 # Flat modules that have not moved into their area yet; each move removes a name.
 UNMOVED: frozenset[str] = frozenset({
-    "actions_health_adapter", "agent_gate_bundle", "agent_gate_corpus", "agnostic_lint",
-    "artifact_budget", "cache_keepalive", "cache_proxy", "codesigned_artifact_adapter",
-    "context_map_lint", "diff_scope", "forge_adapter", "host_admission", "issue_branch",
-    "keepalive_pings", "lane_triage", "launchd_agent_adapter", "model_pricing",
-    "promotion", "promotion_lifecycle", "promotion_schema", "railway_deploy_adapter",
-    "release", "release_adapter", "release_cutover", "release_driver", "release_merge",
-    "release_profile", "release_verification", "run_profile", "subagent_prefix",
-    "suite_runner", "transaction_core", "transaction_custody",
-    "transaction_disposition", "transaction_history", "transaction_invocation",
-    "transaction_plan", "transaction_proof", "transaction_receipt",
-    "transaction_recovery", "transaction_recovery_plan", "transaction_storage",
-    "verified_tree", "verify_block", "verify_checks", "verify_exec", "verify_facts",
-    "verify_issues", "verify_owner", "verify_pending", "verify_run", "worktree_forge",
+    "agent_gate_bundle", "agent_gate_corpus", "agnostic_lint", "artifact_budget",
+    "cache_keepalive", "cache_proxy", "context_map_lint", "diff_scope", "host_admission",
+    "issue_branch", "keepalive_pings", "lane_triage", "model_pricing", "promotion",
+    "promotion_lifecycle", "promotion_schema", "run_profile", "subagent_prefix",
+    "suite_runner", "verified_tree", "verify_block", "verify_checks", "verify_exec",
+    "verify_facts", "verify_issues", "verify_owner", "verify_pending", "verify_run",
+    "worktree_forge",
 })
 
 

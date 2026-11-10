@@ -20,7 +20,8 @@ import os
 from pathlib import Path
 import subprocess
 
-from agent_tools import host_admission, release_adapter, release_profile
+from agent_tools import host_admission
+from agent_tools.release import release_adapter, release_profile
 from agent_tools.project_contract.conformance_registry import (
     CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER,
     NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,

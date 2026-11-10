@@ -1,7 +1,7 @@
 """Crash and retry matrix over merge, tag, Release and deploy (#128 AC3, AC8; spec Test seams)."""
 import unittest
 
-from agent_tools import release_adapter, release_driver
+from agent_tools.release import release_adapter, release_driver
 from . import forge_world, release_driver_support as rs, release_test_support as support
 from .forge_world import CANONICAL, ROWS, ForgeWorld
 

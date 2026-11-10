@@ -9,7 +9,7 @@ Its closed config is `workflow`, `branch`, `services` (a `string_list`), `health
 `health_commit_field`.
 
 This module imports only the standard library, `agent_tools.canonical` and
-`agent_tools.release_merge`: the registry in
+`agent_tools.release.release_merge`: the registry in
 `release_adapter` imports it, never the reverse, so its inner checks are its own (D14).
 
 `inspect(request)` never raises and never mutates. A request outside the closed shape is
@@ -93,7 +93,7 @@ import urllib.request
 from datetime import datetime
 from typing import Any
 
-from agent_tools import release_merge
+from agent_tools.release import release_merge
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
 COLLECTION_BUDGET_SECONDS = 30

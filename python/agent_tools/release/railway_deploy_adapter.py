@@ -9,7 +9,7 @@ request (`watch_only`), so the adapter never changes the world. It also answers 
 release was published on, which resolves the released commit exactly as the issue 555 adapter does.
 
 This module imports only the standard library, `agent_tools.canonical` and
-`agent_tools.release_merge`: the registry in `release_adapter` imports it, never the reverse.
+`agent_tools.release.release_merge`: the registry in `release_adapter` imports it, never the reverse.
 
 `inspect(request)` never raises and never mutates. A request outside the closed shape is
 `unknown`/`parameters_invalid` for an effect and `unknown`/`identity_unobservable` for a
@@ -73,7 +73,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from agent_tools import release_merge
+from agent_tools.release import release_merge
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
 COLLECTION_BUDGET_SECONDS = 30

@@ -3,41 +3,41 @@ D13, #208 D12, #209 D17): the lifecycle vocabularies, `ACTOR_KINDS`, the `Custod
 and `Transaction` snapshot types, the credential shape checks, shared validating history
 walk and snapshot fold. `append_events` builds detached complete candidates with that
 walk; `validate_state` admits stored metadata and compares its projections with the same
-walk's results. The walk hands each action event to `agent_tools.transaction_invocation`, whose
+walk's results. The walk hands each action event to `agent_tools.release.transaction_invocation`, whose
 fold also derives the snapshot's per-action `actions` view on every load, and each proof
-event to `agent_tools.transaction_proof`, whose `proof_view` derives the snapshot's `proof`
+event to `agent_tools.release.transaction_proof`, whose `proof_view` derives the snapshot's `proof`
 view on every load too; an `obligation_observed` joins the evidence-id fold exactly as an
 `evidence_recorded` does (#207 D25). It accepts the stored `proof_plan` only as the
-materialization of its own declaration, through `agent_tools.transaction_plan`'s
+materialization of its own declaration, through `agent_tools.release.transaction_plan`'s
 `plan_violation`, and only when the `created` event pins its `telemetry_digest` (#207 D3,
 D24). It accepts the stored `recovery_plan` likewise, only as the materialization of its own
-declaration bound to the proof plan's, through `agent_tools.transaction_recovery_plan`'s
+declaration bound to the proof plan's, through `agent_tools.release.transaction_recovery_plan`'s
 `recovery_plan_violation`, only when the `created` event pins its digest, and with a
 `recovers` back-link that is null or another transaction's id;
-`agent_tools.transaction_recovery`'s `recovery_view` derives the snapshot's `recovery` view
+`agent_tools.release.transaction_recovery`'s `recovery_view` derives the snapshot's `recovery` view
 on every load (#208 D6, D12), its `recovery_event_violation` checks each recovery event, its
 `recovery_transition_violation` gates each transition and its `recovery_pairing_violation`
 binds `recovery_started` to the entry into `recovering`, `recovery_settled` to the entry into
 `rolled_back` and `recovery_incomplete` to its park (#208 D7, D9, D10); a
 `roll_forward_linked` must also name a transaction id (#208 D11). The `created` event carries
 a non-empty `authority_class`, and each `grant_issued` an `actor_kind` in `ACTOR_KINDS` and a
-non-empty `authority_class` (#209 D11, D22); `agent_tools.transaction_disposition`'s
+non-empty `authority_class` (#209 D11, D22); `agent_tools.release.transaction_disposition`'s
 `failure_event_violation` re-derives each `failure_disposed`, its
 `disposition_pairing_violation` binds that event and every entry into `failed` as the
 recovery pairing does, and its `terminal_blocker` names the action no terminal transition
 may cross (#209 D21). A terminal's last event is `receipt_sealed`, admitted once
 after the terminal transition or its release and checked by
-`agent_tools.transaction_receipt`'s `receipt_event_violation`; `append_events` stamps its
+`agent_tools.release.transaction_receipt`'s `receipt_event_violation`; `append_events` stamps its
 digest through that module's `terminal_receipt`, and `terminal_view` derives the snapshot's
 `terminal` view on every load (#209 D7, D24, D25). It reads no file, lock or clock:
 `validate_state` takes the creation-key index lookup as a callable, which
-`agent_tools.transaction_core` binds to its store root, and the core reads the receipt file
+`agent_tools.release.transaction_core` binds to its store root, and the core reads the receipt file
 itself. It also composes event fields for a lapsed span's reap (`reap_events`) and a late
 owner result (`owner_result_event`), and answers whether an executor and fence were ever
 issued a span (`span_issued`). The `at`-timestamp codec (`format_at`, `parse_at`), the
 strict JSON object rule (`json_object_violation`) that a created `subject` and a late
 `result` share, and the transaction id rule (`is_id`; #209 D30) are imported from
-`agent_tools.transaction_storage`, not held here.
+`agent_tools.release.transaction_storage`, not held here.
 """
 
 import copy
@@ -50,24 +50,24 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_custody import (
+from agent_tools.release.transaction_custody import (
     CUSTODY_EVENTS, EVIDENCE_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
-from agent_tools.transaction_disposition import (
+from agent_tools.release.transaction_disposition import (
     DISPOSITION_EVENT_KEYS, disposition_pairing_violation, failure_event_violation,
     terminal_blocker)
-from agent_tools.transaction_invocation import (
+from agent_tools.release.transaction_invocation import (
     ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event, status)
-from agent_tools.transaction_plan import plan_violation
-from agent_tools.transaction_proof import (
+from agent_tools.release.transaction_plan import plan_violation
+from agent_tools.release.transaction_proof import (
     PROOF_EVENT_KEYS, ProofFold, apply_proof_event, gate_violation, pairing_violation,
     proof_event_violation, proof_view)
-from agent_tools.transaction_receipt import (
+from agent_tools.release.transaction_receipt import (
     RECEIPT_EVENT_KEYS, receipt_event_violation, terminal_receipt, terminal_view)
-from agent_tools.transaction_recovery import (
+from agent_tools.release.transaction_recovery import (
     RECOVERY_EVENT_KEYS, recovery_event_violation, recovery_pairing_violation,
     recovery_transition_violation, recovery_view, selection_refusal)
-from agent_tools.transaction_recovery_plan import recovery_plan_violation
-from agent_tools.transaction_storage import (
+from agent_tools.release.transaction_recovery_plan import recovery_plan_violation
+from agent_tools.release.transaction_storage import (
     StateInvalid, format_at, is_id, json_object_violation, parse_at, serialize)
 
 SCHEMA = "transaction-state/v6"

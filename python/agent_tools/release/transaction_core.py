@@ -3,7 +3,7 @@
 `TransactionStore(root, clock=...)` holds caller-rooted transactions under an absolute,
 pre-existing root, each in one `<id>/state.json`; every event `at` is read from the injected
 clock (integer epoch milliseconds), transaction ids from the wall clock. This module
-re-exports each sibling module's public names: `agent_tools.transaction_history` the
+re-exports each sibling module's public names: `agent_tools.release.transaction_history` the
 `transaction-state/v6` document model, its one validating walk and the snapshot fold;
 `transaction_disposition` the `failed` disposition's grounds, refusals and rules;
 `transaction_recovery` recovery's admission, decisions and rules; `transaction_recovery_plan`
@@ -57,41 +57,41 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_custody import (
+from agent_tools.release.transaction_custody import (
     EVIDENCE_FORMS, LeaseAuthority, admissibility, fence_violation)
-from agent_tools.transaction_disposition import (
+from agent_tools.release.transaction_disposition import (
     CONSEQUENCES, DISPOSITION_REFUSAL_REASONS, GROUNDS, KNOWN_STATE_GROUNDS,
     OBSERVABILITY_GROUNDS, QUALIFIERS, RESIDUE_BOUNDS, disposition_advance_violation,
     failure_events)
-from agent_tools.transaction_history import (
+from agent_tools.release.transaction_history import (
     ACTOR_KINDS, EXTERNAL_STATES, FORWARD, PARKINGS, SCHEMA, STATES, TERMINALS, TRANSITIONS,
     Custody, Transaction, append_events, bound_path, edge_allowed, fenced_id_violation,
     format_at, is_id, is_subject_path, json_object_violation, key_set_violation,
     owner_result_event, parked_since, reap_events, require_custody_shape, require_texts,
     snapshot, span_issued, validate_state)
-from agent_tools.transaction_invocation import (
+from agent_tools.release.transaction_invocation import (
     EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, ActionFold, action_id,
     action_violation, effect_request, fold_actions, inspect_result_violation,
     invoke_result_violation, observed, refusal, refused_error, satisfied, status, unresolved)
-from agent_tools.transaction_plan import (
+from agent_tools.release.transaction_plan import (
     COHORT_MARGIN_FLOOR_MS, COHORT_MARGIN_PERCENT, DEFAULT_CONVERGENCE_WINDOW_MS,
     MAX_COHORT_ATTEMPTS, MAX_COLLECTION_LATENCY_MS, MAX_CONVERGENCE_WINDOW_MS, MAX_FRESHNESS_MS,
     PLAN_REJECTION_REASONS, PLAN_SCHEMA, RUNNING_IDENTITY_FRESHNESS_MS, compile_proof,
     materialize_plan)
-from agent_tools.transaction_proof import (
+from agent_tools.release.transaction_proof import (
     PROOF_REFUSAL_REASONS, advance_violation, cohort_start, collection_refusal,
     next_evidence_id, obligation, observation_request, observation_violation, open_cohort,
     proof_refused, settlement)
-from agent_tools.transaction_receipt import (
+from agent_tools.release.transaction_receipt import (
     HAZARD_SCHEMA, OBSERVATION_SCHEMA, RECEIPT_SCHEMA, ReceiptStore, terminal_receipt)
-from agent_tools.transaction_recovery import (
+from agent_tools.release.transaction_recovery import (
     EFFECT_CLASSES, RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, begin_events,
     begin_requests, check_result_violation, link_events, recovery_advance_violation,
     recovery_refused, recovery_settlement, roll_forward_refusal, selection_refusal)
-from agent_tools.transaction_recovery_plan import (
+from agent_tools.release.transaction_recovery_plan import (
     EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, bind_recovery,
     compile_recovery, materialize_recovery)
-from agent_tools.transaction_storage import (
+from agent_tools.release.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, DispositionRefused, EffectResultInvalid,
     FenceViolation, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected,
     ProofRefused, ReceiptInvalid, RecoveryPlanRejected, RecoveryRefused, StaleCustody,

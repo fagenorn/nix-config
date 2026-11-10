@@ -189,7 +189,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_tools import canonical, forge_adapter, release_profile
+from agent_tools import canonical
+from agent_tools.release import forge_adapter, release_profile
 from agent_tools.guard import contract_export
 from agent_tools.project_contract import (adopt_inspection, adopt_verify, agent_platform,
                                           resolve_project)

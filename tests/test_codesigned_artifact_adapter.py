@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import codesigned_artifact_adapter as adapter, release_adapter
+from agent_tools.release import codesigned_artifact_adapter as adapter, release_adapter
 from .host_world import IDENTITY, OTHER, HostWorld
 
 PATH = "~/Library/Application Support/Notifier/Notifier.app"

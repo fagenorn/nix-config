@@ -7,7 +7,7 @@ import copy
 import hashlib
 import unittest
 
-from agent_tools.transaction_core import (
+from agent_tools.release.transaction_core import (
     CreationConflict, RecoveryRefused, StaleCustody, TransactionStore, TransitionRefused)
 
 from .test_transaction_custody import AUTHORITY, KEYS, SUBJECT, TTL, plain

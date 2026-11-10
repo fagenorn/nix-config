@@ -44,9 +44,9 @@ from collections.abc import Mapping
 from types import MappingProxyType, ModuleType
 from typing import Any
 
-from agent_tools import (actions_health_adapter, codesigned_artifact_adapter, forge_adapter,
-                         launchd_agent_adapter, railway_deploy_adapter,
-                         transaction_invocation, transaction_plan)
+from agent_tools.release import (actions_health_adapter, codesigned_artifact_adapter,
+                                 forge_adapter, launchd_agent_adapter, railway_deploy_adapter,
+                                 transaction_invocation, transaction_plan)
 from agent_tools.canonical import telemetry_digest
 from agent_tools.system.semver import parse_semver
 

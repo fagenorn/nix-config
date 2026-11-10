@@ -134,13 +134,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_tools import release_adapter, release_cutover, release_profile, release_verification
+from agent_tools.release import (release_adapter, release_cutover, release_profile,
+                                 release_verification)
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_core import (
+from agent_tools.release.transaction_core import (
     CreationConflict, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
     TransactionBusy, TransactionError, TransactionStore)
-from agent_tools.transaction_history import TERMINALS, Custody, Transaction
-from agent_tools.transaction_storage import lstat_mode, parse_at
+from agent_tools.release.transaction_history import TERMINALS, Custody, Transaction
+from agent_tools.release.transaction_storage import lstat_mode, parse_at
 
 SCHEMA_VERSION = 1
 KEY_SCHEMA = "release/v1"

@@ -8,7 +8,7 @@ import copy
 import json
 from pathlib import Path
 
-from agent_tools import forge_adapter
+from agent_tools.release import forge_adapter
 
 FIXTURES = Path(__file__).parent / "fixtures/release"
 

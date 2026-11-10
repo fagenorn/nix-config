@@ -18,7 +18,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from agent_tools.transaction_storage import (
+from agent_tools.release.transaction_storage import (
     StateInvalid, atomic_write, fsync_directory, lstat_mode, open_lock, read_json,
     require_directory)
 

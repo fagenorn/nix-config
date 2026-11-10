@@ -50,7 +50,7 @@ class LaddersTest(unittest.TestCase):
             'X = ("bindings.deploy", "skills.config.json", "release deploy inspect")\n',
         "python/agent_tools/project_contract/resolve_project.py": "bindings.deploy\n",
         "python/agent_tools/project_contract/adopt_migrate.py": "bindings.deploy\n",
-        "python/agent_tools/release_profile.py": "bindings.deploy\n",
+        "python/agent_tools/release/release_profile.py": "bindings.deploy\n",
     }
 
     def setUp(self):
@@ -396,7 +396,7 @@ class CandidateTreeTest(unittest.TestCase):
         exempt = {e["path"] for e in report["exempt"] if e["marker_id"] == "bindings-deploy"}
         for path in ("python/agent_tools/project_contract/resolve_project.py",
                      "python/agent_tools/project_contract/adopt_migrate.py",
-                     "python/agent_tools/release_profile.py"):
+                     "python/agent_tools/release/release_profile.py"):
             self.assertIn("bindings.deploy", (self.ROOT / path).read_text("utf-8"), path)
             self.assertIn(path, exempt)
 
@@ -406,7 +406,7 @@ class CandidateTreeTest(unittest.TestCase):
         sys.path.insert(0, str(self.ROOT / "python"))
         try:
             self.assertIsNone(importlib.util.find_spec("agent_tools.release_bridge"))
-            from agent_tools import release
+            from agent_tools.release import release
             with self.assertRaises(SystemExit):
                 release.main(["deploy", "inspect", "--commit", "a" * 40])
         finally:

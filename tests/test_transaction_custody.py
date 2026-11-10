@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.transaction_core import (
+from agent_tools.release.transaction_core import (
     PARKED_CUSTODY_WINDOW_MS, Custody, CustodyMisbound, FenceViolation, GrantInvalid,
     LeaseUnavailable, StaleCustody, StateInvalid, TransactionBusy, TransactionError,
     TransactionStore, TransitionRefused)

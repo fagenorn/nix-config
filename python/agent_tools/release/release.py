@@ -60,8 +60,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from agent_tools import release_adapter, release_profile, transaction_plan
-from agent_tools.release_driver import Driver, Project, Refusal, main_checkout, require_cwd
+from agent_tools.release import release_adapter, release_profile, transaction_plan
+from agent_tools.release.release_driver import Driver, Project, Refusal, main_checkout, require_cwd
 from agent_tools.project_contract.resolve_project import (
     ContractError, add_repo_root, emit_error, emit_json, load_contract,
     require_platform_manifest, resolve, resolves_on_path)

@@ -54,7 +54,7 @@ let
     "lane-triage" = "lane_triage";
     "owner-actions" = "claims.owner_actions";
     "promotion" = "promotion";
-    "release" = "release";
+    "release" = "release.release";
     "resolve-project" = "project_contract.resolve_project";
     "skill-lint" = "skill_lint";
     "verified-tree" = "verified_tree";

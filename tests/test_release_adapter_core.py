@@ -3,9 +3,10 @@ import plistlib
 import unittest
 from pathlib import Path
 
-from agent_tools import (actions_health_adapter, codesigned_artifact_adapter, forge_adapter,
-                         launchd_agent_adapter, release_adapter, release_profile)
-from agent_tools.transaction_storage import InvocationRefused
+from agent_tools.release import (actions_health_adapter, codesigned_artifact_adapter,
+                                 forge_adapter, launchd_agent_adapter, release_adapter,
+                                 release_profile)
+from agent_tools.release.transaction_storage import InvocationRefused
 from . import release_test_support as support
 from .forge_world import ForgeWorld
 from .host_world import IDENTITY, HostWorld

@@ -47,7 +47,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_history import format_at
+from agent_tools.release.transaction_history import format_at
 
 SCHEMA = "release-verification/v1"
 READ_BUDGET_SECONDS = 30

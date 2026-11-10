@@ -100,7 +100,7 @@ NON_LADDER_SITES = (
      "the schema-2 docstring names the removed schema member; a description, not a route"),
     ("python/agent_tools/project_contract/adopt_migrate.py", "bindings-deploy",
      "the migration docstring names the member it retires; a description, not a route"),
-    ("python/agent_tools/release_profile.py", "bindings-deploy",
+    ("python/agent_tools/release/release_profile.py", "bindings-deploy",
      "the docstring says a schema-2 contract lacks the removed member; a description, not a route"),
 )
 

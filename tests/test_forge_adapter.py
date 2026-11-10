@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_adapter, release_adapter, release_profile
+from agent_tools.release import forge_adapter, release_adapter, release_profile
 from agent_tools.system import github_remote
 from . import forge_world
 from . import release_test_support as support

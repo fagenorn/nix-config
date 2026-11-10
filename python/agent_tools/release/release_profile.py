@@ -109,11 +109,11 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
-from agent_tools import release_adapter
+from agent_tools.release import release_adapter
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_plan import MAX_CONVERGENCE_WINDOW_MS, compile_proof
-from agent_tools.transaction_recovery_plan import bind_recovery, compile_recovery
-from agent_tools.transaction_storage import ProofPlanRejected, RecoveryPlanRejected
+from agent_tools.release.transaction_plan import MAX_CONVERGENCE_WINDOW_MS, compile_proof
+from agent_tools.release.transaction_recovery_plan import bind_recovery, compile_recovery
+from agent_tools.release.transaction_storage import ProofPlanRejected, RecoveryPlanRejected
 from agent_tools.system.semver import parse_semver
 
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
