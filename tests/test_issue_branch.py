@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -52,7 +53,16 @@ def pull(number, branch):
 
 PROGRAMS = REPO_ROOT / "home/common/claude-code/skills/deliver-standard"
 HARNESSES = REPO_ROOT / "home/common/agent-skills/tests"
-ISSUE_BRANCH_ARGV = re.compile(r"\bissue-branch --repo-root (\S+) --issue (\d+)\b")
+# The command a program prompt orders: "exactly <argv>" up to the colon or the " and return" that ends it.
+SENT_COMMAND = re.compile(r"\bexactly (issue-branch[^\n]*?)(?::\s| and return)")
+
+
+def sent_argv(text):
+    """The complete argv (program name included) the prompt `text` orders its agent to run."""
+    found = SENT_COMMAND.findall(text)
+    if len(found) != 1:
+        raise AssertionError(f"expected one issue-branch command in the prompt, found {found}")
+    return shlex.split(found[0])
 
 
 def program_prompt(program, harness, args, label):
@@ -195,16 +205,26 @@ class IssueBranchCase(unittest.TestCase):
             if not local:
                 self.git(self.root, "update-ref", "-d", f"refs/heads/{branch}")
 
-    def issue_branch(self, issue=9):
+    def issue_branch(self, issue=9, argv=None):
+        """Run the command; `argv` (a program's sent argv) replaces the default one, with only the
+        launcher and the --repo-root value swapped for this fixture."""
+        args = ["--repo-root", str(self.root), "--issue", str(issue)] if argv is None else self.fixture_args(argv)
         proc = subprocess.run(
-            [sys.executable, "-m", "agent_tools.issue_branch", "--repo-root", str(self.root), "--issue", str(issue)],
+            [sys.executable, "-m", "agent_tools.issue_branch", *args],
             capture_output=True, text=True, timeout=120, cwd=str(self.home),
             env={**os.environ, "HOME": str(self.home), "FAKE_GH_STATE": str(self.state),
                  "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"})
         return proc.returncode, proc.stdout, proc.stderr
 
-    def derived(self, issue=9):
-        code, out, err = self.issue_branch(issue)
+    def fixture_args(self, argv):
+        """`argv` without its program name, the value after --repo-root pointing at the fixture project."""
+        args = list(argv[1:])
+        if "--repo-root" in args[:-1]:
+            args[args.index("--repo-root") + 1] = str(self.root)
+        return args
+
+    def derived(self, issue=9, argv=None):
+        code, out, err = self.issue_branch(issue, argv)
         self.assertEqual(code, 0, err)
         self.assertEqual(err, "")
         self.assertEqual(out.count("\n"), 1)
@@ -274,12 +294,26 @@ class ProgramsDeriveAlikeTest(IssueBranchCase):
         }
         outputs = {}
         for name, text in prompts.items():
-            found = ISSUE_BRANCH_ARGV.findall(text)
-            self.assertEqual(found, [("/r", "1")], name)
-            outputs[name] = self.derived(issue=int(found[0][1]))
+            argv = sent_argv(text)
+            self.assertEqual(argv, ["issue-branch", "--repo-root", "/r", "--issue", "1"], name)
+            outputs[name] = self.derived(argv=argv)
         self.assertEqual(outputs["deliver-standard"], outputs["deliver-batch"])
         self.assertEqual(outputs["deliver-standard"]["branch"], "issue-1-" + SHORT)
         self.assertLessEqual(len(outputs["deliver-standard"]["branch"].removeprefix("issue-1-")), 40)
+
+
+class SentArgvTest(unittest.TestCase):
+    def test_every_sent_argument_is_kept(self):
+        cases = {
+            "run alone and exactly issue-branch --repo-root /r --issue 1: it prints": ["--repo-root", "/r", "--issue", "1"],
+            "alone and exactly issue-branch --repo-root /r --issue 1 --issue 2 and return it":
+                ["--repo-root", "/r", "--issue", "1", "--issue", "2"],
+            "exactly issue-branch --repo-root /r --issue 1 --unsupported and return it":
+                ["--repo-root", "/r", "--issue", "1", "--unsupported"],
+        }
+        for text, want in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(sent_argv(text), ["issue-branch", *want])
 
 
 if __name__ == "__main__":

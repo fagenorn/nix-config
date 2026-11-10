@@ -165,7 +165,7 @@ const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string'
 const FACTS_SCHEMA = {
   type: 'object',
   properties: {
-    state: { type: 'string' }, labels: STRS, title: { type: 'string' }, branch: { type: 'string' },
+    state: { type: 'string' }, labels: STRS, title: { type: 'string' }, branch: { type: 'string' }, branch_error: { type: 'string' },
     claim: { type: 'object', properties: { verdict: { type: 'string', enum: ['free', 'held_by', 'stale', 'error'] }, by: { type: ['string', 'null'] } }, required: ['verdict'] },
     merged_pr: { type: ['integer', 'null'] },
     already_fixed: { anyOf: [{ type: 'object', properties: { commit: { type: 'string' }, evidence: { type: 'string' } }, required: ['commit', 'evidence'] }, { type: 'null' }] },
@@ -177,7 +177,7 @@ const FACTS_SCHEMA = {
 }
 const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git repository at ${REPO}) for a batch delivery with claim holder ${HOLDER}. Change nothing (a git fetch is fine), apart from what forge-claim status itself posts. ${FORGE_TIMEOUT}
 1. gh issue view ${n} --repo ${SLUG} --json state,labels,title,body,createdAt: return state, the label names as labels, and title; keep createdAt for step 7 (it is not returned).
-2. branch: run alone and exactly issue-branch --repo-root ${REPO} --issue ${n} and return the branch member of the one JSON line it prints; on a non-zero exit omit branch.
+2. branch: run alone and exactly issue-branch --repo-root ${REPO} --issue ${n} and return the branch member of the one JSON line it prints; on a non-zero exit omit branch and return branch_error: the exit code and the code and message of the JSON error it printed.
 3. claim: run alone and exactly forge-claim status --repo ${SLUG} --issue ${n} --holder ${HOLDER} and return its verdict (free, held_by or stale) and by; on exit 1 or 2 return verdict error.
 4. merged_pr: the number of a merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,body,title), else null. open_pr: {number, head_branch} of an open PR referencing the issue, else null.
 5. blockers: the issues this one is blocked by, from the body's "Blocked by" list and the tracker's issue dependencies, each as {issue, state} with the state from gh issue view.
@@ -714,6 +714,8 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
 
   // An issue is claimed only once it holds a child slot: a waiting issue holds no claim.
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
+  // Every claim, release and lane step below names the branch: without a derived one nothing is claimed (never `--branch undefined`).
+  if (!nonEmpty(f.branch)) { rows[n] = { issue: n, outcome: 'stopped', stage: 'branch', detail: nonEmpty(f.branch_error) ? f.branch_error : 'issue-branch derived no branch' }; return }
   await admit()
   let admitted = true
   try {

@@ -1456,6 +1456,21 @@ class IssueBranchFactsTest(unittest.TestCase):
         _, calls, _ = run()
         self.assertEqual(ISSUE_BRANCH_ARGV.findall(prompt(calls, "facts-1")), [("/r", "1")])
 
+    def test_a_failed_derivation_never_claims_and_keeps_the_failure_detail(self):
+        reply = {"branch": None, "branch_error": "issue-branch exited 1: forge_failed"}
+        result, calls, _ = run(patch={"facts-1": reply})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "branch",
+                                          "detail": "issue-branch exited 1: forge_failed"})
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertNotIn("acquire-1", labels(calls))
+        self.assertNotIn("child-1", labels(calls))
+        self.assertFalse([c for c in calls if "undefined" in c["prompt"]])
+
+    def test_a_failed_derivation_without_a_detail_still_stops_before_the_claim(self):
+        result, calls, _ = run(patch={"facts-1": {"branch": None}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "branch"))
+        self.assertNotIn("acquire-1", labels(calls))
+
 
 class DemoTest(unittest.TestCase):
     def test_three_issue_batch_with_a_dependency_and_a_questioned_issue_returns_one_table(self):
