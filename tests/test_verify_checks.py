@@ -378,10 +378,12 @@ class DeprecationsRetiredTest(unittest.TestCase):
         self.answer(deprecated=[], adapter="none")
 
     def answer(self, *, deprecated, adapter, targets=(), state="unsupported", resolve_exit=0,
-               project_id="elevenyellow/nodocom"):
+               project_id="elevenyellow/nodocom", schema_version=None):
         (self.answers / "platform-status.json").write_text(
             json.dumps({"project": {"deprecated_uses": deprecated}}))
+        versioned = {} if schema_version is None else {"schema_version": schema_version}
         (self.answers / "resolve.json").write_text(json.dumps({
+            **versioned,
             "project": {"id": project_id, "root": str(self.root)},
             "bindings": {} if adapter is None else {"deploy": {"adapter": adapter}},
             "capabilities": {"release": {"state": state, "reason_code": None, "repair_id": None}},
@@ -419,11 +421,22 @@ class DeprecationsRetiredTest(unittest.TestCase):
                 self.assertEqual(self.check(red_pending=True)[0], 75)
 
     def test_a_schema_2_snapshot_without_a_deploy_binding_reads_c_green(self):
-        self.answer(deprecated=[], adapter=None)
+        self.answer(deprecated=[], adapter=None, schema_version=2)
         code, report = self.check()
         self.assertEqual((code, report["roots"][0]["readings"]["c"]["status"]), (0, "green"))
-        self.answer(deprecated=[], adapter=None, resolve_exit=2)
+        self.answer(deprecated=[], adapter=None, schema_version=2, resolve_exit=2)
         self.assertEqual(self.check()[0], 1)
+
+    def test_a_schema_1_snapshot_without_a_deploy_binding_reads_c_red(self):
+        for version in (1, None, True, "2"):
+            with self.subTest(schema_version=version):
+                self.answer(deprecated=[], adapter=None, schema_version=version)
+                code, report = self.check()
+                self.assertEqual((code, report["roots"][0]["readings"]["c"]["status"]), (1, "red"))
+
+    def test_a_schema_1_snapshot_with_the_none_adapter_reads_c_green(self):
+        self.answer(deprecated=[], adapter="none", schema_version=1)
+        self.assertEqual(self.check()[1]["roots"][0]["readings"]["c"]["status"], "green")
 
     def test_a_real_deploy_adapter_keeps_c_red_and_none_keeps_it_green(self):
         self.answer(deprecated=[], adapter="railway")
