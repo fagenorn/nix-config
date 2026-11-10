@@ -47,7 +47,8 @@ export const meta = {
 // LAND: ship opens the PR at the verified head, takes the cross-host land lock of the integration branch with --wait
 // (the CLI does the waiting), then syncs, pushes and moves the lock after every head change, waits for every check on head (issue 756),
 // re-checks the lock once, merges and releases it; the lock is released on every stop after it was taken, and a release that
-// fails is reported as lock_unreleased on the result (#677).
+// fails is reported as lock_unreleased on the result (#677). After a merge the lock is released first thing in the hold call;
+// a release that call does not confirm gets one standalone release after close-out (#801). Every stop before the merge still releases it.
 //
 // Lifecycle forms follow the contract (merge strategy, delete_branch, credential
 // unsets). A host guard that accepts fewer forms refuses at that command; the
@@ -438,6 +439,10 @@ const SLUG = setup.slug, INT = setup.integration_branch, STRATEGY = setup.merge_
 const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
 const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
+const RELEASE_FIRST = (sha, maybe) => `First, before anything below, release the cross-host landing lock of the branch ${INT}: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
+released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail as release.
+${maybe ? RELEASE_AGAIN(maybe) : ''}Then, whatever its verdict, go on with the steps below.
+`
 const UNSET = setup.unset_env.length ? `unset ${setup.unset_env.join(' ')} && ` : ''
 let GRANTS = []
 const RULES_FOR = (W, extra = GRANTS) => `${BASE_RULES}
@@ -466,6 +471,7 @@ const badKinds = acceptance => acceptance.filter(a => !(a && ACCEPT_KINDS.includ
 const RUN_OK = r => !!(r && r.ran === true && r.exit === 0)
 const LINT_V = { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array' } } }
 const RUN_V = { type: 'object', properties: { ran: { type: 'boolean' }, exit: { type: 'integer' } }, required: ['ran', 'exit'] }
+const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
 const HOLD_SCHEMA = { type: 'object', properties: {
   merge_commit_local: { type: 'boolean' }, code_unmet: STRS, blocks: { type: 'array', items: { type: 'integer' } },
   split: { type: 'array', items: { type: 'object', properties: { ac: { type: 'string' }, issue: { type: 'integer' }, block: { type: 'object' }, lint: LINT_V, verify_run: RUN_V, issue_state: { type: 'string' } }, required: ['ac', 'issue', 'lint', 'verify_run', 'issue_state'] } },
@@ -476,7 +482,9 @@ const STATES = ['OPEN', 'CLOSED']
 // The criterion ids no check of the block names: a hold must cover every criterion it leaves open, or the issue would close on a partial check.
 const covers = (checks, ids) => ids.filter(id => !checks.some(c => c && c.ac === id))
 
-const closeOut = async (PR, mergeCommit, W, prHead) => {
+// The folded release reply of this run's hold call, or null (#801).
+let landRelease = null
+const closeOut = async (PR, mergeCommit, W, prHead, lock = null) => {
   const acceptance = plan ? plan.acceptance : null
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
   const unknown = badKinds(acceptance)
@@ -491,10 +499,11 @@ const closeOut = async (PR, mergeCommit, W, prHead) => {
 5. When blocks is non-empty, move each human criterion into its own new issue that blocks no other issue (forge-issue create --repo ${SLUG}, its body naming #${ISSUE}), hold that issue by step 6 with only that criterion's check (no --blocks flag; its once-run uses --issue <child>), and return one split entry per moved criterion with its issue, block, lint, verify_run and issue_state.
 6. For the criteria left (evidence or human, not split): none left means close #${ISSUE} with a comment naming the evidence and the split issues. Otherwise assemble one hold comment: a line per criterion, then exactly one \`\`\`verify fence holding {"v": 1, "merge": <the merge commit>, "checks": [...]} built from each criterion's verify member with every occurrence of the base sha ${setup.base_sha} replaced by the merge commit (a criterion without a verify member gets one written per ~/.agents/standards/acceptance-planning.md; an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe). Write it to a file outside any work tree and run verify-pending lint --input <file> --repo-root ${REPO} --pr-head ${prHead || '<the headRefOid read in step 1>'} --pr-branch ${setup.branch} plus one --pr-workflow <name> per distinct workflow of gh pr checks ${PR} --repo ${SLUG} --json workflow and one --blocks <n> per blocked issue. On refusal post nothing and return its verdict as lint. Otherwise, when no hold comment with a verify fence exists yet, gh issue comment ${ISSUE} --repo ${SLUG} --body-file <file> (when one exists, post nothing: write its fence JSON to the file and lint that, so lint is still returned), add the needs-verification label (create it if missing), then run alone, once, even when an earlier attempt ran it: verify-pending run --host ${setup.host} --repo ${SLUG} --issue ${ISSUE}. Return block (the posted JSON), lint, verify_run (ran, exit) and issue_state read back from the tracker.`
   const held = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Hold the issue's acceptance after the merge, by ~/.agents/standards/acceptance-planning.md (its "Linting a hold" section is the procedure). Skip the posting steps an earlier attempt already finished (an existing hold comment with a verify fence, the label, a split issue already filed and held for that criterion), but never skip the evidence you return: lint and verify_run are always fresh results of this attempt, so on such a retry take block from the posted verify fence, lint that block, run the once-run, and return all three. Each command in its own Bash call:
-1. Run git -C ${REPO} fetch origin. Merge commit: ${merged}${mergeCommit ? '' : ' (and read headRefOid, the PR head)'}. Confirm git -C ${REPO} cat-file -e <merge commit>^{commit} succeeds and return the result as merge_commit_local; if it fails, stop here. Criteria: ${JSON.stringify(acceptance)}
+${lock ? RELEASE_FIRST(lock.sha, lock.maybe) : ''}1. Run git -C ${REPO} fetch origin. Merge commit: ${merged}${mergeCommit ? '' : ' (and read headRefOid, the PR head)'}. Confirm git -C ${REPO} cat-file -e <merge commit>^{commit} succeeds and return the result as merge_commit_local; if it fails, stop here. Criteria: ${JSON.stringify(acceptance)}
 2. Regrade each code criterion once against the merge commit and the PR's passed required checks; a note criterion is the orchestrator's own observation and is never regraded, held or checked. Return the unmet ids as code_unmet and, if any, stop here: post nothing and add no label.
 3. ${noHold ? 'Every criterion is of kind code or note: post nothing, add no label; return issue_state read from the tracker.' : 'Some criteria are of kind evidence or human. Read gh issue view ' + ISSUE + ' --repo ' + SLUG + ' --json state. When it already shows CLOSED before this attempt posts or runs anything, return already_closed true and issue_state CLOSED, post nothing, add no label and run no verify-pending command for #' + ISSUE + ' itself (step 6 is skipped); steps 4 and 5 still apply, so a split issue an earlier attempt filed is recovered and returned with its lint and a fresh once-run. Otherwise return already_closed false and continue with steps 4 to 6.'}${heldBlock}
-${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: HOLD_SCHEMA })
+${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'clerk', model: 'sonnet', effort: 'high', schema: lock ? { ...HOLD_SCHEMA, properties: { ...HOLD_SCHEMA.properties, release: NULLABLE(RELEASE_SCHEMA) } } : HOLD_SCHEMA })
+  if (lock) landRelease = held ? (held.release ?? null) : null
   if (!held) return stop('hold', { pr: PR })
   if (held.merge_commit_local !== true) return stop('hold', { pr: PR, hold: held })
   if (!Array.isArray(held.code_unmet)) return stop('hold', { pr: PR, hold: held })
@@ -1170,7 +1179,6 @@ const LOCK_SCHEMA = {
   properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'moved', 'held_by', 'lost_to', 'land-contended', 'error'] }, lock_sha: { type: 'string' }, pr: { type: 'integer' }, by: { type: 'string' }, detail: { type: 'string' } },
   required: ['verdict'],
 }
-const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
 let PR = null
 let expected = verify.head
 let head = expected
@@ -1374,12 +1382,20 @@ Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} s
 }
 let landed
 let released = {}
+let mergedNow = false
 try {
   landed = await landBody()
+  mergedNow = landed === null
 } finally {
-  released = await unlock()
+  if (!mergedNow) released = await unlock()
 }
 if (landed) return { ...landed, ...released }
 
-const finished = await closeOut(PR, mg.merge_commit, W, head)
+let finished
+try {
+  finished = await closeOut(PR, mg.merge_commit, W, head, lockHeld ? { sha: lockSha, maybe: lockMaybe && !sameSha(lockMaybe, lockSha) ? lockMaybe : null } : null)
+} finally {
+  if (landRelease && (landRelease.verdict === 'released' || landRelease.verdict === 'not_held')) lockHeld = false
+  released = await unlock()
+}
 return finished.stage === 'done' ? { ...finished, chunked, syncs, verify: verify.results, ...released } : { ...finished, ...released }

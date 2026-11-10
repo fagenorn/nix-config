@@ -64,11 +64,11 @@ const DEFAULTS = [
   [/^pr$/, { pr: 42, head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } }],
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'], renew: { verdict: 'renewed' } }],
   [/^merge$/, { merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } }],
-  [/^hold$/, prompt => ({ merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: SHA, checks: openChecks(prompt) }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held' })],
+  [/^hold$/, prompt => ({ merge_commit_local: true, code_unmet: [], blocks: [], split: [], block: { v: 1, merge: SHA, checks: openChecks(prompt) }, lint: { ok: true, errors: [] }, verify_run: { ran: true, exit: 0 }, issue_state: 'OPEN', notes: 'held', release: { verdict: 'released' } })],
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok' }],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^(pr|merge)$/, ['renew', 'lock']], [/^checks-/, ['renew']], [/^(impl-\d+|direct-impl)$/, ['renew']]]
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^(pr|merge)$/, ['renew', 'lock']], [/^checks-/, ['renew']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
 const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)
