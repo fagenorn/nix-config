@@ -128,6 +128,7 @@ FOLDED_READ = {
     "pr": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "checks-1": ({"state", "head", "failing", "details", "pending"}, {"renew": RENEW_READ}),
     "merge": ({"merged", "behind", "merge_commit", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
+    "impl-1": ({"status", "start_head", "commit", "notes"}, {"renew": RENEW_READ}),
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
                "worktree_path", "head", "merged_pr", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
                "existing", "unset_env", "merge_strategy", "delete_branch", "review", "review_state", "knowledge",
@@ -153,7 +154,7 @@ class FoldTest(unittest.TestCase):
 
     def test_folded_schemas_keep_every_read_field(self):
         _, calls = run()
-        renew = schema_of(calls, "renew-tasks")
+        renew = member(schema_of(calls, "verify"), "renew")
         merge = "d" * 40
         _, moved_calls = run(replies={"checks-1": {"state": "behind", "head": SHA},
                                       "checks-2": {"state": "passed", "head": merge}},
@@ -312,9 +313,65 @@ class FoldTest(unittest.TestCase):
         self.assertLess(names.index("renew-plan"), names.index("plan-review"))
 
 
-CHILD_HAPPY = ["setup", "plan", "plan-codex", "plan-review", "renew-tasks", "impl-1", "review-1",
+CHILD_HAPPY = ["setup", "plan", "plan-codex", "plan-review", "impl-1", "review-1",
                "renew-final-review", "final-codex", "final-1", "verify", "pr", "checks-1", "merge",
                "land-unlock", "hold", "close-out"]
+
+
+class FoldedTaskRenewTest(unittest.TestCase):
+    """#745: the first implementer call of a run renews the claim first; its renew is graded before any task field."""
+
+    def test_only_the_first_implementer_of_a_run_renews(self):
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(2))})
+        self.assertNotIn("renew-tasks", labels(calls))
+        first = prompt(calls, "impl-1")
+        self.assertLess(first.index(RENEW), first.index("/g/task-1.md"))
+        self.assertEqual(schema_of(calls, "impl-1")["required"], ["renew"])
+        self.assertEqual(next(c for c in calls if c["label"] == "impl-1")["agentType"], "implementer")
+        self.assertNotIn(RENEW, prompt(calls, "impl-2"))
+        self.assertNotIn("renew", schema_of(calls, "impl-2")["properties"])
+
+    def test_a_lost_renew_inside_impl_1_stops_before_any_task_result_is_used(self):
+        done = {"status": "done", "start_head": "b0", "commit": "c0ffee", "tests": ["t"], "notes": "ok"}
+        for renew in ({"verdict": "not_held", "by": "h2/b1"}, {"verdict": "error", "detail": "forge down"}, None):
+            with self.subTest(renew=renew):
+                result, calls = run(replies={"impl-1": dict(done, renew=renew)})
+                self.assertEqual((result["stage"], result["at"]), ("claim-lost", "tasks"))
+                self.assertNotIn("review-1", labels(calls))
+                if renew and renew["verdict"] == "not_held":
+                    self.assertNotIn("cont", result)
+                else:
+                    self.assertTrue(result["cont"]["claim_incomplete"])
+                    self.assertEqual(result["cont"]["done"], [])
+                    self.assertNotIn("partial", result["cont"])
+
+    def test_direct_impl_renews_first_and_a_lost_renew_stops_before_its_result(self):
+        _, calls = run(args=DIRECT)
+        self.assertNotIn("renew-tasks", labels(calls))
+        text = prompt(calls, "direct-impl")
+        self.assertLess(text.index(RENEW), text.index("deliver-direct"))
+        self.assertEqual(schema_of(calls, "direct-impl")["required"], ["renew"])
+        result, calls = run(args=DIRECT, patch={"direct-impl": {"renew": {"verdict": "not_held", "by": "h2/b1"},
+                                                                "ineligible": True}})
+        self.assertEqual((result["stage"], result["at"]), ("claim-lost", "tasks"))
+        self.assertNotIn("direct-review", labels(calls))
+
+
+# The bookkeeping agents of one fresh standard issue's happy path at e0c0656d (issue 745 baseline): setup,
+# owner-answer, renew-tasks, renew-final-review, land-unlock and close-out.
+BOOKKEEPING = re.compile(r"^(setup|acquire|worktree|renew|owner-answer|land-lock|land-unlock|close-out)(-|$)")
+BOOKKEEPING_BASELINE = 6
+
+
+class StandardBookkeepingCountTest(unittest.TestCase):
+    def test_a_standard_issue_runs_at_least_two_fewer_bookkeeping_agents(self):
+        # Standalone (acquired), and as a batch child whose folded acquire answers already_held (D1, D6).
+        for kw in ({}, {"args": BATCH_CHILD, "patch": {"setup": {"acquire": HELD}}}):
+            with self.subTest(kw=kw):
+                result, calls = run(**kw)
+                self.assertEqual(result["stage"], "done")
+                book = [l for l in labels(calls) if BOOKKEEPING.match(l)]
+                self.assertLessEqual(len(book), BOOKKEEPING_BASELINE - 2, book)
 
 
 class HappyPathTest(unittest.TestCase):
@@ -660,11 +717,11 @@ class FoldedSetupRenewTest(unittest.TestCase):
 
 RENEW = f"forge-claim renew --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x"
 # (at, the call that renews, nested): a nested renew rides in that call's reply as renew.
-BOUNDARIES = [("tasks", "renew-tasks", False),
+BOUNDARIES = [("tasks", "impl-1", True),
               ("final-review", "renew-final-review", False), ("verify", "verify", True),
               ("ship", "pr", True), ("checks-1", "checks-1", True), ("merge", "merge", True)]
 # The text each folded prompt runs after its renew.
-STEP_MARK = {"verify": "Run the project's declared verification",
+STEP_MARK = {"impl-1": "task-1.md", "verify": "Run the project's declared verification",
              "pr": "open the pull request", "checks-1": "to be mergeable", "merge": "forge-claim land acquire"}
 
 
@@ -805,6 +862,7 @@ class ClaimTest(unittest.TestCase):
 TRANSIENT = {"verdict": "error", "detail": "gh_failed: dial tcp: connect: network is unreachable", "transient": True}
 # The full second reply of each folded step whose first renew ran out of transport retries; the harness fills renew and lock.
 SECOND = {
+    "impl-1": {"status": "done", "start_head": "b0", "commit": "c0ffee", "tests": ["t"], "notes": "ok"},
     "verify": {"head": SHA, "clean": True, "results": [{"id": "build", "status": "pass", "summary": "ok"}]},
     "pr": {"pr": 42, "head": SHA},
     "checks-1": {"state": "passed", "head": SHA, "required": ["ci"]},
@@ -882,8 +940,8 @@ class TransientTest(unittest.TestCase):
 
     def test_every_renew_and_acquire_asks_for_transient(self):
         _, calls = run()
-        self.assertEqual(schema_of(calls, "renew-tasks")["properties"]["transient"], {"type": "boolean"})
-        for via in ("setup", "renew-tasks", "verify", "pr", "checks-1", "merge"):
+        self.assertEqual(member(schema_of(calls, "verify"), "renew")["properties"]["transient"], {"type": "boolean"})
+        for via in ("setup", "impl-1", "verify", "pr", "checks-1", "merge"):
             with self.subTest(via=via):
                 self.assertIn("transient", prompt(calls, via))
         _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
@@ -896,7 +954,7 @@ class TransientTest(unittest.TestCase):
     def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
         timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
         _, calls = run()
-        for via in ("setup", "renew-tasks", "verify", "pr", "checks-1", "merge"):
+        for via in ("setup", "impl-1", "verify", "pr", "checks-1", "merge"):
             with self.subTest(via=via):
                 self.assertIn(timeout, prompt(calls, via))
         _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
@@ -1445,7 +1503,8 @@ class ResumeTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=self.cont(partial=2)))
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[:4], ["setup", "renew-tasks", "impl-2", "review-2"])
+        self.assertEqual(names[:3], ["setup", "impl-2", "review-2"])
+        self.assertIn(RENEW, prompt(calls, "impl-2"))
         self.assertNotIn("plan", names)
         self.assertNotIn("impl-1", names)
         self.assertIn("re-adopt", prompt(calls, "setup"))
@@ -3010,7 +3069,7 @@ class DirectLaneTest(unittest.TestCase):
         self.assertIn("lane: direct.", reviewers[0]["prompt"])
         self.assertIn("direct-codex", names)
         self.assertNotIn("final-1", names)
-        self.assertEqual(names[names.index("direct-impl") - 1], "renew-tasks")
+        self.assertEqual(names[names.index("direct-impl") - 1], "setup")
         self.assertIn("renew-final-review", names[:names.index("direct-review")])
         self.assertIn("direct-lane review", prompt(calls, "pr"))
 
@@ -3273,7 +3332,7 @@ class DeclaredBranchTest(unittest.TestCase):
         cut = labels(calls).index("plan-review") + 1
         post = calls[cut:]
         granted = {c["label"] for c in post if c["agentType"] not in REVIEWERS}
-        self.assertLessEqual({"renew-tasks", "impl-1", "impl-2", "fix-2-1", "renew-final-review", "final-codex",
+        self.assertLessEqual({"impl-1", "impl-2", "fix-2-1", "renew-final-review", "final-codex",
                               "verify", "pr", "checks-1", "merge", "land-unlock", "hold",
                               "close-out"}, granted)
         for c in post:
