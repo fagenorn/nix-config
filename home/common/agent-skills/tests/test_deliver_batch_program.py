@@ -2114,5 +2114,17 @@ class WholeTestFileLandTest(unittest.TestCase):
         self.assertIn("before pushing, run in full every test file", text)
 
 
+class KeptObligationLandTest(unittest.TestCase):
+    """#787: the byte-budget trims left these obligations of the land prompts in place."""
+
+    def test_another_branchs_pr_is_left_untouched(self):
+        _, calls, _ = run()
+        self.assertIn("even when it references this issue; leave it untouched.", prompt(calls, "land-pr-1"))
+
+    def test_a_rerun_must_not_merge_twice(self):
+        _, calls, _ = run()
+        self.assertIn("a re-run must not merge twice.", prompt(calls, "land-merge-1"))
+
+
 if __name__ == "__main__":
     unittest.main()

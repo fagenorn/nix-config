@@ -4316,5 +4316,29 @@ class WholeTestFileTest(unittest.TestCase):
                 self.assertNotIn(WHOLE_RUN[0], text)
 
 
+class KeptObligationTest(unittest.TestCase):
+    """#787: the byte-budget trims left these obligations of the post-loop prompts in place."""
+
+    def test_the_whitespace_attestation_stays_a_question(self):
+        _, calls = WhitespaceCarryForwardTest.scenario(WS_ONLY)
+        self.assertIn("Also judge whether each of its whitespace changes is insignificant:",
+                      prompt(calls, "verify-fix-review-1"))
+
+    def test_a_rejected_finding_needs_evidence_in_notes(self):
+        _, calls = run(replies={"final-1": FixWaveTest.FIRST})
+        self.assertIn("If a finding is wrong, explain with evidence in notes.", prompt(calls, "fix-wave"))
+
+    def test_the_verify_body_asks_for_precise_failure_summaries(self):
+        _, calls = run(replies={"verify": VERIFY_RED})
+        self.assertIn("summarize the failing tests or errors precisely.", prompt(calls, "verify"))
+
+    def test_the_sync_fix_may_not_rewrite_the_merge_and_its_rebuttal_is_checked_yourself(self):
+        fix = {"start_head": "d" * 40, "commit": "d" * 40, "notes": "the finding is wrong because x"}
+        _, calls = run(replies={"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": BAD},
+                       patch={"sync-1": {"conflicted": True, "merge_commit": "d" * 40}, "fix-sync-1": fix})
+        self.assertIn("never redo or rewrite the merge", prompt(calls, "fix-sync-1"))
+        self.assertIn("Check each rebuttal against the code yourself", prompt(calls, "fix-sync-review-1"))
+
+
 if __name__ == "__main__":
     unittest.main()
