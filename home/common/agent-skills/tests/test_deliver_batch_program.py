@@ -2126,5 +2126,40 @@ class KeptObligationLandTest(unittest.TestCase):
         self.assertIn("a re-run must not merge twice.", prompt(calls, "land-merge-1"))
 
 
+class CodexUnavailableDetailTest(unittest.TestCase):
+    """#790: a codex-unavailable child stop shows the reviewer's reason in the table."""
+
+    REASON = "runtime failure: You've hit your usage limit. Try again at Nov 12th, 2026 5:34 AM."
+
+    def test_a_codex_unavailable_stop_shows_its_reason(self):
+        for c in ({"stage": "codex-unavailable", "step": "code", "details": self.REASON, "cont": {"setup": {}}},
+                  {"stage": "codex-unavailable", "step": "plan", "details": self.REASON}):
+            with self.subTest(cont="cont" in c):
+                result, _, _ = run(children={"1": c})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped",
+                                                  "stage": "codex-unavailable", "detail": self.REASON})
+
+    def test_a_codex_unavailable_dead_agent_stop_shows_its_reason_and_trips_the_breaker(self):
+        nothing = "the Codex review step returned nothing"
+        c = {"stage": "codex-unavailable", "step": "code", "details": nothing, "dead_agents": ["final-codex"],
+             "cont": {"setup": {}}}
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"setup": {"max_parallel": 1}},
+                               children={"1": c})
+        self.assertEqual(result["stage"], "breaker")
+        self.assertNotIn("child-2", labels(calls))
+        self.assertEqual(result["relaunch"]["issues"], [1, 2])
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "codex-unavailable",
+                                          "dead_agents": ["final-codex"], "detail": nothing})
+
+    def test_other_stops_keep_their_row(self):
+        for c in ({"stage": "task", "details": "x", "cont": {"setup": {}}},
+                  {"stage": "codex-unavailable", "step": "code", "cont": {"setup": {}}},
+                  {"stage": "plan-review", "details": "the plan reviewer returned nothing",
+                   "dead_agents": ["plan-review"], "cont": {"setup": {}}}):
+            with self.subTest(stage=c["stage"]):
+                result, _, _ = run(children={"1": c})
+                self.assertNotIn("detail", row(result, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

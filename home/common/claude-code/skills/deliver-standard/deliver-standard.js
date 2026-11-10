@@ -706,6 +706,8 @@ const FIX_TESTS = `Before returning, ${WHOLE('the files you changed')}. ${FMT}`
 const CX_USE = 'Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex'
 const CX_WAIT = 'this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn.'
 const CX_NONE = 'If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.'
+// #790: a codex-unavailable stop says why (a usage limit and its reset time), so no diagnosis run is needed.
+const codexWhy = r => (!r ? 'the Codex review step returned nothing' : typeof r.raw_summary === 'string' && r.raw_summary.trim() ? r.raw_summary : 'the Codex review step gave no reason')
 let ACS = null, PLAN_REF = null
 // The last head this run knows for each declared branch (#713); read only through own().
 const branchTips = Object.create(null)
@@ -797,7 +799,7 @@ ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RAN
     }
     const codexR = await codexP
     if (!review) return stop('direct-review', { review: null })
-    if (REVIEW_CODE && (!codexR || !codexR.available)) return stop('codex-unavailable', { step: 'code', codex: codexR })
+    if (REVIEW_CODE && (!codexR || !codexR.available)) return stop('codex-unavailable', { step: 'code', details: codexWhy(codexR), codex: codexR })
     const findings = findingsOf(review).concat(ungradedFindings(review, plan.acceptance), REVIEW_CODE ? findingsOf(codexR).map(f => ({ ...f, source: 'codex' })) : [])
     if (REVIEW_CODE) log(`codex review: ${findingsOf(codexR).length} blocking findings`)
     if (findings.length) {
@@ -902,7 +904,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   if (!planReviewClaude) return stop('plan-review', { details: 'the plan reviewer returned nothing' })
   let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
   if (REVIEW_PLAN) {
-    if (!planCodexR || !planCodexR.available) return stop('codex-unavailable', { step: 'plan', codex: planCodexR })
+    if (!planCodexR || !planCodexR.available) return stop('codex-unavailable', { step: 'plan', details: codexWhy(planCodexR), codex: planCodexR })
     planFindings = planFindings.concat(findingsOf(planCodexR).map(f => ({ ...f, source: 'codex' })))
     log(`codex plan review: ${findingsOf(planCodexR).length} blocking findings`)
   }
@@ -1028,7 +1030,7 @@ const codexR = await codexP
 if (finals.some(r => !r)) return stop('final-review', { details: 'a final reviewer returned nothing', finals })
 let finalFindings = finals.flatMap(findingsOf)
 if (REVIEW_CODE) {
-  if (!codexR || !codexR.available) return stop('codex-unavailable', { step: 'code', codex: codexR })
+  if (!codexR || !codexR.available) return stop('codex-unavailable', { step: 'code', details: codexWhy(codexR), codex: codexR })
   finalFindings = finalFindings.concat(findingsOf(codexR).map(f => ({ ...f, source: 'codex' })))
   log(`codex review: ${findingsOf(codexR).length} blocking findings`)
 }
