@@ -27,6 +27,25 @@ location: `{project_id, root}` with the real root (#148 D18), plus the same
 through the operand; a later registration of the project without an override
 drops it (issue 363).
 
+The default branch's contract stays the authority when it resolves:
+`--integration-branch NAME` equal to the branch it names (or to the default
+branch when it names none) changes nothing, and any other operand refuses. The
+operand is accepted only with `--register` and at most once, refusing
+`adopt.verify.integration_branch_without_register` and
+`adopt.verify.integration_branch_repeated` as `adopt_failure`. A run that
+selects its branch through it carries a `branch_override` object (`branch`,
+`default_branch` and `reason`, whose one value is `default_contract_unresolved`)
+in the report and in its registry entry, and in no other run; a later
+registration of the project that did not need the operand drops it from the
+entry, another project's registration leaves it, and a repeated operand
+registration writes the same bytes. The report `schema_version` stays 2 and the
+registry `schema_version` 1, and no reader decides anything from the member.
+Every operand that the remote or the branch's contract does not confirm refuses
+`not_integrated` with `adopt.registration.integration_branch_unresolved`; a
+pinned commit with no adoption evidence record refuses `not_integrated` with
+`adopt.registration.not_integrated`, and when the default contract did not
+resolve and no operand was given its message names `--integration-branch`.
+
 The resolver is not reached from this module. `adopt-project` owns the one
 seam it is consumed through — invoked as a child process through
 `agent_tools.siblings.sibling_argv`, never imported (D26) — and hands that

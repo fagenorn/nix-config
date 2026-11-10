@@ -27,3 +27,11 @@ Where each section of the three READMEs that issue 694 dissolved went: contract 
 | `python/README.md` | Release adapters | decision | `docs/areas/release/adr/005-adapters-never-claim-success.md`, `docs/areas/release/adr/006-forge-merge-needs-the-protection-floor.md`, `docs/areas/release/adr/007-deploy-watches-are-activation-units.md` |
 | `python/README.md` | Release driver | contract | `python/agent_tools/release_driver.py`, `python/agent_tools/release_verification.py`, `python/agent_tools/release_cutover.py`, `python/agent_tools/release.py` |
 | `python/README.md` | Release driver | decision | `docs/areas/release/adr/008-preview-creates-nothing.md` |
+| `python/README.md` | adopt-project | contract | `python/agent_tools/adopt_project.py`, `python/agent_tools/adopt_links.py`, `python/agent_tools/adopt_references.py`, `python/agent_tools/adopt_verify.py`, `python/agent_tools/adopt_migrate.py` |
+| `python/README.md` | adopt-project | decision | `docs/areas/project-contract/adr/004-adoption-edits-nothing-without-an-answer.md`, `docs/areas/project-contract/adr/005-registration-reads-the-remote.md` |
+| `python/README.md` | Platform deprecations | contract | `python/agent_tools/agent_platform.py`, `python/agent_tools/resolve_project.py` |
+| `python/README.md` | Platform deprecations | decision | `docs/areas/project-contract/adr/002-platform-2-removes-the-legacy-surfaces.md`, `docs/areas/project-contract/adr/003-deprecation-status-reports-presence.md` |
+| `python/README.md` | Platform deprecations | how-to | `docs/guides/retire-the-deploy-watch.md` |
+| `python/README.md` | Project schema 2 | contract | `python/agent_tools/resolve_project.py` |
+| `python/README.md` | Project schema 2 | decision | `docs/areas/project-contract/adr/001-schema-2-drops-the-deploy-watch.md` |
+| `python/README.md` | fallback-audit | contract | `python/agent_tools/fallback_audit.py` |

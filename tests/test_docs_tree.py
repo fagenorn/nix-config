@@ -46,6 +46,14 @@ AUDITED: frozenset[tuple[str, str, str]] = frozenset({
     ("python/README.md", "Release adapters", "decision"),
     ("python/README.md", "Release driver", "contract"),
     ("python/README.md", "Release driver", "decision"),
+    ("python/README.md", "adopt-project", "contract"),
+    ("python/README.md", "adopt-project", "decision"),
+    ("python/README.md", "Platform deprecations", "contract"),
+    ("python/README.md", "Platform deprecations", "decision"),
+    ("python/README.md", "Platform deprecations", "how-to"),
+    ("python/README.md", "Project schema 2", "contract"),
+    ("python/README.md", "Project schema 2", "decision"),
+    ("python/README.md", "fallback-audit", "contract"),
 })
 
 # The base sections no text leaves.

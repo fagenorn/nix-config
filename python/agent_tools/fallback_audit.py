@@ -4,6 +4,41 @@
 `ladders` reports every tracked workflow-entry file that still names a removed
 resolution route. `traces` reports every shell call recorded after an instant
 that ran one. Both are read-only.
+
+`ladders [--repo-root R] [--manifest PATH]` reads the tracked files under
+`ENTRY_PATHSPECS` (`git ls-files`, so untracked files, `.agents/artifacts/**`,
+`**/tests/**`, `**/evals/**` and the module itself are never scanned) and
+reports each `(path, line, marker_id)` hit of an `INVENTORY_MARKERS` literal or
+of a removal subject of kind `project_file` or `platform_behavior` in the
+manifest (`--manifest`, else the repository's committed
+`platform-manifest.json`). `NON_LADDER_SITES` is the closed exemption table,
+and it belongs to nix-config: it applies only when the root's
+`.agents/project.json` declares `project.id` `fagenorn/nix-config`
+(`NON_LADDER_PROJECT_ID`, read through `resolve_project.declared_facts`), so
+another project's audit has no exemption rows and no `stale_exemption` finding,
+and a root whose contract is missing or unreadable has none either (#763). A
+row `(path, marker_id, reason)` moves every hit of exactly that marker in
+exactly that path to `exempt`, and a row with no hit is itself a finding,
+`stale_exemption:<marker_id>`, and a tracked entry file that cannot be read is
+a finding `unreadable_input` (never exempt), because a scan that skipped a file
+proves nothing. A row needs a reason that says why the hit is not a route;
+rewording code to dodge a literal is never a fix. It then runs the fail-closed
+probe, `resolve-project resolve` on a fresh git repository, which must exit 2
+with an `error.code` in `resolve_project.ERROR_CODES`. It prints one JSON line
+`{findings, exempt, probe, clean}` and exits 0 when clean, 1 when not.
+
+`traces --since T [--claude-root P] [--codex-root P]` (T is RFC 3339 with an
+offset) reads its own transcripts: every `*.jsonl` under each root recursively
+(subagent transcripts and Codex's dated rollouts included), skipping a file
+whose mtime is before T. Each line must parse to an object, and a call record
+with a missing or unparseable `timestamp` is not dropped silently; both add to
+`skipped_lines`. A call is a Claude `Bash` `tool_use`, or a Codex
+`function_call` of a shell tool, an `exec` `custom_tool_call` or a
+`local_shell_call`; usage is never read. Each call after T whose text holds the
+literal of `release-deploy-inspect`, `resolve-bindings` or
+`legacy-skills-config` is an execution carrying its first 200 characters, so
+the owner can discount a mere search for the literal. Exit 0 with none, 1 with
+any, 2 on usage or an unopenable file.
 """
 
 from __future__ import annotations

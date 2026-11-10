@@ -5,6 +5,7 @@
 | [CONTEXT-MAP.md](./CONTEXT-MAP.md) | The map: the areas, the paths each governs, and which area owns each term |
 | [areas/](./areas/) | One directory per area: a budgeted glossary plus that area's decision records |
 | [standards/](./standards/) | The coding bar for this repo |
+| [guides/](./guides/) | Procedures: how to do one task, one file each |
 | [archive/](./archive/) | Retained evidence and point-in-time records, kept at their paths |
 | [spikes/](./spikes/) | Point-in-time spike reports, kept at their paths |
 

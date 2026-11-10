@@ -24,6 +24,40 @@ platform's version facts, and — when asked — one project's declared interval
 and compatibility verdict, or one verdict row per registered fleet member. It
 is never normal workflow context (R3.1).
 
+`platform-status` republishes `platform.deprecations` verbatim and adds
+`deprecated_uses` to the `project` block and to each `fleet` row: the ascending
+ids of the `project_file` entries whose `subject` exists under that root by
+`os.lstat` (a dangling symlink counts) and of the `project_schema` entries
+whose `subject` equals the `schema_version` of that root's
+`.agents/project.json` read as JSON, or `null` when the root is not a
+directory, a subject cannot be inspected, or a `project_schema` entry is
+declared and the contract file is missing, unreadable or carries a non-integer
+version (only ENOENT and ENOTDIR mean absent; EACCES or EIO never read as a
+clean report). It never changes `compatible`, `reason_code`, `repair_id` or the
+exit code, and `resolve` never reads it. `removed_uses` (`removed_uses`, issue
+579 P2) applies exactly those rules to `removals`, in the `project` block and in
+every fleet row. The report is interface version 3
+(`PLATFORM_STATUS_SCHEMA_VERSION`).
+
+`platform-status --manifest PATH` (issue 579 P7) judges against the manifest at
+`PATH` instead of the installed one: it is loaded and validated by the
+installed loader's rules, `platform.manifest_path` is `PATH` resolved, and a
+missing or invalid `PATH` refuses `resolver_failure` exactly as a broken
+installed manifest does. The cutover preflight runs the candidate's own code
+this way against the candidate's own manifest.
+
+Platform 2.0.0 supports project schema 2 only (`project_schema_versions` is
+`[2]`, `resolved_schema_version` is 2) and declares the migration
+`bindings-deploy.retire` from schema 1 to 2 (issue 579). Schema 2 is schema 1
+without the deploy watch: the `deploy` member of `bindings` and `capabilities.deploy` are not
+members of it, so an authored one is refused like any member outside the
+schema, and the resolved snapshot has neither. A schema-1 contract is refused
+`unsupported_schema` with reason `project_schema_unsupported`. The projection
+header records the contract's own schema, so a schema-2 contract's `AGENTS.md`
+says `(project schema 2)`. The resolver and adoption tests read a pinned
+schema-2 contract, `home/common/agent-skills/tests/fixtures/project-contract-schema-2.json`
+(P11).
+
 `write-projections` is the tool's only writer. It renders each declared
 projection from the single instruction source and brings its native entry
 target into sync: a wholly generated file for one agent, one managed import
