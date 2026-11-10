@@ -87,8 +87,7 @@ holds the single line `None — no acceptance criteria.` Otherwise:
   untagged criterion gets your judgment, written `<kind> (classified)`.
 - `Task` — the one `Task N` that adds or runs the check.
 - `Check` — `code`: the test, check or CI job; `evidence`: the verify block's
-  trigger, command, threshold and expiry, and the acceptance-record row `AC<n>`
-  the owning implementer fills in; `human`: the judgment, its judge and why.>
+  trigger, command, threshold and expiry; `human`: the judgment, its judge and why.>
 
 ## Decisions
 

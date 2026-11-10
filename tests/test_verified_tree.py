@@ -1,7 +1,7 @@
 """verified-tree: a verification pass recorded against the tree it saw (#263, issue 437).
 
 Each test drives `python -m agent_tools.verified_tree` in a throwaway git
-repository, the way test_launch_commit.py drives its command (#263 D6). The
+repository, the way the other command tests drive theirs (#263 D6). The
 repository is a copy of the eval fixture project whose contract gains a second,
 conditional verification id, resolved under a temporary HOME holding the
 committed platform manifest (the lane-triage harness), with

@@ -64,7 +64,6 @@ in
       recursive = false;
     };
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
-    ".agents/share/ship-delivery.md".source = ../../../python/ship-delivery.md;
 
     # The platform manifest: authored data with nothing templated, so this
     # store copy is byte-identical to the repository's (D1).
@@ -135,8 +134,8 @@ in
       || errorEcho "Clearing $HOME/.agents/lib/python/__pycache__ failed (see the error above). While it remains, an installed agent module may run stale bytecode: remove it and any .pycache-clear.* directory beside it by hand."
   '';
 
-  # The workflow skills invoke these helpers by bare name (`workflow-state`,
-  # `agent-evidence`), so ~/.agents/bin must be on PATH or every spawned agent
+  # The workflow skills invoke these helpers by bare name (`forge-issue`,
+  # `resolve-project`), so ~/.agents/bin must be on PATH or every spawned agent
   # shell gets exit 127 — the failure codex-companion hit before it was wrapped
   # onto PATH (see home/common/claude-code/default.nix).
   home.sessionPath = [ "$HOME/.agents/bin" ];

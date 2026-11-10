@@ -40,7 +40,7 @@ AMBIGUOUS_FENCE_INFO = frozenset({"", "text"})
 # The closed set of command names the skills run: every ~/.agents/bin helper
 # plus common tools. VocabularyGuardTest keeps it honest for shell fences.
 COMMAND_VOCABULARY = frozenset({
-    "[", "adopt-project", "agent-evidence", "agent-model-matrix",
+    "[", "adopt-project", "agent-model-matrix",
     "artifact-budget", "awk", "bash", "brew", "bun", "cargo", "cat", "cd",
     "chmod", "claude", "codex", "conformance",
     "context-map-lint", "cp", "curl",

@@ -107,7 +107,6 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
-    home/common/agent-skills/tests/test_ship_delivery.py \
     home/common/agent-skills/tests/test_delivered_control.py \
     home/common/agent-skills/tests/test_workflow_delivery.py \
     home/common/agent-skills/tests/test_task_brief.py \
@@ -115,7 +114,6 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_review_package.py \
     tests/test_review_pack.py \
     tests/test_review_feasibility.py \
-    tests/test_review_limits_replay.py \
     tests/test_review_projection_cases.py \
     tests/test_review_history.py \
     tests/test_review_record_view.py \
@@ -134,7 +132,6 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
     home/common/agent-skills/tests/test_eval_cases.py \
-    home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \
     home/common/agent-skills/tests/test_skill_lint.py \
@@ -177,17 +174,11 @@ agent-workflow-tests *args:
     tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
-    tests/test_skill_sections.py \
     tests/test_phase_budget.py \
-    tests/test_sdd_brief.py \
-    tests/test_sdd_gate.py \
-    tests/test_launch_commit.py \
-    tests/test_launch_scope.py \
     tests/test_review_range.py \
     tests/test_verified_tree.py \
     tests/test_verification_blocker.py \
     tests/test_verification_observe.py \
-    tests/test_acceptance_record.py \
     tests/test_transaction_core.py \
     tests/test_attempt_identity.py \
     tests/test_attempt_custody.py \

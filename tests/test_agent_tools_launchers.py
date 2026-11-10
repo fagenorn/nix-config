@@ -53,11 +53,10 @@ TIMEOUT_SECONDS = 60
 NOT_LAUNCHERS = ("workflow-state",)
 # The commands #175, #179, #177, #249, #264, #279, #353, #403, #424, #623, #624 and #697 accepted as launchers: a floor, not the
 # full set, which the command table in lib/agent-tools.nix owns (#175 D8).
-LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
+LAUNCHER_FLOOR = ("adopt-project", "agent-model-matrix", "conformance",
                   "context-map-lint", "derive-review-feasibility-fixtures",
                   "diff-scope", "forge-claim", "forge-issue", "lane-triage", "owner-actions",
-                  "replay-retained", "resolve-project", "review-package", "review-range", "sdd-gate",
-                  "ship-delivery")
+                  "replay-retained", "resolve-project", "review-package", "review-range")
 # The retained commands (#249) and their modules: refusal parity cases below.
 RETAINED = {"derive-review-feasibility-fixtures": "derive_review_feasibility_fixtures",
             "replay-retained": "replay_retained"}
@@ -253,20 +252,6 @@ class AgentToolsLauncherTest(unittest.TestCase):
             self.assertRegex(json.loads(completed.stdout)["run_id"], r"^rel_[0-9a-f-]{36}$")
             self.assertNotIn(MARKER, completed.stdout + completed.stderr)
             self.assertTrue((Path(repo) / ".superpowers/attempt-transactions").is_dir())
-
-    def test_ship_delivery_uses_the_real_validator_with_hostile_python_channels(self):
-        context = self.hostile / "bad-context.json"
-        context.write_text('{"interface_version":2}', encoding="utf-8")
-        recipe = self.hostile / "recipe.json"
-        recipe.write_text('{"observed_at":"2026-10-22T00:00:00Z","requested_stage":null}',
-                          encoding="utf-8")
-        completed = self.run_child([str(self.root / ".agents/bin/ship-delivery"),
-            "checkpoint", "--context", str(context), "--input", str(recipe)],
-            self.hostile_env(), self.hostile)
-        self.assertEqual((completed.returncode, completed.stdout), (2, ""))
-        self.assertIn("artifact-budget exited 2: artifact-budget: invalid report", completed.stderr)
-        self.assertNotIn(MARKER, completed.stdout + completed.stderr)
-        self.assertTrue((self.root / ".agents/share/ship-delivery.md").is_file())
 
     def test_the_command_table_generates_each_deployed_command(self):
         launchers = self.launchers()

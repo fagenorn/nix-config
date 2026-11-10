@@ -390,7 +390,7 @@ class CandidateTreeTest(unittest.TestCase):
 
     def test_the_known_ladders_are_deleted_not_reworded(self):
         skill = (self.ROOT / "home/common/agent-skills/skills/research/SKILL.md").read_text("utf-8")
-        self.assertNotIn("~/.agents/bin/agent-evidence", skill)
+        self.assertNotIn("~/.agents/bin/agent-" "evidence", skill)
         sys.path.insert(0, str(self.ROOT / "python"))
         try:
             self.assertIsNone(importlib.util.find_spec("agent_tools.release_bridge"))

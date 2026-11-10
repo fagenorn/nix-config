@@ -40,9 +40,7 @@ let
   # A command's module is its name with each "-" replaced by "_".
   # context-map-lint is a stable path other projects' CIs call without vendoring it (parent D15).
   commands = [
-    "acceptance-record"
     "adopt-project"
-    "agent-evidence"
     "agent-model-matrix"
     "cache-proxy"
     "conformance"
@@ -56,8 +54,6 @@ let
     "lane-triage"
     "ledger-archive"
     "ledger-snapshot"
-    "launch-commit"
-    "launch-scope"
     "owner-actions"
     "promotion"
     "release"
@@ -65,10 +61,7 @@ let
     "resolve-project"
     "review-package"
     "review-range"
-    "sdd-gate"
-    "ship-delivery"
     "skill-lint"
-    "skill-sections"
     "verification-observe"
     "verified-tree"
     "verify-pending"

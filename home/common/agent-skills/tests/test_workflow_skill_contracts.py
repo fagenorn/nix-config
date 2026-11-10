@@ -63,7 +63,7 @@ SHARED_SKILL_MACHINE_TEXT = {
     HANDOFF: (REPORT_CANDIDATE_MKTEMP, REPORT_CANDIDATE_VALIDATION,
               ".superpowers/workflows/<run-id>/handoffs/"),
     RESEARCH: (
-        "`research-observations`", "agent-evidence research <artifact.json>",
+        "`research-observations`",
         "`observed_at`", "`outcome`", "`follow_up`", "`execution_id`", "`transient`",
         "`{file_path, key_facts[]}`",
     ),
@@ -388,7 +388,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
                 continue
             if path.suffix not in text_suffixes and path.name not in {
                 "resolve-project", "context-map-lint", "artifact-budget",
-                "agent-evidence", "agent-model-matrix", "diff-scope",
+                "agent-model-matrix", "diff-scope",
                 "review-package", "sdd-workspace", "workflow-state",
             }:
                 continue
@@ -728,19 +728,19 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 with self.subTest(path=path.name, item=item):
                     self.assertIn(item, text)
 
+    def test_research_and_writing_plans_name_no_retired_helper(self):
+        # Names spelled in pieces so this file never matches the retired-name grep.
+        for path, name in ((RESEARCH, "agent-" "evidence"), (WRITING_PLANS, "acceptance-" "record")):
+            with self.subTest(path=path.parent.name):
+                self.assertNotIn(name, path.read_text(encoding="utf-8"))
+
     def test_helper_binaries_resolve_from_bare_names(self):
-        # Skills invoke agent-evidence by bare name. The Nix module must put
-        # ~/.agents/bin on PATH, and each contract must anchor the full path as
-        # fallback for shells that skip profile init.
+        # Skills invoke helpers by bare name. The Nix module must put
+        # ~/.agents/bin on PATH.
         nix_module = (
             REPO_ROOT / "home/common/agent-skills/default.nix"
         ).read_text(encoding="utf-8")
         self.assertIn('home.sessionPath = [ "$HOME/.agents/bin" ]', nix_module)
-        for name, text in (("research", self.research),):
-            with self.subTest(skill=name):
-                # A second resolution route is a ladder (issue 579): the bare name is the contract.
-                self.assertIn("`agent-evidence research <artifact.json>`", text)
-                self.assertNotIn("~/.agents/bin/agent-evidence", text)
         # The packaged detail producer and external workspace command are both
         # published by bare name; review-package has one command-table owner.
         command_table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
