@@ -1343,7 +1343,7 @@ ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: 'sonnet',
     raced = false
     syncs++
     const sy = await call(`${CTX}
-The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. Do not push. Return conflicted, merge_commit (full sha) and resolved_files; status blocked with notes if you cannot resolve it safely.
+The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. ${FMT} Do not push. Return conflicted, merge_commit (full sha) and resolved_files; status blocked with notes if you cannot resolve it safely.
 ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
     if (!sy || sy.status !== 'done' || !present(sy.merge_commit)) return stop('sync', { pr: PR, sync: sy })
     expected = sy.merge_commit

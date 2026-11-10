@@ -4287,7 +4287,7 @@ class PreCommitFocusTest(unittest.TestCase):
         ({"replies": {"checks-1": RED, "checks-2": PASSED},
           "patch": {"fix-ci": {"start_head": SHA, "commit": FIX}}}, {"fix-ci"}),
         ({"replies": {"checks-1": {"state": "behind", "head": SHA}, "sync-review-1": FINDING, "checks-2": PASSED},
-          "patch": CONFLICT}, {"fix-sync-1"}),
+          "patch": CONFLICT}, {"sync-1", "fix-sync-1"}),
         ({"args": DIRECT, "replies": {"direct-review": BAD}}, {"direct-impl", "direct-fix"}),
     )
     FAMILIES = frozenset().union(*(want for _, want in SCENARIOS))
@@ -4308,7 +4308,9 @@ class PreCommitFocusTest(unittest.TestCase):
     def test_every_focused_site_has_a_scenario(self):
         # A prompt family that gains or loses FOCUSED must be reflected in SCENARIOS.
         source = PROGRAM.read_text(encoding="utf-8")
-        self.assertEqual(source.count("${FOCUSED}") + source.count("${FIX_TESTS}"), len(self.FAMILIES))
+        # The merge sync names FMT directly (it runs WHOLE, not FOCUSED); two of the FMT uses are the FOCUSED and FIX_TESTS definitions.
+        sites = source.count("${FOCUSED}") + source.count("${FIX_TESTS}") + source.count("${FMT}") - 2
+        self.assertEqual(sites, len(self.FAMILIES))
 
     def test_every_implementer_prompt_names_the_flagged_argv(self):
         for label, text in self.implementer_prompts(self.FLAGGED).items():
