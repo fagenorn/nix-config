@@ -190,8 +190,8 @@ import sys
 from pathlib import Path
 
 from agent_tools import (adopt_inspection, adopt_verify, agent_platform, canonical,
-                         contract_export, forge_adapter, github_remote, release_profile,
-                         resolve_project)
+                         contract_export, forge_adapter, release_profile, resolve_project)
+from agent_tools.system import github_remote
 
 REPORT_SCHEMA_VERSION = 1
 DERIVE_REPORT_SCHEMA_VERSION = 2

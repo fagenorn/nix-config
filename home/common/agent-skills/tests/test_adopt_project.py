@@ -3,7 +3,7 @@
 Runs `adopt-project`'s command line under a temporary `HOME` holding a fixture
 manifest. The command consumes the resolver only as a child process of its own
 interpreter, `agent_tools.resolve_project` run through
-`agent_tools.siblings.sibling_argv` (D26, #177 D5). `run` runs the command in
+`agent_tools.system.siblings.sibling_argv` (D26, #177 D5). `run` runs the command in
 this process and answers that resolver child in process too (issue 612);
 `run_child` runs both as real processes, and `ProcessWiringTest` pins that the
 two agree.
@@ -35,7 +35,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import adopt_inspection, adopt_links, adopt_planning, adopt_project
-from agent_tools.siblings import sibling_argv
+from agent_tools.system.siblings import sibling_argv
 
 from ._inprocess_cli import run_module
 from .test_resolve_project import schema_one

@@ -48,7 +48,7 @@ resolve and no operand was given its message names `--integration-branch`.
 
 The resolver is not reached from this module. `adopt-project` owns the one
 seam it is consumed through — invoked as a child process through
-`agent_tools.siblings.sibling_argv`, never imported (D26) — and hands that
+`agent_tools.system.siblings.sibling_argv`, never imported (D26) — and hands that
 call in.
 
 Like its sibling libraries it is imported, never run: no `main` and no

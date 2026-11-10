@@ -120,7 +120,7 @@ transaction.
 
 The resolver is consumed **only** as a child process, never imported (D26):
 `run_resolver` runs `agent_tools.resolve_project` under this process's own
-interpreter through `agent_tools.siblings.sibling_argv` (#177 D5), so
+interpreter through `agent_tools.system.siblings.sibling_argv` (#177 D5), so
 contract validation has one home and an installed run is answered by the
 resolver of its own store environment. The shared platform library
 `agent_platform` is imported directly — it is the one home for the manifest
@@ -140,7 +140,7 @@ import subprocess
 import sys
 
 from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_migrate, adopt_planning, adopt_references, adopt_verify, agent_platform
-from agent_tools.siblings import sibling_argv
+from agent_tools.system.siblings import sibling_argv
 
 
 # --------------------------------------------------------------------------

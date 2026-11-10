@@ -24,7 +24,7 @@ from typing import Any
 
 from agent_tools import forge_adapter
 from agent_tools.canonical import telemetry_digest
-from agent_tools.github_remote import github_slug
+from agent_tools.system.github_remote import github_slug
 
 SANDBOX = "fagenorn/release-merge-sandbox"
 MARKER = "nix-config issue 554 release-merge certification sandbox"

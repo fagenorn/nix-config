@@ -13,8 +13,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import agent_platform, siblings
+from agent_tools import agent_platform
 from agent_tools import owner_actions as oa
+from agent_tools.system import siblings
 from .forge_world import ForgeWorld
 
 SLUG, OTHER, STRANGER = "octo/widgets", "octo/gadgets", "octo/stranger"

@@ -10,5 +10,8 @@ import sys
 
 
 def sibling_argv(module: str) -> list[str]:
-    """argv that runs agent_tools.<module> under this interpreter, isolated iff we are."""
+    """argv that runs agent_tools.<module> under this interpreter, isolated iff we are.
+
+    `module` is the dotted path under agent_tools, such as `project_contract.resolve_project`.
+    """
     return [sys.executable, *(["-I"] if sys.flags.isolated else []), "-m", f"agent_tools.{module}"]

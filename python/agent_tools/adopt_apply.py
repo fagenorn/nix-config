@@ -17,7 +17,7 @@ re-derives the operation list before any of this runs (D33).
 
 The resolver is not reached from this module. `adopt-project` owns the one
 seam it is consumed through — invoked as a child process through
-`agent_tools.siblings.sibling_argv`, never imported (D26) — and hands that
+`agent_tools.system.siblings.sibling_argv`, never imported (D26) — and hands that
 call in, so a second, differently-bounded way to ask the resolver a question
 cannot exist here.
 

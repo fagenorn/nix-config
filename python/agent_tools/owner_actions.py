@@ -77,8 +77,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_tools import agent_platform, forge_claim, forge_markers, siblings
-from agent_tools.github_remote import github_slug
+from agent_tools import agent_platform, forge_claim, forge_markers
+from agent_tools.system import siblings
+from agent_tools.system.github_remote import github_slug
 
 # A repository name may begin with a dot (`org/.github`) but is never `.` or `..`; an owner never does.
 SLUG_PATTERN = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/(?!\.{1,2}$)[A-Za-z0-9_.-]+")

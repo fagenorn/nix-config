@@ -107,7 +107,7 @@ import tempfile
 import time
 from typing import Any, Callable
 
-from agent_tools.github_remote import github_slug
+from agent_tools.system.github_remote import github_slug
 
 CHILD_TIMEOUT_SECONDS = 30
 COLLECTION_BUDGET_SECONDS = 30

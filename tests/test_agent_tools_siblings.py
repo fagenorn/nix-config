@@ -1,4 +1,4 @@
-"""Module-interface seam for agent_tools.siblings (#177 D5, D9, D15)."""
+"""Module-interface seam for agent_tools.system.siblings (#177 D5, D9, D15)."""
 
 import subprocess
 import sys
@@ -6,7 +6,7 @@ import types
 import unittest
 from unittest import mock
 
-from agent_tools import siblings
+from agent_tools.system import siblings
 
 
 class SiblingArgvTest(unittest.TestCase):

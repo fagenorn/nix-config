@@ -130,12 +130,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from agent_tools import forge_markers, github_remote
+from agent_tools import forge_markers
 from agent_tools.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.agent_platform import (
     DEPRECATION_MEMBERS, parse_semver, validate_manifest, validate_registry)
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.push_fixture import make_push_fixture
+from agent_tools.system import github_remote
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
