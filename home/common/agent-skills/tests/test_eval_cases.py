@@ -18,7 +18,7 @@ SKILL_ROOTS = (
     REPO_ROOT / "home/common/agent-skills/skills",
     REPO_ROOT / "home/common/claude-code/skills",
 )
-BUDGET = (sys.executable, "-m", "agent_tools.artifact_budget")
+BUDGET = (sys.executable, "-m", "agent_tools.delivery.artifact_budget")
 POLICY = REPO_ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 SETUP_KINDS = {"dirty-worktree", "shippable-worktree", "planned-worktree", "release-ready", "tracked-issue"}
 PIPELINE_SKILLS = ("ship-release",)

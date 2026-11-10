@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_claim
-from agent_tools import forge_markers as fm
+from agent_tools.claims import forge_claim
+from agent_tools.claims import forge_markers as fm
 from .forge_world import ForgeWorld, host_clock
 
 SLUG, ISSUE = "octo/widgets", 7
@@ -62,8 +62,8 @@ def run(*argv):
 
 
 def start_cli(*argv):
-    """A child `python -m agent_tools.forge_claim` in the current (fake) world."""
-    return subprocess.Popen([sys.executable, "-m", "agent_tools.forge_claim", *argv], stdout=subprocess.PIPE,
+    """A child `python -m agent_tools.claims.forge_claim` in the current (fake) world."""
+    return subprocess.Popen([sys.executable, "-m", "agent_tools.claims.forge_claim", *argv], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, env=dict(os.environ))
 
 
@@ -161,7 +161,7 @@ class AcquireTest(Base):
 
 
 class CliTest(Base):
-    """`python -m agent_tools.forge_claim` as a child process (docs/standards/agent-helpers.md rule 5)."""
+    """`python -m agent_tools.claims.forge_claim` as a child process (docs/standards/agent-helpers.md rule 5)."""
 
     def test_acquire_exit_0_one_json_line(self):
         self.store(next_id=11)

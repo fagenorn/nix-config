@@ -2,8 +2,8 @@
 
 The forwarding cases run the real server in-process on port 0 against `FakeUpstream`, a
 loopback HTTP/1.1 server that records each raw request per upstream connection and runs the
-case's scripted responder; `CommandTest` runs `python -m agent_tools.cache_proxy`.
-`SubagentPrefixTest` calls `agent_tools.subagent_prefix` directly on the sanitised re-test captures in `tests/fixtures/cache_proxy/`.
+case's scripted responder; `CommandTest` runs `python -m agent_tools.hosts.cache_proxy`.
+`SubagentPrefixTest` calls `agent_tools.hosts.subagent_prefix` directly on the sanitised re-test captures in `tests/fixtures/cache_proxy/`.
 """
 
 import copy
@@ -22,8 +22,8 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools import cache_proxy
-from agent_tools import subagent_prefix
+from agent_tools.hosts import cache_proxy
+from agent_tools.hosts import subagent_prefix
 
 TIMEOUT = 10
 SSE_HEAD = (b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -883,11 +883,11 @@ class SubagentPrefixTest(unittest.TestCase):
 
 class CommandTest(unittest.TestCase):
     def run_command(self, *args):
-        return subprocess.run([sys.executable, "-m", "agent_tools.cache_proxy", *args],
+        return subprocess.run([sys.executable, "-m", "agent_tools.hosts.cache_proxy", *args],
                               capture_output=True, text=True, timeout=TIMEOUT, check=False)
 
     def start(self, *args):
-        process = subprocess.Popen([sys.executable, "-m", "agent_tools.cache_proxy", *args],
+        process = subprocess.Popen([sys.executable, "-m", "agent_tools.hosts.cache_proxy", *args],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.addCleanup(process.stderr.close)
         self.addCleanup(process.wait, TIMEOUT)

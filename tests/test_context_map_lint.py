@@ -6,13 +6,13 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).parents[1]
-LINTER = REPO_ROOT / "python/agent_tools/context_map_lint.py"
+LINTER = REPO_ROOT / "python/agent_tools/delivery/context_map_lint.py"
 
 
 class ContextMapLintTest(unittest.TestCase):
     def run_lint(self, root, context_map):
         return subprocess.run(
-            [sys.executable, "-m", "agent_tools.context_map_lint", "--repo-root", str(root), "--context-map", str(context_map)],
+            [sys.executable, "-m", "agent_tools.delivery.context_map_lint", "--repo-root", str(root), "--context-map", str(context_map)],
             text=True, capture_output=True,
         )
 
@@ -29,7 +29,7 @@ class ContextMapLintTest(unittest.TestCase):
     def test_relative_and_outside_maps_are_misuse(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            relative = subprocess.run([sys.executable, "-m", "agent_tools.context_map_lint", "--repo-root", str(root), "--context-map", "CONTEXT-MAP.md"], text=True, capture_output=True)
+            relative = subprocess.run([sys.executable, "-m", "agent_tools.delivery.context_map_lint", "--repo-root", str(root), "--context-map", "CONTEXT-MAP.md"], text=True, capture_output=True)
             self.assertEqual(relative.returncode, 2)
             outside = self.run_lint(root, Path(temp).parent / "outside.md")
             self.assertEqual(outside.returncode, 2)
@@ -37,7 +37,7 @@ class ContextMapLintTest(unittest.TestCase):
     def test_missing_context_map_and_malformed_map(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            missing = subprocess.run([sys.executable, "-m", "agent_tools.context_map_lint", "--repo-root", str(root)], text=True, capture_output=True)
+            missing = subprocess.run([sys.executable, "-m", "agent_tools.delivery.context_map_lint", "--repo-root", str(root)], text=True, capture_output=True)
             self.assertEqual(missing.returncode, 2)
             context_map = root / "CONTEXT-MAP.md"
             context_map.write_text("not a context map")

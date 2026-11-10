@@ -4,8 +4,8 @@ import os
 import tempfile
 from pathlib import Path
 
-from agent_tools import (actions_health_adapter, forge_adapter, railway_deploy_adapter,
-                         release_driver, release_profile)
+from agent_tools.release import (actions_health_adapter, forge_adapter, railway_deploy_adapter,
+                                 release_driver, release_profile)
 from . import release_test_support as support
 from .forge_world import CANONICAL, ROWS
 

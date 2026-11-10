@@ -194,7 +194,7 @@ class PromotionLiteralPinTest(unittest.TestCase):
     """#127 D10: the engine's promotion literals are the package's constants."""
 
     def test_registry_literals_equal_the_promotion_schema(self):
-        from agent_tools import promotion_schema as schema
+        from agent_tools.delivery import promotion_schema as schema
         registry = load_module().registry
         self.assertEqual(
             [registry.PROMOTION_CANDIDATES_RELATIVE, registry.PROMOTION_CANDIDATE_KIND,

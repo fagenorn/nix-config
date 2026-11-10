@@ -1,4 +1,4 @@
-"""Unit tables for `agent_tools.adopt_links` (#345 D3, D4, D5, D14, D15, D18)."""
+"""Unit tables for `agent_tools.project_contract.adopt_links` (#345 D3, D4, D5, D14, D15, D18)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import adopt_links
-from agent_tools.adopt_links import Resolved, RewrittenFile, Tree
+from agent_tools.project_contract import adopt_links
+from agent_tools.project_contract.adopt_links import Resolved, RewrittenFile, Tree
 
 
 def targets(text: str) -> list[tuple[str, bool]]:

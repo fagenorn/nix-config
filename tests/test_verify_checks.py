@@ -1,4 +1,4 @@
-"""`agent_tools.verify_checks`: the committed verify checks of issue 638."""
+"""`agent_tools.verification.verify_checks`: the committed verify checks of issue 638."""
 import json
 import os
 import shutil
@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import agent_gate_bundle, forge_markers, verify_checks
-from agent_tools.verify_checks import required_checks, self_hosted_runner
+from agent_tools.delivery import agent_gate_bundle
+from agent_tools.verification import verify_checks
+from agent_tools.system import forge_api
+from agent_tools.verification.verify_checks import required_checks, self_hosted_runner
 
 from .guard_policy_world import GuardPolicyWorld
 from .pre_push_world import PrePushWorld
@@ -52,8 +54,8 @@ def forge(gets, pages):
         if path not in pages:
             raise AssertionError(f"unexpected paginated read {path}")
         return pages[path]
-    return (mock.patch.object(forge_markers, "api_get", side_effect=api_get),
-            mock.patch.object(forge_markers, "api_pages", side_effect=api_pages))
+    return (mock.patch.object(forge_api, "api_get", side_effect=api_get),
+            mock.patch.object(forge_api, "api_pages", side_effect=api_pages))
 
 
 def search_page(numbers, total=None, incomplete=False):
@@ -159,7 +161,7 @@ class RequiredChecksTest(unittest.TestCase):
     def test_a_malformed_app_id_is_refused(self):
         gets, pages = world([run("lint")])
         gets[PROTECTION] = {"checks": [{"context": "lint", "app_id": "15368"}]}
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             self.check(gets, pages)
 
     def test_no_required_checks_is_not_met(self):
@@ -190,20 +192,20 @@ class RequiredChecksTest(unittest.TestCase):
     def test_a_status_page_that_is_not_a_list_is_refused(self):
         gets, pages = world([run("lint")])
         pages[STATUSES] = [{"message": "nope"}]
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             self.check(gets, pages)
 
     def test_an_incomplete_search_is_refused(self):
         gets, pages = world([run("lint")])
         pages[SEARCH] = [search_page([2610], incomplete=True)]
-        with self.assertRaises(forge_markers.ForgeError) as raised:
+        with self.assertRaises(forge_api.ForgeError) as raised:
             self.check(gets, pages)
         self.assertEqual(raised.exception.code, "payload_invalid")
 
     def test_a_truncated_search_is_refused(self):
         gets, pages = world([run("lint")])
         pages[SEARCH] = [search_page([2610], total=1500)]
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             self.check(gets, pages)
 
     def test_check_runs_on_a_second_page_count_and_a_short_listing_is_refused(self):
@@ -212,13 +214,13 @@ class RequiredChecksTest(unittest.TestCase):
                        {"total_count": 101, "check_runs": [run("lint")]}]
         self.assertEqual(self.check(gets, pages)[0], 0)
         pages[RUNS] = [{"total_count": 101, "check_runs": [run(f"other-{i}") for i in range(100)]}]
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             self.check(gets, pages)
 
     def test_forge_error_propagates(self):
-        with mock.patch.object(forge_markers, "api_pages",
-                               side_effect=forge_markers.ForgeError("gh_failed", "boom")):
-            with self.assertRaises(forge_markers.ForgeError):
+        with mock.patch.object(forge_api, "api_pages",
+                               side_effect=forge_api.ForgeError("gh_failed", "boom")):
+            with self.assertRaises(forge_api.ForgeError):
                 required_checks("elevenyellow/nodocom", "dev", SINCE)
 
 
@@ -234,7 +236,7 @@ class RequiredChecksCommandTest(unittest.TestCase):
         self.assertIn("forge_error", done.stderr)
 
     def test_bad_repo_is_a_usage_error(self):
-        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "required-checks",
+        done = run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks", "required-checks",
                               "--repo", "nodocom", "--base", "dev", "--since", "2026-11-06T17:37:11Z"])
         self.assertEqual(done.returncode, 2)
 
@@ -283,7 +285,7 @@ class ManagedPrePushHookTest(unittest.TestCase):
             encoding="utf-8")
 
     def check(self):
-        return run_from_root(["python3", "-m", "agent_tools.verify_checks",
+        return run_from_root(["python3", "-m", "agent_tools.verification.verify_checks",
                               "managed-pre-push-hook", "--slug", self.SLUG],
                              env_extra=self.world.env)
 
@@ -450,7 +452,7 @@ class DeprecationsRetiredTest(unittest.TestCase):
 
     def test_the_nix_config_root_is_scoped_to_its_skills(self):
         self.answer(deprecated=[], adapter="none", project_id="fagenorn/nix-config")
-        self.commit("python/agent_tools/verify_checks.py", 'RETIRED_COMMAND = "release deploy inspect"\n')
+        self.commit("python/agent_tools/verification/verify_checks.py", 'RETIRED_COMMAND = "release deploy inspect"\n')
         self.commit("tests/test_verify_checks.py", "release deploy inspect\n")
         code, report = self.check()
         self.assertEqual((code, report["roots"][0]["verdict"]), (0, "green"))
@@ -771,12 +773,12 @@ class CutoverManifestTest(unittest.TestCase):
 
     def test_the_command_prints_the_report_and_exits_with_its_code(self):
         world = CutoverWorld(self)
-        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "cutover-manifest",
+        done = run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks", "cutover-manifest",
                               "--repo-root", str(world.clone)])
         self.assertEqual(done.returncode, 75, done.stderr)
         self.assertEqual(json.loads(done.stdout)["verdict"], "absent")
         world.publish_candidate()
-        done = run_from_root([sys.executable, "-m", "agent_tools.verify_checks", "cutover-manifest",
+        done = run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks", "cutover-manifest",
                               "--repo-root", str(world.clone), "--main-ref", "HEAD"])
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.loads(done.stdout)["verdict"], "green")
@@ -787,7 +789,8 @@ class CutoverPreflightTest(unittest.TestCase):
         self.world = CutoverWorld(self)
         self.sha = self.world.publish_candidate(files={
             "python/agent_tools/__init__.py": "",
-            "python/agent_tools/resolve_project.py": CANDIDATE_RESOLVER})
+            "python/agent_tools/project_contract/__init__.py": "",
+            "python/agent_tools/project_contract/resolve_project.py": CANDIDATE_RESOLVER})
         self.bin = self.world.tmp / "bin"
         self.bin.mkdir()
         self.scratch = self.world.tmp / "scratch"
@@ -843,17 +846,31 @@ class CutoverPreflightTest(unittest.TestCase):
     def test_the_candidate_side_failing_names_the_candidate(self):
         self.bridge(f"echo '{BRIDGE_JSON}'")
         self.world.git(self.world.pusher, "checkout", "-q", CANDIDATE_BRANCH)
-        (self.world.pusher / "python/agent_tools/resolve_project.py").write_text(
+        (self.world.pusher / "python/agent_tools/project_contract/resolve_project.py").write_text(
             "import sys\nsys.exit(4)\n", encoding="utf-8")
         self.world.git(self.world.pusher, "commit", "-q", "-am", "break")
         self.world.git(self.world.pusher, "push", "-q", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
         code, report = self.preflight()
         self.assertEqual((code, report["verdict"], report["side"]), (75, "unreadable", "candidate"))
 
+    def test_a_pre_move_candidate_with_the_flat_resolver_is_judged_by_its_own_layout(self):
+        # The recorded cutover candidate predates the domain layout: `agent_tools/resolve_project.py`.
+        self.bridge(f"echo '{BRIDGE_JSON}'")
+        self.world.git(self.world.pusher, "checkout", "-q", CANDIDATE_BRANCH)
+        self.world.git(self.world.pusher, "rm", "-q",
+                       "python/agent_tools/project_contract/resolve_project.py")
+        (self.world.pusher / "python/agent_tools/resolve_project.py").write_text(
+            CANDIDATE_RESOLVER, encoding="utf-8")
+        self.world.git(self.world.pusher, "add", "-A")
+        self.world.git(self.world.pusher, "commit", "-q", "-m", "flat layout")
+        self.world.git(self.world.pusher, "push", "-q", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        code, report = self.preflight()
+        self.assertEqual((code, report["verdict"]), (0, "green"), report)
+
     def test_an_incompatible_candidate_row_is_not_yet(self):
         self.bridge(f"echo '{BRIDGE_JSON}'")
         self.world.git(self.world.pusher, "checkout", "-q", CANDIDATE_BRANCH)
-        (self.world.pusher / "python/agent_tools/resolve_project.py").write_text(
+        (self.world.pusher / "python/agent_tools/project_contract/resolve_project.py").write_text(
             CANDIDATE_RESOLVER.replace('"compatible": True', '"compatible": False'),
             encoding="utf-8")
         self.world.git(self.world.pusher, "commit", "-q", "-am", "incompatible")
@@ -1044,7 +1061,7 @@ class SelfHostedRunnerTest(unittest.TestCase):
         self.assertEqual((code, report["found"], report["status"]), (75, False, None))
 
     def test_a_truncated_listing_is_refused(self):
-        with self.assertRaises(forge_markers.ForgeError):
+        with self.assertRaises(forge_api.ForgeError):
             judge_runner([runner_entry()], total=2)
 
     def test_malformed_entries_are_refused(self):
@@ -1054,7 +1071,7 @@ class SelfHostedRunnerTest(unittest.TestCase):
         del no_status["status"]
         for entries in (["eleven-m5-jarbird"], [{"status": "online"}], [bad_labels], [no_status]):
             with self.subTest(entries=entries):
-                with self.assertRaises(forge_markers.ForgeError):
+                with self.assertRaises(forge_api.ForgeError):
                     judge_runner(entries)
 
 
@@ -1263,12 +1280,28 @@ class GuardPolicyFleetTest(unittest.TestCase):
             Path("/c/home"), Path("/c/python"))
         self.assertEqual((kept["GH_CONFIG_DIR"], kept["GIT_CONFIG_GLOBAL"]), ("/gh", "/dev/null"))
 
+    def test_a_pre_move_candidate_with_the_flat_guard_policy_is_derived_by_its_own_layout(self):
+        # The recorded cutover candidate predates the domain layout: `agent_tools/guard_policy.py`.
+        self.world.project("fixture/one", "fagenorn/one")
+        pusher = self.world.tmp / "candidate-pusher"
+        self.world.git(pusher, "rm", "-q", "python/agent_tools/guard/guard_policy.py")
+        (pusher / "python/agent_tools/guard_policy.py").write_text(
+            "import json\nprint(json.dumps({'outcome': 'derived', 'refused': [], 'row': {}}))\n",
+            encoding="utf-8")
+        self.world.git(pusher, "add", "-A")
+        self.world.git(pusher, "commit", "--quiet", "-m", "flat layout")
+        self.world.git(pusher, "push", "--quiet", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
+        code, report = self.world.fleet()
+        self.assertEqual((code, report["verdict"]), (0, "green"), report)
+        self.assertEqual([(r["repository"], r["outcome"]) for r in report["rows"]],
+                         [("fagenorn/one", "derived")])
+
     def test_the_candidates_code_derives_not_the_hosts(self):
         # A candidate whose guard-policy is broken reads unreadable even though the host's
         # own PYTHONPATH (the world's) holds a working one.
         self.world.project("fixture/one", "fagenorn/one")
         pusher = self.world.tmp / "candidate-pusher"
-        (pusher / "python/agent_tools/guard_policy.py").write_text(
+        (pusher / "python/agent_tools/guard/guard_policy.py").write_text(
             "import sys\nsys.exit(4)\n", encoding="utf-8")
         self.world.git(pusher, "commit", "--quiet", "-am", "break")
         self.world.git(pusher, "push", "--quiet", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")

@@ -3,7 +3,7 @@
 `PrePushWorld(test_case, ...)` builds a temporary directory holding a base policy, a
 compiled policy, a row check, a `hooks/pre-push` that runs the guard source in its pre-push
 mode, and an empty "user global config" that stands for the caller's own. `fixture(slug)`
-returns an `agent_tools.push_fixture.PushFixture` whose global git configuration sets only
+returns an `agent_tools.guard.push_fixture.PushFixture` whose global git configuration sets only
 `core.hooksPath` to this world's hooks directory. No test support here is a `TestCase`.
 """
 import json
@@ -17,7 +17,7 @@ from collections.abc import Iterable
 from itertools import count
 from pathlib import Path
 
-from agent_tools.push_fixture import PushFixture, make_push_fixture
+from agent_tools.guard.push_fixture import PushFixture, make_push_fixture
 
 GUARD_SOURCE = Path(__file__).resolve().parents[1] / "home/common/claude-code/lifecycle_guard.py"
 CHAIN_HOOK = Path(__file__).resolve().parents[1] / "home/common/claude-code/git-hooks/chain-hook"

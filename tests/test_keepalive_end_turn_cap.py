@@ -1,4 +1,4 @@
-"""`agent_tools.keepalive_pings.end_turn_cap` and its verify check (issues 502, 638)."""
+"""`agent_tools.hosts.keepalive_pings.end_turn_cap` and its verify check (issues 502, 638)."""
 import json
 import os
 import subprocess
@@ -8,8 +8,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_tools import keepalive_pings
-from agent_tools.keepalive_pings import CapReport, end_turn_cap
+from agent_tools.hosts import keepalive_pings
+from agent_tools.hosts.keepalive_pings import CapReport, end_turn_cap
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = "home/common/verify-pending/checks/keepalive-end-turn-cap"
@@ -183,7 +183,7 @@ class CommandTest(unittest.TestCase):
                                   cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
 
     def module(self):
-        return [sys.executable, "-m", "agent_tools.keepalive_pings", "end-turn-cap"]
+        return [sys.executable, "-m", "agent_tools.hosts.keepalive_pings", "end-turn-cap"]
 
     def test_exit_codes_and_output(self):
         ok = [request("A", "2026-11-04T00:00:01.000Z"), *pings("A", 2)]
@@ -213,7 +213,7 @@ class CommandTest(unittest.TestCase):
         self.assertTrue(out.startswith("100755 "), out)
 
     def test_cap_is_the_runtime_constant(self):
-        from agent_tools import cache_keepalive
+        from agent_tools.hosts import cache_keepalive
         self.assertEqual(cache_keepalive.END_TURN_PINGS, 2)
         self.assertTrue(hasattr(keepalive_pings, "main"))
 

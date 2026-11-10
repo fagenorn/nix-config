@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from agent_tools import railway_deploy_adapter as adapter
-from agent_tools import release_adapter, release_profile, transaction_plan
+from agent_tools.release import railway_deploy_adapter as adapter
+from agent_tools.release import release_adapter, release_profile, transaction_plan
 from . import release_test_support as support
 from .railway_world import (BASE_TIP, CONFIG, GREEN, HEAD, HOTFIX, MERGE, OLDER, PR, PR_VIEW, RED,
                             RUNNING, SLUG, TIMED_OUT, RailwayWorld, commit_argv, deployment)

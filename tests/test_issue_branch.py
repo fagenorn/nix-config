@@ -1,6 +1,6 @@
-"""Contract tests for `issue-branch` (`agent_tools.issue_branch`, issue 748).
+"""Contract tests for `issue-branch` (`agent_tools.delivery.issue_branch`, issue 748).
 
-The policy functions are imported; the command runs as `python -m agent_tools.issue_branch`
+The policy functions are imported; the command runs as `python -m agent_tools.delivery.issue_branch`
 against a git copy of the eval fixture project with a bare origin, a temporary HOME holding
 the committed platform manifest, and a stub `gh` first on PATH (agent-helpers rule 5).
 """
@@ -18,7 +18,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import issue_branch
+from agent_tools.delivery import issue_branch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
@@ -210,7 +210,7 @@ class IssueBranchCase(unittest.TestCase):
         launcher and the --repo-root value swapped for this fixture."""
         args = ["--repo-root", str(self.root), "--issue", str(issue)] if argv is None else self.fixture_args(argv)
         proc = subprocess.run(
-            [sys.executable, "-m", "agent_tools.issue_branch", *args],
+            [sys.executable, "-m", "agent_tools.delivery.issue_branch", *args],
             capture_output=True, text=True, timeout=120, cwd=str(self.home),
             env={**os.environ, "HOME": str(self.home), "FAKE_GH_STATE": str(self.state),
                  "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"})

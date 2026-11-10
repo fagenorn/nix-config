@@ -2,7 +2,7 @@
 import unittest
 from unittest import mock
 
-from agent_tools import release_verification as verification
+from agent_tools.release import release_verification as verification
 from agent_tools.canonical import telemetry_digest
 from .forge_world import CANONICAL, ForgeWorld
 

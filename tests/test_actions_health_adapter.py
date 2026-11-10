@@ -6,8 +6,8 @@ import time
 import unittest
 from unittest import mock
 
-from agent_tools import actions_health_adapter as adapter
-from agent_tools import release_adapter, release_profile, transaction_plan
+from agent_tools.release import actions_health_adapter as adapter
+from agent_tools.release import release_adapter, release_profile, transaction_plan
 from . import release_test_support as support
 from .actions_world import (BASE_TIP, CONFIG, HEAD, HOTFIX, MERGE, OLDER, PR, PR_VIEW, RUN_LIST,
                             SLUG, ActionsWorld, commit_argv, run)

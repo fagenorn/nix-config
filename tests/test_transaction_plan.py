@@ -9,9 +9,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import transaction_storage
+from agent_tools.release import transaction_storage
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_core import (
+from agent_tools.release.transaction_core import (
     COHORT_MARGIN_FLOOR_MS, DEFAULT_CONVERGENCE_WINDOW_MS, MAX_COHORT_ATTEMPTS,
     MAX_COLLECTION_LATENCY_MS, MAX_CONVERGENCE_WINDOW_MS, MAX_FRESHNESS_MS,
     PLAN_REJECTION_REASONS, PLAN_SCHEMA, RUNNING_IDENTITY_FRESHNESS_MS, CreationConflict,

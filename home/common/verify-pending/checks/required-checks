@@ -2,4 +2,4 @@
 # Verify check for issue 627 (issue 638): the first pull request merged into a base branch
 # after a time had every required check pass before its merge. Reads the forge only.
 # verify-pending runs it from the repository root at the commit the block names.
-PYTHONPATH=python exec python3 -m agent_tools.verify_checks required-checks "$@"
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks required-checks "$@"

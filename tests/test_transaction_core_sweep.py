@@ -18,8 +18,8 @@ import tokenize
 import unittest
 from pathlib import Path
 
-from agent_tools import transaction_core
-from agent_tools.transaction_core import RecoveryPlanRejected, TransactionStore
+from agent_tools.release import transaction_core
+from agent_tools.release.transaction_core import RecoveryPlanRejected, TransactionStore
 
 from .transaction_core_shapes import SHAPES
 from .transaction_core_sweep_support import (
@@ -567,10 +567,10 @@ def neutrality_findings(source):
     return findings
 
 
-from agent_tools import (transaction_custody, transaction_disposition, transaction_history,
-                         transaction_invocation, transaction_plan, transaction_proof,
-                         transaction_receipt, transaction_recovery, transaction_recovery_plan,
-                         transaction_storage)
+from agent_tools.release import (transaction_custody, transaction_disposition, transaction_history,
+                                 transaction_invocation, transaction_plan, transaction_proof,
+                                 transaction_receipt, transaction_recovery,
+                                 transaction_recovery_plan, transaction_storage)
 
 NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_receipt,
                    transaction_disposition, transaction_recovery, transaction_recovery_plan,

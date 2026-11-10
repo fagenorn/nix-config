@@ -15,8 +15,8 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools import transaction_core, transaction_history, transaction_storage
-from agent_tools.transaction_core import (
+from agent_tools.release import transaction_core, transaction_history, transaction_storage
+from agent_tools.release.transaction_core import (
     STATES, TERMINALS, TRANSITIONS, CreationConflict, StateInvalid, Transaction,
     TransactionBusy, TransactionError, TransactionStore, TransitionRefused,
     UnknownTransaction)

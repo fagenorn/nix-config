@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_markers as fm
+from agent_tools.claims import forge_markers as fm
+from agent_tools.system import forge_api
 from .forge_world import ForgeWorld, NETWORK_DOWN, host_clock
 
 SLUG, ISSUE = "octo/widgets", 7
@@ -79,14 +80,14 @@ class ReadWriteTest(unittest.TestCase):
         for instant in (datetime(1970, 1, 1, tzinfo=timezone.utc), datetime(2100, 1, 1, tzinfo=timezone.utc)):
             with self.subTest(instant=instant), host_clock(instant, fm):
                 self.assertEqual(fm.datetime.now(timezone.utc), instant)  # the seam reaches the module
-                self.assertEqual(fm.server_now(), datetime(2026, 11, 6, 12, tzinfo=timezone.utc))
+                self.assertEqual(forge_api.server_now(), datetime(2026, 11, 6, 12, tzinfo=timezone.utc))
 
     def test_tolerated_statuses(self):
         self.world.respond("gh", ["api", "-X", "POST", f"repos/{SLUG}/labels", "-f", "name=x",
                                   "-f", "color=FBCA04"], exit=1, stderr="gh: Validation Failed (HTTP 422)")
         self.world.not_found("gh", ["api", "-X", "DELETE", f"repos/{SLUG}/issues/{ISSUE}/labels/x"])
-        fm.ensure_label(SLUG, "x", "FBCA04")
-        fm.remove_label(SLUG, ISSUE, "x")
+        forge_api.ensure_label(SLUG, "x", "FBCA04")
+        forge_api.remove_label(SLUG, ISSUE, "x")
         self.world.respond("gh", LIST, exit=1, stderr="gh: Server Error (HTTP 500)")
         with self.assertRaises(fm.ForgeError) as raised:
             fm.list_markers(SLUG, ISSUE)
@@ -226,23 +227,42 @@ class ListIssuesTest(unittest.TestCase):
         world.respond_json("gh", ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues?labels=follow-up"
                                   "&state=all&since=2026-11-06T10:00:00Z&per_page=100"],
                            [[{"number": n} for n in range(1, 101)], [{"number": 101}]])
-        self.assertEqual([i["number"] for i in fm.list_issues(SLUG, "follow-up", since)], list(range(1, 102)))
+        self.assertEqual([i["number"] for i in forge_api.list_issues(SLUG, "follow-up", since)], list(range(1, 102)))
 
     def test_a_page_that_is_not_issues_is_refused(self):
         world = ForgeWorld(self)
         since = datetime(2026, 11, 6, 10, tzinfo=timezone.utc)
         world.respond_json("gh", ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues?labels=x"
                                   "&state=all&since=2026-11-06T10:00:00Z&per_page=100"], [{"number": 1}])
-        with self.assertRaises(fm.ForgeError):
-            fm.list_issues(SLUG, "x", since)
+        with self.assertRaises(forge_api.ForgeError):
+            forge_api.list_issues(SLUG, "x", since)
 
 
 class NoHostClockTest(unittest.TestCase):
     def test_module_reads_no_host_clock(self):
-        source = Path(fm.__file__).read_text("utf-8")
-        for spelling in ("time.time", ".now(", "utcnow", "date.today", "localtime"):
-            self.assertNotIn(spelling, source)
-        self.assertIn("from datetime import datetime", source)
+        for module in (fm, forge_api):
+            with self.subTest(module=module.__name__):
+                source = Path(module.__file__).read_text("utf-8")
+                for spelling in ("time.time", ".now(", "utcnow", "date.today", "localtime"):
+                    self.assertNotIn(spelling, source)
+                self.assertIn("from datetime import datetime", source)
+
+
+class TransportSeamTest(unittest.TestCase):
+    def test_the_transport_lives_in_forge_api(self):
+        for name in ("is_transport", "run_gh", "gh_json", "logged_in", "api_get", "api_pages",
+                     "server_now", "ensure_label", "add_label", "remove_label", "graphql",
+                     "create_issue", "add_blocked_by", "list_issues", "open_issues", "close_issue",
+                     "TIMEOUT"):
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(forge_api, name))
+                self.assertFalse(hasattr(fm, name))
+        for name in ("_gh", "_json", "subprocess"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(fm, name))
+
+    def test_forge_markers_raises_the_transport_error(self):
+        self.assertIs(fm.ForgeError, forge_api.ForgeError)
 
 
 REF = "refs/agent-locks/land/main"
@@ -307,13 +327,13 @@ class RefTest(unittest.TestCase):
     def test_cas_keeps_the_failure_code(self):
         for code in ("gh_failed", "gh_timeout"):
             with self.subTest(code=code), \
-                    mock.patch.object(fm, "_gh", side_effect=fm.ForgeError(code, "x")):
+                    mock.patch.object(forge_api, "run_gh", side_effect=fm.ForgeError(code, "x")):
                 self.assertEqual(cas_code(SLUG, NODE, REF, OID_A, OID_B), code)
         for code, transient in (("gh_failed", False), ("gh_timeout", True)):
             with self.subTest(code=code), \
-                    mock.patch.object(fm, "_gh", side_effect=fm.ForgeError(code, "x")):
+                    mock.patch.object(forge_api, "run_gh", side_effect=fm.ForgeError(code, "x")):
                 self.assertEqual(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B).transient, transient)
-        with mock.patch.object(fm, "_gh", side_effect=fm.ForgeError("gh_missing", "x")), \
+        with mock.patch.object(forge_api, "run_gh", side_effect=fm.ForgeError("gh_missing", "x")), \
                 self.assertRaises(fm.ForgeError) as caught:
             fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B)
         self.assertEqual(caught.exception.code, "gh_missing")
@@ -322,12 +342,12 @@ class RefTest(unittest.TestCase):
         for payload in ({"data": {"updateRefs": {"clientMutationId": None}}, "errors": [{"message": "x"}]},
                         {"data": {"updateRefs": None}}):
             with self.subTest(payload=payload), \
-                    mock.patch.object(fm, "_gh", return_value=(0, json.dumps(payload))):
+                    mock.patch.object(forge_api, "run_gh", return_value=(0, json.dumps(payload))):
                 self.assertEqual(cas_code(SLUG, NODE, REF, OID_A, OID_B), "gh_failed")
                 self.assertFalse(fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B).transient)
 
     def test_node_id_outside_the_grammar_is_invalid(self):
-        with mock.patch.object(fm, "_gh", return_value=(0, "not a node id\n")), \
+        with mock.patch.object(forge_api, "run_gh", return_value=(0, "not a node id\n")), \
                 self.assertRaises(fm.ForgeError) as caught:
             fm.repo_node_id(SLUG)
         self.assertEqual(caught.exception.code, "payload_invalid")
@@ -410,7 +430,7 @@ class TransportTest(unittest.TestCase):
         self.world = ForgeWorld(self)
 
     def raised(self, call):
-        with self.assertRaises(fm.ForgeError) as caught:
+        with self.assertRaises(forge_api.ForgeError) as caught:
             call()
         return caught.exception
 
@@ -436,18 +456,18 @@ class TransportTest(unittest.TestCase):
         self.assertEqual((error.code, error.transient), ("gh_failed", False))
 
     def test_a_timeout_is_transient(self):
-        with mock.patch.object(fm.subprocess, "run",
-                               side_effect=fm.subprocess.TimeoutExpired("gh", fm.TIMEOUT)):
+        with mock.patch.object(forge_api.subprocess, "run",
+                               side_effect=forge_api.subprocess.TimeoutExpired("gh", forge_api.TIMEOUT)):
             error = self.raised(lambda: fm.list_markers(SLUG, ISSUE))
         self.assertEqual((error.code, error.transient), ("gh_timeout", True))
 
     def test_constructed_errors_default_by_code(self):
-        self.assertTrue(fm.ForgeError("gh_timeout", "x").transient)
+        self.assertTrue(forge_api.ForgeError("gh_timeout", "x").transient)
         for code in ("gh_failed", "gh_missing", "payload_invalid"):
             with self.subTest(code=code):
-                self.assertFalse(fm.ForgeError(code, "x").transient)
-        self.assertTrue(fm.ForgeError("gh_failed", "x", transient=True).transient)
-        self.assertFalse(fm.ForgeError("gh_timeout", "x", transient=False).transient)
+                self.assertFalse(forge_api.ForgeError(code, "x").transient)
+        self.assertTrue(forge_api.ForgeError("gh_failed", "x", transient=True).transient)
+        self.assertFalse(forge_api.ForgeError("gh_timeout", "x", transient=False).transient)
 
     def test_an_outage_fails_the_next_calls_and_changes_nothing(self):
         self.world.comment_store(SLUG, ISSUE, [comment(5, claim_body(A))])
@@ -482,10 +502,10 @@ class TransportTest(unittest.TestCase):
 
     def test_a_cas_transport_failure_is_returned_with_its_class(self):
         self.world.ref_store(SLUG, {REF: OID_A})
-        bad_gateway = fm.subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="gh: Bad Gateway (HTTP 502)\n")
-        with mock.patch.object(fm.subprocess, "run", return_value=bad_gateway):
+        bad_gateway = forge_api.subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="gh: Bad Gateway (HTTP 502)\n")
+        with mock.patch.object(forge_api.subprocess, "run", return_value=bad_gateway):
             failure = fm.cas_ref(SLUG, NODE, REF, OID_A, OID_B)
-        self.assertIsInstance(failure, fm.ForgeError)
+        self.assertIsInstance(failure, forge_api.ForgeError)
         self.assertEqual((failure.code, failure.transient), ("gh_failed", True))
         self.assertEqual(self.world.refs(), {REF: OID_A})
         failure = fm.cas_ref(SLUG, NODE, REF, OID_B, OID_B)  # the fake's GraphQL error answer: not a transport error

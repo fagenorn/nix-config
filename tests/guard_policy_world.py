@@ -137,7 +137,7 @@ class GuardPolicyWorld:
                 (root / relative).write_text("# architecture\n", "utf-8")
         if render:
             done = subprocess.run(
-                [sys.executable, "-m", "agent_tools.resolve_project", "write-projections",
+                [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "write-projections",
                  "--repo-root", str(root)],
                 capture_output=True, text=True, timeout=120, env=self.env)
             if done.returncode != 0:
@@ -230,7 +230,7 @@ class GuardPolicyWorld:
                 env: dict | None = None) -> tuple[int, dict, str]:
         """Run the command from source: `(exit status, parsed report, stderr)`."""
         done = subprocess.run(
-            [sys.executable, "-m", "agent_tools.guard_policy", "compile",
+            [sys.executable, "-m", "agent_tools.guard.guard_policy", "compile",
              "--base", str(base or self.base), "--output", str(output or self.output)],
             capture_output=True, text=True, timeout=300, env=env or self.env, cwd=self.tmp)
         return done.returncode, json.loads(done.stdout), done.stderr
@@ -238,7 +238,7 @@ class GuardPolicyWorld:
     def derive(self, repository: str, *, env: dict | None = None) -> tuple[int, dict, str]:
         """Run `derive` from source: `(exit status, parsed report, stderr)`."""
         done = subprocess.run(
-            [sys.executable, "-m", "agent_tools.guard_policy", "derive",
+            [sys.executable, "-m", "agent_tools.guard.guard_policy", "derive",
              "--repository", repository],
             capture_output=True, text=True, timeout=300, env=env or self.env, cwd=self.tmp)
         return done.returncode, json.loads(done.stdout), done.stderr
@@ -251,7 +251,7 @@ class GuardPolicyWorld:
             "HOME", "PATH", "PYTHONPATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"))
         script.write_text(
             f"#!/bin/sh\n{exports}exec {shlex.quote(sys.executable)} "
-            '-m agent_tools.guard_policy derive "$@"\n', encoding="utf-8")
+            '-m agent_tools.guard.guard_policy derive "$@"\n', encoding="utf-8")
         script.chmod(0o755)
         return script
 

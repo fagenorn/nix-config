@@ -13,7 +13,7 @@ Standard library only: it imports nothing from the repository's helper package,
 
 The decisions behind the rules below are the records in `docs/areas/guard/adr/`
 (ADR-guard-001 to ADR-guard-008), and the compiler that writes the compiled
-policy is documented in `python/agent_tools/guard_policy.py`.
+policy is documented in `python/agent_tools/guard/guard_policy.py`.
 
 Segments, tokens and verbs
 --------------------------
@@ -572,7 +572,7 @@ loads first in both modes, so an invalid store policy refuses every push just
 as it blocks every Bash call. This hook is the authoritative check and the text
 guard stays the first line (O1): it refuses early, with accepted forms, what
 the hook would refuse late. `tests/test_git_pre_push_hook.py` runs real `git
-push` through the hook against `agent_tools.push_fixture`, a hermetic fixture
+push` through the hook against `agent_tools.guard.push_fixture`, a hermetic fixture
 whose fake ssh carries `git@github.com:<slug>.git` to a local bare repository
 and whose environment drops every inherited `GIT_*` variable, so no rewrite in
 the host's own git configuration can reach a network.
@@ -657,7 +657,7 @@ compiled policy's `derived_repositories`, keyed by the exact repository slug,
 `required_checks` is the sorted list of check names the project's contract
 declares in `bindings.vcs.merge.required_checks`, `[]` when it declares none.
 The row check is the store script `claude-guard-row-check`, which the wrapper
-passes as `--derive-bin` (`python/agent_tools/guard_policy.py` documents the
+passes as `--derive-bin` (`python/agent_tools/guard/guard_policy.py` documents the
 script, the compiler and the activation step that writes the compiled policy).
 No member exists in both files, so neither file is a valid instance of the
 other, and each member has one trust rule:

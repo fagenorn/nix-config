@@ -9,9 +9,9 @@ import fcntl
 import unittest
 from types import MappingProxyType
 
-from agent_tools import transaction_history, transaction_storage
+from agent_tools.release import transaction_history, transaction_storage
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_core import (
+from agent_tools.release.transaction_core import (
     MAX_ATTEMPTS, PARKED_CUSTODY_WINDOW_MS, REFUSAL_REASONS, RETRY_WINDOW_MS,
     EffectResultInvalid, InvocationRefused, StaleCustody, StateInvalid, TransactionError,
     TransactionStore, TransitionRefused, action_id)

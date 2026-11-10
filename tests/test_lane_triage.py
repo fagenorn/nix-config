@@ -1,6 +1,6 @@
-"""Contract tests for `lane-triage` (`agent_tools.lane_triage`, #279).
+"""Contract tests for `lane-triage` (`agent_tools.delivery.lane_triage`, #279).
 
-Runs the command as `python -m agent_tools.lane_triage` against a copy of the
+Runs the command as `python -m agent_tools.delivery.lane_triage` against a copy of the
 eval fixture project under a temporary HOME holding the committed platform
 manifest (agent-helpers rule 5).
 """
@@ -67,7 +67,7 @@ class LaneTriageCase(unittest.TestCase):
         text = payload if isinstance(payload, str) else json.dumps(payload)
         argv = list(args) or ["evaluate", "--repo-root", str(self.root), "--input", "-"]
         proc = subprocess.run(
-            [sys.executable, "-m", "agent_tools.lane_triage", *argv],
+            [sys.executable, "-m", "agent_tools.delivery.lane_triage", *argv],
             input=text, capture_output=True, text=True, timeout=60,
             env={**os.environ, "HOME": str(self.home)}, cwd=str(self.home))
         return proc.returncode, proc.stdout, proc.stderr

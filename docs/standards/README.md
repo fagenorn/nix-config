@@ -7,3 +7,4 @@ It holds deltas only, on top of the bar (Layer 0) and the stack shards
 | Shard | governs | Gist |
 |---|---|---|
 | [agent-helpers.md](agent-helpers.md) | `python/**`, `scripts/**`, `home/common/agent-skills/skills/*/scripts/**`, `home/common/claude-code/lifecycle_guard.py`, `home/common/agent-skills/tests/**` | Agent-workflow Python lives in the `agent_tools` package, runs only through `-m`, and shares one canonical-JSON home. Skill-text tests pin only machine-consumed text. |
+| [package-layout.md](package-layout.md) | `python/agent_tools/**`, `tests/test_agent_tools_layout.py` | Each agent_tools module lives in its area's subpackage, and cross-area imports follow the layout test's table. |
