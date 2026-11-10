@@ -263,15 +263,16 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason).`
 // Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
 const DEAD = []
-const call = async (prompt, opts) => {
+// optional: a step whose failure the caller recovers (the diff-size measurement) is not reported as a dead agent.
+const call = async (prompt, opts, optional) => {
   let reply
   try {
     reply = await agent(prompt, opts)
   } catch (error) {
-    DEAD.push(opts && opts.label)
+    if (!optional) DEAD.push(opts && opts.label)
     throw error
   }
-  if (reply == null) DEAD.push(opts && opts.label)
+  if (reply == null && !optional) DEAD.push(opts && opts.label)
   return reply
 }
 const deadOf = () => (DEAD.length ? { dead_agents: DEAD.slice() } : {})
@@ -984,10 +985,10 @@ if (REVIEW_SIZING && chunked) {
   let sizeReply = null
   let sizeWhy = 'no usable reply'
   try {
-    // agent, not call: a failed optional measurement is recovered here and must not be reported as a dead agent (deliver-batch's breaker reads those).
-    sizeReply = await agent(`${CTX}
+    // optional call: a failed measurement is recovered here and must not be reported as a dead agent (deliver-batch's breaker reads those).
+    sizeReply = await call(`${CTX}
 Measure the delivery's diff size. Run git -C ${W} fetch origin, then git -C ${W} diff --shortstat ${RANGE}${declared(plan).map(b => `, then git -C ${b.worktree} diff --shortstat ${b.base}...${b.name}`).join('')}. Each prints at most one line (N files changed, X insertions(+), Y deletions(-)); an empty output or a missing count is 0. Return measured true and changed_lines: the sum of the insertions and deletions over those lines. If any of these commands exits non-zero or prints an error, return measured false and no changed_lines; never return a partial sum. Run nothing else and change nothing.
-${RULES}`, { label: 'diff-size', phase: 'Final review', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: SIZE_SCHEMA })
+${RULES}`, { label: 'diff-size', phase: 'Final review', agentType: 'clerk', model: 'sonnet', effort: 'low', schema: SIZE_SCHEMA }, true)
   } catch (e) {
     // The measurement is optional: an agent exception must never abort the delivery.
     sizeReply = null
