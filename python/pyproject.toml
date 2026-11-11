@@ -9,3 +9,6 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 include = ["agent_tools*"]
+
+[tool.setuptools.package-data]
+"agent_tools.console" = ["page.html"]

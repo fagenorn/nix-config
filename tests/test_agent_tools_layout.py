@@ -20,6 +20,9 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "claims": frozenset({
         "agent_tools.project_contract.agent_platform",  # owner_actions
     }),
+    "console": frozenset({
+        "agent_tools.project_contract.agent_platform",  # service
+    }),
     "delivery": frozenset({
         "agent_tools.project_contract.resolve_project",  # lane_triage, issue_branch
     }),
@@ -305,7 +308,7 @@ class LayoutRuleTest(unittest.TestCase):
     def test_the_areas_are_the_docs_areas(self):
         self.assertEqual(
             area_packages(AREAS_DIR),
-            frozenset({"claims", "delivery", "guard", "hosts", "project_contract",
+            frozenset({"claims", "console", "delivery", "guard", "hosts", "project_contract",
                        "release", "system", "verification"}))
 
 

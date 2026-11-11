@@ -362,6 +362,17 @@ class DocsTreeTest(unittest.TestCase):
         docstring = " ".join((ast.get_docstring(ast.parse(source)) or "").split())
         self.assertNotIn("cannot prove", docstring)
 
+    def test_the_console_area_owns_its_terms(self):
+        text = (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text()
+        cells = [[c.strip() for c in line.strip().strip("|").split("|")]
+                 for line in text.splitlines() if line.startswith("|")]
+        areas = [row for row in cells if row[0] == "Console" and len(row) == 4]
+        self.assertEqual(len(areas), 1)
+        self.assertIn("(./areas/console/CONTEXT.md)", areas[0][1])
+        self.assertIn("`python/agent_tools/console/**`", areas[0][3])
+        for term in ("Console", "Inbox item", "Quiet project"):
+            self.assertIn([term, "Console"], cells)
+
     def doc(self, path):
         return " ".join((REPO_ROOT / path).read_text().split())
 

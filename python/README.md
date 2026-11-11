@@ -4,7 +4,7 @@ Every agent-workflow helper is a module of one standard-library Python package, 
 
 ## Layout
 
-- `python/agent_tools/` holds the modules in one subpackage per docs area (`claims`, `delivery`, `guard`, `hosts`, `project_contract`, `release`, `verification`, and `system` for code no area owns) beside the gate-pinned top level (`instruction_load`, `skill_lint`, `agent_model_matrix`, `canonical`), and `python/pyproject.toml` declares the package. The layout rule is [`docs/standards/package-layout.md`](../docs/standards/package-layout.md).
+- `python/agent_tools/` holds the modules in one subpackage per docs area (`claims`, `console`, `delivery`, `guard`, `hosts`, `project_contract`, `release`, `verification`, and `system` for code no area owns) beside the gate-pinned top level (`instruction_load`, `skill_lint`, `agent_model_matrix`, `canonical`), and `python/pyproject.toml` declares the package. The layout rule is [`docs/standards/package-layout.md`](../docs/standards/package-layout.md).
 - `lib/agent-tools.nix` builds the package into one Python environment, import-checks every module so that a broken import fails `just build`, and holds the command table. Each command is a module plus one row of that table, and the row is its only install route (ADR-system-002).
 - `home/common/agent-tools/default.nix` applies that builder once per home configuration as the `agentTools` module argument, which agent-skills and claude-code consume.
 - Each row becomes a `~/.agents/bin/<command>` launcher. It unsets the `NIX_PYTHON*` variables and runs `python3 -I -m agent_tools.<area>.<module>` (`agent_tools.<module>` for a top-level module) from the built environment, so nothing on `PYTHONPATH` or in the working directory can shadow the store copy.

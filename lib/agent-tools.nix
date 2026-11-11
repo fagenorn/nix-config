@@ -44,6 +44,7 @@ let
     "artifact-budget" = "delivery.artifact_budget";
     "cache-proxy" = "hosts.cache_proxy";
     "conformance" = "project_contract.conformance";
+    "console" = "console.console";
     "context-map-lint" = "delivery.context_map_lint";
     "diff-scope" = "delivery.diff_scope";
     "fallback-audit" = "project_contract.fallback_audit";
