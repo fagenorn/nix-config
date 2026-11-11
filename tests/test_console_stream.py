@@ -186,6 +186,100 @@ class StreamTest(unittest.TestCase):
         self.assertEqual(response.readline(), b"")
 
 
+def listed_states(view) -> dict:
+    lines = []
+    for entry in view["entries"]:
+        for project in entry.get("projects", [entry]):
+            lines.append(project["outside_sprints"])
+    lines.extend(entry["outside_sprints"] for entry in view["unmanaged"])
+    return {s["session_id"]: s["state"] for line in lines for s in line["sessions"]}
+
+
+class SessionStreamTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.store = root / "state/console/events.sqlite3"
+        self.registry = root / "state/fleet/registry.json"
+        self.sessions = root / "sessions"
+        self.sid = support.hook_cases()[0][1]["session_id"]
+
+    def start(self, **kwargs):
+        support.write_registry(self.registry, support.entries(1))
+        return support.service(
+            self, self.store, self.registry, session_dirs=[self.sessions], **kwargs)
+
+    def busy_session(self, poll_seconds):
+        stamp = int(time.time() * 1000)
+        support.write_session(self.sessions, pid=os.getpid(), session_id=self.sid,
+                              cwd="/srv/p00", status="busy", updated_at=stamp)
+        svc = self.start(session_poll_seconds=poll_seconds)
+        response = open_stream(self, svc)
+        self.assertEqual(listed_states(next_view(response)), {self.sid: "working"})
+        return svc, response, stamp
+
+    def wait_states(self, response, expected, seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if listed_states(next_view(response)) == expected:
+                return
+        raise AssertionError(f"the stream never listed {expected}")
+
+    def test_a_session_start_reaches_the_stream_within_one_second(self):
+        svc = self.start()
+        response = open_stream(self, svc)
+        next_view(response)
+        t0 = time.monotonic()
+        status, _, _ = support.post_hook(svc.address, support.hook_body("session start"))
+        self.assertEqual(status, 204)
+        next_view_listing(response, self.sid)
+        self.assertLess(time.monotonic() - t0, 1.0)
+
+    def test_a_registry_change_from_busy_to_idle_is_shown_within_one_poll(self):
+        svc, response, stamp = self.busy_session(3600)
+        support.write_session(self.sessions, pid=os.getpid(), session_id=self.sid,
+                              cwd="/srv/p00", status="idle", updated_at=stamp + 1)
+        appended = svc.poll_sessions()
+        self.assertEqual([e.kind for e in appended], ["session.seen"])
+        self.assertEqual(listed_states(next_view(response)), {self.sid: "idle"})
+        self.assertEqual(service.SESSION_POLL_SECONDS, 5.0)
+
+    def test_the_poll_thread_shows_a_change_on_its_own(self):
+        _, response, stamp = self.busy_session(0.25)
+        support.write_session(self.sessions, pid=os.getpid(), session_id=self.sid,
+                              cwd="/srv/p00", status="idle", updated_at=stamp + 1)
+        self.wait_states(response, {self.sid: "idle"}, 2)
+
+    def test_a_session_gone_from_the_registry_leaves_after_two_polls(self):
+        _, response, _ = self.busy_session(0.25)
+        (self.sessions / f"{os.getpid()}.json").unlink()
+        self.wait_states(response, {}, 3 * 0.25 + 1.0)
+        kinds = [row[2] for row in support.log_rows(self.store)]
+        self.assertIn("session.gone", kinds)
+
+    def test_a_failing_poll_is_reported_and_retried(self):
+        svc = self.start(session_poll_seconds=0.25)
+        response = open_stream(self, svc)
+        next_view(response)
+        real = service.sessions.read_session_registry
+        calls = []
+
+        def reading(*args, **kwargs):
+            if not calls:
+                calls.append(1)
+                raise RuntimeError("boom")
+            return real(*args, **kwargs)
+
+        stderr = io.StringIO()
+        with mock.patch.object(service.sessions, "read_session_registry", reading), \
+                mock.patch.object(sys, "stderr", stderr):
+            support.write_session(self.sessions, pid=os.getpid(), session_id=self.sid,
+                                  cwd="/srv/p00", status="busy")
+            self.wait_states(response, {self.sid: "working"}, 2)
+        self.assertIn("console: session_poll_failed RuntimeError: boom", stderr.getvalue())
+
+
 def run_console(home, *args):
     env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(REPO_ROOT / "python")}
     return subprocess.Popen(
