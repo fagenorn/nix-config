@@ -53,11 +53,14 @@ class ReloadStep(unittest.TestCase):
     def setUpClass(cls):
         cls.user = units.username()
         # pure: the required CI job runs on Linux, where only a pure evaluation works.
-        cls.got = {host: units.evaluate(f"darwinConfigurations.{host}", """c: u: {
+        evaluated = {host: units.evaluate(f"darwinConfigurations.{host}", """c: u: {
           text = c.system.activationScripts.userLaunchd.text;
-        }""", pure=True)["text"] for host in units.DarwinHosts.HOSTS}
+          agents = builtins.attrNames c.environment.userLaunchAgents;
+        }""", pure=True) for host in units.DarwinHosts.HOSTS}
+        cls.got = {host: got["text"] for host, got in evaluated.items()}
+        cls.agents = {host: got["agents"] for host, got in evaluated.items()}
 
-    def run_text(self, text, has_domain, tail=""):
+    def run_text(self, text, agent_names, has_domain, tail=""):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         root = Path(os.path.realpath(scratch.name))
@@ -68,7 +71,8 @@ class ReloadStep(unittest.TestCase):
             fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         agents = root / "home/Library/LaunchAgents"
         agents.mkdir(parents=True)
-        (agents / "org.nixos.verify-pending.plist").write_text("old")  # a changed plist: the reload path
+        for name in agent_names:
+            (agents / name).write_text("old")  # a changed plist: the reload path
         calls = root / "calls"
         env = {"PATH": f"{root / 'bin'}:/usr/bin:/bin", "CALLS": str(calls),
                "HAS_DOMAIN": "1" if has_domain else "0", "FAKEHOME": str(root / "home")}
@@ -79,49 +83,56 @@ class ReloadStep(unittest.TestCase):
     def hosts(self):
         for host in units.DarwinHosts.HOSTS:
             with self.subTest(host=host):
-                yield self.got[host]
+                yield self.got[host], self.agents[host]
+
+    def test_each_host_installs_the_console_and_verify_pending_agents(self):
+        for host in units.DarwinHosts.HOSTS:
+            with self.subTest(host=host):
+                self.assertEqual(self.agents[host],
+                                 ["org.nixos.agent-console.plist", "org.nixos.verify-pending.plist"])
 
     def test_the_guard_wraps_the_step_and_the_step_calls_bare_launchctl_asuser(self):
         guard = GUARD.read_text()
-        for text in self.hosts():
+        for text, agents in self.hosts():
             self.assertTrue(text.startswith(guard), text[:300])
             self.assertLess(text.index(guard), text.index("reloading user service"))
             self.assertTrue(text.rstrip().endswith("unset -f launchctl"), text[-300:])
             step = text[len(guard):]
             # the form the shell function shadows: never /bin/launchctl or `command launchctl`
-            self.assertEqual(len(re.findall(r'^\s*launchctl asuser "\$\(id -u -- ', step, re.M)), 2, step)
-            self.assertEqual(len(re.findall(r"launchctl asuser", step)), 2, step)
+            self.assertEqual(len(re.findall(r'^\s*launchctl asuser "\$\(id -u -- ', step, re.M)), 2 * len(agents), step)
+            self.assertEqual(len(re.findall(r"launchctl asuser", step)), 2 * len(agents), step)
 
     def test_without_the_guard_a_missing_gui_domain_aborts_the_step(self):
         # The control: the fakes reproduce the failure the guard exists for.
-        for text in self.hosts():
-            done, calls = self.run_text(text.replace(GUARD.read_text(), "", 1), has_domain=False)
+        for text, agents in self.hosts():
+            done, calls = self.run_text(text.replace(GUARD.read_text(), "", 1), agents, has_domain=False)
             self.assertEqual(done.returncode, 134, done.stderr)
             self.assertIn("launchctl load -w", "\n".join(calls))
 
     def test_without_a_gui_domain_the_reload_is_skipped_with_one_line_and_exit_zero(self):
-        for text in self.hosts():
-            done, calls = self.run_text(text, has_domain=False, tail="echo finished")
+        for text, agents in self.hosts():
+            done, calls = self.run_text(text, agents, has_domain=False, tail="echo finished")
             self.assertEqual((done.returncode, done.stdout.splitlines()[-1]), (0, "finished"), done.stderr)
             self.assertEqual(done.stderr.splitlines().count(SKIP_LINE), 1, done.stderr)
             self.assertFalse([c for c in calls if c.startswith("launchctl asuser")], calls)
             self.assertFalse([c for c in calls if " load " in c], calls)
 
     def test_with_a_gui_domain_the_unload_and_load_reach_launchctl_and_nothing_is_skipped(self):
-        for text in self.hosts():
-            done, calls = self.run_text(text, has_domain=True)
+        for text, agents in self.hosts():
+            done, calls = self.run_text(text, agents, has_domain=True)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertNotIn(SKIP_LINE, done.stderr)
-            self.assertEqual(len([c for c in calls if c.startswith("launchctl asuser 502 sudo")]), 2, calls)
+            self.assertEqual(len([c for c in calls if c.startswith("launchctl asuser 502 sudo")]),
+                             2 * len(agents), calls)
             self.assertTrue(any(" load -w " in c for c in calls), calls)
 
     def test_the_guard_is_gone_after_the_step(self):
-        for text in self.hosts():
-            done, _ = self.run_text(text, has_domain=False, tail="type -t launchctl")
+        for text, agents in self.hosts():
+            done, _ = self.run_text(text, agents, has_domain=False, tail="type -t launchctl")
             self.assertEqual(done.stdout.strip().splitlines()[-1], "file", done.stderr)
 
     def test_without_a_gui_domain_other_launchctl_calls_still_reach_launchctl(self):
-        done, calls = self.run_text(GUARD.read_text(), has_domain=False, tail="launchctl setenv FOO bar")
+        done, calls = self.run_text(GUARD.read_text(), [], has_domain=False, tail="launchctl setenv FOO bar")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("launchctl setenv FOO bar", calls)
 
