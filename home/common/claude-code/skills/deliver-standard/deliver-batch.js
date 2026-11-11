@@ -443,6 +443,7 @@ const LOCK_SCHEMA = {
   properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'moved', 'held_by', 'lost_to', 'land-contended', 'error'] }, lock_sha: { type: 'string' }, pr: { type: 'integer' }, by: { type: 'string' }, detail: { type: 'string' } },
   required: ['verdict'],
 }
+const STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['free', 'held_by', 'stale', 'error'] }, lock_sha: { type: 'string' }, by: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
 const LAND_PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head: { type: 'string' }, notes: { type: 'string' } }, required: ['pr', 'head'] }
 const LAND_CHECKS_SCHEMA = {
   type: 'object',
@@ -557,7 +558,15 @@ Then, only when ok is true and lock's verdict is acquired, already_held or moved
 ${CHECKS_STEPS(pr)}
 Return those fields as checks; otherwise return checks null.
 ${RULES}`, label, { ...lifecycleClerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
-    const lv = rec && rec.lock ? rec.lock.verdict : null
+    let lv = rec && rec.lock ? rec.lock.verdict : null
+    let reread = false
+    // #816: a refusal naming this batch at the lock it already held is a move whose read-back lagged, not contention: read the lock once and go on when it is at expected.
+    if (rec && rec.ok === true && rec.head === expected && (lv === 'lost_to' || lv === 'held_by') && rec.lock.by === HOLDER && rec.lock.lock_sha === lockSha) {
+      const st = await call(`The lock move to ${expected} for PR #${pr} of issue #${n} of ${SLUG} answered ${lv} naming this batch at ${lockSha}, which may be a lagging read. Read the cross-host landing lock of the branch ${INT} once: run alone and exactly: forge-claim land status --repo ${SLUG} --branch ${INT} --sha ${expected}
+Return its verdict (free, held_by, stale, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT} Run nothing else.
+${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
+      if (st && st.verdict === 'held_by' && st.lock_sha === expected) { lv = 'moved'; reread = true }
+    }
     if (HOLDING(lv)) {
       lockHeld = true
       lockSha = expected
@@ -565,7 +574,8 @@ ${RULES}`, label, { ...lifecycleClerk, schema: { ...RECORD_SCHEMA, properties: {
     } else if (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to' || (rec && rec.ok === false && !rec.lock)) lockMaybe = null
     if (!rec || rec.ok !== true || rec.head !== expected) return out('stopped', { stage: 'land-record', detail: rec ? rec.detail : `${label} returned nothing`, head: rec ? rec.head : undefined })
     if (!HOLDING(lv)) return out('land-contended', { detail: `the lock did not move to ${expected}` })
-    carried = { label, reply: rec.checks || null }
+    // The record step polled no checks when the lock was only confirmed by the status read: the loop polls them itself.
+    carried = reread ? null : { label, reply: rec.checks || null }
     return null
   }
 

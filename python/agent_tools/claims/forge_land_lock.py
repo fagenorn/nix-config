@@ -61,6 +61,11 @@ failure there waits for the next poll instead of exiting at once (issue 740). Th
 transport retry of `forge_claim` never wraps `--wait`, whose failed-poll count is its own bound.
 
 D9, `release` is a compare-and-swap delete sent without a prior read, then re-read.
+
+D10, a swap that reported no failure whose read-back still shows the old lock is read again up to
+`READBACK_RETRIES` times, `READBACK_DELAY` seconds apart, before it is judged: the git refs API can lag
+a write (issue 816), so a ref that reaches the caller's sha answers `moved` or `acquired`, and only a
+read-back that stays on the old lock, or names a third sha at once, is `lost_to`.
 """
 import time
 from collections.abc import Collection
@@ -71,6 +76,8 @@ from agent_tools.system import forge_api
 
 LOCK_PREFIX = "refs/agent-locks/land/"
 CREATE_ROUNDS = 3
+READBACK_RETRIES = 3
+READBACK_DELAY = 1.0
 IDLE_AFTER = 2700
 POLL = 120
 BOUND = 3600
@@ -199,6 +206,11 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
         attempts.wrote = True
     failure = fm.cas_ref(slug, node(), ref, lock, sha)
     after = observe()
+    for _ in range(READBACK_RETRIES):
+        if failure or after != lock:
+            break
+        sleep(READBACK_DELAY)  # an applied swap whose read-back still shows the old sha (issue 816)
+        after = observe()
     if after == sha:
         if kind == "move":
             return Outcome("moved", sha, pick_pr(mine), None)
