@@ -202,6 +202,8 @@ agent-workflow-tests *args:
     tests/test_console_hook_cost.py \
     tests/test_console_inbox.py \
     tests/test_console_tracker.py \
+    tests/test_console_digest.py \
+    tests/test_console_writes.py \
     tests/test_console_deliveries.py \
     tests/test_console_units.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \

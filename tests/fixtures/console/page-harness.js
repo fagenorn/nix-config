@@ -1,6 +1,8 @@
 "use strict";
 // Test-only. Runs the console page's script under node with a minimal DOM.
 //   node page-harness.js <page.html>   (JSON list of steps on stdin)
+// Steps: frame, open, snapshot, and the focus clock: a first-only start
+// {focused, clock}, then clock, focus, blur, hide, pagehide.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -123,9 +125,11 @@ const markup = html.slice(0, open) + html.slice(close);
 
 const root = new Elem("html");
 let template = null;
-for (const m of markup.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*?\bid="([^"]+)"/g)) {
+for (const m of markup.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?\bid="([^"]+)"[^>]*)>/g)) {
   const node = new Elem(m[1]);
-  node.id = m[2];
+  node.id = m[3];
+  const withContent = /\bcontent="([^"]*)"/.exec(m[2]);
+  if (withContent) node.content = withContent[1];
   if (m[1] === "template") {
     template = node;
     node.content = new Elem("fragment");
@@ -135,7 +139,44 @@ for (const m of markup.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*?\bid="([^"]+)"/g
   }
 }
 
+const steps = JSON.parse(fs.readFileSync(0, "utf8"));
+const state = { focused: false, visibility: "visible", clock: null };
+if (steps.length > 0 && "start" in steps[0]) {
+  state.focused = steps[0].start.focused;
+  state.clock = steps[0].start.clock;
+  steps.shift();
+}
+
+class HarnessDate extends Date {
+  static now() {
+    return state.clock === null ? Date.now() : state.clock;
+  }
+}
+
+const listeners = { window: {}, document: {} };
+function listen(target) {
+  return (name, fn) => {
+    (listeners[target][name] = listeners[target][name] || []).push(fn);
+  };
+}
+function fire(target, name) {
+  for (const fn of listeners[target][name] || []) fn({ type: name });
+}
+const window = { addEventListener: listen("window") };
+const posts = [];
+function fetch(url, options) {
+  posts.push({
+    url, method: options.method, headers: options.headers, keepalive: options.keepalive,
+  });
+  return Promise.resolve({});
+}
+
 const document = {
+  addEventListener: listen("document"),
+  hasFocus: () => state.focused,
+  get visibilityState() {
+    return state.visibility;
+  },
   createElement: (tag) => new Elem(tag),
   getElementById(id) {
     if (template && template.id === id) return template;
@@ -163,7 +204,7 @@ class EventSource {
 }
 
 vm.runInNewContext(script, {
-  document, EventSource, Date, JSON, String, Math, Number, Array, Object, console,
+  document, window, fetch, EventSource, Date: HarnessDate, JSON, String, Math, Number, Array, Object, console,
 });
 
 function node(n) {
@@ -177,7 +218,6 @@ function node(n) {
   };
 }
 
-const steps = JSON.parse(fs.readFileSync(0, "utf8"));
 const snapshots = [];
 for (const step of steps) {
   if ("frame" in step) {
@@ -188,12 +228,27 @@ for (const step of steps) {
     const fold = attached(root).find((n) => n.tagName === "DETAILS" && n.dataset.key === step.open);
     if (!fold) throw new Error("no details with key " + step.open);
     fold.open = true;
+  } else if ("clock" in step) {
+    state.clock = step.clock;
+  } else if (step.focus) {
+    state.focused = true;
+    fire("window", "focus");
+  } else if (step.blur) {
+    state.focused = false;
+    fire("window", "blur");
+  } else if (step.hide) {
+    state.visibility = "hidden";
+    fire("document", "visibilitychange");
+  } else if (step.pagehide) {
+    fire("window", "pagehide");
   } else if (step.snapshot) {
     const byId = (id) => root.children.find((n) => n.id === id) || null;
     const unmanaged = byId("unmanaged");
     snapshots.push({
       projects: node(byId("projects")),
       unmanaged: unmanaged ? node(unmanaged) : null,
+      digest: byId("digest") ? node(byId("digest")) : null,
+      posts: posts.slice(),
     });
   } else {
     throw new Error("unknown step " + JSON.stringify(step));
