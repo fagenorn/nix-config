@@ -175,6 +175,61 @@ class RefusedLockTest(LockCase):
         self.assertIn(f"held_by {OTHER} (pull request 77)", detail)
         self.assertEqual((self.world.refs(), self.swaps()), ({REF: OTHER}, []))
 
+    def test_a_resumed_release_whose_head_moved_parks_and_can_be_abandoned(self):
+        """Review of PR 879: the commit of a resumed release is fixed, so a pull request that
+        moved past it must park, never refuse on every run."""
+        driver = self.driver()
+        tid = rs.seed(driver, merge=support.MERGE)
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{COMMIT}/pulls?per_page=100"], [])
+        reason = f"merge: release pull request no longer at {COMMIT}"
+        for _ in range(3):
+            tokens = [c["token"] for c in driver.preview(None)["confirmations"]]
+            result = driver.run(None, tokens)
+            self.assertEqual((result["state"], result["next"], result["sync"]),
+                             ("attention_required", "attention", None))
+            self.assertIn(result["lock"]["verdict"], ("released", "not_held"))
+            status = driver.status()["release"]
+            self.assertEqual((status["reason"], status["parked_from"]), (reason, "publishing"))
+            self.assertIsNone(driver.current()[1].custody)
+        self.assertEqual((self.merges(), self.world.refs()), ([], {}))
+        self.assertEqual((driver.abandon()["state"], driver.current()[1].transaction_id),
+                         ("abandoned", tid))
+        self.assertTrue(driver.preview(rs.candidate())["mode"] == "new")
+
+    def test_a_transient_failure_of_the_check_is_retried_once(self):
+        run, calls, slept = release_lock.forge_land_lock.run, [], []
+
+        def flaky(args, attempts=None):
+            calls.append(args.action)
+            if len(calls) == 1:
+                raise release_lock.forge_land_lock.forge_api.ForgeError("gh_timeout", "slow")
+            return run(args, attempts)
+
+        with mock.patch.object(release_lock.forge_land_lock, "run", flaky), \
+                mock.patch.object(release_lock, "sleep", slept.append):
+            _, result = rs.release(self.driver(), rs.candidate())
+        self.assertEqual((result["next"], result["lock"]), ("done", RELEASED))
+        self.assertEqual((calls, slept), (["acquire", "acquire", "release"],
+                                          [release_lock.RETRY_DELAY]))
+
+    def test_a_failure_that_is_not_transient_or_repeats_is_not_retried_again(self):
+        error = release_lock.forge_land_lock.forge_api.ForgeError
+        for raised, tries in ((error("gh_failed", "denied"), 1), (error("gh_timeout", "slow"), 2)):
+            with self.subTest(code=raised.code):
+                calls = []
+
+                def failing(args, attempts=None):
+                    calls.append(args.action)
+                    raise raised
+
+                with mock.patch.object(release_lock.forge_land_lock, "run", failing), \
+                        mock.patch.object(release_lock, "sleep", lambda _: None):
+                    lock = release_lock.call("acquire", SLUG, "dev", COMMIT)
+                    self.assertEqual(release_lock.call("release", SLUG, "dev", COMMIT)["verdict"],
+                                     "error")
+                self.assertEqual((lock["verdict"], calls), ("error", ["acquire"] * tries + ["release"]))
+                self.assertFalse(release_lock.gone(lock))
+
     def test_a_lock_that_cannot_be_checked_refuses_and_creates_nothing(self):
         self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{COMMIT}/pulls?per_page=100"], [])
         detail = self.refused("land_lock_unavailable", self.driver())

@@ -134,10 +134,15 @@ never acquires it for the caller and never waits: it makes one one-shot check th
 `release_lock` and proceeds only on `already_held`. A new release is checked after the
 confirmation checks and before the store or the transaction is created; a resumed one is
 checked right before its merge action is invoked, and gives custody up before it refuses.
+A resumed release whose pull request is no longer open at the candidate commit (`no_open_pr`)
+does not refuse: its commit is fixed, so every run would refuse alike. It parks
+`attention_required` with reason `<merge>: release pull request no longer at <commit>`, the
+lock is released as on any `attention`, and the release can be abandoned.
 `acquired` or `moved` refuses `land_lock_lost` (the lock was lost and is now taken again, so a
 landing may have moved the head), `held_by` or `lost_to` refuses `land_lock_held`, and `error`
 refuses `land_lock_unavailable`; each detail names the verdict and the repair: wait for the
 checks on the current head under the lock and preview again. A refusal releases nothing. The
+check is tried once more after a transient forge error. The
 result of `run` on such a profile carries `lock`, `{verdict, lock_sha, detail}` or null. A run
 that began after the merge was satisfied makes no lock call and reports null. One that began
 before it keeps the lock while the release can still merge (`next` is `confirm` or `wait` and
@@ -579,12 +584,13 @@ class Driver:
         return router.lock(action, self.sync["target"]["repository"],
                            self.sync["integration"], sha)
 
-    def _hold(self, router: "_Router", sha: str) -> dict[str, Any]:
+    def _hold(self, router: "_Router", sha: str, *, park: bool = False) -> dict[str, Any]:
         """Re-check the land lock before the release merges: only a lock already at `sha`
-        passes, and every other verdict refuses (issue 875, ADR-claims-009)."""
+        passes, and every other verdict refuses (issue 875, ADR-claims-009). With `park`, the
+        answer `no_open_pr` is returned for the caller to park on."""
         lock = self._lock(router, "acquire", sha)
         verdict = lock["verdict"]
-        if verdict == release_lock.HELD:
+        if verdict == release_lock.HELD or (park and release_lock.gone(lock)):
             return lock
         branch = self.sync["integration"]
         repair = (f"wait for the checks on the current head of {branch} under the lock, then "
@@ -859,15 +865,20 @@ class _Drive:
         return self.driver._lock(self.router, "release",
                                  self.transaction.subject["candidate"]["commit"])
 
-    def hold(self) -> None:
-        """Check the land lock before a resumed release invokes its merge; a refusal gives
-        custody up first (issue 875)."""
+    def hold(self, name: str) -> str | None:
+        """Check the land lock before a resumed release invokes its merge `name` (issue 875).
+        A release pull request no longer open at the candidate commit parks, because the
+        commit is fixed and a refusal would repeat on every run; any other failed check gives
+        custody up and refuses."""
+        sha = self.transaction.subject["candidate"]["commit"]
         try:
-            self.lock = self.driver._hold(self.router,
-                                          self.transaction.subject["candidate"]["commit"])
+            self.lock = self.driver._hold(self.router, sha, park=True)
         except Refusal:
             self.transaction = self.store.release(self.custody)
             raise
+        if release_lock.gone(self.lock):
+            return self.park(f"{name}: release pull request no longer at {sha}")
+        return None
 
     def begin(self) -> str | None:
         if self.transaction.state == "created":
@@ -963,7 +974,9 @@ class _Drive:
             except GrantInvalid:
                 return "confirm"
         if self.lock is None and self.unmerged and name == self.driver.sync["action"]:
-            self.hold()
+            ending = self.hold(name)
+            if ending is not None:
+                return ending
         try:
             self.transaction = self.store.invoke_action(
                 self.custody, name=name, parameters=parameters, effect=self.router)

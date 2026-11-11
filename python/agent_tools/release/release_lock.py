@@ -16,13 +16,18 @@ first preview; the driver only re-checks and releases it, through the two calls 
 - `release`: `released` (the lock is gone, whether or not this call removed it), `not_held`
   (the lock is at another sha, `lock_sha`, and was left alone), or `error`.
 
-`error` covers `no_open_pr` (no open release pull request from `branch` has head `sha`) and
-every forge failure; `detail` names it and `lock_sha` is null. `call` never raises: a lock that
+`error` covers `no_open_pr` (no open release pull request from `branch` has head `sha`, which
+`gone` tells apart) and every forge failure; `detail` names it and `lock_sha` is null. An
+`acquire` that fails with a transient forge error (a `gh` timeout, an HTTP 5xx or a connection
+failure) is tried once more after `RETRY_DELAY` seconds, as `forge-claim` retries a one-shot
+`land acquire`; a `release` is not, since it runs after the merge and a lock left behind is
+stale. `call` never raises: a lock that
 cannot be released must not fail a published release, and one left behind is taken over by the
 staleness rules of `forge_land_lock` (D3 once the release pull request is merged or closed, D4
 after 45 minutes idle).
 """
 
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -30,7 +35,29 @@ from agent_tools.claims import forge_land_lock
 
 ACTIONS = ("acquire", "release")
 HELD = "already_held"
+NO_OPEN_PR = "no_open_pr"
 DETAIL_LIMIT = 240
+RETRY_DELAY = 20
+
+sleep = time.sleep  # a module attribute so tests patch it
+
+
+def gone(lock: dict[str, Any]) -> bool:
+    """`lock` is the answer `no_open_pr`: the release pull request is not open at the sha."""
+    return lock["verdict"] == "error" and (lock["detail"] or "").startswith(NO_OPEN_PR + ":")
+
+
+def _run(args: SimpleNamespace) -> dict[str, Any]:
+    """`forge_land_lock.run`, with one more try of an `acquire` after a transient failure."""
+    attempts = forge_land_lock.Attempts()
+    try:
+        return forge_land_lock.run(args, attempts)[1]
+    except Exception as error:
+        if args.action != "acquire" or not getattr(error, "transient", False):
+            raise
+        attempts.failed()
+    sleep(RETRY_DELAY)
+    return forge_land_lock.run(args, attempts)[1]
 
 
 def call(action: str, repository: str, branch: str, sha: str) -> dict[str, Any]:
@@ -40,7 +67,7 @@ def call(action: str, repository: str, branch: str, sha: str) -> dict[str, Any]:
     args = SimpleNamespace(command="land", action=action, repo=repository, branch=branch,
                            sha=sha, wait=False, release=True)
     try:
-        _, result = forge_land_lock.run(args)
+        result = _run(args)
     except Exception as error:  # a lock failure must never fail a published release
         return {"verdict": "error", "lock_sha": None,
                 "detail": f"{type(error).__name__}: {error}"[:DETAIL_LIMIT]}

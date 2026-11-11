@@ -163,8 +163,9 @@ class ShipReleaseContractsTest(unittest.TestCase):
     def test_a_two_branch_release_holds_the_land_lock_from_before_the_first_preview(self):
         """Issue 875, ADR-release-011: Phase 3 acquires with a wait before the first preview and
         after the release PR is opened, keeps the lock across the confirmation stop and
-        releases it on every other stop; under the lock the one CI wait is bounded at 30
-        minutes instead of 5; Phase 4 acquires again on a lock refusal. Both forms
+        releases it on every other stop but `release_busy`, a timed-out or killed acquire
+        included; under the lock the one CI wait watches every required check of the release
+        pull request for up to 30 minutes, and the re-preview stays the judge; Phase 4 acquires again on a lock refusal. Both forms
         parse against the live `forge-claim` parser."""
         from agent_tools.claims import forge_claim
         phase3 = self.skill.split("## Phase 3", 1)[1].split("\n## ", 1)[0]
@@ -175,11 +176,18 @@ class ShipReleaseContractsTest(unittest.TestCase):
         for form in ("Two-branch project: before the first preview, and again after opening the "
                      "release PR, run alone (60-minute timeout) " + acquire,
                      "in resume form, `<commit>` the release's `commit`",
-                     "`no_open_pr` goes on to the preview",
-                     "The confirmation stop keeps the lock and the run releases it; every "
-                     "other stop, a declined confirmation too, first runs " + release,
+                     "`no_open_pr` goes on to the preview, or in resume form before the merge "
+                     "to reporting it and offering `abandon`.",
+                     "The confirmation stop and a `release_busy` stop keep the lock, and the run "
+                     "releases it; every other stop, a declined confirmation or a timed-out or "
+                     "killed acquire too, first runs " + release,
                      "`release_pr_missing`",
-                     "one foreground call of at most 5 minutes, 30 under the lock.",
+                     "wait once for CI in one foreground call: under the lock `gh pr checks "
+                     "<integration> --repo <slug> --required --watch --fail-fast --interval 60` "
+                     "(30-minute timeout; it can return early, so the re-preview judges), else "
+                     "`gh run watch <id> --exit-status` from `gh run list --commit <commit>` "
+                     "(at most 5 minutes).",
+                     "After either, re-run the same preview.",
                      "Still pending, or another refusal: report it and stop."):
             with self.subTest(form=form):
                 found = phase3.find(form, at)
@@ -189,6 +197,8 @@ class ShipReleaseContractsTest(unittest.TestCase):
         self.assertIn("A `confirmation_stale`, `confirmation_required` or, after acquiring again, "
                       "`land_lock_*` refusal is likewise a re-preview.", phase4)
         self.assertIn("land lock, preview", self.skill.split("## Authorization", 1)[1])
+        self.assertIn("A shell variable does not survive between calls; never expand one.",
+                      self.skill.split("## Phase 0", 1)[1].split("\n## ", 1)[0])
         self.assertIn("the run's `sync` and `lock`", self.skill.split("## Phase 5", 1)[1])
         for form in (acquire, release):
             argv = [("octo/widgets" if part == "<slug>" else "dev" if part == "<integration>"
