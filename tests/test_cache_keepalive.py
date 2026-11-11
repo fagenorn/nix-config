@@ -5,8 +5,10 @@ Later classes drive `Keepalive` on a fake clock against #422's `FakeUpstream`, p
 `ProxyServer` in front of it, and run `python -m agent_tools.hosts.cache_proxy --keepalive`.
 """
 
+import contextlib
 import functools
 import http.client
+import io
 import json
 import select
 import socket
@@ -19,8 +21,9 @@ from unittest import mock
 
 from agent_tools.hosts import cache_keepalive, cache_proxy, subagent_prefix
 from agent_tools.canonical import telemetry_digest
-from tests.test_cache_proxy import (TIMEOUT, FakeUpstream, RecordingStream, closed_port, fixture,
-                                    holders, json_reply)
+from tests import test_cache_proxy
+from tests.test_cache_proxy import (METADATA_BODY, TIMEOUT, FakeUpstream, RecordingStream, closed_port, fixture, holders, json_reply,
+                                    replay)
 
 MESSAGES = "/v1/messages?beta=true"
 SESSION = "5e2b6c1a-0d3f-4c55-9a51-6f0c2d1e7a90"
@@ -30,6 +33,9 @@ START_USAGE = {"input_tokens": 3, "cache_creation_input_tokens": 120,
                "cache_read_input_tokens": 40000,
                "cache_creation": {"ephemeral_5m_input_tokens": 120, "ephemeral_1h_input_tokens": 0},
                "output_tokens": 1}
+
+
+METADATA_USER = json.loads(METADATA_BODY)["metadata"]["user_id"]
 
 
 def mark(ttl=None):
@@ -835,6 +841,49 @@ class FailingPingTest(KeepaliveCase):
         self.assertEqual(self.due(270), [])
 
 
+class PingLimitSensingTest(KeepaliveCase):
+    """A ping's reply goes to the limit sensor, like a client request's reply (#860)."""
+
+    def setUp(self):
+        self.reports = []
+        super().setUp()
+        self.keepalive = cache_keepalive.Keepalive(
+            cache_proxy.LineLog(self.stream), self.keepalive._connect, self.clock,
+            limits=self.sensor())
+
+    def sensor(self):
+        return cache_proxy.LimitSensor(self.reports.append)
+
+    def responder(self):
+        return replay("limits-refused.json")
+
+    def ping_once(self):
+        self.busy_main()
+        self.exchange(AGENT_P, dict(document(), metadata={"user_id": METADATA_USER}))
+        [ping] = self.due(270)
+        self.keepalive.send(ping)
+
+    def test_a_refused_ping_reply_is_reported_with_the_conversations_account(self):
+        self.ping_once()
+        self.assertEqual(len(self.upstream.requests), 1)
+        self.assertEqual(self.reports, [{**test_cache_proxy.LimitHeadersTest.REFUSED_READING,
+                                         "account": "acc-1", "session_id": "ses-1"}])
+
+    def test_a_sensor_that_raises_logs_only_its_type_and_the_ping_is_still_logged(self):
+        def refuse(document):
+            raise ValueError("secret-value-1")
+
+        self.keepalive = cache_keepalive.Keepalive(
+            cache_proxy.LineLog(self.stream), self.keepalive._connect, self.clock,
+            limits=cache_proxy.LimitSensor(refuse))
+        self.ping_once()
+        [error] = self.events("limit_error")
+        self.assertEqual(set(error), {"event", "ts", "error"})
+        self.assertEqual(error["error"], "ValueError")
+        self.assertEqual(len(self.events("ping")), 1)
+        self.assertFalse(any("secret-value-1" in line for line in self.stream.lines))
+
+
 class RunLoopTest(unittest.TestCase):
     def test_run_logs_tick_and_send_errors_and_keeps_running(self):
         stream = RecordingStream()
@@ -1050,6 +1099,42 @@ class KeepaliveProxyTest(unittest.TestCase):
         ends = [json.loads(line) for line in self.stream.lines if '"keepalive_end"' in line]
         self.assertEqual([(end["conversation"], end["reason"]) for end in ends],
                          [(cache_keepalive.conversation_handle(SESSION, AGENT_P), "session_idle")])
+
+
+class LimitWiringTest(unittest.TestCase):
+    """`main` hands the one limit sensor to the keepalive when both flags are on (#860)."""
+
+    class Recorder:
+        def __init__(self, port, upstream, log, keepalive=None, reorder=None, limits=None):
+            self.keepalive, self.limits = keepalive, limits
+            self.server_address = ("127.0.0.1", 1)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+    def run_main(self, *args):
+        servers = []
+        recorder = type("Recorder", (self.Recorder,), {"__init__": lambda this, *a, **k: (
+            self.Recorder.__init__(this, *a, **k), servers.append(this))[0]})
+        with (mock.patch.object(cache_proxy, "ProxyServer", recorder),
+              contextlib.redirect_stderr(io.StringIO())):
+            cache_proxy.main(["--port", "0", *args])
+        [server] = servers
+        return server
+
+    def test_the_keepalive_reports_to_the_proxys_sensor(self):
+        server = self.run_main("--keepalive", "--sense-limits")
+        self.assertIsNotNone(server.limits)
+        self.assertIs(server.keepalive._limits, server.limits)
+
+    def test_without_the_flag_the_keepalive_senses_nothing(self):
+        self.assertIsNone(self.run_main("--keepalive").keepalive._limits)
 
 
 class KeepaliveCommandTest(unittest.TestCase):

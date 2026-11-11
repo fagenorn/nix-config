@@ -38,7 +38,8 @@ document, and the reply the client gets, its request log line and the `listening
 (sensing raised; its only field is `error`, the exception's type name) and `limit_report_failed`
 (a post failed; its only field is `error`, a type name or `status <n>`, written once per failing
 streak and again after the next success). No header value, sign-in or `device_id` is ever logged or
-reported. The launchd agent or systemd
+reported. With `--keepalive` as well, each keepalive ping's reply is sensed the same way, so a
+refusal that only a ping met still reaches the console. The launchd agent or systemd
 user unit that runs it and the `claude` launcher that routes through it are in
 `home/common/claude-code/README.md`.
 
@@ -584,22 +585,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     log = LineLog(sys.stderr)
+    limits = reporter = None
+    if args.sense_limits:
+        reporter = ConsoleReporter(args.console, log)
+        limits = LimitSensor(reporter.report)
     keepalive = None
     if args.keepalive:
         # Imported here because cache_keepalive imports this module's transport constants (D24).
         from agent_tools.hosts import cache_keepalive
         keepalive = cache_keepalive.Keepalive(
             log, functools.partial(open_upstream, args.upstream, upstream_tls(args.upstream)),
-            time.monotonic)
+            time.monotonic, limits=limits)
     reorder = None
     if args.reorder:
         # Imported here because subagent_prefix imports cache_keepalive, which imports this module.
         from agent_tools.hosts import subagent_prefix
         reorder = subagent_prefix.SubagentPrefix()
-    limits = reporter = None
-    if args.sense_limits:
-        reporter = ConsoleReporter(args.console, log)
-        limits = LimitSensor(reporter.report)
     try:
         server = ProxyServer(args.port, args.upstream, log, keepalive, reorder, limits)
     except OSError as error:

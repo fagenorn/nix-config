@@ -38,21 +38,25 @@ One running Claude Code process on this host, shown under the project of its wor
 _Avoid_: agent, terminal
 
 **Outside sprints**:
-The one quiet line of a project that counts its sessions working and waiting; opening it lists them. It raises no inbox item.
+The one quiet line of a project that counts its sessions working and waiting; opening it lists each session with its delivery runs in flight. It raises no inbox item.
 _Avoid_: ad-hoc work, side work
 
 **Not yet managed**:
 A repository with a live session that is not in the fleet registry; it is listed with its sessions and counts as no project. A session outside any repository is not listed.
 _Avoid_: unregistered project, orphan
 
+**Delivery run**:
+One Workflow run of a delivery program started by a session, shown under that session in its project's Outside sprints line while it has no final record: each issue it carries with its stage in plain words (queued, planning, plan review, building task n of m, final review, verifying, landing, done; working for a step the console does not know), and how long since it last moved, quiet for N min after fifteen minutes (ADR-console-005).
+_Avoid_: sprint, job
+
 **Limit reading**:
-The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets (ADR-console-005).
+The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets (ADR-console-006).
 _Avoid_: usage
 
 **Limit stop**:
-A refusal because a window is used up, recorded with its window and reset (ADR-console-005).
+A refusal because a window is used up, recorded with its window and reset (ADR-console-006).
 _Avoid_: rate limit error
 
 **Capacity strip**:
-The top-bar line of each profile's share left and next reset. It reads "tight" when one profile has room among two or more, and is promoted into the statement when every profile is out (ADR-console-005).
+The top-bar line of each profile's share left and next reset. It reads "tight" when one profile has room among two or more, and is promoted into the statement when every profile is out (ADR-console-006).
 _Avoid_: quota bar

@@ -121,6 +121,23 @@ class ProfileCapacityTest(unittest.TestCase):
         self.assertEqual(back["week_left"], 100)
         self.assertIsNone(back["out_until"])
 
+    def test_a_refusal_without_a_top_level_reset_clears_at_the_binding_windows_reset(self):
+        refused = reading_of(report(
+            http_status=429, status="rejected", reset=None, binding="7d", claim="seven_day",
+            windows={"7d": window("rejected", 1.0, T + 100), "5h": window("allowed", 0.2, T + 50)}))
+        out = profile_capacity("work", refused, T)
+        self.assertEqual((out["state"], out["out_until"]), ("out", iso(T + 100)))
+        back = profile_capacity("work", refused, T + 100)
+        self.assertEqual((back["state"], back["out_until"]), ("reset", None))
+        self.assertEqual((back["week_left"], back["five_hour_left"]), (100, 100))
+
+    def test_a_refusal_without_a_binding_uses_the_rejected_windows_reset(self):
+        refused = reading_of(report(
+            http_status=429, status="rejected", reset=None,
+            windows={"5h": window("allowed", 0.2, T + 500), "7d": window("rejected", 1.0, T + 100)}))
+        self.assertEqual(profile_capacity("work", refused, T)["out_until"], iso(T + 100))
+        self.assertEqual(profile_capacity("work", refused, T + 100)["state"], "ok")
+
     def test_no_reading_is_unknown(self):
         self.assertEqual(profile_capacity("idle", None, T), {
             "profile": "idle", "state": "unknown", "week_left": None, "five_hour_left": None,
@@ -231,6 +248,19 @@ class CapacityViewTest(unittest.TestCase):
                     windows={"7d": window("rejected", 1.0, T + 1000)}), name)
         names = [f"p{index}" for index in range(len(kinds))]
         return capacity_view(names, CapacityState(readings, {}), now)
+
+    def test_a_profile_without_a_configured_directory_is_not_current_capacity(self):
+        refused = reading_of(report(
+            http_status=429, status="rejected", reset=T + 100, binding="7d",
+            windows={"7d": window("rejected", 1.0, T + 100)}))
+        gone = reading_of(report(reset=T + 1000, windows={"7d": window("allowed", 0.1, T + 1000)}),
+                          "gone")
+        state = CapacityState({"work": refused, "gone": gone}, {})
+        current = capacity_view(["work"], state, T)
+        self.assertEqual([e["profile"] for e in current["profiles"]], ["work"])
+        self.assertIs(current["all_out"], True)
+        self.assertEqual(current["resumes_at"], iso(T + 100))
+        self.assertIs(current["tight"], False)
 
     def test_tight_needs_one_profile_with_room_among_two(self):
         table = [(["ok"], False), (["ok", "out"], True), (["ok", "unknown"], True),

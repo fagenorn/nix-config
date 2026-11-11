@@ -372,7 +372,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("`python/agent_tools/console/**`", areas[0][3])
         for term in ("Console", "Inbox item", "Quiet project", "Answered item",
                      "Held work", "Waiting since", "Session", "Outside sprints",
-                     "Not yet managed"):
+                     "Not yet managed", "Delivery run"):
             self.assertIn([term, "Console"], cells)
         self.assertIn("- **Console → Claims**:", text)
 
@@ -392,6 +392,16 @@ class DocsTreeTest(unittest.TestCase):
             "A session waiting in its terminal is not one",
         ):
             self.assertIn(needle, context)
+
+    def test_the_console_delivery_decision_is_recorded(self):
+        path = "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-005 — In-flight delivery stage is read from run journals")
+        adr = self.doc(path)
+        for needle in ("journal.jsonl", "ADR-console-001", "#830", "#837",
+                       "quiet for N min", "working", "delivery.seen"):
+            self.assertIn(needle, adr)
+        self.assertIn("**Delivery run**", self.doc("docs/areas/console/CONTEXT.md"))
 
     def test_the_build_provenance_limitation_is_in_a_release_adr_and_the_map(self):
         adrs = [

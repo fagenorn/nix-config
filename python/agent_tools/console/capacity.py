@@ -35,15 +35,19 @@ otherwise stay out forever, since no request is made while out). A window whose 
 passed reads 100 left and is not out, never its stale utilization; otherwise its left is
 `round(100 * max(0, 1 - utilization))`, null when the utilization is unknown, and it is out when its
 status is "rejected" or its utilization is at least 1. The reading is refused when its status is
-"rejected" and its reset is unknown or still ahead. `state` is "out" when refused or any window is
-out; "reset" when there is a window and every window has passed (or there is no window and the
-report's reset has passed); else "ok"; a profile with no reading is "unknown" with every other member
-null. `out_until` is the latest known reset among the out windows and, when refused, the report's
-reset (null when none is known, or when not out); `next_reset` the earliest reset still ahead.
+"rejected" and its refusal reset is unknown or still ahead; that reset is the report's `reset`, else
+the reset of the window the refusal names (`binding`, else the first of "7d", "5h" that is
+"rejected"), so a window that has reset clears a refusal whose top-level reset was lost. `state` is
+"out" when refused or any window is out; "reset" when there is a window and every window has passed
+(or there is no window and the report's reset has passed); else "ok"; a profile with no reading is
+"unknown" with every other member null. `out_until` is the latest known reset among the out windows
+and, when refused, the refusal reset (null when none is known, or when not out); `next_reset` the
+earliest reset still ahead.
 
 `capacity_view` returns `{"tight", "all_out", "resumes_at", "profiles": [<profile_capacity>]}` over
-every named profile and every profile with a reading, sorted. `tight` is true when exactly one
-profile has room (state "ok" or "reset") among at least two; `all_out` when there is a profile and
+exactly the named profiles, sorted: the configured ones, so a profile removed with
+`claude-account rm` stops counting at once while its readings stay in the log and the fold. `tight`
+is true when exactly one profile has room (state "ok" or "reset") among at least two; `all_out` when there is a profile and
 every one is out; `resumes_at` the earliest `out_until` then, null when none is known.
 """
 
@@ -159,15 +163,19 @@ def _refusal(report: dict) -> bool:
     return report["http_status"] == 429 and report["status"] == "rejected"
 
 
+def _stopped_window(binding: str | None, windows: dict) -> str | None:
+    """The window a refusal names: `binding`, else the first of "7d", "5h" that is "rejected"."""
+    if binding is not None:
+        return binding
+    return next((w for w in ("7d", "5h") if windows.get(w, {}).get("status") == "rejected"), None)
+
+
 def report_entries(report: dict, profile: str) -> list[tuple[str, None, dict]]:
     """The `capacity.reading` entry for a parsed report, plus a `capacity.stop` when it is a refusal."""
     entries: list[tuple[str, None, dict]] = [(READING, None, {**report, "profile": profile})]
     if _refusal(report):
         windows = report["windows"]
-        name = report["binding"]
-        if name is None:
-            name = next((w for w in ("7d", "5h")
-                         if windows.get(w, {}).get("status") == "rejected"), None)
+        name = _stopped_window(report["binding"], windows)
         reset = windows.get(name, {}).get("reset") if name is not None else None
         if reset is None:
             reset = report["reset"]
@@ -220,7 +228,11 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
         if not has_passed and (window["status"] == "rejected"
                                or (utilization is not None and utilization >= 1.0)):
             out_resets.append(reset)
-    refused = reading.status == "rejected" and (reading.reset is None or now < reading.reset)
+    stopped = reading.reset
+    if stopped is None:
+        name = _stopped_window(reading.binding, reading.windows)
+        stopped = reading.windows.get(name, {}).get("reset") if name is not None else None
+    refused = reading.status == "rejected" and (stopped is None or now < stopped)
     out = refused or bool(out_resets)
     if out:
         state = "out"
@@ -231,8 +243,8 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
     else:
         state = "ok"
     known_out = [r for r in out_resets if r is not None]
-    if refused and reading.reset is not None:
-        known_out.append(reading.reset)
+    if refused and stopped is not None:
+        known_out.append(stopped)
     ahead = [r for r in (*resets.values(), reading.reset) if r is not None and r > now]
     return {
         "profile": profile,
@@ -246,7 +258,7 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
 
 
 def capacity_view(profiles: Iterable[str], state: CapacityState, now: float) -> dict:
-    names = sorted(set(profiles) | set(state.readings))
+    names = sorted(set(profiles))
     entries = [profile_capacity(name, state.readings.get(name), now) for name in names]
     room = sum(entry["state"] in ("ok", "reset") for entry in entries)
     all_out = bool(entries) and all(entry["state"] == "out" for entry in entries)

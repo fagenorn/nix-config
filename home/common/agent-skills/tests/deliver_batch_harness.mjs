@@ -3,7 +3,7 @@
 //   { "args": {...}, "replies": {"<label>": reply | [reply per call]}, "patch": {"<label>": {...}},
 //     "children": {"<issue>": child result | [one per call] | "throw"}, "turns": {"<issue>:<mode>": n} }
 // A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A reply
-// of null is returned as null (a dead agent). Prints { result, calls, max_active, max_planning, child_events }:
+// of null is returned as null (a dead agent). Prints { result, calls, logs (each log() line), max_active, max_planning, child_events }:
 // calls lists agents ({kind: 'agent', label, prompt, schema, agentType, model, effort, facts_pending}) and children
 // ({kind: 'workflow', label: 'child-<issue>', script, args}) in start order. A children entry applies to every child
 // call of its issue, mode 'plan' and 'ready' alike, in call order, and a list element "throw" throws; an issue with no
@@ -148,5 +148,6 @@ const noop = () => {}
 const body = program.replace(/^export const meta\b/m, 'const meta')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const run = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow', body)
-const result = await run(agent, parallel, pipeline, noop, noop, scenario.args, budget, workflow)
-process.stdout.write(JSON.stringify({ result, calls, max_active: maxActive, max_planning: maxPlanning, child_events: childEvents }))
+const logs = []
+const result = await run(agent, parallel, pipeline, noop, line => { logs.push(String(line)) }, scenario.args, budget, workflow)
+process.stdout.write(JSON.stringify({ result, calls, logs, max_active: maxActive, max_planning: maxPlanning, child_events: childEvents }))

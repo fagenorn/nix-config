@@ -123,10 +123,15 @@ the state a child of an already polluted terminal starts in. A probe is met when
 a `PATH` entry ahead of `/usr/bin` and `python3` reports version 3.13 or later; the check is met only
 when both probes are. It exits 0 when met, 1 when not and 2 when a probe is unreadable (no sentinel lines in
 its output, a timeout or a shell that cannot be run). It never writes a file.
+
+`console-state --port N` (`verify_checks.console_state`, issue 856) is met when
+`GET http://127.0.0.1:N/api/state` answers 200 within 5 seconds, not met on any other status or no
+answer; it reads only that endpoint.
 """
 from __future__ import annotations
 
 import argparse
+import http.client
 import io
 import json
 import os
@@ -1061,6 +1066,29 @@ def darwin_shell_path(*, user: str, home: str, zsh_bin: str = "/bin/zsh",
     return (2 if unreadable else 0 if met else 1), {"met": met, "probes": probes}
 
 
+def console_state(port: int, *, timeout: float = 5.0) -> tuple[int, dict]:
+    """Issue 856: the console's state endpoint answers 200 on loopback (0), else 1."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/api/state")
+        status = connection.getresponse().status
+    except (OSError, http.client.HTTPException) as error:
+        return 1, {"port": port, "status": None, "error": f"{type(error).__name__}: {error}"}
+    finally:
+        connection.close()
+    return (0 if status == 200 else 1), {"port": port, "status": status}
+
+
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 65535")
+    return port
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verify-checks")
     checks = parser.add_subparsers(dest="check", required=True)
@@ -1109,7 +1137,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "darwin-shell-path",
         help="issue 810: a fresh login zsh puts the Nix profiles before /usr/bin")
     shell.add_argument("--zsh", default="/bin/zsh")
+    console = checks.add_parser(
+        "console-state",
+        help="issue 856: the console's state endpoint answers 200 on loopback")
+    console.add_argument("--port", type=_port, required=True)
     args = parser.parse_args(argv)
+    if args.check == "console-state":
+        code, report = console_state(args.port)
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "darwin-shell-path":
         entry = pwd.getpwuid(os.getuid())
         code, report = darwin_shell_path(user=entry.pw_name, home=entry.pw_dir, zsh_bin=args.zsh)

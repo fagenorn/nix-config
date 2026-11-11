@@ -46,7 +46,7 @@ started to learn a profile. The attributed reading is appended with its `capacit
 a refusal, and published. Every poll of the session registry also lists the profile directories
 (`profile_dirs()`, `default_profile_dirs()`: `$HOME/.claude` and each directory of `profiles/` under
 `$CLAUDE_ACCOUNTS_DIR`, else `$HOME/.claude-accounts`; only `is_dir` touches one) so a profile never
-used reads `unknown`, and ends by publishing, so a reset that has passed shows within one poll.
+used reads `unknown` and a removed one is no longer listed, and ends by publishing, so a reset that has passed shows within one poll.
 
 A state request reads only `view_bytes`, which is memory: no log access, no
 registry read, no derivation, no file, no filesystem metadata call, no
@@ -116,9 +116,28 @@ nothing. An exception escaping a poll is one stderr line
 `console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
 thread starts and nothing is read.
 
+Deliveries (#858): after each `poll_sessions()` the same thread calls `poll_deliveries()`, which
+reads the run journals (see `deliveries.py`) of every folded session that is not ended and has a
+repository, under the `projects` directory beside each of `session_dirs()`, outside the ingest
+lock, and then appends `delivery.seen` and `delivery.gone` rows and publishes under it (every
+poll publishes, so the minutes since a run moved advance; an unchanged view bumps no version). A
+journal is read incrementally; one that was truncated or replaced is folded again from its start.
+A run leaves only when its final record exists or its journal is confirmed absent (its listing
+succeeded without it); a journal or a listing that cannot be read keeps the run's last
+observation. A run that names no issue is not listed. A branch names its issue through the
+project's configured branch pattern, `branch_pattern_of(repo)` (default
+`deliveries.configured_branch_pattern`, kept once resolved); while it is None no run of that
+repository names an issue, and a run read under another pattern is folded again from its start.
+A state request reads memory only. Stderr lines: `console: delivery_poll_failed <Type>: <message>`
+(a poll that raised, once per failed poll), `console: branch_pattern_unresolved <repo>` (a
+repository's pattern did not resolve, again only after it resolved in between), `console: journal_unreadable <path> <reason>` (a journal or its final record turned
+unreadable, again only after it read successfully in between) and `console: journals_unreadable
+<session_id> <reason>` (a session's journal listing turned unreadable, likewise).
+
 Construction order: bind the server (an `OSError` propagates and nothing else is
-opened); open the event log; fold the projects, the sessions, the inbox and the read health from it; publish
-the view; sample the registry's signature; `refresh()`; `poll_sessions()`. The
+opened); open the event log; fold the projects, the sessions, the inbox, the read health and the
+deliveries from it; publish the view; sample the registry's signature; `refresh()`;
+`poll_sessions()`; `poll_deliveries()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
 re-raised. `start()` serves on a daemon thread named `console-http`; `close()`
@@ -137,7 +156,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from agent_tools.claims import owner_actions
-from agent_tools.console import capacity, inbox, sessions
+from agent_tools.console import capacity, deliveries, inbox, sessions
 from agent_tools.console.event_log import Event, EventLog, utc_now
 from agent_tools.console.view import (
     ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records, project_for,
@@ -370,6 +389,7 @@ class ConsoleService:
                  tracker: Callable[..., list[dict]] | None = None,
                  tracker_seconds: float = TRACKER_SECONDS,
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
+                 branch_pattern_of: Callable[[str], str | None] = deliveries.configured_branch_pattern,
                  activity: Callable[[str], float | None] = inbox.local_activity,
                  clock: Callable[[], float] = time.time):
         self.registry = Path(registry)
@@ -382,10 +402,16 @@ class ConsoleService:
         self._repo_of = repo_of
         self._sessions: dict[str, sessions.SessionState] = {}
         self._absent: frozenset[str] = frozenset()
+        self._deliveries: dict[tuple[str, str], deliveries.DeliveryState] = {}
+        self._reader = deliveries.JournalReader()
+        self._runs: dict[Path, deliveries.RunFold] = {}
+        self._unreadable: set[str] = set()
         self._session_poller: threading.Thread | None = None
         self._tracker = tracker
         self._tracker_seconds = tracker_seconds
         self._slug_of = slug_of
+        self._branch_pattern_of = branch_pattern_of
+        self._patterns: dict[str, str] = {}
         self._activity = activity
         self._clock = clock
         self._tracker_thread: threading.Thread | None = None
@@ -409,10 +435,12 @@ class ConsoleService:
             self._inbox = inbox_records(events)
             self._health = read_states(events)
             self._capacity = capacity.capacity_state(events)
+            self._deliveries = deliveries.delivery_states(events)
             self._publish()
             self._signature = signature(self.registry)
             self.refresh()
             self.poll_sessions()
+            self.poll_deliveries()
         except BaseException:
             if self.log is not None:
                 self.log.close()
@@ -451,7 +479,8 @@ class ConsoleService:
     def _publish(self) -> None:
         view = encode_view(derive_view(
             self._states.values(), self._inbox, self._health,
-            sessions=self._sessions.values(),
+            sessions=self._sessions.values(), deliveries=self._deliveries,
+            now_ms=int(self._clock() * 1000),
             capacity=capacity.capacity_view(self._profiles, self._capacity, self._clock())))
         with self._published:
             if view != self._view:
@@ -529,12 +558,102 @@ class ConsoleService:
             self._publish()
             return appended
 
+    def _warn_once(self, key: str, line: str) -> None:
+        """Print `line` unless `key` is already unreadable; `_unreadable` is cleared by a good read."""
+        if key not in self._unreadable:
+            self._unreadable.add(key)
+            print(line, file=sys.stderr)
+
+    def _branch_pattern(self, repo: str) -> str | None:
+        """The repository's branch pattern, kept once resolved; None (one stderr line) while it does not resolve."""
+        pattern = self._patterns.get(repo)
+        if pattern is None:
+            pattern = self._branch_pattern_of(repo)
+            if pattern is None:
+                self._warn_once(f"pattern {repo}", f"console: branch_pattern_unresolved {repo}")
+                return None
+            self._patterns[repo] = pattern
+        self._unreadable.discard(f"pattern {repo}")
+        return pattern
+
+    def poll_deliveries(self) -> list[Event]:
+        """Append what the run journals of the live sessions show that the log does not, and publish."""
+        folded = self._deliveries
+        scanned = {sid: s for sid, s in self._sessions.items()
+                   if s.state != sessions.ENDED and s.repo is not None}
+        projects_dirs: list[Path] = []
+        for directory in self._session_dirs():
+            projects = Path(directory).parent / "projects"
+            if projects not in projects_dirs:
+                projects_dirs.append(projects)
+        readings: dict[tuple[str, str], deliveries.DeliveryState] = {}
+        runs: dict[Path, deliveries.RunFold] = {}
+        for sid in sorted(scanned):
+            listing = deliveries.run_journals(projects_dirs, sid)
+            if isinstance(listing, deliveries.Unreadable):
+                readings.update({k: v for k, v in folded.items() if k[0] == sid})
+                runs.update({j: f for j, f in self._runs.items() if j.parents[3].name == sid})
+                self._warn_once(f"listing {sid}",
+                                f"console: journals_unreadable {sid} {listing.reason}")
+                continue
+            self._unreadable.discard(f"listing {sid}")
+            pattern = self._branch_pattern(scanned[sid].repo)
+            for journal in listing:
+                key = (sid, journal.parent.name)
+                path = str(journal)
+                final = deliveries.has_final_record(journal)
+                if final is True:
+                    self._reader.forget(journal)
+                    self._unreadable.discard(path)
+                    continue
+                known = self._runs.get(journal)
+                if known is not None and known.branch_pattern != pattern:
+                    self._reader.forget(journal)
+                chunk = final if isinstance(final, deliveries.Unreadable) else self._reader.read(journal)
+                if isinstance(chunk, deliveries.Unreadable):
+                    if key in folded:
+                        readings[key] = folded[key]
+                    if journal in self._runs:
+                        runs[journal] = self._runs[journal]
+                    self._warn_once(path, f"console: journal_unreadable {path} {chunk.reason}")
+                    continue
+                self._unreadable.discard(path)
+                if chunk is None:
+                    continue
+                fold = self._runs.get(journal)
+                if fold is None or chunk.from_start or fold.branch_pattern != pattern:
+                    fold = deliveries.RunFold(pattern)
+                fold.apply(chunk.records)
+                runs[journal] = fold
+                issues = fold.issues()
+                if issues:
+                    readings[key] = deliveries.DeliveryState(sid, key[1], chunk.moved_ms, issues)
+        for journal in self._runs.keys() - runs.keys():
+            self._reader.forget(journal)
+        self._runs = runs
+        with self._ingest:
+            def project_of(sid: str) -> str | None:
+                repo = scanned[sid].repo
+                return project_for(repo, self._states)
+
+            appended = self.log.append(deliveries.delivery_changes(
+                self._deliveries, readings, scanned, project_of))
+            if appended:
+                self._fold(appended)
+            self._publish()
+            return appended
+
     def _poll_loop(self) -> None:
         while not self._stop.wait(self._session_poll_seconds):
             try:
                 self.poll_sessions()
             except Exception as error:
                 print(f"console: session_poll_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+            try:
+                self.poll_deliveries()
+            except Exception as error:
+                print(f"console: delivery_poll_failed {type(error).__name__}: {error}",
                       file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
@@ -543,6 +662,7 @@ class ConsoleService:
         self._inbox = inbox_records(appended, self._inbox)
         self._health = read_states(appended, self._health)
         self._capacity = capacity.capacity_state(appended, self._capacity)
+        self._deliveries = deliveries.delivery_states(appended, self._deliveries)
 
     def poll_tracker(self) -> None:
         """One refresh of the inbox of every active project; see the module docstring."""

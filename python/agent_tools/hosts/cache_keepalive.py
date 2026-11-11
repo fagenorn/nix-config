@@ -46,6 +46,10 @@ with `session_idle` when the session is not active, with `end_turn_cap` when its
 since its last thread request, those sent while that reply streamed included), checked in that
 order, and otherwise sends the ping.
 
+Limits (#860). `Keepalive(..., limits=)` takes the proxy's `LimitSensor`; each ping's reply is handed to it
+as the headers arrive, with the ping's body, so the reading carries the conversation's account. A
+sensor error is one `limit_error` line (its `error` the exception's type name) and never changes the ping.
+
 Pings. A ping travels on a fresh upstream connection (never a client's) with a `PING_TIMEOUT` =
 30 s socket timeout and is never retried; its response is read to the end, its usage logged, and
 the bytes discarded. The whole exchange is also bounded by that 30 s from the ping's send time,
@@ -426,8 +430,9 @@ class Keepalive:
     """
 
     def __init__(self, log, connect: Callable[[float], http.client.HTTPConnection],
-                 clock: Callable[[], float]) -> None:
+                 clock: Callable[[], float], limits=None) -> None:
         self._log = log
+        self._limits = limits
         self._connect = connect
         self._clock = clock
         self._lock = threading.Lock()
@@ -645,6 +650,7 @@ class Keepalive:
                 connection.putheader(name, value)
             connection.endheaders(ping.body)
             response = connection.getresponse()
+            self._sense(ping, response)
             result.status = response.status
             result.ttfb_ms = round((self._clock() - sent) * 1000, 1)
             self._read(response, sent, result)
@@ -657,6 +663,15 @@ class Keepalive:
         if expired.is_set():
             result.outcome, result.error = "upstream_error", f"ping exceeded {PING_TIMEOUT} s"
             result.usage = {}
+
+    def _sense(self, ping: Ping, response: http.client.HTTPResponse) -> None:
+        """Hand the ping's reply to the limit sensor (#860); whatever it raises stays here as one line."""
+        if self._limits is None:
+            return
+        try:
+            self._limits.sense(ping.body, response.status, response.getheaders())
+        except Exception as error:
+            self._log.write("limit_error", error=type(error).__name__)
 
     def _read(self, response: http.client.HTTPResponse, sent: float, result: _PingResult) -> None:
         """Read the ping's response to its end, for at most `PING_TIMEOUT` from `sent` on the
