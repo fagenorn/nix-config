@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 857: a stopped console adds no cost to a session's hook calls.
+# verify-pending runs it from the repository root at the commit the block names, so
+# `python` below is that commit's agent_tools source. Exit 0 met, 1 not met, 75 not yet.
+PYTHONPATH=python exec python3 -m agent_tools.console.hook_cost "$@"
