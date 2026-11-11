@@ -7,7 +7,10 @@ case's scripted responder; `CommandTest` runs `python -m agent_tools.hosts.cache
 """
 
 import copy
+import http
 import http.client
+import http.server
+import io
 import json
 import contextlib
 import re
@@ -21,6 +24,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.hosts import cache_proxy
 from agent_tools.hosts import rate_limits
@@ -969,6 +973,221 @@ class LimitHeadersTest(unittest.TestCase):
                 self.assertNotIn("dev-secret", repr(result))
 
 
+class FakeConsole:
+    """A loopback console stand-in: records `(method, path, body)` of every request of any method
+    and answers `status` with no body."""
+
+    def __init__(self, status=204):
+        self.requests = []
+        self.content_types = []
+        self.lock = threading.Lock()
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def answer(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                with fake.lock:
+                    fake.requests.append((self.command, self.path, body))
+                    fake.content_types.append(self.headers.get("Content-Type"))
+                self.send_response(status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = answer
+
+        class Server(socketserver.ThreadingTCPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @property
+    def url(self):
+        return "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def seen(self):
+        with self.lock:
+            return list(self.requests)
+
+    def wait_for(self, count):
+        deadline = time.monotonic() + TIMEOUT
+        while time.monotonic() < deadline:
+            if len(self.seen()) >= count:
+                break
+            time.sleep(0.02)
+        return self.seen()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def limits_reply(name, body=b"{}"):
+    """The raw upstream reply a header fixture describes, with `body`."""
+    document = fixture(name)
+    head = "HTTP/1.1 %d %s\r\n" % (document["status"], http.HTTPStatus(document["status"]).phrase)
+    head += "".join("%s: %s\r\n" % (header, value) for header, value in document["headers"])
+    return (head + "Content-Length: %d\r\n\r\n" % len(body)).encode() + body
+
+
+def replay(name, body=b"{}"):
+    """A `FakeUpstream` responder answering every request with the fixture's reply."""
+    reply = limits_reply(name, body)
+
+    def responder(sock, head, request_body):
+        sock.sendall(reply)
+        return True
+
+    return responder
+
+
+METADATA_BODY = json.dumps({"metadata": {"user_id": json.dumps(
+    {"device_id": "d", "account_uuid": "acc-1", "session_id": "ses-1"})}}).encode()
+REQUEST_FIELDS = {"event", "ts", "method", "path", "status", "upstream_conn", "ttfb_ms",
+                  "duration_ms", "bytes", "outcome"}
+
+
+class LimitSensingTest(ProxyCase):
+    """`--sense-limits` reports each reply's unified limit reading and forwards the reply unchanged (#860)."""
+
+    def sensing_proxy(self, upstream_url, limits):
+        stream = RecordingStream()
+        server = cache_proxy.ProxyServer(0, cache_proxy.parse_upstream(upstream_url),
+                                         cache_proxy.LineLog(stream), limits=limits)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1], stream
+
+    def exchange(self, port, body=METADATA_BODY):
+        client = self.client(port)
+        client.request("POST", "/v1/messages", body=body)
+        response = client.getresponse()
+        return response.status, response.getheaders(), response.read()
+
+    def test_a_limit_response_is_reported_and_forwarded_unchanged(self):
+        upstream = self.upstream(replay("limits-allowed.json"))
+        reports = []
+        plain_port, _ = self.proxy(upstream.url)
+        sensing_port, _ = self.sensing_proxy(upstream.url, cache_proxy.LimitSensor(reports.append))
+        self.assertEqual(self.exchange(sensing_port), self.exchange(plain_port))
+        self.assertEqual(reports, [{**LimitHeadersTest.ALLOWED_READING,
+                                    "account": "acc-1", "session_id": "ses-1"}])
+
+    def test_a_response_without_unified_headers_reports_nothing(self):
+        reports = []
+        port, log = self.sensing_proxy(self.upstream(json_reply).url,
+                                       cache_proxy.LimitSensor(reports.append))
+        self.assertEqual(self.exchange(port)[0::2], (200, b"{}"))
+        log.records(1)
+        self.assertEqual(reports, [])
+
+    def test_a_sensor_that_raises_logs_only_its_type(self):
+        def refuse(document):
+            raise ValueError("secret-value-1")
+
+        port, log = self.sensing_proxy(self.upstream(replay("limits-allowed.json")).url,
+                                       cache_proxy.LimitSensor(refuse))
+        self.assertEqual(self.exchange(port)[0::2], (200, b"{}"))
+        sensed, request = log.records(2)
+        self.assertEqual((sensed["event"], sensed["error"]), ("limit_error", "ValueError"))
+        self.assertEqual(set(sensed), {"event", "ts", "error"})
+        self.assertEqual((request["event"], request["status"], request["outcome"]),
+                         ("request", 200, "complete"))
+        self.assertEqual(set(request), REQUEST_FIELDS)
+        self.assertFalse(any("secret-value-1" in line for line in log.lines))
+
+    def test_the_reporter_never_blocks_and_logs_one_line_per_failing_streak(self):
+        stream = RecordingStream()
+        reporter = cache_proxy.ConsoleReporter(
+            cache_proxy.parse_console("http://127.0.0.1:%d" % closed_port()),
+            cache_proxy.LineLog(stream))
+        started = time.monotonic()
+        for number in range(300):
+            reporter.report({"number": number})
+        self.assertLess(time.monotonic() - started, 0.1)
+        stop = threading.Event()
+        stop.set()
+        reporter.run(stop)
+        [failed] = stream.records(1)
+        time.sleep(0.1)
+        self.assertEqual(len(stream.lines), 1)
+        self.assertEqual(failed["event"], "limit_report_failed")
+        self.assertEqual(set(failed), {"event", "ts", "error"})
+
+        console = FakeConsole()
+        self.addCleanup(console.close)
+        reporter = cache_proxy.ConsoleReporter(cache_proxy.parse_console(console.url),
+                                               cache_proxy.LineLog(stream))
+        documents = [{"number": number, "status": "allowed"} for number in range(3)]
+        for document in documents:
+            reporter.report(document)
+        stop = threading.Event()
+        stop.set()
+        reporter.run(stop)
+        self.assertEqual(console.seen(), [("POST", "/api/readings", encode(document))
+                                          for document in documents])
+        self.assertEqual(console.content_types, ["application/json"] * 3)
+        self.assertEqual(len(stream.lines), 1)
+
+
+class LimitFlagTest(unittest.TestCase):
+    """`main` builds a limit sensor and a console reporter only under `--sense-limits` (#860)."""
+
+    class Recorder:
+        instances = []
+
+        def __init__(self, port, upstream, log, keepalive=None, reorder=None, limits=None):
+            self.limits = limits
+            self.server_address = ("127.0.0.1", 1)
+            self.instances.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+    def run_main(self, *args):
+        """`main(args)` against a recording server; returns the exit code, the tripwires, the
+        recorded `limits` argument and the `listening` record."""
+        recorder = type("Recorder", (self.Recorder,), {"instances": []})
+        sensor = mock.Mock(wraps=self.real_sensor)
+        reporter = mock.Mock(wraps=self.real_reporter)
+        stderr = io.StringIO()
+        with (mock.patch.object(cache_proxy, "ProxyServer", recorder),
+              mock.patch.object(cache_proxy, "LimitSensor", sensor),
+              mock.patch.object(cache_proxy, "ConsoleReporter", reporter),
+              contextlib.redirect_stderr(stderr)):
+            code = cache_proxy.main(["--port", "0", *args])
+        [server] = recorder.instances
+        [listening] = [json.loads(line) for line in stderr.getvalue().splitlines()
+                       if json.loads(line)["event"] == "listening"]
+        return code, sensor, reporter, server.limits, listening
+
+    def setUp(self):
+        self.real_sensor = cache_proxy.LimitSensor
+        self.real_reporter = cache_proxy.ConsoleReporter
+
+    def test_the_flag_defaults_off_and_builds_no_sensor(self):
+        self.assertIs(cache_proxy.build_parser().parse_args(["--port", "0"]).sense_limits, False)
+        code, sensor, reporter, limits, listening = self.run_main()
+        self.assertEqual((code, sensor.call_count, reporter.call_count, limits), (0, 0, 0, None))
+        self.assertNotIn("sense_limits", listening)
+        code, sensor, reporter, limits, listening = self.run_main("--sense-limits")
+        self.assertEqual((code, sensor.call_count, reporter.call_count), (0, 1, 1))
+        self.assertIsInstance(limits, self.real_sensor)
+        self.assertIs(listening["sense_limits"], True)
+
+
 class CommandTest(unittest.TestCase):
     def run_command(self, *args):
         return subprocess.run([sys.executable, "-m", "agent_tools.hosts.cache_proxy", *args],
@@ -1046,6 +1265,68 @@ class CommandTest(unittest.TestCase):
             record = self.read_record(process.stderr)
         self.assertEqual(record["event"], "bind_failed")
         self.assertIn("error", record)
+
+    def test_help_lists_sense_limits(self):
+        completed = self.run_command("--help")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--sense-limits", completed.stdout)
+        self.assertIn("--console", completed.stdout)
+
+    def test_without_the_flag_the_command_forwards_and_reports_nothing(self):
+        fixture_reply = fixture("limits-refused.json")
+        console = FakeConsole()
+        self.addCleanup(console.close)
+        fake = FakeUpstream(replay("limits-refused.json", b'{"type":"error"}'))
+        self.addCleanup(fake.close)
+        arguments = ("--port", "0", "--upstream", fake.url, "--console", console.url)
+
+        def exchange(*extra):
+            process = self.start(*arguments, *extra)
+            listening = self.read_record(process.stderr)
+            connection = http.client.HTTPConnection("127.0.0.1", listening["port"], timeout=TIMEOUT)
+            self.addCleanup(connection.close)
+            connection.request("POST", "/v1/messages", body=METADATA_BODY)
+            response = connection.getresponse()
+            result = (response.status, response.getheaders(), response.read())
+            self.read_record(process.stderr)
+            return listening, result
+
+        listening, result = exchange()
+        self.assertNotIn("sense_limits", listening)
+        status, headers, body = result
+        self.assertEqual((status, body), (429, b'{"type":"error"}'))
+        for name, value in fixture_reply["headers"]:
+            self.assertIn((name, value), headers)
+        time.sleep(1.0)
+        self.assertEqual(console.seen(), [])
+
+        listening, sensed = exchange("--sense-limits")
+        self.assertIs(listening["sense_limits"], True)
+        self.assertEqual(sensed, result)
+        [(method, path, report)] = console.wait_for(1)
+        self.assertEqual((method, path), ("POST", "/api/readings"))
+        self.assertEqual(json.loads(report)["http_status"], 429)
+
+    def test_the_command_with_sense_limits_reports_to_the_console(self):
+        console = FakeConsole()
+        self.addCleanup(console.close)
+        fake = FakeUpstream(replay("limits-allowed.json"))
+        self.addCleanup(fake.close)
+        process = self.start("--port", "0", "--sense-limits", "--console", console.url,
+                             "--upstream", fake.url)
+        listening = self.read_record(process.stderr)
+        self.assertIs(listening["sense_limits"], True)
+        connection = http.client.HTTPConnection("127.0.0.1", listening["port"], timeout=TIMEOUT)
+        self.addCleanup(connection.close)
+        connection.request("POST", "/v1/messages", body=METADATA_BODY)
+        self.assertEqual(connection.getresponse().status, 200)
+        [(_, _, report)] = console.wait_for(1)
+        self.assertEqual(json.loads(report)["status"], "allowed")
+
+    def test_a_console_url_off_loopback_is_refused(self):
+        completed = self.run_command("--port", "0", "--console", "http://example.test:1")
+        self.assertEqual((completed.returncode, completed.stdout), (2, ""))
+        self.assertIn("--console", completed.stderr)
 
 
 if __name__ == "__main__":
