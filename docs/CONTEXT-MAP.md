@@ -11,6 +11,7 @@
 | Project contract | [CONTEXT](./areas/project-contract/CONTEXT.md) | The authored project contract, its resolution, adoption and platform manifest | `python/agent_tools/project_contract/**`, `home/common/agent-skills/platform-manifest.json`, `.agents/project.json` |
 | Guard | [CONTEXT](./areas/guard/CONTEXT.md) | The lifecycle guard that adjudicates pushes, PRs, merges and releases | `home/common/claude-code/lifecycle_guard.py`, `python/agent_tools/guard/**` |
 | Hosts | [CONTEXT](./areas/hosts/CONTEXT.md) | Per-host agent runtime: Claude Code install, accounts, cache proxy, launchers | `home/common/claude-code/default.nix`, `home/common/claude-code/accounts/**`, `python/agent_tools/hosts/**`, `lib/agent-tools.nix`, `lib/agent-plugins.nix`, `home/common/agent-tools/**`, `patches/agent-plugins/**`, `home/linux/claude-local/**` |
+| Console | [CONTEXT](./areas/console/CONTEXT.md) | The local page and service saying whether the owner is needed | `python/agent_tools/console/**` |
 | System | [CONTEXT](./areas/system/CONTEXT.md) | Decisions spanning areas | `*` |
 
 ## Terms
@@ -31,6 +32,7 @@
 | Code map | Delivery |
 | Command table | Hosts |
 | Compiled policy | Guard |
+| Console | Console |
 | Decision prompt | Claims |
 | Delivery | Delivery |
 | Deprecation | Project contract |
@@ -38,6 +40,7 @@
 | Detaching word | Guard |
 | Fleet registry | Project contract |
 | Held issue | Verification |
+| Inbox item | Console |
 | Keepalive ping | Hosts |
 | Land lock | Claims |
 | Lane | Delivery |
@@ -55,6 +58,7 @@
 | Project contract | Project contract |
 | Projection | Project contract |
 | Publication-free profile | Release |
+| Quiet project | Console |
 | Raise label | Guard |
 | Receipt | Release |
 | Release profile | Release |
@@ -78,3 +82,4 @@
 - **Guard → Project contract**: a **Derived row** comes from a resolved **Project contract** and the **Fleet registry**.
 - **Hosts → Verification**: every host runs **Verification passes** on a schedule.
 - **Project contract → every area**: each command reads the **ResolvedProject**.
+- **Console → Project contract**: the console's projects are the **Fleet registry**'s entries.

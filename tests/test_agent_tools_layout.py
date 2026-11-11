@@ -305,7 +305,7 @@ class LayoutRuleTest(unittest.TestCase):
     def test_the_areas_are_the_docs_areas(self):
         self.assertEqual(
             area_packages(AREAS_DIR),
-            frozenset({"claims", "delivery", "guard", "hosts", "project_contract",
+            frozenset({"claims", "console", "delivery", "guard", "hosts", "project_contract",
                        "release", "system", "verification"}))
 
 
