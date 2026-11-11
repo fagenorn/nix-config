@@ -1985,6 +1985,121 @@ class RulesRereviewSkipTest(unittest.TestCase):
                 self.assertNotIn("impl-1", names)
                 self.assertEqual(skipped, [])
 
+    REWORDED = "p95 latency stays under 200 ms for a week after the deploy"
+
+    def naming(self, summary, **more):
+        return {"verdict": "findings", "findings": [{"severity": "important", "summary": summary, **more}]}
+
+    @staticmethod
+    def retyped(plan, **top):
+        """The planner's reply after a revise: every criterion's text typed again, differently."""
+        return dict(plan, acceptance=[dict(a, text=a["text"] + ", retyped") for a in plan["acceptance"]], **top)
+
+    def kept_whole(self, plan, reply, **more):
+        """The rules re-review runs and the plan kept is the reply exactly, less criteria_edited."""
+        result, names, skipped = self.go(plan, reply, **more)
+        self.assertEqual(names.count("plan-rules-review"), 1)
+        self.assertEqual(skipped, [])
+        self.assertEqual(result["stage"], "plan-review")
+        final = more.get("plan-branch-revise", reply)
+        self.assertEqual(result["cont"]["plan"], {k: v for k, v in final.items() if k != "criteria_edited"})
+        return result
+
+    def test_a_retyped_text_no_finding_names_keeps_the_earlier_text_and_skips(self):
+        """The planner retypes every criterion in its reply though it reworded none: the earlier text stands."""
+        plan = with_criteria(EVIDENCE, HUMAN)
+        # AC10 and BAC2 are other words, not AC1 or AC2.
+        for name, review in (("bare", self.BARE), ("other ids", self.naming("AC10 and BAC2 have no task", file="/g/task-1.md"))):
+            with self.subTest(findings=name):
+                out = run_out(replies={"plan": plan, "plan-revise": self.retyped(plan, criteria_edited=[]), "plan-review": review,
+                                       "plan-rules-review": self.LEFT}, patch=self.OPEN)
+                names = labels(out["calls"])
+                self.assertNotIn("plan-rules-review", names)
+                self.assertEqual(len([line for line in out["logs"] if self.SKIPPED in line]), 1)
+                self.assertEqual(len([line for line in out["logs"] if "kept the earlier text of 3 criteria" in line]), 1)
+                self.assertIn("impl-1", names)
+                self.assertEqual(out["result"]["acceptance"], plan["acceptance"])
+                later = prompt(out["calls"], "final-1") + prompt(out["calls"], "close-out")
+                self.assertNotIn("retyped", later)
+
+    def test_a_criterion_a_finding_names_keeps_the_reply_whole_and_the_rules_rereview_runs(self):
+        plan = with_criteria(EVIDENCE)
+        rows = (("summary", self.naming("the wording of AC2: names no deploy")),
+                ("lower case", self.naming("criterion ac2 has no task")),
+                ("failing_input", self.naming("a criterion has no task", failing_input="(AC2)")),
+                ("ac", self.naming("no task", ac="AC2")))
+        for name, review in rows:
+            with self.subTest(named_in=name):
+                # AC2, named, takes the reply's text, so the skip cannot fire and nothing is restored: no half-restored plan.
+                self.kept_whole(plan, self.retyped(plan, criteria_edited=[]), review=review)
+
+    def test_a_criterion_the_reply_lists_as_edited_keeps_the_reply_whole_and_the_rules_rereview_runs(self):
+        # The finding names no id (the second criterion), but the planner declares that it reworded AC2; ids compare without case.
+        plan = with_criteria(EVIDENCE)
+        for listed in ("AC2", "ac2"):
+            with self.subTest(listed=listed):
+                result = self.kept_whole(plan, self.retyped(plan, criteria_edited=[listed]),
+                                         review=self.naming("the second criterion names no deploy"))
+                self.assertNotIn("criteria_edited", result["cont"]["plan"])
+
+    def test_the_edited_list_survives_a_branch_revise_after_the_revise(self):
+        # The plan-revise reply names its branch wrongly, so the branch revise's reply (not asked for the list) replaces it.
+        plan = bplan(acceptance=with_criteria(EVIDENCE)["acceptance"])
+        fixed = self.retyped(plan)
+        for name, more in (("absent", {}), ("empty", {"criteria_edited": []})):
+            with self.subTest(branch_revise_list=name):
+                revised = self.retyped(bplan(task_branch="other", acceptance=plan["acceptance"]), criteria_edited=["AC2"])
+                self.kept_whole(plan, revised, **{"plan-branch-revise": dict(fixed, **more)})
+        with self.subTest(branch_revise_list="another id"):
+            revised = self.retyped(bplan(task_branch="other", acceptance=plan["acceptance"]), criteria_edited=[])
+            self.kept_whole(plan, revised, **{"plan-branch-revise": dict(fixed, criteria_edited=["AC1"])})
+        with self.subTest(branch_revise_list="none edited"):
+            revised = self.retyped(bplan(task_branch="other", acceptance=plan["acceptance"]), criteria_edited=[])
+            result, names, skipped = self.go(plan, revised, **{"plan-branch-revise": fixed})
+            self.assertLess(names.index("plan-revise"), names.index("plan-branch-revise"))
+            self.assertNotIn("plan-rules-review", names)
+            self.assertEqual(len(skipped), 1)
+            self.assertEqual(result["acceptance"], plan["acceptance"])
+
+    def test_an_empty_edited_list_restores_and_an_absent_one_is_unknown(self):
+        plan = with_criteria(EVIDENCE)
+        result, names, skipped = self.go(plan, self.retyped(plan, criteria_edited=[]))
+        self.assertNotIn("plan-rules-review", names)
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(result["acceptance"], plan["acceptance"])
+        self.kept_whole(plan, self.retyped(plan))
+
+    def test_the_revise_asks_which_criteria_it_edited(self):
+        out = run_out(replies={"plan": PLAN, "plan-revise": PLAN, "plan-review": self.BARE}, patch=self.OPEN)
+        self.assertIn("criteria_edited: the ids of the criteria whose wording you changed in this revision", prompt(out["calls"], "plan-revise"))
+        self.assertNotIn("criteria_edited", prompt(out["calls"], "plan"))
+        self.assertEqual(schema_of(out["calls"], "plan-revise")["properties"]["criteria_edited"]["items"]["type"], "string")
+
+    def test_a_restore_that_would_not_reach_the_skip_leaves_the_reply_untouched(self):
+        """Restoring by id is wrong once an id means another criterion, so any other change keeps the reply as returned."""
+        plan = with_criteria(EVIDENCE)
+        code = PLAN["acceptance"][0]
+        moved = criterion(EVIDENCE, id="AC3", verify_ac="AC3", text="deployed, retyped")
+        rows = (
+            ("changed verify", [dict(code, text="works, retyped"), criterion(EVIDENCE, text=self.REWORDED, verify_host="h2")]),
+            # AC1 split into AC1 and AC2; the old AC2 is now AC3.
+            ("renumbered", [dict(code, text="parses"), {"id": "AC2", "text": "prints", "kind": "code"}, moved]),
+            ("reused id, changed kind", [dict(code, text="works, retyped"), {"id": "AC2", "text": "prints", "kind": "code"}]),
+            ("duplicate ids", [dict(code, text="parses"), dict(code, text="prints"), criterion(EVIDENCE, text="deployed, retyped")]),
+            ("added", [dict(code, text="works, retyped"), criterion(EVIDENCE, text="deployed, retyped"), HUMAN]),
+        )
+        for name, acceptance in rows:
+            with self.subTest(change=name):
+                self.kept_whole(plan, dict(PLAN, acceptance=acceptance, criteria_edited=[]))
+
+    def test_criteria_edited_never_reaches_the_kept_plan(self):
+        # Any planner reply may carry the member; none keeps it in the plan a stop or a cont holds.
+        plan = with_criteria(HUMAN)
+        listed = dict(plan, criteria_edited=["AC1"])
+        result, _ = run(replies={"plan": listed, "plan-revise": listed, "plan-rules-revise": listed,
+                                 "plan-review": PlanRulesTest.RULE_FINDING, "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        self.assertEqual((result["stage"], result["cont"]["plan"]), ("plan-review", plan))
+
     def test_a_revision_that_planrules_refuses_still_runs_the_rules_rereview(self):
         # No trigger has a rule and the revise changes no id, kind, metric or verify, but it drops a lint: planRules hits R4.
         result, names, skipped = self.go(with_criteria(EVIDENCE), with_criteria(criterion(EVIDENCE, lint=None)))

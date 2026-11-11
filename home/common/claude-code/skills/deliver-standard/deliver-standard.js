@@ -737,6 +737,8 @@ const PLAN_SCHEMA = {
     plan_root: { type: 'string' },
     acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human', 'note'] }, verify: { type: 'object' }, lint: { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } } } } }, metric: { type: 'boolean' } }, required: ['id', 'text', 'kind'] } },
     scripts: STRS,
+    // #819: on a revise, the ids of the criteria whose wording the planner changed; never kept in the plan.
+    criteria_edited: STRS,
     tasks: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, title: { type: 'string' }, file: { type: 'string' }, risk: { type: 'string', enum: ['mechanical', 'low', 'standard', 'security'] }, branch: { type: 'string' } }, required: ['n', 'title', 'file', 'risk'] } },
     branches: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, worktree: { type: 'string' }, base: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' }, clean: { type: 'boolean' } }, required: ['name', 'worktree', 'base', 'head', 'current', 'toplevel', 'common_dir', 'clean'] } },
   },
@@ -802,6 +804,8 @@ Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --json ti
 ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
 // #869: a well-formed plan refused only for its declared branches gets one revise in place first, so a naming fault does not cost the whole plan.
+// #819: the accepted reply's criteria_edited, taken off the plan so it reaches no cont and no stop.
+let planEdited
 const takePlan = async (p, label) => {
   if (wellFormed(p) && branchProblems(p).length) {
     const faults = branchProblems(p)
@@ -814,7 +818,9 @@ const takePlan = async (p, label) => {
   if (!wellFormed(p)) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p }) }
   const bad = branchProblems(p)
   if (bad.length) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p, branch_problems: bad }) }
-  plan = p
+  const { criteria_edited: listed, ...rest } = p
+  plan = rest
+  planEdited = listed
   return null
 }
 
@@ -1021,6 +1027,17 @@ Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} a
 }
 // #819: the members of a criterion the rules judge (its wording among them), key order aside; a revise that leaves them as reviewed needs no rules re-review.
 const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
+// #819: a finding names a criterion by its ac member, or by the id standing as a whole word (AC1 is not in AC10) in its summary, failing_input or file.
+const wholeWord = id => new RegExp('(^|[^A-Za-z0-9_])' + id.replace(/[^A-Za-z0-9_]/g, c => '\\' + c) + '($|[^A-Za-z0-9_])', 'i')
+const namesCriterion = (f, id) => !!f && (f.ac === id || [f.summary, f.failing_input, f.file].some(t => typeof t === 'string' && wholeWord(id).test(t)))
+// #819: the criterion text lives only in the issue and the planner's reply (plan.md maps ids, it holds no text), and a planner retypes
+// every criterion it returns. The candidate gives each criterion that existed before, that no finding names and that the revise does
+// not list as edited (ids compared without case) its earlier text; the caller takes it whole or not at all.
+const keepUnnamedText = (before, after, findings, edited) => after.map(a => {
+  const was = a && typeof a.id === 'string' && a.id ? before.find(b => b && b.id === a.id) : null
+  if (!was || typeof was.text !== 'string' || was.text === a.text || edited.includes(a.id.toLowerCase()) || findings.some(f => namesCriterion(f, a.id))) return a
+  return { ...a, text: was.text }
+})
 // One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
 // Its findings all carry a rule, so its re-review always runs.
 const rulesRevise = async findings => {
@@ -1068,10 +1085,22 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   }
   if (planFindings.length) {
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
-    const reviewedFacts = ruleFacts(plan)
-    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
+    const reviewedFacts = ruleFacts(plan), reviewedCriteria = plan.acceptance
+    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose wording you changed in this revision: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const halted = await takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
+    // #819: the restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or duplicated id,
+    // or any other change, leaves the reply exactly as returned. A plan-revise reply with no criteria_edited is unknown: no restore.
+    // A branch revise that takePlan ran after it adds its own list to the plan-revise reply's.
+    if (Array.isArray(revised.criteria_edited) && !planFindings.some(f => present(f.rule))) {
+      const edited = [revised.criteria_edited, planEdited].flatMap(l => (Array.isArray(l) ? l : [])).filter(x => typeof x === 'string').map(x => x.toLowerCase())
+      const candidate = { ...plan, acceptance: keepUnnamedText(reviewedCriteria, plan.acceptance, planFindings, edited) }
+      const restored = candidate.acceptance.filter((a, i) => a !== plan.acceptance[i]).length
+      if (restored && !planRules(candidate).length && ruleFacts(candidate) === reviewedFacts) {
+        log(`plan-revise: kept the earlier text of ${restored} criteria no finding names and the revise does not list as edited`)
+        plan = candidate
+      }
+    }
     const still = planRules(plan)
     // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, text, kind, metric or verify changed.
     const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts
