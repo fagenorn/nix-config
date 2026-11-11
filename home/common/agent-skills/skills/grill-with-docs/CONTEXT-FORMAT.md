@@ -15,7 +15,7 @@ Domain knowledge lives as a **map plus area glossaries**. The map is an index, n
 ```
 docs/
 ├── README.md            ← routing index: every entry + where new knowledge goes
-├── CONTEXT-MAP.md       ← the map (≤150 lines); links ./areas/<slug>/CONTEXT.md
+├── CONTEXT-MAP.md       ← the map; links ./areas/<slug>/CONTEXT.md
 ├── areas/
 │   ├── system/          ← reserved pseudo-area: decisions no single area owns
 │   │   ├── CONTEXT.md   ←   a stub; its map row carries governs `*`
@@ -36,7 +36,7 @@ The Order / Invoice / Customer names below are illustrative.
 
 ## The map: `<selected-context-map>`
 
-**Hard budget: 150 lines.** Three tables and nothing else.
+**Hard budget: 150 lines by default.** Three tables and nothing else.
 
 ```md
 # Context Map
@@ -106,7 +106,7 @@ Mark an open ambiguity inline on the disputed term and delete the marker in the 
 _Ambiguous_: used for both **Customer** and **User**. Unresolved.
 ```
 
-A writer that pushes the map or an area past its budget consolidates or splits in the same commit; the split procedure is in [SKILL.md](./SKILL.md).
+Over budget, a writer consolidates or splits in the same commit, per [SKILL.md](./SKILL.md).
 
 ## Repos without a map yet
 
@@ -114,4 +114,4 @@ Start with a single `docs/CONTEXT.md` (or a legacy root `CONTEXT.md`) in the are
 
 ## Linting
 
-`~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` checks term resolution, budgets, globs, links and, once `docs/areas/` exists, the layout and ADR ids above. Fix what it reports, and wire it into CI.
+`~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` checks term resolution, budgets, globs, links and, once `docs/areas/` exists, the layout and ADR ids above. `--repo-lint` swaps in the repository's lint and budgets. Fix what it reports, and wire it into CI.

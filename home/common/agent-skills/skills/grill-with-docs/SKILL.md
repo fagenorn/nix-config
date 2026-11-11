@@ -34,16 +34,16 @@ During the session:
 - **Cross-reference the code**: surface any contradiction between what the user states and what the code does.
 - **Update the glossary inline**: when a term resolves, write it into the owning area's glossary and add its row to the map's Terms table, in CONTEXT-FORMAT.md's format. Only terms meaningful to a domain expert.
 
-Two same-commit obligations keep the glossary sustainable: **delete on resolve** (an ambiguity marker goes the moment the ambiguity closes; the resolution lives in the winning definition and its `_Avoid_:` line, or in an ADR) and **net-neutral writes** (a file pushed past its budget, 150 lines for the map or the front-matter `budget:` for an area, is consolidated or split before you finish: consolidate first, tightening entries past two sentences and merging near-duplicate terms; split only when the area covers two things).
+Two same-commit obligations keep the glossary sustainable: **delete on resolve** (an ambiguity marker goes the moment the ambiguity closes; the resolution lives in the winning definition and its `_Avoid_:` line, or in an ADR) and **net-neutral writes** (a file the lint reports over budget is consolidated or split before you finish: consolidate first, tightening entries past two sentences and merging near-duplicate terms; split only when the area covers two things).
 
 **Splitting an area** is four edits in one commit:
 
-1. Create the new area file with front-matter (`area:`, `budget: 200 lines`), a one- or two-sentence purpose, and the moving terms copied verbatim.
+1. Create the new area file with front-matter (`area:`, `budget:`), a one- or two-sentence purpose, and the moving terms copied verbatim.
 2. Delete those terms from the old file.
 3. Add a row to the map's `## Areas` table (name, link, one-line gist, `governs:` globs) and narrow the old area's globs.
 4. Repoint the moved terms' rows in `## Terms` and add any new cross-area edge to `## Relationships`.
 
-Then run `~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` (no selected map, no run) and fix what it reports.
+Then run `~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` (no selected map, no run; a resolved `context-map-lint` command's argv follows `--repo-lint`) and fix what it reports.
 
 Offer an ADR only when the decision is hard to reverse, surprising without context, and the result of a real trade-off; write it per [ADR-FORMAT.md](./ADR-FORMAT.md).
 

@@ -557,6 +557,16 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         self.assertIn("home/common/agent-skills/skills/grill-with-docs/SKILL.md", found)
         self.assertIn("home/common/agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md", found)
 
+    def test_grill_defers_to_a_repository_owned_context_map_lint(self):
+        grill = REPO_ROOT / "home/common/agent-skills/skills/grill-with-docs"
+        skill = (grill / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("a resolved `context-map-lint` command's argv follows `--repo-lint`", skill)
+        self.assertNotRegex(skill, r"\b(150|200) lines")
+        context_format = (grill / "CONTEXT-FORMAT.md").read_text(encoding="utf-8")
+        self.assertIn("`--repo-lint` swaps in the repository's lint and budgets", context_format)
+        self.assertIn("150 lines by default", context_format)
+        self.assertNotIn("≤150", context_format)
+
 
 def corpus_documents():
     """Every skill document in both skill trees, as (path, text) pairs."""

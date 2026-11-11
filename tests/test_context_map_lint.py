@@ -10,9 +10,9 @@ LINTER = REPO_ROOT / "python/agent_tools/delivery/context_map_lint.py"
 
 
 class ContextMapLintTest(unittest.TestCase):
-    def run_lint(self, root, context_map):
+    def run_lint(self, root, context_map, *extra):
         return subprocess.run(
-            [sys.executable, "-m", "agent_tools.delivery.context_map_lint", "--repo-root", str(root), "--context-map", str(context_map)],
+            [sys.executable, "-m", "agent_tools.delivery.context_map_lint", "--repo-root", str(root), "--context-map", str(context_map), *extra],
             text=True, capture_output=True,
         )
 
@@ -42,6 +42,66 @@ class ContextMapLintTest(unittest.TestCase):
             context_map = root / "CONTEXT-MAP.md"
             context_map.write_text("not a context map")
             self.assertEqual(self.run_lint(root, context_map).returncode, 1)
+
+    def over_budget_map(self, root):
+        """A map the default lint fails on its 150-line budget alone."""
+        area = root / "area.md"
+        area.write_text("---\narea: example\nbudget: 200\n---\n\n**Thing**: a term\n")
+        context_map = root / "CONTEXT-MAP.md"
+        context_map.write_text("## Areas\n| Area | Context file | Gist | governs |\n|---|---|---|---|\n| Example | [area](area.md) | x | `*.py` |\n\n## Terms\n| Term | Area |\n|---|---|\n| Thing | Example |\n" + "\n" * 150)
+        (root / "main.py").write_text("")
+        return context_map
+
+    def repo_lint(self, root, body):
+        script = root / "repo-lint.py"
+        script.write_text(body)
+        return [sys.executable, str(script)]
+
+    def test_without_a_repo_lint_the_map_budget_still_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = self.run_lint(root, self.over_budget_map(root))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("budget 150", result.stderr)
+
+    def test_a_map_the_repo_lint_accepts_is_not_failed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.over_budget_map(root)
+            command = self.repo_lint(root, "import os, sys\nprint('repo lint in', os.getcwd(), sys.argv[1:])\n")
+            result = self.run_lint(root, context_map, "--repo-lint", *command, "--flag", "docs")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, f"repo lint in {root} ['--flag', 'docs']\n")
+            self.assertEqual(result.stderr, "")
+
+    def test_the_repo_lint_findings_and_status_are_the_tools(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            area = root / "area.md"
+            area.write_text("---\narea: example\nbudget: 200\n---\n\n**Thing**: a term\n")
+            context_map = root / "CONTEXT-MAP.md"
+            context_map.write_text("## Areas\n| Area | Context file | Gist | governs |\n|---|---|---|---|\n| Example | [area](area.md) | x | `*.py` |\n\n## Terms\n| Term | Area |\n|---|---|\n| Thing | Example |\n")
+            (root / "main.py").write_text("")
+            self.assertEqual(self.run_lint(root, context_map).returncode, 0)
+            command = self.repo_lint(root, "import sys\nprint('map over the repo budget', file=sys.stderr)\nsys.exit(1)\n")
+            result = self.run_lint(root, context_map, "--repo-lint", *command)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stderr, "map over the repo budget\n")
+
+    def test_repo_lint_misuse(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            context_map = self.over_budget_map(root)
+            empty = self.run_lint(root, context_map, "--repo-lint")
+            self.assertEqual(empty.returncode, 2)
+            self.assertIn("Usage: context-map-lint --repo-root ", empty.stderr)
+            absent = self.run_lint(root, context_map, "--repo-lint", str(root / "no-such-lint"))
+            self.assertEqual(absent.returncode, 2)
+            self.assertIn("cannot run the repository's lint", absent.stderr)
+            outside = self.run_lint(root, root.parent / "outside.md", "--repo-lint", "true")
+            self.assertEqual(outside.returncode, 2)
+            stray = self.run_lint(root, context_map, "--other", "true")
+            self.assertEqual(stray.returncode, 2)
 
     def test_source_has_no_policy_discovery(self):
         source = LINTER.read_text(encoding="utf-8")

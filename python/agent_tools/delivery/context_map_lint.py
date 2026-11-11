@@ -11,13 +11,23 @@ unique in their directory, every ADR citation under docs/ resolves, no retired
 four-digit id survives, and the docs root stays clean. Repos on a legacy layout
 have no docs/areas/, so none of that applies to them.
 
-Usage: context-map-lint --repo-root <absolute-root> --context-map <absolute-map>
-Exits 0 when clean, 1 on findings, 2 on misuse.
+A repository that owns its context-map lint, with its own rules and budgets,
+declares it as the `context-map-lint` entry of its project contract's
+`commands`. The caller that resolved the contract passes that entry's argv
+after `--repo-lint`; this tool then runs none of its own checks: it runs that
+command in the repository root and exits with its status, so a map the
+repository's lint accepts is never failed here against this tool's budgets.
+This tool reads no project policy itself. Without `--repo-lint` nothing changes.
+
+Usage: context-map-lint --repo-root <absolute-root> --context-map <absolute-map> [--repo-lint <command> [<arg>...]]
+Exits 0 when clean, 1 on findings, 2 on misuse; with --repo-lint, the command's
+own exit status (2 when it cannot be started, 1 when a signal ended it).
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -281,8 +291,21 @@ def check(root: Path, map_path: Path) -> list[str]:
     return errors
 
 
+def run_repo_lint(command: list[str], root: Path) -> int:
+    """Defer to the repository's own lint: its exit status is this tool's."""
+    try:
+        status = subprocess.run(command, cwd=root).returncode
+    except OSError as error:
+        print(f"context-map-lint: cannot run the repository's lint {command[0]}: {error}", file=sys.stderr)
+        return 2
+    return status if status >= 0 else 1
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 5 or argv[1] != "--repo-root" or argv[3] != "--context-map":
+    repo_lint = argv[6:] if argv[5:6] == ["--repo-lint"] else None
+    if repo_lint is not None:
+        argv = argv[:5]
+    if len(argv) != 5 or argv[1] != "--repo-root" or argv[3] != "--context-map" or repo_lint == []:
         print(__doc__, file=sys.stderr)
         return 2
     supplied_root = Path(argv[2])
@@ -300,6 +323,9 @@ def main(argv: list[str]) -> int:
     except ValueError:
         print(f"context-map-lint: context map is outside repository root: {map_path}", file=sys.stderr)
         return 2
+
+    if repo_lint is not None:
+        return run_repo_lint(repo_lint, root)
 
     errors = check(root, map_path)
     if not errors:
