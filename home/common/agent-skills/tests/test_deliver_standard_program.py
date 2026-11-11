@@ -5012,6 +5012,35 @@ class AmendTest(unittest.TestCase):
         self.assertNotIn("renew-amend", names)
         self.assertLess(names.index("amend"), names.index("plan-review"))
 
+    def test_an_applied_amend_invalidates_the_cached_review_and_verify(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        self.assertEqual(ready["stage"], "ready")
+        stopped, _ = run(replies={"verify": None}, patch={"impl-1": {"commit": TIP}})
+        self.assertEqual(stopped["stage"], "verify")
+        for name, cont, head, skipped in (("verified", ready["cont"], SHA, ("final-1", "verify")),
+                                          ("final reviewed", stopped["cont"], TIP, ("final-1",))):
+            plain, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": head}})
+            with self.subTest(name, amend=False):
+                self.assertEqual(plain["stage"], "done")
+                for label in skipped:
+                    self.assertNotIn(label, labels(calls))
+            result, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), patch={"setup": {"head": head}})
+            with self.subTest(name, amend=True):
+                self.assertEqual(result["stage"], "done")
+                self.assertLess(labels(calls).index("amend"), labels(calls).index("final-1"))
+                self.assertIn("verify", labels(calls))
+                self.assertIn("final-1", labels(calls))
+
+    def test_an_edit_already_recorded_keeps_the_cached_review(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        done = {"status": "applied", "refused": [],
+                "edits": [{"file": ready["cont"]["setup"]["plan_dir"] + "/task-2.md", "exists": True,
+                           "occurrences": 0, "already": True}]}
+        result, calls = run(args=dict(ARGS, cont=ready["cont"], amend=[AMEND_EDIT]),
+                            replies={"amend": done}, patch={"setup": {"head": SHA}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("final-1", labels(calls))
+
     def test_a_resume_without_amend_is_unchanged(self):
         result, calls = run(args=dict(ARGS, cont=AMEND_CONT))
         self.assertEqual(result["stage"], "done")

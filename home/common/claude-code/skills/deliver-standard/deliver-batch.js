@@ -865,7 +865,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       // The plan was settled before the PR existed: an owner answer does not apply on this path.
       const ro = await ask(agent(readoptPrompt(n), { label: `readopt-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: READOPT_SCHEMA }), `readopt-${n}`)
       if (ro === null || ro === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: `readopt-${n} returned nothing` }; return }
-      if (ro.ok === true) {
+      // #811: an accepted PR still goes through the child when an amend is pending for it: landing as it stands would drop the amend.
+      const amendPending = !!(CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n)))
+      if (ro.ok === true && !amendPending) {
         if (!ro.head || !ro.branch || !ro.worktree || !Array.isArray(ro.acceptance) || !ro.acceptance.length) {
           rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: 'readopt reply lacks head, branch, worktree or acceptance' }
           return
@@ -876,7 +878,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
         rows[n] = await enqueue(INT, () => land(n, READY[n]))
         return
       }
-      if (ro.reason !== 'unaccepted') {
+      if (ro.ok !== true && ro.reason !== 'unaccepted') {
         rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: ro.reason || 'other', ...(ro.detail ? { note: ro.detail } : {}) }
         return
       }

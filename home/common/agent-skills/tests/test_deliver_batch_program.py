@@ -2517,6 +2517,17 @@ class AmendTest(unittest.TestCase):
             self.assertNotIn("conts", result["relaunch"])
             self.assertNotIn("amend", result["relaunch"])
 
+    def test_an_accepted_open_pr_with_a_pending_amend_goes_through_the_child_before_landing(self):
+        facts = {"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}}
+        result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}, amend={"1": [AMEND_EDIT]}), patch=facts)
+        ls = labels(calls)
+        self.assertEqual(child(calls, 1)["args"]["amend"], [AMEND_EDIT])
+        self.assertLess(ls.index("readopt-1"), ls.index("child-1"))
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        with self.subTest("an amend already applied is not sent again, so the PR lands as it stands"):
+            _, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts)
+            self.assertNotIn("child-1", labels(calls))
+
     def test_a_run_without_amend_sends_none(self):
         result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}),
                                children={"1": {"stage": "task", "task": {"n": 2}, "cont": reviewed(1)}})

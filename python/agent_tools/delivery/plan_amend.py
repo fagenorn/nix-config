@@ -34,7 +34,8 @@ at the end of the plan. An edit whose line from `: in ` on is already recorded i
 that section is skipped (`already: true`), so a re-run changes no byte.
 
 Text is decoded and encoded as UTF-8 with no newline translation. Files are replaced
-atomically one by one, the plan last; a failed write exits 2.
+atomically one by one, the plan last; a failed write restores every file already
+replaced and exits 2 (its detail names any file that could not be restored).
 """
 
 from __future__ import annotations
@@ -173,26 +174,62 @@ def _result(status: str, edits: list, refused: list, detail: str | None = None) 
     return result
 
 
-def _write_all(changes: dict[str, str]) -> None:
-    """Replace every path by its new text: temporaries first, then the renames."""
-    temporaries: list[tuple[str, str]] = []
+def _stage(path: str, text: str) -> str:
+    """Write `text` to a temporary beside `path` with its mode; return the temporary's path."""
+    handle, temporary = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".plan-amend-")
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(text.encode("utf-8"))
+        shutil.copymode(path, temporary)
+    except OSError:
+        os.remove(temporary)
+        raise
+    return temporary
+
+
+def _write_all(changes: dict[str, str], originals: dict[str, str]) -> None:
+    """Replace every path by its new text, or leave every path as it was.
+
+    The new texts and the original texts are staged in temporaries first, so the
+    renames are all that can fail afterwards; a failed rename puts back, from the
+    staged originals, every path already replaced. An OSError whose message names
+    the paths that could not be put back is raised when a restore itself fails.
+    """
+    staged: list[tuple[str, str, str]] = []  # (new temporary, restore temporary, path)
+    leftovers: list[str] = []
+    replaced: list[tuple[str, str]] = []  # (restore temporary, path)
     try:
         for path, text in changes.items():
-            handle, temporary = tempfile.mkstemp(dir=os.path.dirname(path),
-                                                 prefix=".plan-amend-")
-            temporaries.append((temporary, path))
-            with os.fdopen(handle, "wb") as stream:
-                stream.write(text.encode("utf-8"))
-            shutil.copymode(path, temporary)
-        for temporary, path in temporaries:
-            os.replace(temporary, path)
-    except OSError:
-        for temporary, _ in temporaries:
+            new = _stage(path, text)
+            leftovers.append(new)
+            restore = _stage(path, originals[path])
+            leftovers.append(restore)
+            staged.append((new, restore, path))
+        for new, restore, path in staged:
+            os.replace(new, path)
+            leftovers.remove(new)
+            replaced.append((restore, path))
+    except OSError as error:
+        stuck = []
+        for restore, path in reversed(replaced):
+            try:
+                os.replace(restore, path)
+                leftovers.remove(restore)
+            except OSError:
+                stuck.append(path)
+        for temporary in leftovers:
             try:
                 os.remove(temporary)
             except OSError:
                 pass
+        if stuck:
+            raise OSError(f"{error}; could not restore {', '.join(sorted(stuck))}") from None
         raise
+    for temporary in leftovers:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
 
 
 def amend(request: dict) -> dict:
@@ -266,7 +303,7 @@ def amend(request: dict) -> dict:
     if real_root in changes:
         ordered[real_root] = changes[real_root]
     try:
-        _write_all(ordered)
+        _write_all(ordered, originals)
     except OSError as error:
         return _result("error", [], [], f"write failed: {error}")
     return _result("applied", entries, [])

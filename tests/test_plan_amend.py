@@ -18,13 +18,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from agent_tools.delivery import plan_amend
 
 COMMAND = (sys.executable, "-m", "agent_tools.delivery.plan_amend")
 LINE_2 = ('- Amendment answering the stop at task 2: in task-2.md, '
           'replaced "old rule" with "new rule".\n')
 
 
-class PlanAmendTest(unittest.TestCase):
+class Fixture(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.root, True)
@@ -60,6 +63,8 @@ class PlanAmendTest(unittest.TestCase):
     def E(self, name, find, replace):
         return {"file": str(self.dir / name), "find": find, "replace": replace}
 
+
+class PlanAmendTest(Fixture):
     def test_one_edit_is_written_and_recorded_under_a_new_amendments_section(self):
         code, out = self.apply(self.request([self.E("task-2.md", "old rule", "new rule")]))
         self.assertEqual(code, 0)
@@ -248,6 +253,44 @@ class PlanAmendTest(unittest.TestCase):
                 self.assertEqual(out["status"], "error")
                 self.assertTrue(isinstance(out["detail"], str) and out["detail"])
                 self.assertEqual(self.snapshot(), before)
+
+
+class WriteFailureTest(Fixture):
+    """A write that fails midway leaves every file as it was, or names what it could not restore."""
+
+    def amend_failing(self, fails):
+        """Run the amend with `fails(destination_basename, nth_replace_of_it)` raising OSError when true."""
+        real = os.replace
+        seen = {}
+
+        def replace(source, destination):
+            name = os.path.basename(destination)
+            seen[name] = seen.get(name, 0) + 1
+            if fails(name, seen[name]):
+                raise OSError("injected")
+            return real(source, destination)
+        request = self.request([self.E("task-2.md", "old rule", "new rule")])
+        with mock.patch.object(plan_amend.os, "replace", side_effect=replace):
+            return plan_amend.amend(request)
+
+    def temporaries(self):
+        return [f for f in os.listdir(self.dir) if f.startswith(".plan-amend-")]
+
+    def test_a_failed_plan_replace_restores_the_task_file_and_leaves_no_temporary(self):
+        before = self.snapshot()
+        result = self.amend_failing(lambda name, nth: name == "plan.md")
+        self.assertEqual(result["status"], "error")
+        self.assertIn("injected", result["detail"])
+        self.assertEqual(self.snapshot(), before)
+        code, out = self.apply(self.request([self.E("task-2.md", "old rule", "new rule")]))
+        self.assertEqual((code, out["status"]), (0, "applied"))
+
+    def test_a_failed_restore_names_the_file_left_changed(self):
+        result = self.amend_failing(lambda name, nth: name == "plan.md" or (name == "task-2.md" and nth > 1))
+        self.assertEqual(result["status"], "error")
+        self.assertIn(str(self.dir / "task-2.md"), result["detail"])
+        self.assertEqual((self.dir / "plan.md").read_bytes(), b"# Plan\n\nD5 says old.\n")
+        self.assertEqual(self.temporaries(), [])
 
 
 if __name__ == "__main__":

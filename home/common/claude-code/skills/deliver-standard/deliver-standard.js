@@ -778,9 +778,9 @@ let chunked = false
 // Every declared branch head the setup re-read is the one the record names (no declared branch: always true).
 const branchesSame = rec => declared(plan).every(b => !!rec && own(rec.branches, b.name) && sameSha(rec.branches[b.name], headOf(setup.branch_heads, b.name)))
 // A ready stop's verified head, unchanged and clean, needs no second review or verify.
-const SKIP_REVIEW = !!(verified && plan && sameSha(setup.head, verified.head) && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && branchesSame(verified))
+let SKIP_REVIEW = !!(verified && plan && sameSha(setup.head, verified.head) && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && branchesSame(verified))
 // A passed final review, on the head it passed at (or one that only gained integration-branch merges), is not run again; verify still is.
-const SKIP_FINAL = !SKIP_REVIEW && LANE === 'standard' && !!finalReviewed && !!plan && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && !setup.dirty && (sameSha(setup.head, finalReviewed.head) || setup.since_reviewed === 'merge_only') && branchesSame(finalReviewed)
+let SKIP_FINAL = !SKIP_REVIEW && LANE === 'standard' && !!finalReviewed && !!plan && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && !setup.dirty && (sameSha(setup.head, finalReviewed.head) || setup.since_reviewed === 'merge_only') && branchesSame(finalReviewed)
 if (!SKIP_REVIEW) verified = null
 if (!SKIP_REVIEW && !SKIP_FINAL) finalReviewed = null
 // The last commit the final review will cover.
@@ -788,7 +788,7 @@ let tip = setup.head || null
 // The verification contract as freshly resolved, key order aside: cached results answer only this contract.
 const canon = v => Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v)
 const VERIFY_CONTRACT = canon(setup.verification)
-const VERIFY_CACHED = SKIP_REVIEW && verified.contract === VERIFY_CONTRACT
+let VERIFY_CACHED = SKIP_REVIEW && verified.contract === VERIFY_CONTRACT
 const DIRECT_IMPL = { ...IMPL, properties: { ...IMPL.properties, acceptance: PLAN_SCHEMA.properties.acceptance, sensitive: { type: 'boolean' }, ineligible: { type: 'boolean' } } }
 // The direct lane's first-pass review grades each criterion: met, and the test (name, file:line) or command that shows it.
 const GRADED_FINDINGS = {
@@ -927,6 +927,14 @@ ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MOD
   if (!graded) return { stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: CONT }
   log(`amend: applied ${AMEND_INPUT.edits.length} edit(s) to the plan`)
   amendApplied = true
+  // An edit that changed the plan makes every cached result stale: the final review and verify run again against the amended plan.
+  if (am.edits.some(g => g.already !== true)) {
+    SKIP_REVIEW = false
+    SKIP_FINAL = false
+    VERIFY_CACHED = false
+    verified = null
+    finalReviewed = null
+  }
 }
 if (!plan) {
   const halted = takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA }), 'plan')
