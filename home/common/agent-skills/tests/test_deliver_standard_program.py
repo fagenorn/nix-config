@@ -2257,6 +2257,129 @@ class TaskTest(unittest.TestCase):
         self.assertNotIn("lane:", standard["prompt"])
 
 
+def blocked(notes="no", **more):
+    return dict({"status": "blocked", "notes": notes}, **more)
+
+
+def task_steps(calls):
+    return [label for label in labels(calls) if label.startswith(("impl-", "review-"))]
+
+
+class BlockedOnLaterTaskTest(unittest.TestCase):
+    """#896: a task blocked on a later task of its plan runs just after that task, once."""
+
+    SIX = {"plan": dict(PLAN, tasks=tasks(6))}
+    NEEDS_6 = blocked("Task 5 cannot be finished as written because it depends on Task 6", blocked_on=6)
+    DONE_5 = {"status": "done", "start_head": "b5", "commit": "c5", "notes": "ok"}
+
+    def go(self, args=None, **replies):
+        out = run_out(args, dict(self.SIX, **replies))
+        return out["result"], out["calls"], out["logs"]
+
+    def test_the_named_later_task_runs_first_and_the_delivery_continues(self):
+        result, calls, logs = self.go(**{"impl-5": [self.NEEDS_6, self.DONE_5]})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(task_steps(calls), ["impl-1", "review-1", "impl-2", "review-2", "impl-3", "review-3", "impl-4", "review-4",
+                                             "impl-5", "impl-6", "review-6", "impl-5", "review-5"])
+        self.assertIn("task 5 is blocked on task 6: moved to run just after it, once (order 1, 2, 3, 4, 6, 5)", logs)
+        self.assertEqual([c["label"] for c in calls if c["agentType"] == "planner"], ["plan"])
+        ahead, retry = prompt(calls, "impl-6"), prompt(calls, "impl-5")
+        self.assertIn("Task 5 waits for task 6 and may have left uncommitted edits: leave them as they are.", ahead)
+        self.assertIn("Task 6, which this task was blocked on, is done now.", retry)
+        self.assertIn("uncommitted edits or commits in the worktree", retry)
+        self.assertIn("git -C /r/.wt/w-issue-9-x diff b5..c5", prompt(calls, "review-5"))
+
+    def test_the_implementer_is_asked_for_the_task_number_not_for_prose(self):
+        _, calls, _ = self.go()
+        for label in ("impl-1", "impl-6"):
+            self.assertEqual(schema_of(calls, label)["properties"]["blocked_on"], {"type": "integer"})
+            self.assertIn("blocked_on: the number of the later task of this plan it needs first", prompt(calls, label))
+            self.assertNotIn("waits for task", prompt(calls, label))
+            self.assertNotIn("was blocked on", prompt(calls, label))
+            self.assertNotIn("uncommitted edits", prompt(calls, label))
+
+    def test_a_second_block_of_the_moved_task_stops_with_the_reason(self):
+        for again in (self.NEEDS_6, blocked("still impossible")):
+            with self.subTest(again=again):
+                result, calls, _ = self.go(**{"impl-5": [self.NEEDS_6, again]})
+                self.assertEqual((result["stage"], result["task"]["n"], result["cont"]["partial"]), ("task", 5, 5))
+                self.assertIn("blocked again after it was moved behind task 6", result["reason"])
+                self.assertEqual(labels(calls).count("impl-5"), 2)
+                self.assertEqual(labels(calls).count("impl-6"), 1)
+                self.assertEqual([d["n"] for d in result["cont"]["done"]], [1, 2, 3, 4, 6])
+
+    def test_a_block_that_names_no_later_task_stops_as_before(self):
+        result, calls, _ = self.go(**{"impl-5": blocked("the task file is wrong")})
+        self.assertEqual(result["reason"], "task: task 5 blocked: the task file is wrong")
+        self.assertEqual((result["cont"]["partial"], result["cont"]["plan"]["tasks"]), (5, tasks(6)))
+        self.assertNotIn("reordered", result["cont"])
+        self.assertNotIn("impl-6", labels(calls))
+
+    def test_a_block_on_an_earlier_done_or_unknown_task_stops(self):
+        for named in (4, 5, 9, 0):
+            with self.subTest(named=named):
+                result, calls, _ = self.go(**{"impl-5": blocked("needs it", blocked_on=named)})
+                self.assertEqual((result["stage"], result["cont"]["partial"]), ("task", 5))
+                self.assertIn(f"not moved: task {named} is not a later unfinished task of the plan", result["reason"])
+                self.assertNotIn("reordered", result["cont"])
+                self.assertNotIn("impl-6", labels(calls))
+        for wrong in ("6", 6.5, None):
+            with self.subTest(wrong=wrong):
+                result, calls, _ = self.go(**{"impl-5": blocked("needs it", blocked_on=wrong)})
+                self.assertEqual(result["reason"], "task: task 5 blocked: needs it")
+                self.assertNotIn("impl-6", labels(calls))
+
+    def test_a_named_task_in_another_worktree_stops(self):
+        def plan(on_branch):
+            return dict(bplan(), tasks=[dict(t, **({"branch": "cand"} if t["n"] in on_branch else {})) for t in tasks(6)])
+        result, calls = run(replies={"plan": plan({6}), "impl-5": self.NEEDS_6})
+        self.assertEqual((result["stage"], result["cont"]["partial"]), ("task", 5))
+        self.assertIn("not moved: task 6 commits in another worktree", result["reason"])
+        self.assertNotIn("impl-6", labels(calls))
+        result, calls = run(replies={"plan": plan({5, 6}), "impl-5": [self.NEEDS_6, self.DONE_5]})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(task_steps(calls)[-4:], ["impl-6", "review-6", "impl-5", "review-5"])
+
+    def test_the_tasks_between_keep_their_order(self):
+        result, calls, _ = self.go(**{"impl-3": [blocked("needs 5", blocked_on=5), self.DONE_5]})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([step for step in labels(calls) if step.startswith("impl-")],
+                         ["impl-1", "impl-2", "impl-3", "impl-4", "impl-5", "impl-3", "impl-6"])
+
+    def test_a_block_while_a_moved_task_waits_stops(self):
+        result, calls, _ = self.go(**{"impl-4": blocked("needs 6", blocked_on=6), "impl-5": blocked("needs 4", blocked_on=4)})
+        self.assertEqual((result["stage"], result["task"]["n"], result["cont"]["partial"]), ("task", 5, 5))
+        self.assertIn("not moved behind task 4: task 4 still waits for task 6", result["reason"])
+        self.assertNotIn("impl-6", labels(calls))
+        self.assertEqual([t["n"] for t in result["cont"]["plan"]["tasks"]], [1, 2, 3, 5, 6, 4])
+
+    def test_a_stop_after_the_move_keeps_the_order_and_reruns_no_done_task(self):
+        stopped, _, _ = self.go(**{"impl-5": self.NEEDS_6, "impl-6": None})
+        cont = stopped["cont"]
+        self.assertEqual((stopped["stage"], cont["partial"]), ("task", 6))
+        self.assertEqual([t["n"] for t in cont["plan"]["tasks"]], [1, 2, 3, 4, 6, 5])
+        self.assertEqual(cont["reordered"], [{"task": 5, "after": 6, "notes": self.NEEDS_6["notes"]}])
+        self.assertEqual([d["n"] for d in cont["done"]], [1, 2, 3, 4])
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"dirty": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(task_steps(calls), ["impl-6", "review-6", "impl-5", "review-5"])
+        self.assertIn("Task 5 waits for task 6", prompt(calls, "impl-6"))
+        self.assertIn("uncommitted edits or commits in the worktree", prompt(calls, "impl-5"))
+        # The moved task's one repair is spent across the relaunch too.
+        again, calls = run(args=dict(ARGS, cont=cont), replies={"impl-5": self.NEEDS_6})
+        self.assertEqual((again["stage"], again["cont"]["partial"]), ("task", 5))
+        self.assertIn("blocked again after it was moved behind task 6", again["reason"])
+        self.assertEqual(labels(calls).count("impl-6"), 1)
+        self.assertEqual(again["cont"]["reordered"], cont["reordered"])
+
+    def test_a_later_stop_carries_the_record_and_no_partial(self):
+        result, _, _ = self.go(**{"impl-5": [self.NEEDS_6, self.DONE_5], "verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertNotIn("partial", result["cont"])
+        self.assertEqual([(r["task"], r["after"]) for r in result["cont"]["reordered"]], [(5, 6)])
+        self.assertEqual([d["n"] for d in result["cont"]["done"]], [1, 2, 3, 4, 6, 5])
+
+
 class ResumeTest(unittest.TestCase):
     def cont(self, **extra):
         setup = {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x",
