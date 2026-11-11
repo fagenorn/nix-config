@@ -363,7 +363,8 @@ class TwoBranchCommandTest(ReleaseCommandCase):
             "--title", CANONICAL["title"], "--notes-file", str(self.notes))
         self.assertEqual((code, document["runnable"], document["refusal"]["code"]),
                          (3, False, "release_pr_missing"), err)
-        self.assertEqual([c["action"] for c in document["confirmations"]], ["merge", "tag", "github-release"])
+        self.assertEqual([a["name"] for a in document["actions"]][:3], ["merge", "tag", "github-release"])
+        self.assertEqual(document["confirmations"], [])  # issue 845: none while not runnable
         self.assertIsNone(document["verification"])
         self.assertFalse((self.root / ".git/agent-release").exists())
 
