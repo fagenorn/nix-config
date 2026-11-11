@@ -1967,8 +1967,6 @@ class RulesRereviewSkipTest(unittest.TestCase):
         plan = with_criteria(EVIDENCE)
         code = PLAN["acceptance"][0]
         changes = (
-            # The rules judge the wording: a code criterion reworded into a post-deploy threshold keeps every other member.
-            ("text", [dict(code, text="p95 latency stays under 200 ms for a week after the deploy"), EVIDENCE]),
             ("kind", [code, criterion(HUMAN, id="AC2", verify_ac="AC2")]),
             ("verify", [code, criterion(EVIDENCE, verify_host="h2")]),
             ("metric", [code, criterion(EVIDENCE, metric=True, verify_mode="observe")]),
@@ -1984,6 +1982,59 @@ class RulesRereviewSkipTest(unittest.TestCase):
                 self.assertEqual(result["stage"], "plan-review")
                 self.assertNotIn("impl-1", names)
                 self.assertEqual(skipped, [])
+
+    REWORDED = "p95 latency stays under 200 ms for a week after the deploy"
+
+    def naming(self, summary, **more):
+        return {"verdict": "findings", "findings": [{"severity": "important", "summary": summary, **more}]}
+
+    def test_a_retyped_text_no_finding_names_keeps_the_earlier_text_and_skips(self):
+        """The planner retypes every criterion in its reply; the plan file is unedited, so the earlier text stands."""
+        plan = with_criteria(EVIDENCE, HUMAN)
+        retyped = dict(PLAN, acceptance=[dict(a, text=a["text"] + ", retyped") for a in plan["acceptance"]])
+        # AC10 and BAC2 are other words, not AC1 or AC2.
+        for name, review in (("bare", self.BARE), ("other ids", self.naming("AC10 and BAC2 have no task", file="/g/task-1.md"))):
+            with self.subTest(findings=name):
+                out = run_out(replies={"plan": plan, "plan-revise": retyped, "plan-review": review,
+                                       "plan-rules-review": self.LEFT}, patch=self.OPEN)
+                names = labels(out["calls"])
+                self.assertNotIn("plan-rules-review", names)
+                self.assertEqual(len([line for line in out["logs"] if self.SKIPPED in line]), 1)
+                self.assertIn("impl-1", names)
+                self.assertEqual(out["result"]["acceptance"], plan["acceptance"])
+                later = prompt(out["calls"], "final-1") + prompt(out["calls"], "close-out")
+                self.assertNotIn("retyped", later)
+
+    def test_a_criterion_a_finding_names_takes_the_new_text_and_the_rules_rereview_runs(self):
+        plan = with_criteria(EVIDENCE)
+        retyped = dict(PLAN, acceptance=[dict(a, text=a["text"] + ", retyped") for a in plan["acceptance"]])
+        rows = (("summary", self.naming("the wording of AC2: names no deploy")),
+                ("lower case", self.naming("criterion ac2 has no task")),
+                ("failing_input", self.naming("a criterion has no task", failing_input="(AC2)")),
+                ("ac", self.naming("no task", ac="AC2")))
+        for name, review in rows:
+            with self.subTest(named_in=name):
+                result, names, skipped = self.go(plan, retyped, review=review)
+                self.assertEqual(names.count("plan-rules-review"), 1)
+                self.assertEqual(skipped, [])
+                self.assertEqual(result["stage"], "plan-review")
+                # AC2, named, takes the reply's text; AC1, unnamed, keeps the earlier one.
+                self.assertEqual([a["text"] for a in result["cont"]["plan"]["acceptance"]], ["works", "deployed, retyped"])
+
+    def test_a_changed_verify_on_an_unnamed_criterion_still_runs_the_rules_rereview(self):
+        plan = with_criteria(EVIDENCE)
+        revised = with_criteria(criterion(EVIDENCE, text=self.REWORDED, verify_host="h2"))
+        result, names, skipped = self.go(plan, revised)
+        self.assertEqual(names.count("plan-rules-review"), 1)
+        self.assertEqual(skipped, [])
+        kept = result["cont"]["plan"]["acceptance"][1]
+        self.assertEqual((kept["text"], kept["verify"]["host"]), ("deployed", "h2"))
+
+    def test_a_new_criterion_keeps_its_text_and_counts_as_changed(self):
+        result, names, skipped = self.go(with_criteria(EVIDENCE), with_criteria(EVIDENCE, HUMAN))
+        self.assertEqual(names.count("plan-rules-review"), 1)
+        self.assertEqual(skipped, [])
+        self.assertEqual(result["cont"]["plan"]["acceptance"][2]["text"], HUMAN["text"])
 
     def test_a_revision_that_planrules_refuses_still_runs_the_rules_rereview(self):
         # No trigger has a rule and the revise changes no id, kind, metric or verify, but it drops a lint: planRules hits R4.

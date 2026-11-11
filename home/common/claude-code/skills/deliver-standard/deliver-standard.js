@@ -1021,6 +1021,16 @@ Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} a
 }
 // #819: the members of a criterion the rules judge (its wording among them), key order aside; a revise that leaves them as reviewed needs no rules re-review.
 const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
+// #819: a finding names a criterion by its ac member, or by the id standing as a whole word (AC1 is not in AC10) in its summary, failing_input or file.
+const wholeWord = id => new RegExp('(^|[^A-Za-z0-9_])' + id.replace(/[^A-Za-z0-9_]/g, c => '\\' + c) + '($|[^A-Za-z0-9_])', 'i')
+const namesCriterion = (f, id) => !!f && (f.ac === id || [f.summary, f.failing_input, f.file].some(t => typeof t === 'string' && wholeWord(id).test(t)))
+// #819: a planner retypes every criterion in its reply though the plan file is unedited, so a criterion that existed before and that no
+// finding names keeps its earlier text; a named, new or removed one, and every other member, stays as the reply gave it.
+const keepUnnamedText = (before, after, findings) => after.map(a => {
+  const was = a && typeof a.id === 'string' && a.id ? before.find(b => b && b.id === a.id) : null
+  if (!was || typeof was.text !== 'string' || was.text === a.text || findings.some(f => namesCriterion(f, a.id))) return a
+  return { ...a, text: was.text }
+})
 // One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
 // Its findings all carry a rule, so its re-review always runs.
 const rulesRevise = async findings => {
@@ -1068,10 +1078,11 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   }
   if (planFindings.length) {
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
-    const reviewedFacts = ruleFacts(plan)
+    const reviewedFacts = ruleFacts(plan), reviewedCriteria = plan.acceptance
     const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const halted = await takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
+    plan = { ...plan, acceptance: keepUnnamedText(reviewedCriteria, plan.acceptance, planFindings) }
     const still = planRules(plan)
     // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, text, kind, metric or verify changed.
     const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts
