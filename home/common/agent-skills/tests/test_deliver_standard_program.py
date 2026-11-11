@@ -2646,11 +2646,16 @@ class LandLockTest(unittest.TestCase):
     def test_a_non_holding_wait_answer_stops_with_cont(self):
         for verdict in ("land-contended", "held_by", "lost_to"):
             with self.subTest(verdict=verdict):
-                result, calls = run(patch={"pr": {"lock": {"verdict": verdict, "lock_sha": "b" * 40, "by": "h2/b9"}}})
+                refusal = {"lock": {"verdict": verdict, "lock_sha": "b" * 40, "by": "h2/b9"}}
+                result, calls = run(replies={f"land-lock-{k}": refusal for k in (1, 2, 3)},
+                                    patch={"pr": dict(refusal, checks=None)})
                 self.assertEqual((result["stage"], result["pr"], result["lock"]), ("land-contended", 42, verdict))
                 self.assertIn("cont", result)
-                for gone in ("checks-2", "sync-1", "merge", "land-unlock", "close-out"):
+                for gone in ("checks-1", "checks-2", "sync-1", "merge", "land-unlock", "close-out"):
                     self.assertNotIn(gone, labels(calls))
+                # #818: only a wait that ran out is waited for again; held_by and lost_to stop at once.
+                self.assertEqual([l for l in labels(calls) if l.startswith("land-lock-")],
+                                 ["land-lock-1", "land-lock-2", "land-lock-3"] if verdict == "land-contended" else [])
 
     def test_a_failed_move_releases_the_last_held_sha(self):
         merge = "d" * 40
@@ -2745,6 +2750,92 @@ class LandLockTest(unittest.TestCase):
         self.assertNotIn("land-unlock", labels(calls))
 
 
+class LandWaitRetryTest(unittest.TestCase):
+    """#818: a land-contended answer of the folded acquire --wait is the wait running out behind other landings,
+    so the claim is renewed and the same acquire waits again, three times at most."""
+
+    CONTENDED = {"lock": {"verdict": "land-contended", "lock_sha": "b" * 40, "by": "h2/b9"}}
+    WAIT_OUT = {"pr": dict(CONTENDED, checks=None)}
+
+    @staticmethod
+    def waits(calls):
+        return [l for l in labels(calls) if l.startswith("land-lock-")]
+
+    def test_a_contended_wait_then_an_acquired_lock_ships(self):
+        result, calls = run(patch=self.WAIT_OUT)
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("pr"):], ["pr", "land-lock-1", "checks-1", "merge", "hold", "close-out"])
+        text = prompt(calls, "land-lock-1")
+        self.assertIn(f"forge-claim renew --repo owner/repo --issue 9 --holder {HOLDER} --branch issue-9-x", text)
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n", text)
+        self.assertLess(text.index("forge-claim renew"), text.index("forge-claim land acquire"))
+        call = next(c for c in calls if c["label"] == "land-lock-1")
+        self.assertEqual((call["agentType"], call["model"], call["effort"]), ("clerk", "sonnet", "low"))
+        schema = schema_of(calls, "land-lock-1")
+        self.assertEqual(schema["required"], ["renew"])
+        self.assertIn("verdict", member(schema, "lock")["properties"])
+        # The retried wait polled no checks: the first round polls them itself, behind its own renew, and moves no lock.
+        self.assertIn("forge-claim renew", prompt(calls, "checks-1"))
+        self.assertNotIn("Move the cross-host landing lock", prompt(calls, "checks-1"))
+        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "hold"))
+
+    def test_a_lock_acquired_on_a_later_wait_ships(self):
+        result, calls = run(replies={"land-lock-1": self.CONTENDED, "land-lock-2": self.CONTENDED}, patch=self.WAIT_OUT)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(self.waits(calls), ["land-lock-1", "land-lock-2", "land-lock-3"])
+
+    def test_a_wait_contended_on_every_retry_stops_land_contended(self):
+        result, calls = run(replies={f"land-lock-{k}": self.CONTENDED for k in (1, 2, 3, 4)}, patch=self.WAIT_OUT)
+        self.assertEqual((result["stage"], result["pr"], result["lock"]), ("land-contended", 42, "land-contended"))
+        self.assertIn("cont", result)
+        names = labels(calls)
+        self.assertEqual(names[names.index("pr"):], ["pr", "land-lock-1", "land-lock-2", "land-lock-3"])
+
+    def test_a_not_held_renew_during_a_retry_is_claim_lost(self):
+        result, calls = run(replies={"land-lock-1": self.CONTENDED,
+                                     "land-lock-2": {"renew": {"verdict": "not_held", "by": "h2/b1"}, "lock": None}},
+                            patch=self.WAIT_OUT)
+        self.assertEqual((result["stage"], result["at"]), ("claim-lost", "land-lock-2"))
+        self.assertNotIn("cont", result)
+        self.assertEqual(self.waits(calls), ["land-lock-1", "land-lock-2"])
+        # The renew ended, so the prompt ran no lock command: nothing is held and nothing is released.
+        for gone in ("checks-1", "merge", "land-unlock", "close-out"):
+            self.assertNotIn(gone, labels(calls))
+
+    def test_a_transient_renew_during_a_retry_is_recalled_once(self):
+        result, calls = run(replies={"land-lock-1": [{"renew": TRANSIENT, "lock": None},
+                                                     {"lock": {"verdict": "acquired", "lock_sha": SHA}}]},
+                            patch=self.WAIT_OUT)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(self.waits(calls), ["land-lock-1", "land-lock-1"])
+
+    def test_another_refusal_during_a_retry_stops_without_another_wait(self):
+        for verdict in ("held_by", "lost_to"):
+            with self.subTest(verdict=verdict):
+                result, calls = run(replies={"land-lock-1": {"lock": {"verdict": verdict, "by": "h2/b9"}}},
+                                    patch=self.WAIT_OUT)
+                self.assertEqual((result["stage"], result["lock"]), ("land-contended", verdict))
+                self.assertEqual(self.waits(calls), ["land-lock-1"])
+                self.assertNotIn("land-unlock", labels(calls))
+
+    def test_an_unanswered_retry_stops_with_a_release_at_the_pr_head(self):
+        # The retried acquire may have taken the lock before its answer was lost or failed, so the stop releases it once.
+        for reply in (None, {"lock": None}, {"lock": {"verdict": "error", "detail": "gh failed"}}):
+            with self.subTest(reply=reply):
+                result, calls = run(replies={"land-lock-1": reply}, patch=self.WAIT_OUT)
+                self.assertEqual((result["stage"], result["pr"]), ("land-lock", 42))
+                self.assertIn("cont", result)
+                self.assertEqual(self.waits(calls), ["land-lock-1"])
+                self.assertEqual(labels(calls).count("land-unlock"), 1)
+                self.assertIn(f"--sha {SHA}\n", prompt(calls, "land-unlock"))
+                self.assertNotIn("merge", labels(calls))
+
+    def test_a_lock_held_at_once_runs_no_retry(self):
+        _, calls = run()
+        self.assertEqual(self.waits(calls), [])
+
+
 class ShipFixWaveTest(unittest.TestCase):
     """#649 defect 2 and the sync-review decision: one bounded fix wave, then a stop with cont."""
 
@@ -2783,7 +2874,7 @@ class ShipFixWaveTest(unittest.TestCase):
     def test_failed_or_unreviewed_fix_stops(self):
         cases = {
             "checks-fix": ({}, {"fix-ci": {"status": "blocked", "notes": "no"}}),
-            "checks-fix ": ({}, {"fix-ci": {"start_head": SHA, "commit": SHA}}),
+            "checks-fix ": ({}, {"fix-ci": {"start_head": SHA, "commit": None}}),
             "checks-fix-review": ({"fix-ci-review": FINDING}, {}),
             "checks-fix-review ": ({"fix-ci-review": None}, {}),
         }
@@ -2794,6 +2885,54 @@ class ShipFixWaveTest(unittest.TestCase):
                 self.assertEqual(result["stage"], stage.strip())
                 self.assertIn("cont", result)
                 self.assertNotIn("merge", labels(calls))
+
+    RERAN = {"start_head": SHA, "commit": SHA, "notes": "cache restore failed in setup; failed jobs rerun"}
+
+    def test_a_rerun_at_the_unchanged_head_polls_again_then_ships(self):
+        # #818: done at the unchanged head is a rerun of jobs that failed for no cause in the code.
+        result, calls = run(replies={"checks-2": {"state": "passed", "head": SHA, "required": ["ci-tests"]}},
+                            patch={"pr": {"checks": RED}, "fix-ci": self.RERAN})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("pr"):], ["pr", "fix-ci", "checks-2", "merge", "hold", "close-out"])
+        self.assertIn("forge-claim renew", prompt(calls, "checks-2"))
+        self.assertNotIn("Move the cross-host landing lock", prompt(calls, "checks-2"))
+        self.assertIn(f"--match-head-commit {SHA}", prompt(calls, "merge"))
+
+    def test_a_rerun_in_short_form_is_the_unchanged_head(self):
+        result, calls = run(replies={"checks-2": {"state": "passed", "head": SHA}},
+                            patch={"pr": {"checks": RED}, "fix-ci": dict(self.RERAN, commit=SHA[:9])})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("fix-ci-review", labels(calls))
+        self.assertNotIn("land-push-2", labels(calls))
+
+    def test_a_rerun_that_is_still_red_stops_as_the_ci_failure(self):
+        result, calls = run(replies={"checks-2": RED}, patch={"pr": {"checks": RED}, "fix-ci": self.RERAN})
+        self.assertEqual((result["stage"], result["failing"]), ("checks", ["ci-tests"]))
+        self.assertEqual(result["cont"]["checks_fixes"], 1)
+        names = labels(calls)
+        self.assertEqual(names[names.index("pr"):], ["pr", "fix-ci", "checks-2", "land-unlock"])
+
+    def test_the_ci_fix_prompt_tells_a_causeless_failure_to_rerun(self):
+        _, calls = run(replies={"checks-2": {"state": "passed", "head": SHA}},
+                       patch={"setup": {"unset_env": ["GITHUB_TOKEN"]}, "pr": {"checks": RED}, "fix-ci": self.RERAN})
+        text = prompt(calls, "fix-ci")
+        for needle in ("no cause in the code", "change and commit nothing",
+                       "unset GITHUB_TOKEN && gh run rerun <run-id> --repo owner/repo --failed",
+                       "do not wait for them", f"head unchanged (commit equal to start_head, {SHA})",
+                       "the program then polls the checks itself"):
+            self.assertIn(needle, text)
+
+    def test_a_sync_fix_at_the_unchanged_head_is_still_a_failure(self):
+        # The rerun answer belongs to the CI fix alone: a sync fix with no commit and no rebuttal stops as before.
+        result, calls = run(replies={"sync-review-1": FINDING},
+                            patch={"pr": {"checks": {"state": "behind", "head": SHA}},
+                                   "sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "fix-sync-1": {"start_head": MERGE, "commit": MERGE, "notes": ""}})
+        self.assertEqual(result["stage"], "sync-fix")
+        for gone in ("fix-sync-review-1", "checks-2", "merge"):
+            self.assertNotIn(gone, labels(calls))
+        self.assertNotIn("gh run rerun", prompt(calls, "fix-sync-1"))
 
     def test_failed_check_on_another_head_is_head_moved_not_fixed(self):
         result, calls = run(patch={"pr": {"checks": dict(RED, head="c" * 40)}})
@@ -4290,7 +4429,7 @@ CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer",
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
-             "verify", "verify-", "ws-check-", "land-unlock", "land-push-", "pr", "checks-", "merge",
+             "verify", "verify-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "pr", "checks-", "merge",
              "hold", "close-out")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-",
@@ -4328,6 +4467,7 @@ SCENARIOS = (
      "patch": {"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": FIX}}},
     {"replies": {"sync-review-1": FINDING, "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
      "patch": dict(CONFLICT, pr={"checks": {"state": "behind", "head": SHA}})},
+    {"patch": {"pr": {"lock": {"verdict": "land-contended", "lock_sha": "b" * 40}, "checks": None}}},
     {"args": DIRECT, "replies": {"direct-review": BAD}},
     {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
     WS_SCENARIO,
@@ -4378,7 +4518,7 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model (sonnet, the default, or haiku) is checked before any agent and sets the model of every clerk call except the lifecycle and setup steps, which stay on the default."""
 
-    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "pr", "merge", "hold", "close-out"}
+    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "land-lock-", "pr", "merge", "hold", "close-out"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
         for bad in ("opus", "Haiku", "", 1, None, True):
