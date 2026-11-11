@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
   description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), train? (true lands up to three ready issues that wait behind a busy land queue through one cumulative car pull request, a landing train; false or absent lands every issue serially), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
@@ -19,6 +19,8 @@ export const meta = {
 // no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call except the setup step and the steps that emit a lifecycle verb (land-pr, land-lock, land-merge, land-unlock), which stay on sonnet, #813;
 // passed to every child and kept in the relaunch when haiku, #803), amend ({"<issue>": a non-empty list of {file, find, replace} edits of
 // that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
+// train (boolean, default false, #822: true lands up to TRAIN_MAX ready issues waiting behind a busy land queue through one car pull request, see Train landing below;
+// false or absent, every step and label is the serial landing's; kept in the relaunch when true, never passed to a child).
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
@@ -69,6 +71,7 @@ if (args.decisions !== undefined) {
 }
 if (args.unattended !== undefined && typeof args.unattended !== 'boolean') return bad('unattended must be a boolean')
 if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean') return bad('review_sizing must be a boolean')
+if (args.train !== undefined && typeof args.train !== 'boolean') return bad('train must be a boolean')
 if (args.clerk_model !== undefined && !['sonnet', 'haiku'].includes(args.clerk_model)) return bad('clerk_model must be sonnet or haiku')
 if (args.conts !== undefined) {
   if (!isObj(args.conts)) return bad('conts must be an object')
@@ -92,6 +95,7 @@ if (args.amend !== undefined) {
 const DECISIONS = args.decisions
 const UNATTENDED = args.unattended === true
 const REVIEW_SIZING = args.review_sizing === true
+const TRAIN = args.train === true
 const CLERK_MODEL = args.clerk_model === undefined ? 'sonnet' : args.clerk_model
 // #813: a setup step or one that emits a lifecycle verb must reproduce a wide schema or a guard-exact command, so it never takes the trial model.
 const DEFAULT_CLERK_MODEL = 'sonnet'
@@ -482,13 +486,31 @@ const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 const ACCEPT_KINDS = ['code', 'evidence', 'human', 'note']
 const OPEN_KINDS = ['evidence', 'human']
 const isOpen = a => !!(a && OPEN_KINDS.includes(a.kind))
-const land = async (n, ready) => {
+const RENEW_FIRST_OF = (n, B) => `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
+// The PR step of a landing: push the branch and open or re-adopt its PR with the body at the accepted head. land-pr and a train's train-pr (#822) share it.
+const PR_OPEN = (n, ready, expected) => {
+  const ACS = JSON.stringify(ready.acceptance)
+  const closesLine = !ready.acceptance.some(isOpen) && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
+  return `Then open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${ready.branch} (worktree ${ready.worktree}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
+1. Push the branch: git -C ${ready.worktree} push origin ${ready.branch}.
+2. If an open PR with head ${ready.branch} exists (a re-run), reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
+Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
+Return pr (number) and head (the full sha of the pushed head).`
+}
+// The wait and the grading of a checks poll (its steps 3 and 4), shared by a landing's poll and a train car's (#822); `wait` is the bound of the watch.
+const CHECKS_TAIL = (prRef, wait) => `3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch ${wait}. It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
+4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.`
+// The one merge form of a landing, at an exact head; a train merges its car with the same form (#822).
+const MERGE_CMD = (pr, sha) => `${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${sha}${SETUP.delete_branch ? ' --delete-branch' : ''}`
+// A merged landing must leave a cont naming its PR, or a re-adopted PR (which has none) could not be closed out.
+const markMerged = (n, ready, pr) => {
+  CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: ready.branch, worktree: ready.worktree, worktree_path: ready.worktree }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
+}
+const land = async (n, ready, via = {}) => {
   const W = ready.worktree, B = ready.branch
   const RULES = RULES_FOR(W, B)
-  const ACS = JSON.stringify(ready.acceptance)
   const noHold = !ready.acceptance.some(isOpen)
   const unknownKinds = ready.acceptance.filter(a => !(a && ACCEPT_KINDS.includes(a.kind))).map(a => (a && a.id) || null)
-  const closesLine = noHold && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
   let expected = ready.head
   let pr = null
   let lockHeld = false
@@ -506,10 +528,9 @@ const land = async (n, ready) => {
   // The checks poll steps, shared by the standalone poll and the poll land-pr carries (#801).
   const CHECKS_STEPS = prRef => `1. git -C ${W} fetch origin; if the local branch is ahead of origin/${B}, push it. head is git -C ${W} rev-parse HEAD (the full sha).
 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), answer state behind at once with head.
-3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
-4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.`
+${CHECKS_TAIL(prRef, '(Bash timeout up to 60 minutes; rerun while any is pending)')}`
 
-  const RENEW_FIRST = `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
+  const RENEW_FIRST = RENEW_FIRST_OF(n, B)
   // The nested renew of a folded reply: a row ends the landing, null continues.
   const renewed = (r, label) => {
     if (!r) return out('stopped', { stage: 'renew', detail: `${label} returned no renew` })
@@ -628,6 +649,30 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
     return null
   }
 
+  // The close-out of a merged PR: the tail of a landing, and the whole of a train member's whose PR the train's car merged (#822).
+  const finish = async () => {
+    // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
+    markMerged(n, ready, pr)
+
+    const openCriteria = ready.acceptance.filter(isOpen)
+    const notes = ready.acceptance.filter(a => a && a.kind === 'note')
+    // The lock release rides first in the close-out call (#801); the wrapper releases only what that call did not confirm.
+    const folding = lockHeld
+    const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
+${folding ? RELEASE_FIRST(lockSha, lockMaybe && lockMaybe !== lockSha ? lockMaybe : null) : ''}1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
+2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released. ${FORGE_TIMEOUT}
+3. End the owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision. The merge proves the conflict and the label resolved and the decision settled; a verdict none is fine. decision_ended is true only when the decision end exited 0 (verdict ended or none).
+${notes.length ? `4. Unless a comment starting Orchestrator notes for PR ${pr} already exists on #${n} (an earlier attempt), write to a file outside any work tree a comment whose first line is Orchestrator notes for PR ${pr} (observations the orchestrator records itself; not graded, not held): and then one line <id>: <text> per note of ${JSON.stringify(notes.map(a => ({ id: a.id, text: a.text })))}, and post it with ${UNSET}gh issue comment ${n} --repo ${SLUG} --body-file <file>. Return notes_posted true once that comment exists.\n` : ''}${notes.length ? 5 : 4}. ${noHold
+      ? `Every criterion is of kind code or note. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
+      : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
+Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended${notes.length ? ', notes_posted' : ''} and notes.
+${RULES}`, `close-out-${n}`, { ...lifecycleClerk, schema: folding ? { ...CLOSE_SCHEMA, properties: { ...CLOSE_SCHEMA.properties, release: NULLABLE(RELEASE_SCHEMA) } } : CLOSE_SCHEMA })
+    if (folding && co && co.release && (co.release.verdict === 'released' || co.release.verdict === 'not_held')) lockHeld = false
+    const want = noHold ? 'CLOSED' : 'OPEN'
+    if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true || (notes.length && co.notes_posted !== true)) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
+    return out(noHold ? 'landed' : 'landed-held')
+  }
+
   // The behind handling shared by a checks reply and a lock that was lost and retaken.
   const behind = async () => {
     if (c.sync >= MAX_SYNCS) return out('land-contended', { detail: `behind ${INT} after ${c.sync} resyncs` })
@@ -645,11 +690,7 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
     lockHeld = true
     lockSha = expected
     const prR = await recall(() => call(`${RENEW_FIRST}
-Then open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${B} (worktree ${W}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
-1. Push the branch: git -C ${W} push origin ${B}.
-2. If an open PR with head ${B} exists (a re-run), reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
-Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
-Return pr (number) and head (the full sha of the pushed head).
+${PR_OPEN(n, ready, expected)}
 Take the cross-host landing lock of the branch ${INT} for that PR at the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null.
 Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait for every check of that PR at the head, required or not:
@@ -693,7 +734,17 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
     // A retried wait polled no checks: the loop polls them itself.
     carried = lockStep === `land-pr-${n}` ? { label: lockStep, reply: prR.checks || null } : null
 
-    for (;;) {
+    // #822: the first issue of a train hands over here, holding the lock at its ready head, once its own first poll answers behind (a head that is
+    // current lands alone, as ever). The train answers merged (its car, which contains this head, is merged: only the close-out is left), a row
+    // that ends this landing, or nothing, and then the landing goes on below as if no train had run. The lock never moves meanwhile.
+    let trained = false
+    if (via.train && carried && carried.reply && carried.reply.state === 'behind' && carried.reply.head === expected) {
+      const t = await via.train(pr)
+      if (t && t.row) return out(t.row.outcome, t.row.extra)
+      trained = !!(t && t.merged)
+    }
+
+    for (; !trained;) {
       c.checks++
       const label = `land-checks-${n}-${c.checks}`
       const fold = carried
@@ -756,7 +807,7 @@ Then re-check the cross-host landing lock of the branch ${INT} for PR #${pr}: ru
 ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
 1. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json state,mergeCommit. When state is already MERGED, skip step 2.
-2. Otherwise run, alone and exactly: ${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${expected}${SETUP.delete_branch ? ' --delete-branch' : ''}
+2. Otherwise run, alone and exactly: ${MERGE_CMD(pr, expected)}
 3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
 Return merged, merge_commit and notes. On any other lock verdict run nothing else and return merged false with the verdict in notes.
 ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
@@ -778,37 +829,321 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
       if (!complete(mg, LAND_MERGE_SCHEMA) || mg.merged !== true) return out('stopped', { stage: 'merge', detail: mg.notes })
       break
     }
-    // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
-    CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
-
-    const openCriteria = ready.acceptance.filter(isOpen)
-    const notes = ready.acceptance.filter(a => a && a.kind === 'note')
-    // The lock release rides first in the close-out call (#801); the wrapper releases only what that call did not confirm.
-    const folding = lockHeld
-    const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
-${folding ? RELEASE_FIRST(lockSha, lockMaybe && lockMaybe !== lockSha ? lockMaybe : null) : ''}1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
-2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released. ${FORGE_TIMEOUT}
-3. End the owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision. The merge proves the conflict and the label resolved and the decision settled; a verdict none is fine. decision_ended is true only when the decision end exited 0 (verdict ended or none).
-${notes.length ? `4. Unless a comment starting Orchestrator notes for PR ${pr} already exists on #${n} (an earlier attempt), write to a file outside any work tree a comment whose first line is Orchestrator notes for PR ${pr} (observations the orchestrator records itself; not graded, not held): and then one line <id>: <text> per note of ${JSON.stringify(notes.map(a => ({ id: a.id, text: a.text })))}, and post it with ${UNSET}gh issue comment ${n} --repo ${SLUG} --body-file <file>. Return notes_posted true once that comment exists.\n` : ''}${notes.length ? 5 : 4}. ${noHold
-      ? `Every criterion is of kind code or note. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
-      : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
-Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended${notes.length ? ', notes_posted' : ''} and notes.
-${RULES}`, `close-out-${n}`, { ...lifecycleClerk, schema: folding ? { ...CLOSE_SCHEMA, properties: { ...CLOSE_SCHEMA.properties, release: NULLABLE(RELEASE_SCHEMA) } } : CLOSE_SCHEMA })
-    if (folding && co && co.release && (co.release.verdict === 'released' || co.release.verdict === 'not_held')) lockHeld = false
-    const want = noHold ? 'CLOSED' : 'OPEN'
-    if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true || (notes.length && co.notes_posted !== true)) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
-    return out(noHold ? 'landed' : 'landed-held')
+    return await finish()
   }
 
   let result
   try {
-    result = await body()
+    // #822: a train member whose PR the car merged holds no lock and has only its close-out left.
+    if (Number.isInteger(via.mergedPr)) {
+      pr = via.mergedPr
+      result = await finish()
+    } else result = await body()
   } catch (e) {
     result = out('stopped', { stage: 'land', detail: String((e && e.message) || e) })
   }
   try { await unlock() } catch (e) { /* the row stands; a dead unlock agent already tripped the breaker */ }
   // D9: a landing failure keeps the claim, and CONTS[n] already holds the ready result's cont (set when the child returned), so a relaunch re-adopts both.
   return result
+}
+
+// --- Train landing (#822): only with the train arg; without it landReady is the serial enqueue and nothing below runs ---
+// A ready issue joins WAITING and enqueues one drain on the land queue. A drain takes up to TRAIN_MAX waiting issues. One issue, a merge
+// strategy other than merge, or a first issue whose head is current with the integration branch, lands serially through land(), unchanged.
+// Otherwise the first issue's land() takes the lock at its ready head H1 and hands over to the train (via.train), which:
+//   train-pr-<n>      opens the PR of every later member at its ready head (renew first; no lock, no checks);
+//   train-build-<t>   builds car i = integration branch + heads 1..i on scratch branches land-train/<batch>-<t>-<i>, one car PR each;
+//   train-checks-<t>-<i>  waits for every car's checks, in parallel and bounded; g is the longest green prefix;
+//   train-ready-<t>   renews the claims of members 1..g and reads their PR heads; a member that fails shrinks the train to those before it;
+//   train-merge-<t>   re-checks the lock at H1 (already_held only), merges car g at its exact head and reads the member PRs once;
+//   train-flip-<t>-<k>  reads the states again while a member PR still reads OPEN (the forge marks them merged itself, since the car's
+//                     history contains their heads), TRAIN_FLIP_CALLS times at most; it also reads the car once when the merge reply was lost;
+//   close-out-<n>     per merged member, the landing's own close-out; the lock release rides in the first member's, as in a serial landing;
+//   train-sweep-<s>   closes the open cars and deletes the car branches, the scratch worktree and the merged members' remote branches.
+// Rows stay per issue, with the issue's own PR; the row of an issue whose commits the car merged also carries train and car_pr.
+// Invariants. The lock is the first landing's: taken once at H1, never moved by the train, released once by that landing (its close-out, or its
+// wrapper on any other exit). Nothing merges unless every car up to g is green at its exact head. A train never writes to an issue branch and
+// never reads a merge commit. Each issue joins at most one train per run: an issue a train did not land goes to land() in the same drain, never
+// back to WAITING. Any surprise before the merge step (a dead, thrown or malformed step, a conflict, a red or late car) sweeps and falls back to
+// land(); a surprise in the merge step stops its members, because the car may be merged.
+const TRAIN_MAX = 3
+// forge_land_lock.py lets another host take over a lock it watched unchanged for IDLE_AFTER, 45 minutes, and a train's lock never changes.
+// The one long wait of a train, its car checks, is therefore bounded well below that: the other train steps have the remaining 20 minutes.
+const LOCK_IDLE_MIN = 45
+const TRAIN_CHECKS_WAIT_MIN = 25
+// The forge marks the member PRs merged by itself after the car merge, and that can lag. No step sleeps: the program asks a read-only
+// train-flip step again while a member still reads OPEN, this many times at most, and each call's own duration is the wait.
+const TRAIN_FLIP_CALLS = 8
+const CAR_PREFIX = `land-train/${BATCH}-`
+const FULL_SHA = /^[0-9a-f]{40}$/
+const WAITING = []
+let trainNo = 0
+let sweepNo = 0
+// Cars of this batch may be open: an earlier run that died mid-train, or a train of this run not yet swept clean. An open car contains the
+// lock's sha, and forge-claim refuses to move a lock contained in a PR that is not the caller's. So a drain asks for a sweep before it lands
+// anything, and a train's exits sweep too. A sweep that fails or dies stops nothing: carsMaybe stays set, the drain lands anyway (a lock move
+// may then answer land-contended, as any refused move does) and the next drain asks again.
+let carsMaybe = true
+const TRAIN_LIFECYCLE = { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low' }
+const trainCall = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
+const SWEEP_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' }, closed: { type: 'array', items: { type: 'integer' } }, deleted: STRS, detail: { type: 'string' } }, required: ['ok'] }
+const CARS_SCHEMA = { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, head: { type: 'string' }, pr: { type: 'integer' } }, required: ['issue', 'head', 'pr'] } }
+const TRAIN_READY_SCHEMA = {
+  type: 'object',
+  properties: { members: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, renew: RENEW_SCHEMA, head: { type: 'string' }, state: { type: 'string' } }, required: ['issue', 'renew'] } } },
+  required: ['members'],
+}
+const PR_STATES = { type: 'array', items: { type: 'object', properties: { pr: { type: 'integer' }, state: { type: 'string' } }, required: ['pr', 'state'] } }
+const TRAIN_FLIP_SCHEMA = { type: 'object', properties: { car: { type: 'string' }, prs: PR_STATES }, required: ['prs'] }
+const TRAIN_MERGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    lock: NULLABLE(LOCK_SCHEMA), merged: { type: 'boolean' }, notes: { type: 'string' },
+    prs: PR_STATES,
+  },
+  required: ['merged'],
+}
+
+// Clears every car of this batch; `branches` are the remote branches of members whose PRs the train merged. It never throws.
+const trainSweep = async (branches = []) => {
+  sweepNo++
+  let sw = null
+  try {
+    sw = await trainCall(`Clear the landing-train cars of the batch ${BATCH} in ${SLUG} (the git repository at ${REPO}). A car is a branch whose name starts with ${CAR_PREFIX} and its pull request into ${INT}; touch no other branch and no other pull request. A step that finds nothing changes nothing. Each command in its own Bash call.
+1. Close every open car pull request: list them with ${UNSET}gh pr list --repo ${SLUG} --state open --base ${INT} --json number,headRefName --limit 200 and, for each whose headRefName starts with ${CAR_PREFIX}, run ${UNSET}gh pr close <number> --repo ${SLUG}.
+2. Remove every scratch worktree of the batch: in git -C ${REPO} worktree list --porcelain, each entry whose path ends with /land-train-${BATCH} or whose branch starts with refs/heads/${CAR_PREFIX}; remove it with git -C ${REPO} worktree remove --force <path>.
+3. Delete every local car branch: list them with git -C ${REPO} branch --list '${CAR_PREFIX}*' and run, for each, git -C ${REPO} branch -d <branch>. When git answers that a branch is not fully merged, leave it and go on (never -D).
+4. Delete every remote car branch: list them with git -C ${REPO} ls-remote --heads origin '${CAR_PREFIX}*' and run, for each, alone and exactly, one branch per call: git -C ${REPO} push origin --delete refs/heads/<branch>
+${branches.length ? `5. The pull requests of these branches are merged, as JSON: ${JSON.stringify(branches)}. For each one that git -C ${REPO} ls-remote --heads origin <branch> still lists, run alone and exactly, one branch per call: git -C ${REPO} push origin --delete refs/heads/<branch>\n` : ''}Then read the lists of steps 1 and 4 again. Return ok true only when no open car pull request and no remote car branch is left, with closed (the pull request numbers you closed), deleted (the remote branches you deleted) and detail (anything left, and why).
+${RULES_FOR(REPO, '<branch>')}`, `train-sweep-${sweepNo}`, { ...TRAIN_LIFECYCLE, schema: SWEEP_SCHEMA })
+  } catch (e) { sw = null }
+  carsMaybe = !(sw && sw.ok === true)
+  if (carsMaybe) log(`train-sweep-${sweepNo}: cars of ${BATCH} may still be open${sw && sw.detail ? ` (${sw.detail})` : ''}`)
+}
+
+// One train over `cands` (two or three waiting issues, in order). Every candidate's row is resolved here.
+const runTrain = async cands => {
+  const t = ++trainNo
+  const first = cands[0]
+  const H1 = first.ready.head
+  const carName = i => `${CAR_PREFIX}${t}-${i}`
+  const rowOf = (e, outcome, pr, extra) => ({ issue: e.n, outcome, ...(pr ? { pr } : {}), ...(extra || {}) })
+  const settled = {} // the rows the train itself gave to candidates after the first
+  const closeOuts = [] // the members after the first whose PR reads merged: their close-out is owed
+  let car = null // the merged car
+  let firstMerged = false
+
+  // A train-pr reply's row when it ends the issue, as land-pr's would; null when its PR is open at the ready head.
+  const prFail = (e, r) => {
+    const label = `train-pr-${e.n}`
+    if (!r) return rowOf(e, 'stopped', null, { stage: 'pr', detail: `${label} returned nothing` })
+    if (!r.renew) return rowOf(e, 'stopped', null, { stage: 'renew', detail: `${label} returned no renew` })
+    if (r.renew.verdict === 'not_held') return rowOf(e, 'claim-lost', null, { by: r.renew.by })
+    if (r.renew.verdict !== 'renewed') return rowOf(e, 'stopped', null, { stage: 'renew', detail: r.renew.detail || r.renew.verdict })
+    if (!complete(r, LAND_PR_SCHEMA)) return rowOf(e, 'stopped', null, { stage: 'pr', detail: `${label} returned nothing` })
+    if (r.head !== e.ready.head) return rowOf(e, 'stopped', r.pr, { stage: 'head-moved', expected: e.ready.head, head: r.head })
+    return null
+  }
+  // A member's entry of the train-ready reply: [outcome, extra] when it leaves the train, null when its claim is renewed and its PR open at the ready head.
+  const readyFail = (m, got) => {
+    if (!isObj(got) || got.issue !== m.e.n) return ['stopped', { stage: 'train-ready', detail: `train-ready-${t} returned no entry for issue #${m.e.n}` }]
+    const rn = got.renew
+    if (!isObj(rn)) return ['stopped', { stage: 'renew', detail: `train-ready-${t} returned no renew` }]
+    if (rn.verdict === 'not_held') return ['claim-lost', { by: rn.by }]
+    if (rn.verdict !== 'renewed') return ['stopped', { stage: 'renew', detail: rn.detail || rn.verdict }]
+    if (got.head !== m.e.ready.head) return ['stopped', { stage: 'head-moved', expected: m.e.ready.head, head: got.head }]
+    if (got.state !== 'OPEN') return ['stopped', { stage: 'train-ready', detail: `PR #${m.pr} reads ${got.state}` }]
+    return null
+  }
+  const green = (ck, c) => {
+    if (!ck || ck.head !== c.head || ck.state !== 'passed' || (ck.failing || []).length || (ck.pending || []).length) return false
+    // D11: a declared check missing from the passed names is never merged.
+    return DECLARED.every(d => (ck.passed || []).includes(d))
+  }
+
+  // The first landing calls this holding the lock at H1, with its own PR open there. See via.train in land() for what the answers mean.
+  const train = async pr1 => {
+    let members = [{ e: first, pr: pr1 }]
+    let mergeSent = false
+    // The same row for every member: the first's is returned to its landing, which releases the lock.
+    const endAll = (outcome, extra) => {
+      for (const m of members.slice(1)) settled[m.e.n] = rowOf(m.e, outcome, m.pr, extra)
+      return { row: { outcome, extra } }
+    }
+    // Before the merge step nothing is merged: clear the cars and let the first landing go on; the other candidates land serially after it.
+    const fallBack = async why => {
+      log(`train ${t}: ${why}; its issues land serially`)
+      if (carsMaybe) await trainSweep()
+      return null
+    }
+    try {
+      // 2. The PRs of the later members, in parallel. The first that fails ends the train before it; those after it land serially.
+      const rest = cands.slice(1)
+      const prs = await parallel(rest.map(e => () => recall(() => trainCall(`${RENEW_FIRST_OF(e.n, e.ready.branch)}
+${PR_OPEN(e.n, e.ready, e.ready.head)}
+This PR rides a landing train: take no lock and wait for no check in this step.
+${RULES_FOR(e.ready.worktree, e.ready.branch)}`, `train-pr-${e.n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(LAND_PR_SCHEMA) }), r => r.renew)))
+      for (let i = 0; i < rest.length; i++) {
+        const failed = prFail(rest[i], prs[i])
+        if (failed) { settled[rest[i].n] = failed; break }
+        members.push({ e: rest[i], pr: prs[i].pr })
+      }
+      if (members.length < 2) return await fallBack('no second pull request opened')
+
+      // 3. The cars. Only a leading run of cars the reply names for the right member, with a full sha and a PR, is used.
+      carsMaybe = true
+      const plan = members.map((m, i) => ({ issue: m.e.n, head: m.e.ready.head, car: carName(i + 1) }))
+      const bd = await trainCall(`A landing train of ${SLUG} (the git repository at ${REPO}) lands ${members.length} ready branches into ${INT} with one merge. Build its cars: car i is ${INT} plus the heads of the members 1 to i, each car on its own scratch branch with its own pull request into ${INT}. Never write to a member's own branch, and never resolve a conflict.
+The members, in order, as JSON: ${JSON.stringify(plan)}
+1. Run git -C ${REPO} fetch origin, once: it is the train's only fetch, and the first car starts at the origin/${INT} it brings. Make a fresh directory with mktemp -d and add the scratch worktree at <that directory>/land-train-${BATCH}, on the first car: git -C ${REPO} worktree add -B <the first car> <that path> origin/${INT}
+2. For each member in order: for every car after the first, start it where the previous car ends, never at origin/${INT} again: git -C <the scratch worktree> checkout -B <car>. Merge the member head with a merge commit: git -C <the scratch worktree> merge --no-ff -m 'Land train car <i>' <head>. When the merge conflicts, run git -C <the scratch worktree> merge --abort and stop there: build no further car. Otherwise push the car, alone in its own Bash call, one branch per call: git -C <the scratch worktree> push -u origin <car>. Then open its pull request, alone in its own Bash call run from the repository checkout ${REPO} (the directory this session runs in; never from another directory and never chained after cd): ${UNSET}gh pr create --repo ${SLUG} --base ${INT} --head <car> --title 'Land train ${BATCH} ${t} car <i>' --body 'Car <i> of landing train ${t} of the batch ${BATCH}: the integration branch plus the first <i> ready branches of the train. The batch merges or closes it. Do not merge it by hand.' Use exactly that title and body with only <i> filled in: no issue number, no branch name and no closing keyword. When an open pull request with that head already exists, reuse it.
+3. Run git -C <the scratch worktree> checkout --detach, so that no car branch stays checked out: the merge of a car deletes its branch.
+Return status done when every car was built, pushed and opened, else blocked; conflicted (true only when a merge conflicted); cars: one {issue, head (the full sha of the car's pushed head: git -C <the scratch worktree> rev-parse <car>), pr (the number of its pull request)} per car that was built, pushed and opened, in order, and none from the first that was not; and notes.
+${RULES_FOR('<the scratch worktree>', '<car>')}`, `train-build-${t}`, { agentType: 'implementer', model: 'sonnet', schema: { ...LAND_SYNC_SCHEMA, properties: { ...LAND_SYNC_SCHEMA.properties, cars: CARS_SCHEMA } } })
+      const cars = []
+      for (let i = 0; bd && Array.isArray(bd.cars) && i < members.length; i++) {
+        const c = bd.cars[i]
+        if (!isObj(c) || c.issue !== members[i].e.n || typeof c.head !== 'string' || !FULL_SHA.test(c.head) || !isPosInt(c.pr)) break
+        cars.push(c)
+      }
+      if (!cars.length) return await fallBack(bd ? `no car was built (${bd.notes || bd.status})` : `train-build-${t} returned nothing`)
+
+      // 4. Every car's checks, in parallel, each bounded below the lock's idle takeover and read-only (gh alone: no fetch, no git). 5. The longest green prefix.
+      const cks = await parallel(cars.map((c, i) => () => trainCall(`Wait for every check of the pull request #${c.pr} of ${SLUG} (the git repository at ${REPO}), car ${i + 1} of a landing train into ${INT}, at the car head ${c.head}, required or not. Change nothing.
+1. Read ${UNSET}gh pr view ${c.pr} --repo ${SLUG} --json headRefOid,state. head is its headRefOid. When head is not ${c.head} or the state is not OPEN, answer state failed at once with head and what you read in details.
+2. Run no git command in this step: the cars' checks are read side by side, and a fetch in the shared checkout would collide with theirs. Whether the car is behind ${INT} is not read here; the merge itself refuses a car that is. When a read of this step fails (a gh error, not a failing check), read once more; when it fails again answer state pending with head ${c.head} and the error in details, never failed.
+${CHECKS_TAIL(c.pr, `(give the watch a Bash timeout of ${TRAIN_CHECKS_WAIT_MIN} minutes at most and stop waiting ${TRAIN_CHECKS_WAIT_MIN} minutes after this step began, whatever is still pending then: the train holds the land lock, which another host takes over after ${LOCK_IDLE_MIN} idle minutes)`)}
+${RULES_FOR(REPO, carName(i + 1))}`, `train-checks-${t}-${i + 1}`, { ...TRAIN_LIFECYCLE, schema: LAND_CHECKS_SCHEMA })))
+      let g = 0
+      while (g < cars.length && green(cks[g], cars[g])) g++
+      if (g === 0) return await fallBack('the first car is not green')
+      if (g < members.length) log(`train ${t}: cars 1 to ${g} of ${members.length} are green; the other issues land serially`)
+      members = members.slice(0, g)
+
+      // 6. Renew every member's claim and confirm its PR is open at its ready head. A member that fails shrinks the train to those before it.
+      const rd = await recall(() => trainCall(`A landing train of ${SLUG} (the git repository at ${REPO}) is about to merge into ${INT}. Renew the claims of its members and read their pull requests. Change nothing else.
+The members, in order, as JSON: ${JSON.stringify(members.map(m => ({ issue: m.e.n, branch: m.e.ready.branch, pr: m.pr, head: m.e.ready.head })))}
+1. For each member in order, run alone and exactly: forge-claim renew --repo ${SLUG} --issue <issue> --holder ${HOLDER} --branch <branch> and keep its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as that member's renew. Renew every member, whatever an earlier one answered. ${FORGE_TIMEOUT}
+2. For each member, read ${UNSET}gh pr view <pr> --repo ${SLUG} --json headRefOid,state and keep headRefOid as head and state.
+Return members: one {issue, renew, head, state} per member, in order.
+${RULES_FOR(REPO, '<branch>')}`, `train-ready-${t}`, { agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: TRAIN_READY_SCHEMA }),
+      r => (Array.isArray(r.members) ? r.members : []).map(m => (isObj(m) ? m.renew : null)).find(transientError))
+      if (!rd || !Array.isArray(rd.members)) return await fallBack(`train-ready-${t} returned nothing`)
+      let keep = 0
+      for (; keep < members.length; keep++) {
+        const failed = readyFail(members[keep], rd.members[keep])
+        if (!failed) continue
+        // The first issue's row ends its landing, which releases the lock; the rest land serially.
+        if (keep === 0) return { row: { outcome: failed[0], extra: failed[1] } }
+        settled[members[keep].e.n] = rowOf(members[keep].e, failed[0], members[keep].pr, failed[1])
+        break
+      }
+      members = members.slice(0, keep)
+
+      // The one-shot pre-merge acquire at H1 must answer already_held: the lock never moved, and acquired means it was lost and retaken.
+      const last = cars[members.length - 1]
+      const memberPrs = members.map(m => m.pr)
+      const states = {} // the last state read of each member PR
+      const note = prs => { for (const p of (Array.isArray(prs) ? prs : [])) if (isObj(p) && memberPrs.includes(p.pr)) states[p.pr] = p.state }
+      let flips = 0
+      // One read-only look at the forge: the car's state and the states of `prs`. A dead or thrown read answers null and still counts.
+      const flip = async prs => {
+        flips++
+        let fl = null
+        try {
+          fl = await trainCall(`Landing train ${t} of ${SLUG} (the git repository at ${REPO}) merged, or may have merged, its car, the pull request #${last.pr}, into ${INT}. Read pull request states; change nothing.
+The pull requests to read, as JSON: ${JSON.stringify(prs)}
+1. Read ${UNSET}gh pr view ${last.pr} --repo ${SLUG} --json state and return its state as car.
+2. Read each listed pull request once with ${UNSET}gh pr view <number> --repo ${SLUG} --json state (never read or return its merge commit).
+Return car and prs: one {pr, state} per listed pull request. The forge marks a listed pull request merged by itself once the car is in ${INT}, and that can lag: do not wait and do not read twice, the program asks again. Never merge, close or edit any pull request.
+${RULES_FOR(REPO, '<branch>')}`, `train-flip-${t}-${flips}`, { agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: TRAIN_FLIP_SCHEMA })
+        } catch (e) { fl = null }
+        if (fl) note((Array.isArray(fl.prs) ? fl.prs : []).filter(x => isObj(x) && prs.includes(x.pr)))
+        return fl
+      }
+      mergeSent = true
+      let mg = null
+      let lost = null
+      try {
+        mg = await trainCall(`Landing train ${t} of ${SLUG} (the git repository at ${REPO}) merges its car, the pull request #${last.pr}, into ${INT}. The car contains the heads of the train's member pull requests, so its merge lands them.
+The member pull requests, as JSON: ${JSON.stringify(memberPrs)}
+First re-check the cross-host landing lock of the branch ${INT}: run alone and exactly: ${LAND_ACQUIRE(H1, false)}
+${LOCK_RETURN} Return it as lock.
+Only when lock's verdict is already_held, merge the car; a re-run must not merge twice.
+1. Read ${UNSET}gh pr view ${last.pr} --repo ${SLUG} --json state. When state is already MERGED, skip step 2.
+2. Otherwise run, alone and exactly, in its own Bash call from the repository checkout ${REPO} (the directory this session runs in; never from another directory and never chained after cd): ${MERGE_CMD(last.pr, last.head)}
+3. Read the car's state again: merged is true only when it reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
+4. Only when merged is true, read the state of each member pull request once with ${UNSET}gh pr view <number> --repo ${SLUG} --json state (never read or return its merge commit). The forge marks a member merged by itself once the car is in ${INT}, and that can lag: do not wait for it and do not read twice, the program reads again by itself. Never merge, close or edit a member pull request yourself.
+Return merged, notes and prs: one {pr, state} per member pull request as read (an empty list when merged is false). On any other lock verdict run nothing else and return merged false with the verdict in notes.
+${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIFECYCLE, effort: 'high', schema: TRAIN_MERGE_SCHEMA })
+      } catch (e) { lost = String((e && e.message) || e) }
+      if (!mg || !mg.lock) {
+        // The reply is lost or names no lock verdict, so the car may be merged: one read of the forge decides, before every member stops on it.
+        const fl = await flip(memberPrs)
+        if (!fl || fl.car !== 'MERGED') return endAll('stopped', { stage: 'train-merge', detail: lost || `train-merge-${t} returned ${mg ? 'no lock verdict' : 'nothing'}` })
+        log(`train ${t}: the merge reply was lost and the car reads MERGED; closing out`)
+      } else {
+        const v = mg.lock.verdict
+        if (v !== 'already_held') return endAll('land-contended', { detail: `the land lock was not held before the train merge (${v})` })
+        // An unmerged car is not retried and not landed serially at once: the reply cannot prove the car stayed unmerged, and a relaunch re-reads the forge.
+        if (mg.merged !== true) return endAll('stopped', { stage: 'train-merge', detail: mg.notes })
+        note(mg.prs)
+      }
+
+      // The car is merged, so every member's commits are in the integration branch: each keeps a cont naming its PR, as a merged landing does.
+      car = last
+      for (const m of members) markMerged(m.e.n, m.e.ready, m.pr)
+      const unmerged = () => memberPrs.filter(pr => states[pr] !== 'MERGED')
+      while (unmerged().length && flips < TRAIN_FLIP_CALLS) await flip(unmerged())
+      // A member PR the forge has not marked merged within the bound is stopped without a close-out: nothing here closes or merges it by hand.
+      for (const m of members.slice(1)) {
+        if (states[m.pr] === 'MERGED') closeOuts.push(m)
+        else settled[m.e.n] = rowOf(m.e, 'stopped', m.pr, { stage: 'train-merged-open', train: t, car_pr: car.pr })
+      }
+      if (states[pr1] !== 'MERGED') return { row: { outcome: 'stopped', extra: { stage: 'train-merged-open' } } }
+      firstMerged = true
+      return { merged: true }
+    } catch (err) {
+      const detail = String((err && err.message) || err)
+      if (mergeSent) return endAll('stopped', { stage: 'train-merge', detail })
+      return await fallBack(`a train step threw (${detail})`)
+    }
+  }
+
+  const tag = r => (car ? { ...r, train: t, car_pr: car.pr } : r)
+  // The first landing owns the lock: it takes it, the train runs inside it, and it releases it on every exit.
+  first.resolve(tag(await land(first.n, first.ready, { train })))
+  // Open cars would refuse the next landing's lock moves, so they are cleared before anything else lands.
+  if (carsMaybe) await trainSweep(SETUP.delete_branch ? [...(firstMerged ? [first] : []), ...closeOuts.map(m => m.e)].map(e => e.ready.branch) : [])
+  for (const e of cands.slice(1)) if (settled[e.n]) e.resolve(settled[e.n])
+  for (const m of closeOuts) m.e.resolve(tag(await land(m.e.n, m.e.ready, { mergedPr: m.pr })))
+  // Every other candidate lands serially, here and now: it never waits for another train.
+  for (const e of cands.slice(1)) if (!settled[e.n] && !closeOuts.some(m => m.e === e)) e.resolve(await land(e.n, e.ready))
+}
+
+const kindsOk = e => Array.isArray(e.ready.acceptance) && e.ready.acceptance.every(a => a && ACCEPT_KINDS.includes(a.kind))
+const drain = async () => {
+  if (!WAITING.length) return // an earlier drain took this entry
+  if (carsMaybe) await trainSweep()
+  const take = WAITING.splice(0, TRAIN_MAX)
+  try {
+    // The indirect merge needs the cars' commits in the integration branch's history, so only the merge strategy trains.
+    const cands = SETUP.merge_strategy === 'merge' ? take.filter(kindsOk) : []
+    const trains = cands.length >= 2
+    if (trains) await runTrain(cands)
+    for (const e of take) if (!(trains && cands.includes(e))) e.resolve(await land(e.n, e.ready))
+  } catch (err) {
+    // land() never throws and releases its own lock; a row already resolved keeps its value.
+    for (const e of take) e.resolve({ issue: e.n, outcome: 'stopped', stage: 'land', detail: String((err && err.message) || err) })
+  }
+}
+// The one way a ready issue reaches the land queue. Without train it is the serial enqueue, exactly as before #822.
+const landReady = (n, ready) => {
+  if (!TRAIN) return enqueue(INT, () => land(n, ready))
+  return new Promise(resolve => {
+    WAITING.push({ n, ready, resolve })
+    enqueue(INT, drain)
+  })
 }
 
 // A readoptable issue: an earlier run of this batch already opened its PR, on the branch this batch derives for the issue (D13).
@@ -918,7 +1253,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
         // No child: the slot goes back and the PR lands as it stands, through the same path as a ready child.
         release()
         READY[n] = { head: ro.head, branch: ro.branch, worktree: ro.worktree, acceptance: ro.acceptance, verify: [], tasks: [], cont: CONTS[n] }
-        rows[n] = await enqueue(INT, () => land(n, READY[n]))
+        rows[n] = await landReady(n, READY[n])
         return
       }
       if (ro.ok !== true && ro.reason !== 'unaccepted') {
@@ -978,7 +1313,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `recover-end-${n}`, phase: 'Deliver', ag
     }
     if (r.stage === 'ready') {
       READY[n] = r
-      rows[n] = await enqueue(INT, () => land(n, r))
+      rows[n] = await landReady(n, r)
       return
     }
     if (r.stage === 'claimed') { rows[n] = { issue: n, outcome: 'claim-lost', by: r.by }; return }
@@ -1057,6 +1392,7 @@ const relaunchArgs = () => {
   if (Object.keys(amend).length) a.amend = amend
   if (UNATTENDED) a.unattended = true
   if (REVIEW_SIZING) a.review_sizing = true
+  if (TRAIN) a.train = true
   if (CLERK_MODEL !== 'sonnet') a.clerk_model = CLERK_MODEL
   return a
 }

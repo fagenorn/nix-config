@@ -14,6 +14,7 @@
 // A reply equal to "throw" makes the stub agent throw after its call was recorded (land() catches it and releases).
 // A folded label (NESTED) given an explicit object reply with no own key for one of its nested steps gets that
 // step's default; a key present with null stays null (the nested step did not run).
+// The train steps (#822) default from their own prompt: the members a train-build, train-ready or train-merge prompt lists.
 import { readFileSync } from 'node:fs'
 
 const program = readFileSync(process.argv[2], 'utf8')
@@ -24,6 +25,9 @@ const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'],
 const AC = [{ id: 'AC1', text: 'works', kind: 'code' }]
 const promptHead = p => (p.match(/Accepted head: ([0-9a-f]+)/) || [])[1] || SHA
 const num = label => Number((label.match(/-(\d+)(?:-|$)/) || [])[1])
+const CAR = i => String(i).repeat(40)
+// The JSON value that ends the prompt line starting with `lead`.
+const jsonAfter = (p, lead) => JSON.parse(p.slice(p.indexOf(lead) + lead.length).split('\n')[0])
 // Ordered: the first matching pattern wins. A default gets the label and the prompt.
 const DEFAULTS = [
   [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null })],
@@ -45,9 +49,17 @@ const DEFAULTS = [
   [/^land-merge-/, () => ({ merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } })],
   [/^land-unlock-/, () => ({ verdict: 'released' })],
   [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, decision_ended: true, branch_deleted: true, notes: 'ok', release: { verdict: 'released' } })],
+  // #822 train landing. Car i of a train defaults to head CAR(i) and PR 90 + i; a member PR defaults to OPEN before the merge and MERGED after it, and a train-flip read to a merged car.
+  [/^train-sweep-/, () => ({ ok: true, closed: [], deleted: [] })],
+  [/^train-pr-/, (l, p) => ({ pr: 40 + num(l), head: promptHead(p), renew: { verdict: 'renewed' } })],
+  [/^train-build-/, (l, p) => ({ status: 'done', conflicted: false, worktree: '/tmp/t/land-train', notes: 'ok', cars: jsonAfter(p, 'The members, in order, as JSON: ').map((m, i) => ({ issue: m.issue, head: CAR(i + 1), pr: 91 + i })) })],
+  [/^train-checks-/, (l, p) => ({ state: 'passed', head: (p.match(/at the car head ([0-9a-f]{40})/) || [])[1], required: ['ci'], passed: ['ci'] })],
+  [/^train-ready-/, (l, p) => ({ members: jsonAfter(p, 'The members, in order, as JSON: ').map(m => ({ issue: m.issue, renew: { verdict: 'renewed' }, head: m.head, state: 'OPEN' })) })],
+  [/^train-flip-/, (l, p) => ({ car: 'MERGED', prs: jsonAfter(p, 'The pull requests to read, as JSON: ').map(pr => ({ pr, state: 'MERGED' })) })],
+  [/^train-merge-/, (l, p) => ({ lock: { verdict: 'already_held', lock_sha: SHA }, merged: true, notes: 'merged', prs: jsonAfter(p, 'The member pull requests, as JSON: ').map(pr => ({ pr, state: 'MERGED' })) })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-lock-/, ['renew', 'lock']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock', 'checks']], [/^close-out-/, ['release']]]
+const NESTED = [[/^train-pr-/, ['renew']], [/^train-merge-/, ['lock']], [/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-lock-/, ['renew', 'lock']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock', 'checks']], [/^close-out-/, ['release']]]
 
 const calls = []
 let factsPending = 0 // facts agents started and not yet answered
@@ -64,7 +76,7 @@ async function agent(prompt, opts = {}) {
     factsPending--
   }
   // A landing agent takes a macrotask, so two landings that were not serialised would interleave their calls.
-  if (/^(renew|land|close-out)-/.test(label)) await new Promise(r => setImmediate(r))
+  if (/^(renew|land|close-out|train)-/.test(label)) await new Promise(r => setImmediate(r))
   const n = seen[label] = (seen[label] || 0) + 1
   const replies = scenario.replies || {}
   if (Object.prototype.hasOwnProperty.call(replies, label)) {
