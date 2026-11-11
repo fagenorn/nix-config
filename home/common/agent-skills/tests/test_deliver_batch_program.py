@@ -1577,6 +1577,20 @@ class LandOrderTest(unittest.TestCase):
                 self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n",
                               prompt(calls, "land-unlock-1"))
 
+    def test_a_failed_or_lost_status_read_keeps_the_moved_lock_a_release_target(self):
+        """The read-back proves nothing when it fails: the move may have landed, so cleanup releases both shas."""
+        stale = {"ok": True, "head": B, "lock": {"verdict": "lost_to", "lock_sha": SHA, "by": HOLDER}}
+        again = (f"When it prints not_held with lock_sha {B}, run alone and exactly: "
+                 f"forge-claim land release --repo owner/repo --branch dev --sha {B}")
+        for status in (None, {"verdict": "error", "detail": "gh failed"}):
+            with self.subTest(status=status):
+                result, calls, _ = run(patch=BEHIND, replies={
+                    "land-sync-1-1": self.MERGED, "land-record-1-1": stale, "land-status-1-1": status})
+                self.assertEqual(row(result, 1)["outcome"], "land-contended")
+                text = prompt(calls, "land-unlock-1")
+                self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n", text)
+                self.assertIn(again, text)
+
     def test_a_stop_in_a_behind_resync_releases_the_lock(self):
         result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": {"status": "blocked", "conflicted": False, "notes": "dirty"}})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land-sync"))

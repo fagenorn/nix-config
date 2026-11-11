@@ -560,18 +560,21 @@ Return those fields as checks; otherwise return checks null.
 ${RULES}`, label, { ...lifecycleClerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
     let lv = rec && rec.lock ? rec.lock.verdict : null
     let reread = false
+    let unread = false
     // #816: a refusal naming this batch at the lock it already held is a move whose read-back lagged, not contention: read the lock once and go on when it is at expected.
     if (rec && rec.ok === true && rec.head === expected && (lv === 'lost_to' || lv === 'held_by') && rec.lock.by === HOLDER && rec.lock.lock_sha === lockSha) {
       const st = await call(`The lock move to ${expected} for PR #${pr} of issue #${n} of ${SLUG} answered ${lv} naming this batch at ${lockSha}, which may be a lagging read. Read the cross-host landing lock of the branch ${INT} once: run alone and exactly: forge-claim land status --repo ${SLUG} --branch ${INT} --sha ${expected}
 Return its verdict (free, held_by, stale, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
       if (st && st.verdict === 'held_by' && st.lock_sha === expected) { lv = 'moved'; reread = true }
+      // A failed or lost read proves nothing about where the lock is: the move may have landed, so expected stays a release target.
+      else if (!st || st.verdict === 'error') unread = true
     }
     if (HOLDING(lv)) {
       lockHeld = true
       lockSha = expected
       lockMaybe = null
-    } else if (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to' || (rec && rec.ok === false && !rec.lock)) lockMaybe = null
+    } else if (!unread && (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to' || (rec && rec.ok === false && !rec.lock))) lockMaybe = null
     if (!rec || rec.ok !== true || rec.head !== expected) return out('stopped', { stage: 'land-record', detail: rec ? rec.detail : `${label} returned nothing`, head: rec ? rec.head : undefined })
     if (!HOLDING(lv)) return out('land-contended', { detail: `the lock did not move to ${expected}` })
     // The record step polled no checks when the lock was only confirmed by the status read: the loop polls them itself.
