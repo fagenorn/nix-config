@@ -1672,30 +1672,56 @@ class PlanRulesTest(unittest.TestCase):
                 self.assertIn("plan-review", labels(calls))
                 self.assertIn("D: pick one", prompt(calls, "plan"))
 
-    def test_a_codex_finding_re_reported_without_source_gets_no_rules_only_revise(self):
-        # The rules re-review keeps neither source nor finding identity, so it may re-report a Codex finding under any rule id
-        # or none; a Codex-triggered plan never gets a Claude-only second revise.
-        plan = with_criteria(HUMAN)
-        def report(**kw):
-            return {"verdict": "findings", "findings": [dict({"severity": "important", "summary": "AC1 is not observable"}, **kw)]}
-        for name, codex, rereview in (("ruled", report(rule="R2"), report(rule="R2")),
-                                      ("ruleless", report(), report(rule="R2")),
-                                      ("other-rule", report(rule="R2"), report(rule="R6"))):
+    CODEX_CASES = (("ruled", {"rule": "R2"}, {"rule": "R2"}), ("ruleless", {}, {"rule": "R2"}), ("other-rule", {"rule": "R2"}, {"rule": "R6"}))
+
+    @staticmethod
+    def report(**kw):
+        return {"verdict": "findings", "findings": [dict({"severity": "important", "summary": "AC1 is not observable"}, **kw)]}
+
+    def codex_replies(self, codex, rereviews):
+        # The revise changes the acceptance, so a ruleless trigger still gets its rules re-review (#819).
+        return {"plan": with_criteria(HUMAN), "plan-revise": with_criteria(HUMAN, EVIDENCE), "plan-rules-revise": self.REVISED,
+                "plan-codex": {"available": True, **self.report(**codex)}, "plan-rules-review": rereviews}
+
+    def test_a_codex_triggered_revise_gets_the_rules_only_revise_and_proceeds_when_clean(self):
+        # #823: the rules re-review keeps neither source nor finding identity, so its rule findings on a Codex-triggered plan
+        # are taken as its own: they get the one rules-only revise, and a clean re-review of that proceeds.
+        for name, codex, rereview in self.CODEX_CASES:
             with self.subTest(codex=name):
-                # The revise changes the acceptance, so a ruleless trigger still gets its rules re-review (#819).
-                replies = {"plan": plan, "plan-revise": with_criteria(HUMAN, EVIDENCE), "plan-codex": {"available": True, **codex},
-                           "plan-rules-review": [rereview, {"verdict": "pass", "findings": []}]}
-                result, calls = run(replies=replies)
+                replies = self.codex_replies(codex, [self.report(**rereview), {"verdict": "pass", "findings": []}])
+                result, calls = run(replies=replies, patch={"close-out": {"issue_state": "OPEN"}})
+                names = labels(calls)
+                self.assertNotEqual(result["stage"], "plan-review")
+                self.assertEqual((names.count("plan-revise"), names.count("plan-rules-revise"), names.count("plan-rules-review")), (1, 1, 2))
+                self.assertIn(f'"rule":"{rereview["rule"]}"', prompt(calls, "plan-rules-revise"))
+                self.assertIn("impl-1", names)
+
+    def test_a_kept_plan_whose_triggers_included_codex_resumes_with_one_rules_revise(self):
+        # #823: the kept findings record the Codex trigger, and the resume still runs the rules-only revise, not a replan.
+        for name, codex, rereview in self.CODEX_CASES:
+            with self.subTest(codex=name):
+                left = self.report(**rereview)
+                first, calls = run(replies=self.codex_replies(codex, left))
+                self.assertEqual(first["stage"], "plan-review")
+                self.assertEqual(labels(calls).count("plan-rules-revise"), 1)
+                kept = first["cont"]["plan_findings"]
+                self.assertEqual(kept["rounds"], 1)
+                self.assertEqual([f.get("source") for f in kept["findings"]], ["codex"])
+                self.assertEqual(first["cont"]["plan"], self.REVISED)
+                result, calls = run(args=dict(ARGS, cont=first["cont"]), patch={"close-out": {"issue_state": "OPEN"}})
+                names = labels(calls)
+                for label in ("plan", "plan-revise", "plan-review", "plan-codex"):
+                    self.assertNotIn(label, names)
+                self.assertEqual((names.count("plan-rules-revise"), names.count("plan-rules-review")), (1, 1))
+                self.assertIn("impl-1", names)
+                self.assertNotIn("plan_findings", result.get("cont") or {})
+                # The rounds cap holds: a second failed rules revise drops the plan, and the next resume plans again.
+                result, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"plan-rules-review": left})
                 self.assertEqual(result["stage"], "plan-review")
-                self.assertNotIn("plan-rules-revise", labels(calls))
-                self.assertEqual(labels(calls).count("plan-rules-review"), 1)
-                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
+                self.assertEqual(labels(calls).count("plan-rules-revise"), 1)
+                self.assertIsNone(result["cont"]["plan"])
+                self.assertNotIn("plan_findings", result["cont"])
                 self.assertNotIn("impl-1", labels(calls))
-                # The resume does not run a rules-only revise either: the plan is planned again and reviewed in full.
-                again, calls = run(args=dict(ARGS, cont=result["cont"]))
-                self.assertNotIn("plan-rules-revise", labels(calls))
-                self.assertEqual(labels(calls).count("plan"), 1)
-                self.assertIn("plan-review", labels(calls))
 
     def test_second_rules_failure_on_resume_drops_the_plan(self):
         first, _ = self.keep_stop()
@@ -1709,19 +1735,29 @@ class PlanRulesTest(unittest.TestCase):
         _, calls = run(args=dict(ARGS, cont=result["cont"]))
         self.assertIn("plan", labels(calls))
 
-    def test_codex_finding_left_gets_no_second_revise(self):
+    def test_a_remaining_codex_or_ruleless_finding_stops_with_no_rules_revise(self):
+        # #823 keeps this stop: whatever triggered the revise, a finding left with source codex or with no rule id is not
+        # one the rules-only revise may settle.
         plan = with_criteria(HUMAN)
         echoed = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "s", "source": "codex"}]}
         bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC3 breaks a rule"}]}
-        for left in (echoed, bare):
-            with self.subTest(left=left["findings"][0]["summary"]):
-                result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
-                                             "plan-rules-review": left})
-                self.assertEqual(result["stage"], "plan-review")
-                self.assertNotIn("plan-rules-revise", labels(calls))
-                self.assertEqual(result["cont"]["plan"], plan)
-                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
-                self.assertNotIn("impl-1", labels(calls))
+        for trigger in ("claude", "codex"):
+            for left in (echoed, bare):
+                with self.subTest(trigger=trigger, left=left["findings"][0]["summary"]):
+                    replies = {"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING, "plan-rules-review": left}
+                    if trigger == "codex":
+                        replies["plan-codex"] = {"available": True, **self.RULE_FINDING}
+                    result, calls = run(replies=replies)
+                    self.assertEqual(result["stage"], "plan-review")
+                    self.assertNotIn("plan-rules-revise", labels(calls))
+                    self.assertEqual(result["cont"]["plan"], plan)
+                    self.assertEqual(result["cont"]["plan_findings"]["rounds"], 0)
+                    self.assertNotIn("impl-1", labels(calls))
+                    # The resume runs no rules-only revise either: the plan is planned again and reviewed in full.
+                    again, calls = run(args=dict(ARGS, cont=result["cont"]))
+                    self.assertNotIn("plan-rules-revise", labels(calls))
+                    self.assertEqual(labels(calls).count("plan"), 1)
+                    self.assertIn("plan-review", labels(calls))
 
     def test_rules_rereview_finding_without_a_rule_still_blocks(self):
         plan = with_criteria(HUMAN)
