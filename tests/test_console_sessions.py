@@ -159,6 +159,30 @@ class SessionModelTest(unittest.TestCase):
         self.assertEqual(result["s1"].state, IDLE)
         self.assertEqual(result["s1"].hook_ms, 3000)
 
+    def test_a_hook_is_stamped_with_the_time_it_was_received_not_the_time_it_was_logged(self):
+        kind, payload = hook_entry({**COMMON, **case("finished turn")["payload"]}, repo_of,
+                                   received_ms=1500)
+        self.assertEqual(payload["received_ms"], 1500)
+        result = session_states([Event(1, iso(4000), kind, None, payload)])
+        self.assertEqual(result[SID].hook_ms, 1500)
+        self.assertEqual(result[SID].last_at, iso(4000))
+
+    def test_an_unrelated_notification_keeps_the_time_of_the_state_it_keeps(self):
+        hook = {"session_id": "s1", "cwd": "/srv/p00", "repo": "/srv/p00"}
+        events = [
+            Event(1, iso(1000), HOOK, None, {**hook, "event": "Stop"}),
+            Event(2, iso(2000), HOOK, None, {**hook, "event": "Notification",
+                                             "notification_type": "auth_success"}),
+        ]
+        result = session_states(events)["s1"]
+        self.assertEqual((result.state, result.hook_ms, result.last_seq), ("idle", 1000, 2))
+        events.append(Event(3, iso(3000), HOOK, None, {**hook, "event": "Notification",
+                                                       "notification_type": "idle_prompt"}))
+        self.assertEqual(session_states(events)["s1"].hook_ms, 3000)
+        unseen = Event(1, iso(5000), HOOK, None, {**hook, "event": "Notification",
+                                                  "notification_type": "auth_success"})
+        self.assertEqual(session_states([unseen])["s1"].hook_ms, 5000)
+
 
 def git(*args):
     subprocess.run(["git", *args], check=True, capture_output=True)
@@ -201,6 +225,8 @@ class RegistryTest(unittest.TestCase):
                               "status": "waiting", "waitingFor": "permission prompt",
                               "procStart": "37198", "pidDomain": "linux:m:pid:[1]"},
                 "a/14.json": [1],
+                "a/20.json": {"pid": 20, "sessionId": "s-nul", "cwd": "/tmp/a\u0000b",
+                              "status": "busy"},
                 "a/15.json": {"pid": 15, "cwd": "/x"},
                 "a/16.json": {"pid": "16", "sessionId": "s-strpid", "cwd": "/x"},
                 "a/17.json": {"pid": 17, "sessionId": "s-dead", "cwd": "/x",
@@ -223,6 +249,7 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(result["s-busy"], Observation(
             "s-busy", "/srv/p00", 10, "busy", None, "p00-aa", 1794418246662))
         self.assertIsNone(result["s-shell"].updated_ms)
+        self.assertNotIn("s-nul", result)
         self.assertIn((12, "37198", "linux:m:pid:[1]"), calls)
         self.assertIn((10, None, None), calls)
         table = [

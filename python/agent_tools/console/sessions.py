@@ -11,8 +11,11 @@ Event kinds (stored in the event log, payloads are JSON objects):
   one more string field for its event: `source` (SessionStart), `error`
   (StopFailure), `tool_name` (PermissionRequest), `notification_type`
   (Notification), `reason` (SessionEnd). `repo` is the main checkout of `cwd`,
-  or null when `cwd` is in no git repository. `hook_entry` builds it from a
-  hook's input document and drops every other field.
+  or null when `cwd` is in no git repository, and `received_ms` when known:
+  the epoch milliseconds at which the service received the hook, taken before
+  it answered, which is the time the fold gives the hook (`hook_ms`), the
+  log's own time standing in for a payload without one. `hook_entry` builds it
+  from a hook's input document and drops every other field.
 - `session.seen` (`SEEN`): `{"session_id", "cwd", "repo", "state"}` plus `name`
   when known; the registry poll writes it when its reading differs from the
   folded state.
@@ -31,8 +34,9 @@ StopFailure gives limit when its `error` is `rate_limit`, else idle.
 PermissionRequest gives waiting_answer for the `AskUserQuestion` tool, else
 waiting_permission. A Notification of type `permission_prompt` keeps a waiting
 state and otherwise gives waiting_permission; `idle_prompt` gives idle; any
-other type keeps the state (idle for a session not yet seen). SessionEnd gives
-ended.
+other type keeps the state (idle for a session not yet seen) and the time of
+that state, so it never makes a newer registry reading look older than the
+hook. SessionEnd gives ended.
 
 Registry mapping (`registry_state`): `busy` is working, `idle` is idle,
 `waiting` is waiting_permission when `waitingFor` is `permission prompt` and
@@ -43,6 +47,9 @@ Leaving: a session leaves on SessionEnd (a tombstone, so an older registry
 reading cannot bring it back) and, tombstone or not, when two consecutive polls
 do not find it in the registry. `poll_changes` returns the absent set to pass
 to the next poll.
+
+A registry record whose `cwd` holds a NUL character is not a session and is
+skipped like any other malformed record.
 
 A reading whose `cwd` or `name` differs from the folded state is written as well,
 with the repository resolved again when the directory moved.
@@ -165,8 +172,8 @@ def main_checkout(cwd: str) -> str | None:
     return str(common.parent if common.name == ".git" else common)
 
 
-def hook_entry(document: object,
-               repo_of: Callable[[str], str | None]) -> tuple[str, dict] | None:
+def hook_entry(document: object, repo_of: Callable[[str], str | None],
+               received_ms: int | None = None) -> tuple[str, dict] | None:
     if not isinstance(document, dict):
         return None
     event = document.get("hook_event_name")
@@ -175,6 +182,8 @@ def hook_entry(document: object,
     if event not in HOOK_EVENTS or not _text(session_id) or not _text(cwd):
         return None
     payload = {"event": event, "session_id": session_id, "cwd": cwd, "repo": repo_of(cwd)}
+    if _integer(received_ms):
+        payload["received_ms"] = received_ms
     field = _KEPT_FIELD.get(event)
     if field is not None and isinstance(document.get(field), str):
         payload[field] = document[field]
@@ -241,7 +250,8 @@ def _observation(document: object,
     if not isinstance(document, dict):
         return None
     session_id, cwd, pid = document.get("sessionId"), document.get("cwd"), document.get("pid")
-    if not _text(session_id) or not _text(cwd) or not _integer(pid) or pid <= 0:
+    if not _text(session_id) or not _text(cwd) or "\0" in cwd \
+            or not _integer(pid) or pid <= 0:
         return None
     start = document.get("procStart")
     if _integer(start):
@@ -308,6 +318,11 @@ def _repo_member(payload: Mapping) -> bool:
     return "repo" in payload and (payload["repo"] is None or isinstance(payload["repo"], str))
 
 
+def _keeps_state(event: str, payload: Mapping) -> bool:
+    return event == "Notification" and \
+        payload.get("notification_type") not in ("permission_prompt", "idle_prompt")
+
+
 def session_states(
     events: Iterable[Event],
     states: Mapping[str, SessionState] | None = None,
@@ -326,9 +341,13 @@ def session_states(
             if kind not in HOOK_EVENTS or not isinstance(cwd, str) or not _repo_member(payload):
                 continue
             previous = known.state if known and known.state != ENDED else None
+            received = payload.get("received_ms")
+            hook_ms = received if _integer(received) else at_ms(event.at)
+            if previous in STATES and _keeps_state(kind, payload):
+                hook_ms = known.hook_ms
             result[session_id] = SessionState(
                 session_id, payload["repo"], cwd, hook_transition(kind, payload, previous),
-                known.name if known else None, event.seq, event.at, at_ms(event.at))
+                known.name if known else None, event.seq, event.at, hook_ms)
         elif event.kind == SEEN:
             cwd, state = payload.get("cwd"), payload.get("state")
             if not isinstance(cwd, str) or not _repo_member(payload) or state not in STATES:

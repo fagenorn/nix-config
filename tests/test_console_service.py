@@ -532,6 +532,48 @@ class HookTest(Case):
         self.assertEqual(svc.poll_sessions(), [])
         self.assertEqual(listed(svc), {SID: "waiting_permission"})
 
+    def test_a_reading_made_after_the_answer_is_newer_than_the_hook_it_followed(self):
+        svc = self.start(self.ITEMS, clock=lambda: time.time() - 5)
+        received = int((time.time() - 5) * 1000)
+        gate = threading.Event()
+        real = svc.log.append
+
+        def append(entries):
+            gate.wait(5)
+            return real(entries)
+
+        with mock.patch.object(svc.log, "append", side_effect=append):
+            status, _, _ = support.post_hook(svc.address, support.hook_body("finished turn"))
+            self.assertEqual(status, 204)
+            support.write_session(
+                self.sessions, pid=os.getpid(), session_id=SID, cwd="/srv/p00",
+                status="busy", updated_at=received + 2000)
+            gate.set()
+            wait_rows(self.store, "session.hook", 1)
+        self.assertEqual(listed(svc), {SID: "idle"})
+        svc.poll_sessions()
+        self.assertEqual(listed(svc), {SID: "working"})
+
+    def test_an_unrelated_notification_does_not_hide_a_newer_reading(self):
+        support.write_session(
+            self.sessions, pid=os.getpid(), session_id=SID, cwd="/srv/p00", status="idle",
+            updated_at=int(time.time() * 1000) - 10000)
+        svc = self.start(self.ITEMS, session_poll_seconds=3600)
+        support.write_session(self.sessions, pid=os.getpid(), session_id=SID, cwd="/srv/p00",
+                              status="busy", updated_at=int(time.time() * 1000) - 5000)
+        svc.ingest_hook(support.hook_body("other notification"))
+        svc.poll_sessions()
+        self.assertEqual(listed(svc), {SID: "working"})
+
+    def test_a_registry_record_with_a_nul_in_its_directory_does_not_stop_the_service(self):
+        support.write_session(self.sessions, pid=os.getpid(), session_id="bad",
+                              cwd="/srv/p00\u0000x", status="busy")
+        support.write_session(self.sessions, pid=os.getppid(), session_id="ok",
+                              cwd="/srv/p00", status="idle")
+        svc = self.start(self.ITEMS)
+        svc.poll_sessions()
+        self.assertEqual(listed(svc), {"ok": "idle"})
+
     def test_a_poll_reading_from_before_a_session_end_does_not_bring_it_back(self):
         svc = self.stale_busy_session()
         self.assertTrue(self.interleave(svc, "session end"))

@@ -23,7 +23,9 @@ checks run in this order, each refusal closing the connection: a loopback
 non-negative integer (else 411 `length required`) of at most `MAX_HOOK_BYTES`
 (else 413 `too large`, the body unread). Then the body is read, the `204` is
 written and flushed, and only then is the hook ingested (`ingest_hook`): the
-session that sent it never waits for the log. A body that is not UTF-8 JSON
+session that sent it never waits for the log. The hook's time is taken from the
+service clock before the `204`, not when the log row is written, so a session
+that updates its registry record after the answer is newer than the hook. A body that is not UTF-8 JSON
 is one stderr line `console: hook_unreadable <message>`; any other failure is
 `console: hook_failed <Type>: <message>`; the handler never raises. An
 ignored payload (an unknown event, a missing member) appends nothing. The
@@ -248,6 +250,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self.close_connection = True
         try:
             body = self.rfile.read(int(length))
+            received = console.received_ms()
             self.send_response(204)
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -257,7 +260,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except OSError:
             return
         try:
-            console.ingest_hook(body)
+            console.ingest_hook(body, received)
         except ValueError as error:
             print(f"console: hook_unreadable {error}", file=sys.stderr)
         except Exception as error:
@@ -417,11 +420,17 @@ class ConsoleService:
         self._fold(appended)
         self._publish()
 
-    def ingest_hook(self, body: bytes) -> list[Event]:
+    def received_ms(self) -> int:
+        """The time, in epoch milliseconds, a hook is received; taken before it is answered."""
+        return int(self._clock() * 1000)
+
+    def ingest_hook(self, body: bytes, received_ms: int | None = None) -> list[Event]:
         """Append the session event a hook's input document describes; ValueError if unreadable."""
+        if received_ms is None:
+            received_ms = self.received_ms()
         document = json.loads(body.decode("utf-8"))
         with self._ingest:
-            entry = sessions.hook_entry(document, self._repo_of)
+            entry = sessions.hook_entry(document, self._repo_of, received_ms)
             if entry is None:
                 return []
             kind, payload = entry
