@@ -44,7 +44,13 @@ Wire format, one object:
      "inbox": {"open": [<inbox item>, ...], "answered": [<inbox item>, ...]},
      "project_count": <int>,
      "entries": [<project entry> | <group entry>, ...],
-     "unmanaged": [<unmanaged entry>, ...]}
+     "unmanaged": [<unmanaged entry>, ...],
+     "digest": <digest> | null}
+
+`digest` is what changed since the owner last looked (see `digest.py`):
+`{"since": <last look> | null, "first_visit": <bool>, "recent": [<moment>, ...],
+"earlier": [<moment>, ...], "omitted": <int>}` with a moment `{"at", "kind", "sentence"}`; it is
+null when `derive_view` is given none.
 
 The headline is "1 thing needs you" or "<n> things need you" for open items, else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
@@ -383,6 +389,7 @@ def derive_view(
     health: Mapping[str, ReadState] | None = None,
     sessions: Iterable[SessionState] = (),
     capacity: Mapping | None = None,
+    digest: Mapping | None = None,
     deliveries: Mapping[tuple[str, str], DeliveryState] | None = None,
     now_ms: int | None = None,
 ) -> dict:
@@ -456,6 +463,7 @@ def derive_view(
             {"type": "unmanaged", "root": root, "label": UNMANAGED_LABEL,
              "outside_sprints": _line(unmanaged[root], runs, now_ms)}
             for root in sorted(unmanaged)],
+        "digest": dict(digest) if digest is not None else None,
     }
 
 

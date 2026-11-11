@@ -4,14 +4,16 @@
 the desk page, `GET /api/state` and the `GET /api/stream` update stream
 (`agent_tools.console.service` holds the routes and the stream's frame). The event log is
 `~/.agents/state/console/events.sqlite3`; the fleet registry it follows, and never writes, is
-`~/.agents/state/fleet/registry.json`. Every two minutes it also reads the owner-action items of
+`~/.agents/state/fleet/registry.json`. The page's write token is created once in
+`~/.agents/state/console/page-token` (mode 0600) and kept across restarts. Every two minutes it also reads the owner-action items of
 each active project from the tracker into the log (`agent_tools.console.service` holds the rules).
 
 Once serving it prints exactly one stdout line, `console: serving http://127.0.0.1:<port>/`.
 SIGTERM or SIGINT closes the service and exits 0. A port that cannot be bound is stderr
 `console: cannot listen on 127.0.0.1:<port>: <error>` and exit 1; an event log that cannot be
 used (a schema version this build does not read, a database error) is stderr
-`console: event log unusable: <error>` and exit 1. A bad argument is exit 2.
+`console: event log unusable: <error>` and exit 1; a page token that cannot be read or is malformed is
+stderr `console: page token unusable: <error>` and exit 1. A bad argument is exit 2.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import threading
 
 from agent_tools.console import inbox, service
 from agent_tools.console.event_log import EventLogError
+from agent_tools.console.write_guard import TokenError
 
 
 def port_number(text: str) -> int:
@@ -49,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
         console = service.ConsoleService(
             service.default_store(), service.default_registry(), port=args.port,
             tracker=inbox.read_items)
+    except TokenError as error:
+        print(f"console: page token unusable: {error}", file=sys.stderr)
+        return 1
     except (EventLogError, sqlite3.Error) as error:
         print(f"console: event log unusable: {error}", file=sys.stderr)
         return 1

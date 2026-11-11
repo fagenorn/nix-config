@@ -155,6 +155,7 @@ class WatchedTwoBranchTest(unittest.TestCase):
         world.merge_observation_ready()
         forge, watch = rs.StatefulForge(world), rs.ScriptedWatch(("satisfied", "deployed"))
         world.merge_ready()
+        world.land_lock_ready()
         project = rs.project(self, profiles={"watched": support.watched_merge_profile()},
                              integration="dev")
         driver = release_driver.Driver(project, clock=rs.Clock(), registry={
@@ -184,6 +185,7 @@ class TwoBranchMatrixTest(unittest.TestCase):
         self.clock = rs.Clock()
         self.forge, self.deploy = rs.StatefulForge(self.world), rs.FixtureDeploy()
         self.world.merge_ready()
+        self.world.land_lock_ready()
 
     def driver(self, forge=None, crash=None):
         forge = forge or self.forge

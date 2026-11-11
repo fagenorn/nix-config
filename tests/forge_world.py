@@ -60,6 +60,8 @@ when it exists), the repository node id and the `updateRefs` compare-and-swap, w
 only from the observed oid. `cas_lies=n` makes the next n applied swaps answer failure, the
 spike's observed lie. Schedule entries are the bare op names `get`, `create` and `cas`, with
 the comment store's semantics. `refs()` reads the store, `set_ref(ref, sha)` moves a ref.
+`prefix=...` leaves the read of a ref outside that prefix to the registered responses, which is
+how `land_lock_ready` serves the land lock beside a release's own branch and tag reads (issue 875).
 
 Transport faults (issue 740): `outage(calls=None, stderr=NETWORK_DOWN)` makes the next `calls`
 `gh` invocations (every one when `None`, none when `0`) exit 1 with `stderr` after being logged,
@@ -88,6 +90,7 @@ SYNC = FIXTURE["sync"]["canonical"]
 SYNC_ROWS = {row["id"]: row for row in FIXTURE["sync"]["rows"]}
 SYNC_URL = f"https://github.com/{CANONICAL['slug']}/pull/{SYNC['pr']}"
 TOOLS = ("gh", "git", "claude-bash-lifecycle-guard")
+LAND_LOCK = "refs/agent-locks/land/{branch}"
 CLASS_BRANCHES = {"elevenyellow/nodocom": "dev"}
 FLOOR_PROTECTION = {
     "required_status_checks": {
@@ -123,7 +126,8 @@ if tool == "gh" and (state / "refs.json").exists():
         slug = store["slug"]
         one = "repos/" + slug + "/git/ref/"
         if len(argv) == 2 and argv[0] == "api" and argv[1].startswith(one):
-            return "get", "refs/" + argv[1][len(one):]
+            name = "refs/" + argv[1][len(one):]
+            return ("get", name) if name.startswith(store.get("prefix", "")) else None
         if (len(argv) == 8 and argv[:4] == ["api", "-X", "POST", "repos/" + slug + "/git/refs"]
                 and argv[4] == "-f" and argv[5].startswith("ref=")
                 and argv[6] == "-f" and argv[7].startswith("sha=")):
@@ -522,10 +526,11 @@ class ForgeWorld:
         return {key: store[key] for key in ("state", "state_reason", "labels", "created")}
 
     def ref_store(self, slug: str, refs: dict[str, str] | None = None, *, node_id: str = "R_kgDOtest",
-                  schedule=(), cas_lies: int = 0, lose_reply=()) -> None:
-        """Serve one repository's git refs from shared state (see REF_HANDLER)."""
+                  schedule=(), cas_lies: int = 0, lose_reply=(), prefix: str = "") -> None:
+        """Serve one repository's git refs from shared state (see REF_HANDLER); with `prefix`,
+        a read of a ref outside it is left to the registered responses."""
         (self.state / "refs.json").write_text(json.dumps({
-            "slug": slug, "refs": dict(refs or {}), "node_id": node_id,
+            "slug": slug, "refs": dict(refs or {}), "node_id": node_id, "prefix": prefix,
             "schedule": list(schedule), "cursor": 0, "cas_lies": cas_lies,
             "lose_reply": list(lose_reply)}), encoding="utf-8")
 
@@ -769,6 +774,21 @@ class ForgeWorld:
                           {"object": {"sha": base_tip, "type": "commit"}})
         self.respond_json("gh", ["api", f"repos/{slug}/compare/{base_tip}...{commit}"],
                           {"status": compare})
+
+    def land_lock_ready(self, *, lock=CANONICAL["commit"], head=CANONICAL["commit"],
+                        slug=CANONICAL["slug"], integration="dev",
+                        default=CANONICAL["branch"]) -> None:
+        """Serve the land lock of `integration` (issue 875): the lock ref at `lock` (None is
+        free) and one open release pull request from `integration` at `head` into `default`."""
+        self.ref_store(slug, {LAND_LOCK.format(branch=integration): lock} if lock else {},
+                       prefix=LAND_LOCK.format(branch=""))
+        repo = {"full_name": slug}
+        self.respond_json("gh", ["api", f"repos/{slug}/commits/{head}/pulls?per_page=100"], [{
+            "number": CANONICAL["pr"], "state": "open", "merged_at": None,
+            "base": {"ref": default, "repo": repo},
+            "head": {"ref": integration, "sha": head, "repo": repo}}])
+        self.respond("gh", ["api", f"repos/{slug}", "--jq", ".default_branch"],
+                     stdout=default + "\n")
 
 
 def sync_pull(**overrides) -> dict:

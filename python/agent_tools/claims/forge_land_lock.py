@@ -40,7 +40,7 @@ Every completed ref observation, a lost CAS's re-read and an observed absence in
 the watch when the oid differs. A holder runs a one-shot `acquire` with its sha right before the
 merge and merges only when its verdict is `already_held` or `moved`, never on exit status alone:
 `acquired` also exits 0 and means the lock was lost and taken again, so the base may have moved and
-the holder resyncs first.
+the holder resyncs first. A release holder merges only on `already_held` (ADR-claims-009).
 
 D5, a lock moves to the caller's new head (verdict `moved`: the lock sat at an earlier head of the
 same pull request) only when every open pull request containing it is the caller's; a branch

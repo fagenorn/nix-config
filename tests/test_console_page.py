@@ -44,6 +44,11 @@ const document = {
   querySelector: () => null,
   querySelectorAll: () => [],
 };
+const window = {addEventListener() {}};
+document.addEventListener = () => {};
+document.hasFocus = () => false;
+document.visibilityState = "visible";
+const fetch = () => Promise.resolve({});
 const kept = {};
 class EventSource {
   addEventListener(name, fn) { kept[name] = fn; }
@@ -108,6 +113,11 @@ class PageTest(unittest.TestCase):
         cls.data = PAGE.read_bytes()
         cls.text = cls.data.decode("utf-8")
 
+    def test_the_page_carries_one_token_slot(self) -> None:
+        meta = '<meta name="console-token" id="console-token" content="__CONSOLE_TOKEN__">'
+        self.assertEqual(self.text.count(meta), 1)
+        self.assertEqual(self.text.count("__CONSOLE_TOKEN__"), 1)
+
     def test_the_page_names_no_other_origin(self) -> None:
         patterns = (
             rb"[A-Za-z][A-Za-z0-9+.-]*://",
@@ -127,7 +137,7 @@ class PageTest(unittest.TestCase):
         literals = re.findall(
             r"\b(?:fetch|EventSource)\(\s*([\"'])([^\"']*)\1", self.text
         )
-        self.assertEqual({p for _, p in literals}, {"/api/stream"})
+        self.assertEqual({p for _, p in literals}, {"/api/stream", "/api/looked"})
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
         )
@@ -135,7 +145,10 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertIsNone(re.search(r"\bfetch\(", self.text))
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 1)
+        self.assertIsNotNone(
+            re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
+        )
         self.assertEqual(self.text.count("render(JSON.parse("), 1)
 
     def test_peach_marks_only_needs_you(self) -> None:
@@ -589,3 +602,116 @@ class CapacityPageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+TOKEN = "__CONSOLE_TOKEN__"
+LOOK = {"url": "/api/looked", "method": "POST", "headers": {"X-Console-Token": TOKEN},
+        "keepalive": True}
+
+
+class PageFocusTest(unittest.TestCase):
+    def test_a_hold_longer_than_five_seconds_posts_one_look_when_it_ends(self) -> None:
+        (snap,) = render([
+            {"start": {"focused": False, "clock": 0}}, {"clock": 1000}, {"focus": True},
+            {"clock": 7000}, {"blur": True}, {"snapshot": True},
+        ])
+        self.assertEqual(snap["posts"], [LOOK])
+
+    def test_a_glance_posts_nothing_and_a_later_hold_posts_once(self) -> None:
+        (snap,) = render([
+            {"start": {"focused": False, "clock": 0}},
+            {"clock": 1000}, {"focus": True}, {"clock": 6000}, {"blur": True},
+            {"clock": 7000}, {"focus": True}, {"clock": 12001}, {"blur": True},
+            {"blur": True}, {"snapshot": True},
+        ])
+        self.assertEqual(snap["posts"], [LOOK])
+
+    def test_a_page_loaded_with_focus_counts_from_load(self) -> None:
+        (snap,) = render([
+            {"start": {"focused": True, "clock": 0}}, {"clock": 6000}, {"pagehide": True},
+            {"snapshot": True},
+        ])
+        self.assertEqual(snap["posts"], [LOOK])
+
+    def test_hiding_the_page_ends_a_hold(self) -> None:
+        hidden, blurred = render([
+            {"start": {"focused": False, "clock": 0}}, {"focus": True}, {"clock": 6000},
+            {"hide": True}, {"snapshot": True}, {"blur": True}, {"snapshot": True},
+        ])
+        self.assertEqual(hidden["posts"], [LOOK])
+        self.assertEqual(blurred["posts"], [LOOK])
+
+
+def moment(at: str, sentence: str) -> dict:
+    return {"at": at, "kind": "session.hook", "sentence": sentence}
+
+
+def with_digest(digest: dict | None) -> dict:
+    frame = view([])
+    if digest is not None:
+        frame["digest"] = digest
+    return frame
+
+
+class PageDigestTest(unittest.TestCase):
+    def test_the_digest_lists_newest_first_with_earlier_folded(self) -> None:
+        frame = with_digest({
+            "since": "2026-11-11T08:00:00+00:00", "first_visit": False,
+            "recent": [moment("2026-11-11T09:30:00+00:00", "Newest."),
+                       moment("2026-11-11T09:00:00+00:00", "Second.")],
+            "earlier": [moment("2026-11-11T08:30:00+00:00", "Third.")],
+            "omitted": 2,
+        })
+        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        digest = snap["digest"]
+        head = next(n for n in nodes(digest) if n["cls"] == "digest-head")
+        self.assertTrue(head["text"].startswith("Since you last looked, "))
+        (lines,) = [n for n in nodes(digest) if n["tag"] == "ul" and n["cls"] == "digest"]
+        shown = [text(n) for n in lines["children"]]
+        self.assertEqual(len(shown), 2)
+        self.assertIn("Newest.", shown[0])
+        self.assertIn("Second.", shown[1])
+        (fold,) = [n for n in nodes(digest) if n["tag"] == "details"]
+        self.assertEqual(fold["key"], "earlier")
+        self.assertFalse(fold["open"])
+        summary = next(n for n in nodes(fold) if n["tag"] == "summary")
+        self.assertIn("Earlier", text(summary))
+        self.assertIn("3", text(summary))
+        self.assertIn("Third.", text(fold))
+        self.assertIn("and 2 more", text(fold))
+
+    def test_a_first_visit_says_the_last_eight_hours(self) -> None:
+        frame = with_digest({
+            "since": None, "first_visit": True,
+            "recent": [moment("2026-11-11T09:30:00+00:00", "Newest.")],
+            "earlier": [], "omitted": 0,
+        })
+        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        head = next(n for n in nodes(snap["digest"]) if n["cls"] == "digest-head")
+        self.assertEqual(text(head).strip(), "In the last eight hours")
+
+    def test_an_empty_digest_says_nothing_changed(self) -> None:
+        frame = with_digest({
+            "since": "2026-11-11T08:00:00+00:00", "first_visit": False,
+            "recent": [], "earlier": [], "omitted": 0,
+        })
+        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        self.assertIn("Nothing changed.", text(snap["digest"]))
+
+    def test_a_view_without_a_digest_leaves_the_section_empty(self) -> None:
+        for frame in (with_digest(None), {**with_digest(None), "digest": None}):
+            with self.subTest(null="digest" in frame):
+                (snap,) = render([{"frame": frame}, {"snapshot": True}])
+                self.assertEqual(snap["digest"]["children"], [])
+
+    def test_an_open_earlier_fold_survives_a_new_frame(self) -> None:
+        frame = with_digest({
+            "since": "2026-11-11T08:00:00+00:00", "first_visit": False,
+            "recent": [moment("2026-11-11T09:30:00+00:00", "Newest.")],
+            "earlier": [moment("2026-11-11T08:30:00+00:00", "Third.")], "omitted": 0,
+        })
+        (snap,) = render([
+            {"frame": frame}, {"open": "earlier"}, {"frame": frame}, {"snapshot": True},
+        ])
+        (fold,) = [n for n in nodes(snap["digest"]) if n["tag"] == "details"]
+        self.assertTrue(fold["open"])

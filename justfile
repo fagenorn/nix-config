@@ -171,6 +171,7 @@ agent-workflow-tests *args:
     tests/test_railway_deploy_adapter.py \
     tests/test_release_merge.py \
     tests/test_release_sync.py \
+    tests/test_release_lock.py \
     tests/test_guard_policy.py \
     tests/test_git_pre_push_hook.py \
     tests/test_release_adapter_core.py \
@@ -203,6 +204,8 @@ agent-workflow-tests *args:
     tests/test_console_hook_cost.py \
     tests/test_console_inbox.py \
     tests/test_console_tracker.py \
+    tests/test_console_digest.py \
+    tests/test_console_writes.py \
     tests/test_console_deliveries.py \
     tests/test_console_units.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \

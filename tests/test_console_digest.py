@@ -1,0 +1,102 @@
+"""The console digest: moments in plain sentences and the window they are shown in (#861).
+
+Run: just agent-workflow-tests
+"""
+import json
+import unittest
+from datetime import datetime
+from pathlib import Path
+
+from agent_tools.console.digest import (
+    EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN, Moment, digest, keep, last_looked, moments)
+from agent_tools.console.event_log import Event
+from agent_tools.console.sessions import SessionState
+
+CASES = json.loads(
+    (Path(__file__).parent / "fixtures" / "console" / "digest-events.json").read_text())["cases"]
+NOW = datetime.fromisoformat("2026-11-11T12:00:00.000000+00:00")
+LOOK = "2026-11-11T10:00:00.000000+00:00"
+
+
+def at(minute, micro=0, hour=10):
+    return f"2026-11-11T{hour:02d}:{minute:02d}:00.{micro:06d}+00:00"
+
+
+def sentences(moment_dicts):
+    return [m["sentence"] for m in moment_dicts]
+
+
+class DigestTableTest(unittest.TestCase):
+    def test_the_fixture_table(self):
+        for case in CASES:
+            with self.subTest(case["name"]):
+                events = [Event(*row) for row in case["events"]]
+                now = datetime.fromisoformat(case["now"])
+                result = digest(moments(events, {}, {}), case["last_looked"], now)
+                self.assertEqual(sentences(result["recent"]), case["recent"])
+                self.assertEqual(sentences(result["earlier"]), case["earlier"])
+                self.assertEqual(result["omitted"], case["omitted"])
+                for moment in result["recent"] + result["earlier"]:
+                    self.assertEqual(set(moment), {"at", "kind", "sentence"})
+
+
+class DigestTest(unittest.TestCase):
+    def test_a_first_visit_covers_eight_hours(self):
+        made = [Moment(1, "2026-11-11T03:59:59.999999+00:00", "k", "a"),
+                Moment(2, "2026-11-11T04:00:00.000000+00:00", "k", "b"),
+                Moment(3, "2026-11-11T04:00:00.000001+00:00", "k", "c"),
+                Moment(4, "2026-11-11T11:59:00.000000+00:00", "k", "d")]
+        result = digest(made, None, NOW)
+        self.assertIsNone(result["since"])
+        self.assertIs(result["first_visit"], True)
+        self.assertEqual(sentences(result["recent"]), ["d", "c"])
+        self.assertEqual(FIRST_VISIT.total_seconds(), 8 * 3600)
+
+    def test_a_returning_visit_says_since_when(self):
+        made = [Moment(1, LOOK, "k", "at the look"), Moment(2, at(0, 1), "k", "after")]
+        result = digest(made, LOOK, NOW)
+        self.assertEqual(result["since"], LOOK)
+        self.assertIs(result["first_visit"], False)
+        self.assertEqual(sentences(result["recent"]), ["after"])
+
+    def test_the_digest_is_capped_with_the_rest_earlier(self):
+        made = [Moment(n, at(n % 60, hour=10 + n // 60), "k", f"m{n}") for n in range(1, 61)]
+        result = digest(made, LOOK, NOW)
+        self.assertEqual((SHOWN, EARLIER_MAX), (5, 50))
+        self.assertEqual(sentences(result["recent"]), [f"m{n}" for n in range(60, 55, -1)])
+        self.assertEqual(sentences(result["earlier"]), [f"m{n}" for n in range(55, 5, -1)])
+        self.assertEqual(result["omitted"], 5)
+
+    def test_equal_times_put_the_higher_sequence_first(self):
+        made = [Moment(2, at(5), "k", "two"), Moment(9, at(5), "k", "nine"),
+                Moment(4, at(6), "k", "later"), Moment(3, at(5), "k", "three")]
+        result = digest(made, LOOK, NOW)
+        self.assertEqual(sentences(result["recent"]), ["later", "nine", "three", "two"])
+
+    def test_the_last_look_is_the_newest_look(self):
+        t1, t2 = at(1), at(2)
+        events = [Event(1, t1, LOOKED, None, {}), Event(2, at(1, 5), "project.registered", "p", {}),
+                  Event(3, t2, LOOKED, None, {})]
+        self.assertEqual(last_looked(events), t2)
+        self.assertEqual(last_looked([], "x"), "x")
+        self.assertIsNone(last_looked([Event(1, t1, "project.registered", "p", {})], None))
+
+    def test_moments_read_the_state_before_each_event(self):
+        before = SessionState("s1", "/srv/p00", "/srv/p00", "limit", "deliver", 1, at(0), None)
+        sessions = {"s1": before}
+        event = Event(2, at(1), "session.seen", "owner/p00",
+                      {"session_id": "s1", "cwd": "/srv/p00", "repo": "/srv/p00", "state": "working"})
+        found = moments([event], sessions, {})
+        self.assertEqual([(m.kind, m.sentence) for m in found],
+                         [("resumed", "deliver resumed work in owner/p00.")])
+        self.assertEqual(sessions, {"s1": before})
+
+    def test_keep_drops_moments_at_or_before_the_start(self):
+        made = [Moment(1, at(0), "k", "before"), Moment(2, at(1), "k", "at"),
+                Moment(3, at(1, 1), "k", "after")]
+        self.assertEqual([m.sentence for m in keep(made, at(1))], ["after"])
+        self.assertEqual([m.sentence for m in keep(made, "2026-11-11T12:01:00.000000+02:00")], ["after"])
+
+
+if __name__ == "__main__":
+    unittest.main()

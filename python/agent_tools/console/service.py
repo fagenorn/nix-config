@@ -13,12 +13,14 @@ Routes (every response carries `Cache-Control: no-store` and
     GET /api/stream 200 text/event-stream; charset=utf-8, the update stream (below)
     POST /api/hooks 204, no body, a Claude Code hook's input (below)
     POST /api/readings 204, no body, the cache proxy's limit reading (below)
+    POST /api/looked 204, no body, the page records that the owner looked (below)
     anything else   404
-    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks` and `/api/readings`)
+    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings` and `/api/looked`)
 
-Only `POST /api/hooks` and `POST /api/readings` write: the first appends session observations,
-the second the capacity kinds `capacity.reading` and `capacity.stop` (see `capacity.py`).
-The hook route's checks run in this order, each refusal closing the connection: a loopback
+Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
+`POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
+`capacity.reading` and `capacity.stop` (see `capacity.py`). The hook route's checks run in this
+order, each refusal closing the connection: a loopback
 `Host` (else 403 as above); no `Origin` header (a browser page sends one: 403
 `text/plain` `origin refused`); a `Content-Type` whose media type is
 `application/json` (else 415 `json only`); a `Content-Length` that is a
@@ -31,7 +33,18 @@ that updates its registry record after the answer is newer than the hook. A body
 is one stderr line `console: hook_unreadable <message>`; any other failure is
 `console: hook_failed <Type>: <message>`; the handler never raises. An
 ignored payload (an unknown event, a missing member) appends nothing. The
-route carries no token: it records observations and answers nothing.
+route carries no token: it records observations and answers nothing (ADR-console-004).
+
+A page write (`PAGE_WRITES`, today `POST /api/looked`; ADR-console-008) is made by the desk page
+alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
+check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
+403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
+install's token (else 403 `token refused`; see `write_guard.py`), each refusal closing the
+connection and appending nothing. A page write carries no body: a `Content-Length` other than
+absent or `0`, or any `Transfer-Encoding`, is 400 `no body`. `POST /api/looked` then appends one
+`page.looked` event (`record_look`) and answers an empty `204`. The token is created once in
+`page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
+the slot in the page's `console-token` meta tag.
 
 `POST /api/readings` runs the same checks in the same order (loopback `Host`, no `Origin`,
 `application/json`, a length, at most `MAX_READING_BYTES`), answers `204` and flushes, and only
@@ -52,7 +65,7 @@ A state request reads only `view_bytes`, which is memory: no log access, no
 registry read, no derivation, no file, no filesystem metadata call, no
 subprocess. The view is rebuilt only by `refresh()`, which reads the fleet
 registry, appends the difference to the event log and publishes the new view;
-the page itself is read once, at import.
+the page itself is read once, at import and given its token at construction.
 
 The stream carries `Connection: close` and no `Content-Length`. Its first frame is
 the current view (the page takes its view from the stream alone, never from a
@@ -116,6 +129,23 @@ nothing. An exception escaping a poll is one stderr line
 `console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
 thread starts and nothing is read.
 
+Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
+opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
+`retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
+re-folds the sessions and the inbox records and re-derives the last look and the moments from the
+log under the ingest lock, with the construction code, and publishes, so the running digest equals
+the one a restart would publish, and a later change is judged against what the log still holds. A failing pass
+is one stderr line `console: retention_failed <Type>: <message>` and the loop goes on.
+
+Digest: the view carries `digest.digest(moments, last look, now)` (see `digest.py`). The last look
+is the newest `page.looked` event of the log, the same for every client and across restarts; the
+moments are folded from each appended batch against the state before it, and only those after the
+current window start are kept. The window of a first visit moves with the clock, so
+`DIGEST_THREAD`, started by `start()`, calls `expire_digest()` every `digest_seconds`
+(`DIGEST_SECONDS`): it trims the moments to the window and publishes, which changes the view only
+when a moment left. A failure is one stderr line `console: digest_expiry_failed <Type>: <message>`
+and the loop goes on.
+
 Deliveries (#858): after each `poll_sessions()` the same thread calls `poll_deliveries()`, which
 reads the run journals (see `deliveries.py`) of every folded session that is not ended and has a
 repository, under the `projects` directory beside each of `session_dirs()`, outside the ingest
@@ -135,14 +165,15 @@ unreadable, again only after it read successfully in between) and `console: jour
 <session_id> <reason>` (a session's journal listing turned unreadable, likewise).
 
 Construction order: bind the server (an `OSError` propagates and nothing else is
-opened); open the event log; fold the projects, the sessions, the inbox, the read health and the
-deliveries from it; publish the view; sample the registry's signature; `refresh()`;
-`poll_sessions()`; `poll_deliveries()`. The
+opened); load or create the page token (a `write_guard.TokenError` propagates: the service does
+not start); open the event log; run one retention pass; fold the projects, the sessions, the inbox,
+the read health and the deliveries, then the last look and the digest moments, from it; publish
+the view; sample the registry's signature; `refresh()`; `poll_sessions()`; `poll_deliveries()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
 re-raised. `start()` serves on a daemon thread named `console-http`; `close()`
-sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll and the
-tracker thread and tears the rest down; it is idempotent.
+sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the
+tracker, retention and digest threads and tears the rest down; it is idempotent.
 """
 
 import http.server
@@ -153,10 +184,11 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.claims import owner_actions
-from agent_tools.console import capacity, deliveries, inbox, sessions
+from agent_tools.console import capacity, deliveries, digest, inbox, sessions, write_guard
 from agent_tools.console.event_log import Event, EventLog, utc_now
 from agent_tools.console.view import (
     ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records, project_for,
@@ -175,6 +207,8 @@ POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
 HOOK_PATH = "/api/hooks"
+LOOKED_PATH = "/api/looked"
+PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH})
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
@@ -183,6 +217,10 @@ SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
 TRACKER_THREAD = "console-tracker-poll"
+RETENTION_SECONDS = 86400.0
+RETENTION_THREAD = "console-retention"
+DIGEST_SECONDS = 60.0
+DIGEST_THREAD = "console-digest"
 
 
 def default_store() -> Path:
@@ -300,6 +338,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if not self._loopback():
             return
         route = self.path.split("?", 1)[0]
+        if route in PAGE_WRITES:
+            return self._page_write(route)
         if route not in POST_LIMITS:
             return self._refuse_method()
         length = self._checked_length(POST_LIMITS[route])
@@ -329,18 +369,44 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: {name}_failed {type(error).__name__}: {error}", file=sys.stderr)
 
+    def _page_write(self, route: str):
+        console = self.server.console
+        refusal = write_guard.refusal(
+            self.headers["Host"], self.headers.get_all("Origin") or [],
+            self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
+        if refusal is not None:
+            return self._refuse(*refusal)
+        if (self.headers.get("Content-Length", "0") != "0"
+                or self.headers.get("Transfer-Encoding") is not None):
+            return self._refuse(400, "no body")
+        self.close_connection = True
+        try:
+            console.record_look()
+        except Exception as error:
+            print(f"console: look_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "look failed")
+        try:
+            self.send_response(204)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+        except OSError:
+            return
+
     def do_GET(self):
         if not self._loopback():
             return
         route = self.path.split("?", 1)[0]
         if route == "/":
-            self._send(200, "text/html; charset=utf-8", PAGE,
+            self._send(200, "text/html; charset=utf-8", self.server.console.page_bytes,
                        ("Content-Security-Policy", CSP))
         elif route == "/api/state":
             self._send(200, "application/json", self.server.console.view_bytes)
         elif route == "/api/stream":
             self._stream()
-        elif route in POST_LIMITS:
+        elif route in POST_LIMITS or route in PAGE_WRITES:
             self._refuse_method()
         else:
             self._send(404, "text/plain", b"not found\n")
@@ -372,7 +438,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if not self._loopback():
             return
         self.close_connection = True
-        allow = "POST" if self.path.split("?", 1)[0] in POST_LIMITS else "GET"
+        route = self.path.split("?", 1)[0]
+        allow = "POST" if route in POST_LIMITS or route in PAGE_WRITES else "GET"
         self._send(405, "text/plain", b"method not allowed\n",
                    ("Allow", allow), ("Connection", "close"))
 
@@ -391,7 +458,11 @@ class ConsoleService:
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
                  branch_pattern_of: Callable[[str], str | None] = deliveries.configured_branch_pattern,
                  activity: Callable[[str], float | None] = inbox.local_activity,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 retention_seconds: float = RETENTION_SECONDS,
+                 digest_seconds: float = DIGEST_SECONDS,
+                 log_clock: Callable[[], str] = utc_now,
+                 token_path: Path | None = None):
         self.registry = Path(registry)
         self._poll_seconds = poll_seconds
         self._session_dirs = session_dirs
@@ -414,6 +485,12 @@ class ConsoleService:
         self._patterns: dict[str, str] = {}
         self._activity = activity
         self._clock = clock
+        self._retention_seconds = retention_seconds
+        self._digest_seconds = digest_seconds
+        self._retention_thread: threading.Thread | None = None
+        self._digest_thread: threading.Thread | None = None
+        self._looked: str | None = None
+        self._moments: list[digest.Moment] = []
         self._tracker_thread: threading.Thread | None = None
         self._closing = False
         self._stop = threading.Event()
@@ -428,13 +505,19 @@ class ConsoleService:
         self._closed = False
         self._server = ConsoleServer(port, self)
         try:
-            self.log = EventLog(store)
+            self._token = write_guard.load_token(
+                Path(store).with_name(write_guard.TOKEN_FILE) if token_path is None
+                else token_path)
+            self._page = PAGE.replace(write_guard.TOKEN_SLOT, self._token.encode("ascii"))
+            self.log = EventLog(store, clock=log_clock)
+            self.log.retain()
             events = self.log.events()
             self._states = project_states(events)
             self._sessions = sessions.session_states(events)
             self._inbox = inbox_records(events)
             self._health = read_states(events)
             self._capacity = capacity.capacity_state(events)
+            self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
             self._publish()
             self._signature = signature(self.registry)
@@ -461,6 +544,15 @@ class ConsoleService:
         return self._profiles
 
     @property
+    def page_bytes(self) -> bytes:
+        """The page, with this install's token in its slot."""
+        return self._page
+
+    @property
+    def page_token(self) -> str:
+        return self._token
+
+    @property
     def version(self) -> int:
         return self._version
 
@@ -476,11 +568,21 @@ class ConsoleService:
                 return None
             return self._version, self._view
 
+    def _now(self) -> datetime:
+        return datetime.fromtimestamp(self._clock(), timezone.utc)
+
+    def _derive_digest(self, events: list[Event]) -> None:
+        """Derive the last look and the moments from the whole log (construction and retention)."""
+        self._looked = digest.last_looked(events)
+        self._moments = digest.keep(digest.moments(events, {}, {}),
+                                    digest.window_start(self._looked, self._now()))
+
     def _publish(self) -> None:
         view = encode_view(derive_view(
             self._states.values(), self._inbox, self._health,
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000),
+            digest=digest.digest(self._moments, self._looked, self._now()),
             capacity=capacity.capacity_view(self._profiles, self._capacity, self._clock())))
         with self._published:
             if view != self._view:
@@ -536,6 +638,13 @@ class ConsoleService:
                 print("console: reading_unattributed", file=sys.stderr)
                 return []
             appended = self.log.append(capacity.report_entries(report, profile))
+            self._apply(appended)
+            return appended
+
+    def record_look(self) -> list[Event]:
+        """Append one `page.looked` event: the owner looked at the page."""
+        with self._ingest:
+            appended = self.log.append([(digest.LOOKED, None, {})])
             self._apply(appended)
             return appended
 
@@ -657,12 +766,56 @@ class ConsoleService:
                       file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
+        new = digest.moments(appended, self._sessions, self._inbox)
+        self._looked = digest.last_looked(appended, self._looked)
         self._states = project_states(appended, self._states)
         self._sessions = sessions.session_states(appended, self._sessions)
         self._inbox = inbox_records(appended, self._inbox)
         self._health = read_states(appended, self._health)
         self._capacity = capacity.capacity_state(appended, self._capacity)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
+        self._moments = digest.keep([*self._moments, *new],
+                                    digest.window_start(self._looked, self._now()))
+
+    def retain(self) -> int:
+        """One retention pass; when it removed rows, re-fold the digest's baselines and publish.
+
+        The folded sessions and inbox records are rebuilt from the retained log, as a
+        restart would, so a later change is judged against what the log still holds.
+        """
+        with self._ingest:
+            removed = self.log.retain()
+            if removed:
+                events = self.log.events()
+                self._sessions = sessions.session_states(events)
+                self._inbox = inbox_records(events)
+                self._capacity = capacity.capacity_state(events)
+                self._derive_digest(events)
+                self._publish()
+            return removed
+
+    def expire_digest(self) -> None:
+        """Trim the moments to the current window and publish."""
+        with self._ingest:
+            self._moments = digest.keep(
+                self._moments, digest.window_start(self._looked, self._now()))
+            self._publish()
+
+    def _retain_loop(self) -> None:
+        while not self._stop.wait(self._retention_seconds):
+            try:
+                self.retain()
+            except Exception as error:
+                print(f"console: retention_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+
+    def _expire_loop(self) -> None:
+        while not self._stop.wait(self._digest_seconds):
+            try:
+                self.expire_digest()
+            except Exception as error:
+                print(f"console: digest_expiry_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
 
     def poll_tracker(self) -> None:
         """One refresh of the inbox of every active project; see the module docstring."""
@@ -744,6 +897,12 @@ class ConsoleService:
             self._tracker_thread = threading.Thread(
                 target=self._track, name=TRACKER_THREAD, daemon=True)
             self._tracker_thread.start()
+        self._retention_thread = threading.Thread(
+            target=self._retain_loop, name=RETENTION_THREAD, daemon=True)
+        self._retention_thread.start()
+        self._digest_thread = threading.Thread(
+            target=self._expire_loop, name=DIGEST_THREAD, daemon=True)
+        self._digest_thread.start()
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="console-http", daemon=True)
         self._thread.start()
@@ -762,6 +921,10 @@ class ConsoleService:
             self._session_poller.join()
         if self._tracker_thread is not None:
             self._tracker_thread.join()
+        if self._retention_thread is not None:
+            self._retention_thread.join()
+        if self._digest_thread is not None:
+            self._digest_thread.join()
         if self._thread is not None:
             self._server.shutdown()
         self._server.server_close()

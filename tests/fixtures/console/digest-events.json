@@ -1,0 +1,552 @@
+{
+ "cases": [
+  {
+   "name": "every kind in plain words",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T09:00:00.000000+00:00",
+     "project.registered",
+     "owner/p00",
+     {
+      "root": "/srv/p00"
+     }
+    ],
+    [
+     2,
+     "2026-11-11T09:01:00.000000+00:00",
+     "inbox.seen",
+     "owner/p00",
+     {
+      "key": "k/B",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 8,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Merge it?",
+      "questions": [],
+      "items": [],
+      "answered": false,
+      "held_work": 1
+     }
+    ],
+    [
+     3,
+     "2026-11-11T09:02:00.000000+00:00",
+     "session.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "cwd": "/srv/p00",
+      "repo": "/srv/p00",
+      "state": "working",
+      "name": "deliver"
+     }
+    ],
+    [
+     4,
+     "2026-11-11T09:03:00.000000+00:00",
+     "session.seen",
+     "owner/p00",
+     {
+      "session_id": "bbbbbbbb-2222",
+      "cwd": "/srv/p00",
+      "repo": "/srv/p00",
+      "state": "working"
+     }
+    ],
+    [
+     5,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     6,
+     "2026-11-11T10:01:00.000000+00:00",
+     "inbox.seen",
+     "owner/p00",
+     {
+      "key": "k/A",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 7,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Which database?",
+      "questions": [],
+      "items": [],
+      "answered": false,
+      "held_work": 1
+     }
+    ],
+    [
+     7,
+     "2026-11-11T10:02:00.000000+00:00",
+     "inbox.changed",
+     "owner/p00",
+     {
+      "key": "k/B",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 8,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Merge it?",
+      "questions": [],
+      "items": [],
+      "answered": true,
+      "held_work": 1
+     }
+    ],
+    [
+     8,
+     "2026-11-11T10:03:00.000000+00:00",
+     "session.hook",
+     "owner/p00",
+     {
+      "event": "StopFailure",
+      "session_id": "aaaaaaaa-1111",
+      "cwd": "/srv/p00",
+      "repo": "/srv/p00",
+      "error": "rate_limit"
+     }
+    ],
+    [
+     9,
+     "2026-11-11T10:04:00.000000+00:00",
+     "session.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "cwd": "/srv/p00",
+      "repo": "/srv/p00",
+      "state": "working",
+      "name": "deliver"
+     }
+    ],
+    [
+     10,
+     "2026-11-11T10:05:00.000000+00:00",
+     "session.hook",
+     "owner/p00",
+     {
+      "event": "SessionEnd",
+      "session_id": "aaaaaaaa-1111",
+      "cwd": "/srv/p00",
+      "repo": "/srv/p00",
+      "reason": "other"
+     }
+    ],
+    [
+     11,
+     "2026-11-11T10:06:00.000000+00:00",
+     "session.gone",
+     "owner/p00",
+     {
+      "session_id": "bbbbbbbb-2222"
+     }
+    ]
+   ],
+   "recent": [
+    "bbbbbbbb ended in owner/p00.",
+    "deliver ended in owner/p00.",
+    "deliver resumed work in owner/p00.",
+    "deliver stopped on a usage limit in owner/p00.",
+    "owner/p00 #8 was answered."
+   ],
+   "earlier": [
+    "owner/p00 #7 needs you: Which database?"
+   ],
+   "omitted": 0
+  },
+  {
+   "name": "the look and what came before say nothing",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T09:00:00.000000+00:00",
+     "inbox.seen",
+     "owner/p00",
+     {
+      "key": "k/7",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 7,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Before?",
+      "questions": [],
+      "items": [],
+      "answered": false,
+      "held_work": 1
+     }
+    ],
+    [
+     2,
+     "2026-11-11T10:00:00.000000+00:00",
+     "inbox.seen",
+     "owner/p00",
+     {
+      "key": "k/8",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 8,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "At the look?",
+      "questions": [],
+      "items": [],
+      "answered": false,
+      "held_work": 1
+     }
+    ],
+    [
+     3,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ]
+   ],
+   "recent": [],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "a session outside any repository says nothing",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     2,
+     "2026-11-11T10:01:00.000000+00:00",
+     "session.hook",
+     "owner/p00",
+     {
+      "event": "StopFailure",
+      "session_id": "aaaaaaaa-1111",
+      "cwd": "/srv/p00",
+      "repo": null,
+      "error": "rate_limit"
+     }
+    ]
+   ],
+   "recent": [],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "an ended session that then goes says it once",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T09:00:00.000000+00:00",
+     "session.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "cwd": "/srv/p00",
+      "repo": "/srv/p00",
+      "state": "working",
+      "name": "deliver"
+     }
+    ],
+    [
+     2,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     3,
+     "2026-11-11T10:01:00.000000+00:00",
+     "session.hook",
+     "owner/p00",
+     {
+      "event": "SessionEnd",
+      "session_id": "aaaaaaaa-1111",
+      "cwd": "/srv/p00",
+      "repo": "/srv/p00",
+      "reason": "other"
+     }
+    ],
+    [
+     4,
+     "2026-11-11T10:02:00.000000+00:00",
+     "session.gone",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111"
+     }
+    ]
+   ],
+   "recent": [
+    "deliver ended in owner/p00."
+   ],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "an item first seen answered says answered",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     2,
+     "2026-11-11T10:01:00.000000+00:00",
+     "inbox.seen",
+     "owner/p00",
+     {
+      "key": "k/5",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 5,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Done?",
+      "questions": [],
+      "items": [],
+      "answered": true,
+      "held_work": 1
+     }
+    ]
+   ],
+   "recent": [
+    "owner/p00 #5 was answered."
+   ],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "a change to an unknown or answered item says nothing",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     2,
+     "2026-11-11T10:01:00.000000+00:00",
+     "inbox.changed",
+     "owner/p00",
+     {
+      "key": "k/u",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 5,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Unknown?",
+      "questions": [],
+      "items": [],
+      "answered": true,
+      "held_work": 1
+     }
+    ],
+    [
+     3,
+     "2026-11-11T10:02:00.000000+00:00",
+     "inbox.seen",
+     "owner/p00",
+     {
+      "key": "k/v",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 6,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Already?",
+      "questions": [],
+      "items": [],
+      "answered": true,
+      "held_work": 1
+     }
+    ],
+    [
+     4,
+     "2026-11-11T10:03:00.000000+00:00",
+     "inbox.changed",
+     "owner/p00",
+     {
+      "key": "k/v",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 6,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Already?",
+      "questions": [],
+      "items": [],
+      "answered": true,
+      "held_work": 1
+     }
+    ]
+   ],
+   "recent": [
+    "owner/p00 #6 was answered."
+   ],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "malformed payloads say nothing",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     2,
+     "2026-11-11T10:01:00.000000+00:00",
+     "inbox.seen",
+     "owner/p00",
+     {
+      "key": "k/5",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Q?",
+      "questions": [],
+      "items": [],
+      "answered": false,
+      "held_work": 1
+     }
+    ],
+    [
+     3,
+     "2026-11-11T10:02:00.000000+00:00",
+     "inbox.seen",
+     "owner/p00",
+     {
+      "key": "k/x",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": true,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": "Q?",
+      "questions": [],
+      "items": [],
+      "answered": false,
+      "held_work": 1
+     }
+    ],
+    [
+     4,
+     "2026-11-11T10:03:00.000000+00:00",
+     "inbox.seen",
+     "owner/p00",
+     {
+      "key": "k/y",
+      "project_id": "owner/p00",
+      "repo": "octo/p00",
+      "issue": 5,
+      "comment_id": 1,
+      "url": "https://example.test/1",
+      "reason": "question",
+      "question": 3,
+      "questions": [],
+      "items": [],
+      "answered": false,
+      "held_work": 1
+     }
+    ]
+   ],
+   "recent": [],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "delivery rows say nothing yet",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     2,
+     "2026-11-11T10:01:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 9,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     3,
+     "2026-11-11T10:02:00.000000+00:00",
+     "delivery.gone",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1"
+     }
+    ]
+   ],
+   "recent": [],
+   "earlier": [],
+   "omitted": 0
+  }
+ ]
+}
