@@ -4080,6 +4080,39 @@ class DeadAgentTest(unittest.TestCase):
         self.assertNotIn("dead_agents", result)
 
 
+class FixCommitScopeTest(unittest.TestCase):
+    """A fix agent stages by path only what its fix changed: one committed a lock file a tool had generated."""
+
+    SCOPE = ("Before committing, read git status in the worktree you commit in and stage by path only the files the fix "
+             "itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); a lock file, "
+             "a generated file or an untracked file the fix did not need is left unstaged and named in notes.")
+    CRITICAL = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "bug"}]}
+    FAIL = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
+
+    def test_every_fix_prompt_carries_the_commit_scope(self):
+        scenarios = (
+            (("fix-1-1",), {"replies": {"review-1": self.CRITICAL}}),
+            (("fix-wave", "fix-wave-2"), {"replies": {"final-1": FixWaveTest.FIRST, "fix-wave-review": FixWaveTest.narrowing()}}),
+            (("direct-fix",), {"args": DIRECT, "replies": {"direct-review": BAD}}),
+            (("verify-fix-1",), {"replies": {"verify": self.FAIL}}),
+            (("fix-ci",), {"replies": {"checks-2": {"state": "passed", "head": SHA, "required": ["ci-tests"]}},
+                           "patch": {"pr": {"checks": RED}, "fix-ci": ShipFixWaveTest.RERAN}}),
+            (("fix-sync-1",), {"replies": {"sync-review-1": FINDING},
+                               "patch": {"pr": {"checks": {"state": "behind", "head": SHA}},
+                                         "sync-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
+                                         "fix-sync-1": {"start_head": MERGE, "commit": FIX}}}),
+        )
+        for wanted, scenario in scenarios:
+            _, calls = run(**scenario)
+            for label in wanted:
+                with self.subTest(label=label):
+                    self.assertEqual(prompt(calls, label).count(self.SCOPE), 1)
+
+    def test_no_other_prompt_carries_it(self):
+        _, calls = run()
+        self.assertEqual([c["label"] for c in calls if self.SCOPE in c["prompt"]], [])
+
+
 class SourceTest(unittest.TestCase):
     def test_land_lock_calls_are_the_batch_calls(self):
         """#677 P1: deliver-standard reuses deliver-batch's land-lock calls verbatim."""

@@ -765,6 +765,8 @@ const FOCUSED = `Run only the tests covering the files you changed, not the full
 // #787: whole test files after the task loop; one class missed a failing sibling test three times.
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
 const FIX_TESTS = `Before returning, ${WHOLE('the files you changed')}. ${FMT}`
+// A fix agent once committed a lock file a tool had generated beside its fix; every fix prompt carries this.
+const COMMIT_SCOPE = 'Before committing, read git status in the worktree you commit in and stage by path only the files the fix itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); a lock file, a generated file or an untracked file the fix did not need is left unstaged and named in notes.'
 const CX_USE = 'Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex'
 const CX_WAIT = 'this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn.'
 const CX_NONE = 'If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.'
@@ -866,7 +868,7 @@ ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RAN
     if (REVIEW_CODE) log(`codex review: ${findingsOf(codexR).length} blocking findings`)
     if (findings.length) {
       log(`direct review: ${findings.length} blocking findings, one fix round`)
-      fix = await call(`${CTX}\n${PLAN_REF} Fix these review findings in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findings)}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${IMPL_RETURN}\n${RULES}`, { label: 'direct-fix', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+      fix = await call(`${CTX}\n${PLAN_REF} Fix these review findings in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findings)}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'direct-fix', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
       if (!implDone(fix)) return stop('direct-fix', { fix })
       const rereview = await call(`${CTX}
 Re-review only these previously reported findings against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findings)}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'direct-rereview', phase: 'Final review', agentType: 'reviewer-lite', schema: FINDINGS })
@@ -1063,7 +1065,7 @@ ${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of tas
   while (findingsOf(review).length && rounds < 2) {
     rounds++
     const fix = await call(`${start}
-Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findingsOf(review))}. If a finding is wrong, say so in notes with evidence instead of changing code. ${MAP_FIRST} ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE}
+Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findingsOf(review))}. If a finding is wrong, say so in notes with evidence instead of changing code. ${MAP_FIRST} ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}${PUSH_HERE}
 ${RULES}`, { label: `fix-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: IMPL })
     if (!implDone(fix)) return halt('task-fix', { task: t, impl: fix })
     impl = fix
@@ -1147,7 +1149,7 @@ if (finalFindings.length) {
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
     if (!implDone(fw)) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves })
     const collected = []
     for (const b of declared(plan)) {
@@ -1231,7 +1233,7 @@ if (verify) {
 let vRounds = 0
 while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
-  const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. ${FIX_TESTS} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+  const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
   if (!implDone(fix)) return stop('verify-fix', { verify, fix })
   const pre = rerunIds(verify, fix)
   const ws = pre ? await call(wsCheckPrompt(fix), { label: `ws-check-${vRounds}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: WS_CHECK }) : null
@@ -1423,7 +1425,7 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
       const w = await shipFix({
         label: 'fix-ci', reviewLabel: 'fix-ci-review',
         rerun: true,
-        fixPrompt: `${CTX}\n${PLAN_REF} The checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without it, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FIX_TESTS} ${IMPL_RETURN}
+        fixPrompt: `${CTX}\n${PLAN_REF} The checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without it, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}
 When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: rerun the failed jobs once, with ${UNSET}gh run rerun <run-id> --repo ${SLUG} --failed for each failed run (its id is in the failing check's link), do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.\n${RULES}`,
         reviewPrompt: fix => `${CTX}\nReview this fix for failing checks: ${span(fix)}; the failure it answers: ${failing} (${ck.details || 'no log'}); notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check, or a fix with no regression test. Do not edit anything.`,
       })
@@ -1483,7 +1485,7 @@ Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} s
         const w = await shipFix({
           label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
           rebuttal: true,
-          fixPrompt: `${CTX}\nA reviewer found defects in the conflict resolution of merge commit ${sy.merge_commit} (git -C ${W} show --cc ${sy.merge_commit}): ${JSON.stringify(findingsOf(sr))}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes. Do not push. ${FIX_TESTS} ${IMPL_RETURN}\n${RULES}`,
+          fixPrompt: `${CTX}\nA reviewer found defects in the conflict resolution of merge commit ${sy.merge_commit} (git -C ${W} show --cc ${sy.merge_commit}): ${JSON.stringify(findingsOf(sr))}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes. Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
           reviewPrompt: (fix, moved) => `${CTX}\nRe-review these conflict-resolution findings against ${moved ? `the fix (${span(fix)}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${sy.merge_commit}: ${JSON.stringify(findingsOf(sr))}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${W} show --cc ${sy.merge_commit}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`,
         })
         if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix })
