@@ -106,6 +106,11 @@ class PageTest(unittest.TestCase):
         cls.data = PAGE.read_bytes()
         cls.text = cls.data.decode("utf-8")
 
+    def test_the_page_carries_one_token_slot(self) -> None:
+        meta = '<meta name="console-token" id="console-token" content="__CONSOLE_TOKEN__">'
+        self.assertEqual(self.text.count(meta), 1)
+        self.assertEqual(self.text.count("__CONSOLE_TOKEN__"), 1)
+
     def test_the_page_names_no_other_origin(self) -> None:
         patterns = (
             rb"[A-Za-z][A-Za-z0-9+.-]*://",

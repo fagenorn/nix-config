@@ -61,6 +61,26 @@ def post_hook(address, body, headers=None, host=None):
         connection.close()
 
 
+def post_page(address, path, headers=None, body=b"", host=None):
+    """A POST that sends exactly the headers given, plus Host and Content-Length.
+
+    A header's value may be a list: the header is then sent once per member.
+    """
+    connection = http.client.HTTPConnection(*address, timeout=5)
+    try:
+        connection.putrequest("POST", path, skip_host=True)
+        connection.putheader("Host", f"{address[0]}:{address[1]}" if host is None else host)
+        for name, value in (headers or {}).items():
+            for each in value if isinstance(value, list) else [value]:
+                connection.putheader(name, each)
+        connection.putheader("Content-Length", str(len(body)))
+        connection.endheaders(body)
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
 def write_session(directory, *, pid, session_id, cwd, status, waiting_for=None, name=None,
                   updated_at=None):
     directory = Path(directory)

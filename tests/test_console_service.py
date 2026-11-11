@@ -299,7 +299,8 @@ class PageRouteTest(Case):
         svc = self.start()
         status, headers, body = support.request(svc.address, "GET", "/")
         self.assertEqual(status, 200)
-        self.assertEqual(body, PAGE_FILE.read_bytes())
+        self.assertEqual(
+            body, PAGE_FILE.read_bytes().replace(b"__CONSOLE_TOKEN__", svc.page_token.encode()))
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
         self.assertEqual(headers["Content-Security-Policy"], service.CSP)
         self.assertEqual(headers["Cache-Control"], "no-store")
@@ -317,10 +318,11 @@ class MethodTest(Case):
                 status, headers, _ = support.request(svc.address, method, path)
                 self.assertEqual((method, path, status), (method, path, 405))
                 self.assertEqual(headers["Allow"], "GET")
-        for method in ("GET", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
-            status, headers, _ = support.request(svc.address, method, "/api/hooks")
-            self.assertEqual((method, status), (method, 405))
-            self.assertEqual(headers["Allow"], "POST")
+        for path in ("/api/hooks", "/api/looked"):
+            for method in ("GET", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+                status, headers, _ = support.request(svc.address, method, path)
+                self.assertEqual((method, path, status), (method, path, 405))
+                self.assertEqual(headers["Allow"], "POST")
         self.assertEqual(support.log_rows(self.store), rows)
 
 

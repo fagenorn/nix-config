@@ -12,11 +12,12 @@ Routes (every response carries `Cache-Control: no-store` and
     GET /api/state  200 application/json, the encoded view (see `view.py`)
     GET /api/stream 200 text/event-stream; charset=utf-8, the update stream (below)
     POST /api/hooks 204, no body, a Claude Code hook's input (below)
+    POST /api/looked 204, no body, the page records that the owner looked (below)
     anything else   404
-    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`)
+    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks` and `/api/looked`)
 
-Only `POST /api/hooks` writes, and it appends session observations only. Its
-checks run in this order, each refusal closing the connection: a loopback
+Two kinds of write exist. The hook route, `POST /api/hooks`, appends session observations
+only. Its checks run in this order, each refusal closing the connection: a loopback
 `Host` (else 403 as above); no `Origin` header (a browser page sends one: 403
 `text/plain` `origin refused`); a `Content-Type` whose media type is
 `application/json` (else 415 `json only`); a `Content-Length` that is a
@@ -29,13 +30,24 @@ that updates its registry record after the answer is newer than the hook. A body
 is one stderr line `console: hook_unreadable <message>`; any other failure is
 `console: hook_failed <Type>: <message>`; the handler never raises. An
 ignored payload (an unknown event, a missing member) appends nothing. The
-route carries no token: it records observations and answers nothing.
+route carries no token: it records observations and answers nothing (ADR-console-004).
+
+A page write (`PAGE_WRITES`, today `POST /api/looked`; ADR-console-008) is made by the desk page
+alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
+check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
+403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
+install's token (else 403 `token refused`; see `write_guard.py`), each refusal closing the
+connection and appending nothing. A page write carries no body: a `Content-Length` other than
+absent or `0`, or any `Transfer-Encoding`, is 400 `no body`. `POST /api/looked` then appends one
+`page.looked` event (`record_look`) and answers an empty `204`. The token is created once in
+`page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
+the slot in the page's `console-token` meta tag.
 
 A state request reads only `view_bytes`, which is memory: no log access, no
 registry read, no derivation, no file, no filesystem metadata call, no
 subprocess. The view is rebuilt only by `refresh()`, which reads the fleet
 registry, appends the difference to the event log and publishes the new view;
-the page itself is read once, at import.
+the page itself is read once, at import and given its token at construction.
 
 The stream carries `Connection: close` and no `Content-Length`. Its first frame is
 the current view (the page takes its view from the stream alone, never from a
@@ -100,7 +112,8 @@ nothing. An exception escaping a poll is one stderr line
 thread starts and nothing is read.
 
 Construction order: bind the server (an `OSError` propagates and nothing else is
-opened); open the event log; fold the projects, the sessions, the inbox and the read health from it; publish
+opened); load or create the page token (a `write_guard.TokenError` propagates: the service does
+not start); open the event log; fold the projects, the sessions, the inbox and the read health from it; publish
 the view; sample the registry's signature; `refresh()`; `poll_sessions()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
@@ -120,7 +133,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from agent_tools.claims import owner_actions
-from agent_tools.console import inbox, sessions
+from agent_tools.console import digest, inbox, sessions, write_guard
 from agent_tools.console.event_log import Event, EventLog, utc_now
 from agent_tools.console.view import (
     ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records, project_for,
@@ -139,6 +152,8 @@ POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
 HOOK_PATH = "/api/hooks"
+LOOKED_PATH = "/api/looked"
+PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH})
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
@@ -234,7 +249,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._loopback():
             return
-        if self.path.split("?", 1)[0] != HOOK_PATH:
+        route = self.path.split("?", 1)[0]
+        if route in PAGE_WRITES:
+            return self._page_write(route)
+        if route != HOOK_PATH:
             return self._refuse_method()
         if self.headers.get("Origin") is not None:
             return self._refuse(403, "origin refused")
@@ -266,18 +284,44 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: hook_failed {type(error).__name__}: {error}", file=sys.stderr)
 
+    def _page_write(self, route: str):
+        console = self.server.console
+        refusal = write_guard.refusal(
+            self.headers["Host"], self.headers.get_all("Origin") or [],
+            self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
+        if refusal is not None:
+            return self._refuse(*refusal)
+        if (self.headers.get("Content-Length", "0") != "0"
+                or self.headers.get("Transfer-Encoding") is not None):
+            return self._refuse(400, "no body")
+        self.close_connection = True
+        try:
+            console.record_look()
+        except Exception as error:
+            print(f"console: look_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "look failed")
+        try:
+            self.send_response(204)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+        except OSError:
+            return
+
     def do_GET(self):
         if not self._loopback():
             return
         route = self.path.split("?", 1)[0]
         if route == "/":
-            self._send(200, "text/html; charset=utf-8", PAGE,
+            self._send(200, "text/html; charset=utf-8", self.server.console.page_bytes,
                        ("Content-Security-Policy", CSP))
         elif route == "/api/state":
             self._send(200, "application/json", self.server.console.view_bytes)
         elif route == "/api/stream":
             self._stream()
-        elif route == HOOK_PATH:
+        elif route == HOOK_PATH or route in PAGE_WRITES:
             self._refuse_method()
         else:
             self._send(404, "text/plain", b"not found\n")
@@ -309,7 +353,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if not self._loopback():
             return
         self.close_connection = True
-        allow = "POST" if self.path.split("?", 1)[0] == HOOK_PATH else "GET"
+        route = self.path.split("?", 1)[0]
+        allow = "POST" if route == HOOK_PATH or route in PAGE_WRITES else "GET"
         self._send(405, "text/plain", b"method not allowed\n",
                    ("Allow", allow), ("Connection", "close"))
 
@@ -326,7 +371,8 @@ class ConsoleService:
                  tracker_seconds: float = TRACKER_SECONDS,
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
                  activity: Callable[[str], float | None] = inbox.local_activity,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 token_path: Path | None = None):
         self.registry = Path(registry)
         self._poll_seconds = poll_seconds
         self._session_dirs = session_dirs
@@ -354,6 +400,10 @@ class ConsoleService:
         self._closed = False
         self._server = ConsoleServer(port, self)
         try:
+            self._token = write_guard.load_token(
+                Path(store).with_name(write_guard.TOKEN_FILE) if token_path is None
+                else token_path)
+            self._page = PAGE.replace(write_guard.TOKEN_SLOT, self._token.encode("ascii"))
             self.log = EventLog(store)
             events = self.log.events()
             self._states = project_states(events)
@@ -377,6 +427,15 @@ class ConsoleService:
     @property
     def view_bytes(self) -> bytes:
         return self._view
+
+    @property
+    def page_bytes(self) -> bytes:
+        """The page, with this install's token in its slot."""
+        return self._page
+
+    @property
+    def page_token(self) -> str:
+        return self._token
 
     @property
     def version(self) -> int:
@@ -437,6 +496,13 @@ class ConsoleService:
             repo = payload["repo"]
             project = None if repo is None else project_for(repo, self._states)
             appended = self.log.append([(kind, project, payload)])
+            self._apply(appended)
+            return appended
+
+    def record_look(self) -> list[Event]:
+        """Append one `page.looked` event: the owner looked at the page."""
+        with self._ingest:
+            appended = self.log.append([(digest.LOOKED, None, {})])
             self._apply(appended)
             return appended
 
