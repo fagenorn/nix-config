@@ -4225,7 +4225,9 @@ class AgentTypeTest(unittest.TestCase):
 
 
 class ClerkModelTest(unittest.TestCase):
-    """#803: clerk_model (sonnet, the default, or haiku) is checked before any agent and sets the model of every clerk call."""
+    """#803, #813: clerk_model (sonnet, the default, or haiku) is checked before any agent and sets the model of every clerk call except the lifecycle and setup steps, which stay on the default."""
+
+    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "pr", "merge", "hold", "close-out"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
         for bad in ("opus", "Haiku", "", 1, None, True):
@@ -4244,6 +4246,7 @@ class ClerkModelTest(unittest.TestCase):
     def test_every_clerk_call_takes_the_clerk_model(self):
         clerk_stems = {stem for stem, kinds in EXPECTED.items() if kinds == frozenset({CLERK})}
         seen = set()
+        pinned = set()
         for index, scenario in enumerate(SCENARIOS):
             with self.subTest(i=index):
                 base = run(**scenario)[1]
@@ -4253,18 +4256,24 @@ class ClerkModelTest(unittest.TestCase):
                     self.assertEqual(t["agentType"], b["agentType"], b["label"])
                     self.assertEqual(t["effort"], b["effort"], b["label"])
                     if b["agentType"] == CLERK:
+                        stem = AgentTypeTest.stem_of(t["label"])
                         self.assertEqual(b["model"], "sonnet", b["label"])
-                        self.assertEqual(t["model"], "haiku", b["label"])
-                        seen.add(AgentTypeTest.stem_of(t["label"]))
+                        if stem in self.ON_DEFAULT:
+                            self.assertEqual(t["model"], "sonnet", b["label"])
+                            pinned.add(stem)
+                        else:
+                            self.assertEqual(t["model"], "haiku", b["label"])
+                            seen.add(stem)
                     else:
                         self.assertEqual(t["model"], b["model"], b["label"])
-        self.assertEqual(seen, clerk_stems)
+        self.assertEqual(pinned, self.ON_DEFAULT)
+        self.assertEqual(seen, clerk_stems - self.ON_DEFAULT)
 
     def test_clerk_model_is_never_kept_in_cont(self):
         result, calls = run(args=dict(ARGS, mode="plan", clerk_model="haiku"))
         self.assertEqual(result["stage"], "planned")
         self.assertNotIn("clerk_model", json.dumps(result["cont"]))
-        models = [c["model"] for c in calls if c["agentType"] == CLERK]
+        models = [c["model"] for c in calls if c["agentType"] == CLERK and c["label"] not in self.ON_DEFAULT]
         self.assertTrue(models)
         self.assertEqual(set(models), {"haiku"})
 
@@ -4273,7 +4282,7 @@ class ClerkModelTest(unittest.TestCase):
         sites = re.findall(r"agentType: 'clerk', model: ([^,]+),", text)
         self.assertEqual(len(sites), text.count("agentType: 'clerk'"))
         self.assertGreater(len(sites), 0)
-        self.assertEqual(set(sites), {"CLERK_MODEL"})
+        self.assertEqual(set(sites), {"CLERK_MODEL", "DEFAULT_CLERK_MODEL"})
 
 
 class PromptCommandFormTest(unittest.TestCase):
