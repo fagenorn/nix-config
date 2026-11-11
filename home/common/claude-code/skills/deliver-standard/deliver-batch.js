@@ -923,12 +923,12 @@ const TRAIN_MAX = 3
 // The one long wait of a train, its car checks, is therefore bounded below that: TRAIN_CHECKS_WAIT_MIN, plus TRAIN_CHECKS_MORE_MIN once
 // per train when a car is still pending with no failed check at the first cap (#822: a late car is nearly finished CI). The lock cannot be
 // re-asserted (only a changed sha restarts a waiter's watch), so the two waits leave the other train steps (train-pr, train-build,
-// train-ready, train-merge: about five minutes in the first real train) 8 minutes of the 45. Past that bound nothing unsafe happens: a
+// train-ready, train-merge: about five minutes in the first real train) 10 minutes of the 45. Past that bound nothing unsafe happens: a
 // waiter that took the lock over makes train-merge's acquire answer something other than already_held, so nothing merges, and a fallen-back
 // first landing's lock move is refused; the rows end land-contended.
 const LOCK_IDLE_MIN = 45
 const TRAIN_CHECKS_WAIT_MIN = 25
-const TRAIN_CHECKS_MORE_MIN = 12
+const TRAIN_CHECKS_MORE_MIN = 10
 // The forge marks the member PRs merged by itself after the car merge, and that can lag. No step sleeps: the program asks a read-only
 // train-flip step again while a member still reads OPEN, this many times at most, and each call's own duration is the wait.
 const TRAIN_FLIP_CALLS = 8

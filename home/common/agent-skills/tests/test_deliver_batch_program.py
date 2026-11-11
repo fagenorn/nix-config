@@ -3585,8 +3585,8 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(order[order.index("train-build-1") + 1:order.index("train-merge-1")],
                          ["train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more", "train-ready-1"])
         first, more = step_text(calls, "train-checks-1-1"), step_text(calls, "train-checks-1-1-more")
-        self.assertIn("12 minutes at most and stop waiting 12 minutes after this step began", more)
-        self.assertEqual(more, first.replace("25 minutes", "12 minutes"))
+        self.assertIn("10 minutes at most and stop waiting 10 minutes after this step began", more)
+        self.assertEqual(more, first.replace("25 minutes", "10 minutes"))
         self.assertIn("gh pr merge 92 ", prompt(calls, "train-merge-1"))
         for n, pr in ((1, 41), (2, 42)):
             self.assertEqual(row(result, n), {"issue": n, "outcome": "landed", "pr": pr, "train": 1, "car_pr": 92})
